@@ -42,6 +42,13 @@ external work. Navigation and reconnect never retarget an admitted turn. Unknown
 remain uncertain and require an explicit new human retry. An expired lease alone does not authorize
 another paid request. Both provider retries and Mastra error-processor retries are disabled.
 
+Requirements uses the frozen selected Ticket without rereading it solely for attribution. Explicitly
+invoked Skills and the assigned Interview Skill load through Mastra's native `getSkill` API before
+inference, with at most 8 KiB of reference text. Other Skills and larger references remain on demand.
+The Project Agent adapter uses source-specific provider citations: only Code requires a commit/path;
+an unused footnote is nullable. Factory validates the returned domain result, including Epic rules.
+A known structured-output rejection is failed, not an unknown provider outcome.
+
 One OpenCode server runs as the development user in the Ticket Workspace. Factory reaches its
 native API through the Runtime Connector and `@opencode/client`; browsers do not connect directly.
 OpenCode receives generation-bound inference access and no reusable forge credential. Factory

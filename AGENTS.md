@@ -25,7 +25,6 @@
   Preserve retained source, history, approvals and immutable runtime identities.
 - Persist product state, external intent/outcome, human decisions, Verification/merge results and
   compact Evidence. Logs, heartbeats and resource samples stay ephemeral.
-- Never replay uncertain paid inference automatically. Retry needs explicit new human input.
 
 ## Verification
 

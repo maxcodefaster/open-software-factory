@@ -93,33 +93,12 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
+    // This fixture owns a separate temporary database, not product resources.
+    // Its owner-checked disposal removes the whole database, including bootstrap
+    // Skills attributed to the fixture user. Row-by-row deletion breaks those FKs.
     try {
-      await database.client.begin(async (transaction) => {
-        const projects = await transaction<Array<{ safe: boolean }>>`
-          SELECT NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE project_id = project.id)
-            AND NOT EXISTS(SELECT 1 FROM factory.change WHERE project_id = project.id)
-            AND NOT EXISTS(SELECT 1 FROM factory.requirement_approval approval
-              JOIN factory.ticket ticket ON ticket.id = approval.ticket_id WHERE ticket.project_id = project.id)
-            AND NOT EXISTS(SELECT 1 FROM factory.ticket WHERE project_id = project.id AND created_by <> ${userID}) AS safe
-          FROM factory.project project WHERE id = ${projectID} AND created_by = ${userID}
-            AND slug = ${`turn-${suffix}`} FOR UPDATE
-        `;
-        if (!projects[0]?.safe) throw new Error("Owned runtime-free fixture cleanup refused");
-        await transaction`DELETE FROM factory.ticket_conversation WHERE project_id = ${projectID}`;
-        // Only this owned injected fixture's revisions are disposable. The setting is transaction-local.
-        await transaction`SET LOCAL session_replication_role = replica`;
-        await transaction`DELETE FROM factory.requirement_revision WHERE created_by = ${userID}
-          AND ticket_id IN (SELECT id FROM factory.ticket WHERE project_id = ${projectID})`;
-        await transaction`SET LOCAL session_replication_role = origin`;
-        await transaction`DELETE FROM factory.ticket WHERE project_id = ${projectID} AND created_by = ${userID}`;
-        await transaction`DELETE FROM factory.forge_grant_intent WHERE project_id=${projectID}`;
-        await transaction`DELETE FROM factory.forge_branch_intent WHERE project_id=${projectID}`;
-        await transaction`DELETE FROM factory.project WHERE id = ${projectID} AND created_by = ${userID}`;
-        await transaction`DELETE FROM factory.forge_account_intent WHERE user_id=${userID}`;
-        await transaction`DELETE FROM auth."user" WHERE id = ${userID} AND email = ${`turn-${suffix}@factory.local`}`;
-      });
-    } finally {
       await database.client.end();
+    } finally {
       await isolated.dispose();
     }
   }
@@ -773,6 +752,34 @@ test("an unknown provider outcome requires a new explicit command rather than re
         .message(owned.projectID, undefined, "One request", owned.userID, crypto.randomUUID()),
     ).rejects.toThrow();
     expect(owned.requests()).toBe(2);
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("a known local structured-output rejection is failed, not an unknown provider outcome", async () => {
+  const owned = await fixture({ ...answer, message: "" });
+  const commandID = crypto.randomUUID();
+  try {
+    owned.release();
+    await expect(
+      owned
+        .controller()
+        .message(owned.projectID, undefined, "Retain this input", owned.userID, commandID),
+    ).rejects.toMatchObject({ name: "ProjectAgentOutputError" });
+    expect(await owned.turns()).toMatchObject([{ commandId: commandID, state: "failed" }]);
+    expect((await owned.entries()).filter((entry) => entry.kind === "user-message")).toHaveLength(
+      1,
+    );
+    const current = await owned.controller().get(owned.projectID, undefined, owned.userID);
+    expect(current?.turn?.summary).toBe(
+      "The Project Agent returned an invalid response. Your input is saved.",
+    );
+    await owned
+      .controller()
+      .message(owned.projectID, undefined, "Retain this input", owned.userID, commandID);
+    await owned.controller().recover();
+    expect(owned.requests()).toBe(1);
   } finally {
     await owned.dispose();
   }

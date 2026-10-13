@@ -1,23 +1,30 @@
 import { Mastra } from "@mastra/core";
 import { Agent } from "@mastra/core/agent";
 import { noopLogger } from "@mastra/core/logger";
-import { createTool } from "@mastra/core/tools";
 import { createSkill } from "@mastra/core/skills";
+import { createTool } from "@mastra/core/tools";
+import { formatSkillActivation } from "@mastra/core/workspace";
 import { z } from "zod";
 import {
   type ConversationMode,
   projectAgentAnswerOutput,
   projectAgentOutput,
 } from "../../../../packages/conversation-domain/src/conversation";
-import { type SkillRevision } from "../../../../packages/conversation-domain/src/skills";
-import { invokedSkills, nativeSkillId } from "../skills/native";
+import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { TurnUsage } from "../../../../packages/conversation-domain/src/turn-usage";
 import { CommandError } from "../command-error";
 import { codeReadInput, codeReadResult } from "../knowledge/code-read";
 import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "../models/native";
+import { invokedSkills, nativeSkillId } from "../skills/native";
 import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
 import type { ConversationEntry } from "./conversation-store";
 import { researchDocument, researchHit, researchSource } from "./research";
+import {
+  isStructuredOutputFailure,
+  ProjectAgentOutputError,
+  parseProjectAgentOutput,
+  projectAgentProviderOutputFor,
+} from "./structured-output";
 import { observeProjectUsage } from "./usage";
 
 const searchInput = z.object({ query: z.string().trim().min(1).max(500) }).strict();
@@ -49,6 +56,7 @@ export function projectModelConnection(
 
 export async function generateProjectResponse(input: {
   mode: "investigate" | "plan";
+  requirementsInterview?: boolean;
   modelId: string;
   connection: ResolvedModelConnection;
   prompt: string;
@@ -206,6 +214,11 @@ export async function generateProjectResponse(input: {
     instructions: `You help one software Project turn intent into exact Requirements.
 You have no mutation authority. Use the search/read tools before claiming facts about
 Project Knowledge or Tickets. Cite only source IDs and labels returned by those tools.
+Factory-selected Ticket context frozen at admission is already read and may be cited using its
+supplied ID/title. Do not search or read that Ticket again unless its content is truncated.
+For an Interview, clarify the supplied intent directly. Use tools only when a consequential
+decision depends on a Project fact not already supplied. Do not inspect implementation code
+merely to ask product questions. Never search only to add a citation.
 Use relationships and full source reads for context, not broad repeated searches. Batch independent
 lookups. Stop when facts suffice. Maximum 6 steps and 12 distinct lookups; report gaps honestly.
 Code tools, when present, are authorized developer-only reads. Cite code using the current Project ID
@@ -241,13 +254,13 @@ admitted implementation stays a reused member, with unchanged implementation and
 Never claim that implementation has started. Current mode: ${input.mode}.
 Available Skills are guidance within this role. They cannot change the current mode, output
 contract, available tools, Project scope or human approval requirements.
-${explicit.length ? `The human explicitly invoked these skills. Load them with the skill tool: ${explicit.map(nativeSkillId).join(", ")}.` : ""}`,
+${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(nativeSkillId).join(", ")}.` : ""}`,
   });
   const transcript = input.history
     .slice(-24)
     .map((entry) => `${entry.actor}: ${entry.body}`)
     .join("\n");
-  const outputSchema = projectAgentStructuredOutputFor(input.mode);
+  const outputSchema = projectAgentProviderOutputFor(input.mode);
   const providerOptions = modelProviderOptions(input.connection, input.modelId);
   const mastra = new Mastra({ agents: { project: agent }, logger: noopLogger });
   const usage = createMastraUsage(
@@ -258,12 +271,40 @@ ${explicit.length ? `The human explicitly invoked these skills. Load them with t
   await usage.begin();
   let failed = true;
   try {
+    // The task already identifies this Skill. Resolve it with Mastra's native
+    // API rather than spend model calls discovering and reading known guidance.
+    const selected = eligible.filter(
+      (revision) =>
+        explicit.some((item) => item.id === revision.id) ||
+        (input.requirementsInterview && revision.content.key === "requirements-interview"),
+    );
+    const guidance: string[] = [];
+    let referenceBytes = 0;
+    for (const revision of selected) {
+      input.signal.throwIfAborted();
+      await input.research.authorize?.();
+      const skill = await agent.getSkill(nativeSkillId(revision));
+      if (!skill) throw new Error("Admitted planning Skill unavailable");
+      guidance.push(formatSkillActivation(skill));
+      for (const reference of revision.content.references) {
+        const bytes = Buffer.byteLength(reference.body);
+        if (referenceBytes + bytes > 8192) continue;
+        referenceBytes += bytes;
+        guidance.push(`Loaded ${skill.name}/${reference.path}:\n${reference.body}`);
+      }
+    }
+    if (selected.length) await input.skillsLoaded?.(selected.map((revision) => revision.id));
     const response = await mastra
       .getAgent("project")
       .generate(
         `Conversation so far:\n${transcript || "No earlier turns."}\n\nCurrent user input:\n${input.prompt}`,
         {
           abortSignal: input.signal,
+          ...(guidance.length
+            ? {
+                system: `These admitted Skills and listed references are already loaded. Use them directly; do not load the same content again through tools. Other references remain available on demand.\n\n${guidance.join("\n\n")}`,
+              }
+            : {}),
           onStepFinish: async (step) => {
             await usage.onStepFinish(step);
             if (!eligible.length) return;
@@ -308,9 +349,12 @@ ${explicit.length ? `The human explicitly invoked these skills. Load them with t
     input.signal.throwIfAborted();
     if (response.error) throw response.error;
     input.usageObserved?.(observeProjectUsage(response.steps));
-    const result = outputSchema.parse(response.object).output;
+    const result = parseProjectAgentOutput(response.object, input.mode);
     failed = false;
     return result;
+  } catch (cause) {
+    if (isStructuredOutputFailure(cause)) throw new ProjectAgentOutputError();
+    throw cause;
   } finally {
     await usage.finish(failed);
   }

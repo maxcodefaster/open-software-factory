@@ -1,8 +1,8 @@
+import { z } from "zod";
 import {
   type AgentTurnCommand,
   agentTurnCommandInput,
 } from "../../../../packages/conversation-domain/src/agent-turn";
-import { z } from "zod";
 import {
   assertModeAuthority,
   type ConversationMode,
@@ -12,29 +12,28 @@ import {
   type ProjectAgentOutput,
   sourceCitationInput,
 } from "../../../../packages/conversation-domain/src/conversation";
+import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { readTurnObservation } from "../agent/turn-observation";
 import {
   type AgentTurnRecord,
   type AgentTurnTransaction,
   createAgentTurnStore,
 } from "../agent/turn-store";
+import { createUsageObservations } from "../agent/usage-observations";
 import type { ChangeView } from "../change/types";
 import { CommandError } from "../command-error";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
-import { createModelSettingsController } from "../models/controller";
-import { createSkillController } from "../skills/controller";
-import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
-import { generateProjectResponse, projectModelConnection } from "./adapter";
+import { codeReadInput } from "../knowledge/code-read";
+import type { createKnowledgeController } from "../knowledge/controller";
 import { createModelConnections } from "../models/connections";
-import { createOpenBaoModelSecrets } from "../models/secrets";
+import { createModelSettingsController } from "../models/controller";
 import type { ResolvedModelConnection } from "../models/native";
-import {
-  admittedTicketContext,
-  admittedProjectContext,
-  ticketContextPrompt,
-} from "./ticket-context";
-import { readTurnObservation } from "../agent/turn-observation";
-import { createUsageObservations } from "../agent/usage-observations";
+import { createOpenBaoModelSecrets } from "../models/secrets";
+import { createSkillController } from "../skills/controller";
+import { createUsageJournal } from "../usage/journal";
+import { recordedMastraUsage } from "../usage/record-mastra";
+import { generateProjectResponse, projectModelConnection } from "./adapter";
 import {
   appendConversationEntry,
   type Citation,
@@ -43,12 +42,14 @@ import {
   lockConversation,
 } from "./conversation-store";
 import { persistProjectOutput } from "./effects";
-import { searchResearch, readResearch } from "./research";
-import type { createKnowledgeController } from "../knowledge/controller";
 import { createEpicConfirmation } from "./epic-confirmation";
-import { codeReadInput } from "../knowledge/code-read";
-import { recordedMastraUsage } from "../usage/record-mastra";
-import { createUsageJournal } from "../usage/journal";
+import { readResearch, searchResearch } from "./research";
+import { ProjectAgentOutputError } from "./structured-output";
+import {
+  admittedProjectContext,
+  admittedTicketContext,
+  ticketContextPrompt,
+} from "./ticket-context";
 
 export { projectAgentStructuredOutput, projectAgentStructuredOutputFor } from "./adapter";
 
@@ -576,6 +577,9 @@ export function createProjectAgentController(
       }
       try {
         output = await generateProjectResponse({
+          requirementsInterview:
+            command.kind === "project-answer" ||
+            (command.kind === "project-message" && command.intent === "requirements-interview"),
           mode:
             command.kind === "project-message" && command.intent === "project-research"
               ? "investigate"
@@ -670,8 +674,10 @@ export function createProjectAgentController(
         await turns.settle(
           owner.id,
           token,
-          "uncertain",
-          "The provider outcome could not be established. The same command will not be submitted again.",
+          cause instanceof ProjectAgentOutputError ? "failed" : "uncertain",
+          cause instanceof ProjectAgentOutputError
+            ? cause.message
+            : "The provider outcome could not be established. The same command will not be submitted again.",
         );
         throw cause;
       }

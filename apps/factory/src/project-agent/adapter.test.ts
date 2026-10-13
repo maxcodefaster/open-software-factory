@@ -1,5 +1,178 @@
 import { expect, test } from "bun:test";
+import { requirementsInterviewSkill } from "../skills/reviewed";
 import { generateProjectResponse } from "./adapter";
+
+test.each([
+  { provider: "openai" as const, modelId: "gpt-6-luna" },
+  { provider: "openai" as const, modelId: "owned-chat-model" },
+  { provider: "anthropic" as const, modelId: "owned-messages-model" },
+  { provider: "deepseek" as const, modelId: "owned-deepseek-model" },
+])(
+  "native $provider/$modelId Interview uses Ticket provenance and already-loaded guidance",
+  async ({ provider, modelId }) => {
+    const sourceID = crypto.randomUUID();
+    const skillID = crypto.randomUUID();
+    let requests = 0;
+    let providerSchema = "";
+    const model = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests++;
+        const body = (await request.json()) as {
+          text?: { format: { schema: unknown } };
+          response_format?: { json_schema?: { schema: unknown } };
+          messages?: unknown;
+          input?: unknown;
+          system?: unknown;
+        };
+        providerSchema = JSON.stringify(
+          body.text?.format.schema ?? body.response_format?.json_schema?.schema ?? {},
+        );
+        const input = JSON.stringify([body.messages, body.input, body.system]);
+        expect(input).toContain(requirementsInterviewSkill.instructions.replaceAll("\n", "\\n"));
+        expect(input).toContain(
+          requirementsInterviewSkill.references[0]?.body.replaceAll("\n", "\\n") ??
+            "missing reference",
+        );
+        const output = JSON.stringify({
+          output: {
+            kind: "round",
+            message: "One decision remains.",
+            questions: [
+              {
+                type: "free-text",
+                prompt: "Where should the account appear?",
+                placeholder: "Location",
+              },
+            ],
+            citations: [
+              { source: "ticket", id: sourceID, label: "Account summary", reference: null },
+            ],
+          },
+        });
+        if (provider === "anthropic")
+          return Response.json({
+            id: "msg-owned",
+            type: "message",
+            role: "assistant",
+            model: modelId,
+            content: [{ type: "text", text: output }],
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 10 },
+          });
+        if (modelId !== "gpt-6-luna")
+          return Response.json({
+            id: "chat-owned",
+            object: "chat.completion",
+            created: 1,
+            model: modelId,
+            choices: [
+              { index: 0, message: { role: "assistant", content: output }, finish_reason: "stop" },
+            ],
+            usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+          });
+        return Response.json({
+          id: "resp-citation-contract",
+          created_at: 1,
+          model: "gpt-6-luna",
+          status: "completed",
+          output: [
+            {
+              type: "message",
+              id: "msg-citation-contract",
+              role: "assistant",
+              content: [
+                {
+                  type: "output_text",
+                  annotations: [],
+                  text: output,
+                },
+              ],
+            },
+          ],
+          usage: {
+            input_tokens: 10,
+            output_tokens: 10,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        });
+      },
+    });
+    try {
+      const output = await generateProjectResponse({
+        mode: "plan",
+        requirementsInterview: true,
+        modelId,
+        connection: {
+          provider,
+          baseURL: `http://127.0.0.1:${model.port}/v1`,
+          apiKey: "owned-test-token",
+        },
+        skills: [
+          {
+            id: skillID,
+            revision: 1,
+            digest: "a".repeat(64),
+            published: true,
+            content: requirementsInterviewSkill,
+          },
+        ],
+        skillsLoaded: async (ids) => {
+          expect(ids).toEqual([skillID]);
+          expect(requests).toBe(0);
+        },
+        prompt: "Clarify the selected Ticket using its frozen context.",
+        history: [],
+        signal: AbortSignal.timeout(4000),
+        searchKnowledge: async () => [],
+        searchTickets: async () => [],
+        research: {
+          search: async () => [],
+          read: async () => {
+            throw new Error("Not needed");
+          },
+        },
+      });
+      expect(output.kind).toBe("round");
+      expect(output.citations).toEqual([
+        { source: "ticket", id: sourceID, label: "Account summary" },
+      ]);
+      expect(requests).toBe(1);
+      // Non-code variants must not ask a model to invent Git provenance.
+      const citationSchemas: Array<Record<string, unknown>> = [];
+      function inspect(value: unknown) {
+        if (!value || typeof value !== "object") return;
+        const object = value as Record<string, unknown>;
+        if (object["properties"] && typeof object["properties"] === "object") {
+          const properties = object["properties"] as Record<
+            string,
+            { enum?: string[]; const?: string }
+          >;
+          if (
+            properties["source"]?.enum?.includes("ticket") ||
+            properties["source"]?.const === "ticket"
+          )
+            citationSchemas.push(properties);
+        }
+        for (const child of Object.values(object)) {
+          if (Array.isArray(child)) child.forEach(inspect);
+          else inspect(child);
+        }
+      }
+      inspect(JSON.parse(providerSchema));
+      if (modelId === "gpt-6-luna") expect(citationSchemas.length).toBeGreaterThan(0);
+      for (const properties of citationSchemas) {
+        expect(properties).not.toHaveProperty("commitSha");
+        expect(properties).not.toHaveProperty("path");
+      }
+    } finally {
+      await model.stop(true);
+    }
+  },
+);
 
 test("Luna uses Responses with reasoning, retained search tools and no provider storage", async () => {
   const requests: Array<Record<string, unknown>> = [];
