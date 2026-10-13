@@ -1,0 +1,78 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #202329;
+  background: #f8f9fb;
+  font-synthesis: none;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  max-width: 64rem;
+  margin: auto;
+  padding: 2rem;
+}
+section {
+  max-width: 24rem;
+  margin: 12vh auto;
+}
+h1 {
+  font-size: 1.9rem;
+  font-weight: 600;
+  letter-spacing: -0.04em;
+}
+form,
+label {
+  display: grid;
+  gap: 0.5rem;
+}
+form {
+  gap: 1rem;
+}
+label {
+  font-size: 0.9rem;
+}
+input,
+button {
+  font: inherit;
+  border-radius: 0.5rem;
+  padding: 0.75rem;
+}
+input {
+  width: 100%;
+  border: 1px solid #ccd0d8;
+  background: white;
+}
+input:focus-visible,
+button:focus-visible {
+  outline: 2px solid #556ce8;
+  outline-offset: 3px;
+}
+button {
+  border: 0;
+  color: white;
+  background: #303b62;
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.text-button {
+  padding: 0.5rem 0;
+  color: #465783;
+  background: none;
+  font-size: 0.9rem;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+[role="alert"] {
+  color: #a92b32;
+  font-size: 0.9rem;
+}

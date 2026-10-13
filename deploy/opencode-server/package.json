@@ -1,0 +1,9 @@
+{
+  "name": "factory-opencode-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode/server": "2.0.27",
+    "effect": "4.0.1"
+  }
+}

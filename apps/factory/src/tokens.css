@@ -1,0 +1,243 @@
+:root,
+[data-background] {
+  color-scheme: light;
+
+  --font-display: "Sansita", Georgia, serif;
+  --font-interface: "Inter Variable", Inter, system-ui, sans-serif;
+  --font-technical: "IBM Plex Mono", ui-monospace, monospace;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --color-ink: #1d211d;
+  --color-ink-muted: #343c34;
+  --color-ink-faint: #858c85;
+  --color-ink-inverse: #f8f7f2;
+  --color-paper: #f7f5ef;
+  --color-paper-cool: #eef1ed;
+  --color-river: #667f82;
+  --color-river-deep: #3f5e63;
+  --color-river-soft: color-mix(in srgb, var(--color-river-deep) 13%, transparent);
+  --color-moss: #65705d;
+  --color-wheat: #a58c59;
+  --color-danger: #94554d;
+  --color-danger-soft: rgb(148 85 77 / 11%);
+  --color-success: #47735d;
+  --color-success-soft: rgb(71 115 93 / 12%);
+  --color-warning: #927137;
+  --color-warning-soft: rgb(146 113 55 / 12%);
+  --color-focus: var(--color-river-deep);
+  --terminal-background: #f5f6f2;
+  --terminal-foreground: #202521;
+  --terminal-cursor: #315d64;
+  --terminal-selection: #ccd9d7;
+
+  --line-subtle: rgb(29 33 29 / 10%);
+  --line-default: rgb(29 33 29 / 16%);
+  --line-strong: rgb(29 33 29 / 28%);
+  --line-inverse: rgb(255 255 255 / 30%);
+  --line-accent: color-mix(in srgb, var(--color-river-deep) 24%, transparent);
+  --line-danger: rgb(148 85 77 / 24%);
+
+  --material-chrome: rgb(250 249 245 / 66%);
+  --material-chrome-hover: rgb(255 255 252 / 78%);
+  --surface-rgb: 250 250 247;
+  --material-window: rgb(var(--surface-rgb) / 68%);
+  --material-document: rgb(250 250 247 / 94%);
+  --material-popover: rgb(252 252 248);
+  --material-document-popover: rgb(252 252 248);
+  --material-panel: rgb(247 248 245 / 68%);
+  --material-card: rgb(252 251 247 / 56%);
+  --material-card-hover: rgb(255 255 252 / 72%);
+  --material-board-card: rgb(252 251 247 / 92%);
+  --material-input: rgb(255 255 252 / 52%);
+  --material-overlay: rgb(23 27 23 / 18%);
+  --material-tooltip: rgb(29 33 29 / 91%);
+  --material-message-user: color-mix(in srgb, var(--color-river-deep) 12%, transparent);
+  --material-message-tool: rgb(247 247 242 / 72%);
+  --material-code: rgb(29 33 29 / 6%);
+  --material-control-inverse-hover: rgb(255 255 255 / 14%);
+  --material-accent: color-mix(in srgb, var(--color-river-deep) 11%, transparent);
+  --material-accent-strong: color-mix(in srgb, var(--color-river-deep) 18%, transparent);
+  --material-danger: rgb(255 247 244 / 74%);
+  --material-metadata: rgb(238 241 236 / 49%);
+  --material-backdrop: rgb(29 33 29 / 14%);
+  --material-menu-backdrop: rgb(29 33 29 / 9%);
+  --auth-brand-scrim-opacity: 0.86;
+  --material-auth-veil: rgb(247 245 239 / var(--auth-brand-scrim-opacity));
+  --material-auth-scrim: linear-gradient(
+    90deg,
+    var(--material-auth-veil) 0% 65%,
+    rgb(247 245 239 / 34%) 100%
+  );
+
+  --frost-saturation-chrome: 1.12;
+  --frost-saturation-window: 1.18;
+
+  --blur-chrome: 24px;
+  --blur-window: 28px;
+  --blur-card: 14px;
+  --blur-backdrop: 8px;
+  --blur-obscured: 1px;
+  --blur-menu-backdrop: 2px;
+  --saturation-menu-backdrop: 0.9;
+
+  --shadow-control: 0 8px 30px rgb(25 32 27 / 9%), inset 0 1px rgb(255 255 255 / 72%);
+  --shadow-control-active: 0 4px 14px rgb(25 32 27 / 11%);
+  --shadow-card: inset 0 1px var(--line-inverse);
+  --shadow-float: 0 18px 55px rgb(25 32 27 / 16%), inset 0 1px rgb(255 255 255 / 72%);
+  --shadow-window: 0 28px 90px rgb(25 32 27 / 20%), inset 0 1px rgb(255 255 255 / 74%);
+  --shadow-focus: 0 0 0 3px var(--color-river-soft);
+  --shadow-selection-ring: 0 0 0 3px var(--color-river-soft);
+  --shadow-inset-line: inset 0 0 0 1px var(--line-default);
+  --shadow-success-ring: 0 0 0 3px rgb(71 115 93 / 11%);
+  --shadow-accent-ring: 0 0 0 3px var(--color-river-soft);
+  --shadow-none: 0 0 transparent;
+
+  --radius-xs: 6px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+  --radius-xl: 26px;
+  --radius-pill: 999px;
+  --radius-window: var(--radius-md);
+  --radius-control: var(--radius-sm);
+  --control-height: 32px;
+  --control-icon-size: 16px;
+
+  --space-0-5: 2px;
+  --space-1: 4px;
+  --space-1-5: 6px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  --text-xs: 11px;
+  --text-sm: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 28px;
+  --text-title: 44px;
+  --text-title-mobile: 36px;
+  --text-window-title: clamp(1.3rem, 2vw, 1.65rem);
+  --text-display: clamp(48px, 7vw, 96px);
+  --leading-tight: 1.05;
+  --leading-label: 1.35;
+  --leading-body: 1.6;
+  --tracking-tight: -0.035em;
+  --tracking-label: 0.1em;
+
+  --duration-reduced: 1ms;
+  --duration-fast: 140ms;
+  --duration-normal: 220ms;
+  --duration-slow: 360ms;
+  --duration-activity: 1500ms;
+  --ease-standard: cubic-bezier(0.2, 0.75, 0.2, 1);
+  --ease-enter: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  --ease-spring: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-pop: cubic-bezier(0.34, 1.3, 0.64, 1);
+  --motion-enter-y: -8px;
+  --motion-enter-x: -12px;
+  --motion-window-y: 10px;
+  --motion-lift-y: -2px;
+  --motion-window-scale: 0.985;
+  --motion-menu-scale: 0.96;
+  --motion-control-scale: 1.06;
+  --motion-active-scale: 0.96;
+  --motion-icon-start-opacity: 0.45;
+  --motion-icon-start-rotation: -8deg;
+  --motion-icon-start-scale: 0.9;
+  --motion-activity-opacity: 0.35;
+
+  --topbar-height: 72px;
+  --agent-panel-width: clamp(320px, 30vw, 430px);
+  --window-gutter: 28px;
+  --window-top: 82px;
+  --window-bottom: 22px;
+  --window-compact-width: 42rem;
+  --window-compact-height: 30rem;
+  --window-desktop-margin: 5rem;
+  --panel-unavailable-height: 24rem;
+  --menu-project-width: 24rem;
+  --menu-project-max-height: 34rem;
+  --menu-settings-width: 22rem;
+  --window-control-size: 28px;
+  --window-control-icon-size: 14px;
+  --window-control-inset: 5px;
+  --window-control-radius: 9px;
+  --workspace-tab-height: 38px;
+  --workspace-tab-min-width: 104px;
+  --workspace-tab-max-width: 192px;
+  --workspace-tab-close-size: 22px;
+  --workspace-tab-close-opacity: 0.48;
+  --workspace-tab-active-line-size: 1px;
+  --agent-composer-textarea-height: 28px;
+  --agent-composer-max-height: 160px;
+  --document-width: 46rem;
+  --document-padding-inline: clamp(var(--space-4), 3vw, var(--space-8));
+  --document-padding-block: var(--space-6);
+  --document-history-max-height: min(28rem, 60vh);
+  --history-narrow-height: 14rem;
+  --history-panel-width: 13.5rem;
+  --editor-format-control-height: 28px;
+  --editor-link-width: 11rem;
+  --editor-command-min-width: 12rem;
+  --auth-layout-gap: clamp(40px, 8vw, 140px);
+  --auth-layout-padding: clamp(28px, 5vw, 72px);
+
+  --layer-desktop: 1;
+  --layer-window: 20;
+  --layer-panel: 30;
+  --layer-topbar: 50;
+  --layer-menu: 60;
+  --layer-modal: 80;
+  --layer-toast: 90;
+
+  --desktop-art: url("/art/river-landscape.jpg");
+  --desktop-art-position: center 48%;
+  --desktop-art-filter: saturate(0.66) brightness(1.09) contrast(0.88);
+  --desktop-art-scrim: linear-gradient(rgb(244 244 237 / 48%), rgb(236 239 233 / 36%));
+}
+
+[data-background="river-landscape"] {
+  --desktop-art: url("/art/river-landscape.jpg");
+  --desktop-art-position: center 48%;
+  --desktop-art-filter: saturate(0.66) brightness(1.09) contrast(0.88);
+  --desktop-art-scrim: linear-gradient(rgb(244 244 237 / 48%), rgb(236 239 233 / 36%));
+}
+
+[data-background="the-harvesters"] {
+  --color-river: #927849;
+  --color-river-deep: #70552e;
+  --surface-rgb: 252 249 243;
+  --desktop-art: url("/art/the-harvesters.jpg");
+  --desktop-art-position: center 45%;
+  --desktop-art-filter: saturate(0.64) brightness(1.08) contrast(0.86);
+  --desktop-art-scrim: linear-gradient(rgb(248 244 232 / 49%), rgb(241 237 226 / 34%));
+}
+
+[data-background="mountainous-landscape"] {
+  --color-river: #7b7a8d;
+  --color-river-deep: #59596e;
+  --surface-rgb: 248 249 252;
+  --desktop-art: url("/art/mountainous-landscape.jpg");
+  --desktop-art-position: center 48%;
+  --desktop-art-filter: saturate(0.54) brightness(1.18) contrast(0.76);
+  --desktop-art-scrim: linear-gradient(rgb(239 239 232 / 43%), rgb(227 232 225 / 31%));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root,
+  [data-background] {
+    --duration-fast: var(--duration-reduced);
+    --duration-normal: var(--duration-reduced);
+    --duration-slow: var(--duration-reduced);
+  }
+}

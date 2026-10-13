@@ -1,0 +1,10 @@
+{
+  "name": "Factory starter",
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspace/project",
+  "remoteUser": "node",
+  "updateRemoteUserUID": false,
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "npm ci && npm run db:migrate"
+}

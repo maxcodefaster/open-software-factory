@@ -1,0 +1,6 @@
+node_modules/
+browser-app/lib/
+browser-app/src-gen/
+browser-app/esbuild.mjs
+browser-app/gen-esbuild.*
+factory-ide-extension/lib/

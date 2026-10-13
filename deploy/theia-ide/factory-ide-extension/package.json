@@ -1,0 +1,30 @@
+{
+  "name": "factory-ide-extension",
+  "private": true,
+  "version": "0.0.0",
+  "files": [
+    "lib",
+    "src"
+  ],
+  "dependencies": {
+    "@theia/core": "1.76.0",
+    "@theia/editor": "1.76.0",
+    "@theia/filesystem": "1.76.0",
+    "@theia/markers": "1.76.0",
+    "@theia/monaco": "1.76.0",
+    "@theia/navigator": "1.76.0",
+    "@theia/search-in-workspace": "1.76.0",
+    "@theia/workspace": "1.76.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "typescript": "6.0.3"
+  },
+  "scripts": {
+    "build": "tsc && cp src/browser/factory-ide.css lib/browser/factory-ide.css"
+  },
+  "theiaExtensions": [
+    {
+      "frontend": "lib/browser/factory-ide-frontend-module"
+    }
+  ]
+}

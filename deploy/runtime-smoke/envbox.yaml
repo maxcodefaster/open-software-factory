@@ -1,0 +1,117 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: open-factory-envbox-smoke
+  labels:
+    app.kubernetes.io/managed-by: open-software-factory
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: runtime-data
+  namespace: open-factory-envbox-smoke
+  labels:
+    app.kubernetes.io/managed-by: open-software-factory
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: envbox-smoke
+  namespace: open-factory-envbox-smoke
+  labels:
+    app.kubernetes.io/managed-by: open-software-factory
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  terminationGracePeriodSeconds: 120
+  containers:
+    - name: envbox
+      image: ghcr.io/coder/envbox@sha256:13e4477ed65912a72e52bb7115db63d4da934cf8a55962c8fdf7c470901dceff
+      imagePullPolicy: IfNotPresent
+      command: [/envbox, docker]
+      securityContext:
+        privileged: true
+      resources:
+        requests:
+          cpu: 500m
+          memory: 1Gi
+          ephemeral-storage: 2Gi
+        limits:
+          cpu: "6"
+          memory: 8Gi
+          ephemeral-storage: 8Gi
+      env:
+        - name: CODER_INNER_IMAGE
+          value: FACTORY_RUNTIME_HOST_IMAGE
+        - name: CODER_INNER_USERNAME
+          value: root
+        - name: CODER_INNER_HOSTNAME
+          value: open-factory-runtime
+        - name: CODER_AGENT_TOKEN
+          value: unused-required-by-envbox
+        - name: CODER_CPUS
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.cpu
+        - name: CODER_MEMORY
+          valueFrom:
+            resourceFieldRef:
+              resource: limits.memory
+        - name: CODER_MOUNTS
+          value: /home/coder:/home/coder
+        - name: CODER_BOOTSTRAP_SCRIPT
+          value: |
+            set -eu
+            test -z "${CODER_AGENT_URL:-}" || { echo 'CODER_AGENT_URL is forbidden' >&2; exit 1; }
+            unset CODER_AGENT_TOKEN CODER_AGENT_SUBSYSTEM CODER_AGENT_URL
+            dockerd-entrypoint.sh >/var/log/factory-dockerd.log 2>&1 &
+            until docker info >/dev/null 2>&1; do sleep 1; done
+            docker run --rm hello-world >/home/coder/hello-world.log
+            printf 'ready\n' >/home/coder/factory-runtime-ready
+            exec sleep infinity
+      volumeMounts:
+        - name: registry-ca
+          mountPath: /etc/docker/certs.d/registry.open-factory-envbox-smoke.svc.cluster.local:5000/ca.crt
+          subPath: ca.crt
+          readOnly: true
+        - name: runtime-data
+          mountPath: /home/coder
+          subPath: home
+        - name: runtime-data
+          mountPath: /var/lib/coder/docker
+          subPath: inner-docker
+        - name: runtime-data
+          mountPath: /var/lib/coder/containers
+          subPath: inner-containers
+        - name: runtime-data
+          mountPath: /var/lib/docker
+          subPath: outer-docker
+        - name: runtime-data
+          mountPath: /var/lib/containers
+          subPath: outer-containers
+        - name: sysbox-state
+          mountPath: /var/lib/sysbox
+        - name: kernel-modules
+          mountPath: /lib/modules
+          readOnly: true
+  volumes:
+    - name: registry-ca
+      secret:
+        secretName: registry-tls
+        items:
+          - { key: ca.crt, path: ca.crt }
+    - name: runtime-data
+      persistentVolumeClaim:
+        claimName: runtime-data
+    - name: sysbox-state
+      emptyDir: {}
+    - name: kernel-modules
+      hostPath:
+        path: /lib/modules
+        type: Directory

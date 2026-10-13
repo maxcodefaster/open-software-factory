@@ -1,0 +1,47 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
+  "files": {
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/coverage",
+      "!**/node_modules",
+      "!**/.factory",
+      "!deploy/theia-ide/factory-ide-extension/lib",
+      "!deploy/theia-ide/browser-app/lib",
+      "!deploy/theia-ide/browser-app/src-gen",
+      "!deploy/theia-ide/browser-app/esbuild.mjs",
+      "!deploy/theia-ide/browser-app/gen-esbuild.browser.mjs",
+      "!deploy/theia-ide/browser-app/gen-esbuild.node.mjs",
+      "!test-results",
+      "!playwright-report"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "linter": {
+    "enabled": true,
+    "rules": { "preset": "recommended" }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": { "source": { "organizeImports": "on" } }
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "semicolons": "always",
+      "trailingCommas": "all"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["deploy/theia-ide/factory-ide-extension/src/**/*.ts"],
+      "javascript": { "parser": { "unsafeParameterDecoratorsEnabled": true } }
+    }
+  ]
+}

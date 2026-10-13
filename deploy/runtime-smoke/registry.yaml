@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: open-factory-envbox-smoke
+  labels:
+    app.kubernetes.io/name: open-factory-registry
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: open-factory-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: open-factory-registry
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: registry
+          image: docker.io/library/registry:3@sha256:1be55279f18a2fe1a74edf2664cac61c1bea305b7b4642dab412e7affdcb3e33
+          env:
+            - { name: REGISTRY_HTTP_ADDR, value: 0.0.0.0:5000 }
+            - { name: REGISTRY_HTTP_TLS_CERTIFICATE, value: /tls/tls.crt }
+            - { name: REGISTRY_HTTP_TLS_KEY, value: /tls/tls.key }
+          ports:
+            - { name: https, containerPort: 5000 }
+          readinessProbe:
+            httpGet: { path: /v2/, port: https, scheme: HTTPS }
+          volumeMounts:
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: data, mountPath: /var/lib/registry }
+      volumes:
+        - name: tls
+          secret:
+            secretName: registry-tls
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: registry
+  namespace: open-factory-envbox-smoke
+spec:
+  selector:
+    app.kubernetes.io/name: open-factory-registry
+  ports:
+    - { name: https, port: 5000, targetPort: https }

@@ -1,0 +1,8 @@
+{
+  "name": "Unsafe runtime fixture",
+  "dockerComposeFile": ".devcontainer/unsafe.compose.yaml",
+  "service": "app",
+  "workspaceFolder": "/workspace/project",
+  "remoteUser": "node",
+  "updateRemoteUserUID": false
+}

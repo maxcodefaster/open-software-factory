@@ -1,0 +1,252 @@
+import { mkdir, mkdtemp, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
+import upstream from "../../upstream.json";
+import { buildModelID } from "./change-agent-turns";
+
+const runtimeImage =
+  "registry.localhost:5443/open-factory/build-runtime-host@sha256:1a824718e94c0b4ecfae9414ec570fee7176f4763c1163361c82eac991461891";
+
+export async function docker(...args: string[]) {
+  const process = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
+  const [out, error, status] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (status !== 0) throw new Error(`Owned process fixture failed: ${args[0]}: ${error}`);
+  return (args[0] === "logs" ? out + error : out).trim();
+}
+
+export async function observe<T>(
+  read: () => Promise<T>,
+  accepts: (value: T) => boolean,
+  failure = "Owned process assertion did not become true",
+  timeout = 15_000,
+) {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (accepts(value)) return value;
+    await Bun.sleep(50);
+  }
+  throw new Error(failure);
+}
+
+export async function pinnedOpenCode(
+  artifactImage = process.env["FACTORY_OPENCODE_TEST_IMAGE"] ?? runtimeImage,
+  browserClient?: { path: string; endpoint: string; token: string; turnID: string },
+  serverBinary = process.env["FACTORY_OPENCODE_SERVER_TEST_BINARY"],
+  providerBaseURL?: string,
+  retainedProject?: string,
+  expectedVersion = upstream.openCode.version,
+  skillManifest?: {
+    digest: string;
+    files: Array<{ path: string; body: string; digest: string; executable: boolean }>;
+  },
+) {
+  const packaged = process.env["FACTORY_OPENCODE_PACKAGED_SERVER"] === "1";
+  const nativeServer = Boolean(serverBinary || packaged);
+  if (!/^(?:[a-zA-Z0-9.:/-]+@)?sha256:[a-f0-9]{64}$/.test(artifactImage))
+    throw new Error("Owned OpenCode artifact requires an exact image digest");
+  const id = crypto.randomUUID();
+  const source = `factory-owned-opencode-artifact-${id}`;
+  const container = `factory-owned-opencode-process-${id}`;
+  const scratch = await realpath(await mkdtemp(resolve(tmpdir(), "factory-opencode-process-")));
+  const project = retainedProject ?? resolve(scratch, "project");
+  await mkdir(project, { recursive: true });
+  const created: string[] = [];
+  async function dispose() {
+    for (const name of [...created].reverse()) {
+      const owner = await docker(
+        "inspect",
+        "--format",
+        '{{index .Config.Labels "factory.owned-process-test"}}',
+        name,
+      );
+      if (owner !== id) throw new Error("Owned process cleanup refused");
+      await docker("rm", "--force", name);
+      created.splice(created.indexOf(name), 1);
+    }
+  }
+  try {
+    const label = `factory.owned-process-test=${id}`;
+    await docker("create", "--name", source, "--label", label, artifactImage);
+    created.push(source);
+    if (skillManifest)
+      await Bun.write(resolve(scratch, "admitted-skills.json"), JSON.stringify(skillManifest));
+    if (packaged) {
+      // Run the exact runtime artifact itself; do not copy hundreds of upstream files to the host.
+    } else if (serverBinary) {
+      const { copyFile } = await import("node:fs/promises");
+      await copyFile(serverBinary, resolve(scratch, "opencode"));
+    } else
+      await docker(
+        "cp",
+        `${source}:/opt/factory/opencode/glibc/opencode`,
+        resolve(scratch, "opencode"),
+      );
+    await docker(
+      "run",
+      "--detach",
+      "--name",
+      container,
+      "--label",
+      label,
+      "--env",
+      `FACTORY_PROCESS_MODEL_ID=${buildModelID}`,
+      ...(providerBaseURL ? ["--env", `FACTORY_PROCESS_PROVIDER_URL=${providerBaseURL}`] : []),
+      ...(nativeServer ? ["--env", "FACTORY_PROCESS_NATIVE_SERVER=1"] : []),
+      ...(skillManifest
+        ? [
+            "--env",
+            "FACTORY_PROCESS_SKILL_MANIFEST=/owned-skills.json",
+            "--mount",
+            `type=bind,src=${resolve(scratch, "admitted-skills.json")},dst=/owned-skills.json,readonly`,
+          ]
+        : []),
+      ...(packaged ? ["--env", "FACTORY_PROCESS_PACKAGED_SERVER=1"] : []),
+      ...(browserClient
+        ? [
+            "--env",
+            `FACTORY_BUILD_BROWSER_URL=${browserClient.endpoint}`,
+            "--env",
+            "FACTORY_BUILD_BROWSER_COMMAND=/tmp/factory-runtime-connector-1",
+            "--env",
+            `FACTORY_BUILD_BROWSER_TOKEN=${browserClient.token}`,
+            "--env",
+            `FACTORY_PROCESS_BROWSER_TURN=${browserClient.turnID}`,
+            "--mount",
+            `type=bind,src=${browserClient.path},dst=/tmp/factory-runtime-connector-1,readonly`,
+          ]
+        : []),
+      "--publish",
+      "127.0.0.1::4096",
+      "--publish",
+      "127.0.0.1::4097",
+      ...(!packaged
+        ? [
+            "--mount",
+            `type=bind,src=${resolve(scratch, "opencode")},dst=/opt/factory/opencode,readonly`,
+          ]
+        : []),
+      ...(nativeServer && !packaged
+        ? [
+            "--mount",
+            `type=bind,src=${resolve("deploy/opencode-server")},dst=/owned-server,readonly`,
+          ]
+        : []),
+      "--mount",
+      `type=bind,src=${project},dst=/workspace/project`,
+      "--mount",
+      `type=bind,src=${resolve("test/fixtures")},dst=/owned-fixture,readonly`,
+      ...(packaged ? ["--entrypoint", "node"] : []),
+      packaged ? artifactImage : upstream.nodeDevelopment.image,
+      ...(!packaged ? ["node"] : []),
+      "/owned-fixture/opencode-process.mjs",
+    );
+    created.push(container);
+    const port = (await docker("port", container, "4096/tcp")).split(":").at(-1);
+    const controlPort = (await docker("port", container, "4097/tcp")).split(":").at(-1);
+    const transport = (request: Request, path: string) => {
+      const target = new Request(`http://127.0.0.1:${port}${path}`, request);
+      target.headers.set(
+        "authorization",
+        `Basic ${Buffer.from("opencode:owned-opencode-server-password").toString("base64")}`,
+      );
+      return fetch(target, {
+        signal: AbortSignal.any([request.signal, AbortSignal.timeout(15_000)]),
+      });
+    };
+    const client = createOpenCodeClient(transport);
+    // Read native identity for either the retained source or the upgraded artifact.
+    const nativeInfo = async () => {
+      const path = "/api/info";
+      const response = await transport(new Request(`http://owned${path}`), path);
+      if (!response.ok) throw new Error(`Owned server readiness failed: ${response.status}`);
+      return response.json() as Promise<{ version: string }>;
+    };
+    const control = async (action = "", method = "GET") => {
+      const response = await fetch(`http://127.0.0.1:${controlPort}/control${action}`, {
+        method,
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) throw new Error(`Owned process control failed: ${response.status}`);
+      return response.json() as Promise<{
+        pid: number;
+        generation: number;
+        running: boolean;
+        providerRequests: number;
+        heldRequests: number;
+        heldCodingRequests: number;
+        browserTools: string[];
+        imageRequests: number;
+      }>;
+    };
+    await observe(
+      async () => {
+        try {
+          await nativeInfo();
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      (ready) => ready,
+      "Owned native server did not become ready",
+      45_000,
+    );
+    // Both readiness paths are read-only. Candidate discovery can return 503
+    // during activation; observe this location without restarting or prompting.
+    await observe(
+      () =>
+        client.model
+          .list(
+            { location: { directory: "/workspace/project" } },
+            { signal: AbortSignal.timeout(10_000) },
+          )
+          .then(() => true)
+          .catch(() => false),
+      (ready) => ready,
+      "Owned native location did not become ready",
+      45_000,
+    );
+    const version = nativeServer
+      ? `opencode v${(await nativeInfo()).version}`
+      : await docker("exec", container, "/opt/factory/opencode", "--version");
+    if (version !== `opencode v${expectedVersion}`)
+      throw new Error(`Pinned OpenCode version differs: ${version}`);
+    console.log("Owned pinned process", { version, scratch });
+    const installBrowserScreenshot = async (sessionID: string, data: string) => {
+      if (!/^[a-f0-9-]{36}$/.test(sessionID))
+        throw new Error("Owned screenshot Session identity required");
+      await docker(
+        "exec",
+        container,
+        "node",
+        "-e",
+        "const fs=require('fs');const dir='/tmp/factory-build-browser-'+process.argv[1];fs.mkdirSync(dir,{mode:0o700});fs.writeFileSync(dir+'/screenshot.jpg',Buffer.from(process.argv[2],'base64'),{mode:0o600})",
+        sessionID,
+        data,
+      );
+    };
+    return {
+      client,
+      control,
+      transport,
+      dispose,
+      scratch,
+      installBrowserScreenshot,
+      diagnostics: async () => ({
+        state: await docker("inspect", "--format", "{{json .State}}", container),
+        logs: (await docker("logs", container)).slice(-4000),
+      }),
+    };
+  } catch (cause) {
+    if (nativeServer && created.includes(container))
+      console.log("Owned native server startup", (await docker("logs", container)).slice(-3000));
+    await dispose();
+    throw cause;
+  }
+}

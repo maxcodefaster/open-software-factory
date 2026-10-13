@@ -1,0 +1,153 @@
+.usage-settings {
+  padding: var(--space-3) var(--space-6) var(--space-6);
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+}
+.usage-note {
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  margin: 0;
+}
+.usage-totals {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-5);
+}
+.usage-totals section {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+}
+.usage-totals span {
+  font-size: var(--text-sm);
+}
+.usage-totals strong {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-medium);
+}
+.usage-settings small {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+.usage-settings form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
+  gap: var(--space-4);
+}
+.usage-settings > section,
+.usage-breakdown {
+  min-width: 0;
+}
+.usage-settings fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.usage-settings legend {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  margin-bottom: var(--space-3);
+}
+.usage-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+  margin-top: var(--space-4);
+}
+.usage-fields label {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.usage-fields label > div {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.usage-fields input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  background: var(--material-input);
+  color: var(--color-ink);
+  font: inherit;
+}
+.usage-settings button {
+  justify-self: start;
+}
+.usage-observations {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+.usage-observations li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4);
+  font-size: var(--text-sm);
+}
+.usage-observations small {
+  flex-basis: 100%;
+}
+.usage-breakdown summary {
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.usage-price-models,
+.usage-price-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block: var(--space-3);
+}
+.usage-table {
+  overflow: auto;
+  margin-top: var(--space-3);
+}
+.usage-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+}
+.usage-table th,
+.usage-table td {
+  text-align: left;
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--line-subtle);
+  vertical-align: top;
+}
+.usage-table th {
+  font-weight: var(--weight-medium);
+}
+.usage-table small {
+  display: block;
+  margin-top: var(--space-1);
+}
+.usage-fields label > div > small {
+  flex-shrink: 0;
+  white-space: nowrap;
+  letter-spacing: normal;
+  text-transform: none;
+}
+@media (max-width: 760px) {
+  .usage-settings {
+    padding-inline: var(--space-4);
+  }
+  .usage-fields,
+  .usage-totals {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

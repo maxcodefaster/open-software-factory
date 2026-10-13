@@ -1,0 +1,12 @@
+name: Factory Verification
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+jobs:
+  verify:
+    runs-on: factory-verification
+    steps:
+      - name: Confirm the assigned commit
+        run: test "$(cat /workspace/project/.git/HEAD)" = "${{ forgejo.event.pull_request.head.sha }}"
+      - name: Check the starter
+        run: cd /workspace/project && npm run check

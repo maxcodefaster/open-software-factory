@@ -1,0 +1,369 @@
+import type { createDatabase } from "../../../../packages/db/src/client";
+import type { createForgejoClient } from "../../../../packages/forge/src/forge";
+import {
+  setupInspectionCommand,
+  setupInspectionOutput,
+  setupInspectionView,
+} from "../../../../packages/project-domain/src/setup";
+import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { CommandError } from "../command-error";
+import { readableCodePath } from "../knowledge/code-read";
+import { factoryForgeSource } from "../knowledge/forge-source";
+import type { ResolvedModelConnection } from "../models/native";
+import type { AgentTurnTransaction } from "../agent/turn-store";
+import { inspectConfiguration } from "./inspection-agent";
+import { recordedMastraUsage } from "../usage/record-mastra";
+import { createUsageJournal } from "../usage/journal";
+import {
+  configurationPath,
+  requiredConfiguration,
+  validateConfiguration,
+  validateSetupProposal,
+} from "./configuration";
+
+type InspectionRow = {
+  id: string;
+  projectID: string;
+  sourceCommit: string;
+  state: string;
+  output: unknown;
+  failure: string | null;
+  modelID: string | null;
+  connectionID: string | null;
+  connectionVersion: number | null;
+  userID: string;
+  parentID: string | null;
+  answers: Record<string, string>;
+};
+export function createSetupInspection(input: {
+  database: ReturnType<typeof createDatabase>;
+  forge: ReturnType<typeof createForgejoClient>;
+  forgeURL: string;
+  forgeOwner: string;
+  model(
+    projectID: string,
+    userID: string,
+    transaction: AgentTurnTransaction,
+  ): Promise<{ modelID: string; connectionID: string | null; connectionVersion: number | null }>;
+  connection(reference: {
+    connectionID: string | null;
+    connectionVersion: number | null;
+  }): Promise<ResolvedModelConnection>;
+  ready(projectID: string, userID: string): Promise<void>;
+  generate?: typeof inspectConfiguration;
+}) {
+  const sql = input.database.client;
+  const access = createAccessController(input.database);
+  const executions = new Map<string, Promise<void>>();
+  const aborts = new Map<string, AbortController>();
+  async function project(projectID: string, userID: string) {
+    await access.requireProject(userID, projectID, true);
+    const [value] = await sql<
+      { url: string; branch: string }[]
+    >`SELECT repository_url AS url,default_branch AS branch FROM factory.project WHERE id=${projectID}`;
+    if (!value) throw new CommandError("not-found", "Project not found");
+    return {
+      ...value,
+      repository: factoryForgeSource(value.url, input.forgeURL, input.forgeOwner),
+    };
+  }
+  async function row(id: string) {
+    const [value] = await sql<
+      InspectionRow[]
+    >`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,failure,
+      model_id AS "modelID",connection_id AS "connectionID",connection_version::float8 AS "connectionVersion",created_by AS "userID",parent_id AS "parentID",answers
+      FROM factory.project_setup_inspection WHERE id=${id}`;
+    return value;
+  }
+  async function view(projectID: string, userID: string) {
+    await access.requireProject(userID, projectID, true);
+    const [value] =
+      await sql`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,failure
+      FROM factory.project_setup_inspection WHERE project_id=${projectID} ORDER BY created_at DESC LIMIT 1`;
+    return value ? setupInspectionView.parse(value) : null;
+  }
+  async function inspect(value: InspectionRow) {
+    const lock = await sql.reserve();
+    try {
+      const [claimed] = await lock<
+        { held: boolean }[]
+      >`SELECT pg_try_advisory_lock(hashtext(${`setup-inspect:${value.id}`})) AS held`;
+      if (!claimed?.held) return;
+      const current = await project(value.projectID, value.userID);
+      const admitted = await row(value.id);
+      if (admitted?.state !== "inspecting") return;
+      const abort = new AbortController();
+      aborts.set(value.id, abort);
+      const files = await input.forge.listFiles(current.repository, value.sourceCommit);
+      const existing = files.map((file) => file.path);
+      if (!value.modelID) throw new Error("Inspection model was not admitted");
+      const connection = await input.connection(value);
+      const output = await (input.generate ?? inspectConfiguration)({
+        modelID: value.modelID,
+        connection,
+        usageSink: recordedMastraUsage(input.database, {
+          id: `setup:${value.id}`,
+          projectID: value.projectID,
+          userID: value.userID,
+          purpose: "setup",
+          provider: connection.provider ?? "openai",
+          model: value.modelID,
+        }),
+        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
+        answers: value.answers,
+        context: await questionContext(value),
+        existingConfiguration: existing.filter(configurationPath),
+        paths: files
+          .filter(
+            (file) =>
+              file.size <= 64000 &&
+              (readableCodePath(file.path) ||
+                configurationPath(file.path) ||
+                /(?:^|\/)Dockerfile$/.test(file.path)),
+          )
+          .slice(0, 2000)
+          .map((file) => file.path),
+        read: async (path) => {
+          await access.requireProject(value.userID, value.projectID, true);
+          const admitted = await row(value.id);
+          if (admitted?.state !== "inspecting") throw new Error("Inspection was stopped");
+          return input.forge.getFile(current.repository, path, value.sourceCommit);
+        },
+      });
+      validateSetupProposal(output, existing);
+      await access.requireProject(value.userID, value.projectID, true);
+      await sql`UPDATE factory.project_setup_inspection SET state='proposal',output=${JSON.stringify(output)}::jsonb,updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+    } catch {
+      await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection could not finish. Existing source is unchanged; retry when ready.',updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+    } finally {
+      aborts.delete(value.id);
+      await lock`SELECT pg_advisory_unlock(hashtext(${`setup-inspect:${value.id}`}))`;
+      lock.release();
+    }
+  }
+  async function questionContext(value: InspectionRow) {
+    const rounds: { question: string; answer: string }[][] = [];
+    let child = value;
+    for (let count = 0; child.parentID && count < 8; count++) {
+      const parent = await row(child.parentID);
+      if (!parent || parent.projectID !== value.projectID)
+        throw new Error("Question context is unavailable");
+      const output = setupInspectionOutput.parse(parent.output);
+      rounds.unshift(
+        output.questions.map((question) => ({
+          question: question.question,
+          answer: child.answers[question.id] ?? "",
+        })),
+      );
+      child = parent;
+    }
+    if (child.parentID) throw new Error("Setup question round bound reached");
+    return rounds.flat();
+  }
+  async function start(
+    projectID: string,
+    userID: string,
+    commandID: string,
+    continuation: { parentID?: string; answers?: Record<string, string> } = {},
+  ) {
+    const command = setupInspectionCommand.parse({ id: commandID, ...continuation });
+    const current = await project(projectID, userID);
+    const previous = await row(commandID);
+    if (previous) {
+      if (
+        previous.projectID !== projectID ||
+        previous.userID !== userID ||
+        previous.parentID !== (command.parentID ?? null) ||
+        JSON.stringify(previous.answers) !== JSON.stringify(command.answers)
+      )
+        throw new CommandError("conflict", "Inspection command belongs to different work");
+      return view(projectID, userID);
+    }
+    const head = await input.forge.getDefaultBranch(current.repository);
+    const files = await input.forge.listFiles(current.repository, head.headSha);
+    const complete = requiredConfiguration.every((path) =>
+      files.some((file) => file.path === path),
+    );
+    if (complete) {
+      validateConfiguration(
+        await Promise.all(
+          requiredConfiguration.map(async (path) => ({
+            path,
+            content: await input.forge.getFile(current.repository, path, head.headSha),
+          })),
+        ),
+        files.map((file) => file.path),
+      );
+    }
+    await sql.begin(async (transaction) => {
+      await transaction`SELECT id FROM factory.project WHERE id=${projectID} FOR UPDATE`;
+      await projectAuthorityIn(transaction, userID, projectID, true);
+      if (command.parentID) {
+        const [parent] = await transaction<
+          InspectionRow[]
+        >`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,answers,parent_id AS "parentID"
+          FROM factory.project_setup_inspection WHERE id=${command.parentID} FOR UPDATE`;
+        if (!parent || parent.projectID !== projectID || parent.state !== "proposal")
+          throw new CommandError("conflict", "The setup question changed");
+        if (parent.sourceCommit !== head.headSha)
+          throw new CommandError(
+            "conflict",
+            "Source changed. Inspect the current configuration again.",
+          );
+        const output = setupInspectionOutput.parse(parent.output);
+        if (
+          output.questions.some((question) => !command.answers[question.id]) ||
+          Object.keys(command.answers).some(
+            (key) => !output.questions.some((question) => question.id === key),
+          )
+        )
+          throw new CommandError(
+            "conflict",
+            "Answer the current setup questions before continuing",
+          );
+        await transaction`UPDATE factory.project_setup_inspection SET state='superseded' WHERE id=${parent.id} AND state='proposal'`;
+      }
+      await projectAuthorityIn(transaction, userID, projectID, true);
+      const active =
+        await transaction`SELECT id FROM factory.project_setup_inspection WHERE project_id=${projectID} AND state IN ('inspecting','proposal','confirming')`;
+      if (active.length)
+        throw new CommandError("conflict", "Continue the retained setup inspection");
+      const model = complete ? undefined : await input.model(projectID, userID, transaction);
+      await transaction`INSERT INTO factory.project_setup_inspection(id,project_id,source_commit,state,model_id,connection_id,connection_version,created_by,parent_id,answers)
+        VALUES(${commandID},${projectID},${head.headSha},${complete ? "complete" : "inspecting"},${model?.modelID ?? null},${model?.connectionID ?? null},${model?.connectionVersion ?? null},${userID},${command.parentID ?? null},${JSON.stringify(command.answers)}::jsonb)`;
+    });
+    if (complete) await input.ready(projectID, userID);
+    else {
+      const saved = await row(commandID);
+      if (saved) {
+        const work = inspect(saved).finally(() => executions.delete(commandID));
+        executions.set(commandID, work);
+      }
+    }
+    return view(projectID, userID);
+  }
+  async function stop(projectID: string, userID: string, id: string) {
+    await project(projectID, userID);
+    const value = await row(id);
+    if (!value || value.projectID !== projectID)
+      throw new CommandError("not-found", "Inspection not found");
+    if (["inspecting", "proposal"].includes(value.state)) {
+      await sql`UPDATE factory.project_setup_inspection SET state='superseded',failure=NULL,updated_at=now()
+        WHERE id=${id} AND state IN ('inspecting','proposal')`;
+      aborts.get(id)?.abort(new DOMException("Inspection stopped", "AbortError"));
+    } else if (value.state === "confirming") {
+      throw new CommandError(
+        "conflict",
+        "Configuration was confirmed. Check its result before starting another inspection.",
+      );
+    }
+    return view(projectID, userID);
+  }
+  async function confirm(projectID: string, userID: string, id: string) {
+    const current = await project(projectID, userID);
+    const connection = await sql.reserve();
+    try {
+      const [lock] = await connection<
+        { held: boolean }[]
+      >`SELECT pg_try_advisory_lock(hashtext(${`setup-confirm:${id}`})) AS held`;
+      if (!lock?.held) throw new CommandError("conflict", "Confirmation is already running");
+      try {
+        const value = await row(id);
+        if (
+          !value ||
+          value.projectID !== projectID ||
+          !["proposal", "confirming", "confirmed"].includes(value.state)
+        )
+          throw new CommandError("conflict", "Setup proposal is unavailable");
+        if (value.state === "confirmed") return view(projectID, userID);
+        const output = setupInspectionOutput.parse(value.output);
+        if (output.questions.length || !output.files.length)
+          throw new CommandError("conflict", "Answer the remaining setup questions first");
+        const head = await input.forge.getDefaultBranch(current.repository);
+        await input.forge.ensureDefaultBranchProtection(current.repository, current.branch, false);
+        const branchName = `factory/setup-${id}`;
+        if (value.state === "proposal" && head.headSha !== value.sourceCommit)
+          throw new CommandError(
+            "conflict",
+            "Source changed. Inspect its current configuration again before confirming",
+          );
+        await sql.begin(async (transaction) => {
+          await transaction`INSERT INTO factory.project_setup_confirmation(inspection_id,created_by) VALUES(${id},${userID}) ON CONFLICT(inspection_id) DO NOTHING`;
+          await transaction`UPDATE factory.project_setup_inspection SET state='confirming',updated_at=now() WHERE id=${id} AND state='proposal'`;
+        });
+        const commit = await input.forge.applySetupFiles({
+          repository: current.repository,
+          branch: branchName,
+          baseCommit: value.sourceCommit,
+          files: output.files,
+          proposalID: id,
+        });
+        await access.requireProject(userID, projectID, true);
+        const observed = await input.forge.getDefaultBranch(current.repository);
+        if (observed.headSha !== value.sourceCommit && observed.headSha !== commit)
+          throw new CommandError(
+            "conflict",
+            "Main branch changed; confirmed files were not merged",
+          );
+        if (observed.headSha !== commit) {
+          const pull = await input.forge.ensurePullRequest({
+            repository: current.repository,
+            baseBranch: current.branch,
+            headBranch: branchName,
+            expectedHeadSha: commit,
+            title: "Configure Project for Factory",
+            body: "Exact human-confirmed Project setup. No application code changes.",
+          });
+          if (pull.baseSha !== value.sourceCommit)
+            throw new CommandError("conflict", "Main branch changed before setup merge");
+          await input.forge.mergeFastForward(
+            current.repository,
+            pull.number,
+            commit,
+            current.branch,
+          );
+        }
+        await sql`UPDATE factory.project_setup_inspection SET state='confirmed',failure=NULL,updated_at=now() WHERE id=${id} AND state='confirming'`;
+        await input.ready(projectID, userID);
+        return view(projectID, userID);
+      } finally {
+        await connection`SELECT pg_advisory_unlock(hashtext(${`setup-confirm:${id}`}))`;
+      }
+    } finally {
+      connection.release();
+    }
+  }
+  return {
+    start,
+    view,
+    confirm,
+    stop,
+    async settle() {
+      await Promise.allSettled([...executions.values()]);
+    },
+    async recover() {
+      const confirmed = await sql<
+        { projectID: string; userID: string }[]
+      >`SELECT project_id AS "projectID",created_by AS "userID" FROM factory.project_setup_inspection WHERE state IN ('confirmed','complete')`;
+      for (const value of confirmed) await input.ready(value.projectID, value.userID);
+      const pending = await sql<
+        { id: string }[]
+      >`SELECT id FROM factory.project_setup_inspection WHERE state='inspecting'`;
+      for (const value of pending) {
+        const connection = await sql.reserve();
+        try {
+          const [lock] = await connection<
+            { held: boolean }[]
+          >`SELECT pg_try_advisory_lock(hashtext(${`setup-inspect:${value.id}`})) AS held`;
+          if (lock?.held) {
+            await createUsageJournal(input.database).abandon(`setup:${value.id}`);
+            await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection was interrupted. Retry explicitly; source is unchanged.' WHERE id=${value.id} AND state='inspecting'`;
+            await connection`SELECT pg_advisory_unlock(hashtext(${`setup-inspect:${value.id}`}))`;
+          }
+        } finally {
+          connection.release();
+        }
+      }
+    },
+  };
+}

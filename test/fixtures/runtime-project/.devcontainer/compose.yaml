@@ -1,0 +1,36 @@
+services:
+  app:
+    image: docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+    command: ["sleep", "infinity"]
+    cap_drop: [ALL]
+    volumes:
+      - ..:/workspace/project
+      - fixture-data:/workspace/data
+    depends_on:
+      support:
+        condition: service_healthy
+  support:
+    image: docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2
+    command: ["node", "/opt/fixture/support.mjs"]
+    volumes:
+      - ../support.mjs:/opt/fixture/support.mjs:ro
+      - fixture-data:/workspace/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4100/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+  app-server:
+    image: docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2
+    profiles: [runtime]
+    command: ["node", "/workspace/project/src/server.mjs"]
+    working_dir: /workspace/project
+    volumes:
+      - ..:/workspace/project
+    ports:
+      - "4300:4300"
+    depends_on:
+      support:
+        condition: service_healthy
+volumes:
+  fixture-data:

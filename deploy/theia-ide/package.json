@@ -1,0 +1,15 @@
+{
+  "name": "factory-theia-ide",
+  "private": true,
+  "version": "0.0.0",
+  "workspaces": [
+    "browser-app",
+    "factory-ide-extension"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace factory-ide-extension && npm run build --workspace browser-app"
+  },
+  "overrides": {
+    "dompurify": "3.4.17"
+  }
+}

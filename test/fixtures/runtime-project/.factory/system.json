@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "primaryApp": "web",
+  "apps": [
+    {
+      "id": "web",
+      "label": "Web",
+      "command": ["node", "src/server.mjs"],
+      "port": 4300,
+      "healthPath": "/health"
+    },
+    {
+      "id": "worker",
+      "label": "Worker monitor",
+      "command": ["node", "src/worker.mjs"],
+      "port": 4310,
+      "healthPath": "/health"
+    }
+  ]
+}

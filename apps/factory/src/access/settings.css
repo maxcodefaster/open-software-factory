@@ -1,0 +1,158 @@
+.access-settings-body {
+  display: grid;
+  gap: var(--space-6);
+}
+.access-settings h3 {
+  margin: 0 0 var(--space-3);
+  font-size: var(--text-md);
+  font-weight: var(--weight-medium);
+}
+.access-list {
+  list-style: none;
+  padding: 0;
+  margin: var(--space-3) 0;
+}
+.access-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding-block: var(--space-3);
+  border-bottom: 1px solid var(--line-subtle);
+}
+.access-person {
+  flex: 1;
+  min-width: 0;
+}
+.access-person strong,
+.access-person span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.access-person strong {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+.access-person span,
+.access-list small,
+.access-settings label small {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+.access-add-account summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.access-settings details summary {
+  cursor: pointer;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+.access-settings details button {
+  display: block;
+  margin-top: var(--space-2);
+}
+.access-settings form {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.access-settings code {
+  overflow-wrap: anywhere;
+}
+.access-add-account form {
+  padding-top: var(--space-4);
+}
+.access-settings label {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-sm);
+  font-family: var(--font-interface);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.access-settings input,
+.access-settings select {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  background: var(--material-input);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+}
+.access-add-member {
+  margin-top: var(--space-4);
+}
+.access-settings .access-permission {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+.access-settings .access-permission input[type="checkbox"] {
+  width: auto;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--blue);
+}
+.access-account-actions {
+  position: relative;
+  margin-left: auto;
+}
+.access-account-actions > button {
+  width: var(--space-8);
+  height: var(--space-8);
+  padding: var(--space-1);
+}
+.access-account-menu {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: var(--layer-menu);
+  width: min(17rem, calc(100vw - var(--space-12)));
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  background: var(--material-popover);
+  box-shadow: var(--shadow-float);
+  animation: menu-in var(--duration-fast) var(--ease-enter);
+}
+.access-account-menu button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  text-align: left;
+  font-size: var(--text-sm);
+}
+.access-account-menu[data-side="above"] {
+  top: auto;
+  bottom: calc(100% + var(--space-1));
+}
+.access-account-menu button:hover {
+  background: var(--material-accent);
+}
+.access-account-menu svg {
+  width: var(--space-4);
+  height: var(--space-4);
+  flex: none;
+}
+.access-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  font-size: var(--text-sm);
+}
+@media (max-width: 480px) {
+  .access-person {
+    flex-basis: 100%;
+  }
+}

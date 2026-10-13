@@ -1,0 +1,426 @@
+import { createHash } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { expect, test } from "@playwright/test";
+import { createDatabase } from "../../packages/db/src/client";
+import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+
+test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
+test.setTimeout(30_000);
+let projectID = "";
+let ticketID = "";
+let revisionID = "";
+const title = "A calm implementation journey";
+
+test.beforeEach(async ({ page }) => {
+  await signIn(page);
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  const { session } = await (await page.request.get("/api/session")).json();
+  projectID = crypto.randomUUID();
+  ticketID = crypto.randomUUID();
+  revisionID = crypto.randomUUID();
+  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
+    route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no source" } }),
+  );
+  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
+    route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no IDE" } }),
+  );
+  const canonical = canonicalRequirementContent({
+    summary: "Make the **starter** welcoming.",
+    acceptanceCriteria: ["A clear first action."],
+    nonGoals: [],
+  });
+  const db = createDatabase(1);
+  try {
+    await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
+      VALUES (${projectID}, ${`implementation-ux-${projectID}`}, 'Implementation UX', 'https://example.invalid/owned-implementation-ux.git', 'main', '.devcontainer/devcontainer.json', ${session.user.id})`;
+    await db.client`INSERT INTO factory.ticket(id, project_id, title, state, created_by)
+      VALUES (${ticketID}, ${projectID}, ${title}, 'ready', ${session.user.id})`;
+    await db.client`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
+      VALUES (${revisionID}, ${ticketID}, 1, ${canonical}, ${createHash("sha256").update(canonical).digest("hex")}, ${session.user.id})`;
+  } finally {
+    await db.client.end();
+  }
+});
+test.afterEach(async () => {
+  if (projectID) await deleteFactoryProject(projectID);
+  projectID = "";
+});
+
+async function selectProject(page: Parameters<typeof signIn>[0]) {
+  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await page
+    .getByRole("button")
+    .filter({ hasText: `implementation-ux-${projectID}` })
+    .click();
+}
+
+test("capacity wait and Coding pause retain the Ticket and expose only an explicit resume", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID(),
+    turnID = crypto.randomUUID();
+  let paused = false;
+  const resumes: unknown[] = [];
+  const change = {
+    id: changeID,
+    projectId: projectID,
+    ticketId: ticketID,
+    branchName: "factory/owned-usage",
+    baseSha: "a".repeat(40),
+    state: "active",
+    branchState: "succeeded",
+    implementationState: "starting",
+    buildTurnState: "pending",
+  };
+  await page.route("**/api/changes?*", (route) => route.fulfill({ json: { changes: [change] } }));
+  await page.route(`**/api/changes/${changeID}/agent`, (route) =>
+    route.fulfill({
+      json: {
+        state: "starting",
+        sessionAvailable: true,
+        runtimeConnected: false,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+        computeWait: paused ? null : "capacity",
+        codingPause: paused ? { turnID, reason: "finish-reserve-used" } : null,
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await page.route(`**/api/changes/${changeID}/agent/resume`, (route) => {
+    resumes.push(route.request().postDataJSON());
+    return route.abort("failed");
+  });
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  await expect(page.getByText("Waiting for execution capacity.", { exact: false })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Resume implementation", exact: true }),
+  ).toHaveCount(0);
+  await mkdir(".factory/screenshots/usage-limits", { recursive: true });
+  await page.screenshot({ path: ".factory/screenshots/usage-limits/capacity-wait.png" });
+  paused = true;
+  await expect(page.getByText("Coding paused at its allowance.", { exact: false })).toBeVisible({
+    timeout: 10000,
+  });
+  const resume = page.getByRole("button", { name: "Resume implementation", exact: true });
+  await expect(resume).toBeEnabled();
+  expect(resumes).toEqual([]);
+  await page.screenshot({ path: ".factory/screenshots/usage-limits/coding-pause.png" });
+  await resume.click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await resume.click();
+  await expect.poll(() => resumes.length).toBe(2);
+  expect(resumes[1]).toEqual(resumes[0]);
+  expect(resumes[0]).toMatchObject({ pausedTurnId: turnID });
+  await expect(page.getByRole("tab", { name: title, exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(resume).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: ".factory/screenshots/usage-limits/coding-pause-narrow.png" });
+});
+
+test("Implement is one explicit recoverable action and does not open IDE or Assistant", async ({
+  page,
+}) => {
+  const requests: Array<{ commandId: string; revisionId: string }> = [];
+  await page.route(`**/api/tickets/${ticketID}/implement`, async (route) => {
+    requests.push(route.request().postDataJSON());
+    if (requests.length === 1) return route.abort("failed");
+    return route.fulfill({ status: 202, contentType: "application/json", body: "{}" });
+  });
+  await selectProject(page);
+  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Start Change", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Implement", exact: true }).click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await page.getByRole("button", { name: "Implement", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(requests[0]?.revisionId).toBe(revisionID);
+  await expect(page.getByRole("region", { name: "Agent panel", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: title, exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+  await expect(page.locator(".ticket-metadata")).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: "Ticket Epic" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Assign to Epic…", exact: true })).toBeVisible();
+  await expect(page.locator(".ticket-action-menu select")).toHaveCount(0);
+  await page
+    .getByRole("textbox", { name: "Specification summary", exact: true })
+    .click({ position: { x: 4, y: 4 } });
+  await expect(page.getByRole("combobox", { name: "Ticket Epic" })).toHaveCount(0);
+});
+
+test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  let received: { commandId: string; text: string } | undefined;
+  let researchRequests = 0;
+  const agent = {
+    state: "committed",
+    sessionAvailable: true,
+    runtimeConnected: true,
+    messagesAvailable: true,
+    messages: [],
+    stopPending: false,
+    stopId: null,
+  };
+  const change = {
+    id: changeID,
+    projectId: projectID,
+    ticketId: ticketID,
+    branchName: "factory/change-123456789abc",
+    baseSha: "a".repeat(40),
+    state: "active",
+    branchState: "succeeded",
+    verificationState: "succeeded",
+    implementationState: "committed",
+    buildTurnState: "completed",
+  };
+  const conversation = {
+    id: crypto.randomUUID(),
+    projectId: projectID,
+    ticketId: ticketID,
+    mode: "build",
+    version: 1,
+    entries: [],
+  };
+  await page.route("**/api/changes?*", (route) => route.fulfill({ json: { changes: [change] } }));
+  await page.route(`**/api/changes/${changeID}/agent`, (route) => route.fulfill({ json: agent }));
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
+    route.fulfill({
+      json: {
+        verificationState: "succeeded",
+        actionRunUrl: "http://127.0.0.1:33030/owned/starter/actions/runs/1",
+      },
+    }),
+  );
+  await page.route(`**/api/projects/${projectID}/conversation/mode`, (route) =>
+    route.fulfill({ json: conversation }),
+  );
+  await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
+    researchRequests += 1;
+    return route.fulfill({ json: conversation });
+  });
+  await page.route(`**/api/changes/${changeID}/agent/request-changes`, (route) => {
+    received = route.request().postDataJSON();
+    return route.fulfill({ json: { ...agent, state: "starting" } });
+  });
+  await selectProject(page);
+  await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Cancel Change", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Open Forgejo checks" })).toBeHidden();
+  await page.locator(".ticket-checks summary").click();
+  await expect(page.getByRole("link", { name: "Open Forgejo checks" })).toBeVisible();
+  await page.getByRole("button", { name: "Request changes", exact: true }).click();
+  const input = page.getByRole("textbox", { name: "Message conversation", exact: true });
+  await expect(input).toBeVisible();
+  await expect(page.locator(".agent-state")).toHaveText("Complete");
+  await expect(page.getByText("Details", { exact: true })).toHaveCount(0);
+  await input.fill("Correct the first action within the original requirements.");
+  await input.press("Enter");
+  await expect
+    .poll(() => received?.text)
+    .toBe("Correct the first action within the original requirements.");
+  expect(researchRequests).toBe(0);
+  await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+  await mkdir(".factory/screenshots/implementation-journey", { recursive: true });
+  await page.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
+  await page.screenshot({ path: ".factory/screenshots/implementation-journey/review-desktop.png" });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.screenshot({ path: ".factory/screenshots/implementation-journey/review-narrow.png" });
+  const documentBox = await page.locator(".ticket-document").boundingBox();
+  expect(documentBox?.width).toBeLessThanOrEqual(430);
+});
+
+test("Settings is a retained Project-bound workspace tab with no modal", async ({ page }) => {
+  await selectProject(page);
+  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Open settings", exact: true }).click();
+  const settings = page.getByRole("region", { name: "Settings", exact: true });
+  await expect(page.getByRole("tab", { name: "Settings", exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(settings.getByRole("heading", { name: "Personal", exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole("heading", { name: "Implementation UX", exact: true }),
+  ).toBeVisible();
+  await expect(settings.getByRole("heading", { name: "Factory", exact: true })).toBeVisible();
+  const skills = settings
+    .getByRole("navigation", { name: "Settings navigation" })
+    .locator("section")
+    .filter({ has: page.getByRole("heading", { name: "Personal", exact: true }) })
+    .getByRole("button", { name: "Skills", exact: true });
+  await skills.click();
+  await page.getByRole("tab", { name: title, exact: true }).click();
+  await page.getByRole("tab", { name: "Settings", exact: true }).click();
+  await expect(skills).toHaveAttribute("aria-current", "page");
+  await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
+  await expect(settings).toBeHidden();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Open settings", exact: true }).click();
+  await expect(page.getByRole("tab", { name: "Settings", exact: true })).toHaveCount(1);
+  await expect(skills).toHaveAttribute("aria-current", "page");
+  await mkdir(".factory/screenshots/implementation-journey", { recursive: true });
+  await page.screenshot({
+    path: ".factory/screenshots/implementation-journey/settings-desktop.png",
+  });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await expect(page.getByRole("button", { name: "Minimize workspace", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
+  await page.screenshot({
+    path: ".factory/screenshots/implementation-journey/settings-narrow.png",
+  });
+});
+
+test("post-start human edits and selected History retain immutable scope without dispatch", async ({
+  page,
+}) => {
+  const db = createDatabase(1);
+  const changeID = crypto.randomUUID();
+  try {
+    const { session } = await (await page.request.get("/api/session")).json();
+    const approvalID = crypto.randomUUID();
+    await db.client`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
+      VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${session.user.id})`;
+    await db.client`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
+      VALUES (${changeID}, ${projectID}, ${ticketID}, ${approvalID}, ${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`}, ${"a".repeat(40)}, 'active', ${session.user.id})`;
+    await db.client`INSERT INTO factory.branch_create_operation(id, change_id, repository_owner, repository_name, branch_name, start_sha, idempotency_key, state, completed_at, observed_head_sha)
+      SELECT id, id, 'owned', 'implementation-ux', branch_name, base_sha, id::text, 'succeeded', now(), base_sha FROM factory.change WHERE id = ${changeID}`;
+    await db.client`UPDATE factory.ticket SET state = 'in-progress' WHERE id = ${ticketID}`;
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button")
+      .click();
+    // Fail optional notice persistence only. Durable command admission intentionally
+    // requires recovery storage and must not be bypassed by a presentation test.
+    await page.evaluate(() => {
+      const get = Storage.prototype.getItem,
+        set = Storage.prototype.setItem;
+      Storage.prototype.getItem = function (key) {
+        if (key.startsWith("document-notice:"))
+          throw new DOMException("Notice storage disabled", "SecurityError");
+        return get.call(this, key);
+      };
+      Storage.prototype.setItem = function (key, value) {
+        if (key.startsWith("document-notice:"))
+          throw new DOMException("Notice storage disabled", "SecurityError");
+        return set.call(this, key, value);
+      };
+    });
+    const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
+    await summary.click();
+    await summary.fill("Keep the **starter** welcoming. Updated human wording.");
+    await expect
+      .poll(async () => {
+        const [saved] = await db.client<
+          { content: string }[]
+        >`SELECT canonical_content AS content FROM factory.ticket_document_revision WHERE ticket_id=${ticketID} ORDER BY ordinal DESC LIMIT 1`;
+        return saved ? JSON.parse(saved.content).summary : "";
+      })
+      .toContain("Updated human wording.");
+    const notice = page.locator(".ticket-document-notice");
+    await expect(notice).toContainText("Document updated since implementation");
+    const [saved] = await db.client<Array<{ scope: string; documents: number; turns: number }>>`
+      SELECT approval.requirement_revision_id AS scope,
+        (SELECT count(*)::integer FROM factory.ticket_document_revision WHERE ticket_id = ${ticketID}) AS documents,
+        (SELECT count(*)::integer FROM factory.agent_turn WHERE ticket_id = ${ticketID}) AS turns
+      FROM factory.requirement_approval approval WHERE approval.ticket_id = ${ticketID}`;
+    expect(saved).toEqual({ scope: revisionID, documents: 1, turns: 0 });
+    await notice
+      .getByRole("button", { name: "Document updated since implementation", exact: true })
+      .click();
+    const history = page.getByRole("complementary", { name: "Specification history" });
+    await expect(page.locator(".historical-document")).toContainText("Updated human wording");
+    await history.getByRole("button", { name: /Version 1/ }).click();
+    await expect(page.locator(".historical-document")).not.toContainText("Updated human wording");
+    await expect(history).toContainText(session.user.name);
+    await page.screenshot({
+      path: ".factory/screenshots/implementation-journey/document-history-desktop.png",
+    });
+    await page.setViewportSize({ width: 430, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      430,
+    );
+    await page.screenshot({
+      path: ".factory/screenshots/implementation-journey/document-history-narrow.png",
+    });
+    await history.getByRole("button", { name: "Close history", exact: true }).click();
+    await notice.getByRole("button", { name: "Dismiss document update", exact: true }).click();
+    await expect(notice).toHaveCount(0);
+    await expect(summary).toHaveAttribute("aria-readonly", "false");
+    const [turns] =
+      await db.client`SELECT count(*)::integer AS count FROM factory.agent_turn WHERE ticket_id = ${ticketID}`;
+    expect(turns?.["count"]).toBe(0);
+  } finally {
+    await db.client.end();
+  }
+});
+
+test("Trash and Restore preserve an unimplemented Ticket without dispatch", async ({ page }) => {
+  await selectProject(page);
+  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
+  await expect(summary).toContainText("starter");
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Move to Trash", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled();
+  await expect(summary).toHaveAttribute("aria-readonly", "true");
+  await page.getByRole("button", { name: "Restore", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);
+  await expect(summary).toHaveAttribute("aria-readonly", "false");
+  await expect(summary).toContainText("starter");
+  const db = createDatabase(1);
+  try {
+    const [work] = await db.client`SELECT
+      (SELECT count(*)::integer FROM factory.agent_turn WHERE ticket_id=${ticketID}) AS turns,
+      (SELECT count(*)::integer FROM factory.change WHERE ticket_id=${ticketID}) AS changes`;
+    expect(work).toMatchObject({ turns: 0, changes: 0 });
+  } finally {
+    await db.client.end();
+  }
+});
+
+test("delivered work creates one linked unapproved follow-up without another Build", async ({
+  page,
+}) => {
+  const db = createDatabase(1);
+  try {
+    const { session } = await (await page.request.get("/api/session")).json();
+    const approvalID = crypto.randomUUID();
+    await db.client`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
+      VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${session.user.id})`;
+    await db.client`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
+      VALUES (${crypto.randomUUID()}, ${projectID}, ${ticketID}, ${approvalID}, 'factory/change-123456789abc', ${"a".repeat(40)}, 'delivered', ${session.user.id})`;
+    await db.client`INSERT INTO factory.branch_create_operation(id, change_id, repository_owner, repository_name, branch_name, start_sha, idempotency_key, state, completed_at, observed_head_sha)
+      SELECT id, id, 'owned', 'implementation-ux', branch_name, base_sha, id::text, 'succeeded', now(), base_sha FROM factory.change WHERE ticket_id = ${ticketID}`;
+    await db.client`UPDATE factory.ticket SET state = 'done' WHERE id = ${ticketID}`;
+    await selectProject(page);
+    await page.getByRole("button", { name: /History/ }).click();
+    await page.getByRole("button").filter({ hasText: title }).last().click();
+    await page.getByRole("button", { name: "Create follow-up", exact: true }).click();
+    await expect(page.getByRole("button", { name: /Follow-up to/ })).toBeVisible();
+    const [linked] = await db.client<
+      Array<{ approved: number; turns: number; changeCount: number }>
+    >`
+      SELECT (SELECT count(*)::integer FROM factory.requirement_approval WHERE ticket_id = link.ticket_id) AS approved,
+        (SELECT count(*)::integer FROM factory.agent_turn WHERE ticket_id = link.ticket_id) AS turns,
+        (SELECT count(*)::integer FROM factory.change WHERE ticket_id = link.ticket_id) AS "changeCount"
+      FROM factory.ticket_follow_up link WHERE source_ticket_id = ${ticketID}`;
+    expect(linked).toEqual({ approved: 0, turns: 0, changeCount: 0 });
+  } finally {
+    await db.client.end();
+  }
+});

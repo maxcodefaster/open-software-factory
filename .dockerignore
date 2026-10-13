@@ -1,0 +1,15 @@
+.git
+.factory
+.env
+.env.*
+!.env.example
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+**/*.tsbuildinfo
+playwright-report
+test-results
+deploy/theia-ide/*/lib
+deploy/theia-ide/browser-app/src-gen
+deploy/theia-ide/browser-app/*esbuild*.mjs

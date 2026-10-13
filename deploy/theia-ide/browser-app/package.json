@@ -1,0 +1,40 @@
+{
+  "name": "factory-theia-browser",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "@theia/core": "1.76.0",
+    "@theia/editor": "1.76.0",
+    "@theia/filesystem": "1.76.0",
+    "@theia/markers": "1.76.0",
+    "@theia/messages": "1.76.0",
+    "@theia/monaco": "1.76.0",
+    "@theia/navigator": "1.76.0",
+    "@theia/preferences": "1.76.0",
+    "@theia/search-in-workspace": "1.76.0",
+    "@theia/workspace": "1.76.0",
+    "factory-ide-extension": "0.0.0"
+  },
+  "devDependencies": {
+    "@theia/cli": "1.76.0"
+  },
+  "scripts": {
+    "build": "theia build --mode production"
+  },
+  "theia": {
+    "target": "browser",
+    "frontend": {
+      "config": {
+        "applicationName": "Factory IDE",
+        "defaultTheme": "factory-light",
+        "preferences": {
+          "window.menuBarVisibility": "hidden",
+          "workbench.statusBar.visible": false,
+          "files.autoSave": "off",
+          "search.followSymlinks": false,
+          "security.workspace.trust.enabled": false
+        }
+      }
+    }
+  }
+}

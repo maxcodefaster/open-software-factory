@@ -1,0 +1,235 @@
+import { expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
+import { createForgejoClient } from "../../packages/forge/src/forge";
+import { factoryProcess } from "../fixtures/factory-process";
+import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
+
+test("actual Forgejo atomically applies only confirmed missing setup files and recovers lost commit response", async () => {
+  const process = await factoryProcess();
+  const database = process.connect();
+  const manager = crypto.randomUUID();
+  const contributor = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  const setupID = crypto.randomUUID();
+  const repository = {
+    owner: "factory-mutation",
+    name: `owned-inspection-${projectID.slice(0, 8)}`,
+  };
+  const token = (await readFile(".factory/forgejo-token", "utf8")).trim();
+  const apiURL = "http://127.0.0.1:33030/api/v1/";
+  let loseResponse = false;
+  const forge = createForgejoClient({
+    apiURL,
+    token,
+    fetch: async (url, options) => {
+      const response = await fetch(url, options);
+      if (
+        loseResponse &&
+        options?.method === "POST" &&
+        String(url).endsWith("/contents") &&
+        response.ok
+      ) {
+        loseResponse = false;
+        await response.body?.cancel();
+        throw new DOMException("owned lost file acknowledgement", "AbortError");
+      }
+      return response;
+    },
+  });
+  let created = false;
+  let generations = 0;
+  let ready = 0;
+  let waitForStop = false;
+  try {
+    for (const userID of [manager, contributor])
+      await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${userID},'Owned inspection',${`${userID}@inspection.test`})`;
+    await forge.createSetupRepository({ repository, setupID });
+    created = true;
+    await forge.createSetupFiles({
+      repository,
+      branch: "main",
+      setupID,
+      files: [
+        {
+          path: "package.json",
+          content: '{"scripts":{"dev":"node server.js","test":"node --test"}}',
+        },
+        { path: "server.js", content: 'console.log("owned application");\n' },
+      ],
+    });
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${repository.name},'Owned application',${`http://127.0.0.1:33030/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${manager})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${projectID},${manager},'developer',true,${manager}),(${projectID},${contributor},'product-contributor',false,${manager})`;
+    await database.client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
+      VALUES(${crypto.randomUUID()},${setupID},${manager},${projectID},'Owned import',${repository.name},'import','https://github.com/owned/import',${"a".repeat(64)},'committed')`;
+    await expect(requireSetupReady(database.client, projectID)).rejects.toThrow("Confirm");
+    const files = [
+      {
+        path: ".devcontainer/devcontainer.json",
+        content: '{"image":"node:24-bookworm","workspaceFolder":"/workspace/project",}',
+      },
+      {
+        path: ".factory/system.json",
+        content: JSON.stringify({
+          version: 1,
+          primaryApp: "web",
+          apps: [
+            {
+              id: "web",
+              label: "Web",
+              command: ["npm", "run", "dev"],
+              port: 4300,
+              healthPath: "/health",
+            },
+          ],
+        }),
+      },
+      {
+        path: ".forgejo/workflows/factory-verification.yml",
+        content:
+          "name: Verification\non: pull_request\njobs:\n  verify:\n    runs-on: factory-verification\n    steps:\n      - run: npm test\n",
+      },
+    ];
+    const controller = createSetupInspection({
+      database,
+      forge,
+      forgeURL: apiURL,
+      forgeOwner: repository.owner,
+      model: async () => ({
+        modelID: "controlled-setup-model",
+        connectionID: null,
+        connectionVersion: null,
+      }),
+      connection: async () => ({ apiKey: "not-a-production-key" }),
+      ready: async () => {
+        ready++;
+        await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
+          VALUES(${projectID},'configuration','ready',${crypto.randomUUID()}) ON CONFLICT(project_id,task) DO NOTHING`;
+      },
+      generate: async (input) => {
+        generations++;
+        if (waitForStop) {
+          input.signal.throwIfAborted();
+          await new Promise((resolve) =>
+            input.signal.addEventListener("abort", resolve, { once: true }),
+          );
+          input.signal.throwIfAborted();
+        }
+        expect(input.paths).toContain("server.js");
+        expect(await input.read("server.js")).toContain("owned application");
+        if (!input.answers?.["health"] && !input.context?.length)
+          return {
+            purpose: "An application fixture with its existing Node scripts.",
+            services: [],
+            uncertainty: ["Health endpoint needs confirmation."],
+            questions: [{ id: "health", question: "Which existing health path is available?" }],
+            files: [],
+          };
+        if (!input.answers?.["start"]) {
+          expect(input.context).toEqual([
+            {
+              question: "Which existing health path is available?",
+              answer: "/health",
+            },
+          ]);
+          return {
+            purpose: "An application fixture with its existing Node scripts.",
+            services: [],
+            uncertainty: [],
+            questions: [{ id: "start", question: "Which existing command starts the app?" }],
+            files: [],
+          };
+        }
+        expect(input.context).toEqual([
+          { question: "Which existing health path is available?", answer: "/health" },
+          { question: "Which existing command starts the app?", answer: "npm run dev" },
+        ]);
+        return {
+          purpose: "An application fixture with its existing Node scripts.",
+          services: [{ name: "Web", description: "HTTP application", port: 4300 }],
+          uncertainty: [],
+          questions: [],
+          files,
+        };
+      },
+    });
+    await expect(controller.start(projectID, contributor, crypto.randomUUID())).rejects.toThrow(
+      "Manager",
+    );
+    const commandID = crypto.randomUUID();
+    waitForStop = true;
+    const stoppedID = crypto.randomUUID();
+    await controller.start(projectID, manager, stoppedID);
+    await expect(controller.stop(projectID, contributor, stoppedID)).rejects.toThrow("Manager");
+    await controller.stop(projectID, manager, stoppedID);
+    await controller.settle();
+    expect((await controller.view(projectID, manager))?.state).toBe("superseded");
+    expect(ready).toBe(0);
+    waitForStop = false;
+    generations = 0;
+    await controller.start(projectID, manager, commandID);
+    await controller.settle();
+    expect((await controller.view(projectID, manager))?.state).toBe("proposal");
+    const before = await forge.getDefaultBranch(repository);
+    expect(await forge.listFiles(repository, before.headSha)).toHaveLength(2);
+    await controller.start(projectID, manager, commandID);
+    expect(generations).toBe(1);
+    await expect(controller.confirm(projectID, manager, commandID)).rejects.toThrow("Answer");
+    // Discarding an unanswered proposal makes a new exact-source inspection possible.
+    await controller.stop(projectID, manager, commandID);
+    const replacementID = crypto.randomUUID();
+    await controller.start(projectID, manager, replacementID);
+    await controller.settle();
+    expect(generations).toBe(2);
+    await expect(
+      controller.start(projectID, manager, crypto.randomUUID(), {
+        parentID: commandID,
+        answers: { health: "/health" },
+      }),
+    ).rejects.toThrow("changed");
+    const answeredID = crypto.randomUUID();
+    await controller.start(projectID, manager, answeredID, {
+      parentID: replacementID,
+      answers: { health: "/health" },
+    });
+    await controller.settle();
+    expect(generations).toBe(3);
+    expect((await controller.view(projectID, manager))?.output?.questions[0]?.id).toBe("start");
+    const finalID = crypto.randomUUID();
+    await controller.start(projectID, manager, finalID, {
+      parentID: answeredID,
+      answers: { start: "npm run dev" },
+    });
+    await controller.settle();
+    await forge.ensureDefaultBranchProtection(repository, "main", false);
+    loseResponse = true;
+    await controller.confirm(projectID, manager, finalID);
+    await forge.protectSetupWorkflow(repository, "main");
+    expect(loseResponse).toBe(false);
+    expect((await controller.view(projectID, manager))?.state).toBe("confirmed");
+    const after = await forge.getDefaultBranch(repository);
+    expect(after.headSha).not.toBe(before.headSha);
+    expect(await forge.listFiles(repository, after.headSha)).toHaveLength(5);
+    expect(await forge.getFile(repository, "server.js", after.headSha)).toBe(
+      'console.log("owned application");\n',
+    );
+    await controller.confirm(projectID, manager, finalID);
+    expect(ready).toBe(1);
+    await requireSetupReady(database.client, projectID);
+    // Complete configuration is accepted without another model call or file edit.
+    await controller.start(projectID, manager, crypto.randomUUID());
+    expect((await controller.view(projectID, manager))?.state).toBe("complete");
+    expect(generations).toBe(4);
+  } finally {
+    if (created && (await forge.setupRepository(repository, setupID))) {
+      const response = await fetch(`${apiURL}repos/${repository.owner}/${repository.name}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(response.ok).toBe(true);
+    }
+    await database.client.end({ timeout: 2 });
+    await process.dispose();
+  }
+}, 45_000);

@@ -1,0 +1,5 @@
+[tools]
+bun = "1.4.3"
+node = "24.21.0"
+kubeconform = "0.8.0"
+mkcert = "1.4.4"

@@ -1,0 +1,191 @@
+.project-setup-panel {
+  padding: var(--space-5);
+  overflow: auto;
+  flex: 1;
+}
+.setup-introduction h2 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--text-lg);
+}
+.setup-introduction p,
+.setup-note,
+.setup-progress p {
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+.setup-form {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-5);
+}
+.setup-form label {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  font-family: var(--font-interface);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.setup-readiness ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+.setup-inspection form,
+.setup-inspection label {
+  display: grid;
+  gap: var(--space-3);
+}
+.setup-inspection form {
+  gap: var(--space-4);
+}
+.setup-inspection > .quiet-button {
+  margin-top: var(--space-3);
+}
+.setup-inspection ul {
+  padding-left: var(--space-5);
+  font-size: var(--text-sm);
+}
+.setup-inspection label {
+  font: inherit;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.setup-inspection textarea {
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  color: var(--color-ink);
+  background: var(--material-input);
+}
+.setup-inspection pre {
+  max-height: 20rem;
+  overflow: auto;
+  font-size: var(--text-xs);
+}
+.setup-readiness li {
+  display: flex;
+  align-items: start;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+}
+.setup-readiness li > span:nth-child(2) {
+  flex: 1;
+}
+.setup-readiness small {
+  display: block;
+  color: var(--color-ink-muted);
+  margin-top: var(--space-1);
+}
+.setup-task-indicator {
+  width: var(--space-4);
+  height: var(--space-4);
+  border: 1px solid var(--line-default);
+  border-radius: 50%;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+.setup-readiness [data-state="running"] .setup-task-indicator {
+  border-top-color: var(--color-river-deep);
+  animation: setup-progress-spin 1s linear infinite;
+}
+.setup-readiness [data-state="ready"] .setup-task-indicator {
+  color: var(--color-river-deep);
+  border-color: transparent;
+}
+@keyframes setup-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .setup-readiness [data-state="running"] .setup-task-indicator {
+    animation: none;
+  }
+}
+.setup-form input {
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  background: var(--material-input);
+  color: var(--color-ink);
+}
+.setup-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-2);
+  padding: 0;
+  border: 0;
+  margin: 0;
+}
+.setup-choice button {
+  display: grid;
+  gap: var(--space-2);
+  text-align: left;
+  padding: var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  background: var(--material-input);
+  color: var(--color-ink);
+}
+.setup-choice button[aria-pressed="true"] {
+  border-color: var(--color-river-deep);
+  background: var(--material-accent);
+}
+.setup-choice span,
+.setup-optional,
+.setup-submit span {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+.setup-submit {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-2);
+}
+.setup-settings-link {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  color: var(--color-ink-muted);
+  background: transparent;
+  border: 0;
+  margin-top: var(--space-5);
+  font-size: var(--text-sm);
+}
+.setup-progress {
+  display: grid;
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+}
+.setup-empty-board {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-4);
+  width: 100%;
+  height: 100%;
+}
+.setup-empty-board section {
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  background: var(--material-card);
+}
+.setup-empty-board h2 {
+  text-align: center;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+@media (max-width: 760px) {
+  .setup-empty-board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

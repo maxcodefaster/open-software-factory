@@ -1,0 +1,58 @@
+.runtime-workspace iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex: 1;
+  border: 0;
+  background: var(--color-paper);
+}
+.runtime-frame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.runtime-frame iframe[inert] {
+  visibility: hidden;
+}
+.runtime-frame-state {
+  position: absolute;
+  inset: 0;
+  background: var(--material-document-popover);
+  color: var(--color-ink-muted);
+  padding: var(--space-6);
+}
+.workspace-window[hidden],
+.runtime-workspace-tab[hidden] {
+  display: none;
+}
+
+.runtime-workspace-tab {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  grid-column: 1 / -1;
+}
+
+.runtime-workspace-tab > .runtime-workspace {
+  position: relative;
+  flex: 1;
+}
+
+.editor-source-status {
+  position: absolute;
+  inset-inline-end: var(--space-3);
+  inset-block-end: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--material-document-popover);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+
+.editor-retry {
+  position: absolute;
+  inset-inline-start: var(--space-3);
+  inset-block-end: var(--space-3);
+}

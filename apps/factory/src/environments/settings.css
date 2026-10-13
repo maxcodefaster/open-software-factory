@@ -1,0 +1,87 @@
+.environment-settings form {
+  display: grid;
+  gap: var(--space-5);
+}
+.environment-settings fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0;
+  min-width: 0;
+}
+.environment-settings legend {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  margin-bottom: var(--space-3);
+}
+.environment-row,
+.environment-registry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  gap: var(--space-3);
+  padding-block: var(--space-3);
+  border-bottom: 1px solid var(--line-subtle);
+  align-items: start;
+}
+.environment-settings label {
+  display: grid;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  min-width: 0;
+}
+.environment-settings input,
+.environment-settings textarea {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  background: var(--material-input);
+  color: var(--color-ink);
+  font-family: var(--font-interface);
+  font-size: var(--text-sm);
+  min-height: 0;
+  height: auto;
+}
+.environment-settings textarea {
+  resize: vertical;
+  min-height: var(--editor-format-control-height);
+}
+.environment-grants {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  align-items: center;
+  align-self: center;
+}
+.environment-grants label,
+.environment-settings .environment-check {
+  display: flex;
+  align-items: center;
+}
+.environment-settings input[type="checkbox"] {
+  width: auto;
+  min-height: 0;
+}
+.environment-settings button {
+  justify-self: start;
+}
+.environment-settings .model-settings-note {
+  margin-block: var(--space-3);
+}
+.environment-import {
+  margin-top: var(--space-3);
+}
+.environment-settings summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+}
+.environment-import textarea {
+  margin-top: var(--space-3);
+}
+@media (max-width: 600px) {
+  .environment-row,
+  .environment-registry {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

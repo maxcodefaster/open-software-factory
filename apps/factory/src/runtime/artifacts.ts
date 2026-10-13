@@ -1,0 +1,61 @@
+import type { createDatabase } from "../../../../packages/db/src/client";
+import type { TransactionSql } from "postgres";
+import { freezeRuntimeEnvironment } from "../environments/runtime";
+
+export type RuntimeArtifactRole = "development" | "build" | "verification" | "staging";
+export interface RuntimeArtifactIntent {
+  readonly role: RuntimeArtifactRole;
+  readonly runtimeHostImage: string;
+  readonly browserToolsImage: string | null;
+  readonly environmentVersion: number;
+}
+export interface RuntimeArtifactConfiguration {
+  readonly hostImages: Readonly<Record<RuntimeArtifactRole, string | undefined>>;
+  readonly browserToolsImage: string | undefined;
+}
+
+type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
+function pinnedImage(value: string | undefined, label: string): string {
+  if (!value || !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(value))
+    throw new Error(`${label} must be configured with an exact image digest`);
+  return value;
+}
+
+export async function freezeRuntimeArtifacts(
+  sql: SQL,
+  attemptID: string,
+  configuration: RuntimeArtifactConfiguration,
+): Promise<RuntimeArtifactIntent> {
+  const environment = await freezeRuntimeEnvironment(sql, attemptID);
+  const read = async () =>
+    (
+      await sql<RuntimeArtifactIntent[]>`
+        SELECT role,runtime_host_image AS "runtimeHostImage",browser_tools_image AS "browserToolsImage",${environment.version}::float8 AS "environmentVersion"
+        FROM factory.runtime_artifact_intent WHERE runtime_attempt_id=${attemptID}`
+    )[0];
+  const retained = await read();
+  if (retained) return retained;
+  const [attempt] = await sql<Array<{ role: RuntimeArtifactRole }>>`
+    SELECT CASE WHEN isolated_kind='verification' THEN 'verification'
+      WHEN isolated_kind='staging' THEN 'staging'
+      WHEN change_id IS NOT NULL AND workspace_id IS NOT NULL THEN 'build'
+      ELSE 'development' END AS role
+    FROM factory.runtime_attempt WHERE id=${attemptID} AND state='create-intended'
+      AND stop_intended_at IS NULL`;
+  if (!attempt) throw new Error("Runtime artifact selection requires active create intent");
+  const runtimeHostImage = pinnedImage(
+    configuration.hostImages[attempt.role],
+    `${attempt.role} runtime image`,
+  );
+  const browserToolsImage =
+    attempt.role === "build"
+      ? pinnedImage(configuration.browserToolsImage, "Build browser image")
+      : null;
+  await sql`
+    INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image)
+    VALUES(${attemptID},${attempt.role},${runtimeHostImage},${browserToolsImage})
+    ON CONFLICT(runtime_attempt_id) DO NOTHING`;
+  const intent = await read();
+  if (!intent) throw new Error("Runtime artifact intent was not recorded");
+  return intent;
+}
