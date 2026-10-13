@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
 import upstream from "../../upstream.json";
+import { ensureLocalForgeIdentity } from "./forge-identity";
+import { installForgeBrowserLogout } from "./forge-logout";
 import {
   composeEnvironment,
   composeProject,
@@ -12,9 +14,8 @@ import {
   requireOwnedResource,
   requireResetConfirmation,
 } from "./installation";
+import { ensureLocalMetricsServer } from "./metrics-server";
 import { localOpenBao } from "./openbao";
-import { ensureLocalForgeIdentity } from "./forge-identity";
-import { installForgeBrowserLogout } from "./forge-logout";
 import {
   inspectCurrentContainers,
   requireComposePins,
@@ -22,7 +23,7 @@ import {
   requirePinnedImage,
 } from "./preflight";
 import { waitForFactory } from "./readiness";
-import { ensureLocalMetricsServer } from "./metrics-server";
+import { waitForRegistry } from "./registry-readiness";
 import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
 import { localStarterCompose, starterImageManifest, starterImagesSchema } from "./starter-images";
 
@@ -101,8 +102,6 @@ const composeArguments = [
   ...(installation ? ["--project-name", composeProject(installation)] : []),
 ];
 const namespace = "open-factory-envbox-smoke";
-const registryHost = "registry.localhost:5443";
-const registryRepository = `${registryHost}/open-factory/runtime-host`;
 const starterImagesFile = resolve(sharedStateDirectory, "starter-images.json");
 
 async function command(
@@ -234,6 +233,15 @@ async function ensureRegistry() {
 }
 
 async function publishRuntimeHost() {
+  const reservation = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(null, { status: 503 }),
+  });
+  const registryPort = reservation.port;
+  const registryHost = `registry.localhost:${registryPort}`;
+  const registryRepository = `${registryHost}/open-factory/runtime-host`;
+  await reservation.stop(true);
   const metadataFile = resolve(stateDirectory, "runtime-host-metadata.json");
   const rootCA = resolve(
     await command(["mise", "exec", "--", "mkcert", "-CAROOT"], { quiet: true }),
@@ -248,23 +256,12 @@ async function publishRuntimeHost() {
       "-n",
       namespace,
       "service/registry",
-      "5443:5000",
+      `${registryPort}:5000`,
     ],
     { cwd: root, stdout: "ignore", stderr: "pipe" },
   );
   try {
-    for (let attempt = 0; attempt < 60; attempt += 1) {
-      const probe = Bun.spawn(
-        ["curl", "--fail", "--silent", "--cacert", rootCA, `https://${registryHost}/v2/`],
-        {
-          cwd: root,
-          stdout: "ignore",
-          stderr: "ignore",
-        },
-      );
-      if ((await probe.exited) === 0) break;
-      await Bun.sleep(250);
-    }
+    await waitForRegistry({ forward, host: registryHost, caFile: rootCA });
     let runtimeReference = "";
     for (const artifact of [
       {

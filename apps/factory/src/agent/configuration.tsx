@@ -1,13 +1,13 @@
 import { createEffect, createSignal, Show } from "solid-js";
+import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
 import {
-  inheritedModelSettingsView,
   type InheritedModelSettingsView,
+  inheritedModelSettingsView,
 } from "../../../../packages/conversation-domain/src/model-inheritance";
 import {
-  inheritedSkillSettingsView,
   type InheritedSkillSettings,
+  inheritedSkillSettingsView,
 } from "../../../../packages/conversation-domain/src/skill-inheritance";
-import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
 import { apiRequest } from "../api-client";
 
@@ -77,6 +77,17 @@ export function AgentBlockers(props: {
   };
   return (
     <>
+      <Show
+        when={
+          props.turn?.engine === "mastra" &&
+          ["uncertain", "failed", "stopped"].includes(props.turn.state)
+        }
+      >
+        <p class="agent-configuration-note" role="alert">
+          The assistant could not finish this response. Your work is saved. No request was resent.
+          Send a new message when you are ready to continue.
+        </p>
+      </Show>
       <Show when={blocked() || error()}>
         <p class="agent-configuration-note" role="status">
           {blocked() ?? error()}

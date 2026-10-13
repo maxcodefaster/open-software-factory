@@ -53,7 +53,7 @@ import type { RuntimeAttemptView } from "./types";
 
 type Database = ReturnType<typeof createDatabase>;
 const { FACTORY_RUNTIME_HOST_IMAGE: runtimeHostImage } = process.env;
-const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"] ?? "factory-coding-model";
+const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
 const systemContractPath = ".factory/system.json";
 
 function requirePinnedRuntimeHostImage(value: string | undefined) {

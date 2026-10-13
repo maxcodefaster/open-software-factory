@@ -135,6 +135,9 @@ export function ProjectSetupPanel(props: {
   onSettings(): void;
   onProject(projectID: string): void;
 }) {
+  // The controller outlives this panel. Cleanup must not read a <Show> accessor
+  // after navigation has removed the panel that supplied it.
+  const setup = props.setup;
   const [fields, setFields] = createSignal<ProjectSetupFields>({
     name: "",
     slug: "",
@@ -187,27 +190,24 @@ export function ProjectSetupPanel(props: {
     if (timer) clearTimeout(timer);
     timer = undefined;
     const value = fields();
-    const target = props.setup.draft();
+    const target = setup.draft();
     if (!target) return saveChain;
     if (saved()) return saveChain;
     setSaving(true);
     saveChain = saveChain
-      .then(() => props.setup.save(value, target.id))
+      .then(() => setup.save(value, target.id))
       .then(() => {
-        if (
-          props.setup.draft()?.id === target.id &&
-          JSON.stringify(value) === JSON.stringify(fields())
-        ) {
+        if (setup.draft()?.id === target.id && JSON.stringify(value) === JSON.stringify(fields())) {
           setSaved(true);
           try {
-            localStorage.removeItem(props.setup.draftStorageKey);
+            localStorage.removeItem(setup.draftStorageKey);
           } catch {
             /* Optional local storage. */
           }
         } else remember();
       })
       .catch((error: unknown) => {
-        props.setup.setError(error instanceof Error ? error.message : "Draft could not be saved.");
+        setup.setError(error instanceof Error ? error.message : "Draft could not be saved.");
       })
       .finally(() => {
         setSaving(false);
@@ -224,7 +224,7 @@ export function ProjectSetupPanel(props: {
     timer = setTimeout(() => void flush(), 500);
   }
   function remember(value = fields()) {
-    const draft = props.setup.draft();
+    const draft = setup.draft();
     if (!draft || draft.state !== "draft") return;
     // Persist only validated nonsecret fields, never the token DOM input or a
     // pasted URL containing credentials. Partial URLs are not retained.
@@ -232,7 +232,7 @@ export function ProjectSetupPanel(props: {
     if (!parsed.success) return;
     try {
       localStorage.setItem(
-        props.setup.draftStorageKey,
+        setup.draftStorageKey,
         JSON.stringify({
           id: draft.id,
           version: draft.version,

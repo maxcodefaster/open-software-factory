@@ -1,29 +1,30 @@
 import type { z } from "zod";
 import {
+  type InheritedModelSettingsView,
+  type ModelRole,
+  modelRoles,
+  type PersonalModelSettings,
+  type ProjectModelSettings,
+  personalModelInput,
+  projectModelInput,
+  resolveRoleModel,
+} from "../../../../packages/conversation-domain/src/model-inheritance";
+import {
   approvedModelCatalogue,
   type ModelSettingsView,
   type modelDefaultsInput,
   modelRulesInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
-import {
-  modelRoles,
-  type ModelRole,
-  type ProjectModelSettings,
-  type PersonalModelSettings,
-  type InheritedModelSettingsView,
-  projectModelInput,
-  personalModelInput,
-  resolveRoleModel,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { projectAuthorityIn } from "../access/controller";
 import { providerCatalogue } from "./native";
 
 export function modelEnvironment() {
-  const planningModelId = process.env["FACTORY_PROJECT_AGENT_MODEL"] ?? "factory-planning-model";
-  const buildModelId = process.env["FACTORY_AGENT_MODEL_ID"] ?? "factory-coding-model";
+  const planningModelId =
+    process.env["FACTORY_PROJECT_AGENT_MODEL"]?.trim() || "factory-planning-model";
+  const buildModelId = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
   return {
     planningModelId,
     buildModelId,
@@ -32,8 +33,8 @@ export function modelEnvironment() {
       buildModelId,
       additionalIds: process.env["FACTORY_MODEL_IDS"],
     }),
-    baseURL: process.env["FACTORY_MODEL_BASE_URL"],
-    apiKey: process.env["FACTORY_MODEL_API_KEY"],
+    baseURL: process.env["FACTORY_MODEL_BASE_URL"]?.trim() || undefined,
+    apiKey: process.env["FACTORY_MODEL_API_KEY"]?.trim() || undefined,
   };
 }
 

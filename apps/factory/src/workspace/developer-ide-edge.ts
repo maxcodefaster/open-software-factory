@@ -118,8 +118,8 @@ export function createDeveloperIDEEdge(
         return json({ error: "Editor origin is invalid" }, 403);
       const authorized = await access.authorize(request, userID, epoch);
       if (!authorized) return json({ error: "Editor access required" }, 401);
-      if (!suffix.startsWith("/services"))
-        return json({ error: "Editor socket is unavailable" }, 404);
+      // Pinned Theia multiplexes its RPC channels over native Socket.IO.
+      if (suffix !== "/socket.io/") return json({ error: "Editor socket is unavailable" }, 404);
       const origin = await editors.connection(userID, epoch);
       const target = new URL(`${suffix}${url.search}`, origin);
       target.protocol = "ws:";

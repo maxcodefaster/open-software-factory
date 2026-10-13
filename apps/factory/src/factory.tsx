@@ -2926,7 +2926,13 @@ function FactoryWorkspace(props: {
                   </div>
                 </section>
               </Show>
-              <Show when={visibleConversation().length === 0 && !assistantPending()}>
+              <Show
+                when={
+                  visibleConversation().length === 0 &&
+                  !assistantPending() &&
+                  !["uncertain", "failed", "stopped"].includes(conversation()?.turn?.state ?? "")
+                }
+              >
                 <div class="agent-empty compact">
                   <Icon name="agent" />
                   <p>
