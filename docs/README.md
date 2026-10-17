@@ -169,6 +169,8 @@ Sandbox, with a repository-scoped one-job Forgejo runner. The Change and recorde
 heads must still match the approved values; movement invalidates Delivery. A correction needs a
 new commit and Verification. Staging retains its previous healthy Preview until replacement is ready.
 Delivery ends at Staging, rather than a production application deployment.
+Cleanup confirms no writers on the delivered Change branch while retaining its protected source
+ref and history. It does not temporarily remove protection to force branch deletion.
 
 Knowledge Pages have stable identities, ordered hierarchy, immutable revisions and recoverable
 autosave. Generation reads one exact repository commit and fences concurrent human changes.
@@ -283,6 +285,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | [0008](adr/0008-fixed-role-agent-engines.md) | Fixed concrete engines with configurable models and Skills |
 | [0009](adr/0009-independent-workspace-file-access.md) | Canonical file access independent of execution |
 | [0010](adr/0010-factory-identity-and-change-writers.md) | Factory identity and exclusive Change editing |
+| [0011](adr/0011-delivered-branch-retention.md) | Delivered branches retain source behind a closed write fence |
 
 ## Verification and operating limits
 

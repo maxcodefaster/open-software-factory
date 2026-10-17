@@ -103,6 +103,7 @@ test("failed exact Verification requests one bounded repair on the same Change",
           prompts.push({ changeID, text, userID, commandID, repair });
         },
       },
+      async () => {},
       { client: f.forge, owner: "owned" },
     );
     await controller.reconcile(f.owned.changeID);
@@ -149,6 +150,7 @@ test.each(["head", "base"] as const)(
             throw new Error("Green run must not repair");
           },
         },
+        async () => {},
         { client: f.forge, owner: "owned" },
       );
       await controller.reconcile(f.owned.changeID);
@@ -202,7 +204,7 @@ test("promotion retains the healthy Staging while starting, then retries only ow
       .client`INSERT INTO factory.promotion_operation(id, change_id, project_id, commit_sha, state, previous_runtime_attempt_id, replacement_runtime_attempt_id)
       VALUES (${crypto.randomUUID()}, ${f.owned.changeID}, ${f.owned.projectID}, ${f.sha}, 'starting', ${previous}, ${replacement})`;
     const stopped: string[] = [];
-    let deleted = 0;
+    const retired: string[] = [];
     let failed = false;
     const controller = createDeliveryController(
       f.database,
@@ -219,13 +221,11 @@ test("promotion retains the healthy Staging while starting, then retries only ow
         },
       },
       { prompt: async () => null },
+      async (id) => {
+        retired.push(id);
+      },
       {
-        client: {
-          ...f.forge,
-          deleteBranch: async () => {
-            deleted += 1;
-          },
-        },
+        client: f.forge,
         owner: "owned",
       },
     );
@@ -249,7 +249,7 @@ test("promotion retains the healthy Staging while starting, then retries only ow
     expect((await controller.get(f.owned.changeID))?.["cleanupError"]).toBeNull();
     expect(stopped).toEqual([previous, previous, f.owned.attemptID]);
     expect(stopped).not.toContain(replacement);
-    expect(deleted).toBe(1);
+    expect(retired).toEqual([f.owned.changeID]);
   } finally {
     await f.close();
   }

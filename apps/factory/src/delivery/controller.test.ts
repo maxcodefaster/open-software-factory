@@ -3,7 +3,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { createDeliveryController } from "./controller";
 
-function fixture(delivered = false, repair = false, superseded = false) {
+function fixture(delivered = false, repair = false, superseded = false, protectedBranch = false) {
   const baseSHA = "a".repeat(40);
   const commitSHA = "b".repeat(40);
   let state = delivered ? "delivered" : "active";
@@ -23,6 +23,7 @@ function fixture(delivered = false, repair = false, superseded = false) {
   let supersededStopped = false;
   const stoppedAttempts: string[] = [];
   const deletedRunners: number[] = [];
+  const retiredBranches: string[] = [];
   const verificationID = crypto.randomUUID();
   const repairCommands: Array<{ id: string; repair: boolean | undefined }> = [];
   const client = Object.assign(
@@ -132,7 +133,9 @@ function fixture(delivered = false, repair = false, superseded = false) {
       defaultHead = commitSHA;
       return { headSha: commitSHA };
     },
-    deleteBranch: async () => {},
+    deleteBranch: async () => {
+      if (protectedBranch) throw new Error("Forge request failed with HTTP 403");
+    },
     deleteRunner: async (_repository: unknown, id: number) => {
       deletedRunners.push(id);
     },
@@ -157,6 +160,9 @@ function fixture(delivered = false, repair = false, superseded = false) {
         promptCalls += 1;
         if (rejectPrompt) throw new Error("Prompt not sent");
       },
+    },
+    async (changeID: string) => {
+      retiredBranches.push(changeID);
     },
     { client: forge, owner: "factory" },
   );
@@ -188,10 +194,19 @@ function fixture(delivered = false, repair = false, superseded = false) {
     stoppedAttempts,
     deletedRunners,
     supersededState: () => supersededState,
+    retiredBranches,
   };
 }
 
 describe("Delivery recovery", () => {
+  test("retires a delivered protected branch without opening a deletion permission gap", async () => {
+    const f = fixture(true, false, false, true);
+    await f.controller.reconcile("change");
+    expect(f.retiredBranches).toEqual(["change"]);
+    expect(f.cleanupError()).toBeNull();
+    await f.controller.reconcile("change");
+    expect(f.retiredBranches).toEqual(["change"]);
+  });
   test("a newer commit cancels and cleans only the superseded Verification once", async () => {
     const f = fixture(false, false, true);
     await f.controller.reconcile("change");

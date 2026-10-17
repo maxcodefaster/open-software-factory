@@ -317,7 +317,16 @@ agentController = createAgentController(
   changeWriters,
 );
 await agentController.recover();
-deliveryController = createDeliveryController(database, runtimeController, agentController);
+deliveryController = createDeliveryController(
+  database,
+  runtimeController,
+  agentController,
+  async (changeID) => {
+    if (!forgeAccess)
+      throw new CommandError("unavailable", "Forge branch retirement is not configured");
+    await forgeAccess.protectChange(changeID, []);
+  },
+);
 const ticketTrash = createTicketTrashController(
   database,
   runtimeController,

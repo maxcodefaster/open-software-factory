@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createTicketTrashController } from "../../apps/factory/src/change/trash";
@@ -8,6 +8,30 @@ import { createForgejoClient } from "../../packages/forge/src/forge";
 import type { KubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess, eventually } from "../fixtures/factory-process";
+
+// Kubernetes is injected below. These pinned fixture identities are never launched.
+const configuration = {
+  FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
+  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
+  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
+  FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
+  FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
+  FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
+  FACTORY_FORGEJO_OWNER: "owned-cancellation-fixture",
+};
+const previous = new Map<string, string | undefined>();
+beforeAll(() => {
+  for (const [key, value] of Object.entries(configuration)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+});
+afterAll(() => {
+  for (const [key, value] of previous) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 test.each([
   ...[
@@ -157,6 +181,7 @@ test.each([
             throw new Error("Cancelled work must not repair");
           },
         },
+        async () => {},
         { client: forge, owner: "owned" },
       );
       reconciliation = delivery.reconcile(owned.changeID);

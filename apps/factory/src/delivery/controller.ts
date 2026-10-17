@@ -46,6 +46,7 @@ export function createDeliveryController(
   database: Database,
   runtime: RuntimeController,
   agent: AgentController,
+  retireBranch: (changeID: string) => Promise<void>,
   forgeOverride?: { client: ReturnType<typeof createForgejoClient>; owner: string },
 ) {
   const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
@@ -632,7 +633,7 @@ export function createDeliveryController(
         if (verification.runnerID)
           await forge.deleteRunner(repository, Number(verification.runnerID));
       }
-      await forge.deleteBranch(repository, change.branchName);
+      await retireBranch(change.id);
       await database.client`UPDATE factory.promotion_operation SET last_error = NULL, updated_at = now() WHERE id = ${promotion.id}`;
     } catch (cause) {
       await database.client`UPDATE factory.promotion_operation SET last_error = ${bounded(cause instanceof Error ? cause.message : "Delivery cleanup failed")}, updated_at = now() WHERE id = ${promotion.id}`;
