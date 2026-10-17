@@ -21,11 +21,11 @@ import { editorTextRectangles } from "./editor-text-rectangles";
 import { markdownHTML } from "./markdown";
 import { RequirementDocument } from "./requirement-document";
 import { RichDocumentSurface } from "./rich-document-surface";
+import { sourceReviewURL } from "./source-review";
 import { TicketChecks } from "./ticket-checks";
 import { TicketDependencies, type TicketDependenciesProps } from "./ticket-dependencies";
 import { TicketSecondaryActions } from "./ticket-secondary-actions";
 import { VersionHistory } from "./version-history";
-import { sourceReviewURL } from "./source-review";
 
 type TicketView = {
   id: string;
