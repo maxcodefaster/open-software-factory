@@ -68,6 +68,7 @@ export class FactoryRuntimeContext {
   #value: FactoryRuntimeState | undefined;
   #selection = 0;
   #cancel: AbortController | undefined;
+  #observing = false;
   constructor(
     private readonly href: () => string = () => window.location.href,
     private readonly fetcher: (
@@ -100,6 +101,40 @@ export class FactoryRuntimeContext {
       this.#value.attemptID === runtime.attemptID
     )
       this.select(runtime.workspaceID);
+  }
+  async observe() {
+    const current = this.#value;
+    const signal = this.#cancel?.signal;
+    if (
+      !current ||
+      !signal ||
+      signal.aborted ||
+      this.#observing ||
+      [
+        "loading",
+        "create-intended",
+        "starting",
+        "reconnecting",
+        "stop-intended",
+        "stopping",
+      ].includes(current.state)
+    )
+      return;
+    const selection = this.#selection;
+    this.#observing = true;
+    try {
+      await this.#request(current.workspaceID, selection, signal);
+      if (
+        ["create-intended", "starting", "reconnecting", "stop-intended", "stopping"].includes(
+          this.#value?.state ?? "",
+        )
+      )
+        await this.#read(current.workspaceID, selection, signal);
+    } catch (cause) {
+      this.#fail(current.workspaceID, selection, signal, cause);
+    } finally {
+      this.#observing = false;
+    }
   }
   async prepare() {
     const current = this.#value;
@@ -209,6 +244,13 @@ export class FactoryRuntimeContext {
       });
   }
   #set(value: FactoryRuntimeState) {
+    if (
+      this.#value?.workspaceID === value.workspaceID &&
+      this.#value.attemptID === value.attemptID &&
+      this.#value.state === value.state &&
+      this.#value.failure === value.failure
+    )
+      return;
     this.#value = value;
     for (const listener of this.#listeners) listener(value);
   }

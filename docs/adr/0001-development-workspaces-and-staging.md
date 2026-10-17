@@ -113,3 +113,9 @@ own Workspace. Promotion replaces only healthy Staging revisions.
 Checkout and approved data survive compute Stop and Trash. Restore does not restart implementation.
 Data removal is explicit and must account for file-access resources as well as execution resources;
 ordinary compute shutdown must not delete the files or their access service.
+
+A connector transport timeout withdraws readiness, not ownership. Factory observes the recorded
+Pod UID before treating reconnect delay as runtime failure. A live owned Pod or an unavailable
+Kubernetes observation retains its capabilities and remains reconnecting. Repeated observations
+detect missing, terminal or changed resources without adopting a replacement UID. Explicit Stop
+and confirmed runtime failure still fence capabilities and clean up only owned resources.

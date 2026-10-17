@@ -82,6 +82,15 @@ export function createChangeWriterController(options: {
       // Settled work needs no explicit Stop. The first authorized developer
       // receives editing after the same process and Git fence as early takeover.
       if (finished) return this.takeOver(changeID, userID, crypto.randomUUID(), finished.epoch);
+      const [pending] = await database.client<{ commandID: string }[]>`
+        SELECT writer.request_id AS "commandID" FROM factory.change_writer writer
+        LEFT JOIN factory.runtime_attempt attempt ON attempt.id=writer.fence_attempt_id
+        WHERE writer.change_id=${changeID} AND writer.state='handoff'
+          AND writer.requested_by=${userID} AND writer.request_id IS NOT NULL
+          AND (writer.fence_attempt_id IS NULL OR attempt.state='stopped')`;
+      // Continue only the same person's recorded request after positive teardown
+      // evidence. Takeover rechecks permissions, Stop, source and branch fences.
+      if (pending) return this.takeOver(changeID, userID, pending.commandID);
       return readView(changeID, userID);
     },
     async prepareAgent(changeID: string, turnID: string) {

@@ -3,10 +3,44 @@ import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { admitComputeIn, computeAllocationIn } from "../../apps/factory/src/usage/compute";
 import { createComputeWait } from "../../apps/factory/src/usage/compute-wait";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+
+test("an explicitly admitted new Agent turn can create compute after confirmed Stop without reviving stopped work", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const work = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.runtime_attempt SET state='create-intended' WHERE id=${work.attemptID}`;
+    await database.client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=false WHERE change_id=${work.changeID}`;
+    const admission = createChangeAdmission(database, "factory-coding-model");
+    const next = await admission.admit(work.changeID, work.userID, {
+      kind: "change-start",
+      commandId: crypto.randomUUID(),
+    });
+    await work.writers.prepareAgent(work.changeID, next.turn.id);
+    const waits = createComputeWait(database);
+    let creates = 0;
+    const create = async () => {
+      creates++;
+      return true;
+    };
+    expect(await waits.launch(work.attemptID, create)).toBe(true);
+    await database.client`INSERT INTO factory.runtime_compute_wait(attempt_id) VALUES(${work.attemptID})`;
+    expect(await waits.admit(work.attemptID)).toBe(true);
+    await database.client`UPDATE factory.change_agent_session SET stop_pending=true WHERE change_id=${work.changeID}`;
+    expect(await waits.launch(work.attemptID, create)).toBeUndefined();
+    await database.client`UPDATE factory.change_agent_session SET stop_pending=false,active_turn_id=${next.turn.id} WHERE change_id=${work.changeID}`;
+    expect(await waits.launch(work.attemptID, create)).toBeUndefined();
+    expect(creates).toBe(1);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 30_000);
 
 test("human takeover can restart Ticket compute while its Agent remains stopped", async () => {
   const owned = await factoryProcess();

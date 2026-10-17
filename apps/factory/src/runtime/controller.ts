@@ -52,7 +52,6 @@ import type { ExecutionReserve } from "./reserve-controller";
 import type { RuntimeAttemptView } from "./types";
 
 type Database = ReturnType<typeof createDatabase>;
-const { FACTORY_RUNTIME_HOST_IMAGE: runtimeHostImage } = process.env;
 const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
 const systemContractPath = ".factory/system.json";
 
@@ -117,7 +116,9 @@ export function createRuntimeController(
   readRegistryCA: () => Promise<string> = readRuntimeRegistryCA,
   reserve?: ExecutionReserve,
 ) {
-  const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(runtimeHostImage);
+  const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(
+    process.env["FACTORY_RUNTIME_HOST_IMAGE"],
+  );
   const artifactConfiguration = {
     hostImages: {
       development: pinnedRuntimeHostImage,
@@ -138,6 +139,24 @@ export function createRuntimeController(
     token: FACTORY_FORGEJO_TOKEN,
   });
   const cleanupRetries = new Set<string>();
+  const reconnectObservations = new Map<string, ReturnType<typeof setTimeout>>();
+  function clearReconnectObservation(attemptID: string) {
+    const timer = reconnectObservations.get(attemptID);
+    if (timer) clearTimeout(timer);
+    reconnectObservations.delete(attemptID);
+  }
+  function observeReconnectLater(attemptID: string) {
+    if (reconnectObservations.has(attemptID)) return;
+    const timer = setTimeout(() => {
+      reconnectObservations.delete(attemptID);
+      void updateStatus(attemptID, "disconnected", "Waiting for runtime connectors").catch(() => {
+        console.error("Runtime reconnect observation failed");
+        observeReconnectLater(attemptID);
+      });
+    }, 15_000);
+    timer.unref();
+    reconnectObservations.set(attemptID, timer);
+  }
   let cleanupTail: Promise<void> = Promise.resolve();
   const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
   const computeWait = createComputeWait(database, reserve);
@@ -399,6 +418,7 @@ export function createRuntimeController(
                     version = version + 1
                   WHERE runtime_attempt_id = ${attemptID}
                     AND state IN ('starting', 'active', 'cancelling')
+                    AND (${state} = 'failed' OR cancel_requested_at IS NOT NULL)
                 `;
               }
             });
@@ -425,6 +445,10 @@ export function createRuntimeController(
               failure = COALESCE(failure, 'Runtime cleanup failed'), version = version + 1
             WHERE runtime_attempt_id = ${attemptID}
               AND state IN ('starting', 'active', 'cancelling')
+              AND (cancel_requested_at IS NOT NULL OR EXISTS(
+                SELECT 1 FROM factory.runtime_attempt WHERE id=${attemptID}
+                  AND stop_intended_at IS NULL
+              ))
           `;
         });
       } finally {
@@ -432,21 +456,25 @@ export function createRuntimeController(
       }
     })();
   }
-  async function beginCleanup(attemptID: string, failure?: string) {
+  async function beginCleanup(attemptID: string, failure?: string, observedAt?: string) {
+    clearReconnectObservation(attemptID);
     const projects = await database.client<Array<{ projectID: string }>>`
       SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id = ${attemptID}
     `;
     const projectID = projects[0]?.projectID;
     if (!projectID) return;
     const lock = database.coordination();
+    let changed = false;
     try {
       await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
-      await lock`
+      const result = await lock`
         UPDATE factory.runtime_attempt SET state = 'stopping',
           failure = COALESCE(CASE WHEN failure IN ('parent connector reconnecting','child connector reconnecting') THEN NULL ELSE failure END, ${failure ?? null}), updated_at = now()
         WHERE id = ${attemptID}
           AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping')
+          AND (${observedAt ?? null}::timestamptz IS NULL OR updated_at=${observedAt ?? null}::timestamptz)
       `;
+      changed = result.count === 1;
     } finally {
       try {
         await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
@@ -454,15 +482,52 @@ export function createRuntimeController(
         await lock.end({ timeout: 1 });
       }
     }
+    if (!changed) return;
     hub.revoke(attemptID);
     retryCleanup(attemptID);
   }
   async function updateStatus(attemptID: string, phase: string, error?: string) {
+    if (phase === "disconnected") {
+      const [attempt] = await database.client<
+        {
+          state: string;
+          namespace: string;
+          podName: string;
+          uid: string | null;
+          observedAt: string;
+        }[]
+      >`SELECT state, kubernetes_namespace AS namespace, kubernetes_pod_name AS "podName",
+        kubernetes_uid AS uid, updated_at::text AS "observedAt"
+        FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!attempt || !["starting", "ready"].includes(attempt.state)) return;
+      let failure: string | undefined;
+      try {
+        const pod = await kubernetes.getPod(attempt.namespace, attempt.podName);
+        if (!pod) failure = "Runtime Pod disappeared while connectors were reconnecting";
+        else if (!attempt.uid || pod.uid !== attempt.uid)
+          failure = "Runtime Pod UID changed while connectors were reconnecting";
+        else if (pod.phase === "Failed" || pod.phase === "Succeeded")
+          failure = "Runtime Pod terminated while connectors were reconnecting";
+      } catch {
+        // A failed observation proves neither resource loss nor permission to delete.
+      }
+      if (failure) {
+        await beginCleanup(attemptID, failure, attempt.observedAt);
+        return;
+      }
+      // Transport loss alone must not delete live compute or revoke its reconnect tokens.
+      const changed = await database.client`UPDATE factory.runtime_attempt SET state='starting',
+        failure=${error ?? "Waiting for runtime connectors"}, updated_at=now()
+        WHERE id=${attemptID} AND state IN ('starting','ready')
+          AND updated_at=${attempt.observedAt}::timestamptz`;
+      if (changed.count === 1) observeReconnectLater(attemptID);
+      return;
+    }
     if (phase === "stopped") {
       await database.client`UPDATE factory.runtime_attempt attempt SET stop_intended_at=COALESCE(stop_intended_at,now()) WHERE attempt.id=${attemptID} AND attempt.isolated_kind='prebuild' AND attempt.state IN ('starting','ready') AND EXISTS(SELECT 1 FROM factory.project_image_preparation preparation WHERE preparation.runtime_attempt_id=attempt.id AND preparation.state='succeeded')`;
       await beginCleanup(attemptID);
       return;
-    } else if (phase === "failed" || phase === "disconnected" || phase === "cleanup-failed") {
+    } else if (phase === "failed" || phase === "cleanup-failed") {
       await beginCleanup(attemptID, error ?? "runtime failed");
       return;
     }
@@ -485,7 +550,10 @@ export function createRuntimeController(
             (${state} = 'stopping' AND state IN ('stop-intended', 'stopping'))
           )
     `;
-    if (changed.count === 1 && state === "ready") await settleReadyChange(attemptID);
+    if (changed.count === 1 && state === "ready") {
+      clearReconnectObservation(attemptID);
+      await settleReadyChange(attemptID);
+    }
   }
   async function observeStartup(
     attemptID: string,
@@ -1144,6 +1212,7 @@ export function createRuntimeController(
         WHERE change.runtime_attempt_id = attempt.id
           AND change.state IN ('starting', 'active', 'cancelling')
           AND attempt.state IN ('stopped', 'failed')
+          AND (attempt.state='failed' OR change.cancel_requested_at IS NOT NULL)
       `;
       await database.client`
         UPDATE factory.runtime_attempt SET state = 'stopping', cleanup_attempts = 0,
@@ -2191,6 +2260,7 @@ export function createRuntimeController(
     },
     status: updateStatus,
     async stop(attemptID: string) {
+      clearReconnectObservation(attemptID);
       const projects = await database.client<Array<{ projectID: string }>>`
         SELECT project_id AS "projectID" FROM factory.runtime_attempt WHERE id = ${attemptID}
       `;

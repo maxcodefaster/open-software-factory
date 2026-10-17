@@ -9,6 +9,118 @@ import { factoryProcess } from "../fixtures/factory-process";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 
+test.each(["active", "failed"] as const)(
+  "retrying an assigned startup failure on a %s Change fences its old Sandbox before granting a new Agent writer",
+  async (changeState) => {
+    const processFixture = await factoryProcess();
+    const owned = await fixture(undefined, undefined, processFixture.connect());
+    const turns = createAgentTurnStore(owned.database);
+    const admission = createChangeAdmission(owned.database, "factory-coding-model");
+    const grants: string[][] = [];
+    const stops: string[] = [];
+    let stopped = false;
+    const options = {
+      database: owned.database,
+      agentUsername: "owned-control",
+      stopDeadlineMs: 1,
+      runtime: {
+        stop: async (attemptID: string) => {
+          stops.push(attemptID);
+        },
+        get: async () => ({ state: stopped ? "stopped" : "stopping" }),
+      },
+      stopAgent: async () => {},
+      protect: async (_changeID: string, writers: readonly string[]) => {
+        grants.push([...writers]);
+      },
+    };
+    try {
+      const first = await admission.admit(owned.changeID, owned.userID, {
+        kind: "change-start",
+        commandId: crypto.randomUUID(),
+      });
+      await createChangeWriterController(options).prepareAgent(owned.changeID, first.turn.id);
+      const claimed = await turns.claimPending(first.turn.id);
+      if (!claimed?.ownerToken) throw new Error("Owned startup turn lease missing");
+      await owned.database.client`UPDATE factory.change_agent_turn_intent
+      SET runtime_attempt_id=${owned.attemptID} WHERE turn_id=${first.turn.id}`;
+      expect(
+        await turns.failPending(first.turn.id, claimed.ownerToken, "Owned Sandbox startup failed"),
+      ).toBe(true);
+      await owned.database.client`UPDATE factory.change_agent_session SET state='failed',
+      active_turn_id=${first.turn.id},last_error='Owned Sandbox startup failed'
+      WHERE change_id=${owned.changeID}`;
+      if (changeState === "failed") {
+        await owned.database.client`INSERT INTO factory.branch_create_operation(id,change_id,
+        repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
+        SELECT ${crypto.randomUUID()},id,'owned','retry',branch_name,base_sha,${crypto.randomUUID()},
+          'succeeded',base_sha,now() FROM factory.change WHERE id=${owned.changeID}`;
+        await owned.database
+          .client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${owned.attemptID}`;
+        await owned.database
+          .client`UPDATE factory.change SET state='failed' WHERE id=${owned.changeID}`;
+      }
+      const retry = await admission.admit(owned.changeID, owned.userID, {
+        kind: "change-start",
+        commandId: crypto.randomUUID(),
+      });
+      const controller = createChangeWriterController(options);
+      await expect(controller.prepareAgent(owned.changeID, retry.turn.id)).rejects.toThrow(
+        "compute has stopped",
+      );
+      expect(stops).toEqual([owned.attemptID]);
+      expect(grants.at(-1)).toEqual([]);
+      expect((await turns.get(first.turn.id))?.state).toBe("failed");
+      expect((await turns.get(retry.turn.id))?.state).toBe("pending");
+      expect((await controller.view(owned.changeID, owned.userID)).state).toBe("agent-preparing");
+      stopped = true;
+      await createChangeWriterController(options).prepareAgent(owned.changeID, retry.turn.id);
+      expect(grants.at(-1)).toEqual(["owned-control"]);
+      expect(stops.every((id) => id === owned.attemptID)).toBe(true);
+      expect((await controller.view(owned.changeID, owned.userID)).state).toBe("agent");
+    } finally {
+      await owned.dispose();
+      await processFixture.dispose();
+    }
+  },
+  30_000,
+);
+
+test("an uncertain predecessor cannot be replaced even when its Session reports failure", async () => {
+  const processFixture = await factoryProcess();
+  const owned = await fixture(undefined, undefined, processFixture.connect());
+  const turns = createAgentTurnStore(owned.database);
+  const admission = createChangeAdmission(owned.database, "factory-coding-model");
+  try {
+    const first = await admission.admit(owned.changeID, owned.userID, {
+      kind: "change-start",
+      commandId: crypto.randomUUID(),
+    });
+    await owned.writers.prepareAgent(owned.changeID, first.turn.id);
+    const claimed = await turns.claimPending(first.turn.id);
+    if (!claimed?.ownerToken) throw new Error("Owned turn lease missing");
+    expect(await turns.beginDispatch(first.turn.id, claimed.ownerToken)).not.toBeNull();
+    expect(
+      await turns.settle(first.turn.id, claimed.ownerToken, "uncertain", "Owned ambiguous outcome"),
+    ).toBe(true);
+    await owned.database.client`UPDATE factory.change_agent_session SET state='failed',
+      active_turn_id=${first.turn.id} WHERE change_id=${owned.changeID}`;
+    await expect(
+      admission.admit(owned.changeID, owned.userID, {
+        kind: "change-start",
+        commandId: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow();
+    expect((await turns.get(first.turn.id))?.state).toBe("uncertain");
+    const [writer] = await owned.database.client`SELECT turn_id FROM factory.change_writer
+      WHERE change_id=${owned.changeID}`;
+    expect(writer?.["turn_id"]).toBe(first.turn.id);
+  } finally {
+    await owned.dispose();
+    await processFixture.dispose();
+  }
+}, 30_000);
+
 test("settled completion releases editing once and a stale completion cannot stop a newer Agent", async () => {
   const processFixture = await factoryProcess();
   const owned = await fixture(undefined, undefined, processFixture.connect());
@@ -161,7 +273,9 @@ test("Ticket writer fences saves, requires settled Stop and compute teardown, an
     );
     expect(stopping).toBe(1);
     stopped = true;
-    expect(await controller.takeOver(owned.changeID, owned.userID, commandID)).toMatchObject({
+    await owned.database
+      .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    expect(await controller.view(owned.changeID, owned.userID)).toMatchObject({
       state: "human",
       canWrite: true,
     });

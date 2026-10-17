@@ -331,6 +331,7 @@ function FactoryWorkspace(props: {
     changeID: string,
     view: AgentView,
     read?: ReturnType<typeof agentReadFence.beginRead>,
+    historyRequested = true,
   ) {
     if (read && !agentReadFence.current(read)) return;
     if (!read) agentReadFence.commandPublished();
@@ -342,7 +343,7 @@ function FactoryWorkspace(props: {
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
     }
-    lastAgentSnapshot = retainAgentActivity(lastAgentSnapshot, changeID, view);
+    lastAgentSnapshot = retainAgentActivity(lastAgentSnapshot, changeID, view, historyRequested);
     setAgent(lastAgentSnapshot.view);
   }
   function resetAgentView() {
@@ -836,7 +837,7 @@ function FactoryWorkspace(props: {
       if (selectedChange()?.id !== changeID) return;
       if (agentView && agentReadFence.current(read)) {
         if (history && agentView.messagesAvailable) lastAgentHistory = { changeID, at: Date.now() };
-        publishAgentView(changeID, agentView, read);
+        publishAgentView(changeID, agentView, read, history);
       }
       setDelivery(deliveryView);
     } else if (!changeID) {
@@ -1918,7 +1919,11 @@ function FactoryWorkspace(props: {
       connectionInterrupted: agent().state === "working" && !agent().runtimeConnected,
     });
   const agentCanRun = () =>
-    !detail()?.ticket.trashedAt && ["active", "starting"].includes(selectedChange()?.state ?? "");
+    !detail()?.ticket.trashedAt &&
+    (["active", "starting"].includes(selectedChange()?.state ?? "") ||
+      (selectedChange()?.state === "failed" &&
+        ["failed", "stopped"].includes(selectedChange()?.runtimeState ?? "") &&
+        ["failed", "stopped"].includes(agent().state)));
   const canPromptBuild = () =>
     conversationMode() === "build" &&
     agentCanRun() &&

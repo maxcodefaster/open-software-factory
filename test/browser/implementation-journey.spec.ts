@@ -55,6 +55,51 @@ async function selectProject(page: Parameters<typeof signIn>[0]) {
     .click();
 }
 
+test("the specification leads while request details remain available and editable without repeated prose", async ({
+  page,
+}) => {
+  const db = createDatabase(1);
+  const request =
+    "Earlier request context that must remain available without repeating the specification.";
+  try {
+    await db.client`UPDATE factory.ticket SET description=${request} WHERE id=${ticketID}`;
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "requirements", exact: true })
+      .getByRole("button")
+      .click();
+    const details = page.locator(".ticket-request-details");
+    const description = page.getByRole("textbox", { name: "Ticket description", exact: true });
+    await expect(
+      page.getByRole("textbox", { name: "Specification summary", exact: true }),
+    ).toBeVisible();
+    await expect(description).toBeHidden();
+    await details.locator("summary").click();
+    await expect(description).toHaveText(request);
+    await description.fill("Revised request context stays intact.");
+    await expect
+      .poll(async () => {
+        const [row] = await db.client`SELECT description FROM factory.ticket WHERE id=${ticketID}`;
+        return row?.["description"];
+      })
+      .toBe("Revised request context stays intact.");
+    await details.locator("summary").click();
+    await expect(description).toBeHidden();
+    await details.locator("summary").click();
+    await expect(description).toHaveText("Revised request context stays intact.");
+    await mkdir(".factory/test-results/implementation-journey", { recursive: true });
+    await page.screenshot({
+      path: ".factory/test-results/implementation-journey/request-details-expanded.png",
+    });
+    await details.locator("summary").click();
+    await page.screenshot({
+      path: ".factory/test-results/implementation-journey/specification-first.png",
+    });
+  } finally {
+    await db.client.end();
+  }
+});
+
 test("capacity wait and Coding pause retain the Ticket and expose only an explicit resume", async ({
   page,
 }) => {
@@ -158,6 +203,86 @@ test("Implement is one explicit recoverable action and does not open IDE or Assi
     .getByRole("textbox", { name: "Specification summary", exact: true })
     .click({ position: { x: 4, y: 4 } });
   await expect(page.getByRole("combobox", { name: "Ticket Epic" })).toHaveCount(0);
+});
+
+test("an implementing Ticket never offers another Implement while its Change read is delayed", async ({
+  page,
+}) => {
+  const release = Promise.withResolvers<void>();
+  const db = createDatabase(1);
+  try {
+    await db.client`UPDATE factory.ticket SET state='in-progress' WHERE id=${ticketID}`;
+    await page.route("**/api/changes?*", async (route) => {
+      await release.promise;
+      await route.fulfill({ json: { changes: [] } });
+    });
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button")
+      .click();
+    await expect(
+      page.getByRole("textbox", { name: "Specification summary", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Implement", exact: true })).toHaveCount(0, {
+      timeout: 3_000,
+    });
+  } finally {
+    release.resolve();
+    await page.unrouteAll({ behavior: "wait" });
+    await db.client.end();
+  }
+});
+
+test("a failed Sandbox leaves an explicit implementation retry in the Change Agent", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  await page.route("**/api/changes?*", (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-failed",
+            baseSha: "a".repeat(40),
+            state: "failed",
+            branchState: "succeeded",
+            runtimeState: "failed",
+            implementationState: "failed",
+            buildTurnState: "failed",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+    route.fulfill({
+      json: {
+        state: "failed",
+        sessionAvailable: true,
+        runtimeConnected: false,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+        lastError: "Owned Sandbox startup failed",
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry implementation", exact: true }),
+  ).toBeEnabled();
 });
 
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({

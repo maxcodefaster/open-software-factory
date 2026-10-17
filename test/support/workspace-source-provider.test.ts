@@ -6,6 +6,7 @@ import { FileOperationError } from "../../deploy/theia-ide/node_modules/@theia/f
 // published const enums have no runtime exports for Bun's isolated transpiler.
 import {
   SourceResponseError,
+  FactorySourceClient,
   type SourceChange,
   type SourceTransport,
 } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-source-client";
@@ -14,10 +15,50 @@ import {
   workspaceResource,
 } from "../../deploy/theia-ide/factory-ide-extension/lib/browser/factory-workspace-files";
 
+test.each([401, 403, 404, 503])(
+  "source watch closes rejected access %s without a native watcher-capacity warning",
+  async (status) => {
+    const original = globalThis.EventSource;
+    let events: { onerror?: () => void; closed: boolean } | undefined;
+    class OwnedEvents {
+      onerror?: () => void;
+      onmessage?: (event: { data: string }) => void;
+      closed = false;
+      constructor() {
+        events = this;
+      }
+      close() {
+        this.closed = true;
+      }
+    }
+    Object.defineProperty(globalThis, "EventSource", { configurable: true, value: OwnedEvents });
+    const states: Array<boolean | undefined> = [];
+    let close: (() => void) | undefined;
+    try {
+      const client = new FactorySourceClient(new URL("http://owned.invalid/editor/"), async () =>
+        Response.json({ error: "Owned unavailable access" }, { status }),
+      );
+      close = client.watch(
+        "workspace-a",
+        () => {},
+        (retrying) => states.push(retrying),
+      );
+      events?.onerror?.();
+      await Bun.sleep(0);
+      expect(states).toEqual(status === 503 ? [true] : [true, false]);
+      expect(events?.closed).toBe(status !== 503);
+    } finally {
+      close?.();
+      Object.defineProperty(globalThis, "EventSource", { configurable: true, value: original });
+    }
+  },
+);
+
 function sourceFixture() {
   const documents = new Map<string, string>();
   const writes: Array<{ workspaceID: string; body: Readonly<Record<string, unknown>> }> = [];
   const watchers = new Map<string, (event: SourceChange) => void>();
+  const disconnects = new Map<string, () => void>();
   let subscriptions = 0;
   let closes = 0;
   const version = (content: string) => createHash("sha256").update(content).digest("hex");
@@ -48,12 +89,14 @@ function sourceFixture() {
       if (!documents.has(key)) throw new SourceResponseError(404);
       return file(documents.get(key) ?? "");
     },
-    watch(workspaceID, changed) {
+    watch(workspaceID, changed, disconnected) {
       subscriptions++;
       watchers.set(workspaceID, changed);
+      disconnects.set(workspaceID, disconnected);
       return () => {
         closes++;
         watchers.delete(workspaceID);
+        disconnects.delete(workspaceID);
       };
     },
   };
@@ -61,6 +104,7 @@ function sourceFixture() {
     documents,
     writes,
     watchers,
+    disconnects,
     provider: new FactoryWorkspaceFiles(transport),
     subscriptions: () => subscriptions,
     closes: () => closes,
@@ -190,6 +234,8 @@ describe("pinned Theia Workspace provider", () => {
     await fixture.provider.readFile(resource);
     const changed: string[] = [];
     let errors = 0;
+    const connections: ReadonlyMap<string, boolean>[] = [];
+    fixture.provider.onWatchConnectionChanged((value) => connections.push(value));
     fixture.provider.onDidChangeFile((events) =>
       changed.push(...events.map((event) => event.resource.toString())),
     );
@@ -198,8 +244,12 @@ describe("pinned Theia Workspace provider", () => {
       recursive: true,
       excludes: [],
     });
+    fixture.disconnects.get("workspace-a")?.();
+    expect(errors).toBe(0);
+    expect(connections.at(-1)?.get("workspace-a")).toBe(true);
     fixture.documents.set("workspace-a/app.ts", "runtime edit");
     fixture.watchers.get("workspace-a")?.({ kind: "resync", path: "" });
+    expect(connections.at(-1)?.size).toBe(0);
     expect(changed).toEqual(["factory-workspace://workspace-a/", resource.toString()]);
     expect(errors).toBe(0);
     await expect(

@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
@@ -15,6 +15,129 @@ import {
 import upstream from "../../upstream.json";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+
+// These controller tests inject Kubernetes and never launch these artifacts.
+const configuration = {
+  FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
+  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
+  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
+  FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
+  FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
+  FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
+  FACTORY_FORGEJO_OWNER: "owned-runtime-fixture",
+};
+const previous = new Map<string, string | undefined>();
+beforeAll(() => {
+  for (const [key, value] of Object.entries(configuration)) {
+    previous.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+});
+afterAll(() => {
+  for (const [key, value] of previous) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
+test.each(["live", "observation unavailable", "reconnected during observation"] as const)(
+  "connector reconnect delay preserves a %s Sandbox and its capabilities",
+  async (scenario) => {
+    const process = await factoryProcess();
+    const database = process.connect();
+    const token = "owned-reconnect-capability";
+    const owned = await fixture(undefined, undefined, database, token);
+    const hub = new RuntimeHub(async () => {});
+    let present = true;
+    let deletions = 0;
+    const observation = Promise.withResolvers<void>();
+    const observed = Promise.withResolvers<void>();
+    try {
+      await database.client`UPDATE factory.runtime_attempt SET kubernetes_uid='owned-live-pod',
+      kubernetes_namespace_uid='owned-live-namespace' WHERE id=${owned.attemptID}`;
+      hub.allow(owned.attemptID, 1, hashConnectorToken(token), hashConnectorToken(token));
+      const controller = createRuntimeController(
+        database,
+        hub,
+        "owned-reconnect-secret",
+        {
+          prepareExecution: async () => {
+            throw new Error("Connection recovery must not prepare another checkout");
+          },
+        },
+        {
+          ...createKubernetesClient(),
+          getNamespace: async () => ({ uid: "owned-live-namespace", labels: {} }),
+          getPod: async () => {
+            if (scenario === "observation unavailable")
+              throw new Error("Owned observation timeout");
+            if (scenario === "reconnected during observation") {
+              observed.resolve();
+              await observation.promise;
+            }
+            return present
+              ? {
+                  uid: "owned-live-pod",
+                  phase: "Running",
+                  labels: {},
+                  envboxImage: upstream.envbox.image,
+                  runtimeHostImage: "owned-image-not-used-by-observation",
+                }
+              : null;
+          },
+          deletePod: async () => {
+            deletions++;
+            present = false;
+          },
+          deleteNamespace: async () => {
+            deletions++;
+            present = false;
+          },
+        },
+        async () => "",
+      );
+      const disconnected = controller.status(
+        owned.attemptID,
+        "disconnected",
+        "Owned connector is reconnecting",
+      );
+      if (scenario === "reconnected during observation") {
+        await observed.promise;
+        await controller.status(owned.attemptID, "ready");
+        observation.resolve();
+      }
+      await disconnected;
+      const [waiting] =
+        await database.client`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      expect(waiting?.["state"]).toBe(
+        scenario === "reconnected during observation" ? "ready" : "starting",
+      );
+      expect(deletions).toBe(0);
+      expect(
+        hub.authorize(
+          new Request("http://factory.local/internal/connectors", {
+            headers: {
+              authorization: `Bearer ${token}`,
+              "x-factory-connector-role": "child",
+              "x-factory-runtime-attempt": owned.attemptID,
+              "x-factory-runtime-generation": "1",
+            },
+          }),
+          hashConnectorToken,
+        ),
+      ).not.toBeNull();
+      await controller.status(owned.attemptID, "ready");
+      const [recovered] =
+        await database.client`SELECT state,kubernetes_uid FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      expect(recovered).toMatchObject({ state: "ready", kubernetes_uid: "owned-live-pod" });
+      expect(deletions).toBe(0);
+    } finally {
+      await database.client.end({ timeout: 1 });
+      await process.dispose();
+    }
+  },
+  30_000,
+);
 
 test.each(["personal", "staging", "ticket"] as const)(
   "retained %s runtime reads do not deadlock a one-connection application pool",
@@ -230,6 +353,58 @@ test("cancelling Ticket compute before create retains its independently owned so
     await processFixture.dispose();
   }
 }, 30_000);
+
+test.each(["stop", "cancel", "failure"] as const)(
+  "%s cleanup preserves the correct Change outcome across Factory recovery",
+  async (action) => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    try {
+      const work = await fixture(undefined, undefined, database);
+      const controller = createRuntimeController(
+        database,
+        new RuntimeHub(async () => {}),
+        "owned-cleanup-outcome-secret",
+        {
+          prepareExecution: async () => {
+            throw new Error("Cleanup must not prepare source");
+          },
+        },
+        { ...createKubernetesClient(), getNamespace: async () => null, getPod: async () => null },
+        async () => "",
+      );
+      if (action === "cancel")
+        await database.client`UPDATE factory.change SET cancel_requested_at=now() WHERE id=${work.changeID}`;
+      if (action === "failure")
+        await controller.status(work.attemptID, "failed", "Owned runtime failure");
+      else await controller.stop(work.attemptID);
+      await eventually(
+        async () =>
+          (
+            await database.client`SELECT state FROM factory.runtime_attempt WHERE id=${work.attemptID}`
+          )[0]?.["state"],
+        (state) => state === (action === "failure" ? "failed" : "stopped"),
+        "Cleanup did not settle",
+      );
+      const expected = action === "stop" ? "active" : action === "cancel" ? "cancelled" : "failed";
+      expect(
+        (await database.client`SELECT state FROM factory.change WHERE id=${work.changeID}`)[0]?.[
+          "state"
+        ],
+      ).toBe(expected);
+      await controller.recover();
+      expect(
+        (await database.client`SELECT state FROM factory.change WHERE id=${work.changeID}`)[0]?.[
+          "state"
+        ],
+      ).toBe(expected);
+    } finally {
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  30_000,
+);
 
 test.each([
   "create",
@@ -456,6 +631,9 @@ test.each([
       await Promise.race([
         beforeCreate || recoveredCreate ? preparing.promise : entered.promise,
         creating.then(() => {
+          // Initial create returns before its background observer reaches a
+          // replacement. Success here is not failure to reach that boundary.
+          if (boundary === "observer replacement") return entered.promise;
           throw new Error("Owned runtime create finished without reaching its test boundary");
         }),
       ]);
@@ -510,7 +688,10 @@ test.each([
       await creating?.catch(() => undefined);
       await recovering?.catch(() => undefined);
       await reserve?.close();
-      await database.client.end({ timeout: 0 });
+      // Let the observer released by the stopped replacement boundary finish
+      // its final state read before disposing its database.
+      await Bun.sleep(0);
+      await database.client.end({ timeout: 2 });
       await process.dispose();
     }
   },

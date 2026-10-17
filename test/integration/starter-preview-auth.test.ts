@@ -106,6 +106,15 @@ test("Starter authentication works behind the real scoped App proxy path and ret
       port: 0,
       async fetch(request) {
         const url = new URL(request.url);
+        if (
+          ["127.0.0.1", "localhost"].includes(url.hostname) &&
+          url.pathname === "/factory-shell"
+        ) {
+          return new Response(
+            `<h1>Factory shell</h1><iframe title="Starter preview" width="100%" height="680" src="http://${id.replaceAll("-", "")}.app.runtime.localhost:${url.port}${prefix}/"></iframe>`,
+            { headers: { "content-type": "text/html" } },
+          );
+        }
         assetPaths.push(url.pathname);
         if (!url.pathname.startsWith(`${prefix}/`))
           return new Response("Unscoped request", { status: 404 });
@@ -171,6 +180,41 @@ test("Starter authentication works behind the real scoped App proxy path and ret
     });
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await visible(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+
+    const embeddedContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+    const embedded = await embeddedContext.newPage();
+    await embedded.goto(`http://127.0.0.1:${proxy.port}/factory-shell`);
+    const app = embedded.frameLocator('iframe[title="Starter preview"]');
+    await app.getByRole("button", { name: "Create an account", exact: true }).click();
+    await app.getByLabel("Name", { exact: true }).fill("Embedded app user");
+    await app.getByLabel("Email", { exact: true }).fill(`${crypto.randomUUID()}@starter.test`);
+    await app.getByLabel("Password", { exact: true }).fill(crypto.randomUUID());
+    await app.getByRole("button", { name: "Create account", exact: true }).click();
+    await visible(app.getByRole("heading", { name: "You're home." })).toBeVisible({
+      timeout: 5000,
+    });
+    await embedded.reload();
+    await visible(app.getByRole("heading", { name: "You're home." })).toBeVisible();
+    await mkdir(".factory/test-results/starter-preview-auth", { recursive: true });
+    await embedded.screenshot({
+      path: ".factory/test-results/starter-preview-auth/embedded-home.png",
+      animations: "disabled",
+    });
+
+    // Another top-level site must not inherit the embedded App session, even
+    // though both pages use the same browser cookie jar and exact App origin.
+    const otherShell = await embeddedContext.newPage();
+    await otherShell.goto(`http://localhost:${proxy.port}/factory-shell`);
+    await visible(
+      otherShell
+        .frameLocator('iframe[title="Starter preview"]')
+        .getByRole("heading", { name: "Welcome back", exact: true }),
+    ).toBeVisible();
+    await otherShell.close();
+
+    await app.getByRole("button", { name: "Sign out", exact: true }).click();
+    await visible(app.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
+    await embeddedContext.close();
     expect(errors).toEqual([]);
     expect(assetPaths.filter((path) => !path.startsWith(`${prefix}/`))).toEqual([]);
   } finally {

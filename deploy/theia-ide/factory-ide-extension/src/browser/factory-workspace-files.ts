@@ -144,14 +144,27 @@ export class FactoryWorkspaceFiles
     FileSystemProviderCapabilities.FileReadWrite | FileSystemProviderCapabilities.PathCaseSensitive;
   readonly onDidChangeCapabilities = Event.None;
   private readonly changes = new Emitter<readonly FileChange[]>();
-  private readonly errors = new Emitter<void>();
+  private readonly connectionChanges = new Emitter<ReadonlyMap<string, boolean>>();
+  private readonly disconnected = new Map<string, boolean>();
   readonly onDidChangeFile = this.changes.event;
-  readonly onFileWatchError = this.errors.event;
+  // Theia interprets this event as native watcher capacity exhaustion.
+  readonly onFileWatchError = Event.None;
+  readonly onWatchConnectionChanged = this.connectionChanges.event;
   private readonly versions = new Map<string, string>();
   private readonly directoryMetadata = new Map<string, { stat: Stat; expires: number }>();
   private readonly watches = new Map<string, { references: number; close: () => void }>();
 
   constructor(private readonly transport: SourceTransport) {}
+
+  private watchConnection(workspaceID: string, retrying: boolean | undefined) {
+    if (retrying === undefined) {
+      if (!this.disconnected.delete(workspaceID)) return;
+    } else {
+      if (this.disconnected.get(workspaceID) === retrying) return;
+      this.disconnected.set(workspaceID, retrying);
+    }
+    this.connectionChanges.fire(new Map(this.disconnected));
+  }
 
   private async request(
     resource: URI,
@@ -283,6 +296,7 @@ export class FactoryWorkspaceFiles
     const resource = change.path ? root.resolve(change.path) : root;
     workspaceResource(resource);
     if (change.kind === "resync") {
+      this.watchConnection(workspaceID, undefined);
       const observed = [...this.versions.keys()]
         .map((uri) => new URI(uri))
         .filter((uri) => uri.authority === workspaceID);
@@ -309,9 +323,9 @@ export class FactoryWorkspaceFiles
         close: this.transport.watch(
           workspaceID,
           (change) => this.changed(workspaceID, change),
-          () => {
+          (retrying = true) => {
             this.clearDirectoryMetadata(workspaceID);
-            this.errors.fire(undefined);
+            this.watchConnection(workspaceID, retrying);
           },
         ),
       };
@@ -326,6 +340,7 @@ export class FactoryWorkspaceFiles
         if (--shared.references === 0) {
           shared.close();
           this.watches.delete(workspaceID);
+          this.watchConnection(workspaceID, undefined);
         }
       },
     };
@@ -343,7 +358,7 @@ export class FactoryWorkspaceFiles
     this.versions.clear();
     this.directoryMetadata.clear();
     this.changes.dispose();
-    this.errors.dispose();
+    this.connectionChanges.dispose();
   }
 }
 

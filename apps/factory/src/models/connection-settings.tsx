@@ -68,6 +68,20 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
     data()?.providers.find((entry) => entry.provider === provider())?.models ?? [];
   const deployment = () =>
     data()?.deployment.find((entry) => entry.role === role() && entry.configured);
+  function selectSavedConnection(value: ModelConnectionView) {
+    setData((previous) =>
+      previous
+        ? {
+            ...previous,
+            connections: [
+              ...previous.connections.filter((entry) => entry.connectionID !== value.connectionID),
+              value,
+            ],
+          }
+        : previous,
+    );
+    setConnection(value);
+  }
   async function load() {
     try {
       const value = await apiRequest(catalogue, "/api/model-connections");
@@ -127,7 +141,7 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
           body: JSON.stringify(adoption),
         });
         adoption = undefined;
-        if (!disposed) setConnection(selected);
+        if (!disposed) selectSavedConnection(selected);
       }
       if (key() || pending) {
         pending ??= {
@@ -150,7 +164,7 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
         );
         pending = undefined;
         setKey("");
-        if (!disposed) setConnection(selected);
+        if (!disposed) selectSavedConnection(selected);
       }
       if (!selected?.configured)
         throw new Error("Enter a provider key or select an existing connection");
@@ -237,6 +251,19 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
             <option value="build">Implementation</option>
           </select>
         </div>
+        <div class="model-role">
+          <label for="connection-provider">Provider</label>
+          <select
+            id="connection-provider"
+            value={provider()}
+            disabled={busy() || useDeployment()}
+            onChange={(event) => chooseProvider(modelProvider.parse(event.currentTarget.value))}
+          >
+            <For each={data()?.providers ?? []}>
+              {(entry) => <option value={entry.provider}>{entry.label}</option>}
+            </For>
+          </select>
+        </div>
         <Show when={deployment()}>
           {(configured) => (
             <label class="model-checkbox model-deployment-choice">
@@ -267,25 +294,12 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
             </label>
           )}
         </Show>
-        <div class="model-role">
-          <label for="connection-provider">Provider</label>
-          <select
-            id="connection-provider"
-            value={provider()}
-            disabled={busy() || useDeployment()}
-            onChange={(event) => chooseProvider(modelProvider.parse(event.currentTarget.value))}
-          >
-            <For each={data()?.providers ?? []}>
-              {(entry) => <option value={entry.provider}>{entry.label}</option>}
-            </For>
-          </select>
-        </div>
         <Show
           when={data()?.connections.some(
             (entry) => entry.provider === provider() && entry.configured,
           )}
         >
-          <div class="model-role">
+          <div class="model-role model-connection-picker">
             <label for="existing-connection">Connection</label>
             <select
               id="existing-connection"
@@ -302,7 +316,9 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
                 probeCommand = undefined;
               }}
             >
-              <option value="">New connection</option>
+              <option value="" selected={!connection()}>
+                New connection
+              </option>
               <For
                 each={
                   data()?.connections.filter(
@@ -311,7 +327,10 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
                 }
               >
                 {(entry) => (
-                  <option value={entry.connectionID}>
+                  <option
+                    value={entry.connectionID}
+                    selected={entry.connectionID === connection()?.connectionID}
+                  >
                     {entry.endpoint ? new URL(entry.endpoint).host : "Configured provider"}
                   </option>
                 )}
@@ -319,6 +338,24 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
             </select>
           </div>
         </Show>
+        <div class="model-role">
+          <label for="connection-model">Model</label>
+          <input
+            id="connection-model"
+            list="connection-models"
+            value={model()}
+            disabled={busy() || useDeployment()}
+            placeholder="Select or enter your provider model"
+            onInput={(event) => {
+              setModel(event.currentTarget.value);
+              setResult(undefined);
+              probeCommand = undefined;
+            }}
+          />
+          <datalist id="connection-models">
+            <For each={models()}>{(id) => <option value={id} />}</For>
+          </datalist>
+        </div>
         <div class="model-role">
           <label for="connection-key">API key</label>
           <input
@@ -346,24 +383,6 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
             onInput={(event) => setEndpoint(event.currentTarget.value)}
           />
         </details>
-        <div class="model-role">
-          <label for="connection-model">Model</label>
-          <input
-            id="connection-model"
-            list="connection-models"
-            value={model()}
-            disabled={busy() || useDeployment()}
-            placeholder="Select or enter your provider model"
-            onInput={(event) => {
-              setModel(event.currentTarget.value);
-              setResult(undefined);
-              probeCommand = undefined;
-            }}
-          />
-          <datalist id="connection-models">
-            <For each={models()}>{(id) => <option value={id} />}</For>
-          </datalist>
-        </div>
         <p class="model-settings-note">
           Save performs a small inference check with tools and structured output. Provider usage
           charges may apply. Limits are shown only when reported; this is not a throughput
@@ -377,6 +396,7 @@ export function ModelConnectionSettings(props: { onChange: () => void; settingsV
           </Show>
           <button
             type="submit"
+            class="primary-button"
             disabled={
               busy() ||
               !model() ||

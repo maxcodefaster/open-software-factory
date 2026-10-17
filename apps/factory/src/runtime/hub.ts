@@ -932,7 +932,8 @@ export function theiaConnectionToken(headers: Headers) {
 }
 
 // An untrusted App cannot set Factory/IDE credentials or cookies for other
-// runtime paths. Preserve App values/expiry but remove Domain and scope Path.
+// runtime paths. Preserve values/expiry, but bind browser state to its runtime
+// path and top-level site so sessions also work in Factory's cross-site iframe.
 export function scopeAppCookies(response: Response, path: string) {
   if (!/^\/runtime\/[a-f0-9-]{36}\/(app|preview\/app(?:-[a-z][a-z0-9-]{0,26})?)$/.test(path))
     throw new Error("App cookie path is not scoped");
@@ -952,8 +953,13 @@ export function scopeAppCookies(response: Response, path: string) {
       )
     )
       continue;
-    const safe = attributes.filter((value) => !/^(?:domain|path)\s*=/i.test(value));
-    headers.append("set-cookie", [pair, ...safe, `Path=${path}`].join("; "));
+    const safe = attributes.filter(
+      (value) => !/^(?:domain|path|samesite|secure|partitioned)(?:\s*=|$)/i.test(value),
+    );
+    headers.append(
+      "set-cookie",
+      [pair, ...safe, `Path=${path}`, "SameSite=None", "Secure", "Partitioned"].join("; "),
+    );
   }
   return new Response(response.body, {
     status: response.status,

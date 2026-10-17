@@ -4,6 +4,16 @@ status: accepted
 
 # Factory admits agent turns before external execution
 
+Build startup follows the recorded Sandbox lifecycle rather than a separate poll-count cutoff.
+Runtime operations retain their preparation bounds. Stop, authority loss and a changed runtime
+generation interrupt waiting before inference. A known failed Agent turn can be retried by an
+explicit human command, but an assigned previous Sandbox must be fenced and stopped before the
+new Agent receives writing authority. An uncertain turn never qualifies for that retry path.
+
+Read-only OpenCode transport failures retain observation of the same admitted execution. They
+do not authorize another prompt or turn a status-read deadline into a lost dispatch receipt.
+Each observation cycle still rechecks its lease, Stop and authority before continuing.
+
 Factory records the command identity, bounded input, current authority/model snapshot and one
 exclusive execution owner in PostgreSQL before submitting Project or Change Agent work. Reusing
 a command identity returns its original turn, while changed input conflicts. Losing a connection

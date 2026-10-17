@@ -40,3 +40,9 @@ logout and verifies the session ended before returning. No proxy cookie imperson
 CSRF protection or helper-token revocation is involved. Forgejo helper OAuth tokens can access
 native APIs within the person's grants; they are not Git-only tokens. All-device termination ends
 Factory sessions; native Forgejo browser sessions on other devices remain an explicit limitation.
+
+App previews use separate runtime origins and cannot set Factory or IDE credentials. Factory
+preserves App cookie values, expiry and HttpOnly, removes Domain, and scopes Path to the exact App.
+It sets SameSite=None, Secure and Partitioned so authentication works inside the Factory frame
+without sharing the session with another top-level site. Opening the App in a separate tab has its
+own browser-session partition and may require a separate App sign-in.

@@ -84,7 +84,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
         },
         (row) => row?.state === "ready",
         "Starter runtime not ready",
-        240_000,
+        900_000,
       );
     }
     try {
@@ -171,7 +171,9 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
               row.task === "main-preview" && row.state === "ready",
           ),
         "Starter setup preview did not become ready",
-        300_000,
+        // Cold image acquisition and pinned Feature installation can outlast
+        // five minutes. The runtime owns its bounded startup failure.
+        900_000,
       );
       timings["initialPreviewMS"] = Math.round(performance.now() - started);
       const [preview] = await database.client<
@@ -257,6 +259,11 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
       terminal = await ownedRuntimeTerminal(factory.base, cookie, runtime.id);
       timings["terminalMS"] = Math.round(performance.now() - runtimeStarted);
       expect(await terminal.evaluate<string>("return process.cwd()")).toBe("/workspace/project");
+      expect(
+        await terminal.evaluate<string>(
+          "return require('node:child_process').execFileSync('git',['--version'],{encoding:'utf8'}).trim()",
+        ),
+      ).toMatch(/^git version /);
       expect(
         await terminal.evaluate<boolean>(
           "return !!process.env.DATABASE_URL && !!process.env.BETTER_AUTH_SECRET",

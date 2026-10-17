@@ -21,6 +21,34 @@ function connectorSocket(role: "parent" | "child") {
   } as unknown as ServerWebSocket<RuntimeSocketData>;
 }
 
+test.each(["parent", "child"] as const)(
+  "both connector hellos publish readiness when %s reconnects last",
+  (lastRole) => {
+    const phases: string[] = [];
+    const hub = new RuntimeHub(async (_id, phase) => {
+      phases.push(phase);
+    });
+    const first = connectorSocket(lastRole === "parent" ? "child" : "parent");
+    const last = connectorSocket(lastRole);
+    try {
+      hub.open(first);
+      hub.message(
+        first,
+        JSON.stringify({
+          type: "hello",
+          role: first.data.kind === "connector" ? first.data.role : "",
+        }),
+      );
+      expect(phases).toEqual([]);
+      hub.open(last);
+      hub.message(last, JSON.stringify({ type: "hello", role: lastRole }));
+      expect(phases).toEqual(["ready"]);
+    } finally {
+      hub.revoke("attempt");
+    }
+  },
+);
+
 test("terminal parent status is not replaced by reconnect failure on socket close", async () => {
   const phases: string[] = [];
   const hub = new RuntimeHub(async (_id, phase) => {
@@ -428,10 +456,25 @@ describe("Runtime edge headers", () => {
       headers.append("set-cookie", value);
     const scoped = scopeAppCookies(new Response("App", { headers }), path);
     expect(scoped.headers.getSetCookie()).toEqual([
-      `starter.session_token=app; HttpOnly; SameSite=Lax; Path=${path}`,
-      `theme=light; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=${path}`,
+      `starter.session_token=app; HttpOnly; Path=${path}; SameSite=None; Secure; Partitioned`,
+      `theme=light; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=${path}; SameSite=None; Secure; Partitioned`,
     ]);
     expect(() => scopeAppCookies(new Response(), "/")).toThrow("scoped");
+  });
+  test("App logout preserves expiry while replacing contradictory cookie isolation attributes", () => {
+    const path = `/runtime/${crypto.randomUUID()}/app`;
+    const response = scopeAppCookies(
+      new Response(null, {
+        headers: {
+          "set-cookie":
+            "starter.session_token=; Max-Age=0; HttpOnly; Domain=other.test; Path=/; SameSite=Strict; samesite=Lax; SECURE; partitioned",
+        },
+      }),
+      path,
+    );
+    expect(response.headers.getSetCookie()).toEqual([
+      `starter.session_token=; Max-Age=0; HttpOnly; Path=${path}; SameSite=None; Secure; Partitioned`,
+    ]);
   });
   test("App requests retain their cookies and exact proxy path without Factory credentials or spoofed proxy headers", () => {
     const id = crypto.randomUUID();

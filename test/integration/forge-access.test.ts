@@ -211,7 +211,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     await access.repositoryGrant(foreign.owner, foreign.name, id, false);
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned developer',${input.email})`;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${id},${repository.name},'Owned product',${`${origin}/${repository.owner}/${repository.name}.git`},'main','.devcontainer/devcontainer.json',${id})`;
+      VALUES(${id},${repository.name},'Owned product',${`${origin}/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${id},${id},'developer',${id})`;
     await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
       VALUES('Factory',${`http://host.orb.internal:${discovery.port}/.well-known/openid-configuration`},${`${origin}/user/oauth2/Factory/callback`},${sourceID},'ready',${id})`;
@@ -220,6 +220,9 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       forge: access,
       owner: repository.owner,
     });
+    await reconcile.reconcile(id);
+    // Both clone URL spellings identify the same exact Factory-owned repository.
+    await database.client`UPDATE factory.project SET repository_url=${`${origin}/${repository.owner}/${repository.name}.git`} WHERE id=${id}`;
     await reconcile.reconcile(id);
     expect(
       (

@@ -29,15 +29,14 @@ export type ProjectWorkspaceState = {
 };
 
 export function workspaceTabRuntimeURL(tab: WorkspaceTab, embedded = false) {
-  if (tab.view === "ide" && tab.workspaceID)
-    return `/api/developer-ide/access?${embedded ? "embed=1&" : ""}workspace=${encodeURIComponent(tab.workspaceID)}`;
-  if (!tab.attemptID || (tab.view !== "ide" && tab.view !== "preview")) return undefined;
-  const path =
-    tab.view === "ide"
-      ? `/runtime/${tab.attemptID}/ide/`
-      : tab.appChannel
-        ? `/runtime/${tab.attemptID}/preview/${tab.appChannel}/`
-        : `/runtime/${tab.attemptID}/app/`;
+  if (tab.view === "ide")
+    return tab.workspaceID
+      ? `/api/developer-ide/access?${embedded ? "embed=1&" : ""}workspace=${encodeURIComponent(tab.workspaceID)}`
+      : undefined;
+  if (!tab.attemptID || tab.view !== "preview") return undefined;
+  const path = tab.appChannel
+    ? `/runtime/${tab.attemptID}/preview/${tab.appChannel}/`
+    : `/runtime/${tab.attemptID}/app/`;
   return `/api/runtime-access?${embedded ? "embed=1&" : ""}path=${encodeURIComponent(path)}`;
 }
 

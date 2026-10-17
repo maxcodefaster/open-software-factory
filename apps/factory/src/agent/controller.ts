@@ -20,11 +20,13 @@ import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
+  isOpenCodeObservationTransportError,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
 } from "./opencode-client";
 import { observeOpenCodeUsage } from "./opencode-usage";
 import { createChangeAgentStop } from "./stop";
+import { waitForBuildSandbox } from "./runtime-readiness";
 import { readTurnObservation } from "./turn-observation";
 import {
   type AgentTurnRecord,
@@ -447,27 +449,23 @@ export function createAgentController(
     return change;
   }
 
-  async function awaitReadyChange(changeID: string, turnID: string) {
-    let change = await currentChange(changeID);
-    for (let observation = 0; observation < 360 && !closed; observation += 1) {
-      const session = await row(changeID);
-      if (session?.state !== "starting" || session.activeTurnID !== turnID) {
-        throw new CommandError("conflict", "Implementation startup was stopped");
-      }
-      if (change.runtimeAttemptID && change.runtimeState === "ready") {
+  async function awaitReadyChange(changeID: string, turnID: string, attemptID: string) {
+    return waitForBuildSandbox(
+      attemptID,
+      async () => {
+        const session = await row(changeID);
+        const change = await currentChange(changeID);
         return {
-          ...change,
+          active:
+            session?.state === "starting" &&
+            session.activeTurnID === turnID &&
+            !session.stopPending,
           runtimeAttemptID: change.runtimeAttemptID,
-          runtimeState: "ready" as const,
+          runtimeState: change.runtimeState,
         };
-      }
-      if (change.runtimeState === "failed" || change.runtimeState === "stopped") {
-        throw new Error("Ticket Sandbox failed before OpenCode became ready");
-      }
-      await Bun.sleep(1_000);
-      change = await currentChange(changeID);
-    }
-    throw new Error("Ticket Sandbox did not become ready in time");
+      },
+      () => closed,
+    );
   }
 
   async function execute(turnID: string) {
@@ -533,7 +531,7 @@ export function createAgentController(
         await turns.releasePending(turnID, ownerToken);
         return;
       }
-      const change = await awaitReadyChange(changeID, turnID);
+      const change = await awaitReadyChange(changeID, turnID, attemptID);
       const client = createOpenCodeClient(
         createChangeAgentTransport(database, hub, change.runtimeAttemptID, turnID, ownerToken),
       );
@@ -1213,7 +1211,15 @@ export function createAgentController(
             );
         } catch (cause) {
           const error = cause instanceof Error ? cause.message : "OpenCode status failed";
-          if (hub.connected(session.runtimeAttemptID) && !error.includes("timed out")) throw cause;
+          // These are read-only observations of the recorded execution. Losing
+          // one response is not a lost prompt receipt and must not fence a live
+          // turn. Renewal and Stop checks still run before the next observation.
+          if (
+            hub.connected(session.runtimeAttemptID) &&
+            !isOpenCodeObservationTransportError(cause) &&
+            !error.includes("timed out")
+          )
+            throw cause;
         }
         await Bun.sleep(1_000);
       }

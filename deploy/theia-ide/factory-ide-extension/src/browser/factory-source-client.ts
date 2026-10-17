@@ -23,7 +23,7 @@ export interface SourceTransport {
   watch(
     workspaceID: string,
     change: (event: SourceChange) => void,
-    disconnected: () => void,
+    disconnected: (retrying?: boolean) => void,
   ): () => void;
 }
 
@@ -61,7 +61,10 @@ export function sourceChange(value: unknown): SourceChange {
 export class FactorySourceClient implements SourceTransport {
   constructor(
     private readonly base: URL,
-    private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
+    private readonly fetcher: (
+      input: RequestInfo | URL,
+      init?: RequestInit,
+    ) => Promise<Response> = globalThis.fetch.bind(globalThis),
   ) {}
 
   private url(workspaceID: string, operation: string): URL {
@@ -102,7 +105,7 @@ export class FactorySourceClient implements SourceTransport {
   watch(
     workspaceID: string,
     change: (event: SourceChange) => void,
-    disconnected: () => void,
+    disconnected: (retrying?: boolean) => void,
   ): () => void {
     const events = new EventSource(this.url(workspaceID, "events"));
     events.onmessage = (event) => {
@@ -110,14 +113,17 @@ export class FactorySourceClient implements SourceTransport {
         const value: unknown = JSON.parse(event.data);
         change(sourceChange(value));
       } catch {
-        disconnected();
+        disconnected(false);
         events.close();
       }
     };
     events.onerror = () => {
-      disconnected();
+      disconnected(true);
       void this.request(workspaceID, "stat", { path: "" }).catch((error: unknown) => {
-        if (error instanceof SourceResponseError && error.status === 403) events.close();
+        if (error instanceof SourceResponseError && [401, 403, 404].includes(error.status)) {
+          disconnected(false);
+          events.close();
+        }
       });
     };
     // The service emits resync on every connection, including reconnect. No

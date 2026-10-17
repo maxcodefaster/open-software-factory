@@ -178,7 +178,7 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
         if (!changes[0]) return false;
         const confirmed = await sql<Array<{ id: string }>>`
         UPDATE factory.change_agent_session SET stop_pending = false, stop_dispatched = false,
-          last_error = CASE WHEN last_error LIKE 'Stop remains unconfirmed.%' THEN NULL ELSE last_error END,
+          last_error = NULL,
           updated_at = now()
         WHERE change_id = ${changeID} AND state = 'stopped' AND stop_pending
           AND stop_id IS NOT DISTINCT FROM ${current.stopID} AND runtime_attempt_id = ${current.attemptID}

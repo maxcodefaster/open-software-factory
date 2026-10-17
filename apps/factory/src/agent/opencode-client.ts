@@ -1,7 +1,11 @@
-import { OpenCode } from "@opencode/client";
+import { ClientError, OpenCode } from "@opencode/client";
 import { z } from "zod";
 
 type AgentTransport = (request: Request, path: string) => Promise<Response>;
+
+export function isOpenCodeObservationTransportError(error: unknown) {
+  return error instanceof ClientError && error.reason === "Transport";
+}
 
 type RecordedInput = {
   readonly sessionID: string;

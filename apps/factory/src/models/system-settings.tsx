@@ -98,58 +98,55 @@ export function SystemModelSettings(props: { active?: boolean }) {
       >
         {(current) => (
           <>
-            <p class="model-settings-note">
-              Research, requirements &amp; Wiki: {current().planningModelId || "Not selected"}
-              <br />
-              Implementation: {current().buildModelId || "Not selected"}
-            </p>
-            <form onSubmit={(event) => void save(event)}>
-              <p class="model-settings-note">
-                Existing Changes keep their original Build model. Running turns are never
-                reconfigured.
-              </p>
-              <details class="model-policy">
-                <summary>Model override permissions</summary>
-                <For each={modelRoles}>
-                  {(role) => (
-                    <SystemRoleRules
-                      role={role}
-                      models={current().models}
-                      rule={rules()?.[role] ?? current().rules[role]}
-                      busy={busy()}
-                      onChange={(value) => {
-                        setRules((previous) => ({
-                          ...(previous ?? current().rules),
-                          [role]: value,
-                        }));
-                        setSaved(false);
-                      }}
-                    />
-                  )}
-                </For>
-                <footer class="model-settings-actions">
-                  <span role="status">
-                    {saved()
-                      ? "Defaults saved"
-                      : current().source === "environment"
-                        ? "Using environment defaults"
-                        : "Administrator defaults"}
-                  </span>
-                  <button
-                    type="submit"
-                    class="primary-button"
-                    disabled={
-                      busy() ||
-                      (!dirty() && current().source !== "environment") ||
-                      !current().models.includes(planning()) ||
-                      !current().models.includes(build())
-                    }
-                  >
-                    {busy() ? "Saving…" : "Save permissions"}
-                  </button>
-                </footer>
-              </details>
-            </form>
+            <Show when={current().connection.configured}>
+              <form onSubmit={(event) => void save(event)}>
+                <p class="model-settings-note">
+                  Existing Changes keep their original Build model. Running turns are never
+                  reconfigured.
+                </p>
+                <details class="model-policy">
+                  <summary>Model override permissions</summary>
+                  <For each={modelRoles}>
+                    {(role) => (
+                      <SystemRoleRules
+                        role={role}
+                        models={current().models}
+                        rule={rules()?.[role] ?? current().rules[role]}
+                        busy={busy()}
+                        onChange={(value) => {
+                          setRules((previous) => ({
+                            ...(previous ?? current().rules),
+                            [role]: value,
+                          }));
+                          setSaved(false);
+                        }}
+                      />
+                    )}
+                  </For>
+                  <footer class="model-settings-actions">
+                    <span role="status">
+                      {saved()
+                        ? "Defaults saved"
+                        : current().source === "environment"
+                          ? "Using environment defaults"
+                          : "Administrator defaults"}
+                    </span>
+                    <button
+                      type="submit"
+                      class="primary-button"
+                      disabled={
+                        busy() ||
+                        (!dirty() && current().source !== "environment") ||
+                        !current().models.includes(planning()) ||
+                        !current().models.includes(build())
+                      }
+                    >
+                      {busy() ? "Saving…" : "Save permissions"}
+                    </button>
+                  </footer>
+                </details>
+              </form>
+            </Show>
           </>
         )}
       </Show>

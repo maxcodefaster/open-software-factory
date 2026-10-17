@@ -765,7 +765,12 @@ async function publishedSourceImages() {
 
 async function startServer(runtimeImage: string, forgejoToken?: string) {
   const settings = localServerSettings(
-    installation ? { FACTORY_HOST: process.env["FACTORY_HOST"] } : process.env,
+    installation
+      ? {
+          FACTORY_HOST: process.env["FACTORY_HOST"],
+          FACTORY_EXECUTION_RESERVE_TARGET: process.env["FACTORY_EXECUTION_RESERVE_TARGET"],
+        }
+      : process.env,
     {
       email: installation ? `admin-${installation.name}@factory.local` : "admin@factory.local",
       password: installation
@@ -815,6 +820,7 @@ async function startServer(runtimeImage: string, forgejoToken?: string) {
       FACTORY_BROWSER_TOOLS_IMAGE: browserImage,
       ...sourceImages,
       FACTORY_HOST: settings.host,
+      FACTORY_EXECUTION_RESERVE_TARGET: settings.executionReserveTarget,
       FACTORY_PORT: String(factoryPort),
       FACTORY_BASE_URL: factoryBaseURL,
       FACTORY_WIKI_WEBHOOK_URL:

@@ -231,6 +231,44 @@ test("ordinary monitoring settles an inactive promoted input without a terminal 
   }
 });
 
+test("a cancelled read-only observation keeps monitoring the same Build without another prompt", async () => {
+  const owned = await fixture();
+  const controller = owned.controller();
+  const commandID = crypto.randomUUID();
+  const request = owned.hub.request.bind(owned.hub);
+  let reads = 0;
+  let finished = false;
+  owned.hub.request = async (attempt, channel, input, path) => {
+    if (new URL(input.url).pathname.endsWith("/active")) {
+      reads++;
+      if (reads === 1) throw new Error("Runtime request was cancelled");
+      if (!finished) return Response.json({ data: { [owned.sessionID]: { type: "running" } } });
+    }
+    return request(attempt, channel, input, path);
+  };
+  try {
+    owned.acceptResponse();
+    await controller.prompt(
+      owned.changeID,
+      "Keep observing this implementation",
+      owned.userID,
+      commandID,
+    );
+    await owned.requested;
+    owned.release();
+    await until(async () => reads >= 2, 300);
+    expect((await owned.turn(commandID))?.state).toBe("running");
+    expect(owned.requests()).toBe(1);
+    finished = true;
+    owned.finish();
+    await until(async () => (await controller.get(owned.changeID)).state === "committed", 500);
+    expect(owned.requests()).toBe(1);
+    expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
+  } finally {
+    await owned.dispose();
+  }
+}, 20_000);
+
 // Four real one-second monitoring intervals plus PostgreSQL commit and cleanup exceed a five-second budget.
 test("nonconsecutive inactive snapshots do not strand or prematurely settle running work", async () => {
   const owned = await fixture();
@@ -1054,6 +1092,16 @@ test.each(["unchanged", "Stop", "mode version", "generation", "invalid admission
       expect(await owned.controller().get(owned.changeID)).toMatchObject({
         state: boundary === "unchanged" ? "committed" : boundary === "Stop" ? "stopped" : "failed",
       });
+      // Competing read-only recovery owners may briefly reclaim the same
+      // uncertain record before their authority check rejects it. Wait for
+      // durable settlement, not only the earlier Session projection.
+      await until(
+        async () =>
+          ["completed", "stopped", "uncertain"].includes(
+            (await owned.turn(commandID))?.state ?? "",
+          ),
+        300,
+      );
       expect((await owned.turn(commandID))?.state).toBe(
         boundary === "unchanged" ? "completed" : boundary === "Stop" ? "stopped" : "uncertain",
       );

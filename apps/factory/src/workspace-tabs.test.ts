@@ -74,9 +74,8 @@ describe("workspace tabs", () => {
     expect(
       workspaceTabRuntimeURL({ ...ide, workspaceID: "workspace-1", attemptID: "old" }, true),
     ).toBe("/api/developer-ide/access?embed=1&workspace=workspace-1");
-    expect(workspaceTabRuntimeURL({ ...ide, attemptID: "attempt-1" })).toBe(
-      "/api/runtime-access?path=%2Fruntime%2Fattempt-1%2Fide%2F",
-    );
+    expect(workspaceTabRuntimeURL({ ...ide, attemptID: "attempt-1" })).toBeUndefined();
+    expect(workspaceTabRuntimeURL({ ...ide, attemptID: "attempt-1" }, true)).toBeUndefined();
     expect(workspaceTabRuntimeURL({ ...preview, attemptID: "attempt-2" })).toBe(
       "/api/runtime-access?path=%2Fruntime%2Fattempt-2%2Fapp%2F",
     );

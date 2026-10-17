@@ -290,6 +290,8 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     props.current.proposal?.base.version === props.current.ticket.version
       ? props.current.proposal
       : undefined;
+  const separateSummary = () =>
+    Boolean((props.latestRevision || proposal()) && draftSummary() !== draftDescription());
   const [historyRevisionID, setHistoryRevisionID] = createSignal<string>();
   const versions = () => [
     ...props.current.documentRevisions,
@@ -348,6 +350,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     setHistoryRevisionID(undefined);
   }
   let documentElement: HTMLElement | undefined;
+  let requestDetailsElement: HTMLDetailsElement | undefined;
   let linkInput: HTMLInputElement | undefined;
   const [formattingElement, setFormattingElement] = createSignal<HTMLDivElement>();
   const [commandElement, setCommandElement] = createSignal<HTMLDivElement>();
@@ -969,7 +972,13 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                 <div class="ticket-status-context">
                   <span>{props.ticketReference}</span>
                   <span>{effectiveStatus()}</span>
-                  <Show when={!props.change && props.latestRevision}>
+                  <Show
+                    when={
+                      !props.change &&
+                      props.current.ticket.state === "ready" &&
+                      props.latestRevision
+                    }
+                  >
                     {(revision) => (
                       <span>
                         {revision().approvalId ? "Implementation scope" : "Ready to implement"}
@@ -1111,6 +1120,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                     when={
                       !props.current.ticket.trashedAt &&
                       !props.current.ticket.convertedToEpicId &&
+                      props.current.ticket.state === "ready" &&
                       props.latestRevision &&
                       !props.change &&
                       !proposal()
@@ -1252,22 +1262,31 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                 class="ticket-inline-title"
                 {...richTextHandlers({ field: "title", update: setDraftTitle })}
               />
-              <RichTextSurface
-                value={draftDescription()}
-                label="Ticket description"
-                field="description"
-                editable={canEditSpecification()}
-                placeholder="Add planning context"
-                class="ticket-inline-description markdown-body"
-                {...richTextHandlers({
-                  field: "description",
-                  slash: true,
-                  update: setDraftDescription,
-                })}
-              />
-              <Show
-                when={(props.latestRevision || proposal()) && draftSummary() !== draftDescription()}
+              <details
+                class="ticket-request-details"
+                ref={requestDetailsElement}
+                open={
+                  !separateSummary() ||
+                  Boolean(requestDetailsElement?.contains(document.activeElement))
+                }
               >
+                <summary hidden={!separateSummary()}>Request details</summary>
+                {/* Keep the editor mounted and never fold focused text when a proposal arrives. */}
+                <RichTextSurface
+                  value={draftDescription()}
+                  label="Ticket description"
+                  field="description"
+                  editable={canEditSpecification()}
+                  placeholder="Add planning context"
+                  class="ticket-inline-description markdown-body"
+                  {...richTextHandlers({
+                    field: "description",
+                    slash: true,
+                    update: setDraftDescription,
+                  })}
+                />
+              </details>
+              <Show when={separateSummary()}>
                 <RichTextSurface
                   value={draftSummary()}
                   label="Specification summary"

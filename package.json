@@ -21,7 +21,7 @@
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
-    "typecheck": "tsc -b --pretty false",
+    "typecheck": "bun scripts/testing/typecheck.ts",
     "runtime:conformance": "bun scripts/runtime/conformance.ts",
     "connector:check": "bun run connector:check:host && bun run connector:check:linux",
     "connector:check:host": "cd services/runtime-connector && go test -race ./... && go vet ./...",

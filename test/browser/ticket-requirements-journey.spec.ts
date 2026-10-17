@@ -498,6 +498,8 @@ test("real Luna elaborates detailed intent; confirmation preserves scope and man
   expect(turn?.model).toBe("gpt-6-luna");
   await page.screenshot({ path: `${captures}/proposal-desktop.png` });
   await expect(page.getByRole("complementary", { name: "Agent panel" })).toBeHidden();
+  if (!(await page.getByRole("textbox", { name: "Ticket description", exact: true }).isVisible()))
+    await page.locator(".ticket-request-details > summary").click();
   await page
     .getByRole("textbox", { name: "Ticket description", exact: true })
     .fill("Human-edited proposal: retain private intent until publication.");
@@ -516,6 +518,8 @@ test("real Luna elaborates detailed intent; confirmation preserves scope and man
       "description"
     ],
   ).toBe("Human-edited proposal: retain private intent until publication.");
+  if (!(await page.getByRole("textbox", { name: "Ticket description", exact: true }).isVisible()))
+    await page.locator(".ticket-request-details > summary").click();
   await page
     .getByRole("textbox", { name: "Ticket description", exact: true })
     .fill("Human refinement: private drafts stay local to this browser.");

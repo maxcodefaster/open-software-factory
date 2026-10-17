@@ -121,7 +121,7 @@ export function createForgeAccessReconciliation(options: {
               repository.search ||
               repository.hash ||
               (options.origin && repository.origin !== options.origin) ||
-              repository.pathname !== `/${owner}/${project.slug}.git`)
+              repository.pathname.replace(/\.git$/, "") !== `/${owner}/${project.slug}`)
           )
             throw new Error("Factory Project repository differs from its recorded forge identity");
           await sql`INSERT INTO factory.forge_grant_intent(project_id,user_id,desired)

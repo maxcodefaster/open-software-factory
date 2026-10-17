@@ -118,16 +118,9 @@ export const zeroMutators = defineMutators({
       if (!project) throw new Error("Project not found");
       const existing = await tx.run(zql.ticket.where("id", args.id).one());
       if (existing) {
-        if (
-          existing.projectId !== args.projectId ||
-          existing.createdBy !== ctx.userId ||
-          existing.title !== args.title ||
-          existing.description !== args.description ||
-          existing.state !== (args.state ?? "inbox")
-        )
-          throw new Error(
-            "This draft was already created with different content. Open the saved Ticket.",
-          );
+        // Cached collisions may already have been removed on the server. Do not
+        // overwrite them optimistically or prevent the authoritative retry.
+        // The server validates identity, ownership and the exact saved content.
         return;
       }
       const now = Date.now();

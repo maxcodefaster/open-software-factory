@@ -1,6 +1,15 @@
 import { expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import upstream from "../../upstream.json";
 import { localStarterCompose, starterImageManifest } from "./starter-images";
+
+test("Starter includes the pinned Git Feature for human and Agent source inspection", async () => {
+  const config = JSON.parse(
+    await readFile("templates/starter-app/.devcontainer/devcontainer.json", "utf8"),
+  );
+  expect(config.features[upstream.gitFeature.image]).toEqual({ version: "os-provided" });
+  expect(upstream.gitFeature.image).toMatch(/@sha256:[a-f0-9]{64}$/);
+});
 
 test("Starter locality selects only the exact native manifest and leaves unrelated image inputs alone", () => {
   const manifest = {

@@ -75,6 +75,20 @@ test("accepts genuinely empty history once the live read succeeds", () => {
   expect(retainAgentActivity({ changeID: "a", view: loaded }, "a", empty).view).toEqual(empty);
 });
 
+test("a status-only poll keeps history availability rather than flashing an outage", () => {
+  expect(
+    retainAgentActivity({ changeID: "a", view: loaded }, "a", unavailable, false).view,
+  ).toEqual({
+    ...unavailable,
+    messagesAvailable: true,
+    messages: loaded.messages,
+  });
+  expect(
+    retainAgentActivity({ changeID: "a", view: loaded }, "b", unavailable, false).view
+      .messagesAvailable,
+  ).toBe(false);
+});
+
 test("pending Stop overrides every session state without promising resume", () => {
   for (const state of [
     "idle",

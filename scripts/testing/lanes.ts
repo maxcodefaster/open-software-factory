@@ -73,17 +73,10 @@ if (import.meta.main) {
   if (requested.includes("--list")) {
     for (const path of selected.sort()) console.log(path);
   } else {
-    const env = { ...process.env };
-    if (lane !== "live") {
-      for (const key of Object.keys(env))
-        if (
-          key.startsWith("FACTORY_") &&
-          (key.endsWith("_LIVE") ||
-            key.includes("_PROOF") ||
-            /MODEL.*(KEY|TOKEN|BASE_URL)/.test(key))
-        )
-          delete env[key];
-    }
+    const prerequisites = await import("./test-prerequisites");
+    const env =
+      lane === "live" ? { ...process.env } : prerequisites.verificationEnvironment(process.env);
+    if (lane !== "live") await prerequisites.prepareTestPrerequisites(selected, env);
     // All fixtures retain separate databases. Only daemon startup and the empty
     // migrated baseline are shared by this invocation, never product state.
     const owned =

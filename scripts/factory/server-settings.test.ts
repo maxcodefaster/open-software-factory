@@ -3,6 +3,16 @@ import { localServerSettings } from "./server-settings";
 
 const defaults = { email: "admin@factory.local", password: "factory-local-password" };
 
+test("a fresh local launch keeps spare compute off unless explicitly requested", () => {
+  expect(localServerSettings({}, defaults).executionReserveTarget).toBe("0");
+  for (const value of ["0", "1", "4"]) {
+    expect(
+      localServerSettings({ FACTORY_EXECUTION_RESERVE_TARGET: value }, defaults)
+        .executionReserveTarget,
+    ).toBe(value);
+  }
+});
+
 test("local startup preserves explicit listener and bootstrap credentials", () => {
   expect(
     localServerSettings(
@@ -17,8 +27,13 @@ test("local startup preserves explicit listener and bootstrap credentials", () =
     host: "127.0.0.1",
     email: "chosen@factory.local",
     password: "chosen-local-test-password",
+    executionReserveTarget: "0",
   });
-  expect(localServerSettings({}, defaults)).toEqual({ host: "0.0.0.0", ...defaults });
+  expect(localServerSettings({}, defaults)).toEqual({
+    host: "0.0.0.0",
+    ...defaults,
+    executionReserveTarget: "0",
+  });
 });
 
 test("owned installation defaults retain their own identity, and invalid settings do not disclose values", () => {
@@ -28,6 +43,7 @@ test("owned installation defaults retain their own identity, and invalid setting
     host: "0.0.0.0",
     email: "owned@factory.local",
     password: "owned-password",
+    executionReserveTarget: "0",
   });
   for (const environment of [
     { FACTORY_HOST: "" },

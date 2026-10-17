@@ -38,40 +38,41 @@ describe("runtime workspace frame identity", () => {
     ).toBeUndefined();
     expect(runtimeWorkspaceURL(preview, projectID, [], undefined, [])).toBeUndefined();
   });
-  test("resolves embedded IDE and declared development Preview URLs", () => {
-    expect(runtimeWorkspaceURL(ide, projectID, [ready])).toBe(
-      "/api/runtime-access?embed=1&path=%2Fruntime%2Fattempt-1%2Fide%2F",
-    );
+  test("never falls back to a runtime IDE while declared development Previews remain scoped", () => {
+    expect(runtimeWorkspaceURL(ide, projectID, [ready])).toBeUndefined();
     expect(runtimeWorkspaceURL(preview, projectID, [ready])).toBe(
       "/api/runtime-access?embed=1&path=%2Fruntime%2Fattempt-1%2Fpreview%2Fweb%2F",
     );
     expect(
       runtimeWorkspaceURL(ide, projectID, [{ ...ready, runtimeKind: "ticket" }]),
-    ).toBeDefined();
+    ).toBeUndefined();
   });
 
   test("never substitutes another attempt or another Project", () => {
-    expect(runtimeWorkspaceURL(ide, projectID, [{ ...ready, id: "replacement" }])).toBeUndefined();
-    expect(runtimeWorkspaceURL(ide, "project-2", [ready])).toBeUndefined();
+    expect(
+      runtimeWorkspaceURL(preview, projectID, [{ ...ready, id: "replacement" }]),
+    ).toBeUndefined();
+    expect(runtimeWorkspaceURL(preview, "project-2", [ready])).toBeUndefined();
     expect(
       runtimeWorkspaceURL({ id: ide.id, view: "ide", label: "IDE" }, projectID, [ready]),
     ).toBeUndefined();
   });
 
   test("retains only an already-attached exact frame during Connector reconnection", () => {
-    const attached = runtimeWorkspaceURL(ide, projectID, [ready]);
+    const attached = runtimeWorkspaceURL(preview, projectID, [ready]);
+    expect(attached).toBeDefined();
     const reconnecting = { ...ready, state: "starting", failure: "child connector reconnecting" };
-    expect(runtimeWorkspaceURL(ide, projectID, [reconnecting], attached)).toBe(attached);
-    expect(runtimeWorkspaceURL(ide, projectID, [reconnecting])).toBeUndefined();
+    expect(runtimeWorkspaceURL(preview, projectID, [reconnecting], attached)).toBe(attached);
+    expect(runtimeWorkspaceURL(preview, projectID, [reconnecting])).toBeUndefined();
     expect(
-      runtimeWorkspaceURL(ide, projectID, [{ ...ready, state: "starting" }], attached),
+      runtimeWorkspaceURL(preview, projectID, [{ ...ready, state: "starting" }], attached),
     ).toBeUndefined();
-    expect(runtimeWorkspaceURL(ide, "other-project", [reconnecting], attached)).toBeUndefined();
+    expect(runtimeWorkspaceURL(preview, "other-project", [reconnecting], attached)).toBeUndefined();
     expect(
-      runtimeWorkspaceURL(ide, projectID, [{ ...reconnecting, id: "replacement" }], attached),
+      runtimeWorkspaceURL(preview, projectID, [{ ...reconnecting, id: "replacement" }], attached),
     ).toBeUndefined();
     expect(
-      runtimeWorkspaceURL(ide, projectID, [{ ...reconnecting, state: "stopping" }], attached),
+      runtimeWorkspaceURL(preview, projectID, [{ ...reconnecting, state: "stopping" }], attached),
     ).toBeUndefined();
     const staging = { ...ready, runtimeKind: "staging" as const };
     const tab = { ...ide, view: "preview" as const, id: "preview:staging" };
@@ -88,7 +89,8 @@ describe("runtime workspace frame identity", () => {
 
   test.each(["pending", "starting", "failed", "stopped", "cancelled"])(
     "does not mount a %s runtime",
-    (state) => expect(runtimeWorkspaceURL(ide, projectID, [{ ...ready, state }])).toBeUndefined(),
+    (state) =>
+      expect(runtimeWorkspaceURL(preview, projectID, [{ ...ready, state }])).toBeUndefined(),
   );
 
   test("does not expose IDE or development Preview for Staging or Verification", () => {

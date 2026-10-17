@@ -29,6 +29,10 @@ test.each([true, false])(
     };
     try {
       const stopID = await savedStop(owned, dispatched);
+      if (dispatched)
+        await owned.database.client`UPDATE factory.change_agent_session
+        SET last_error='Execution outcome uncertain. Stop or resolve this turn before new Build work.'
+        WHERE change_id=${owned.changeID}`;
       expect((await controller.get(owned.changeID)).stopId).toBe(stopID);
       const result = await controller.recheckStop(owned.changeID, stopID);
       expect(result).toMatchObject({
@@ -36,6 +40,7 @@ test.each([true, false])(
         stopPending: !dispatched,
         stopId: dispatched ? null : stopID,
       });
+      if (dispatched) expect(result.lastError).toBeNull();
       expect(methods.every((method) => method === "GET")).toBe(true);
       expect(owned.interrupts()).toBe(0);
       expect(owned.requests()).toBe(0);

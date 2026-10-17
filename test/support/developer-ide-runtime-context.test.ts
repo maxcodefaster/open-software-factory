@@ -95,3 +95,34 @@ test("only explicit preparation starts compute and its lost response cannot affe
   expect(context.value?.state).toBe("stopped");
   expect(calls).toEqual(["GET", "POST", "GET"]);
 });
+
+test("quiet runtime observation follows externally started compute without resetting an unchanged editor", async () => {
+  let ready = false;
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (_input, init) => {
+      calls.push(init?.method ?? "GET");
+      return Response.json({
+        workspaceID: runtime.workspaceID,
+        attemptID: ready ? runtime.attemptID : null,
+        state: ready ? "ready" : "stopped",
+        failure: null,
+      });
+    },
+  );
+  const states: string[] = [];
+  context.subscribe((value) => {
+    if (value) states.push(value.state);
+  });
+  context.select(runtime.workspaceID);
+  await Bun.sleep(0);
+  await context.observe();
+  expect(states).toEqual(["loading", "stopped"]);
+  ready = true;
+  await context.observe();
+  await context.observe();
+  expect(states).toEqual(["loading", "stopped", "ready"]);
+  expect(context.value?.attemptID).toBe(runtime.attemptID);
+  expect(calls.every((method) => method === "GET")).toBe(true);
+});

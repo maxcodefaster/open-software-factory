@@ -4,10 +4,35 @@ import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import type { ExecutionReserve } from "../runtime/reserve-controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { admitComputeIn, ComputeCapacityError } from "./compute";
 import { codingBudgetIn } from "./policy";
 
 type Database = ReturnType<typeof createDatabase>;
+
+async function changeAllowsComputeIn(
+  sql: AgentTurnTransaction,
+  changeID: string,
+  attemptID: string,
+) {
+  const [active] = await sql`SELECT change.id FROM factory.change change
+    JOIN factory.ticket ticket ON ticket.id=change.ticket_id
+    WHERE change.id=${changeID} AND change.state IN ('starting','active')
+      AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
+      AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session session WHERE session.change_id=change.id
+        AND (session.stop_pending OR (session.state='stopped' AND NOT EXISTS(
+          SELECT 1 FROM factory.change_writer writer WHERE writer.change_id=change.id
+            AND (writer.state='human' OR (writer.state='agent' AND NOT writer.fence_required AND EXISTS(
+              SELECT 1 FROM factory.agent_turn next
+              JOIN factory.change_agent_turn_intent intent ON intent.turn_id=next.id
+              WHERE next.id=writer.turn_id AND next.change_id=change.id AND next.state='pending'
+                AND next.id IS DISTINCT FROM session.active_turn_id
+                AND (intent.runtime_attempt_id IS NULL OR intent.runtime_attempt_id=${attemptID})
+            )))
+        ))))`;
+  return Boolean(active);
+}
+
 export function createComputeWait(database: Database, reserve?: ExecutionReserve) {
   return {
     async launch<T>(attemptID: string, create: () => Promise<T>) {
@@ -56,14 +81,7 @@ export function createComputeWait(database: Database, reserve?: ExecutionReserve
         )
           return undefined;
         if (attempt.changeID) {
-          const [active] =
-            await sql`SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-            WHERE change.id=${attempt.changeID} AND change.state IN ('starting','active') AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
-              AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=change.id AND
-                (stop_pending OR (state='stopped' AND NOT EXISTS(
-                  SELECT 1 FROM factory.change_writer WHERE change_id=change.id AND state='human'
-                ))))`;
-          if (!active) return undefined;
+          if (!(await changeAllowsComputeIn(sql, attempt.changeID, attemptID))) return undefined;
           // CI runs no inference. Its subsequent automatic repair is separately budgeted.
           if (!attempt.coding) return create();
           const budget = await codingBudgetIn(sql, attempt.projectID, true);
@@ -146,14 +164,7 @@ export function createComputeWait(database: Database, reserve?: ExecutionReserve
           return false;
         }
         if (attempt.changeID) {
-          const [current] =
-            await sql`SELECT change.id FROM factory.change change JOIN factory.ticket ticket ON ticket.id=change.ticket_id
-            WHERE change.id=${attempt.changeID} AND change.state IN ('starting','active') AND change.cancel_requested_at IS NULL AND ticket.trashed_at IS NULL
-              AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=change.id AND
-                (stop_pending OR (state='stopped' AND NOT EXISTS(
-                  SELECT 1 FROM factory.change_writer WHERE change_id=change.id AND state='human'
-                ))))`;
-          if (!current) {
+          if (!(await changeAllowsComputeIn(sql, attempt.changeID, attemptID))) {
             await sql`UPDATE factory.runtime_attempt SET state='stop-intended',stop_intended_at=now(),updated_at=now() WHERE id=${attemptID}`;
             await sql`DELETE FROM factory.runtime_compute_wait WHERE attempt_id=${attemptID}`;
             return false;

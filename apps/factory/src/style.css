@@ -880,6 +880,21 @@ dt,
   font-weight: 600;
   margin: 0;
 }
+.model-provider-setup form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--space-4);
+}
+.model-provider-setup form > .model-role {
+  padding-block: 0;
+  border-top: 0;
+}
+.model-provider-setup form > .model-connection-picker,
+.model-provider-setup form > .model-deployment-choice,
+.model-provider-setup form > details,
+.model-provider-setup form > .model-settings-note,
+.model-provider-setup form > .model-settings-actions {
+  grid-column: 1 / -1;
+}
 .model-settings-actions {
   display: flex;
   align-items: center;
@@ -966,6 +981,7 @@ dt,
 }
 .model-connection-status {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-3);
   padding-block: var(--space-4);
 }
@@ -976,6 +992,12 @@ dt,
 }
 .model-connection-status small {
   color: var(--color-ink-muted);
+}
+@media (max-width: 720px) {
+  .model-provider-setup form,
+  .model-connection-status {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .model-checkbox input {
   width: auto;
@@ -2729,6 +2751,14 @@ dt,
   color: var(--color-ink-muted);
   font-size: var(--text-md);
   line-height: var(--leading-body);
+}
+
+.ticket-request-details > summary {
+  width: fit-content;
+  padding-block: var(--space-2);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
 }
 
 .ticket-inline-description > :first-child,

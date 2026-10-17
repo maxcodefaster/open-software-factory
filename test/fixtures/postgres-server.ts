@@ -80,7 +80,8 @@ export async function ownedTestDatabase(identity: PostgresIdentity, id: string, 
   await verify(identity);
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid test database identity");
   const name = `owned_${id.replaceAll("-", "")}`;
-  const admin = postgres(identity.url, { max: 1 });
+  // Do not connect to the template itself while cloning it.
+  const admin = postgres(identity.url.replace(/\/factory$/, "/postgres"), { max: 1 });
   try {
     if (retained) {
       const [existing] = await admin<
@@ -95,7 +96,7 @@ export async function ownedTestDatabase(identity: PostgresIdentity, id: string, 
     url: identity.url.replace(/\/factory$/, `/${name}`),
     async dispose() {
       await verify(identity);
-      const admin = postgres(identity.url, { max: 1 });
+      const admin = postgres(identity.url.replace(/\/factory$/, "/postgres"), { max: 1 });
       try {
         await admin.unsafe(`DROP DATABASE ${name} WITH (FORCE)`);
       } finally {

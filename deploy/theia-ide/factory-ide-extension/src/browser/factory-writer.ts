@@ -31,7 +31,10 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
       void this.#read();
     });
     this.#timer = setInterval(() => {
-      if (!document.hidden) void this.#read();
+      if (!document.hidden) {
+        void this.#read();
+        void factoryRuntimeContext.observe();
+      }
     }, 2_000);
   }
   async #read(takeOver = false) {

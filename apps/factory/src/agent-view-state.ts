@@ -62,13 +62,18 @@ export function retainAgentActivity(
   previous: AgentSnapshot | undefined,
   changeID: string,
   view: AgentView,
+  historyRequested = true,
 ): AgentSnapshot {
   return {
     changeID,
     view: {
       ...view,
+      messagesAvailable:
+        !historyRequested && previous?.changeID === changeID
+          ? previous.view.messagesAvailable
+          : view.messagesAvailable,
       messages:
-        !view.messagesAvailable && previous?.changeID === changeID
+        (!historyRequested || !view.messagesAvailable) && previous?.changeID === changeID
           ? previous.view.messages
           : view.messages,
     },

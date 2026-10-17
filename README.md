@@ -98,6 +98,12 @@ Run commands through `mise exec --` to use the pinned tools. Keep dependencies e
 from committed lockfiles. `upstream.json` owns the upstream artifact pins; package manifests and
 lockfiles own application dependencies.
 
+The test and type-check launchers prepare separately locked test dependencies when the selected checks need
+them. Editor adapter tests install the Theia composition without dependency lifecycle scripts and
+compile the Factory extension. The scoped Starter authentication proof prepares the template's
+locked dependencies. Unchanged inputs reuse the local test cache; focused checks that do not use
+these components skip preparation. This first-run setup performs no model inference.
+
 Start the backend with `factory:up`, then use `factory:dev` and open the Vite URL it prints.
 Development proxies authenticated API and planning-cache traffic to that backend without
 allowing foreign browser origins. `FACTORY_DEV_BACKEND_URL` selects a different loopback backend

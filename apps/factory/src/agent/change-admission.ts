@@ -84,7 +84,8 @@ export function createChangeAdmission(
       LEFT JOIN factory.change_agent_session session ON session.change_id = change.id
       WHERE change.id = ${changeID}
         AND (change.state IN ('branch-pending', 'starting', 'active') OR (
-          change.state='failed' AND session.change_id IS NULL
+          change.state='failed'
+          AND (session.change_id IS NULL OR (session.state IN ('failed','stopped') AND NOT session.stop_pending))
           AND EXISTS(SELECT 1 FROM factory.branch_create_operation WHERE change_id=change.id AND state='succeeded')
           AND EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE id=change.runtime_attempt_id AND state IN ('failed','stopped'))
         ))

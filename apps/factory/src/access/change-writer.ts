@@ -36,30 +36,37 @@ export async function claimAgentWriterIn(
   turnID: string,
 ) {
   const writer = await lockChangeWriterIn(sql, changeID);
+  let fencePrevious = writer.state === "human";
   if (writer.state === "handoff")
     throw new CommandError("conflict", "Wait for editing takeover before starting the Agent");
   if (["agent", "agent-preparing"].includes(writer.state) && writer.turnID !== turnID) {
-    const [settled] = await sql`SELECT previous.id FROM factory.agent_turn previous
+    const [settled] = await sql<{ requiresFence: boolean | null }[]>`SELECT previous.id,
+        ((session.state='failed' AND previous.state='failed' AND NOT EXISTS(
+          SELECT 1 FROM factory.coding_pause pause WHERE pause.turn_id=previous.id AND pause.resumed_by_turn_id IS NULL))
+          OR (session.change_id IS NOT NULL AND intent.runtime_attempt_id IS NULL
+            AND previous.state IN ('failed','stopped'))) AS "requiresFence"
+        FROM factory.agent_turn previous
         LEFT JOIN factory.change_agent_session session ON session.change_id=previous.change_id
         LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id=previous.id
         WHERE previous.id=${writer.turnID} AND previous.change_id=${changeID}
           AND ((NOT session.stop_pending AND (session.state IN ('committed','stopped')
-          OR (session.state='failed' AND session.active_turn_id=${writer.turnID} AND EXISTS(
-            SELECT 1 FROM factory.coding_pause pause JOIN factory.agent_turn turn ON turn.id=pause.turn_id
-            WHERE turn.id=${writer.turnID} AND turn.state='failed' AND pause.resumed_by_turn_id IS NULL))))
-          OR (session.change_id IS NULL AND previous.state IN ('failed','stopped')
-            AND intent.turn_id IS NOT NULL AND intent.runtime_attempt_id IS NULL))
+          OR (session.state='failed' AND session.active_turn_id=${writer.turnID}
+            AND previous.state='failed')))
+          OR (previous.state IN ('failed','stopped')
+            AND intent.turn_id IS NOT NULL AND intent.runtime_attempt_id IS NULL
+            AND (session.change_id IS NULL OR NOT session.stop_pending)))
           AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${changeID} AND id<>${turnID} AND state IN ('pending','dispatching','running','uncertain'))`;
-    // Runtime assignment and Session intent precede any OpenCode mutation.
-    // A failed or stopped, unassigned input never acquired an external writer. Exclude
-    // the newly inserted pending turn when proving the prior owner.
+    // Known failures can still own startup hooks or background processes. Admit
+    // an explicit retry only with a full runtime fence before its writer grant.
+    // Uncertain work and unconfirmed Stop remain ineligible.
     const [previous] =
       await sql`SELECT id FROM factory.agent_turn WHERE id=${writer.turnID} AND state IN ('completed','stopped','failed')`;
     if (!settled || !previous)
       throw new CommandError("conflict", "The previous Agent writer has not been safely released");
+    fencePrevious ||= Boolean(settled.requiresFence);
   }
   await sql`UPDATE factory.change_writer SET state='agent-preparing',turn_id=${turnID},user_id=NULL,
-    fence_required=fence_required OR state='human',fence_attempt_id=CASE WHEN fence_required THEN fence_attempt_id ELSE (SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}) END,
+    fence_required=fence_required OR ${fencePrevious},fence_attempt_id=CASE WHEN fence_required THEN fence_attempt_id ELSE (SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}) END,
     requested_by=NULL,request_id=NULL,
     epoch=epoch+1,updated_at=now() WHERE change_id=${changeID}`;
 }

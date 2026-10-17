@@ -5,6 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { factoryTerminalTheme } from "./factory-theme";
+import { factoryWriteContext } from "./factory-write-context";
 import {
   factoryRuntimeContext,
   readyRuntime,
@@ -184,6 +185,7 @@ export class FactoryTerminalWidget extends BaseWidget {
   readonly #initialized = new Set<string>();
   readonly #status = document.createElement("div");
   readonly #contextSubscription: { dispose(): void };
+  readonly #writeSubscription: { dispose(): void };
   #runtime: FactoryRuntimeReference | undefined;
   #terminals: StoredTerminal[] = [];
   #activeID: string | undefined;
@@ -214,6 +216,16 @@ export class FactoryTerminalWidget extends BaseWidget {
       }
       this.#render();
     });
+    this.#writeSubscription = factoryWriteContext.subscribe(() => {
+      // Detach, never Close, terminals when writing authority changes.
+      for (const [id, view] of this.#views) {
+        if (!factoryWriteContext.allows(view.runtime.workspaceID)) {
+          view.dispose();
+          this.#views.delete(id);
+        }
+      }
+      this.#render();
+    });
   }
 
   protected override onAfterAttach(message: Message): void {
@@ -235,6 +247,7 @@ export class FactoryTerminalWidget extends BaseWidget {
 
   override dispose(): void {
     this.#contextSubscription.dispose();
+    this.#writeSubscription.dispose();
     for (const view of this.#views.values()) view.dispose();
     this.#views.clear();
     super.dispose();
@@ -255,7 +268,15 @@ export class FactoryTerminalWidget extends BaseWidget {
     this.#tabs.replaceChildren();
     for (const view of this.#views.values()) view.show(false);
     this.#status.replaceChildren();
-    this.#status.hidden = Boolean(this.#runtime);
+    const workspaceID = factoryRuntimeContext.value?.workspaceID;
+    const canWrite = !!workspaceID && factoryWriteContext.allows(workspaceID);
+    this.#status.hidden = Boolean(this.#runtime) && canWrite;
+    if (!canWrite && workspaceID) {
+      const copy = document.createElement("p");
+      copy.textContent = "Observation mode. Take over editing before opening a terminal.";
+      this.#status.append(copy);
+      return;
+    }
     if (!this.#runtime) {
       const state = factoryRuntimeContext.value;
       const copy = document.createElement("p");
