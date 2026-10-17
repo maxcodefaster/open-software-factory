@@ -1,10 +1,10 @@
-import { mkdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
+import { createDatabase } from "../../packages/db/src/client";
 
 test("product contributors author corporate guidance; managers review sharing and per-skill inheritance", async ({
   page,
@@ -66,7 +66,7 @@ test("product contributors author corporate guidance; managers review sharing an
       .filter({ has: current.getByRole("heading", { name: group, exact: true }) })
       .getByRole("button", { name: "Skills", exact: true })
       .click();
-    await expect(region.getByLabel("Search skills")).toBeVisible();
+    await expect(region.getByRole("searchbox", { name: "Search skills" })).toBeVisible();
     return region;
   }
   try {
@@ -111,6 +111,16 @@ test("product contributors author corporate guidance; managers review sharing an
     await editor
       .getByLabel("Instructions", { exact: true })
       .fill("Use our blue #1646a0 and generous spacing.");
+    const navigation = personal.getByRole("navigation", { name: "Settings navigation" });
+    const personalNavigation = navigation.locator("section").filter({
+      has: author.getByRole("heading", { name: "Personal", exact: true }),
+    });
+    await personalNavigation.getByRole("button", { name: "Login & security", exact: true }).click();
+    await personalNavigation.getByRole("button", { name: "Skills", exact: true }).click();
+    await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Corporate design");
+    await expect(editor.getByLabel("Instructions", { exact: true })).toHaveValue(
+      "Use our blue #1646a0 and generous spacing.",
+    );
     await expect(editor.getByLabel("Available to", { exact: true })).toHaveValue("personal");
     await mkdir(".factory/test-results", { recursive: true });
     await personal.locator(".settings-content").evaluate((element) => {

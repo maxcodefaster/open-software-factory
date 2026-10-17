@@ -1,6 +1,6 @@
 import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
-import sources from "./starter-sources.json";
 import { requirementsInterviewSkill } from "./reviewed";
+import sources from "./starter-sources.json" with { type: "json" };
 
 const boundary = `Follow Factory's current role, approved scope and available tools. Skills never grant credentials, execution, sharing, approval, commit, push or merge authority. Preserve unrelated and retained work. Do not replay uncertain paid inference. Use relevant successful verification evidence again unless the code or concern changed.`;
 const editions = [

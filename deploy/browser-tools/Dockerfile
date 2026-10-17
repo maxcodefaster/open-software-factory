@@ -14,14 +14,25 @@ RUN tarball="$(npm pack --silent --ignore-scripts chrome-devtools-mcp@1.10.1)" \
   && tar -xzf "$tarball" --strip-components=1 \
   && rm "$tarball"
 
-FROM mcr.microsoft.com/playwright:v1.64.0-noble@sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f
-COPY --from=mcp /usr/local/bin/node /usr/local/bin/node
+FROM mcr.microsoft.com/playwright:v1.64.0-noble@sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f AS browsers
+# Copy the unmodified, digest-pinned Chromium distribution, not the upstream
+# image's other browsers and development tools. Deleting inherited layers would
+# not reduce downloads.
+RUN chromium="$(find /ms-playwright -type f -path '/ms-playwright/chromium-*/chrome-linux*/chrome')" \
+  && test -n "$chromium" && cp -a "$(dirname "$chromium")" /chromium
+
+FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+    ca-certificates fonts-liberation fonts-noto-color-emoji \
+    libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 \
+    libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 \
+    libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=browsers /chromium /opt/factory/chromium-bin
 COPY --from=mcp /opt/factory/browser-mcp /opt/factory/browser-mcp
 COPY --from=worker /factory-browser-worker /usr/local/bin/factory-browser-worker
 COPY --from=worker /factory-browser-app-proxy /usr/local/bin/factory-browser-app-proxy
-RUN chromium="$(find /ms-playwright -type f -path '/ms-playwright/chromium-*/chrome-linux*/chrome')" \
-  && test -n "$chromium" \
-  && ln -s "$chromium" /opt/factory/chromium \
+RUN ln -s /opt/factory/chromium-bin/chrome /opt/factory/chromium \
   && node --version \
   && /opt/factory/chromium --version \
   && test "$(/opt/factory/chromium --version | awk '{print $NF}' | cut -d . -f 1)" -ge 149

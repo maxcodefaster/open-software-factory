@@ -1,7 +1,9 @@
 import { z } from "zod";
-import upstream from "../../../upstream.json";
+import upstream from "../../../upstream.json" with { type: "json" };
+import { runCommand } from "./command";
+import { kubernetesCommand } from "./config";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
-import { createKubernetesClient, readSmokeRegistryCA } from "./client";
+import { createKubernetesClient, readRuntimeRegistryCA } from "./client";
 import { renderEnvboxPod } from "./envbox-pod";
 
 export interface SlotObservation {
@@ -207,29 +209,18 @@ export function validateReserveObservation(
 }
 
 async function command(args: string[], input?: string) {
-  const child = Bun.spawn(["kubectl", "--context", "orbstack", ...args], {
-    stdin: input === undefined ? "ignore" : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
+  const {
+    stdout: output,
+    stderr: error,
+    exitCode: status,
+  } = await runCommand(kubernetesCommand(["--request-timeout=10s", ...args]), input, {
+    timeoutMS: 15_000,
+    outputBytes: 2 * 1024 * 1024,
   });
-  const timer = setTimeout(() => child.kill(), 15_000);
-  timer.unref();
-  if (input !== undefined && child.stdin && typeof child.stdin !== "number") {
-    child.stdin.write(input);
-    child.stdin.end();
-  }
-  const [output, error, status] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  clearTimeout(timer);
   if (status !== 0) {
     if (error.includes("NotFound") || error.includes("not found")) return null;
     throw new Error("Execution slot infrastructure command failed");
   }
-  if (output.length > 2 * 1024 * 1024)
-    throw new Error("Execution slot observation exceeds its bound");
   return output;
 }
 
@@ -251,7 +242,7 @@ export function createReserveClient(): ReserveClient {
   }
   return {
     async prepare(slot) {
-      const resources = renderReserveResources(slot, await readSmokeRegistryCA());
+      const resources = renderReserveResources(slot, await readRuntimeRegistryCA());
       const current = await read(slot);
       if (current.length) {
         // Partial creates may resume only under this persisted unpredictable slot identity.
@@ -283,7 +274,7 @@ export function createReserveClient(): ReserveClient {
         !slot.claimUID
       )
         throw new Error("Execution slot activation requires complete durable assignment");
-      const seed = renderReserveResources(slot, await readSmokeRegistryCA());
+      const seed = renderReserveResources(slot, await readRuntimeRegistryCA());
       const current = await read(slot);
       const assignment = resources.find(
         (resource) =>

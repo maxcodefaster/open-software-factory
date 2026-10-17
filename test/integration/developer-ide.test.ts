@@ -6,9 +6,9 @@ import type {
 } from "../../packages/runtime-kubernetes/src/developer-ide";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
-async function fixture() {
+async function fixture(maxConnections = 10) {
   const owned = await factoryProcess();
-  const database = owned.connect();
+  const database = owned.connect(maxConnections);
   const developerID = crypto.randomUUID();
   const contributorID = crypto.randomUUID();
   const projects = [crypto.randomUUID(), crypto.randomUUID()] as const;
@@ -38,6 +38,57 @@ async function fixture() {
     },
   };
 }
+
+test("editor preparation keeps the application pool available with one connection", async () => {
+  const owned = await fixture(1);
+  const preparing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const editors = createDeveloperIDEController(owned.database, {
+    async prepare() {
+      preparing.resolve();
+      await release.promise;
+      return { namespaceUID: "pool-namespace", podUID: "pool-pod", ready: true, failed: false };
+    },
+    async observe() {
+      return null;
+    },
+    async endpoint() {
+      return "http://127.0.0.1:4400";
+    },
+    async stop() {},
+    close() {},
+  });
+  try {
+    await editors.ensure(owned.projectID, owned.developerID);
+    await Promise.race([
+      preparing.promise,
+      Bun.sleep(1000).then(() => {
+        throw new Error("Editor preparation deadlocked the application pool");
+      }),
+    ]);
+    const current = await Promise.race([
+      editors.get(owned.developerID),
+      Bun.sleep(1000).then(() => {
+        throw new Error("Editor preparation starved application reads");
+      }),
+    ]);
+    expect(current.state).toBe("create-intended");
+    await editors.stop(owned.developerID);
+    release.resolve();
+    await eventually(
+      () => editors.get(owned.developerID),
+      (value) => value.state === "stopped",
+      "Preparation overrode Stop",
+    );
+  } finally {
+    release.resolve();
+    // A failing pool-deadlock regression cannot reach the adapter's release gate.
+    // Terminate only this fixture's client before waiting for its worker cleanup.
+    await owned.database.client.end({ timeout: 1 });
+    await editors.close();
+    await owned.dispose();
+  }
+}, 30_000);
 
 test("explicit editor retry observes a late ready Pod without replacing its recorded intent", async () => {
   const owned = await fixture();

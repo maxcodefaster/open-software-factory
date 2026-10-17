@@ -1,9 +1,10 @@
 import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vite";
+import { factoryDevelopmentProxy } from "../../scripts/factory/dev-proxy";
 
 export default defineConfig({
   root: import.meta.dirname,
-  plugins: [solid({ ssr: false })],
+  plugins: [solid({ ssr: false }), factoryDevelopmentProxy()],
   build: {
     target: "esnext",
     outDir: "dist",
@@ -22,5 +23,5 @@ export default defineConfig({
       },
     },
   },
-  oxc: false,
+  oxc: {},
 });

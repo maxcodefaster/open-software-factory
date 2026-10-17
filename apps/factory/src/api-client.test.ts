@@ -19,7 +19,10 @@ test("retains the server's command error and returns validated successful data",
     .mockResolvedValueOnce(Response.json({ id: "revision" }));
   try {
     const schema = z.object({ id: z.string() });
-    await expect(apiRequest(schema, "/fixture")).rejects.toThrow("Revision is immutable");
+    await expect(apiRequest(schema, "/fixture")).rejects.toMatchObject({
+      message: "Revision is immutable",
+      status: 409,
+    });
     await expect(apiRequest(schema, "/fixture")).resolves.toEqual({ id: "revision" });
   } finally {
     fetch.mockRestore();

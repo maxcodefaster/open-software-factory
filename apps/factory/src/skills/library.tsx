@@ -1,23 +1,23 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
 import { createPatch } from "diff";
+import { createEffect, createSignal, For, Show } from "solid-js";
 import { z } from "zod";
 import {
-  skillLibraryView,
   resolveLibraryChoice,
   type SkillLibraryEntry,
   type SkillLibraryView,
   type SkillScope,
+  skillLibraryView,
 } from "../../../../packages/conversation-domain/src/skill-library";
 import {
-  skillContentInput,
-  skillRevisionInput,
   type SkillContent,
   type SkillRevision,
   type SkillRole,
+  skillContentInput,
+  skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import { apiRequest } from "../api-client";
-import { SkillRevisionEditor } from "./revision-editor";
 import { SkillRevisionDetails } from "./revision-details";
+import { SkillRevisionEditor } from "./revision-editor";
 import "./library.css";
 
 const resultInput = z.object({ content: skillContentInput, warnings: z.array(z.string()) });
@@ -61,8 +61,6 @@ export function SkillLibrary(props: {
     () => [props.projectId, props.scope, props.active] as const,
     () => {
       if (props.active !== false) {
-        setEditing(undefined);
-        setInspected(undefined);
         void load();
       }
       return () => {

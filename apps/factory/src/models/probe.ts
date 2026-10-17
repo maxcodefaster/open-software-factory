@@ -5,6 +5,7 @@ import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
 import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
+import { nativeAgentPolicy, nativeStepGuard } from "./execution-policy";
 import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "./native";
 
 const output = z
@@ -98,9 +99,7 @@ export async function probeModel(input: {
       id: "factory-model-probe",
       name: "Factory model connection check",
       model: nativeModel(input.connection, input.modelId),
-      maxRetries: 0,
-      errorProcessorDefaults: false,
-      maxProcessorRetries: 0,
+      ...nativeAgentPolicy,
       tools: { probe: probeTool },
       instructions:
         "Call probe exactly once. Then return verified:true and its exact value using the output schema. Do nothing else.",
@@ -111,6 +110,7 @@ export async function probeModel(input: {
     const result = await mastra.getAgent("probe").generate("Check this connection.", {
       abortSignal: signal,
       maxSteps: 2,
+      prepareStep: nativeStepGuard({ signal, maxInputBytes: 32 * 1024 }),
       modelSettings: { maxOutputTokens: 128, maxRetries: 0 },
       structuredOutput: { schema: output, jsonPromptInjection: "auto" },
       onStepFinish: (step) => usage.onStepFinish(step),

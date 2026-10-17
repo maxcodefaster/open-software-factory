@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
 import { admittedTicketContext } from "../../apps/factory/src/project-agent/ticket-context";
-import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
-import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -41,6 +41,7 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
         modelId: "owned-model",
         conversationVersion: 1,
         skillRevisionIds: [],
+        requiredSkillRevisionIds: [],
       },
     };
     const output = {
@@ -93,13 +94,15 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
       requirementRevisionId: null,
       proposalEntryId: proposal.id,
       ...output.ticket,
+      title: "Human-edited intended outcome",
+      description: "Human-reviewed proposal with a clarified description",
       requirement: output.requirement,
     };
+    await documents.save(ticketID, owned.userID, input);
+    await documents.save(ticketID, owned.userID, input);
     await expect(
-      documents.save(ticketID, owned.userID, { ...input, title: "Tampered" }),
-    ).rejects.toThrow("without replacing");
-    await documents.save(ticketID, owned.userID, input);
-    await documents.save(ticketID, owned.userID, input);
+      documents.save(ticketID, owned.userID, { ...input, title: "Different replay" }),
+    ).rejects.toThrow("another document");
     const [accepted] = await db.client<
       Array<{
         title: string;
@@ -113,12 +116,17 @@ test("Requirements output stages a proposal; confirmation is atomic, exact and r
         (SELECT count(*)::int FROM factory.ticket_document_revision WHERE ticket_id=${ticketID}) AS documents,document.author_kind AS "authorKind"
       FROM factory.ticket ticket JOIN factory.ticket_document_revision document ON document.ticket_id=ticket.id WHERE ticket.id=${ticketID}`;
     expect(accepted).toEqual({
-      title: output.ticket.title,
+      title: input.title,
       state: "ready",
       revisions: 1,
       documents: 1,
       authorKind: "ai",
     });
+    expect(
+      (await db.client`SELECT description FROM factory.ticket WHERE id=${ticketID}`)[0]?.[
+        "description"
+      ],
+    ).toBe(input.description);
     // Description-only refinement must not create the same content-addressed requirement twice.
     const refinement = {
       ...input,

@@ -236,7 +236,9 @@ describe("runtime Kubernetes resources", () => {
     );
     const agentCommand = agentProcess.command[2];
     expect(agentProcess.command.slice(0, 2)).toEqual(["sh", "-c"]);
-    expect(agentCommand).toContain("/opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs");
+    expect(agentCommand).toContain(
+      "/opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs",
+    );
     expect(agentProcess.env.FACTORY_OPENCODE_CONFIG).toContain("gpt-5.6-terra");
     expect(
       JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.settings

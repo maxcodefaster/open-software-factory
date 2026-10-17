@@ -162,7 +162,7 @@ test.each([
         changedPaths: files.map((file) => file.path),
         sources: [],
         signal: AbortSignal.timeout(15_000),
-        modelCalls: { remaining: scenario === "execution-bound" ? 1 : 32 },
+        providerRequests: { remaining: scenario === "execution-bound" ? 1 : 32 },
         readFiles: async (paths) =>
           paths.map((path) => {
             read.add(path);

@@ -29,10 +29,16 @@
 ## Verification
 
 - Use `mise exec --` for pinned tools. Run the relevant commands from the README and fix regressions
-  caused by the change. Do not rerun unchanged successful gates or paid live proofs without a reason.
+  caused by the change. Rerun checks when relevant changes or uncertain results warrant it.
+- Use configured paid models and live proofs when they help implement or verify the requested work.
+  Do not skip necessary verification solely because it incurs model usage or ask for a separate
+  budget discussion for routine calls. Keep paid calls in explicit live lanes, not default tests.
+- Honor explicit user spending/time limits and required approvals. Do not invent additional token,
+  time or spending caps, maintain countdowns or report usage unless requested or required by tooling.
+  This guidance does not change Factory's product-level execution limits or admission/retry rules.
 - Documentation changes use `bun run check:docs`; Connector changes use `bun run connector:check`.
   UI changes need affected browser checks and inspected screenshots; runtime changes need native proof.
 - Live fixtures must own separate resources. Cleanup requires exact ownership and preserves unrelated
   data. Never reset the retained installation to make a test pass.
-- After two work blocks without behavior, regression evidence or a concrete blocker, change approach.
-  Finish with concrete evidence and any remaining limits.
+- Change approach when work stalls instead of repeating unproductive steps. Finish with concrete
+  evidence and any remaining limits.

@@ -29,7 +29,7 @@
         "defaultTheme": "factory-light",
         "preferences": {
           "window.menuBarVisibility": "hidden",
-          "workbench.statusBar.visible": false,
+          "workbench.statusBar.visible": true,
           "files.autoSave": "off",
           "search.followSymlinks": false,
           "security.workspace.trust.enabled": false

@@ -2,6 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { runtimeFactoryURL, runtimeForgeURL, runtimeRepositoryCloneURL } from "./endpoints";
 
 describe("runtime Factory endpoints", () => {
+  test("Linux callbacks and clone URLs use the installation's reachable host", () => {
+    const prior = process.env["FACTORY_RUNTIME_HOST"];
+    try {
+      process.env["FACTORY_RUNTIME_HOST"] = "192.0.2.10";
+      expect(runtimeFactoryURL("/internal/runtime-connect")).toContain("192.0.2.10");
+    } finally {
+      if (prior === undefined) delete process.env["FACTORY_RUNTIME_HOST"];
+      else process.env["FACTORY_RUNTIME_HOST"] = prior;
+    }
+  });
   test("resolves the configured isolated Forge for clone and Verification without changing other origins", () => {
     const previous = process.env["FACTORY_FORGEJO_API_URL"];
     try {

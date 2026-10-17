@@ -8,6 +8,11 @@ export function databaseURL() {
 }
 
 export function createDatabase(max = 10) {
-  const client = postgres(databaseURL(), { max });
-  return { client, db: drizzle(client, { schema }) };
+  const url = databaseURL();
+  const client = postgres(url, { max });
+  return {
+    client,
+    db: drizzle(client, { schema }),
+    coordination: () => postgres(url, { max: 1, idle_timeout: 0 }),
+  };
 }

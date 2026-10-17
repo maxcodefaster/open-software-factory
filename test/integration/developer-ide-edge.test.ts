@@ -267,7 +267,7 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
     await reader?.read();
     const closeResult = Promise.withResolvers<void>();
     socket = new ClientSocket(
-      `${frontend.url.origin.replace("http:", "ws:")}${editorURL.pathname}services`,
+      `${frontend.url.origin.replace("http:", "ws:")}${editorURL.pathname}socket.io/`,
       {
         headers: {
           host: editorURL.host,

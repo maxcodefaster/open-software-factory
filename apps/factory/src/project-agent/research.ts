@@ -16,7 +16,21 @@ export const researchDocument = researchHit.extend({
   truncated: z.boolean(),
   nextOffset: z.number().int().nullable(),
   relationships: z
-    .array(z.object({ source: researchSource, id: z.uuid(), label: z.string() }))
+    .array(
+      z.object({
+        source: researchSource,
+        id: z.uuid(),
+        label: z.string(),
+        relationship: z.enum([
+          "parent-epic",
+          "member-ticket",
+          "prerequisite",
+          "dependent",
+          "parent-page",
+          "child-page",
+        ]),
+      }),
+    )
     .max(40),
 });
 type Database = ReturnType<typeof createDatabase>;
@@ -116,14 +130,14 @@ export async function readResearch(
     const relations =
       source === "ticket"
         ? await sql`
-      SELECT 'epic'::text AS source,e.id,e.title AS label FROM factory.epic e JOIN factory.ticket t ON t.epic_id=e.id WHERE t.id=${id} AND t.project_id=${projectID}
-      UNION ALL SELECT 'ticket',t.id,t.title FROM factory.ticket_dependency edge JOIN factory.ticket t
+      SELECT 'epic'::text AS source,e.id,e.title AS label,'parent-epic'::text AS relationship FROM factory.epic e JOIN factory.ticket t ON t.epic_id=e.id WHERE t.id=${id} AND t.project_id=${projectID}
+      UNION ALL SELECT 'ticket',t.id,t.title,CASE WHEN edge.ticket_id=${id} THEN 'prerequisite' ELSE 'dependent' END FROM factory.ticket_dependency edge JOIN factory.ticket t
         ON t.id=CASE WHEN edge.ticket_id=${id} THEN edge.prerequisite_id ELSE edge.ticket_id END
         WHERE edge.project_id=${projectID} AND (edge.ticket_id=${id} OR edge.prerequisite_id=${id}) AND t.trashed_at IS NULL AND t.state!='cancelled' AND t.converted_to_epic_id IS NULL LIMIT 40`
         : source === "epic"
-          ? await sql`SELECT 'ticket'::text AS source,id,title AS label FROM factory.ticket
+          ? await sql`SELECT 'ticket'::text AS source,id,title AS label,'member-ticket'::text AS relationship FROM factory.ticket
         WHERE project_id=${projectID} AND epic_id=${id} AND trashed_at IS NULL AND state!='cancelled' AND converted_to_epic_id IS NULL ORDER BY created_at LIMIT 40`
-          : await sql`SELECT 'knowledge'::text AS source,id,title AS label FROM factory.knowledge_page
+          : await sql`SELECT 'knowledge'::text AS source,id,title AS label,CASE WHEN parent_id=${id} THEN 'child-page' ELSE 'parent-page' END AS relationship FROM factory.knowledge_page
         WHERE project_id=${projectID} AND state='active' AND (parent_id=${id} OR id=(SELECT parent_id FROM factory.knowledge_page WHERE id=${id} AND project_id=${projectID})) LIMIT 40`;
     const body = String(row["body"]);
     return researchDocument.parse({

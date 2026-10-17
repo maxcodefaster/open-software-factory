@@ -43,7 +43,7 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
         VALUES (${projectID}, ${`environment-${projectID}`}, 'Owned environment', 'https://example.invalid/owned.git',
           'main', '.devcontainer/devcontainer.json', ${manager})`;
       for (const [userID, role] of [
-        [manager, "developer"],
+        [manager, "product-contributor"],
         [developer, "developer"],
         [contributor, "product-contributor"],
       ])
@@ -163,6 +163,32 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
     await expect(controller.save(projectID, manager, "development", delayedInput)).rejects.toThrow(
       "changed",
     );
+    for (const revoked of ["management", "account"] as const) {
+      const commandID = crypto.randomUUID();
+      const secretKey = `projects/${projectID}/development/${commandID}`;
+      const previous = stored.get(`projects/${projectID}/development/${winner.commandID}`)!;
+      stored.set(secretKey, { ...previous, commandID });
+      await database.client`INSERT INTO factory.environment_write(command_id,project_id,environment,
+        base_version,fingerprint,manifest,secret_key,created_by)
+        SELECT ${commandID},project_id,environment,2,fingerprint,manifest,${secretKey},created_by
+        FROM factory.environment_write WHERE command_id=${winner.commandID}`;
+      if (revoked === "management")
+        await database.client`UPDATE factory.project_membership SET manage_project=false
+          WHERE project_id=${projectID} AND user_id=${manager}`;
+      else
+        await database.client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${manager}`;
+      await recovered.recover();
+      const [environment] = await database.client<Array<{ version: number }>>`
+        SELECT version::float8 AS version FROM factory.project_environment
+        WHERE project_id=${projectID} AND environment='development'`;
+      expect(environment?.version).toBe(2);
+      const [intent] = await database.client<Array<{ state: string }>>`
+        SELECT state FROM factory.environment_write WHERE command_id=${commandID}`;
+      expect(intent?.state).toBe("discarded");
+      await database.client`UPDATE factory.project_membership SET manage_project=true
+        WHERE project_id=${projectID} AND user_id=${manager}`;
+      await database.client`UPDATE factory.account_access SET disabled_at=NULL WHERE user_id=${manager}`;
+    }
     const unavailable = createEnvironmentController(
       database,
       { configured: false, read: secrets.read, create: secrets.create },

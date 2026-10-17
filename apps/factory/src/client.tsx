@@ -3,7 +3,7 @@ import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/500.css";
-import { Factory } from "./factory";
+import { Factory } from "./factory-entry";
 import "./tokens.css";
 import "./knowledge-workspace.css";
 import "./runtime-workspace.css";

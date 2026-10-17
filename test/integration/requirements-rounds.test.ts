@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { fixture } from "../fixtures/change-agent-turns";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { fixture } from "../fixtures/change-agent-turns";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("automatic Requirements entry starts once; round advancement persists without another model call", async () => {
   const process = await factoryProcess();
@@ -171,9 +171,12 @@ test("automatic Requirements entry starts once; round advancement persists witho
     try {
       for (const key of connectionKeys) Bun.env[key] = "";
       await controller.dispatchRequirementsEntries();
-        const failed = await eventually(() => controller.get(owned.projectID, retainedID, owned.userID),
-          value => value?.turn?.state === "failed", "Missing retained model failure");
-        expect(failed?.turn?.state).toBe("failed");
+      const failed = await eventually(
+        () => controller.get(owned.projectID, retainedID, owned.userID),
+        (value) => value?.turn?.state === "failed",
+        "Missing retained model failure",
+      );
+      expect(failed?.turn?.state).toBe("failed");
       expect((await db.client`SELECT id FROM factory.ticket WHERE id=${retainedID}`).length).toBe(
         1,
       );

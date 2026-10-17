@@ -11,6 +11,7 @@ import {
   identitySetup,
 } from "../../db/src/schema";
 import { factoryForgeIssuer, forgeClientID, forgeClientSecret } from "./forge-issuer";
+import { requireLocalForgeIssuer } from "./local-issuer";
 import {
   directoryProvisioning,
   emergencyAdministratorID,
@@ -43,25 +44,12 @@ export function createFactoryAuth(
   const development =
     process.env["NODE_ENV"] !== "production" &&
     ["localhost", "127.0.0.1", "[::1]"].includes(new URL(baseURL).hostname);
-  const publicIssuer = `${baseURL.replace(/\/$/, "")}/api/auth`;
-  const issuerOverride = process.env["FACTORY_FORGE_ISSUER_URL"];
-  const internalIssuer =
-    issuerOverride && issuerOverride !== publicIssuer ? new URL(issuerOverride) : undefined;
-  if (
-    internalIssuer &&
-    (!development ||
-      internalIssuer.hostname !== "host.orb.internal" ||
-      internalIssuer.protocol !== "http:" ||
-      internalIssuer.port !== new URL(baseURL).port ||
-      internalIssuer.pathname !== "/api/auth" ||
-      internalIssuer.username ||
-      internalIssuer.password ||
-      internalIssuer.search ||
-      internalIssuer.hash)
-  )
-    throw new Error(
-      "Internal Forge issuer override is limited to the exact local development listener",
-    );
+  const internalIssuer = requireLocalForgeIssuer(
+    baseURL,
+    process.env["FACTORY_FORGE_ISSUER_URL"],
+    development,
+    process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal",
+  );
   if (!development && new URL(baseURL).protocol !== "https:")
     throw new Error("Non-development installations require an HTTPS Factory URL");
   if (

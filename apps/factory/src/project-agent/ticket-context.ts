@@ -47,9 +47,9 @@ export async function admittedProjectContext(
     await sql`SELECT id,name,default_branch AS "defaultBranch" FROM factory.project WHERE id=${projectID}`;
   const relationships = ticketID
     ? await sql`
-    SELECT 'epic'::text AS source,e.id,e.title,e.version::integer AS version FROM factory.epic e
+    SELECT 'epic'::text AS source,e.id,e.title,e.version::integer AS version,'parent-epic'::text AS relationship FROM factory.epic e
       JOIN factory.ticket t ON t.epic_id=e.id WHERE t.id=${ticketID} AND t.project_id=${projectID}
-    UNION ALL SELECT 'ticket',t.id,t.title,t.version::integer FROM factory.ticket_dependency edge
+    UNION ALL SELECT 'ticket',t.id,t.title,t.version::integer,CASE WHEN edge.ticket_id=${ticketID} THEN 'prerequisite' ELSE 'dependent' END FROM factory.ticket_dependency edge
       JOIN factory.ticket t ON t.id=CASE WHEN edge.ticket_id=${ticketID} THEN edge.prerequisite_id ELSE edge.ticket_id END
       WHERE edge.project_id=${projectID} AND (edge.ticket_id=${ticketID} OR edge.prerequisite_id=${ticketID}) AND t.trashed_at IS NULL LIMIT 40`
     : [];

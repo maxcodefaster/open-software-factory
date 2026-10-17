@@ -187,7 +187,9 @@ export function createWorkspaceSourceController(
       if (stream.workspaceID === workspaceID) controller.abort();
   }
   async function reconcile(workspaceID: string) {
-    const sql = await database.client.reserve();
+    // Checkout and connection warming must not hold the application pool used
+    // by source reads and Stop. This connection owns only this reconciliation.
+    const sql = database.coordination();
     const key = `workspace-source:${workspaceID}`;
     try {
       await sql`SELECT pg_advisory_lock(hashtext(${key}))`;
@@ -240,8 +242,11 @@ export function createWorkspaceSourceController(
       // A failed teardown remains visible and recoverable, but must not launch endless workers.
       return (await row(workspaceID, sql))?.state !== "stop-intended";
     } finally {
-      await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
-      sql.release();
+      try {
+        await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
+      } finally {
+        await sql.end({ timeout: 1 });
+      }
     }
   }
   function schedule(workspaceID: string) {

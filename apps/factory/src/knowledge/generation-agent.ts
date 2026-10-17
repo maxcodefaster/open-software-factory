@@ -1,6 +1,6 @@
 import type {
-  WikiPageSnapshot,
   WikiGenerationOutput,
+  WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
 import type { ResolvedModelConnection } from "../models/native";
 import type { MastraUsageSink } from "../usage/mastra";
@@ -16,7 +16,7 @@ export type WikiGenerationInput = {
   sources: Array<{ path: string; content: string }>;
   readFiles(paths: string[]): Promise<Array<{ path: string; content: string }>>;
   publish?(output: WikiGenerationOutput): Promise<WikiPageSnapshot[]>;
-  modelCalls?: { remaining: number };
+  providerRequests?: { remaining: number };
   usageSink?(callID: string): MastraUsageSink;
   signal: AbortSignal;
 };

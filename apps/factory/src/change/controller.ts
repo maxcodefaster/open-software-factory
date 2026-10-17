@@ -431,10 +431,14 @@ export function createChangeController(
           await admitBuild(existing[0].id);
           return existing[0].id;
         }
-        const budget = await codingBudgetIn(sql,ticket.projectID,false);
-        if (!budget.allowed) throw new CommandError("conflict", budget.reason === "accounting-incomplete"
-          ? "Coding accounting is incomplete. Check Usage & limits before commissioning work."
-          : "The monthly Coding allowance is used. New work waits for a reset or allowance increase.");
+        const budget = await codingBudgetIn(sql, ticket.projectID, false);
+        if (!budget.allowed)
+          throw new CommandError(
+            "conflict",
+            budget.reason === "accounting-incomplete"
+              ? "Coding accounting is incomplete. Check Usage & limits before commissioning work."
+              : "The monthly Coding allowance is used. New work waits for a reset or allowance increase.",
+          );
         if (ticket.state === "cancelled" || ticket.state === "done")
           throw new CommandError(
             "conflict",

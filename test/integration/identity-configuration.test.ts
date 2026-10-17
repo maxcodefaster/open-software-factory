@@ -230,19 +230,37 @@ test("native company sign-in check survives restart and unrelated state cookies 
         })
       ).json(),
     ).toBeNull();
-    const unavailable = createIdentityConfiguration(database, "owned-key", {
-      configured: true,
-      async read() { throw new Error("Owned protected store unavailable"); },
-      async create() { throw new Error("Owned protected store unavailable"); },
-    }, [provider.issuer]);
+    const unavailable = createIdentityConfiguration(
+      database,
+      "owned-key",
+      {
+        configured: true,
+        async read() {
+          throw new Error("Owned protected store unavailable");
+        },
+        async create() {
+          throw new Error("Owned protected store unavailable");
+        },
+      },
+      [provider.issuer],
+    );
     await unavailable.bootstrap();
     expect(unavailable.policy.companySignIn).toBe(true);
-    expect(await unavailable.session(new Request(fixture.base, { headers: { cookie: adminCookie } }))).not.toBeNull();
+    expect(
+      await unavailable.session(new Request(fixture.base, { headers: { cookie: adminCookie } })),
+    ).not.toBeNull();
     const member = await post("sign-in/sso", {});
     expect(member.status).toBe(200);
     const memberBody = (await member.json()) as { url: string };
-    const memberLogin = await fetch(provider.callback(memberBody.url, { subject: "company-a", email: "company-a@company.test" }), { redirect: "manual", headers: { cookie: cookies(member) } });
-    expect(await unavailable.session(new Request(fixture.base, { headers: { cookie: cookies(memberLogin) } }))).toBeNull();
+    const memberLogin = await fetch(
+      provider.callback(memberBody.url, { subject: "company-a", email: "company-a@company.test" }),
+      { redirect: "manual", headers: { cookie: cookies(member) } },
+    );
+    expect(
+      await unavailable.session(
+        new Request(fixture.base, { headers: { cookie: cookies(memberLogin) } }),
+      ),
+    ).toBeNull();
   } finally {
     await server?.stop(true);
     await provider.dispose();

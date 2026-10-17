@@ -6,20 +6,20 @@ import {
   setupInspectionView,
 } from "../../../../packages/project-domain/src/setup";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { readableCodePath } from "../knowledge/code-read";
 import { factoryForgeSource } from "../knowledge/forge-source";
 import type { ResolvedModelConnection } from "../models/native";
-import type { AgentTurnTransaction } from "../agent/turn-store";
-import { inspectConfiguration } from "./inspection-agent";
-import { recordedMastraUsage } from "../usage/record-mastra";
 import { createUsageJournal } from "../usage/journal";
+import { recordedMastraUsage } from "../usage/record-mastra";
 import {
   configurationPath,
   requiredConfiguration,
   validateConfiguration,
   validateSetupProposal,
 } from "./configuration";
+import { inspectConfiguration } from "./inspection-agent";
 
 type InspectionRow = {
   id: string;
@@ -56,6 +56,24 @@ export function createSetupInspection(input: {
   const access = createAccessController(input.database);
   const executions = new Map<string, Promise<void>>();
   const aborts = new Map<string, AbortController>();
+  async function inspectionLock(id: string, work: () => Promise<void>) {
+    // A session lock must live across inference, but must not occupy the pool
+    // used by authorization, usage and ordinary requests. This connection does
+    // only coordination and is closed with the operation, never held idle.
+    const lock = input.database.coordination();
+    try {
+      const [claimed] = await lock<{ held: boolean }[]>`
+        SELECT pg_try_advisory_lock(hashtext(${`setup-inspect:${id}`})) AS held`;
+      if (!claimed?.held) return;
+      try {
+        await work();
+      } finally {
+        await lock`SELECT pg_advisory_unlock(hashtext(${`setup-inspect:${id}`}))`;
+      }
+    } finally {
+      await lock.end({ timeout: 1 });
+    }
+  }
   async function project(projectID: string, userID: string) {
     await access.requireProject(userID, projectID, true);
     const [value] = await sql<
@@ -83,63 +101,58 @@ export function createSetupInspection(input: {
     return value ? setupInspectionView.parse(value) : null;
   }
   async function inspect(value: InspectionRow) {
-    const lock = await sql.reserve();
-    try {
-      const [claimed] = await lock<
-        { held: boolean }[]
-      >`SELECT pg_try_advisory_lock(hashtext(${`setup-inspect:${value.id}`})) AS held`;
-      if (!claimed?.held) return;
-      const current = await project(value.projectID, value.userID);
-      const admitted = await row(value.id);
-      if (admitted?.state !== "inspecting") return;
-      const abort = new AbortController();
-      aborts.set(value.id, abort);
-      const files = await input.forge.listFiles(current.repository, value.sourceCommit);
-      const existing = files.map((file) => file.path);
-      if (!value.modelID) throw new Error("Inspection model was not admitted");
-      const connection = await input.connection(value);
-      const output = await (input.generate ?? inspectConfiguration)({
-        modelID: value.modelID,
-        connection,
-        usageSink: recordedMastraUsage(input.database, {
-          id: `setup:${value.id}`,
-          projectID: value.projectID,
-          userID: value.userID,
-          purpose: "setup",
-          provider: connection.provider ?? "openai",
-          model: value.modelID,
-        }),
-        signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
-        answers: value.answers,
-        context: await questionContext(value),
-        existingConfiguration: existing.filter(configurationPath),
-        paths: files
-          .filter(
-            (file) =>
-              file.size <= 64000 &&
-              (readableCodePath(file.path) ||
-                configurationPath(file.path) ||
-                /(?:^|\/)Dockerfile$/.test(file.path)),
-          )
-          .slice(0, 2000)
-          .map((file) => file.path),
-        read: async (path) => {
-          await access.requireProject(value.userID, value.projectID, true);
-          const admitted = await row(value.id);
-          if (admitted?.state !== "inspecting") throw new Error("Inspection was stopped");
-          return input.forge.getFile(current.repository, path, value.sourceCommit);
-        },
-      });
-      validateSetupProposal(output, existing);
-      await access.requireProject(value.userID, value.projectID, true);
-      await sql`UPDATE factory.project_setup_inspection SET state='proposal',output=${JSON.stringify(output)}::jsonb,updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
-    } catch {
-      await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection could not finish. Existing source is unchanged; retry when ready.',updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
-    } finally {
-      aborts.delete(value.id);
-      await lock`SELECT pg_advisory_unlock(hashtext(${`setup-inspect:${value.id}`}))`;
-      lock.release();
-    }
+    return inspectionLock(value.id, async () => {
+      try {
+        const current = await project(value.projectID, value.userID);
+        const admitted = await row(value.id);
+        if (admitted?.state !== "inspecting") return;
+        const abort = new AbortController();
+        aborts.set(value.id, abort);
+        const files = await input.forge.listFiles(current.repository, value.sourceCommit);
+        const existing = files.map((file) => file.path);
+        if (!value.modelID) throw new Error("Inspection model was not admitted");
+        const connection = await input.connection(value);
+        const output = await (input.generate ?? inspectConfiguration)({
+          modelID: value.modelID,
+          connection,
+          usageSink: recordedMastraUsage(input.database, {
+            id: `setup:${value.id}`,
+            projectID: value.projectID,
+            userID: value.userID,
+            purpose: "setup",
+            provider: connection.provider ?? "openai",
+            model: value.modelID,
+          }),
+          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
+          answers: value.answers,
+          context: await questionContext(value),
+          existingConfiguration: existing.filter(configurationPath),
+          paths: files
+            .filter(
+              (file) =>
+                file.size <= 64000 &&
+                (readableCodePath(file.path) ||
+                  configurationPath(file.path) ||
+                  /(?:^|\/)Dockerfile$/.test(file.path)),
+            )
+            .slice(0, 2000)
+            .map((file) => file.path),
+          read: async (path) => {
+            await access.requireProject(value.userID, value.projectID, true);
+            const admitted = await row(value.id);
+            if (admitted?.state !== "inspecting") throw new Error("Inspection was stopped");
+            return input.forge.getFile(current.repository, path, value.sourceCommit);
+          },
+        });
+        validateSetupProposal(output, existing);
+        await access.requireProject(value.userID, value.projectID, true);
+        await sql`UPDATE factory.project_setup_inspection SET state='proposal',output=${JSON.stringify(output)}::jsonb,updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+      } catch {
+        await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection could not finish. Existing source is unchanged; retry when ready.',updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+      } finally {
+        aborts.delete(value.id);
+      }
+    });
   }
   async function questionContext(value: InspectionRow) {
     const rounds: { question: string; answer: string }[][] = [];
@@ -174,7 +187,8 @@ export function createSetupInspection(input: {
         previous.projectID !== projectID ||
         previous.userID !== userID ||
         previous.parentID !== (command.parentID ?? null) ||
-        JSON.stringify(previous.answers) !== JSON.stringify(command.answers)
+        Object.keys(previous.answers).length !== Object.keys(command.answers).length ||
+        Object.entries(command.answers).some(([key, value]) => previous.answers[key] !== value)
       )
         throw new CommandError("conflict", "Inspection command belongs to different work");
       return view(projectID, userID);
@@ -350,19 +364,10 @@ export function createSetupInspection(input: {
         { id: string }[]
       >`SELECT id FROM factory.project_setup_inspection WHERE state='inspecting'`;
       for (const value of pending) {
-        const connection = await sql.reserve();
-        try {
-          const [lock] = await connection<
-            { held: boolean }[]
-          >`SELECT pg_try_advisory_lock(hashtext(${`setup-inspect:${value.id}`})) AS held`;
-          if (lock?.held) {
-            await createUsageJournal(input.database).abandon(`setup:${value.id}`);
-            await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection was interrupted. Retry explicitly; source is unchanged.' WHERE id=${value.id} AND state='inspecting'`;
-            await connection`SELECT pg_advisory_unlock(hashtext(${`setup-inspect:${value.id}`}))`;
-          }
-        } finally {
-          connection.release();
-        }
+        await inspectionLock(value.id, async () => {
+          await createUsageJournal(input.database).abandon(`setup:${value.id}`);
+          await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection was interrupted. Retry explicitly; source is unchanged.' WHERE id=${value.id} AND state='inspecting'`;
+        });
       }
     },
   };

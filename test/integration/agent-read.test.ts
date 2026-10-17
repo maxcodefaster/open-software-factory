@@ -13,6 +13,7 @@ test("completed history can be read from the same retained Workspace without reb
   const owned = await fixture();
   const replacementID = crypto.randomUUID();
   const original = owned.hub.request.bind(owned.hub);
+  let historyReads = 0;
   try {
     await owned.database
       .client`UPDATE factory.runtime_attempt SET state = 'failed' WHERE id = ${owned.attemptID}`;
@@ -26,6 +27,7 @@ test("completed history can be read from the same retained Workspace without reb
       .client`UPDATE factory.change SET runtime_attempt_id = ${replacementID} WHERE id = ${owned.changeID}`;
     owned.hub.request = async (attemptID, channel, request, path) => {
       if (new URL(request.url).pathname.endsWith("/message")) {
+        historyReads++;
         expect(attemptID).toBe(replacementID);
         return Response.json({
           data: [
@@ -40,11 +42,21 @@ test("completed history can be read from the same retained Workspace without reb
       }
       return original(attemptID, channel, request, path);
     };
+    expect(await owned.controller().get(owned.changeID, undefined, false)).toMatchObject({
+      state: "committed",
+      messagesAvailable: false,
+      messages: [],
+      runtimeConnected: true,
+      sessionAvailable: true,
+      stopPending: false,
+    });
+    expect(historyReads).toBe(0);
     expect(await owned.controller().get(owned.changeID)).toMatchObject({
       messagesAvailable: true,
       runtimeConnected: true,
       messages: [expect.objectContaining({ text: "Retained exact answer" })],
     });
+    expect(historyReads).toBe(1);
     const [session] = await owned.database.client<
       Array<{ attemptID: string }>
     >`SELECT runtime_attempt_id AS "attemptID" FROM factory.change_agent_session WHERE change_id = ${owned.changeID}`;

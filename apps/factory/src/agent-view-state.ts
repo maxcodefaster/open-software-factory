@@ -2,6 +2,19 @@ import type { AgentView } from "./api-contracts";
 
 export type AgentSnapshot = { changeID: string; view: AgentView };
 
+export function createAgentReadFence() {
+  let revision = 0;
+  let read = 0;
+  return {
+    beginRead: () => ({ revision, read: ++read }),
+    current: (token: { revision: number; read: number }) =>
+      token.revision === revision && token.read === read,
+    commandPublished: () => {
+      revision++;
+    },
+  };
+}
+
 const agentStatusLabels = {
   idle: "Ready to build",
   starting: "Starting",

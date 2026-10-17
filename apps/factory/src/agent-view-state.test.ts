@@ -1,7 +1,23 @@
 import { expect, test } from "bun:test";
+import {
+  buildAgentHint,
+  buildAgentNeedsStart,
+  buildAgentStatus,
+  createAgentReadFence,
+  retainAgentActivity,
+} from "./agent-view-state";
 import type { AgentView } from "./api-contracts";
-import { buildAgentHint, buildAgentStatus, retainAgentActivity } from "./agent-view-state";
-import { buildAgentNeedsStart } from "./agent-view-state";
+
+test("an older activity read cannot undo Stop or another settled command", () => {
+  const fence = createAgentReadFence();
+  const old = fence.beginRead();
+  fence.commandPublished();
+  expect(fence.current(old)).toBe(false);
+  const first = fence.beginRead();
+  const newer = fence.beginRead();
+  expect(fence.current(first)).toBe(false);
+  expect(fence.current(newer)).toBe(true);
+});
 
 const loaded: AgentView = {
   state: "working",

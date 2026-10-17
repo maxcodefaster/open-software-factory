@@ -3,8 +3,8 @@ import type { ServerWebSocket } from "bun";
 import { implementationInput } from "../../../packages/change-domain/src/implementation";
 import {
   changeAgentPromptInput,
-  changeAgentStartInput,
   changeAgentResumeInput,
+  changeAgentStartInput,
   changeAgentStopConfirmationInput,
 } from "../../../packages/conversation-domain/src/agent-turn";
 import {
@@ -15,8 +15,8 @@ import {
 import { confirmEpicProposalInput } from "../../../packages/conversation-domain/src/epic-proposal";
 import { modelDefaultsInput } from "../../../packages/conversation-domain/src/model-settings";
 import { createDatabase } from "../../../packages/db/src/client";
-import { createForgejoClient } from "../../../packages/forge/src/forge";
 import { createForgejoAccess } from "../../../packages/forge/src/access";
+import { createForgejoClient } from "../../../packages/forge/src/forge";
 import { identityConfigurationWrite } from "../../../packages/identity-domain/src/configuration";
 import { isDesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import { knowledgeEditInput } from "../../../packages/knowledge-domain/src/knowledge";
@@ -32,21 +32,21 @@ import {
 import { requirementContentInput } from "../../../packages/requirement-domain/src/requirement";
 import { hashConnectorToken } from "../../../packages/runtime-domain/src/identity";
 import { SystemContractError } from "../../../packages/system-contract/src/system-contract";
-import { createAccessController } from "./access/controller";
-import { createAccessRoutes } from "./access/routes";
-import { createChangeWriterController } from "./access/writer-controller";
-import { runtimeWriteAuthorityIn, workspaceWriteAuthorityIn } from "./access/change-writer";
-import { createTerminalWriterBoundary } from "./runtime/browser-writer";
-import { createIdentityConfiguration } from "./access/identity-configuration";
-import { createRuntimeAccess } from "./access/runtime";
-import { createAccessRevocation } from "./access/revocation";
 import { createAccountRevocation } from "./access/account-revocation";
-import { createProjectAppPreviews } from "./access/previews";
+import { runtimeWriteAuthorityIn, workspaceWriteAuthorityIn } from "./access/change-writer";
+import { createAccessController } from "./access/controller";
 import { createForgeAccessReconciliation } from "./access/forge";
 import { createForgeIdentityRoutes } from "./access/forge-routes";
+import { createIdentityConfiguration } from "./access/identity-configuration";
+import { createProjectAppPreviews } from "./access/previews";
+import { createAccessRevocation } from "./access/revocation";
+import { createAccessRoutes } from "./access/routes";
+import { createRuntimeAccess } from "./access/runtime";
+import { createChangeWriterController } from "./access/writer-controller";
 import { createBuildBrowserController } from "./agent/browser-controller";
 import { createBuildBrowserEndpoint } from "./agent/browser-endpoint";
 import { createAgentController } from "./agent/controller";
+import { createOpenCodeClient } from "./agent/opencode-client";
 import { createChangeController } from "./change/controller";
 import { createTicketDocumentController } from "./change/document";
 import { createTicketTrashController } from "./change/trash";
@@ -70,7 +70,9 @@ import { createOpenBaoModelSecrets } from "./models/secrets";
 import { createUIPreferenceController } from "./preferences/controller";
 import { projectModelConnection } from "./project-agent/adapter";
 import { createProjectAgentController } from "./project-agent/controller";
+import { projectResponseStream } from "./project-agent/stream-response";
 import { createProjectRoute } from "./routes/projects";
+import { createTerminalWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
 import { scopeRuntimeEmbedding } from "./runtime/embedding";
 import {
@@ -95,9 +97,9 @@ import { createProjectSetupRoutes } from "./setup/routes";
 import { createImportSecrets } from "./setup/secrets";
 import { createSkillController } from "./skills/controller";
 import { createSkillRoutes } from "./skills/routes";
-import { createUsageRoutes } from "./usage/routes";
+import { usageCatalogue } from "./usage/rates";
 import { createRecordedOpenCodeUsage } from "./usage/record-opencode";
-import { createOpenCodeClient } from "./agent/opencode-client";
+import { createUsageRoutes } from "./usage/routes";
 import { createDeveloperIDEController } from "./workspace/developer-ide-controller";
 import {
   createDeveloperIDEEdge,
@@ -124,6 +126,7 @@ if (
   );
 }
 const database = createDatabase();
+void usageCatalogue.refresh();
 const ticketDocuments = createTicketDocumentController(database);
 const runtimeSecret = FACTORY_AUTH_SECRET ?? "local-development-secret-change-before-production";
 const factoryAuth = createIdentityConfiguration(database, runtimeSecret, undefined, [
@@ -792,6 +795,18 @@ async function route(request: Request) {
       if (action === "message") {
         const parsed = conversationMessageInput.safeParse(await request.json().catch(() => null));
         if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
+        if (request.headers.get("accept")?.includes("text/event-stream"))
+          return projectResponseStream((observer) =>
+            projectAgentController.message(
+              projectID,
+              parsed.data.ticketId,
+              parsed.data.text,
+              session.user.id,
+              parsed.data.commandId,
+              parsed.data.intent,
+              observer,
+            ),
+          );
         return json(
           await projectAgentController.message(
             projectID,
@@ -953,7 +968,10 @@ async function route(request: Request) {
       if (!session) return json({ error: "Authentication required" }, 401);
       const [, changeID, action] = agentRoute;
       if (!changeID) return json({ error: "Change is required" }, 400);
-      if (!action && request.method === "GET") return json(await agentController.get(changeID));
+      if (!action && request.method === "GET")
+        return json(
+          await agentController.get(changeID, undefined, url.searchParams.get("history") !== "0"),
+        );
       if (request.method !== "POST") return new Response(null, { status: 405 });
       if (action === "start") {
         const parsed = changeAgentStartInput.safeParse(await request.json().catch(() => null));

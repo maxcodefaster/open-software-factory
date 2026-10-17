@@ -32,13 +32,27 @@ const planning = z.discriminatedUnion("kind", [
   requirement.extend({ citations }),
   epic.extend({ citations }),
 ]);
+const interview = z.discriminatedUnion("kind", [
+  answer.extend({ citations }),
+  question.extend({ citations }),
+  round.extend({ citations }),
+  requirement.extend({ citations }),
+]);
 
 // Strict provider schemas require every property. Non-applicable Git fields must
 // be absent from non-code variants, and an unused footnote is explicitly null.
-export function projectAgentProviderOutputFor(mode: ConversationMode) {
+export function projectAgentProviderOutputFor(
+  mode: ConversationMode,
+  requirementsInterview = false,
+) {
   return z
     .object({
-      output: mode === "investigate" ? projectAgentAnswerOutput.extend({ citations }) : planning,
+      output:
+        mode === "investigate"
+          ? projectAgentAnswerOutput.extend({ citations })
+          : requirementsInterview
+            ? interview
+            : planning,
     })
     .strict();
 }

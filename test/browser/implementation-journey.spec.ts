@@ -74,7 +74,7 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
     buildTurnState: "pending",
   };
   await page.route("**/api/changes?*", (route) => route.fulfill({ json: { changes: [change] } }));
-  await page.route(`**/api/changes/${changeID}/agent`, (route) =>
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
     route.fulfill({
       json: {
         state: "starting",
@@ -166,6 +166,10 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   const changeID = crypto.randomUUID();
   let received: { commandId: string; text: string } | undefined;
   let researchRequests = 0;
+  let state = "committed";
+  let holdRead = false;
+  const held = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
   const agent = {
     state: "committed",
     sessionAvailable: true,
@@ -196,10 +200,24 @@ test("Review corrections send to the retained Build without IDE; checks and cont
     entries: [],
   };
   await page.route("**/api/changes?*", (route) => route.fulfill({ json: { changes: [change] } }));
-  await page.route(`**/api/changes/${changeID}/agent`, (route) => route.fulfill({ json: agent }));
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, async (route) => {
+    const snapshot = { ...agent, state };
+    if (holdRead) {
+      holdRead = false;
+      held.resolve();
+      await release.promise;
+    }
+    await route.fulfill({ json: snapshot });
+  });
+  await page.route(`**/api/changes/${changeID}/agent/stop`, (route) => {
+    state = "stopped";
+    return route.fulfill({ json: { ...agent, state } });
+  });
   await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
     route.fulfill({
       json: {
+        pullRequestNumber: 1,
+        pullRequestUrl: "http://127.0.0.1:33030/owned/starter/pulls/1",
         verificationState: "succeeded",
         actionRunUrl: "http://127.0.0.1:33030/owned/starter/actions/runs/1",
       },
@@ -214,11 +232,22 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   });
   await page.route(`**/api/changes/${changeID}/agent/request-changes`, (route) => {
     received = route.request().postDataJSON();
-    return route.fulfill({ json: { ...agent, state: "starting" } });
+    state = "working";
+    return route.fulfill({ json: { ...agent, state } });
   });
   await selectProject(page);
   await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
   await expect(page.getByRole("button", { name: "Deliver", exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Review source changes", exact: true }),
+  ).toHaveAttribute("href", "http://127.0.0.1:33030/owned/starter/pulls/1/files");
+  await expect(
+    page.getByRole("link", { name: "Review source changes", exact: true }),
+  ).toHaveAttribute("rel", "noreferrer");
+  await expect(page.getByRole("link", { name: "Review source changes", exact: true })).toHaveCSS(
+    "text-decoration-line",
+    "none",
+  );
   await expect(page.getByRole("button", { name: "Cancel Change", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Open Forgejo checks" })).toBeHidden();
   await page.locator(".ticket-checks summary").click();
@@ -234,6 +263,24 @@ test("Review corrections send to the retained Build without IDE; checks and cont
     .poll(() => received?.text)
     .toBe("Correct the first action within the original requirements.");
   expect(researchRequests).toBe(0);
+  await expect(page.locator(".agent-state")).toHaveText("Working");
+  holdRead = true;
+  await held.promise;
+  await page.getByRole("button", { name: "Stop OpenCode", exact: true }).click();
+  await expect(page.locator(".agent-state")).toHaveText("Stopped");
+  const oldResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === `/api/changes/${changeID}/agent`,
+  );
+  release.resolve();
+  await oldResponse;
+  // Assert in the next rendered frame, before a later truthful poll can conceal rollback.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(page.locator(".agent-state")).toHaveText("Stopped", { timeout: 100 });
   await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
   await mkdir(".factory/screenshots/implementation-journey", { recursive: true });
   await page.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
@@ -242,6 +289,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await page.screenshot({ path: ".factory/screenshots/implementation-journey/review-narrow.png" });
   const documentBox = await page.locator(".ticket-document").boundingBox();
   expect(documentBox?.width).toBeLessThanOrEqual(430);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
 });
 
 test("Settings is a retained Project-bound workspace tab with no modal", async ({ page }) => {

@@ -1,5 +1,4 @@
-.theia-sidebar-menu,
-.theia-settings-container {
+.theia-sidebar-menu {
   display: none !important;
 }
 
@@ -301,7 +300,10 @@
   outline-offset: var(--factory-ide-space);
 }
 @media (max-width: 480px) {
-  .factory-writer-status { flex-wrap: wrap; width: max-content; }
+  .factory-writer-status {
+    flex-wrap: wrap;
+    width: max-content;
+  }
 }
 .factory-writer-status button:disabled {
   opacity: 0.5;

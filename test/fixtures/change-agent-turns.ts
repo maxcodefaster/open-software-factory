@@ -344,7 +344,12 @@ export async function fixture(
           await sql`DELETE FROM factory.forge_branch_intent WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.project WHERE id = ${projectID} AND created_by = ${userID}`;
           await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${userID}`;
-          await sql`DELETE FROM auth."user" WHERE id = ${userID} AND email = ${`build-turn-${suffix}@factory.local`}`;
+          // Published installation guidance retains its author until the owned database
+          // is disposed. Do not rewrite provenance or delete shared guidance to remove a user.
+          await sql`DELETE FROM auth."user" WHERE id = ${userID} AND email = ${`build-turn-${suffix}@factory.local`}
+            AND NOT EXISTS(SELECT 1 FROM factory.skill_revision WHERE created_by=${userID})
+            AND NOT EXISTS(SELECT 1 FROM factory.skill_publication WHERE updated_by=${userID})
+            AND NOT EXISTS(SELECT 1 FROM factory.system_skill_settings WHERE updated_by=${userID})`;
         });
         if (stopFailure) throw stopFailure;
       } finally {

@@ -1,9 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
+import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import {
+  conformanceManifest,
+  conformanceNamespace,
+  removeConformanceResource,
+} from "./conformance-resources";
 
-const namespace = "open-factory-envbox-smoke";
-const pod = "envbox-smoke";
+const namespace = conformanceNamespace;
+const owner = crypto.randomUUID();
+const pod = `conformance-${owner}`;
 const workspaceContainer = "workspace_cvm";
 const workspace = "/home/coder/runtime-project";
 const sourceWorkspace = "/home/coder/runtime-source-project";
@@ -59,27 +67,10 @@ type ConnectorMessage = {
 };
 
 async function command(args: string[], options: CommandOptions = {}) {
-  const child = Bun.spawn(args, {
-    stdin: options.input === undefined ? "ignore" : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
+  const { stdout, stderr, exitCode } = await runCommand(args, options.input, {
+    timeoutMS: 360_000,
+    outputBytes: 4 * 1024 * 1024,
   });
-  const input =
-    options.input === undefined
-      ? Promise.resolve()
-      : (async () => {
-          const stdin = child.stdin;
-          if (!stdin) throw new Error("Command stdin pipe was not created");
-          stdin.write(options.input as string);
-          await stdin.flush();
-          stdin.end();
-        })();
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-    input,
-  ]);
   if (exitCode !== 0) {
     throw new Error(`${args.join(" ")} failed (${exitCode})\n${stderr || stdout}`);
   }
@@ -88,7 +79,7 @@ async function command(args: string[], options: CommandOptions = {}) {
 }
 
 function kubectl(args: string[]) {
-  return command(["kubectl", "--context", "orbstack", ...args]);
+  return command(kubernetesCommand(args));
 }
 
 function outerDocker(args: string[]) {
@@ -98,10 +89,7 @@ function outerDocker(args: string[]) {
 function inner(args: string[], options: CommandOptions = {}) {
   const interactive = options.input === undefined ? [] : ["-i"];
   return command(
-    [
-      "kubectl",
-      "--context",
-      "orbstack",
+    kubernetesCommand([
       "exec",
       ...interactive,
       "-n",
@@ -112,7 +100,7 @@ function inner(args: string[], options: CommandOptions = {}) {
       "exec",
       workspaceContainer,
       ...args,
-    ],
+    ]),
     options,
   );
 }
@@ -130,16 +118,17 @@ async function prepareSmokeRuntime() {
     resolve(import.meta.dir, "../../deploy/runtime-smoke/envbox.yaml"),
     "utf8",
   );
-  await command(["kubectl", "--context", "orbstack", "apply", "-f", "-"], {
-    input: template.replace("FACTORY_RUNTIME_HOST_IMAGE", expectedRuntimeHost),
+  await command(kubernetesCommand(["create", "-f", "-"]), {
+    input: JSON.stringify({
+      apiVersion: "v1",
+      kind: "List",
+      items: conformanceManifest(template, owner, expectedRuntimeHost),
+    }),
   });
   await kubectl(["wait", "--for=condition=Ready", `pod/${pod}`, "-n", namespace, "--timeout=300s"]);
   for (let attempt = 0; attempt < 240; attempt += 1) {
-    const probe = Bun.spawn(
-      [
-        "kubectl",
-        "--context",
-        "orbstack",
+    const probe = await runCommand(
+      kubernetesCommand([
         "exec",
         "-n",
         namespace,
@@ -150,26 +139,18 @@ async function prepareSmokeRuntime() {
         workspaceContainer,
         "docker",
         "info",
-      ],
-      { stdout: "ignore", stderr: "ignore" },
+      ]),
+      undefined,
     );
-    if ((await probe.exited) === 0) return;
+    if (probe.exitCode === 0) return;
     await Bun.sleep(1_000);
   }
   throw new Error("Envbox workspace Docker daemon did not become ready");
 }
 
 async function removeSmokeRuntime() {
-  await kubectl(["delete", "pod", pod, "-n", namespace, "--ignore-not-found", "--wait=true"]);
-  await kubectl([
-    "delete",
-    "pvc",
-    "runtime-data",
-    "-n",
-    namespace,
-    "--ignore-not-found",
-    "--wait=true",
-  ]);
+  await removeConformanceResource("pods", owner);
+  await removeConformanceResource("persistentvolumeclaims", owner);
 }
 
 async function removeIds(resource: "container" | "network" | "volume", ids: string) {
@@ -218,10 +199,7 @@ async function stageFixture(target = workspace) {
     stderr: "pipe",
   });
   const extraction = Bun.spawn(
-    [
-      "kubectl",
-      "--context",
-      "orbstack",
+    kubernetesCommand([
       "exec",
       "-i",
       "-n",
@@ -239,7 +217,7 @@ async function stageFixture(target = workspace) {
       target,
       "-xf",
       "-",
-    ],
+    ]),
     { stdin: archive.stdout, stdout: "pipe", stderr: "pipe" },
   );
   const [archiveExit, extractionExit, archiveError, extractionError] = await Promise.all([
@@ -254,10 +232,7 @@ async function stageFixture(target = workspace) {
 
 async function devcontainerUp() {
   const output = await command(
-    [
-      "kubectl",
-      "--context",
-      "orbstack",
+    kubernetesCommand([
       "exec",
       "-n",
       namespace,
@@ -274,7 +249,7 @@ async function devcontainerUp() {
       config,
       "--log-format",
       "json",
-    ],
+    ]),
     { quiet: true },
   );
   const result = output
@@ -683,7 +658,7 @@ async function verifyConnector() {
     revision: "main",
     devcontainerPath: ".devcontainer/devcontainer.json",
     composeProjectName: composeProject,
-    controlUrl: `ws://host.orb.internal:${port}/runtime/connect`,
+    controlUrl: `ws://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${port}/runtime/connect`,
     channels: [
       {
         name: "app",
@@ -805,7 +780,7 @@ async function verifyUnsafeMountRejected() {
     revision: "main",
     devcontainerPath: "unsafe.devcontainer.json",
     composeProjectName: composeProject,
-    controlUrl: `ws://host.orb.internal:${port}/runtime/connect`,
+    controlUrl: `ws://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${port}/runtime/connect`,
     channels: [
       { name: "app", kind: "app", target: "http://127.0.0.1:4300", healthPath: "/health" },
     ],
@@ -882,8 +857,8 @@ async function main() {
   console.log("Runtime conformance passed with Connector transport and complete inner cleanup");
 }
 
-await prepareSmokeRuntime();
 try {
+  await prepareSmokeRuntime();
   await main();
 } finally {
   await removeSmokeRuntime();

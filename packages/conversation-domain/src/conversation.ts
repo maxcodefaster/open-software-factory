@@ -36,7 +36,13 @@ const questionOptionInput = z
 
 const choiceQuestionFields = {
   prompt: z.string().trim().min(1).max(1_000),
-  options: z.array(questionOptionInput).min(2).max(8),
+  options: z
+    .array(questionOptionInput)
+    .min(2)
+    .max(8)
+    .refine((options) => new Set(options.map((option) => option.id)).size === options.length, {
+      message: "Question option identities must be unique",
+    }),
   allowCustom: z.boolean().default(true),
 };
 
@@ -168,6 +174,8 @@ export function normalizeInterviewAnswer(question: InterviewQuestion, value: Int
     return { selectedOptionIds: [], customText: answer.customText, labels: [answer.customText] };
   }
   const options = new Map(question.options.map((option) => [option.id, option.label]));
+  if (options.size !== question.options.length)
+    throw new Error("Question option identities must be unique");
   if (selected.some((id) => !options.has(id)))
     throw new Error("The answer contains an unknown option");
   if (question.type === "single-select" && selected.length > 1) {

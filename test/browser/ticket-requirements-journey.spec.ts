@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
-import { signIn, deleteFactoryProject } from "../support/factory-fixture";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
 const captures = ".factory/screenshots/ticket-requirements-journey";
@@ -228,6 +228,80 @@ test("Ticket keystrokes and undo survive delayed autosave acknowledgement and re
   }
 });
 
+test("a stale Assistant detail poll cannot undo completed Ticket autosave", async ({ page }) => {
+  await draft(page, "Stale detail probe", "Original human intent.");
+  await page.getByRole("button", { name: "Create as idea", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Create as idea", exact: true })).toBeHidden();
+  const editor = page.getByRole("textbox", { name: "Ticket description", exact: true });
+  await expect(editor).toHaveText("Original human intent.");
+  const [ticket] = await db.client<Array<{ id: string; version: number }>>`
+    SELECT id,version::int FROM factory.ticket WHERE project_id=${projectID}`;
+  if (!ticket) throw new Error("Missing owned Ticket");
+  const oldRead = Promise.withResolvers<void>();
+  const releaseRead = Promise.withResolvers<void>();
+  const delivered = Promise.withResolvers<void>();
+  const freshRead = Promise.withResolvers<void>();
+  const submittedVersions: number[] = [];
+  let capturedVersion = -1;
+  let hold = true;
+  await page.route(`**/api/tickets/${ticket.id}`, async (route) => {
+    const response = await route.fetch();
+    const value = (await response.json()) as { ticket: { version: number } };
+    if (hold) {
+      hold = false;
+      capturedVersion = value.ticket.version;
+      oldRead.resolve();
+      await releaseRead.promise;
+      await route.fulfill({ response });
+      delivered.resolve();
+    } else {
+      await route.fulfill({ response });
+      if (value.ticket.version > ticket.version) freshRead.resolve();
+    }
+  });
+  await page.route(`**/api/tickets/${ticket.id}/document`, async (route) => {
+    submittedVersions.push(
+      (route.request().postDataJSON() as { expectedVersion: number }).expectedVersion,
+    );
+    await route.continue();
+  });
+  try {
+    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+    await oldRead.promise;
+    await editor.fill("New saved intent.");
+    await freshRead.promise;
+    await expect(page.locator(".ticket-editor-actions")).toBeHidden();
+    const [saved] = await db.client<
+      Array<{ version: number }>
+    >`SELECT version::int FROM factory.ticket WHERE id=${ticket.id}`;
+    if (!saved) throw new Error("Owned Ticket disappeared");
+    expect(capturedVersion).toBeLessThan(saved.version);
+    // Leave the old read alive, but stop later polls from repairing a stale rollback.
+    await page.getByRole("button", { name: "Minimize Agent panel" }).click();
+    releaseRead.resolve();
+    await delivered.promise;
+    await expect(editor).toHaveText("New saved intent.");
+    await page.waitForTimeout(100);
+    await expect(editor).toHaveText("New saved intent.");
+    await editor.fill("New saved intent. More context.");
+    await expect.poll(() => submittedVersions.length).toBe(2);
+    expect(submittedVersions[1]).toBe(saved.version);
+    await expect
+      .poll(async () => {
+        const [row] = await db.client<
+          Array<{ description: string }>
+        >`SELECT description FROM factory.ticket WHERE id=${ticket.id}`;
+        return row?.description;
+      })
+      .toBe("New saved intent. More context.");
+    await mkdir(".factory/test-results/optimization", { recursive: true });
+    await page.screenshot({ path: ".factory/test-results/optimization/ticket-autosave.png" });
+  } finally {
+    releaseRead.resolve();
+    await page.unrouteAll({ behavior: "wait" });
+  }
+});
+
 test("continued focused Ticket typing stays recoverable after a completed autosave", async ({
   page,
 }) => {
@@ -394,9 +468,13 @@ test("Project proposals enter a personal rich draft without publishing or replac
   );
 });
 
-test("real Luna elaborates detailed intent; confirmation preserves scope and manual edits remain editable", async ({
-  page,
-}) => {
+test("real Luna elaborates detailed intent; confirmation preserves scope and manual edits remain editable", {
+  tag: "@paid",
+}, async ({ page }) => {
+  test.skip(
+    process.env["FACTORY_BROWSER_LANE"] !== "paid",
+    "Requires the explicit paid browser lane",
+  );
   const title = "Keep ticket drafts across reload";
   await draft(
     page,
@@ -544,9 +622,13 @@ test("editable Epic preview keeps focus, restores drafts and confirms every memb
   ).toContain("downloads a CSV");
 });
 
-test("real Luna finds scoped Wiki and Tickets, then proposes and confirms larger work without starting Builds", async ({
-  page,
-}) => {
+test("real Luna finds scoped Wiki and Tickets, then proposes and confirms larger work without starting Builds", {
+  tag: "@paid",
+}, async ({ page }) => {
+  test.skip(
+    process.env["FACTORY_BROWSER_LANE"] !== "paid",
+    "Requires the explicit paid browser lane",
+  );
   const wikiID = crypto.randomUUID(),
     ticketID = crypto.randomUUID();
   const body =

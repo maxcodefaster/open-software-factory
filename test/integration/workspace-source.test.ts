@@ -11,9 +11,9 @@ import type {
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
-async function ownedSourceFixture() {
+async function ownedSourceFixture(maxConnections = 10) {
   const processFixture = await factoryProcess();
-  const database = processFixture.connect();
+  const database = processFixture.connect(maxConnections);
   const projectID = crypto.randomUUID();
   const developerID = crypto.randomUUID();
   const otherDeveloperID = crypto.randomUUID();
@@ -51,6 +51,64 @@ async function ownedSourceFixture() {
     },
   };
 }
+
+test("source connection warming leaves application reads and Stop available with one connection", async () => {
+  const fixture = await ownedSourceFixture(1);
+  const connecting = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const observed: SourceResourceObservation = {
+    namespaceUID: "pool-namespace",
+    claimUID: "pool-claim",
+    podUID: "pool-pod",
+    storageNode: "pool-node",
+    ready: true,
+    failed: false,
+  };
+  const sources = createWorkspaceSourceController(fixture.database, "owned-source-secret", {
+    async executionNode() {
+      throw new Error("No execution needed");
+    },
+    async prepare() {
+      return observed;
+    },
+    async observe() {
+      return observed;
+    },
+    async connect() {
+      connecting.resolve();
+      await release.promise;
+    },
+    async request() {
+      throw new Error("No file request needed");
+    },
+    async stop() {},
+    close() {},
+  });
+  try {
+    const initial = await sources.ensurePersonal(fixture.projectID, fixture.developerID);
+    await connecting.promise;
+    const read = sources.get(initial.workspaceID, fixture.developerID);
+    void read.catch(() => {});
+    const current = await Promise.race([
+      read,
+      Bun.sleep(1000).then(() => {
+        throw new Error("Source warming starved application reads");
+      }),
+    ]);
+    expect(current.state).toBe("preparing");
+    await sources.stop(initial.workspaceID, fixture.developerID);
+    release.resolve();
+    await eventually(
+      () => sources.get(initial.workspaceID, fixture.developerID),
+      (value) => value.state === "stopped",
+      "Source warming overrode Stop",
+    );
+  } finally {
+    release.resolve();
+    await sources.close();
+    await fixture.dispose();
+  }
+}, 30_000);
 
 test("source readiness waits for its exact connection and Stop fences pending connection completion", async () => {
   const fixture = await ownedSourceFixture();

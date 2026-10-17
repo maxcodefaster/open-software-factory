@@ -1,8 +1,8 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { forgeUsername } from "../../../../packages/forge/src/access";
 import { CommandError } from "../command-error";
-import { projectDevelopmentAuthorityIn } from "./controller";
 import { lockChangeWriterIn } from "./change-writer";
+import { projectDevelopmentAuthorityIn } from "./controller";
 
 type Database = ReturnType<typeof createDatabase>;
 type WriterView = {
@@ -27,14 +27,17 @@ export function createChangeWriterController(options: {
 }) {
   const { database } = options;
   async function exclusive<T>(changeID: string, work: () => Promise<T>): Promise<T> {
-    const connection = await database.client.reserve();
+    const connection = database.coordination();
     const key = `change-writer-operation:${changeID}`;
     try {
       await connection`SELECT pg_advisory_lock(hashtext(${key}))`;
       return await work();
     } finally {
-      await connection`SELECT pg_advisory_unlock(hashtext(${key}))`;
-      connection.release();
+      try {
+        await connection`SELECT pg_advisory_unlock(hashtext(${key}))`;
+      } finally {
+        await connection.end({ timeout: 1 });
+      }
     }
   }
   async function stopped(attemptID: string | null) {

@@ -74,7 +74,9 @@ export function createDeveloperIDEController(
       throw new CommandError("conflict", "Editor lifecycle changed during preparation");
   }
   async function reconcile(userID: string) {
-    const sql = await database.client.reserve();
+    // Kubernetes preparation can wait while authorization and Stop need the
+    // application pool. Keep its session lock on a short-lived dedicated connection.
+    const sql = database.coordination();
     const key = `developer-ide:${userID}`;
     try {
       await sql`SELECT pg_advisory_lock(hashtext(${key}))`;
@@ -111,8 +113,11 @@ export function createDeveloperIDEController(
       await sql`UPDATE factory.developer_ide SET state=CASE WHEN state='ready' THEN 'failed' ELSE state END,failure='Editor resources are unavailable. Factory is checking the recorded intent.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
       return (await row(userID, sql))?.state !== "stop-intended";
     } finally {
-      await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
-      sql.release();
+      try {
+        await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
+      } finally {
+        await sql.end({ timeout: 1 });
+      }
     }
   }
   function schedule(userID: string) {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
+import type { ConversationView } from "../../apps/factory/src/api-contracts";
 import {
   type InterviewQuestion,
   interviewAnswerCommandInput,
@@ -101,6 +102,178 @@ async function openTicketAgent(page: Page) {
   return panel;
 }
 
+for (const outcome of ["complete", "error"] as const) {
+  test(`streams Markdown in the selected context and cleans up on ${outcome}`, async ({ page }) => {
+    const turnId = crypto.randomUUID();
+    let view: ConversationView = {
+      id: crypto.randomUUID(),
+      projectId: projectID,
+      ticketId: ticketID,
+      mode: "plan",
+      version: 1,
+      entries: [],
+    };
+    let holdRead = false;
+    const readStarted = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    const readDelivered = Promise.withResolvers<void>();
+    await page.route(
+      `**/api/projects/${projectID}/conversation?ticketId=${ticketID}`,
+      async (route) => {
+        const captured = view;
+        if (holdRead) {
+          holdRead = false;
+          readStarted.resolve();
+          await releaseRead.promise;
+          await route.fulfill({ json: captured });
+          readDelivered.resolve();
+        } else await route.fulfill({ json: captured });
+      },
+    );
+    await page.addInitScript(
+      ({ projectID, turnId }) => {
+        // Bun adds preconnect to the merged global fetch type; browsers do not have it.
+        const browser = window as unknown as {
+          fetch: (input: RequestInfo | URL, options?: RequestInit) => Promise<Response>;
+        };
+        const originalFetch = browser.fetch.bind(window);
+        const controls = window as unknown as {
+          emitProjectAnswer: (event: object, close?: boolean) => void;
+          streamRequests: number;
+        };
+        controls.streamRequests = 0;
+        browser.fetch = async (input, options) => {
+          const url = input instanceof Request ? input.url : String(input);
+          if (!url.endsWith(`/api/projects/${projectID}/conversation/message`))
+            return originalFetch(input, options);
+          controls.streamRequests++;
+          return new Response(
+            new ReadableStream({
+              start(controller) {
+                controls.emitProjectAnswer = (event, close = false) => {
+                  controller.enqueue(
+                    new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+                  );
+                  if (close) controller.close();
+                };
+                controls.emitProjectAnswer({ type: "admitted", turnId });
+                controls.emitProjectAnswer({
+                  type: "answer",
+                  turnId,
+                  text: "**Live answer**\n\n- First point",
+                });
+              },
+            }),
+            { status: 201, headers: { "content-type": "text/event-stream" } },
+          );
+        };
+      },
+      { projectID, turnId },
+    );
+    const panel = await openTicketAgent(page);
+    const message = panel.getByLabel("Message conversation");
+    await message.fill("Give me a quick overview");
+    await message.press("Enter");
+    const live = panel.getByLabel("Assistant streaming response");
+    await expect(live.locator("strong")).toHaveText("Live answer");
+    await expect(live.locator("li")).toHaveText("First point");
+    await expect(panel.getByLabel("Assistant responding")).toBeHidden();
+    await expect(message).toHaveValue("");
+    await page.getByRole("button", { name: "Minimize Agent panel" }).click();
+    await expect(panel).toBeHidden();
+    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+    await expect(live).toBeVisible();
+    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await expect(panel.getByLabel("Assistant streaming response")).toHaveCount(0);
+    await page.getByRole("tab", { name: ticketTitle, exact: true }).click();
+    await expect(live).toBeVisible();
+    await mkdir(".factory/test-results/streaming", { recursive: true });
+    await page.screenshot({ path: `.factory/test-results/streaming/${outcome}-live.png` });
+    if (outcome === "complete") {
+      const longText = `**Live answer**\n\n${Array.from({ length: 24 }, (_, index) => `Paragraph ${index + 1}. Read earlier messages without being pulled down.`).join("\n\n")}`;
+      await page.evaluate(
+        ({ turnId, text }) =>
+          (window as unknown as { emitProjectAnswer: (event: object) => void }).emitProjectAnswer({
+            type: "answer",
+            turnId,
+            text,
+          }),
+        { turnId, text: longText },
+      );
+      const history = panel.locator(".conversation-history");
+      await expect
+        .poll(() => history.evaluate((element) => element.scrollHeight > element.clientHeight))
+        .toBe(true);
+      await history.hover();
+      await page.mouse.wheel(0, -4000);
+      await expect.poll(() => history.evaluate((element) => element.scrollTop)).toBe(0);
+      await page.evaluate(
+        ({ turnId, text }) =>
+          (window as unknown as { emitProjectAnswer: (event: object) => void }).emitProjectAnswer({
+            type: "answer",
+            turnId,
+            text,
+          }),
+        { turnId, text: `${longText}\n\nMore streamed text.` },
+      );
+      await expect(live).toContainText("More streamed text.");
+      await page.waitForTimeout(80);
+      expect(await history.evaluate((element) => element.scrollTop)).toBe(0);
+      try {
+        holdRead = true;
+        await readStarted.promise;
+        view = {
+          ...view,
+          version: 2,
+          entries: [
+            {
+              id: crypto.randomUUID(),
+              ordinal: 1,
+              kind: "agent-message",
+              actor: "project-agent",
+              mode: "plan",
+              body: "**Live answer**\n\n- First point\n- Finished",
+              payload: {},
+              citations: [],
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        };
+        await page.evaluate(
+          (conversation) =>
+            (
+              window as unknown as { emitProjectAnswer: (event: object, close: boolean) => void }
+            ).emitProjectAnswer({ type: "complete", conversation }, true),
+          view,
+        );
+        await expect(panel.locator(".agent-message.assistant")).toHaveCount(1);
+        await expect(panel.locator(".agent-message.assistant")).toContainText("Finished");
+        releaseRead.resolve();
+        await readDelivered.promise;
+        // A stale GET must never remove the completed answer, even briefly.
+        await expect(panel.locator(".agent-message.assistant")).toContainText("Finished", {
+          timeout: 300,
+        });
+      } finally {
+        holdRead = false;
+        releaseRead.resolve();
+      }
+    } else {
+      await page.evaluate(() =>
+        (
+          window as unknown as { emitProjectAnswer: (event: object, close: boolean) => void }
+        ).emitProjectAnswer({ type: "error", error: "Owned response failed" }, true),
+      );
+      await expect(panel).not.toContainText("Live answer");
+      await expect(page.getByRole("alert")).toContainText("Owned response failed");
+    }
+    await expect(live).toHaveCount(0);
+    expect(
+      await page.evaluate(() => (window as unknown as { streamRequests: number }).streamRequests),
+    ).toBe(1);
+  });
+}
+
 async function insertQuestion(question: InterviewQuestion) {
   if (!database) throw new Error("Missing fixture database");
   const conversationID = crypto.randomUUID();
@@ -163,7 +336,7 @@ test("IDE tabs retain their own Ticket conversation after switching and minimizi
       json: { changes: body.changes.map((change) => ({ ...change, runtimeState: "ready" })) },
     });
   });
-  await page.route(`**/api/changes/${changeID}/agent`, (route) =>
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
     route.fulfill({ json: buildView }),
   );
   let buildPrompt: unknown;
@@ -251,7 +424,35 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
   const waiting = new Promise<void>((resolve) => {
     release = resolve;
   });
+  let showProgress = false;
+  await page.route(
+    `**/api/projects/${projectID}/conversation?ticketId=${ticketID}`,
+    async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      if (!showProgress) {
+        await route.fulfill({ json: body });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          ...body,
+          turn: {
+            id: crypto.randomUUID(),
+            commandId: crypto.randomUUID(),
+            state: "running",
+            engine: "mastra",
+            mode: "plan",
+            modelId: "owned-ui-model",
+            skills: [],
+            progress: { phase: "reading", completedLookups: 2 },
+          },
+        },
+      });
+    },
+  );
   await page.route(`**/api/projects/${projectID}/conversation/answer`, async (route) => {
+    showProgress = true;
     await waiting;
     await route.fulfill({ status: 503, json: { error: "Owned delayed answer interrupted" } });
   });
@@ -260,6 +461,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
     const pending = page.getByRole("status", { name: "Assistant responding" });
     await expect(pending).toBeVisible();
     await expect(pending).toHaveAttribute("aria-busy", "true");
+    await expect(pending).toContainText("Reading Project sources… · 2 research steps completed");
     await expect(page.locator(".assistant-skeleton span")).toHaveCount(3);
     expect(
       await page
@@ -273,6 +475,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
     await expect(pending).toBeVisible();
     await page.screenshot({ path: `${evidenceDirectory}/interview-pending-narrow.png` });
     release();
+    await page.unroute(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}`);
     await expect(
       page.getByRole("alert").filter({ hasText: "Owned delayed answer interrupted" }),
     ).toBeVisible();

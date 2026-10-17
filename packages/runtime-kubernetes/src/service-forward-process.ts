@@ -1,3 +1,4 @@
+import { kubernetesCommand } from "./config";
 // Fixed trusted service connections only. IPC disconnection owns cleanup after Factory death.
 export async function runServiceForward(role: "source" | "editor", args: readonly string[]) {
   const [namespace, podName] = args;
@@ -13,10 +14,7 @@ export async function runServiceForward(role: "source" | "editor", args: readonl
   )
     process.exit(1);
   const forward = Bun.spawn(
-    [
-      "kubectl",
-      "--context",
-      "orbstack",
+    kubernetesCommand([
       "port-forward",
       "--address",
       "127.0.0.1",
@@ -24,7 +22,7 @@ export async function runServiceForward(role: "source" | "editor", args: readonl
       namespace,
       `pod/${podName}`,
       role === "source" ? "0:4600" : "0:4400",
-    ],
+    ]),
     { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
   );
   let stopping = false;

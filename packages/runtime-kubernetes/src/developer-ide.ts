@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { z } from "zod";
+import { kubernetesCommand } from "./config";
 import { createKubernetesClient, type KubernetesClient } from "./client";
 import { renderDeveloperIDEResources, type DeveloperIDEResources } from "./developer-ide-manifest";
 
@@ -91,23 +92,14 @@ export function validateDeveloperIDEObservation(
 }
 
 async function command(args: string[], input?: unknown) {
-  const child = Bun.spawn(["kubectl", "--context", "orbstack", ...args], {
-    stdin: input === undefined ? "ignore" : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const timer = setTimeout(() => child.kill(), 15_000);
-  const stdin = child.stdin;
-  if (input !== undefined && stdin && typeof stdin !== "number") {
-    stdin.write(JSON.stringify(input));
-    stdin.end();
-  }
-  const [output, error, status] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  clearTimeout(timer);
+  const {
+    stdout: output,
+    stderr: error,
+    exitCode: status,
+  } = await runCommand(
+    kubernetesCommand(["--request-timeout=10s", ...args]),
+    input === undefined ? undefined : JSON.stringify(input),
+  );
   if (status !== 0) {
     if (error.includes("NotFound") || error.includes("not found")) return null;
     throw new Error("Developer IDE infrastructure command failed");
@@ -234,3 +226,4 @@ export function createDeveloperIDEClient(
     },
   };
 }
+import { runCommand } from "./command";

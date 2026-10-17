@@ -1,7 +1,8 @@
-import upstream from "../../../upstream.json";
-import { computeReservation, type ComputeClass } from "../../runtime-domain/src/compute";
+import upstream from "../../../upstream.json" with { type: "json" };
+import { type ComputeClass, computeReservation } from "../../runtime-domain/src/compute";
 
 export type { ComputeClass } from "../../runtime-domain/src/compute";
+
 const dockerBootstrap =
   'set -eu\ntest -z "$' +
   "{CODER_AGENT_URL:-}\" || { echo 'CODER_AGENT_URL is forbidden' >&2; exit 1; }\nunset CODER_AGENT_TOKEN CODER_AGENT_SUBSYSTEM CODER_AGENT_URL\nmkdir -p /etc/docker/certs.d/registry.open-factory-envbox-smoke.svc.cluster.local:5000\ncp /factory/registry-ca/ca.crt /etc/docker/certs.d/registry.open-factory-envbox-smoke.svc.cluster.local:5000/ca.crt\ndockerd-entrypoint.sh dockerd --host=unix:///var/run/docker.sock >/var/log/factory-dockerd.log 2>&1 &\n";

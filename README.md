@@ -12,7 +12,7 @@ Sysbox, a private Docker daemon, the Dev Containers CLI and the Factory Runtime 
 
 ## Start locally
 
-The maintained local environment uses macOS with OrbStack's Linux Docker daemon and Kubernetes
+The source-development environment uses macOS with OrbStack's Linux Docker daemon and Kubernetes
 context `orbstack`. Install [mise](https://mise.jdx.dev/), enable that environment, then run:
 
 ```sh
@@ -26,8 +26,17 @@ password `factory-local-password`; these are development defaults. Configure pro
 in Settings. Optional environment bootstrap is described in [.env.example](.env.example); put real
 credentials in the ignored `.env` file.
 
-Startup provisions the local database, Forgejo, planning cache and encrypted OpenBao, publishes
-the pinned runtime artifacts, applies database migrations and builds Factory. Cold artifact builds
+The local listener defaults to `0.0.0.0` so OrbStack-hosted runtimes can call Factory.
+Set `FACTORY_HOST` explicitly to narrow that listener, noting that loopback-only access may prevent
+runtime callbacks. `FACTORY_ADMIN_EMAIL` and `FACTORY_ADMIN_PASSWORD` are honored for bootstrap and
+Forge setup. Set a private password before first startup if the listener is reachable by others.
+Bootstrap never resets an existing account's password; later starts must use that account's
+current credentials for Forge setup.
+Disposable installations keep their own generated administrator identity and private password
+instead of inheriting the normal installation's administrator overrides.
+
+Startup provisions the local database, Forgejo, planning cache and encrypted OpenBao, reuses a
+complete set of pinned runtime artifacts or publishes them once, applies migrations and builds Factory. Cold artifact builds
 and Sandbox preparation can take several minutes. Installation data and exact artifact references
 live under the ignored `.factory/` directory.
 
@@ -38,6 +47,25 @@ mise exec -- bun run factory:restart
 
 Restart adopts published pins for new runtime attempts and preserves existing intent and data.
 Use [runtime artifact instructions](deploy/runtime-host/README.md) when changing runtime images.
+
+### Run Factory through Compose
+
+The same application can run in a container, with Compose managing PostgreSQL, Forgejo,
+Zero and encrypted OpenBao. It still needs Kubernetes for Envbox execution. Compose does not
+replace the runtime with host containers. See [local deployment](deploy/local/README.md) for
+the Mac/Linux prerequisites, image publication and isolated local ports.
+
+With a published Factory image and a self-contained kubeconfig:
+
+```sh
+export FACTORY_IMAGE=ghcr.io/maxcodefaster/open-software-factory/factory:<published-version>
+export FACTORY_RUNTIME_HOST=host.orb.internal  # On Linux, use the host's reachable address.
+docker compose --project-name factory-compose -f deploy/local/compose.yaml up -d factory
+```
+
+The initial password is generated privately in `.factory/compose/admin-password`. Provider
+connections are configured in Factory Settings. No Bun, Node or compiler is needed on the host
+when using published images. The publication workflow is manual; it does not publish on every push.
 
 ## Repository layout
 
@@ -70,25 +98,45 @@ Run commands through `mise exec --` to use the pinned tools. Keep dependencies e
 from committed lockfiles. `upstream.json` owns the upstream artifact pins; package manifests and
 lockfiles own application dependencies.
 
+Start the backend with `factory:up`, then use `factory:dev` and open the Vite URL it prints.
+Development proxies authenticated API and planning-cache traffic to that backend without
+allowing foreign browser origins. `FACTORY_DEV_BACKEND_URL` selects a different loopback backend
+for an isolated installation. It does not start or reset that installation.
+
 | Command | Purpose |
 | --- | --- |
 | `bun run factory:dev` | Vite frontend development against the local Factory server |
 | `bun run factory:build` | Build the frontend |
+| `bun run factory:image` | Build the local application image with the currently published runtime pins |
 | `bun run check:docs` | Validate documentation names, local links and anchors |
 | `bun run typecheck` | Check all TypeScript projects and tests |
-| `bun run test:unit` | Domain, adapter, controller and operation-tool unit tests |
-| `bun run connector:check` | Go race tests and vet for the Connector |
+| `bun run test:unit` | Fast domain, adapter and operation tests, including pure `test/support` tests; no live models |
+| `bun run test:controllers` | Owned PostgreSQL/controller checks; separate fixture databases on one migrated test daemon |
+| `bun run test:native` | Explicit owned OpenCode, source, Forgejo and OpenBao adapter proofs |
+| `bun run test:live` | Opt-in live proofs, still requiring each proof's environment flag |
+| `bun run connector:check` | Host and digest-pinned Linux race tests, native privilege checks and vet |
 | `bun run test:postgres` | Database integration checks |
 | `bun run test:forgejo` | Forgejo integration checks |
 | `bun run runtime:conformance` | Actual Envbox/Dev Container/Connector conformance |
-| `bun run test:browser` | Browser journeys against the local Factory |
+| `bun run test:browser` | UI journeys; excludes native, paid and retained-installation restart tests |
+| `bun run test:browser:native` | Explicit real IDE/Terminal/Preview/Delivery journeys |
+| `bun run test:browser:paid` | Explicit real provider journeys; incurs model usage |
+| `bun run test:browser:manual` | Retained-installation captures/restarts; run only when no admitted work is active |
 | `bun run check` | Documentation, formatting, lint, types, units and Connector checks |
-| `bun run check:integration` | Complete check plus PostgreSQL, Forgejo and native runtime conformance |
+| `bun run check:integration` | Complete check plus PostgreSQL invariants and the owned controller lane |
 
 Live proofs under `test/support` opt in through their documented environment flags. Some use real
 model providers and incur usage. Test fixtures own separate databases, Projects and runtime
 identities; their cleanup must preserve unrelated work. Run the affected checks for a change rather
 than repeating every live journey after a documentation edit.
+
+Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
+Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live
+model flags and provider credentials, and do not load `.env` in the test runner. Native runtime
+conformance and Forgejo checks remain explicit commands, not hidden steps in the default integration gate.
+Runtime conformance owns unique Pods/claims in the shared registry namespace. `runtime:smoke:down`
+removes only labeled conformance resources with UID preconditions; it never deletes the namespace
+or registry. Old unlabeled resources require separate ownership review.
 
 ## Documentation
 

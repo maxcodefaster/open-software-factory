@@ -1,13 +1,13 @@
 import { expect, test } from "bun:test";
-import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
+import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts";
+import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts";
 
 test("automatic preparation coalesces exact jobs, bounds producers and fences results to runtime environment", async () => {
   const process = await factoryProcess();
-  const database = process.connect();
+  const database = process.connect(1);
   try {
     const token = "owned-preparation-token";
     const owned = await fixture(undefined, undefined, database, token);
@@ -150,7 +150,7 @@ test("restarted preparation expires old producers and waits for confirmed teardo
     const producerID = crypto.randomUUID();
     await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
       VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended','owned-expired-producer','runtime-2',${"a".repeat(64)},${"b".repeat(64)},now()-interval '13 minutes',${owned.userID})`;
-    await database.client`UPDATE factory.project_image_preparation SET state='running',runtime_attempt_id=${producerID} WHERE id=${job.id}`;
+    await database.client`UPDATE factory.project_image_preparation SET state='running',runtime_attempt_id=${producerID},updated_at=now()-interval '13 minutes' WHERE id=${job.id}`;
     const restarted = createProjectPreparation(input);
     await restarted.drain();
     expect(expired).toEqual([producerID]);

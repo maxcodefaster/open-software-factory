@@ -28,3 +28,19 @@ test("Ticket owns one restore action, while the active interview owns answering"
   });
   expect(clarificationAction({ ...input, working: true }).label).toBe("Clarification in progress");
 });
+
+test("finding the remaining question scans long answered history linearly", () => {
+  let reads = 0;
+  const entries = Array.from({ length: 1000 }, (_, index) => ({
+    id: `entry-${index}`,
+    ordinal: index,
+    get kind() {
+      reads++;
+      return index % 2 ? "answer" : "question";
+    },
+    inReplyToEntryId: index % 2 ? `entry-${index - 1}` : null,
+  }));
+  const current = { id: "current", ordinal: 1001, kind: "question" };
+  expect(unansweredClarification([...entries, current])).toBe(current);
+  expect(reads).toBeLessThan(1000 * 8);
+});

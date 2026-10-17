@@ -87,7 +87,11 @@ test("real Forgejo creates one exact turnkey Starter and recovers the lost initi
     const [membership] =
       await database.client`SELECT role FROM factory.project_membership WHERE user_id=${manager}`;
     expect(membership?.["role"]).toBe("developer");
-    expect((await database.client`SELECT manage_project FROM factory.project_membership WHERE user_id=${manager}`)[0]?.["manage_project"]).toBe(true);
+    expect(
+      (
+        await database.client`SELECT manage_project FROM factory.project_membership WHERE user_id=${manager}`
+      )[0]?.["manage_project"],
+    ).toBe(true);
   } finally {
     if (setupID) {
       const owned = await forge.setupRepository({ owner: "factory-mutation", name }, setupID);

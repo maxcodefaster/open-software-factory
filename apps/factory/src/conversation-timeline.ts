@@ -15,9 +15,20 @@ export function conversationTimeline<
   },
   TMessage extends { id: string; at: number },
 >(entries: TEntry[], messages: TMessage[]): ConversationTimelineItem<TEntry, TMessage>[] {
+  // Overlapping history pages may repeat identities. Keep the latest snapshot,
+  // never deduplicate by text: distinct commands can intentionally say the same thing.
+  entries = [...new Map(entries.map((entry) => [entry.id, entry])).values()];
+  messages = [...new Map(messages.map((message) => [message.id, message])).values()];
   const questions = new Set(
     entries.filter((entry) => entry.kind === "question").map((entry) => entry.id),
   );
+  const answered = new Set<string>();
+  let latestClarification = Number.NEGATIVE_INFINITY;
+  for (const entry of entries) {
+    if (entry.kind === "answer" && entry.inReplyToEntryId) answered.add(entry.inReplyToEntryId);
+    if (supersedesClarification({ ...entry, kind: entry.kind ?? "" }))
+      latestClarification = Math.max(latestClarification, entry.ordinal);
+  }
   const timeline: ConversationTimelineItem<TEntry, TMessage>[] = [
     ...entries
       .filter(
@@ -25,14 +36,8 @@ export function conversationTimeline<
           entry.kind !== "mode-change" &&
           !(
             entry.kind === "question" &&
-            !entries.some(
-              (answer) => answer.kind === "answer" && answer.inReplyToEntryId === entry.id,
-            ) &&
-            entries.some(
-              (newer) =>
-                newer.ordinal > entry.ordinal &&
-                supersedesClarification({ ...newer, kind: newer.kind ?? "" }),
-            )
+            !answered.has(entry.id) &&
+            latestClarification > entry.ordinal
           ) &&
           !(
             entry.kind === "answer" &&

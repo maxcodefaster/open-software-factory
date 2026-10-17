@@ -4,10 +4,10 @@ import {
   conversationModeInput,
   sourceCitationInput,
 } from "../../../packages/conversation-domain/src/conversation";
-import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
 import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
-import type { FactoryZeroSchema } from "../../../packages/zero-schema/src";
+import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
 import { requirementContentInput } from "../../../packages/requirement-domain/src/content";
+import type { FactoryZeroSchema } from "../../../packages/zero-schema/src";
 
 export const requirementProposalSchema = z.object({
   id: z.uuid(),
@@ -272,6 +272,14 @@ export const conversationViewSchema = z.object({
   turn: turnObservationInput.optional(),
 });
 export type ConversationView = z.infer<typeof conversationViewSchema>;
+
+export const conversationStreamEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("admitted"), turnId: z.uuid() }),
+  z.object({ type: z.literal("answer"), turnId: z.uuid(), text: z.string().max(12_000) }),
+  z.object({ type: z.literal("complete"), conversation: conversationViewSchema }),
+  z.object({ type: z.literal("error"), error: z.string() }),
+]);
+export type ConversationStreamEvent = z.infer<typeof conversationStreamEventSchema>;
 
 export const deliveryViewSchema = z.object({
   cleanupError: optionalString,

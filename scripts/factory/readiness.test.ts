@@ -1,5 +1,36 @@
 import { expect, test } from "bun:test";
-import { waitForFactory } from "./readiness";
+import { completeFactoryStartup, waitForFactory } from "./readiness";
+
+test("installation readiness follows the planning cache and is never announced after its failure", async () => {
+  const calls: string[] = [];
+  const server = async () => {
+    calls.push("server");
+  };
+  await expect(
+    completeFactoryStartup({
+      startServer: server,
+      startPlanningCache: async () => {
+        calls.push("cache");
+        throw new Error("Cache unavailable");
+      },
+      ready: () => {
+        calls.push("ready");
+      },
+    }),
+  ).rejects.toThrow("Cache unavailable");
+  expect(calls).toEqual(["server", "cache"]);
+  calls.length = 0;
+  await completeFactoryStartup({
+    startServer: server,
+    startPlanningCache: async () => {
+      calls.push("cache");
+    },
+    ready: () => {
+      calls.push("ready");
+    },
+  });
+  expect(calls).toEqual(["server", "cache", "ready"]);
+});
 
 function child() {
   return Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 1000)"], {

@@ -9,7 +9,14 @@ import { factoryProcess } from "../fixtures/factory-process";
 // Real controller, Mastra adapter and PostgreSQL. Only model output is injected.
 // Owned Docker/database setup and teardown need their own bounded integration budget.
 // Run separately: bun test --timeout 30000 test/integration/project-agent-turns.test.ts
-async function fixture(output: ProjectAgentOutput, failResponse = false, maxConnections = 10) {
+async function fixture(
+  output: ProjectAgentOutput,
+  failResponse: boolean | number = false,
+  maxConnections = 10,
+  searchQuery?: string,
+  searchSource?: "knowledge" | "ticket" | "epic",
+  splitAnswer = false,
+) {
   const isolated = await factoryProcess();
   const database = isolated.connect(maxConnections);
   const userID = crypto.randomUUID();
@@ -18,6 +25,7 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
   const release = Promise.withResolvers<void>();
   const requested = Promise.withResolvers<void>();
   const secondRequest = Promise.withResolvers<void>();
+  const tail = Promise.withResolvers<void>();
   let requests = 0;
   const requestedModels: string[] = [];
   const requestedBodies: string[] = [];
@@ -39,9 +47,26 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
       if (failResponse)
         return Response.json(
           { error: { message: "Injected lost provider outcome" } },
-          { status: 503 },
+          { status: typeof failResponse === "number" ? failResponse : 503 },
         );
       const content = JSON.stringify({ output });
+      const searchOnly = requests === 1 && searchQuery;
+      const message = searchOnly
+        ? {
+            role: "assistant",
+            tool_calls: [
+              {
+                id: "owned-search",
+                type: "function",
+                function: {
+                  name: "searchProject",
+                  arguments: JSON.stringify({ query: searchQuery, source: searchSource }),
+                },
+              },
+            ],
+          }
+        : { role: "assistant", content };
+      const finish_reason = searchOnly ? "tool_calls" : "stop";
       const common = {
         id: "chatcmpl-turn-regression",
         created: 1_789_423_600,
@@ -51,9 +76,36 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
         return Response.json({
           ...common,
           object: "chat.completion",
-          choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
+          choices: [{ index: 0, message, finish_reason }],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
         });
+      }
+      if (splitAnswer) {
+        return new Response(
+          new ReadableStream({
+            async start(controller) {
+              const send = (content: string, finished = false) =>
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    `data: ${JSON.stringify({
+                      ...common,
+                      object: "chat.completion.chunk",
+                      choices: [
+                        { index: 0, delta: { content }, finish_reason: finished ? "stop" : null },
+                      ],
+                    })}\n\n`,
+                  ),
+                );
+              send('{"output":{"kind":"answer","message":"Hello');
+              await tail.promise;
+              send(' world","citations":[]}}');
+              send("", true);
+              controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"));
+              controller.close();
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
       }
       const chunks = [
         {
@@ -88,6 +140,7 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
 
   async function dispose() {
     release.resolve();
+    tail.resolve();
     await model.stop(true);
     for (const [key, value] of previousEnvironment) {
       if (value === undefined) delete process.env[key];
@@ -133,6 +186,7 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
     requested: requested.promise,
     secondRequest: secondRequest.promise,
     release: () => release.resolve(),
+    releaseTail: () => tail.resolve(),
     requests: () => requests,
     requestedModels,
     requestedBodies,
@@ -154,6 +208,98 @@ async function fixture(output: ProjectAgentOutput, failResponse = false, maxConn
     dispose,
   };
 }
+
+test("each live answer snapshot validates account access once through its durable owner", async () => {
+  const owned = await fixture(
+    { kind: "answer", message: "Hello world", citations: [] },
+    false,
+    1,
+    undefined,
+    undefined,
+    true,
+  );
+  const first = Promise.withResolvers<void>();
+  let accountReads = 0;
+  let snapshotAccountReads = 0;
+  let pending: Promise<unknown> | undefined;
+  owned.database.client.options.debug = (_connection, query) => {
+    if (query.includes('FROM auth."user"')) accountReads++;
+  };
+  try {
+    owned.release();
+    pending = owned
+      .controller()
+      .message(
+        owned.projectID,
+        undefined,
+        "Say hello",
+        owned.userID,
+        crypto.randomUUID(),
+        undefined,
+        {
+          admitted: () => {},
+          answerText: (_turnID, text) => {
+            if (text === "Hello") {
+              accountReads = 0;
+              first.resolve();
+            } else if (text === "Hello world") snapshotAccountReads = accountReads;
+          },
+        },
+      );
+    void pending.catch(() => {});
+    await Promise.race([
+      first.promise,
+      Bun.sleep(5000).then(() => {
+        throw new Error("No first streamed snapshot");
+      }),
+    ]);
+    await Bun.sleep(50);
+    owned.releaseTail();
+    await pending;
+    expect(snapshotAccountReads).toBe(1);
+    expect(owned.requests()).toBe(1);
+  } finally {
+    owned.releaseTail();
+    await pending?.catch(() => {});
+    await owned.dispose();
+  }
+}, 30_000);
+
+test("a search snippet cannot authorize an unread Wiki citation or unsupported footnote", async () => {
+  const pageID = crypto.randomUUID();
+  const owned = await fixture(
+    {
+      kind: "answer",
+      message: "Unsupported conclusion.[^1]",
+      citations: [{ source: "knowledge", id: pageID, label: "Owned Wiki", reference: 1 }],
+    },
+    false,
+    10,
+    "Owned Wiki",
+  );
+  try {
+    await owned.database
+      .client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,citations,created_by)
+      VALUES(${pageID},${owned.projectID},'owned-wiki','Owned Wiki','A snippet is not a full read','A snippet is not a full read',${"a".repeat(40)},'[]'::jsonb,${owned.userID})`;
+    owned.release();
+    await expect(
+      owned
+        .controller()
+        .message(
+          owned.projectID,
+          undefined,
+          "Explain Owned Wiki",
+          owned.userID,
+          crypto.randomUUID(),
+        ),
+    ).rejects.toThrow();
+    expect(owned.requests()).toBe(2);
+    expect((await owned.turns())[0]?.state).toBe("failed");
+    expect((await owned.entries()).some((entry) => entry.kind === "agent-message")).toBe(false);
+  } finally {
+    await owned.dispose();
+  }
+}, 30_000);
 
 test("Contributor citation filtering preserves the supported inline reference number", async () => {
   const output: ProjectAgentOutput = {
@@ -275,6 +421,195 @@ const answer = {
   message: "This is injected output for the lifecycle regression.",
   citations: [],
 } satisfies ProjectAgentOutput;
+
+test("the unified Project search preserves the requested source filter through the controller", async () => {
+  const owned = await fixture(answer, false, 10, "Release guide", "knowledge");
+  const pageID = crypto.randomUUID();
+  const ticketID = crypto.randomUUID();
+  try {
+    await owned.database
+      .client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,citations,created_by)
+      VALUES(${pageID},${owned.projectID},'release-guide','Release guide','Owned Wiki','Owned Wiki',${"a".repeat(40)},'[]'::jsonb,${owned.userID})`;
+    await owned.database.client`INSERT INTO factory.ticket(id,project_id,title,created_by)
+      VALUES(${ticketID},${owned.projectID},'Release guide',${owned.userID})`;
+    owned.release();
+    await owned
+      .controller()
+      .message(
+        owned.projectID,
+        undefined,
+        "Read the Release guide Wiki",
+        owned.userID,
+        crypto.randomUUID(),
+      );
+    expect(owned.requests()).toBe(2);
+    const body = JSON.parse(owned.requestedBodies[1] ?? "{}");
+    const result = body.messages.filter((item: { role: string }) => item.role === "tool");
+    expect(JSON.stringify(result)).toContain(pageID);
+    expect(JSON.stringify(result)).not.toContain(ticketID);
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("Project permission loss fails without publishing or continuing paid work", async () => {
+  const owned = await fixture(answer, false, 10, "Any source");
+  const pending = owned
+    .controller()
+    .message(
+      owned.projectID,
+      undefined,
+      "Research this Project",
+      owned.userID,
+      crypto.randomUUID(),
+    );
+  try {
+    await owned.requested;
+    await owned.database.client`UPDATE factory.account_access SET disabled_at=now()
+      WHERE user_id=${owned.userID}`;
+    owned.release();
+    await expect(pending).rejects.toThrow();
+    expect((await owned.turns())[0]?.state).toBe("failed");
+    const [turn] = await owned.database.client`SELECT outcome_summary FROM factory.agent_turn
+      WHERE project_id=${owned.projectID}`;
+    expect(turn?.["outcome_summary"]).toContain("authority");
+    expect(owned.requests()).toBe(1);
+    expect((await owned.entries()).filter((entry) => entry.kind === "agent-message")).toHaveLength(
+      0,
+    );
+    await owned.controller().recover();
+    expect(owned.requests()).toBe(1);
+  } finally {
+    owned.release();
+    await Promise.allSettled([pending]);
+    await owned.dispose();
+  }
+});
+
+for (const status of [401, 429]) {
+  test(`Project provider ${status} is a definite failure and is never retried`, async () => {
+    const owned = await fixture(answer, status);
+    const commandID = crypto.randomUUID();
+    try {
+      owned.release();
+      await expect(
+        owned
+          .controller()
+          .message(owned.projectID, undefined, "One request", owned.userID, commandID),
+      ).rejects.toThrow();
+      expect((await owned.turns())[0]?.state).toBe("failed");
+      await owned
+        .controller()
+        .message(owned.projectID, undefined, "One request", owned.userID, commandID);
+      expect(owned.requests()).toBe(1);
+      expect(
+        (await owned.entries()).filter((entry) => entry.kind === "agent-message"),
+      ).toHaveLength(0);
+    } finally {
+      await owned.dispose();
+    }
+  });
+}
+
+test("an explicit Stop remains stopped when native inference returns late", async () => {
+  const owned = await fixture(answer);
+  const pending = owned
+    .controller()
+    .message(owned.projectID, undefined, "An admitted request", owned.userID, crypto.randomUUID());
+  try {
+    await owned.requested;
+    await owned.database.client`UPDATE factory.agent_turn SET state='stopped', owner_token=NULL,
+      owner_expires_at=NULL WHERE project_id=${owned.projectID}`;
+    owned.release();
+    await expect(pending).rejects.toThrow();
+    expect((await owned.turns())[0]?.state).toBe("stopped");
+    expect((await owned.entries()).filter((entry) => entry.kind === "agent-message")).toHaveLength(
+      0,
+    );
+    await owned.controller().recover();
+    expect(owned.requests()).toBe(1);
+  } finally {
+    owned.release();
+    await Promise.allSettled([pending]);
+    await owned.dispose();
+  }
+});
+
+test("a custom choice answer replans instead of publishing an obsolete prefetched question", async () => {
+  const owned = await fixture({
+    kind: "question",
+    message: "Clarify the changed scope",
+    question: {
+      type: "free-text",
+      prompt: "Which external users need access?",
+      placeholder: "Users",
+    },
+    citations: [],
+  });
+  try {
+    const controller = owned.controller();
+    const conversation = await controller.setMode(owned.projectID, undefined, "plan", owned.userID);
+    if (!conversation) throw new Error("Owned conversation required");
+    const firstQuestion = {
+      type: "single-select" as const,
+      prompt: "Who uses this?",
+      allowCustom: true,
+      options: [
+        { id: "internal", label: "Internal users", description: "Company accounts only" },
+        { id: "dev", label: "Developers", description: "Development staff only" },
+      ],
+    };
+    const obsolete = {
+      type: "free-text" as const,
+      prompt: "Which company department?",
+      placeholder: "Department",
+    };
+    const entry = await owned.database.client.begin((sql) =>
+      appendConversationEntry(sql, conversation.id, {
+        kind: "question",
+        actor: "project-agent",
+        mode: "plan",
+        body: firstQuestion.prompt,
+        payload: {
+          question: firstQuestion,
+          roundId: crypto.randomUUID(),
+          roundQuestions: [firstQuestion, obsolete],
+          roundIndex: 0,
+        },
+        citations: [],
+        inReplyToEntryId: null,
+        requirementRevisionId: null,
+      }),
+    );
+    owned.release();
+    const commandID = crypto.randomUUID();
+    const response = await controller.answer(
+      owned.projectID,
+      undefined,
+      entry.id,
+      { selectedOptionIds: [], customText: "External customers instead" },
+      owned.userID,
+      commandID,
+    );
+    expect(owned.requests()).toBe(1);
+    expect(
+      response?.entries.filter((item) => item.kind === "question").map((item) => item.body),
+    ).toEqual([firstQuestion.prompt, "Which external users need access?"]);
+    expect(response?.entries.filter((item) => item.kind === "answer")).toHaveLength(1);
+    expect(owned.requestedBodies[0]).toContain("External customers instead");
+    await controller.answer(
+      owned.projectID,
+      undefined,
+      entry.id,
+      { selectedOptionIds: [], customText: "External customers instead" },
+      owned.userID,
+      commandID,
+    );
+    expect(owned.requests()).toBe(1);
+  } finally {
+    await owned.dispose();
+  }
+});
 
 async function until(check: () => Promise<boolean>) {
   for (let observation = 0; observation < 250; observation += 1) {
@@ -587,12 +922,17 @@ test("independent controllers cannot both dispatch work for one Conversation", a
 });
 
 test("a late Plan question cannot publish after switching to Investigate", async () => {
-  const owned = await fixture({
-    kind: "question",
-    message: "One decision remains.",
-    question: { type: "free-text", prompt: "What changes?", placeholder: "Describe it" },
-    citations: [],
-  });
+  const owned = await fixture(
+    {
+      kind: "question",
+      message: "One decision remains.",
+      question: { type: "free-text", prompt: "What changes?", placeholder: "Describe it" },
+      citations: [],
+    },
+    false,
+    10,
+    "Any source",
+  );
   const controller = owned.controller();
   let pending: Promise<unknown> | undefined;
   try {
@@ -609,6 +949,8 @@ test("a late Plan question cannot publish after switching to Investigate", async
     owned.release();
     await Promise.allSettled([pending]);
     expect((await owned.entries()).filter((entry) => entry.kind === "question")).toHaveLength(0);
+    expect(owned.requests()).toBe(1);
+    expect((await owned.turns())[0]?.state).toBe("failed");
   } finally {
     owned.release();
     if (pending) await Promise.allSettled([pending]);

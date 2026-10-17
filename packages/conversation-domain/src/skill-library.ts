@@ -85,12 +85,20 @@ export function librarySkillIds(
   choices: LibraryChoice[],
   role: "planning" | "build",
 ) {
+  return librarySkillAssignments(entries, choices, role).map((item) => item.revisionId);
+}
+
+export function librarySkillAssignments(
+  entries: SkillLibraryEntry[],
+  choices: LibraryChoice[],
+  role: "planning" | "build",
+) {
   return entries.flatMap((entry) => {
     const choice = resolveLibraryChoice(choices, entry.id, role);
     if (!choice || choice.state === "disable") return [];
     const revision = entry.revisions.find((item) => item.id === choice.revisionId);
     if (!revision?.published || !revision.content.roles.includes(role))
       throw new Error("An enabled skill version is unavailable");
-    return [revision.id];
+    return [{ revisionId: revision.id, required: choice.state === "required" }];
   });
 }

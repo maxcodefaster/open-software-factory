@@ -12,7 +12,7 @@ import {
 import {
   createKubernetesClient,
   type KubernetesClient,
-  readSmokeRegistryCA,
+  readRuntimeRegistryCA,
   requireRuntimePodArtifacts,
 } from "../../../../packages/runtime-kubernetes/src/client";
 import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
@@ -114,7 +114,7 @@ export function createRuntimeController(
   connectorSecret: string,
   sources: Pick<ReturnType<typeof createWorkspaceSourceController>, "prepareExecution">,
   kubernetes: KubernetesClient = createKubernetesClient(),
-  readRegistryCA: () => Promise<string> = readSmokeRegistryCA,
+  readRegistryCA: () => Promise<string> = readRuntimeRegistryCA,
   reserve?: ExecutionReserve,
 ) {
   const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(runtimeHostImage);
@@ -171,7 +171,7 @@ export function createRuntimeController(
     action: (sql: Database["client"]) => Promise<T>,
     connection?: Database["client"],
   ) {
-    const reserved = connection ? undefined : await database.client.reserve();
+    const reserved = connection ? undefined : database.coordination();
     const lock = connection ?? reserved;
     if (!lock) throw new Error("Runtime resource connection missing");
     const key = `runtime-resources:${attemptID}`;
@@ -179,8 +179,11 @@ export function createRuntimeController(
       await lock`SELECT pg_advisory_lock(hashtext(${key}))`;
       return await action(lock);
     } finally {
-      await lock`SELECT pg_advisory_unlock(hashtext(${key}))`;
-      reserved?.release();
+      try {
+        await lock`SELECT pg_advisory_unlock(hashtext(${key}))`;
+      } finally {
+        await reserved?.end({ timeout: 1 });
+      }
     }
   }
   async function recordCreated(
@@ -435,9 +438,9 @@ export function createRuntimeController(
     `;
     const projectID = projects[0]?.projectID;
     if (!projectID) return;
-    const lock = await database.client.reserve();
-    await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
+    const lock = database.coordination();
     try {
+      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
       await lock`
         UPDATE factory.runtime_attempt SET state = 'stopping',
           failure = COALESCE(CASE WHEN failure IN ('parent connector reconnecting','child connector reconnecting') THEN NULL ELSE failure END, ${failure ?? null}), updated_at = now()
@@ -445,8 +448,11 @@ export function createRuntimeController(
           AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping')
       `;
     } finally {
-      await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
-      lock.release();
+      try {
+        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
+      } finally {
+        await lock.end({ timeout: 1 });
+      }
     }
     hub.revoke(attemptID);
     retryCleanup(attemptID);
@@ -952,7 +958,7 @@ export function createRuntimeController(
       }
     },
     async startProjectPrebuild(preparationID: string) {
-      const lock = await database.client.reserve();
+      const lock = database.coordination();
       let projectLock: string | undefined;
       try {
         await lock`SELECT pg_advisory_lock(hashtext(${`project-prebuild:${preparationID}`}))`;
@@ -1109,9 +1115,12 @@ export function createRuntimeController(
           lock,
         );
       } finally {
-        if (projectLock) await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
-        await lock`SELECT pg_advisory_unlock(hashtext(${`project-prebuild:${preparationID}`}))`;
-        lock.release();
+        try {
+          if (projectLock) await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
+          await lock`SELECT pg_advisory_unlock(hashtext(${`project-prebuild:${preparationID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
     async recover() {
@@ -1241,9 +1250,11 @@ export function createRuntimeController(
       await createAccessController(database).requireDevelopment(userID, projectID);
       await requireSetupReady(database.client, projectID);
       const workspaceIdentity = personalWorkspaceIdentity(projectID, userID);
-      const lock = await database.client.reserve();
-      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
+      // Source preparation, infrastructure calls and result reads use the
+      // application pool. Session coordination must not reserve one of its slots.
+      const lock = database.coordination();
       try {
+        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
         const projects = await lock<
           Array<{
             id: string;
@@ -1428,15 +1439,18 @@ export function createRuntimeController(
         }
         return this.get(identity.attemptID);
       } finally {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
-        lock.release();
+        try {
+          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
     async ensureStaging(projectID: string, userID: string) {
       await requireSetupReady(database.client, projectID);
-      const lock = await database.client.reserve();
-      await lock`SELECT pg_advisory_lock(hashtext(${`staging:${projectID}`}))`;
+      const lock = database.coordination();
       try {
+        await lock`SELECT pg_advisory_lock(hashtext(${`staging:${projectID}`}))`;
         const projects = await lock<
           Array<{ repositoryURL: string; defaultBranch: string; devcontainerPath: string }>
         >`
@@ -1590,8 +1604,11 @@ export function createRuntimeController(
         }
         return this.get(identity.attemptID);
       } finally {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`staging:${projectID}`}))`;
-        lock.release();
+        try {
+          await lock`SELECT pg_advisory_unlock(hashtext(${`staging:${projectID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
     async startPersisted(changeID: string, userID: string) {
@@ -1602,9 +1619,9 @@ export function createRuntimeController(
       const projectID = lockRows[0]?.projectID;
       if (!projectID) throw new Error("Change not found");
       await requireSetupReady(database.client, projectID);
-      const lock = await database.client.reserve();
-      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
+      const lock = database.coordination();
       try {
+        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
         const rows = await lock<
           Array<{
             changeID: string;
@@ -1809,8 +1826,11 @@ export function createRuntimeController(
         }
         return this.get(identity.attemptID);
       } finally {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
-        lock.release();
+        try {
+          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${workspaceIdentity.workspaceID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
     async startVerification(verificationID: string, userID: string) {
@@ -1850,9 +1870,9 @@ export function createRuntimeController(
         )
       )
         return this.get(verification.attemptID);
-      const lock = await database.client.reserve();
-      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
+      const lock = database.coordination();
       try {
+        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
         const current = await lock<
           Array<{ attemptID: string | null; attemptState: string | null }>
         >`
@@ -1954,8 +1974,11 @@ export function createRuntimeController(
         );
         return this.get(identity.attemptID);
       } finally {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
-        lock.release();
+        try {
+          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
     async startStagingReplacement(promotionID: string, userID: string) {
@@ -1979,9 +2002,9 @@ export function createRuntimeController(
       const promotion = rows[0];
       if (!promotion) throw new Error("Promotion was not found");
       if (promotion.attemptID) return this.get(promotion.attemptID);
-      const lock = await database.client.reserve();
-      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
+      const lock = database.coordination();
       try {
+        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
         const current = await lock<Array<{ attemptID: string | null }>>`
           SELECT replacement_runtime_attempt_id AS "attemptID"
           FROM factory.promotion_operation WHERE id = ${promotionID} FOR UPDATE
@@ -2054,8 +2077,11 @@ export function createRuntimeController(
         );
         return this.get(identity.attemptID);
       } finally {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
-        lock.release();
+        try {
+          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${promotion.projectID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
     async get(attemptID: string) {
@@ -2170,9 +2196,9 @@ export function createRuntimeController(
       `;
       const projectID = projects[0]?.projectID;
       if (!projectID) throw new Error("Runtime Attempt is not active");
-      const lock = await database.client.reserve();
-      await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
+      const lock = database.coordination();
       try {
+        await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
         const [failed] = await lock<{ id: string }[]>`
           UPDATE factory.runtime_attempt SET stop_intended_at=COALESCE(stop_intended_at,now()),updated_at=now()
           WHERE id=${attemptID} AND state='failed' RETURNING id`;
@@ -2230,8 +2256,11 @@ export function createRuntimeController(
         }
         return this.get(attemptID);
       } finally {
-        await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
-        lock.release();
+        try {
+          await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:${projectID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
       }
     },
   };

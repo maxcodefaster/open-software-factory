@@ -2,6 +2,16 @@ import { z } from "zod";
 
 const errorResponseSchema = z.object({ error: z.string().optional() });
 
+export class APIRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "APIRequestError";
+  }
+}
+
 export async function apiRequest<TSchema extends z.ZodType>(
   schema: TSchema,
   path: string,
@@ -11,7 +21,8 @@ export async function apiRequest<TSchema extends z.ZodType>(
   const value = await response.json().catch(() => undefined);
   if (!response.ok) {
     const error = errorResponseSchema.safeParse(value);
-    throw new Error(
+    throw new APIRequestError(
+      response.status,
       error.success && error.data.error
         ? error.data.error
         : `Request failed with ${response.status}`,

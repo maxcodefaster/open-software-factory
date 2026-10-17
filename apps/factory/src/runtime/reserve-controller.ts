@@ -2,9 +2,9 @@ import type { TransactionSql } from "postgres";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   defaultReservePolicy,
-  requireReservePolicy,
   type ReservePolicy,
   type ReserveRole,
+  requireReservePolicy,
 } from "../../../../packages/runtime-domain/src/reserve";
 import {
   createReserveClient,
@@ -47,14 +47,17 @@ export function createExecutionReserve(
   let timer: ReturnType<typeof setInterval> | undefined;
 
   async function withSlotLock<T>(id: string, action: (sql: Database["client"]) => Promise<T>) {
-    const sql = await database.client.reserve();
+    const sql = database.coordination();
     const key = `execution-slot:${id}`;
     try {
       await sql`SELECT pg_advisory_lock(hashtext(${key}))`;
       return await action(sql);
     } finally {
-      await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
-      sql.release();
+      try {
+        await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
+      } finally {
+        await sql.end({ timeout: 1 });
+      }
     }
   }
   async function reconcile() {

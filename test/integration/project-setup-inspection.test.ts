@@ -1,9 +1,114 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
-import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
+
+test("setup inference does not retain the application's only pooled database connection", async () => {
+  const isolated = await factoryProcess();
+  const database = isolated.connect(1);
+  const userID = crypto.randomUUID(),
+    projectID = crypto.randomUUID();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let work: Promise<unknown> | undefined;
+  let controller: ReturnType<typeof createSetupInspection> | undefined;
+  const commandID = crypto.randomUUID();
+  let generations = 0;
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${userID},'Owned pool proof',${`${userID}@pool.test`})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${`pool-${projectID.slice(0, 8)}`},'Pool proof','https://forge.test/owned/pool','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+      VALUES(${projectID},${userID},'developer',true,${userID})`;
+    const forge = createForgejoClient({
+      apiURL: "https://forge.test/api/v1/",
+      token: "owned-fixture",
+      fetch: async (url) => {
+        const path = String(url);
+        if (path.endsWith("/branches/main"))
+          return Response.json({ name: "main", commit: { id: "a".repeat(40) } });
+        if (path.includes("/git/trees/"))
+          return Response.json({
+            sha: "a".repeat(40),
+            truncated: false,
+            tree: [{ path: "package.json", type: "blob", sha: "b".repeat(40), size: 40 }],
+          });
+        if (path.endsWith("/repos/owned/pool"))
+          return Response.json({ name: "pool", owner: { login: "owned" }, default_branch: "main" });
+        throw new Error(`Unsupported owned fixture path: ${new URL(path).pathname}`);
+      },
+    });
+    controller = createSetupInspection({
+      database,
+      forge,
+      forgeURL: "https://forge.test",
+      forgeOwner: "owned",
+      model: async () => ({ modelID: "owned-model", connectionID: null, connectionVersion: null }),
+      connection: async () => ({ apiKey: "owned-key" }),
+      ready: async () => {},
+      generate: async () => {
+        generations++;
+        entered.resolve();
+        await release.promise;
+        return {
+          purpose: "Owned application",
+          services: [],
+          uncertainty: [],
+          questions: [
+            { id: "port", question: "Which port should the app use?" },
+            { id: "health", question: "Which existing health path is available?" },
+          ],
+          files: [],
+        };
+      },
+    });
+    work = controller.start(projectID, userID, commandID);
+    await Promise.race([
+      entered.promise,
+      Bun.sleep(1500).then(() => {
+        throw new Error("Setup inference was blocked by its own reserved pool connection");
+      }),
+    ]);
+    const start = performance.now();
+    const [read] = await Promise.race([
+      database.client`SELECT 1 AS available`,
+      Bun.sleep(1500).then(() => {
+        throw new Error("Application pool remained occupied during inference");
+      }),
+    ]);
+    expect(read?.["available"]).toBe(1);
+    expect(performance.now() - start).toBeLessThan(1500);
+    release.resolve();
+    await work;
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    const continuationID = crypto.randomUUID();
+    const continuation = { parentID: commandID, answers: { health: "/health", port: "3000" } };
+    await controller.start(projectID, userID, continuationID, continuation);
+    await controller.settle();
+    expect(generations).toBe(2);
+    await controller.start(projectID, userID, continuationID, continuation);
+    await controller.start(projectID, userID, continuationID, {
+      parentID: commandID,
+      answers: { port: "3000", health: "/health" },
+    });
+    expect(generations).toBe(2);
+    await expect(
+      controller.start(projectID, userID, continuationID, {
+        parentID: commandID,
+        answers: { port: "4000", health: "/health" },
+      }),
+    ).rejects.toThrow("different work");
+  } finally {
+    release.resolve();
+    await database.client.end({ timeout: 0 });
+    await work?.catch(() => undefined);
+    await controller?.settle();
+    await isolated.dispose();
+  }
+}, 30_000);
 
 test("actual Forgejo atomically applies only confirmed missing setup files and recovers lost commit response", async () => {
   const process = await factoryProcess();

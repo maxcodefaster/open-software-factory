@@ -29,10 +29,7 @@ import {
   epicProposalInput,
 } from "../../../packages/conversation-domain/src/epic-proposal";
 import { assistantContext } from "../../../packages/interface-domain/src/assistant-context";
-import {
-  type DesktopBackgroundKey,
-  defaultDesktopBackgroundKey,
-} from "../../../packages/interface-domain/src/background";
+import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import {
   type BoardStage,
   ticketBoardStage,
@@ -65,6 +62,7 @@ import {
   buildAgentHint,
   buildAgentNeedsStart,
   buildAgentStatus,
+  createAgentReadFence,
   retainAgentActivity,
 } from "./agent-view-state";
 import { apiRequest, emptyResponseSchema } from "./api-client";
@@ -76,7 +74,6 @@ import {
   appPreviewsSchema,
   attemptsResponseSchema,
   type Bootstrap,
-  bootstrapSchema,
   type Change,
   type ConversationView,
   changesResponseSchema,
@@ -114,6 +111,7 @@ import {
   ConversationEntryCard,
   conversationQuestion,
 } from "./conversation-components";
+import { streamConversation } from "./conversation-stream";
 import { conversationTimeline } from "./conversation-timeline";
 import { bindDialogKeyboard } from "./dialog-keyboard";
 import { DockAppButton, DockButton } from "./dock";
@@ -122,9 +120,9 @@ import { EpicProposalWorkspace } from "./epic-proposal-workspace";
 import { Icon } from "./icon";
 import type { KnowledgeDraft } from "./knowledge-workspace";
 import { createLifecyclePoller } from "./lifecycle-poller";
+import { markdownHTML } from "./markdown";
 import { bindPopoverKeyboard } from "./popover-keyboard";
 import { createProjectSetupInteraction, ProjectSetupPanel, SetupEmptyBoard } from "./setup/panel";
-import { SignIn } from "./sign-in";
 import { TicketBoardContents } from "./ticket-board";
 import {
   type PersonalTicketDraft,
@@ -179,64 +177,24 @@ function ticketReference(ticketID: string) {
   return `TCK-${ticketID.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
 }
 
-export function Factory() {
-  const [bootstrap, setBootstrap] = createSignal<Bootstrap>();
-  const [error, setError] = createSignal("");
-  function load() {
-    setError("");
-    void apiRequest(bootstrapSchema, "/api/session")
-      .then(setBootstrap)
-      .catch((cause) =>
-        setError(cause instanceof Error ? cause.message : "Factory failed to load"),
-      );
-  }
-  createEffect(() => undefined, load);
-  const authenticatedBootstrap = () => {
-    const value = bootstrap();
-    return value?.session ? { ...value, session: value.session } : undefined;
-  };
-
+export function AuthenticatedFactory(props: Bootstrap & { session: Session }) {
   return (
-    <Switch>
-      <Match when={bootstrap() === undefined}>
-        <main class="loading" data-background={defaultDesktopBackgroundKey}>
-          <Show when={error()} fallback={<span>Opening Factory</span>}>
-            <p role="alert">{error()}</p>
-            <button type="button" class="quiet-button" onClick={load}>
-              Retry opening Factory
-            </button>
-          </Show>
-        </main>
-      </Match>
-      <Match when={!bootstrap()?.session}>
-        <SignIn
-          companySignIn={bootstrap()?.identity.companySignIn ?? false}
-          error={error()}
-          setError={setError}
-          background={bootstrap()?.uiPreference.desktopBackgroundKey ?? defaultDesktopBackgroundKey}
-        />
-      </Match>
-      <Match when={authenticatedBootstrap()}>
-        {(value) => (
-          <ZeroProvider
-            identity={{ userId: value().session.user.id, schemaVersion: "slice-11b-access" }}
-            cacheURL={value().zeroCacheURL}
-            schema={zeroSchema}
-            mutators={zeroMutators}
-            context={{
-              userId: value().session.user.id,
-              systemManager: value().session.systemManager,
-            }}
-          >
-            <FactoryWorkspace
-              session={value().session}
-              uiPreference={value().uiPreference}
-              modelRelayConfigured={value().modelRelayConfigured}
-            />
-          </ZeroProvider>
-        )}
-      </Match>
-    </Switch>
+    <ZeroProvider
+      identity={{ userId: props.session.user.id, schemaVersion: "slice-11b-access" }}
+      cacheURL={props.zeroCacheURL}
+      schema={zeroSchema}
+      mutators={zeroMutators}
+      context={{
+        userId: props.session.user.id,
+        systemManager: props.session.systemManager,
+      }}
+    >
+      <FactoryWorkspace
+        session={props.session}
+        uiPreference={props.uiPreference}
+        modelRelayConfigured={props.modelRelayConfigured}
+      />
+    </ZeroProvider>
   );
 }
 
@@ -266,10 +224,6 @@ function FactoryWorkspace(props: {
   const [selectedEpicID, setSelectedEpicID] = createSignal("");
   createEffect(selectedProjectID, () => {
     setSelectedEpicID("");
-  });
-  const knowledgePages = useZeroQuery(() => {
-    const projectId = selectedProjectID();
-    return projectId ? zeroQueries.knowledge.list({ projectId }) : null;
   });
   const [selectedTicketID, setSelectedTicketID] = createSignal<string>();
   const [epicProposals, setEpicProposals] = createSignal<Record<string, EpicProposal>>({});
@@ -371,7 +325,15 @@ function FactoryWorkspace(props: {
     stopId: null,
   });
   let lastAgentSnapshot: AgentSnapshot | undefined;
-  function publishAgentView(changeID: string, view: AgentView) {
+  const agentReadFence = createAgentReadFence();
+  let lastAgentHistory = { changeID: "", at: 0 };
+  function publishAgentView(
+    changeID: string,
+    view: AgentView,
+    read?: ReturnType<typeof agentReadFence.beginRead>,
+  ) {
+    if (read && !agentReadFence.current(read)) return;
+    if (!read) agentReadFence.commandPublished();
     try {
       if (view.turn) {
         acknowledgeCommand(agentCommandScope("change-start", changeID), view.turn.commandId);
@@ -384,6 +346,8 @@ function FactoryWorkspace(props: {
     setAgent(lastAgentSnapshot.view);
   }
   function resetAgentView() {
+    agentReadFence.commandPublished();
+    lastAgentHistory = { changeID: "", at: 0 };
     lastAgentSnapshot = undefined;
     setAgent({
       state: "idle",
@@ -396,6 +360,26 @@ function FactoryWorkspace(props: {
     });
   }
   const [storedConversation, setConversation] = createSignal<ConversationView>();
+  let conversationReadGeneration = 0;
+  let ticketReadGeneration = 0;
+  let workspaceDisposed = false;
+  const projectStreams = new Set<AbortController>();
+  onCleanup(() => {
+    workspaceDisposed = true;
+    for (const controller of projectStreams) controller.abort();
+    projectStreams.clear();
+  });
+  const [streamedAnswers, setStreamedAnswers] = createSignal<
+    Record<string, { turnId: string; text: string }>
+  >({});
+  const streamedAnswer = () => {
+    const answer = streamedAnswers()[assistantKey()];
+    if (!answer?.text) return undefined;
+    const turn = conversation()?.turn;
+    if (turn?.id === answer.turnId && !["pending", "dispatching", "running"].includes(turn.state))
+      return undefined;
+    return answer;
+  };
   const conversation = () => {
     const value = storedConversation();
     return value &&
@@ -405,6 +389,9 @@ function FactoryWorkspace(props: {
       : undefined;
   };
   function publishConversation(value: ConversationView | undefined) {
+    // A command result supersedes GETs already in flight, even when their
+    // captured turn state has the same document version.
+    conversationReadGeneration++;
     setConversation(value);
     for (const entry of value?.entries ?? []) {
       const parsed = epicProposalInput.safeParse(entry.payload["epicProposal"]);
@@ -664,6 +651,12 @@ function FactoryWorkspace(props: {
     return projectWorkspaces()[selectedProjectID() ?? "factory"];
   };
   const workspaceTabs = () => currentWorkspaceState()?.tabs ?? [];
+  const knowledgePages = useZeroQuery(() => {
+    const projectId = selectedProjectID();
+    return projectId && workspaceTabs().some((tab) => tab.view === "knowledge")
+      ? zeroQueries.knowledge.list({ projectId })
+      : null;
+  });
   const activeWorkspaceTab = () => {
     if (!workspaceWindow.present()) return undefined;
     return selectedWorkspaceTab(currentWorkspaceState());
@@ -826,19 +819,32 @@ function FactoryWorkspace(props: {
     }
     const changeID = selectedChange()?.id;
     if (changeID) {
+      const read = agentReadFence.beginRead();
+      const historyInterval = ["starting", "working"].includes(agent().state) ? 2_000 : 10_000;
+      const history =
+        agentOpen() &&
+        (lastAgentHistory.changeID !== changeID ||
+          Date.now() - lastAgentHistory.at >= historyInterval);
       const [agentView, deliveryView] = await Promise.all([
-        apiRequest(agentViewSchema, `/api/changes/${changeID}/agent`, { signal }),
+        apiRequest(
+          agentViewSchema,
+          `/api/changes/${changeID}/agent${history ? "" : "?history=0"}`,
+          { signal },
+        ),
         apiRequest(deliveryViewSchema, `/api/changes/${changeID}/delivery`, { signal }),
       ]);
       if (selectedChange()?.id !== changeID) return;
-      if (agentView) publishAgentView(changeID, agentView);
+      if (agentView && agentReadFence.current(read)) {
+        if (history && agentView.messagesAvailable) lastAgentHistory = { changeID, at: Date.now() };
+        publishAgentView(changeID, agentView, read);
+      }
       setDelivery(deliveryView);
     } else if (!changeID) {
       resetAgentView();
       setDelivery(undefined);
     }
     if (projectID && workspaceView() === "knowledge") {
-      await refreshKnowledge();
+      await refreshKnowledge(signal);
     }
   }
   const lifecyclePoller = createLifecyclePoller({
@@ -849,9 +855,18 @@ function FactoryWorkspace(props: {
   const refreshLifecycleState = lifecyclePoller.refresh;
 
   async function refreshTicketDetail(ticketID = selectedTicketID()) {
+    const generation = ++ticketReadGeneration;
+    const projectID = selectedProjectID();
     if (ticketID) {
       const body = await apiRequest(ticketDetailSchema, `/api/tickets/${ticketID}`);
-      if (selectedTicketID() !== ticketID) return;
+      if (
+        workspaceDisposed ||
+        generation !== ticketReadGeneration ||
+        selectedProjectID() !== projectID ||
+        selectedTicketID() !== ticketID ||
+        (detail()?.ticket.id === ticketID && body.ticket.version < (detail()?.ticket.version ?? 0))
+      )
+        return;
       setDetail(body);
     }
   }
@@ -859,6 +874,7 @@ function FactoryWorkspace(props: {
     projectID = selectedProjectID(),
     ticketID = assistantTicketID(),
   ) {
+    const generation = ++conversationReadGeneration;
     if (!projectID) {
       setConversation(undefined);
       return;
@@ -868,7 +884,13 @@ function FactoryWorkspace(props: {
       conversationViewSchema.nullable(),
       `/api/projects/${projectID}/conversation${query}`,
     );
-    if (selectedProjectID() !== projectID || assistantTicketID() !== ticketID) return;
+    if (
+      workspaceDisposed ||
+      generation !== conversationReadGeneration ||
+      selectedProjectID() !== projectID ||
+      assistantTicketID() !== ticketID
+    )
+      return;
     try {
       if (value) acknowledgeConversation(value);
     } catch (cause) {
@@ -883,6 +905,8 @@ function FactoryWorkspace(props: {
     () => [agentOpen(), selectedProjectID(), assistantTicketID()] as const,
     ([open, projectID, ticketID]) => {
       if (!open || !projectID) return;
+      lastAgentHistory = { changeID: "", at: 0 };
+      void refreshLifecycleState();
       let stopped = false;
       let timer: ReturnType<typeof setTimeout>;
       async function refresh() {
@@ -1467,9 +1491,10 @@ function FactoryWorkspace(props: {
   async function checkStopStatus() {
     const change = selectedChange();
     if (!change) return;
+    const read = agentReadFence.beginRead();
     await mutate(async () => {
       const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent`);
-      if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
+      if (selectedChange()?.id === change.id) publishAgentView(change.id, value, read);
     });
   }
 
@@ -1577,15 +1602,24 @@ function FactoryWorkspace(props: {
       intent = "project-research";
     const query = ticketID ? `?ticketId=${encodeURIComponent(ticketID)}` : "";
     const scope = agentCommandScope("project-message");
+    const streamKey = assistantKey();
+    let streamTurnId: string | undefined;
+    const clearStreamedAnswer = () =>
+      setStreamedAnswers((current) => {
+        if (current[streamKey]?.turnId !== streamTurnId) return current;
+        const next = { ...current };
+        delete next[streamKey];
+        return next;
+      });
     let commandId: string | undefined;
     const contextIsCurrent = () =>
-      selectedProjectID() === projectID && assistantTicketID() === ticketID;
+      !workspaceDisposed && selectedProjectID() === projectID && assistantTicketID() === ticketID;
     const clearSubmittedDraft = () => {
       if (commandId) acknowledgeCommand(scope, commandId);
       if (
         form &&
         contextIsCurrent() &&
-        String(new FormData(form).get("message") ?? "").trim() === text
+        (form.elements.namedItem("message") as HTMLTextAreaElement | null)?.value.trim() === text
       )
         form.reset();
     };
@@ -1604,18 +1638,20 @@ function FactoryWorkspace(props: {
             },
           );
           if (!contextIsCurrent()) return;
-          setConversation(contextualConversation);
+          publishConversation(contextualConversation);
         }
         commandId = agentCommandIds.forInput(
           scope,
           JSON.stringify({ projectID, ticketID, text, intent }),
           text,
         );
-        const value = await apiRequest(
-          conversationViewSchema,
+        const streamController = new AbortController();
+        projectStreams.add(streamController);
+        const value = await streamConversation(
           `/api/projects/${projectID}/conversation/message`,
           {
             method: "POST",
+            signal: streamController.signal,
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
               ...(ticketID ? { ticketId: ticketID } : {}),
@@ -1624,7 +1660,22 @@ function FactoryWorkspace(props: {
               ...(intent ? { intent } : {}),
             }),
           },
-        );
+          (event) => {
+            if (workspaceDisposed) return;
+            if (event.type === "admitted") {
+              streamTurnId = event.turnId;
+              clearSubmittedDraft();
+              if (contextIsCurrent()) void refreshConversation().catch(() => {});
+            } else if (event.type === "answer" && event.turnId === streamTurnId) {
+              setStreamedAnswers((current) => ({
+                ...current,
+                [streamKey]: { turnId: event.turnId, text: event.text },
+              }));
+            } else if (event.type === "complete") {
+              clearStreamedAnswer();
+            }
+          },
+        ).finally(() => projectStreams.delete(streamController));
         clearSubmittedDraft();
         if (!contextIsCurrent()) return;
         publishConversation(value);
@@ -1636,6 +1687,7 @@ function FactoryWorkspace(props: {
       contextIsCurrent,
       assistantKey(),
     );
+    clearStreamedAnswer();
     if (result.ok || !contextIsCurrent()) return;
 
     const refreshed = await apiRequest(
@@ -1643,7 +1695,7 @@ function FactoryWorkspace(props: {
       `/api/projects/${projectID}/conversation${query}`,
     ).catch(() => null);
     if (!refreshed || !contextIsCurrent()) return;
-    setConversation(refreshed);
+    publishConversation(refreshed);
     const admitted =
       commandId &&
       refreshed.entries.some(
@@ -1725,6 +1777,7 @@ function FactoryWorkspace(props: {
 
   function loadTicketContext(ticketID: string) {
     const projectID = selectedProjectID();
+    ticketReadGeneration++;
     setSelectedTicketID(ticketID);
     setDetail(undefined);
     resetAgentView();
@@ -1758,6 +1811,7 @@ function FactoryWorkspace(props: {
     setSelectedKnowledgePageID(undefined);
     setOpenRepositoryDocument(undefined);
     setRepositoryDocuments([]);
+    repositoryInventory = "";
     setKnowledgeGeneration(undefined);
     setKnowledgeHistory([]);
     setKnowledgeSearch([]);
@@ -1804,14 +1858,17 @@ function FactoryWorkspace(props: {
             activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.changeID : undefined,
           ticketChangeId: assistantTicketID() ? selectedChange()?.id : undefined,
         });
-  const answeredQuestionIDs = () =>
-    new Set(
-      conversation()
-        ?.entries.filter((entry) => entry.kind === "answer")
-        .map((entry) => entry.inReplyToEntryId)
-        .filter((value): value is string => Boolean(value)) ?? [],
-    );
-  const currentInterviewQuestion = () => unansweredClarification(conversation()?.entries ?? []);
+  const interviewAnswers = createMemo(() => {
+    const answers = new Map<string, string>();
+    for (const entry of conversation()?.entries ?? [])
+      if (entry.kind === "answer" && entry.inReplyToEntryId && !answers.has(entry.inReplyToEntryId))
+        answers.set(entry.inReplyToEntryId, entry.body);
+    return answers;
+  });
+  const answeredQuestionIDs = () => interviewAnswers();
+  const currentInterviewQuestion = createMemo(() =>
+    unansweredClarification(conversation()?.entries ?? []),
+  );
   const pendingInterview = () =>
     pendingInterviewAnswer()?.key !== assistantKey() &&
     conversationMode() === "plan" &&
@@ -1844,9 +1901,7 @@ function FactoryWorkspace(props: {
   const answerSummary = (questionID: string) => {
     const pendingAnswer = pendingInterviewAnswer();
     return (
-      conversation()?.entries.find(
-        (entry) => entry.kind === "answer" && entry.inReplyToEntryId === questionID,
-      )?.body ??
+      interviewAnswers().get(questionID) ??
       (pendingAnswer?.key === assistantKey() && pendingAnswer.questionID === questionID
         ? pendingAnswer.text
         : undefined)
@@ -2078,21 +2133,29 @@ function FactoryWorkspace(props: {
     });
   }
 
-  async function refreshKnowledge() {
+  let repositoryInventory = "";
+  async function refreshKnowledge(signal?: AbortSignal) {
     const project = selectedProject();
     if (!project) return;
-    const [generation, documents] = await Promise.all([
-      apiRequest(
-        knowledgeGenerationSchema.nullable(),
-        `/api/projects/${project.id}/knowledge/generation`,
-      ),
-      canDevelopProject()
-        ? apiRequest(repositoryDocumentsSchema, `/api/projects/${project.id}/knowledge/documents`)
-        : Promise.resolve({ documents: [] }),
-    ]);
+    const generation = await apiRequest(
+      knowledgeGenerationSchema.nullable(),
+      `/api/projects/${project.id}/knowledge/generation`,
+      signal ? { signal } : {},
+    );
     if (selectedProjectID() !== project.id) return;
     setKnowledgeGeneration(generation ?? undefined);
+    const inventory = `${project.id}:${canDevelopProject()}:${generation?.id ?? ""}:${generation?.state ?? ""}`;
+    if (inventory === repositoryInventory) return;
+    const documents = canDevelopProject()
+      ? await apiRequest(
+          repositoryDocumentsSchema,
+          `/api/projects/${project.id}/knowledge/documents`,
+          signal ? { signal } : {},
+        )
+      : { documents: [] };
+    if (selectedProjectID() !== project.id) return;
     setRepositoryDocuments(canDevelopProject() ? documents.documents : []);
+    repositoryInventory = inventory;
   }
   async function openKnowledge() {
     const project = selectedProject();
@@ -2196,11 +2259,12 @@ function FactoryWorkspace(props: {
   const latestRevision = () => detail()?.revisions[0];
   const latestRequirement = () =>
     requirementContent(detail()?.documentRevisions[0] ?? latestRevision());
-  const visibleConversation = () =>
+  const visibleConversation = createMemo(() =>
     conversationTimeline(
       conversation()?.entries ?? [],
       assistantTicketID() && selectedChange() ? agent().messages : [],
-    );
+    ),
+  );
 
   createEffect(assistantKey, () => conversationScroll?.reset());
 
@@ -2911,14 +2975,39 @@ function FactoryWorkspace(props: {
                   );
                 }}
               </For>
-              <Show when={assistantPending()}>
+              <Show when={streamedAnswer()}>
+                <article
+                  class="agent-message assistant"
+                  aria-label="Assistant streaming response"
+                  aria-busy="true"
+                >
+                  <div
+                    class="markdown-body"
+                    innerHTML={markdownHTML(streamedAnswer()?.text ?? "")}
+                  />
+                </article>
+              </Show>
+              <Show when={assistantPending() && !streamedAnswer()}>
                 <section
                   class="assistant-reply-placeholder"
                   role="status"
                   aria-label="Assistant responding"
                   aria-busy="true"
                 >
-                  <span>Preparing a response…</span>
+                  <span>
+                    {(() => {
+                      const progress = conversation()?.turn?.progress;
+                      if (!progress) return "Preparing a response…";
+                      const label = {
+                        guidance: "Loading Project guidance…",
+                        thinking: "Preparing a response…",
+                        searching: "Searching the Project…",
+                        reading: "Reading Project sources…",
+                        validating: "Checking the response…",
+                      }[progress.phase];
+                      return `${label}${progress.completedLookups ? ` · ${progress.completedLookups} research steps completed` : ""}`;
+                    })()}
+                  </span>
                   <div class="assistant-skeleton" aria-hidden="true">
                     <span />
                     <span />

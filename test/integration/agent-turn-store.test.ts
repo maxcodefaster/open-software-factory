@@ -44,6 +44,7 @@ async function fixture() {
     conversationVersion: 1,
     modelId: "owned-admission-model",
     skillRevisionIds: [],
+    requiredSkillRevisionIds: [],
   } satisfies AgentTurnAuthority;
   return {
     database,

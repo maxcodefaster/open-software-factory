@@ -147,7 +147,7 @@ test.skipIf(!enabled)(
     const editorImage = await docker(
       "image",
       "inspect",
-      "factory-slice17-developer-ide:proof",
+      process.env["FACTORY_EDITOR_PROOF_IMAGE"] ?? "factory-slice17-developer-ide:proof",
       "--format",
       "{{.Id}}",
     );
@@ -382,6 +382,11 @@ test.skipIf(!enabled)(
       });
       await page.goto(`${proxy.url}_proof`);
       const frame = page.frameLocator("iframe");
+      await browserExpect(frame.getByText("Editor settings", { exact: true })).toBeVisible();
+      await browserExpect(frame.getByText("Save: manual", { exact: true })).toBeVisible();
+      await frame.getByText("Editor settings", { exact: true }).click();
+      await browserExpect(frame.locator(".theia-settings-container")).toBeVisible();
+      await page.screenshot({ path: resolve(artifacts, "editor-preferences.png") });
       await frame.locator("#files").getByText("app.ts", { exact: true }).dblclick();
       await browserExpect(frame.locator(".monaco-editor").first()).toBeVisible();
       await browserExpect(frame.locator(".view-lines").first()).toContainText("workspace-a");

@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import type postgres from "postgres";
 import { createDatabase } from "../../packages/db/src/client";
 
-const { client } = createDatabase(1);
+const database = createDatabase(2);
+const { client } = database;
 const suffix = crypto.randomUUID().slice(0, 8);
 const userID = "01994a7d-0000-7000-8000-000000000001";
 const otherUserID = crypto.randomUUID();
@@ -676,19 +677,51 @@ try {
       INSERT INTO factory.ticket(id, project_id, title, created_by)
       VALUES (${concurrencyTicketID}, ${concurrencyProjectID}, 'Concurrent Ticket', ${userID})
     `;
-    const [first, second] = await Promise.all([
-      client`
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const firstUpdate = client.begin(async (sql) => {
+      const [session] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      const changed = await sql`
         UPDATE factory.ticket SET description = 'first', version = version + 1
         WHERE id = ${concurrencyTicketID} AND project_id = ${concurrencyProjectID} AND version = 1
         RETURNING id
-      `,
-      client`
+      `;
+      entered.resolve();
+      await release.promise;
+      return { changed, pid: session?.pid };
+    });
+    await entered.promise;
+    const secondEntered = Promise.withResolvers<number>();
+    const secondUpdate = client.begin(async (sql) => {
+      const [session] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
+      secondEntered.resolve(session!.pid);
+      return sql`
         UPDATE factory.ticket SET description = 'second', version = version + 1
         WHERE id = ${concurrencyTicketID} AND project_id = ${concurrencyProjectID} AND version = 1
         RETURNING id
-      `,
-    ]);
-    if (first.length + second.length !== 1) {
+      `;
+    });
+    const secondPID = await secondEntered.promise;
+    const observer = database.coordination();
+    try {
+      const deadline = Date.now() + 3_000;
+      let contended = false;
+      while (Date.now() < deadline) {
+        const [activity] = await observer<{ waiting: boolean }[]>`
+          SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=${secondPID}`;
+        if (activity?.waiting) {
+          contended = true;
+          break;
+        }
+        await Bun.sleep(10);
+      }
+      if (!contended) throw new Error("Ticket CAS proof did not create real lock contention");
+    } finally {
+      release.resolve();
+      await observer.end();
+    }
+    const [first, second] = await Promise.all([firstUpdate, secondUpdate]);
+    if (first.pid === secondPID || first.changed.length + second.length !== 1) {
       throw new Error("PostgreSQL did not serialize concurrent Ticket compare-and-swap updates");
     }
   } finally {

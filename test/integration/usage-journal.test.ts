@@ -92,9 +92,9 @@ test("usage journal serializes replay, freezes attribution/rates and retains twe
     });
     await journal.settle("owned:long-lived", "completed");
     expect(await journal.prune(pruneAfter)).toHaveLength(0);
-    expect(
-      [...await database.client`SELECT event_id FROM factory.usage_entry WHERE operation_id='owned:long-lived'`],
-    ).toEqual([{ event_id: "recent" }]);
+    expect([
+      ...(await database.client`SELECT event_id FROM factory.usage_entry WHERE operation_id='owned:long-lived'`),
+    ]).toEqual([{ event_id: "recent" }]);
     await journal.abandon("owned:long-lived");
     await expect(journal.record("unadmitted", observation)).rejects.toThrow(
       "admitted before observation",

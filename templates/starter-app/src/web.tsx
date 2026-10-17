@@ -3,15 +3,18 @@ import { createSignal, Show } from "solid-js";
 import { createAuthClient } from "better-auth/client";
 import "./web.css";
 
-const base=new URL(document.baseURI);
-const auth = createAuthClient({baseURL:base.origin,basePath:`${base.pathname.replace(/\/$/,"")}/api/auth`});
+const base = new URL(document.baseURI);
+const auth = createAuthClient({
+  baseURL: base.origin,
+  basePath: `${base.pathname.replace(/\/$/, "")}/api/auth`,
+});
 function App() {
   const [name, setName] = createSignal<string | null | undefined>();
   const [signup, setSignup] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   async function refresh() {
-    const response = await fetch(new URL("api/session",base));
+    const response = await fetch(new URL("api/session", base));
     const data = (await response.json()) as { name?: string };
     setName(response.ok ? (data.name ?? "") : null);
   }
@@ -77,6 +80,7 @@ function App() {
                 </button>
               </form>
               <button
+                type="button"
                 class="text-button"
                 onClick={() => {
                   setSignup(!signup());
@@ -91,6 +95,7 @@ function App() {
           <header>
             <span>{name()}</span>
             <button
+              type="button"
               class="text-button"
               onClick={async () => {
                 await auth.signOut();

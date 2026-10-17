@@ -1,4 +1,7 @@
-import upstream from "../../../upstream.json";
+import upstream from "../../../upstream.json" with { type: "json" };
+import { readFile } from "node:fs/promises";
+import { runCommand } from "./command";
+import { kubernetesCommand } from "./config";
 
 export interface RuntimePodObservation {
   readonly uid: string;
@@ -40,24 +43,7 @@ export interface KubernetesClient {
 }
 
 async function kubectl(arguments_: string[], input?: string) {
-  const process = Bun.spawn(["kubectl", "--context", "orbstack", ...arguments_], {
-    stdin: input === undefined ? "ignore" : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  if (input !== undefined) {
-    const stdin = process.stdin;
-    if (!stdin) throw new Error("kubectl stdin was not created");
-    stdin.write(input);
-    await stdin.flush();
-    stdin.end();
-  }
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-    process.exited,
-  ]);
-  return { stdout, stderr, exitCode };
+  return runCommand(kubernetesCommand(["--request-timeout=10s", ...arguments_]), input);
 }
 
 export function createKubernetesClient(run: typeof kubectl = kubectl): KubernetesClient {
@@ -395,7 +381,9 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
   };
 }
 
-export async function readSmokeRegistryCA() {
+export async function readRuntimeRegistryCA() {
+  const certificateFile = process.env["FACTORY_REGISTRY_CA_FILE"];
+  if (certificateFile) return readFile(certificateFile, "utf8");
   const result = await kubectl([
     "get",
     "secret",

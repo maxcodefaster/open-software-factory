@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { kubernetesCommand } from "./config";
 
 const payload = z.object({
   metadata: z.object({ name: z.string(), namespace: z.string() }),
@@ -81,10 +82,10 @@ async function boundedText(stream: ReadableStream<Uint8Array>, limit: number) {
   }
 }
 async function readRaw(path: string) {
-  const process = Bun.spawn(
-    ["kubectl", "--context", "orbstack", "get", "--request-timeout=2s", "--raw", path],
-    { stdout: "pipe", stderr: "pipe" },
-  );
+  const process = Bun.spawn(kubernetesCommand(["get", "--request-timeout=2s", "--raw", path]), {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const timeout = setTimeout(() => process.kill(), 2500);
   try {
     const [output, error, status] = await Promise.all([

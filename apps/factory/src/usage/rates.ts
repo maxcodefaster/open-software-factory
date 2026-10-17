@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { usageRate, type UsageRate } from "../../../../packages/conversation-domain/src/usage";
+import { type UsageRate, usageRate } from "../../../../packages/conversation-domain/src/usage";
 
 const cost = z.number().finite().nonnegative().max(1_000_000).optional();
 const prices = z.object({ input: cost, output: cost, cache_read: cost, cache_write: cost });
@@ -16,7 +16,15 @@ export function catalogueRate(
 ): UsageRate | null {
   const parsed = catalogue.safeParse(input);
   if (!parsed.success) return null;
-  const selected = parsed.data[providerID]?.models[modelID]?.cost;
+  return parsedRate(parsed.data, providerID, modelID, fetchedAt);
+}
+function parsedRate(
+  input: z.infer<typeof catalogue>,
+  providerID: string,
+  modelID: string,
+  fetchedAt: string,
+): UsageRate | null {
+  const selected = input[providerID]?.models[modelID]?.cost;
   if (!selected) return null;
   const tier = (value: z.infer<typeof prices>, above: number) => ({
     above,
@@ -41,7 +49,7 @@ export function catalogueRate(
 export function createUsageCatalogue(
   fetcher: (url: string, init?: RequestInit) => Promise<Response> = fetch,
 ) {
-  let cached: { body: unknown; fetchedAt: string; expires: number } | undefined;
+  let cached: { body: z.infer<typeof catalogue>; fetchedAt: string; expires: number } | undefined;
   let pending: Promise<void> | undefined;
   async function refresh() {
     try {
@@ -72,24 +80,34 @@ export function createUsageCatalogue(
         offset += part.byteLength;
       }
       const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
-      if (!catalogue.safeParse(body).success) return;
-      cached = { body, fetchedAt: new Date().toISOString(), expires: Date.now() + 86_400_000 };
+      const parsed = catalogue.safeParse(body);
+      if (!parsed.success) return;
+      cached = {
+        body: parsed.data,
+        fetchedAt: new Date().toISOString(),
+        expires: Date.now() + 86_400_000,
+      };
     } catch {
       /* Unavailable price is unknown; never publish a fabricated free rate. */
     }
   }
   let nextAttempt = 0;
+  function refreshIfDue() {
+    if (pending) return pending;
+    if ((cached && cached.expires >= Date.now()) || Date.now() < nextAttempt)
+      return Promise.resolve();
+    pending = refresh().finally(() => {
+      pending = undefined;
+      nextAttempt = Date.now() + 300_000;
+    });
+    return pending;
+  }
   return {
-    async get(providerID: string, modelID: string) {
-      if ((!cached || cached.expires < Date.now()) && Date.now() >= nextAttempt) {
-        pending ??= refresh().finally(() => {
-          pending = undefined;
-          nextAttempt = Date.now() + 300_000;
-        });
-        await pending;
-      }
+    refresh: refreshIfDue,
+    get(providerID: string, modelID: string) {
+      void refreshIfDue();
       return cached && cached.expires >= Date.now()
-        ? catalogueRate(cached.body, providerID, modelID, cached.fetchedAt)
+        ? parsedRate(cached.body, providerID, modelID, cached.fetchedAt)
         : null;
     },
   };

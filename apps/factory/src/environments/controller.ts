@@ -1,20 +1,20 @@
 import { createHmac } from "node:crypto";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import {
-  environmentManifest,
-  environmentMetadata,
-  environmentWrite,
-  replaceEnvironment,
+  type EnvironmentBundle,
   type EnvironmentManifest,
   type EnvironmentSettingsView,
   type EnvironmentWrite,
-  type EnvironmentBundle,
+  environmentManifest,
+  environmentMetadata,
+  environmentWrite,
   type ProjectEnvironment,
+  replaceEnvironment,
 } from "../../../../packages/project-domain/src/environment";
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { emptyEnvironment, type EnvironmentSecrets, type StoredEnvironment } from "./openbao";
+import { type EnvironmentSecrets, emptyEnvironment, type StoredEnvironment } from "./openbao";
 
 type Database = ReturnType<typeof createDatabase>;
 type SettingsRow = { version: number; manifest: EnvironmentManifest; secretKey: string | null };
@@ -75,11 +75,21 @@ export function createEnvironmentController(
         "unavailable",
         "The stored environment does not match its save intent.",
       );
-    await database.client.begin(async (sql) => {
+    return database.client.begin(async (sql) => {
       await lock(sql, row.projectID, row.environment);
       const intent = await writeRow(sql, row.commandID);
-      if (!intent || intent.state === "committed") return;
+      if (!intent) throw conflict();
+      if (intent.state === "committed") return true;
       if (intent.state === "discarded") throw conflict();
+      try {
+        await projectAuthorityIn(sql, intent.createdBy, intent.projectID, true);
+      } catch (cause) {
+        if (!(cause instanceof CommandError) || !["forbidden", "not-found"].includes(cause.code))
+          throw cause;
+        // Keep the encrypted external result, but never publish it after authority loss.
+        await sql`UPDATE factory.environment_write SET state='discarded' WHERE command_id=${intent.commandID}`;
+        return false;
+      }
       const active = await current(sql, row.projectID, row.environment);
       if (active.version !== row.baseVersion) throw conflict();
       await sql`INSERT INTO factory.project_environment(project_id, environment, version, manifest, secret_key)
@@ -88,6 +98,7 @@ export function createEnvironmentController(
           manifest=EXCLUDED.manifest, secret_key=EXCLUDED.secret_key, updated_at=now()`;
       await sql`UPDATE factory.environment_write SET state='committed', committed_at=now()
         WHERE command_id=${row.commandID}`;
+      return true;
     });
   }
   async function get(
@@ -96,8 +107,8 @@ export function createEnvironmentController(
     environment: ProjectEnvironment,
   ): Promise<EnvironmentSettingsView> {
     return database.client.begin(async (sql) => {
-      await projectDevelopmentAuthorityIn(sql, userID, projectID);
       const canManage = await projectAuthorityIn(sql, userID, projectID);
+      if (!canManage) await projectDevelopmentAuthorityIn(sql, userID, projectID);
       const row = await current(sql, projectID, environment);
       const [pending] = await sql<
         Array<{ commandID: string }>
@@ -214,8 +225,11 @@ export function createEnvironmentController(
         stored = confirmed;
       }
     }
-    await database.client.begin((sql) => projectAuthorityIn(sql, userID, projectID, true));
-    await settle(admission.row, stored);
+    if (!(await settle(admission.row, stored)))
+      throw new CommandError(
+        "forbidden",
+        "Project management access changed before the environment save completed.",
+      );
     return get(projectID, userID, environment);
   }
   return {

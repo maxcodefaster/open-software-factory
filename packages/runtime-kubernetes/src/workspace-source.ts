@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { kubernetesCommand } from "./config";
 import { resolve } from "node:path";
 import { createKubernetesClient, type KubernetesClient } from "./client";
 import { renderWorkspaceSourceResources, type WorkspaceSourceManifest } from "./source-manifest";
@@ -106,24 +107,14 @@ export async function boundedSourceBody(
 }
 
 async function executeCommand(args: string[], input?: unknown) {
-  const child = Bun.spawn(["kubectl", "--context", "orbstack", ...args], {
-    stdin: input === undefined ? "ignore" : "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const timer = setTimeout(() => child.kill(), 15_000);
-  timer.unref();
-  const stdin = child.stdin;
-  if (input !== undefined && stdin && typeof stdin !== "number") {
-    stdin.write(JSON.stringify(input));
-    stdin.end();
-  }
-  const [output, error, status] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  clearTimeout(timer);
+  const {
+    stdout: output,
+    stderr: error,
+    exitCode: status,
+  } = await runCommand(
+    kubernetesCommand(["--request-timeout=10s", ...args]),
+    input === undefined ? undefined : JSON.stringify(input),
+  );
   if (status !== 0) {
     if (error.includes("NotFound") || error.includes("not found")) return null;
     throw new Error("Workspace source infrastructure command failed");
@@ -546,3 +537,4 @@ function completeSourceObservation(
   const owner = metadata.parse(namespace.metadata);
   return validateSourceObservation(input, { pod, claim, secret, namespace: owner });
 }
+import { runCommand } from "./command";

@@ -1,20 +1,80 @@
 import { expect, test } from "bun:test";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
+import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import {
   hashConnectorToken,
   runtimeConnectorTokens,
 } from "../../packages/runtime-domain/src/identity";
+import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import {
   createKubernetesClient,
   type KubernetesClient,
 } from "../../packages/runtime-kubernetes/src/client";
+import upstream from "../../upstream.json";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
-import upstream from "../../upstream.json";
-import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
-import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
-import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
+
+test.each(["personal", "staging", "ticket"] as const)(
+  "retained %s runtime reads do not deadlock a one-connection application pool",
+  async (kind) => {
+    const isolated = await factoryProcess();
+    const database = isolated.connect(1);
+    let pending: Promise<unknown> | undefined;
+    try {
+      const owned = await fixture(undefined, undefined, database);
+      const controller = createRuntimeController(
+        database,
+        new RuntimeHub(async () => {}),
+        "owned-pool-secret",
+        {
+          async prepareExecution() {
+            throw new Error("Retained runtime must not prepare source");
+          },
+        },
+        {
+          ...createKubernetesClient(),
+          async apply() {
+            throw new Error("Retained runtime must not create resources");
+          },
+        },
+        async () => "",
+      );
+      let expected = owned.attemptID;
+      if (kind === "personal") {
+        const workspaceID = crypto.randomUUID();
+        const namespace = `factory-workspace-${workspaceID.replaceAll("-", "").slice(0, 12)}`;
+        expected = crypto.randomUUID();
+        await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
+        VALUES(${workspaceID},${owned.projectID},'personal',${owned.userID},'main',${"a".repeat(40)},${namespace},'never-created',${owned.userID})`;
+        await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${expected},${owned.projectID},${workspaceID},1,${"a".repeat(40)},'ready',${namespace},'never-created',${"a".repeat(64)},${"b".repeat(64)},now(),${owned.userID})`;
+        pending = controller.start(owned.projectID, owned.userID);
+      } else if (kind === "staging") {
+        await database.client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id) VALUES(${owned.projectID},${"a".repeat(40)},${owned.attemptID})`;
+        pending = controller.ensureStaging(owned.projectID, owned.userID);
+      } else {
+        await database.client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
+        SELECT ${crypto.randomUUID()},id,'owned','pool',branch_name,base_sha,${crypto.randomUUID()},'succeeded',base_sha,now() FROM factory.change WHERE id=${owned.changeID}`;
+        pending = controller.startPersisted(owned.changeID, owned.userID);
+      }
+      void pending.catch(() => {});
+      const current = await Promise.race([
+        pending,
+        Bun.sleep(1000).then(() => {
+          throw new Error("Retained runtime read deadlocked the application pool");
+        }),
+      ]);
+      expect(current).toMatchObject({ id: expected, state: "ready" });
+    } finally {
+      await database.client.end({ timeout: 1 });
+      await pending?.catch(() => {});
+      await isolated.dispose();
+    }
+  },
+  30_000,
+);
 
 test("Stop retires a failed older attempt without reactivating it or stopping its replacement", async () => {
   const processFixture = await factoryProcess();
@@ -393,7 +453,12 @@ test.each([
       creating = controller(true).startVerification(verificationID, owned.userID);
       // The rejection is checked after releasing the boundary, never left unhandled.
       void creating.catch(() => undefined);
-      await (beforeCreate || recoveredCreate ? preparing.promise : entered.promise);
+      await Promise.race([
+        beforeCreate || recoveredCreate ? preparing.promise : entered.promise,
+        creating.then(() => {
+          throw new Error("Owned runtime create finished without reaching its test boundary");
+        }),
+      ]);
       const attempts = await database.client<{ id: string }[]>`
       SELECT id FROM factory.runtime_attempt WHERE verification_id = ${verificationID}`;
       attemptID = attempts[0]?.id;

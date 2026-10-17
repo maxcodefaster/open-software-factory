@@ -3,6 +3,7 @@ import {
   assertModeAuthority,
   conversationMessageInput,
   interviewAnswerCommandInput,
+  interviewQuestionInput,
   normalizeInterviewAnswer,
 } from "./conversation";
 
@@ -71,6 +72,29 @@ describe("Requirements Interview answers", () => {
     ],
     allowCustom: true,
   };
+
+  for (const type of ["single-select", "multi-select"] as const)
+    test(`${type} rejects duplicate option identities before an answer can change meaning`, () => {
+      const duplicate = {
+        ...question,
+        type,
+        options: [
+          { id: "access", label: "Read only", description: "Never allow editing" },
+          { id: "access", label: "Editable", description: "Allow editing" },
+        ],
+      };
+      expect(interviewQuestionInput.safeParse(duplicate).success).toBe(false);
+      expect(() =>
+        normalizeInterviewAnswer(duplicate, { selectedOptionIds: ["access"], customText: "" }),
+      ).toThrow("unique");
+      const valid = {
+        ...duplicate,
+        options: [duplicate.options[0]!, { ...duplicate.options[1]!, id: "edit" }],
+      };
+      expect(
+        normalizeInterviewAnswer(valid, { selectedOptionIds: ["access"], customText: "" }).labels,
+      ).toEqual(["Read only"]);
+    });
 
   test("keeps selected labels and a custom answer", () => {
     expect(

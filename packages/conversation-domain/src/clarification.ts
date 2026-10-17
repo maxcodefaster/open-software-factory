@@ -15,14 +15,16 @@ export function supersedesClarification(entry: ClarificationEntry) {
 }
 
 export function unansweredClarification<T extends ClarificationEntry>(entries: readonly T[]) {
+  const answered = new Set<string>();
+  let latestClarification = Number.NEGATIVE_INFINITY;
+  for (const entry of entries) {
+    if (entry.kind === "answer" && entry.inReplyToEntryId) answered.add(entry.inReplyToEntryId);
+    if (supersedesClarification(entry))
+      latestClarification = Math.max(latestClarification, entry.ordinal);
+  }
   return entries.find(
     (entry) =>
-      entry.kind === "question" &&
-      !entries.some(
-        (later) =>
-          (later.kind === "answer" && later.inReplyToEntryId === entry.id) ||
-          (later.ordinal > entry.ordinal && supersedesClarification(later)),
-      ),
+      entry.kind === "question" && !answered.has(entry.id) && entry.ordinal >= latestClarification,
   );
 }
 

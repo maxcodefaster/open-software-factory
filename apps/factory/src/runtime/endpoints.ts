@@ -5,7 +5,7 @@ export function runtimeFactoryURL(path: string) {
 
 function runtimeHostURL(url: URL) {
   if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) {
-    url.hostname = "host.orb.internal";
+    url.hostname = process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal";
   }
   return url.toString();
 }

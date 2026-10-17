@@ -43,8 +43,27 @@ remain uncertain and require an explicit new human retry. An expired lease alone
 another paid request. Both provider retries and Mastra error-processor retries are disabled.
 
 Requirements uses the frozen selected Ticket without rereading it solely for attribution. Explicitly
-invoked Skills and the assigned Interview Skill load through Mastra's native `getSkill` API before
+invoked Skills, applicable required rules and the assigned Interview Skill load through Mastra's native `getSkill` API before
 inference, with at most 8 KiB of reference text. Other Skills and larger references remain on demand.
+Manual-only guidance still requires invocation. Task-specific structured context preserves earlier
+decisions and option meanings within 96 KiB without duplicating the current input. Oversized core
+context fails before inference; optional assistant background may be omitted. Research/Interview
+instructions and output contracts stay separate. Project requests have a 60-second deadline,
+six provider steps, 256 KiB of serialized per-step input and at most 6,000 output tokens per step.
+These byte limits are conservative resource bounds, not tokenizer-specific context guarantees.
+Wiki uses a shared budget of 32 provider requests, including tool rounds and deliberate repairs,
+with at most 1 MiB of per-step input and 8,000 output tokens. Setup/probes use the same no-retry
+policy and their existing task deadlines. Setup, runtime, source, IDE, Forge access, Change Writer
+and execution-reserve coordination use
+short-lived PostgreSQL sessions so infrastructure waits do not occupy the application pool.
+These sessions close after each operation and count toward PostgreSQL's connection capacity.
+Assistant research progress is ephemeral and contains no source text.
+Ordinary Assistant answers stream provisional Markdown through the authenticated message command.
+The first text is immediate; subsequent snapshots coalesce at 40 ms to bound authorization and
+rendering work. Browser reads cannot overwrite a newer command result, and disconnected streams
+have a bounded client lifetime without retrying the model request.
+Questions and proposals stay hidden until validated. Partial text is not persisted; final validation
+publishes the answer and its citations once. Disconnecting a browser does not stop or replay work.
 The Project Agent adapter uses source-specific provider citations: only Code requires a commit/path;
 an unused footnote is nullable. Factory validates the returned domain result, including Epic rules.
 A known structured-output rejection is failed, not an unknown provider outcome.
@@ -162,6 +181,19 @@ Session totals reconcile usage rather than adding it again; inherited fork histo
 Missing consumption stays unknown. Optional Coding budgets prevent new starts, with a shared finish
 reserve for commissioned work; in-flight calls can overshoot. Project research is measured separately.
 CPU/RAM samples and runtime logs are ephemeral, not Zero projections or persisted Evidence.
+Pricing reads use a validated in-memory catalogue. Cold/expired prices stay unknown while one
+bounded background refresh runs; network requests never hold an inference or budget transaction.
+Environment managers can read masked metadata without Developer access. Settlement and recovery
+recheck their current management/account authority before publishing an externally written version.
+
+Agent status polls omit native message history when the panel is closed. Visible history refreshes
+at two seconds while starting/working and ten seconds after settlement. Opening the panel requests
+fresh history; a command-result fence rejects older reads. Wiki bodies subscribe only while a Wiki
+tab exists, including minimized tabs with retained drafts. Repository inventory refreshes on the
+generation identity/state rather than every status tick. The signed-out entry loads no document editor.
+Infrastructure commands have bounded combined output and deadlines; timeout leaves the external
+outcome unconfirmed, never authorization to replace an immutable resource identity. Idle sweeps
+advance through ID-ordered batches so busy early rows cannot indefinitely hide later Workspaces.
 
 The Solid desktop uses shared semantic tokens, bundled Sansita/Inter and curated local artwork.
 Wallpaper keys are durable user preferences. Open windows, panel visibility and geometry are
@@ -284,3 +316,33 @@ TypeScript and the sign-in capture check. A sampled legacy unconfirmed-Stop brow
 before its changed output path: it selects a Ticket and expects Build controls, while the current
 Assistant derives Build context from the IDE or an explicit correction. This fixture needs its
 context setup updated separately; the cleanup changes no product behavior or provider execution.
+
+The Project Agent hardening has native context/Skill/budget regressions, PostgreSQL turn/recovery,
+directed research, Epic confirmation and setup-pool checks, plus three Assistant browser journeys
+with inspected desktop/narrow captures. Configured Luna semantic cases cover settled option
+meanings beyond 24 entries, scope, corrections, relevant questions and prerequisite reasoning.
+Observed one-step results took 2.4–4.1 seconds; research took 4.9–9.3 seconds, with first actual
+research feedback at 1.7–3.0 seconds. The previous repaired Ticket observation took 6.5 seconds
+with one provider request, versus the broken 15–16-second/four-to-five-step path. These are individual
+observations, not a matched benchmark or latency SLA. Run the opt-in
+`FACTORY_AGENT_QUALITY_LIVE=1` cases in `apps/factory/src/project-agent/quality.test.ts` with the
+configured model-secret environment. They incur usage but do not modify retained Tickets.
+Custom choice answers and explicit correction phrases invalidate prefetched rounds; this is a
+conservative dispatch rule, not a general semantic correction classifier. Assistant feedback is
+ephemeral research progress, not streamed unvalidated proposal text.
+
+The stabilization checks cover 482 fast tests, constrained-pool Forge/Writer/reserve coordination,
+Environment authority-loss recovery, fair idle sweeps, immutable known/unknown usage and enabled
+Coding limits. Owned fixture tests prove isolated databases and process recovery while reusing only
+the empty migrated baseline. PostgreSQL CAS checks observe real lock contention between two
+different sessions. Linux Connector race tests/vet include filesystem tests omitted by macOS;
+the irreversible credential transition runs separately as CGO-free code, matching the shipped binary.
+The root-private snapshot trust file covers only the validated checkout and its Git directory.
+
+Native Envbox conformance passed restart, retained volume, Connector transport and unsafe-mount
+rejection, then removed its unique owned Pod/claim without touching the shared registry. Browser
+checks cover retained Skill drafts, Wiki draft recovery, Settings tabs, old reads after Stop and
+signed-out editor exclusion, with inspected desktop/narrow captures. The entry bundle decreased
+from about 1.35 MB to 204 KB uncompressed. These checks do not claim every historical browser
+fixture or paid provider journey passed; native, paid and retained-installation restart lanes are
+explicit commands. No paid provider requests are needed for the default lanes.

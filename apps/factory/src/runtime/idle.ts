@@ -20,13 +20,17 @@ export function createIdleCompute(
   let running: Promise<void> | null = null;
   let timer: ReturnType<typeof setInterval> | undefined;
   let closed = false;
+  let after: string | null = null;
 
   async function reconcile() {
     if (!idleMS || closed) return;
     const candidates = await database.client<
       Array<{ id: string; projectID: string; changeID: string | null }>
     >`SELECT id,project_id AS "projectID",change_id AS "changeID" FROM factory.runtime_attempt
-      WHERE workspace_id IS NOT NULL AND state='ready' ORDER BY updated_at,id LIMIT 64`;
+      WHERE workspace_id IS NOT NULL AND state='ready'
+        AND (${after}::uuid IS NULL OR id>${after}::uuid) ORDER BY id LIMIT 64`;
+    // Advance even when every candidate is busy. Activity remains ephemeral.
+    after = candidates.length === 64 ? candidates.at(-1)!.id : null;
     for (const attempt of candidates) {
       if (closed) return;
       let claimed = false;

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { createDatabase } from "../../packages/db/src/client";
 import { ownedPlanningCache } from "./planning-cache";
+import { ownedTestDatabase } from "./postgres-server";
 
 async function docker(...args: string[]) {
   const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -82,6 +83,7 @@ export async function factoryProcess(
   const container = `factory-owned-commit-process-${id}`;
   const processes: ReturnType<typeof Bun.spawn>[] = [];
   let created = false;
+  let shared: Awaited<ReturnType<typeof ownedTestDatabase>> | undefined;
   let planningCache: Awaited<ReturnType<typeof ownedPlanningCache>> | undefined;
   async function shutdown() {
     for (const child of processes) {
@@ -93,6 +95,11 @@ export async function factoryProcess(
     await shutdown();
     await planningCache?.dispose();
     planningCache = undefined;
+    if (shared) {
+      await shared.dispose();
+      shared = undefined;
+      return;
+    }
     if (!created) return;
     const owner = await docker(
       "inspect",
@@ -105,7 +112,10 @@ export async function factoryProcess(
     created = false;
   }
   try {
-    if (retained) {
+    const sharedIdentity = process.env["FACTORY_TEST_POSTGRES"];
+    if (sharedIdentity) {
+      shared = await ownedTestDatabase(JSON.parse(sharedIdentity), id, Boolean(retained));
+    } else if (retained) {
       const owner = await docker(
         "inspect",
         "--format",
@@ -136,19 +146,25 @@ export async function factoryProcess(
         "-c",
         "wal_level=logical",
       );
-    created = true;
-    const databasePort = (await docker("port", container, "5432/tcp")).split(":").at(-1);
-    if (!databasePort || !/^\d+$/.test(databasePort))
+    created = !shared;
+    const databasePort = shared
+      ? ""
+      : (await docker("port", container, "5432/tcp")).split(":").at(-1);
+    if (!shared && (!databasePort || !/^\d+$/.test(databasePort)))
       throw new Error("Owned database port missing");
-    const databaseURL = `postgresql://factory:owned-process-not-a-secret@127.0.0.1:${databasePort}/factory`;
-    const migration = Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
-      env: { ...process.env, DATABASE_URL: databaseURL },
-      stdout: "ignore",
-      stderr: "pipe",
-    });
+    const databaseURL =
+      shared?.url ??
+      `postgresql://factory:owned-process-not-a-secret@127.0.0.1:${databasePort}/factory`;
+    const migration = shared
+      ? undefined
+      : Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
+          env: { ...process.env, DATABASE_URL: databaseURL },
+          stdout: "ignore",
+          stderr: "pipe",
+        });
     const [error, status] = await Promise.all([
-      new Response(migration.stderr).text(),
-      migration.exited,
+      migration ? new Response(migration.stderr).text() : "",
+      migration?.exited ?? 0,
     ]);
     if (status !== 0) throw new Error(`Owned migration failed: ${error}`);
     const reservation = retained

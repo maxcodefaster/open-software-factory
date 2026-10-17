@@ -25,6 +25,7 @@ import { TicketChecks } from "./ticket-checks";
 import { TicketDependencies, type TicketDependenciesProps } from "./ticket-dependencies";
 import { TicketSecondaryActions } from "./ticket-secondary-actions";
 import { VersionHistory } from "./version-history";
+import { sourceReviewURL } from "./source-review";
 
 type TicketView = {
   id: string;
@@ -980,6 +981,19 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                   </Show>
                 </div>
                 <div class="ticket-header-actions">
+                  <Show when={props.canDevelop && sourceReviewURL(props.delivery?.pullRequestUrl)}>
+                    {(href) => (
+                      <a
+                        class="quiet-button"
+                        aria-label="Review source changes"
+                        href={href()}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Review changes
+                      </a>
+                    )}
+                  </Show>
                   <Show
                     when={
                       !props.current.ticket.trashedAt &&

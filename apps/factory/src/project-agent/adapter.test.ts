@@ -1,6 +1,115 @@
 import { expect, test } from "bun:test";
 import { requirementsInterviewSkill } from "../skills/reviewed";
 import { generateProjectResponse } from "./adapter";
+import type { ConversationEntry } from "./conversation-store";
+
+test("native Project Agent preserves structured context and sends current input once", async () => {
+  let captured = "";
+  const model = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const body = (await request.json()) as { messages: unknown };
+      captured = JSON.stringify(body.messages);
+      return Response.json({
+        id: "chat-context",
+        object: "chat.completion",
+        created: 1,
+        model: "owned-context",
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: JSON.stringify({
+                output: { kind: "answer", message: "Local fixture.", citations: [] },
+              }),
+            },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 },
+      });
+    },
+  });
+  const entry = (ordinal: number, value: Partial<ConversationEntry>): ConversationEntry => ({
+    id: crypto.randomUUID(),
+    ordinal,
+    actor: "project-agent",
+    kind: "agent-message",
+    mode: "plan",
+    body: "",
+    payload: {},
+    citations: [],
+    inReplyToEntryId: null,
+    requirementRevisionId: null,
+    createdAt: "2026-10-13T00:00:00Z",
+    ...value,
+  });
+  const question = entry(1, {
+    kind: "question",
+    body: "Choose A or B",
+    payload: {
+      question: {
+        type: "single-select",
+        prompt: "Choose A or B",
+        allowCustom: true,
+        options: [
+          { id: "a", label: "A", description: "OPTION_SEMANTICS_REQUIRED" },
+          { id: "b", label: "B", description: "Other" },
+        ],
+      },
+    },
+  });
+  const history = [
+    question,
+    entry(2, {
+      kind: "answer",
+      actor: "user",
+      body: "A",
+      inReplyToEntryId: question.id,
+      payload: { answer: { selectedOptionIds: ["a"], customText: "" } },
+    }),
+    ...Array.from({ length: 26 }, (_, index) => entry(index + 3, { body: "Unrelated chatter" })),
+    entry(29, {
+      kind: "requirement",
+      body: "Proposal ready",
+      payload: {
+        requirement: {
+          summary: "PROPOSAL_SCOPE_REQUIRED",
+          acceptanceCriteria: ["Read-only name"],
+          nonGoals: [],
+        },
+      },
+    }),
+    entry(30, { kind: "user-message", actor: "user", body: "CURRENT_UNIQUE_INPUT" }),
+  ];
+  try {
+    await generateProjectResponse({
+      mode: "plan",
+      modelId: "owned-context",
+      connection: {
+        baseURL: `http://127.0.0.1:${model.port}/v1`,
+        apiKey: "owned-test-token",
+      },
+      prompt: "CURRENT_UNIQUE_INPUT",
+      history,
+      signal: AbortSignal.timeout(4000),
+      research: {
+        search: async () => [],
+        read: async () => {
+          throw new Error("Not needed");
+        },
+      },
+    });
+    expect(captured).toContain("OPTION_SEMANTICS_REQUIRED");
+    expect(captured).toContain(question.id);
+    expect(captured).toContain("PROPOSAL_SCOPE_REQUIRED");
+    expect(captured.split("CURRENT_UNIQUE_INPUT")).toHaveLength(2);
+  } finally {
+    await model.stop(true);
+  }
+});
 
 test.each([
   { provider: "openai" as const, modelId: "gpt-6-luna" },
@@ -12,6 +121,9 @@ test.each([
   async ({ provider, modelId }) => {
     const sourceID = crypto.randomUUID();
     const skillID = crypto.randomUUID();
+    const requiredID = crypto.randomUUID();
+    const optionalID = crypto.randomUUID();
+    const manualID = crypto.randomUUID();
     let requests = 0;
     let providerSchema = "";
     const model = Bun.serve({
@@ -30,6 +142,9 @@ test.each([
           body.text?.format.schema ?? body.response_format?.json_schema?.schema ?? {},
         );
         const input = JSON.stringify([body.messages, body.input, body.system]);
+        expect(input).toContain("REQUIRED_GUIDANCE_ALREADY_LOADED");
+        expect(input).not.toContain("OPTIONAL_GUIDANCE_NOT_PRELOADED");
+        expect(input).not.toContain("MANUAL_GUIDANCE_NOT_AUTOLOADED");
         expect(input).toContain(requirementsInterviewSkill.instructions.replaceAll("\n", "\\n"));
         expect(input).toContain(
           requirementsInterviewSkill.references[0]?.body.replaceAll("\n", "\\n") ??
@@ -119,16 +234,39 @@ test.each([
             published: true,
             content: requirementsInterviewSkill,
           },
+          ...[
+            {
+              id: requiredID,
+              key: "mandatory-rule",
+              instructions: "REQUIRED_GUIDANCE_ALREADY_LOADED",
+            },
+            {
+              id: optionalID,
+              key: "optional-rule",
+              instructions: "OPTIONAL_GUIDANCE_NOT_PRELOADED",
+            },
+            {
+              id: manualID,
+              key: "manual-rule",
+              instructions: "MANUAL_GUIDANCE_NOT_AUTOLOADED",
+              manualOnly: true,
+            },
+          ].map(({ id, ...content }) => ({
+            id,
+            revision: 1,
+            digest: "b".repeat(64),
+            published: true,
+            content: { ...requirementsInterviewSkill, references: [], ...content },
+          })),
         ],
+        requiredSkillRevisionIds: [requiredID, manualID],
         skillsLoaded: async (ids) => {
-          expect(ids).toEqual([skillID]);
+          expect(ids).toEqual([skillID, requiredID]);
           expect(requests).toBe(0);
         },
         prompt: "Clarify the selected Ticket using its frozen context.",
         history: [],
         signal: AbortSignal.timeout(4000),
-        searchKnowledge: async () => [],
-        searchTickets: async () => [],
         research: {
           search: async () => [],
           read: async () => {
@@ -191,8 +329,8 @@ test("Luna uses Responses with reasoning, retained search tools and no provider 
             type: "function_call",
             id: "fc-owned",
             call_id: "call-owned",
-            name: "knowledgeTool",
-            arguments: JSON.stringify({ query: "draft" }),
+            name: "searchProject",
+            arguments: JSON.stringify({ query: "draft", source: "knowledge" }),
           }
         : { type: "message", id: "msg-owned" };
       const output = {
@@ -276,13 +414,14 @@ test("Luna uses Responses with reasoning, retained search tools and no provider 
       prompt: "How do our drafts work?",
       history: [],
       signal: AbortSignal.timeout(4000),
-      searchKnowledge: async () => {
-        searches++;
-        return [{ id: sourceID, label: "Drafts", excerpt: "Drafts stay private." }];
-      },
-      searchTickets: async () => [],
       research: {
-        search: async () => [],
+        search: async (_query, source) => {
+          expect(source).toBe("knowledge");
+          searches++;
+          return [
+            { source: "knowledge", id: sourceID, label: "Drafts", excerpt: "Drafts stay private." },
+          ];
+        },
         read: async () => {
           throw new Error("No source in this fixture");
         },
@@ -295,8 +434,6 @@ test("Luna uses Responses with reasoning, retained search tools and no provider 
       expect(body["reasoning"]).toMatchObject({ effort: "low" });
       expect(body["store"]).toBe(false);
       expect((body["tools"] as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
-        "knowledgeTool",
-        "ticketTool",
         "searchProject",
         "readProject",
       ]);
@@ -311,6 +448,7 @@ test("native Mastra batches memoized research, rechecks authority and bounds dis
     loads = 0,
     authorities = 0;
   const sourceID = crypto.randomUUID();
+  const queries: string[] = [];
   const model = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -322,7 +460,10 @@ test("native Mastra batches memoized research, rechecks authority and bounds dis
         type: "function",
         function: {
           name: "searchProject",
-          arguments: JSON.stringify({ query: index < 3 ? "same" : `query-${index}` }),
+          arguments: JSON.stringify({
+            query:
+              index < 5 ? ["same", " same ", "ｓａｍｅ", "İ", "i\u0307"][index] : `query-${index}`,
+          }),
         },
       }));
       const message =
@@ -389,14 +530,13 @@ test("native Mastra batches memoized research, rechecks authority and bounds dis
       prompt: "Research",
       history: [],
       signal: AbortSignal.timeout(5000),
-      searchKnowledge: async () => [],
-      searchTickets: async () => [],
       research: {
         authorize: async () => {
           authorities++;
         },
-        search: async () => {
+        search: async (query) => {
           loads++;
+          queries.push(query);
           return [{ source: "ticket", id: sourceID, label: "Owned", excerpt: "Known" }];
         },
         read: async () => {
@@ -406,7 +546,11 @@ test("native Mastra batches memoized research, rechecks authority and bounds dis
     });
     expect(output.kind).toBe("answer");
     expect(loads).toBe(12);
-    expect(authorities).toBe(16);
+    expect(queries.filter((query) => query.normalize("NFKC").trim() === "same")).toHaveLength(1);
+    // PostgreSQL folds these differently even though JS lowercases them identically.
+    expect(queries).toContain("İ");
+    expect(queries).toContain("i\u0307");
+    expect(authorities).toBe(18); // Every tool call plus each provider step.
     expect(requests).toBe(2);
   } finally {
     await model.stop(true);

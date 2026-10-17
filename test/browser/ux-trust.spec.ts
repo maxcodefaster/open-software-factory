@@ -254,7 +254,9 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
     stopPending: false,
     stopId: null,
   });
-  await page.route(`**/api/changes/${change.id}/agent`, (route) => route.fulfill({ json: view() }));
+  await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) =>
+    route.fulfill({ json: view() }),
+  );
   await page.route(`**/api/changes/${change.id}/agent/start`, (route) => {
     state = "working";
     sessionAvailable = true;
@@ -751,7 +753,7 @@ test("updates keyed Change activity on polling without remounting its disclosure
   `;
   if (!change) throw new Error("Missing fixture Change");
   let completed = false;
-  await page.route(`**/api/changes/${change.id}/agent`, (route) =>
+  await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) =>
     route.fulfill({
       json: {
         state: "working",
@@ -847,7 +849,7 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
     const body = await response.json();
     await route.fulfill({ response, json: { ...body, modelRelayConfigured: true } });
   });
-  await page.route(`**/api/changes/${change.id}/agent`, (route) => {
+  await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) => {
     reads++;
     return route.fulfill({
       json: {
@@ -978,7 +980,9 @@ test("explicit Stop confirmation preserves the draft and sends only the displaye
       json: { ...(await response.json()), modelRelayConfigured: true },
     });
   });
-  await page.route(`**/api/changes/${change.id}/agent`, (route) => route.fulfill({ json: view() }));
+  await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) =>
+    route.fulfill({ json: view() }),
+  );
   await page.route(`**/api/changes/${change.id}/agent/check-stop`, (route) => {
     confirmations.push(route.request().postDataJSON());
     if (canConfirm) stopPending = false;
@@ -1114,7 +1118,7 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
       json: { ...(await response.json()), modelRelayConfigured: true },
     });
   });
-  await page.route(`**/api/changes/${change.id}/agent`, (route) => {
+  await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) => {
     observedPhase = phase;
     return route.fulfill({
       json: {
@@ -1283,7 +1287,9 @@ for (const action of ["start", "prompt"] as const) {
       stopId: null,
     };
     const submissions: Array<{ commandId: string; text?: string }> = [];
-    await page.route(`**/api/changes/${change.id}/agent`, (route) => route.fulfill({ json: view }));
+    await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) =>
+      route.fulfill({ json: view }),
+    );
     await page.route(`**/api/changes/${change.id}/agent/${action}`, (route) => {
       submissions.push(route.request().postDataJSON());
       return submissions.length === 1
@@ -1513,7 +1519,7 @@ test("keeps Build ready, working and stopped states compact across workspace wid
     const body = await response.json();
     await route.fulfill({ response, json: { ...body, modelRelayConfigured: true } });
   });
-  await page.route(`**/api/changes/${change.id}/agent`, (route) =>
+  await page.route(`**/api/changes/${change.id}/agent{,?*}`, (route) =>
     route.fulfill({
       json: {
         state,

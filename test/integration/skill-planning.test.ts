@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
-import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createSkillController } from "../../apps/factory/src/skills/controller";
+import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
 import { fixture as buildFixture, buildModelID } from "../fixtures/change-agent-turns";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 const providerRequest = z
@@ -303,6 +303,8 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
     );
     const turn = await createAgentTurnStore(owned.database).getByCommand(commandID);
     expect(turn?.authority.skillRevisionIds).toEqual([id]);
+    if (turn?.authority.mode !== "build")
+      expect(turn?.authority.requiredSkillRevisionIds).toEqual([id]);
     expect(turn?.state).toBe("completed");
     const observed = (await owned.agent.get(owned.projectID, undefined, owned.userID))?.turn;
     expect(observed).toMatchObject({
@@ -320,8 +322,8 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
     expect(observed?.usage).toMatchObject({
       source: "mastra-provider",
       coverage: "complete",
-      inputTokens: 3,
-      outputTokens: 3,
+      inputTokens: 1,
+      outputTokens: 1,
       reasoningTokens: null,
       cacheReadTokens: null,
       cacheWriteTokens: null,
@@ -334,13 +336,11 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
     expect(
       (await restarted.get(owned.projectID, undefined, owned.userID))?.turn?.usage,
     ).toMatchObject({ source: "unavailable", inputTokens: null, outputTokens: null });
-    expect(owned.observations).toHaveLength(3);
+    expect(owned.observations).toHaveLength(1);
     await expect(
       owned.agent.get(owned.projectID, undefined, crypto.randomUUID()),
     ).rejects.toMatchObject({ code: "forbidden" });
     expect(owned.observations).toMatchObject([
-      { instructions: false, reference: false, replacement: false },
-      { instructions: true, reference: false, replacement: false },
       { instructions: true, reference: true, replacement: false },
     ]);
     expect(owned.observations[0]?.tools).toContain("skill");
@@ -478,7 +478,7 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
       owned.userID,
       crypto.randomUUID(),
     );
-    expect(owned.observations).toHaveLength(6);
+    expect(owned.observations).toHaveLength(4);
     await owned.database
       .client`DELETE FROM factory.ticket_conversation WHERE id = ${conversation.id}`;
     expect(

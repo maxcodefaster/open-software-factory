@@ -11,7 +11,7 @@ export function createForgeAccessReconciliation(options: {
 }) {
   const { database, forge, owner } = options;
   async function protectMain(projectID: string, repository: string, branch: string) {
-    const sql = await database.client.reserve();
+    const sql = database.coordination();
     try {
       await sql`SELECT pg_advisory_lock(hashtextextended(${`forge-branch:${projectID}:${branch}`},0))`;
       await sql`INSERT INTO factory.forge_branch_intent(project_id,branch,writers,merger)
@@ -26,21 +26,23 @@ export function createForgeAccessReconciliation(options: {
       });
       await sql`UPDATE factory.forge_branch_intent SET confirmed=true WHERE project_id=${projectID} AND branch=${branch} AND writers='{}' AND merger=${owner}`;
     } finally {
-      await sql`SELECT pg_advisory_unlock(hashtextextended(${`forge-branch:${projectID}:${branch}`},0))`;
-      sql.release();
+      try {
+        await sql`SELECT pg_advisory_unlock(hashtextextended(${`forge-branch:${projectID}:${branch}`},0))`;
+      } finally {
+        await sql.end({ timeout: 1 });
+      }
     }
   }
   return {
     async protectChange(changeID: string, writers: readonly string[]) {
-      const [change] = await database.client<
-        { projectID: string; repository: string; branch: string }[]
-      >`
+      const sql = database.coordination();
+      let key: string | undefined;
+      try {
+        const [change] = await sql<{ projectID: string; repository: string; branch: string }[]>`
         SELECT change.project_id AS "projectID",project.slug AS repository,change.branch_name AS branch
         FROM factory.change change JOIN factory.project project ON project.id=change.project_id WHERE change.id=${changeID}`;
-      if (!change) throw new Error("Forge Change branch is unavailable");
-      const key = `forge-branch:${change.projectID}:${change.branch}`;
-      const sql = await database.client.reserve();
-      try {
+        if (!change) throw new Error("Forge Change branch is unavailable");
+        key = `forge-branch:${change.projectID}:${change.branch}`;
         await sql`SELECT pg_advisory_lock(hashtextextended(${key},0))`;
         await sql`INSERT INTO factory.forge_branch_intent(project_id,branch,writers,merger)
           VALUES(${change.projectID},${change.branch},${sql.array([...writers])},${owner})
@@ -54,15 +56,18 @@ export function createForgeAccessReconciliation(options: {
         });
         await sql`UPDATE factory.forge_branch_intent SET confirmed=true WHERE project_id=${change.projectID} AND branch=${change.branch}`;
       } finally {
-        await sql`SELECT pg_advisory_unlock(hashtextextended(${key},0))`;
-        sql.release();
+        try {
+          if (key) await sql`SELECT pg_advisory_unlock(hashtextextended(${key},0))`;
+        } finally {
+          await sql.end({ timeout: 1 });
+        }
       }
     },
     async reconcile(userID: string) {
       const [connection] = await database.client<{ sourceID: number }[]>`
         SELECT source_id::integer AS "sourceID" FROM factory.forge_connection WHERE state='ready'`;
       if (!connection) return;
-      const sql = await database.client.reserve();
+      const sql = database.coordination();
       try {
         await sql`SELECT pg_advisory_lock(hashtextextended(${`forge-account:${userID}`},0))`;
         const [person] = await sql<{ email: string; name: string; allowed: boolean }[]>`
@@ -151,8 +156,11 @@ export function createForgeAccessReconciliation(options: {
           await transaction`UPDATE factory.forge_account_intent SET forge_user_id=${observedID ?? null},state=${person.allowed ? "ready" : "disabled"},observed_at=now() WHERE user_id=${userID}`;
         });
       } finally {
-        await sql`SELECT pg_advisory_unlock(hashtextextended(${`forge-account:${userID}`},0))`;
-        sql.release();
+        try {
+          await sql`SELECT pg_advisory_unlock(hashtextextended(${`forge-account:${userID}`},0))`;
+        } finally {
+          await sql.end({ timeout: 1 });
+        }
       }
     },
   };

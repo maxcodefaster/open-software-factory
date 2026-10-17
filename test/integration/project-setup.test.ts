@@ -140,7 +140,11 @@ test("retained setup, protected private import and ambiguous create recover with
         await database.client`SELECT role FROM factory.project_membership WHERE user_id=${manager}`
       )[0]?.["role"],
     ).toBe("developer");
-    expect((await database.client`SELECT manage_project FROM factory.project_membership WHERE user_id=${manager}`)[0]?.["manage_project"]).toBe(true);
+    expect(
+      (
+        await database.client`SELECT manage_project FROM factory.project_membership WHERE user_id=${manager}`
+      )[0]?.["manage_project"],
+    ).toBe(true);
     await restarted.create(manager, { ...command, importToken: undefined });
     expect(creates).toBe(1);
     expect(

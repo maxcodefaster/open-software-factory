@@ -1,25 +1,25 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { CommandError } from "../command-error";
-import { createRepositoryKnowledgeCache } from "./repository-cache";
-import { searchSnippet } from "./search-snippet";
-import { projectAuthorityIn, createAccessController } from "../access/controller";
-import type { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
+import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
   validateWikiGeneration,
   type WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
-import { createModelSettingsController } from "../models/controller";
-import { generateWiki, type WikiGenerationInput } from "./generation-agent";
-import { projectModelConnection } from "../project-agent/adapter";
+import type { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
+import { createAccessController, projectAuthorityIn } from "../access/controller";
+import { CommandError } from "../command-error";
 import { createModelConnections } from "../models/connections";
+import { createModelSettingsController } from "../models/controller";
 import { createOpenBaoModelSecrets } from "../models/secrets";
-import { createDocumentSearchCache } from "./document-search-cache";
-import { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { factoryForgeSource } from "./forge-source";
-import { publishWikiPackage, WikiPublicationConflict } from "./publication";
-import { codeReadInput, codeReadResult, readableCodePath } from "./code-read";
-import { recordedMastraUsage } from "../usage/record-mastra";
+import { projectModelConnection } from "../project-agent/adapter";
 import { createUsageJournal } from "../usage/journal";
+import { recordedMastraUsage } from "../usage/record-mastra";
+import { codeReadInput, codeReadResult, readableCodePath } from "./code-read";
+import { createDocumentSearchCache } from "./document-search-cache";
+import { factoryForgeSource } from "./forge-source";
+import { generateWiki, type WikiGenerationInput } from "./generation-agent";
+import { publishWikiPackage, WikiPublicationConflict } from "./publication";
+import { createRepositoryKnowledgeCache } from "./repository-cache";
+import { searchSnippet } from "./search-snippet";
 
 type Database = ReturnType<typeof createDatabase>;
 type KnowledgeEdit = typeof knowledgeEditInput._output;
@@ -281,7 +281,7 @@ export function createKnowledgeController(
         ? await modelConnections.resolve(reference.connectionID, reference.version)
         : projectModelConnection("knowledge");
       const signal = AbortSignal.timeout(360_000);
-      const modelCalls = { remaining: 32 };
+      const providerRequests = { remaining: 32 };
       for (let retry = 0; retry < 3; retry++) {
         signal.throwIfAborted();
         failureMessage =
@@ -302,7 +302,7 @@ export function createKnowledgeController(
             sources: bundle.sources,
             readFiles: bundle.readFiles,
             signal,
-            modelCalls,
+            providerRequests,
             usageSink: (callID) =>
               recordedMastraUsage(database, {
                 id: `wiki:${generationID}:${attemptId}:${callID}`,

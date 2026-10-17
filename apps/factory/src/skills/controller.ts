@@ -1,5 +1,14 @@
 import { createHash } from "node:crypto";
 import {
+  type InheritedSkillSettings,
+  type PersonalSkillSettings,
+  type ProjectSkillSettings,
+  personalSkillSettingsInput,
+  projectSkillSettingsInput,
+  resolveRoleSkills,
+} from "../../../../packages/conversation-domain/src/skill-inheritance";
+import { librarySkillAssignments } from "../../../../packages/conversation-domain/src/skill-library";
+import {
   type SkillContent,
   type SkillPublish,
   type SkillRevision,
@@ -15,14 +24,6 @@ import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { createSkillLibraryController } from "./library-controller";
-import {
-  type InheritedSkillSettings,
-  type ProjectSkillSettings,
-  type PersonalSkillSettings,
-  projectSkillSettingsInput,
-  personalSkillSettingsInput,
-  resolveRoleSkills,
-} from "../../../../packages/conversation-domain/src/skill-inheritance";
 
 function digest(content: SkillContent) {
   return createHash("sha256").update(JSON.stringify(content)).digest("hex");
@@ -249,7 +250,7 @@ export function createSkillController(database: ReturnType<typeof createDatabase
         return { settings: await system(sql), revisions };
       });
     },
-    async resolve(
+    async resolveAssignment(
       role: SkillRole,
       sql: AgentTurnTransaction,
       context: { projectID: string; userID: string },
@@ -258,15 +259,28 @@ export function createSkillController(database: ReturnType<typeof createDatabase
       const legacy = await inherited(sql, context.projectID, context.userID);
       const view = await library.viewIn(sql, context.userID, context.projectID, legacy);
       try {
-        const ids = library.resolveIds(view.entries, view.choices, role);
+        const assignments = librarySkillAssignments(view.entries, view.choices, role);
+        const ids = assignments.map((item) => item.revisionId);
         if (ids.length > 16) throw new Error("At most 16 skills can be enabled per role");
-        return ids;
+        return {
+          revisionIds: ids,
+          requiredRevisionIds: assignments
+            .filter((item) => item.required)
+            .map((item) => item.revisionId),
+        };
       } catch (error) {
         throw new CommandError(
           "unavailable",
           error instanceof Error ? error.message : "Skill settings are unavailable",
         );
       }
+    },
+    async resolve(
+      role: SkillRole,
+      sql: AgentTurnTransaction,
+      context: { projectID: string; userID: string },
+    ) {
+      return (await this.resolveAssignment(role, sql, context)).revisionIds;
     },
     async setProject(projectID: string, userID: string, value: ProjectSkillSettings) {
       const input = projectSkillSettingsInput.parse(value);

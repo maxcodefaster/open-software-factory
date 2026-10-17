@@ -24,6 +24,12 @@ Publication updates the local digest files without restarting Factory or replaci
 identities. `factory:restart` loads those pins for new Attempts; existing artifact intents remain fixed.
 Runtime manifests use registry digest references, never publication tags.
 
+Normal `factory:up` reuses a complete published set instead of rebuilding all roles. The manual
+[distribution workflow](../../.github/workflows/images.yaml) builds amd64/arm64 roles and embeds
+their exact multi-architecture digests in the Factory image. A release bundle replaces defaults
+atomically during container startup; it cannot change a persisted Runtime Attempt. See
+[local deployment](../local/README.md) for Compose and Linux setup.
+
 The clean execution reserve prepares fresh Staging and Verification only. It contains pinned tools
 and base images, no checkout, user/model/forge capabilities or used containers/volumes. Default target
 is one slot per role, with one concurrent creation, two spare slots and sixteen total admitted or
@@ -90,3 +96,7 @@ snapshot cleanup. It passes no reusable Factory, model or forge capabilities int
 CLI and registry output does not become product Evidence. This freezes the recipe and identifies
 the resulting artifact; arbitrary network-dependent Dockerfile commands are not a reproducibility
 guarantee. Private cache eviction does not delete canonical source or approved data.
+
+Snapshot creation uses a temporary root-private Git configuration trusting only that canonical
+checkout and its Git directory. This passes the exact trust boundary to local upload-pack on Git
+versions that discard command-line overrides, without changing user or installation configuration.

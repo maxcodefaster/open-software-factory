@@ -9,11 +9,11 @@ import { createOpenBaoModelSecrets } from "../models/secrets";
 import { runtimeRepositoryCloneURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import type { RuntimeAttemptView } from "../runtime/types";
+import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/native";
 import { codingAllowanceDenial } from "../usage/opencode";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createBuildBrowserController } from "./browser-controller";
 import { createChangeAdmission } from "./change-admission";
-import { nativeSkillManifestInput, observedNativeSkillIds } from "../skills/native";
 import { createChangeAgentTransport } from "./change-transport";
 import { createAgentCommitTransport } from "./commit-transport";
 import {
@@ -1482,7 +1482,7 @@ export function createAgentController(
       return this.get(changeID);
     },
 
-    async get(changeID: string, turnID?: string) {
+    async get(changeID: string, turnID?: string, history = true) {
       const [waiting] = await database.client<
         Array<{ reason: string }>
       >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
@@ -1535,7 +1535,7 @@ export function createAgentController(
           activityRuntimeState = retained.state;
         }
       }
-      if (session.sessionID && activityRuntimeState === "ready") {
+      if (history && session.sessionID && activityRuntimeState === "ready") {
         try {
           const page = await opencode(hub, activityAttemptID).message.list(
             { sessionID: session.sessionID, limit: 100 },

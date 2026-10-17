@@ -1,0 +1,126 @@
+name: Publish distribution images
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Immutable release version, for example 0.1.0
+        required: true
+        type: string
+permissions:
+  contents: read
+  packages: write
+concurrency:
+  group: distribution-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  roles:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE: ${{ inputs.version }}
+      ARCH: ${{ matrix.arch }}
+      IMAGE_ROOT: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build native runtime roles
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          IMAGE_ROOT="${IMAGE_ROOT,,}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker buildx imagetools inspect "$IMAGE_ROOT/factory:$RELEASE" > /dev/null 2>&1; then
+            echo 'This distribution version is already published. Choose a new version.'
+            exit 1
+          fi
+          docker buildx create --use
+          for role in runtime-host build-runtime-host verification-runtime-host developer-ide browser-tools workspace-files; do
+            image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
+            dockerfile=deploy/runtime-host/Dockerfile
+            target=(--target "$role")
+            if [[ "$role" == browser-tools || "$role" == workspace-files ]]; then
+              dockerfile="deploy/$role/Dockerfile"
+              target=()
+            fi
+            docker buildx build --platform "linux/$ARCH" --provenance=false --push \
+              --file "$dockerfile" "${target[@]}" --tag "$image" .
+          done
+  manifests:
+    needs: roles
+    runs-on: ubuntu-24.04
+    outputs:
+      artifacts: ${{ steps.publish.outputs.artifacts }}
+    env:
+      RELEASE: ${{ inputs.version }}
+      IMAGE_ROOT: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Publish multi-architecture role manifests
+        id: publish
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE_ROOT="${IMAGE_ROOT,,}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          artifacts='{}'
+          for role in runtime-host build-runtime-host verification-runtime-host developer-ide browser-tools workspace-files; do
+            image="$IMAGE_ROOT/$role:$RELEASE"
+            docker buildx imagetools create --tag "$image" "$image-amd64" "$image-arm64"
+            digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"
+            [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+            artifacts="$(jq -c --arg role "$role" --arg ref "$IMAGE_ROOT/$role@$digest" '. + {($role): $ref}' <<< "$artifacts")"
+          done
+          printf 'artifacts=%s\n' "$artifacts" >> "$GITHUB_OUTPUT"
+  factory:
+    needs: manifests
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE: ${{ inputs.version }}
+      ARCH: ${{ matrix.arch }}
+      IMAGE_ROOT: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Build native Factory with exact runtime references
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FACTORY_RUNTIME_ARTIFACTS: ${{ needs.manifests.outputs.artifacts }}
+        run: |
+          set -euo pipefail
+          IMAGE_ROOT="${IMAGE_ROOT,,}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx create --use
+          docker buildx build --platform "linux/$ARCH" --provenance=false --push \
+            --file deploy/factory/Dockerfile --build-arg FACTORY_RUNTIME_ARTIFACTS \
+            --tag "$IMAGE_ROOT/factory:$RELEASE-$ARCH" .
+  distribution:
+    needs: factory
+    runs-on: ubuntu-24.04
+    env:
+      RELEASE: ${{ inputs.version }}
+      IMAGE_ROOT: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Publish multi-architecture Factory manifest
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE_ROOT="${IMAGE_ROOT,,}"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create --tag "$IMAGE_ROOT/factory:$RELEASE" \
+            "$IMAGE_ROOT/factory:$RELEASE-amd64" "$IMAGE_ROOT/factory:$RELEASE-arm64"

@@ -13,6 +13,36 @@ const result = z
   })
   .strict();
 
+async function preparationUpload(request: Request) {
+  if (Number(request.headers.get("content-length")) > 4096) return null;
+  const signal = AbortSignal.any([request.signal, AbortSignal.timeout(10_000)]);
+  signal.throwIfAborted();
+  const reader = request.body?.getReader();
+  if (!reader) return null;
+  const abort = () => {
+    void reader.cancel().catch(() => {});
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const next = await reader.read();
+      signal.throwIfAborted();
+      if (next.done) break;
+      size += next.value.byteLength;
+      if (size > 4096) return null;
+      chunks.push(next.value);
+    }
+    const parsed = result.safeParse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+    return parsed.success ? parsed.data : null;
+  } finally {
+    signal.removeEventListener("abort", abort);
+    void reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 export function createProjectPreparation(input: {
   database: Database;
   head(projectID: string): Promise<string>;
@@ -46,7 +76,7 @@ export function createProjectPreparation(input: {
     if (draining) return draining;
     const task = (async () => {
       // One global active producer. Jobs coalesce to the newest requested recipe per environment.
-      const connection = await sql.reserve();
+      const connection = input.database.coordination();
       try {
         const [lock] = await connection<
           Array<{ held: boolean }>
@@ -75,7 +105,7 @@ export function createProjectPreparation(input: {
           await connection`SELECT pg_advisory_unlock(hashtext('project-image-preparation'))`;
         }
       } finally {
-        connection.release();
+        await connection.end({ timeout: 1 });
       }
     })();
     draining = task;
@@ -90,6 +120,13 @@ export function createProjectPreparation(input: {
       new Response(null, { status: 401, headers: { "cache-control": "no-store" } });
     const token = request.headers.get("authorization")?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1];
     if (!token) return denied();
+    // Read the small upload before acquiring an attempt lock or a pool slot.
+    // A disconnected/slow Connector must not block Stop or ordinary requests.
+    const upload =
+      request.method === "POST" ? await preparationUpload(request).catch(() => undefined) : null;
+    if (upload === undefined)
+      return new Response(null, { status: 503, headers: { "cache-control": "no-store" } });
+    if (request.method === "POST" && !upload) return denied();
     return sql
       .begin(async (transaction) => {
         const [attempt] = await transaction<
@@ -129,27 +166,10 @@ export function createProjectPreparation(input: {
           attempt.jobEnvironment !== attempt.environment
         )
           return denied();
-        if (Number(request.headers.get("content-length")) > 4096) return denied();
-        const reader = request.body?.getReader();
-        if (!reader) return denied();
-        const chunks: Uint8Array[] = [];
-        let size = 0;
-        try {
-          for (;;) {
-            const next = await reader.read();
-            if (next.done) break;
-            size += next.value.byteLength;
-            if (size > 4096) return denied();
-            chunks.push(next.value);
-          }
-        } finally {
-          await reader.cancel();
-        }
-        const parsed = result.safeParse(JSON.parse(Buffer.concat(chunks).toString("utf8")));
         if (
-          !parsed.success ||
+          !upload ||
           !attempt.imageRepository ||
-          !parsed.data.image.startsWith(attempt.imageRepository + "@")
+          !upload.image.startsWith(attempt.imageRepository + "@")
         )
           return denied();
         const [job] = await transaction<
@@ -157,12 +177,11 @@ export function createProjectPreparation(input: {
         >`SELECT state,identity,image FROM factory.project_image_preparation WHERE id=${attempt.jobID} FOR UPDATE`;
         if (job?.state === "succeeded")
           return new Response(null, {
-            status:
-              job.identity === parsed.data.identity && job.image === parsed.data.image ? 204 : 409,
+            status: job.identity === upload.identity && job.image === upload.image ? 204 : 409,
             headers: { "cache-control": "no-store" },
           });
         if (job?.state !== "running") return denied();
-        await transaction`UPDATE factory.project_image_preparation SET state='succeeded',identity=${parsed.data.identity},image=${parsed.data.image},failure=NULL,updated_at=now() WHERE id=${attempt.jobID} AND state='running'`;
+        await transaction`UPDATE factory.project_image_preparation SET state='succeeded',identity=${upload.identity},image=${upload.image},failure=NULL,updated_at=now() WHERE id=${attempt.jobID} AND state='running'`;
         return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
       })
       .catch(() => new Response(null, { status: 503, headers: { "cache-control": "no-store" } }));

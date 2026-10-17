@@ -136,7 +136,8 @@ export function createOpenBaoKV(input: OpenBaoOptions = openBaoEnvironment()) {
       await request(path(key), "POST", { options: { cas: 0 }, data: schema.parse(value) });
     },
     async removeImport(key: string) {
-      if (!key.startsWith("imports/")) throw new Error("Only temporary import credentials may be removed");
+      if (!key.startsWith("imports/"))
+        throw new Error("Only temporary import credentials may be removed");
       await request(path(key).replace(`/data/`, `/metadata/`), "DELETE");
     },
     async renew() {

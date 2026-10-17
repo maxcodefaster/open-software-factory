@@ -1,18 +1,20 @@
-import { Agent } from "@mastra/core/agent";
 import { Mastra } from "@mastra/core";
+import { Agent } from "@mastra/core/agent";
 import { noopLogger } from "@mastra/core/logger";
 import { createTool } from "@mastra/core/tools";
 import { createStep, createWorkflow } from "@mastra/core/workflows";
 import { z } from "zod";
 import {
-  wikiGenerationOutput,
   validateWikiGeneration,
   type WikiGenerationOutput,
+  wikiGenerationOutput,
 } from "../../../../packages/knowledge-domain/src/generation";
+import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
+import { modelProviderOptions, nativeModel } from "../models/native";
 import { projectModelConnection } from "../project-agent/adapter";
-import { nativeModel, modelProviderOptions } from "../models/native";
-import type { WikiGenerationInput } from "./generation-agent";
+import { isStructuredOutputFailure } from "../project-agent/structured-output";
 import { createMastraUsage } from "../usage/mastra";
+import type { WikiGenerationInput } from "./generation-agent";
 
 const topicSchema = z.object({
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
@@ -54,9 +56,10 @@ Bodies exclude their separate title. Internal Wiki links use #wiki/<slug> only f
 Do not archive or delete pages. Cite only paths actually read. Never link to not-yet-published pages.`;
 
 export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {
+  input = { ...input, signal: AbortSignal.any([input.signal, AbortSignal.timeout(360_000)]) };
   if (!input.publish) throw new Error("Wiki workflow requires checked publication");
   const publish: NonNullable<WikiGenerationInput["publish"]> = input.publish;
-  const modelCalls = input.modelCalls ?? { remaining: 32 };
+  const providerRequests = input.providerRequests ?? { remaining: 32 };
   const connection = input.connection ?? projectModelConnection("knowledge");
   const providerOptions = modelProviderOptions(connection, input.modelId);
   let executionError: unknown;
@@ -104,11 +107,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     steps = 4,
   ): Promise<z.output<T>> {
     activeSignal.throwIfAborted();
-    if (modelCalls.remaining-- <= 0) throw new Error("Wiki model execution bound exhausted");
     const agent = new Agent({
       id,
       name: `Factory Wiki ${id}`,
-      maxRetries: 0,
+      ...nativeAgentPolicy,
       model: nativeModel(connection, input.modelId),
       tools: { readSource: sources.tool },
       instructions: `${instructions}\n${task}`,
@@ -129,9 +131,17 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             maxSteps: steps,
             abortSignal: activeSignal,
             onStepFinish: usage.onStepFinish,
+            prepareStep: nativeStepGuard({
+              signal: activeSignal,
+              maxInputBytes: 1024 * 1024,
+              requests: providerRequests,
+            }),
+            modelSettings: { maxRetries: 0, maxOutputTokens: 8000 },
             ...(providerOptions ? { providerOptions } : {}),
             structuredOutput: { schema, jsonPromptInjection: "auto" },
           });
+        if (result.error) throw result.error;
+        activeSignal.throwIfAborted();
         failed = false;
         return result;
       } finally {
@@ -141,14 +151,8 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     try {
       return schema.parse((await generate()).object);
     } catch (cause) {
-      if (
-        !(cause instanceof z.ZodError) &&
-        (!(cause instanceof Error) ||
-          !cause.message.includes("Structured output validation failed"))
-      )
-        throw cause;
+      if (!isStructuredOutputFailure(cause)) throw cause;
       activeSignal.throwIfAborted();
-      if (modelCalls.remaining-- <= 0) throw new Error("Wiki model execution bound exhausted");
       const repaired = (
         await generate(
           "Your structured output violated its schema. Return concise facts as separate findings, at most 1200 characters each with at most 8 inspected paths. Respect every declared array/string bound. Do not omit useful facts or invent content to satisfy the format.",

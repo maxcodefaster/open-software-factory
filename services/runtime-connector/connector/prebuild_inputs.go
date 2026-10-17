@@ -118,6 +118,16 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 		"-c", "safe.directory="+assignment.WorkspaceFolder,
 		"-c", "safe.directory="+filepath.Join(assignment.WorkspaceFolder, ".git"),
 		"clone", "--no-hardlinks", "--no-checkout", "--", assignment.WorkspaceFolder, snapshot)
+	// Local upload-pack clears command-line and environment config overrides on
+	// some Git versions. A root-private config trusts only the validated checkout
+	// and is inherited by that subprocess, without changing installation config.
+	trust := filepath.Join(staging, "git-trust")
+	for _, directory := range []string{assignment.WorkspaceFolder, filepath.Join(assignment.WorkspaceFolder, ".git")} {
+		if prebuildCommand(ctx, "/tmp", "git", "config", "--file", trust, "--add", "safe.directory", directory).Run() != nil {
+			return input, "", errors.New("prebuild exact checkout trust could not be configured")
+		}
+	}
+	clone.Env = assignedEnvironment(clone.Env, map[string]string{"GIT_CONFIG_GLOBAL": trust})
 	if clone.Run() != nil {
 		return input, "", errors.New("prebuild snapshot could not be created")
 	}

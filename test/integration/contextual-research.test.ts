@@ -1,15 +1,15 @@
 import { expect, test } from "bun:test";
-import { factoryProcess } from "../fixtures/factory-process";
-import { fixture } from "../fixtures/change-agent-turns";
-import { searchResearch, readResearch } from "../../apps/factory/src/project-agent/research";
-import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
-import { createEpicConfirmation } from "../../apps/factory/src/project-agent/epic-confirmation";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { createHash } from "node:crypto";
-import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
+import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { createEpicConfirmation } from "../../apps/factory/src/project-agent/epic-confirmation";
+import { readResearch, searchResearch } from "../../apps/factory/src/project-agent/research";
+import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
+import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { fixture } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test("Ticket detail hides unconfirmed code-derived proposals from Contributors after downgrade", async () => {
   const process = await factoryProcess();
@@ -139,7 +139,30 @@ test("weighted indexed research finds current specs, typos, references and relat
         firstPage.version,
       ),
     ).rejects.toThrow("changed");
-    expect(read.relationships.some((item) => item.id === epic)).toBe(true);
+    expect(read.relationships.find((item) => item.id === epic)?.relationship).toBe("parent-epic");
+    const prerequisite = crypto.randomUUID(),
+      dependent = crypto.randomUUID();
+    await db.client`INSERT INTO factory.ticket(id,project_id,title,description,created_by)
+      VALUES(${prerequisite},${owned.projectID},'Prepare export','',${owned.userID}),
+        (${dependent},${owned.projectID},'Deliver export','',${owned.userID})`;
+    await db.client`INSERT INTO factory.ticket_dependency(project_id,ticket_id,prerequisite_id,created_by)
+      VALUES(${owned.projectID},${dependent},${prerequisite},${owned.userID})`;
+    expect(
+      (await readResearch(db, owned.projectID, owned.userID, "ticket", dependent)).relationships,
+    ).toContainEqual({
+      source: "ticket",
+      id: prerequisite,
+      label: "Prepare export",
+      relationship: "prerequisite",
+    });
+    expect(
+      (await readResearch(db, owned.projectID, owned.userID, "ticket", prerequisite)).relationships,
+    ).toContainEqual({
+      source: "ticket",
+      id: dependent,
+      label: "Deliver export",
+      relationship: "dependent",
+    });
     expect(
       (await readResearch(db, owned.projectID, owned.userID, "epic", epic)).relationships[0]?.id,
     ).toBe(owned.ticketID);

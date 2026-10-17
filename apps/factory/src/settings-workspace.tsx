@@ -1,9 +1,9 @@
 import { createSignal, For, Show } from "solid-js";
+import { SecuritySettings } from "./access/security-settings";
 import { AccessSettings } from "./access/settings";
+import { rememberSettingsReturn } from "./access/settings-return";
 import { EnvironmentSettings } from "./environments/settings";
 import { ModelSettings } from "./models/settings";
-import { SecuritySettings } from "./access/security-settings";
-import { rememberSettingsReturn } from "./access/settings-return";
 import { UsageSettings } from "./usage/settings";
 import "./settings-workspace.css";
 
@@ -69,7 +69,8 @@ export function SettingsWorkspace(props: {
             categories: [
               "usage",
               "skills",
-              ...(props.developer ? (["models", "environment"] as Category[]) : []),
+              ...(props.developer ? (["models"] as Category[]) : []),
+              ...(props.developer || canManage() ? (["environment"] as Category[]) : []),
               ...(canManage() ? ["people" as const] : []),
             ] as Category[],
           },
@@ -158,7 +159,9 @@ export function SettingsWorkspace(props: {
             projectID={selection().scope === "project" ? props.project?.id : undefined}
           />
         </Show>
-        <Show when={category() === "environment" && props.developer && props.project}>
+        <Show
+          when={category() === "environment" && (props.developer || canManage()) && props.project}
+        >
           {(project) => <EnvironmentSettings projectID={project().id} />}
         </Show>
         <Show when={category() === "people" && canManage()}>

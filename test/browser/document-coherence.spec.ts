@@ -330,7 +330,7 @@ test("repository documents stay read-only and their write route creates no plann
   await page.getByLabel("Repository document", { exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Knowledge body", exact: true })).toHaveCount(0);
   const response = await page.request.put(`/api/projects/${projectID}/knowledge/documents`, {
-    headers: { origin: "http://127.0.0.1:3000" },
+    headers: { origin: new URL(page.url()).origin },
     data: { path, expectedBlobSha: commit, body: "Overwrite" },
   });
   expect(response.status()).toBe(405);
@@ -481,6 +481,10 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await editor.press("Enter");
   await editor.pressSequentially("Recovered draft.");
   await expect(page.getByRole("alert")).toContainText("Saving temporarily unavailable");
+  await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
+  await expect(editor).toBeHidden();
+  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await expect(editor).toContainText("Recovered draft.");
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
   await page.getByRole("button", { name: "Open project menu" }).click();
@@ -725,7 +729,7 @@ test("Wiki drag movement rejects source writes and History restores a new human 
   >`SELECT current_body AS body,version::integer AS version FROM factory.knowledge_page WHERE id=${pageID}`;
   if (!before) throw new Error("No page");
   const saved = await page.request.put(`/api/knowledge/pages/${pageID}`, {
-    headers: { origin: "http://127.0.0.1:3000" },
+    headers: { origin: new URL(page.url()).origin },
     data: { expectedVersion: before.version, title, body: "Changed human explanation." },
   });
   expect(saved.ok()).toBe(true);
@@ -1082,7 +1086,7 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
   expect(JSON.parse(second.canonicalContent).acceptanceCriteria).toContain("Review remains human.");
   const approved = await page.request.post(
     `/api/tickets/${ticketID}/requirements/${second.id}/approve`,
-    { headers: { origin: "http://127.0.0.1:3000" } },
+    { headers: { origin: new URL(page.url()).origin } },
   );
   expect(approved.ok()).toBe(true);
   const detail = await page.request.get(`/api/tickets/${ticketID}`);

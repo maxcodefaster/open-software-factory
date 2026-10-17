@@ -14,7 +14,7 @@ const policy =
   'path "factory/data/projects/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/models/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/identity/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/imports/*" { capabilities = ["create", "read", "update"] }\npath "factory/metadata/imports/*" { capabilities = ["delete"] }\npath "auth/token/renew-self" { capabilities = ["update"] }';
 
 // Concrete local OpenBao service, independent of Project execution. No dev mode or root token in Factory.
-export async function localOpenBao(stateDirectory: string) {
+export async function localOpenBao(stateDirectory: string, compose?: readonly string[]) {
   const directory = resolve(await realpath(stateDirectory), "openbao");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
@@ -41,8 +41,9 @@ export async function localOpenBao(stateDirectory: string) {
   const identity = identitySchema.parse(JSON.parse(await readFile(identityFile, "utf8")));
   const container = `factory-openbao-${identity.owner}`;
   const volume = `${container}-data`;
-  async function command(args: string[], input?: string) {
+  async function command(args: string[], input?: string, env?: Record<string, string>) {
     const child = Bun.spawn(args, {
+      env: { ...process.env, ...env },
       stdin: input === undefined ? "ignore" : "pipe",
       stdout: "pipe",
       stderr: "ignore",
@@ -91,9 +92,6 @@ export async function localOpenBao(stateDirectory: string) {
   const key = resolve(configDirectory, "tls.key");
   if (!(await lstat(certificate).catch(() => undefined))) {
     await command([
-      "mise",
-      "exec",
-      "--",
       "mkcert",
       "-cert-file",
       certificate,
@@ -119,7 +117,7 @@ export async function localOpenBao(stateDirectory: string) {
   };
   await writeFile(resolve(configDirectory, "config.json"), JSON.stringify(config), { mode: 0o600 });
   const address = `https://127.0.0.1:${identity.port}`;
-  const caFile = resolve(await command(["mise", "exec", "--", "mkcert", "-CAROOT"]), "rootCA.pem");
+  const caFile = resolve(await command(["mkcert", "-CAROOT"]), "rootCA.pem");
   const ca = await readFile(caFile, "utf8");
   const tokenFile = resolve(directory, "factory-token");
   const loginFile = resolve(directory, "factory-login.json");
@@ -204,38 +202,47 @@ export async function localOpenBao(stateDirectory: string) {
       }
     }
     if (!(await owned("container", container))) {
-      await docker(
-        "run",
-        "--detach",
-        "--name",
-        container,
-        "--label",
-        `factory.openbao-owner=${identity.owner}`,
-        "--user",
-        "0:0",
-        "--cap-drop",
-        "ALL",
-        "--memory",
-        "512m",
-        "--memory-swap",
-        "512m",
-        "--security-opt",
-        "no-new-privileges",
-        "--read-only",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=16m",
-        "--mount",
-        `type=bind,source=${configDirectory},target=/bao/config,readonly`,
-        "--mount",
-        `type=volume,source=${volume},target=/bao/data`,
-        "--publish",
-        `127.0.0.1:${identity.port}:8200`,
-        "--entrypoint",
-        "/usr/bin/bao",
-        upstream.openbao.image,
-        "server",
-        "-config=/bao/config/config.json",
-      );
+      if (compose)
+        await command([...compose, "up", "--detach", "--no-deps", "openbao"], undefined, {
+          FACTORY_OPENBAO_CONTAINER: container,
+          FACTORY_OPENBAO_OWNER: identity.owner,
+          FACTORY_OPENBAO_VOLUME: volume,
+          FACTORY_OPENBAO_CONFIG: configDirectory,
+          FACTORY_OPENBAO_PORT: String(identity.port),
+        });
+      else
+        await docker(
+          "run",
+          "--detach",
+          "--name",
+          container,
+          "--label",
+          `factory.openbao-owner=${identity.owner}`,
+          "--user",
+          "0:0",
+          "--cap-drop",
+          "ALL",
+          "--memory",
+          "512m",
+          "--memory-swap",
+          "512m",
+          "--security-opt",
+          "no-new-privileges",
+          "--read-only",
+          "--tmpfs",
+          "/tmp:rw,noexec,nosuid,size=16m",
+          "--mount",
+          `type=bind,source=${configDirectory},target=/bao/config,readonly`,
+          "--mount",
+          `type=volume,source=${volume},target=/bao/data`,
+          "--publish",
+          `127.0.0.1:${identity.port}:8200`,
+          "--entrypoint",
+          "/usr/bin/bao",
+          upstream.openbao.image,
+          "server",
+          "-config=/bao/config/config.json",
+        );
     } else await docker(refreshPolicy ? "restart" : "start", container);
     let health: { initialized: boolean; sealed: boolean } | undefined;
     for (let attempt = 0; attempt < 100; attempt += 1) {

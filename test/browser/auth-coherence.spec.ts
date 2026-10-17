@@ -4,6 +4,10 @@ import { luminance, rgb } from "../support/visual-contrast";
 
 for (const width of [1440, 900, 390]) {
   test(`signed-out supporting text has a contrast floor at ${width}px`, async ({ page }) => {
+    const scripts: string[] = [];
+    page.on("request", (request) => {
+      if (request.resourceType() === "script") scripts.push(request.url());
+    });
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/");
     await expect(page.getByRole("heading", { name: "Sign in", exact: true })).toBeVisible();
@@ -13,6 +17,12 @@ for (const width of [1440, 900, 390]) {
     await expect(page.locator(".managed-access")).toHaveText(
       "Use the account provided by your Factory administrator.",
     );
+    await page.waitForLoadState("networkidle");
+    expect(
+      scripts.filter((url) =>
+        /\/(?:document-engine|document-highlighting|factory)-[^/]+\.js/.test(url),
+      ),
+    ).toEqual([]);
 
     for (const background of ["river-landscape", "mountainous-landscape", "the-harvesters"]) {
       // Presentation-only variants in a signed-out fixture; no persisted user preference changes.

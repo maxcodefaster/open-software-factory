@@ -25,7 +25,11 @@ never the author's other private versions. Personal choices remain per Project. 
 identity has its own Inherit, Enable or Disable choice; required inherited revisions are locked.
 Untouched identities receive later defaults, while revision updates require explicit adoption.
 
-Use native discovery and on-demand loading in both engines. Checkout-free work receives readable
+Use native discovery and on-demand loading in both engines. Project admission retains required
+versus optional revision choices. Applicable required rules, explicitly invoked Skills and the
+assigned Interview Skill load through native Mastra APIs before inference. Manual-only Skills
+still require human invocation. References preload up to a shared 8 KiB; larger references stay
+on demand. Observations distinguish actual loads from eligibility. Checkout-free work receives readable
 references through Mastra's inline skills and cannot execute package scripts. Execution-dependent
 packages are Build-only. Build intent retains the exact manifest and slash-invocation attachments
 before installation. The privileged Runtime Connector parent installs verified packages outside

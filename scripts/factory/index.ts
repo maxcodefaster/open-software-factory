@@ -3,6 +3,9 @@ import { dirname, resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
 import upstream from "../../upstream.json";
+import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { installRuntimeArtifacts, publishedRuntimeArtifacts } from "./artifacts";
+import { requireContainerState } from "./container-state";
 import { ensureLocalForgeIdentity } from "./forge-identity";
 import { installForgeBrowserLogout } from "./forge-logout";
 import {
@@ -22,7 +25,8 @@ import {
   requireModelConfiguration,
   requirePinnedImage,
 } from "./preflight";
-import { waitForFactory } from "./readiness";
+import { completeFactoryStartup, waitForFactory } from "./readiness";
+import { localServerSettings } from "./server-settings";
 import { waitForRegistry } from "./registry-readiness";
 import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
 import { localStarterCompose, starterImageManifest, starterImagesSchema } from "./starter-images";
@@ -32,7 +36,9 @@ process.env["FACTORY_FORGEJO_IMPORT_DOMAINS"] =
   projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"])
     .map((origin) => new URL(origin).hostname)
     .join(",") || "imports-disabled.invalid";
-const sharedStateDirectory = resolve(root, ".factory");
+const sharedStateDirectory = resolve(
+  process.env["FACTORY_STATE_DIRECTORY"] || resolve(root, ".factory"),
+);
 const action = process.argv[2];
 const flags = process.argv.slice(3);
 function option(flag: string) {
@@ -56,7 +62,7 @@ if (
   requireResetConfirmation(null, confirmation, flags.includes("--data"));
 if (disposableName && action === "publish-runtime")
   throw new Error("Disposable installations reuse approved published runtime images");
-if (!["up", "restart", "reset", "status", "publish-runtime"].includes(action ?? ""))
+if (!["up", "container", "restart", "reset", "status", "publish-runtime"].includes(action ?? ""))
   throw new Error("Unknown Factory action");
 if (disposableName && action === "up") requireModelConfiguration(process.env);
 const installation = disposableName
@@ -89,9 +95,15 @@ const forgejoAdminTokenFile = resolve(stateDirectory, "forgejo-admin-token");
 const authSecretFile = resolve(stateDirectory, "auth-secret");
 const serverLogFile = resolve(stateDirectory, "server.log");
 const serverIdentityFile = resolve(stateDirectory, "server.json");
-const factoryPort = installation?.ports.factory ?? 3000;
-const forgejoPort = installation?.ports.forgejo ?? 33030;
-const zeroPort = installation?.ports.zero ?? 4948;
+const factoryPort =
+  installation?.ports.factory ?? Number(process.env["FACTORY_LOCAL_PORT"] || 3000);
+const forgejoPort =
+  installation?.ports.forgejo ?? Number(process.env["FACTORY_LOCAL_FORGEJO_PORT"] || 33030);
+const zeroPort = installation?.ports.zero ?? Number(process.env["FACTORY_LOCAL_ZERO_PORT"] || 4948);
+for (const port of [factoryPort, forgejoPort, zeroPort])
+  if (!Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new Error("Invalid local Factory port");
+let foregroundServer: ReturnType<typeof Bun.spawn> | undefined;
 const factoryBaseURL = `http://127.0.0.1:${factoryPort}`;
 const forgejoBaseURL = `http://127.0.0.1:${forgejoPort}`;
 const composeArguments = [
@@ -141,6 +153,10 @@ async function command(
 }
 
 async function preflight() {
+  if (process.platform === "linux" && !process.env["FACTORY_RUNTIME_HOST"])
+    throw new Error(
+      "Set FACTORY_RUNTIME_HOST to this host's address reachable from Kubernetes Pods",
+    );
   if (Bun.version !== "1.4.3") throw new Error("Factory startup requires Bun 1.4.3");
   for (const value of [
     upstream.envbox.image,
@@ -178,10 +194,7 @@ async function preflight() {
 }
 
 async function kubectl(arguments_: string[], input?: string, quiet = false) {
-  return command(
-    ["kubectl", "--context", "orbstack", ...arguments_],
-    input === undefined ? { quiet } : { input, quiet },
-  );
+  return command(kubernetesCommand(arguments_), input === undefined ? { quiet } : { input, quiet });
 }
 
 async function ensureRegistry() {
@@ -193,14 +206,8 @@ async function ensureRegistry() {
   await mkdir(stateDirectory, { recursive: true });
   const certificate = resolve(stateDirectory, "registry.pem");
   const key = resolve(stateDirectory, "registry-key.pem");
-  const rootCA = resolve(
-    await command(["mise", "exec", "--", "mkcert", "-CAROOT"], { quiet: true }),
-    "rootCA.pem",
-  );
+  const rootCA = resolve(await command(["mkcert", "-CAROOT"], { quiet: true }), "rootCA.pem");
   await command([
-    "mise",
-    "exec",
-    "--",
     "mkcert",
     "-cert-file",
     certificate,
@@ -243,21 +250,15 @@ async function publishRuntimeHost() {
   const registryRepository = `${registryHost}/open-factory/runtime-host`;
   await reservation.stop(true);
   const metadataFile = resolve(stateDirectory, "runtime-host-metadata.json");
-  const rootCA = resolve(
-    await command(["mise", "exec", "--", "mkcert", "-CAROOT"], { quiet: true }),
-    "rootCA.pem",
-  );
+  const rootCA = resolve(await command(["mkcert", "-CAROOT"], { quiet: true }), "rootCA.pem");
   const forward = Bun.spawn(
-    [
-      "kubectl",
-      "--context",
-      "orbstack",
+    kubernetesCommand([
       "port-forward",
       "-n",
       namespace,
       "service/registry",
       `${registryPort}:5000`,
-    ],
+    ]),
     { cwd: root, stdout: "ignore", stderr: "pipe" },
   );
   try {
@@ -390,6 +391,9 @@ async function publishRuntimeHost() {
         starterImagesSchema.parse({ platform, development: references[0], support: references[1] }),
       ),
     );
+    // Publication owns the individual build outputs. Drop an older release
+    // bundle only after all native artifacts have been published successfully.
+    await rm(resolve(sharedStateDirectory, "runtime-artifacts.json"), { force: true });
     return runtimeReference;
   } finally {
     forward.kill();
@@ -501,6 +505,9 @@ async function ensureForgejo() {
     if (!token) throw new Error("Forgejo returned no mutation token");
     await writeFile(forgejoTokenFile, `${token}\n`, { mode: 0o600 });
   }
+  // Distribution startup creates infrastructure identities only. The runtime
+  // conformance repository belongs to the source-development installation.
+  if (action === "container") return token;
   const authorization = `Bearer ${token}`;
   const repositoryAPI = `${forgejoBaseURL}/api/v1/repos/factory-mutation/runtime-fixture`;
   const starterImages = starterImagesSchema.parse(
@@ -727,9 +734,11 @@ async function ensureForgeAdministrator() {
 }
 
 async function publishedBrowserImage() {
+  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
   const browserImage =
     installation?.browserImage ??
     process.env["FACTORY_BROWSER_TOOLS_IMAGE"] ??
+    artifacts?.["browser-tools"] ??
     (await readFile(browserImageFile, "utf8")).trim();
   if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(browserImage))
     throw new Error("Published browser tools image is not pinned");
@@ -737,12 +746,15 @@ async function publishedBrowserImage() {
 }
 
 async function publishedSourceImages() {
+  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
   const files =
     process.env["FACTORY_WORKSPACE_FILES_IMAGE"] ??
+    artifacts?.["workspace-files"] ??
     (await readFile(sourceFilesImageFile, "utf8")).trim();
   requirePinnedImage(files);
   const editor =
     process.env["FACTORY_DEVELOPER_IDE_IMAGE"] ??
+    artifacts?.["developer-ide"] ??
     (await readFile(developerIDEImageFile, "utf8")).trim();
   requirePinnedImage(editor);
   return {
@@ -752,13 +764,25 @@ async function publishedSourceImages() {
 }
 
 async function startServer(runtimeImage: string, forgejoToken?: string) {
+  const settings = localServerSettings(
+    installation ? { FACTORY_HOST: process.env["FACTORY_HOST"] } : process.env,
+    {
+      email: installation ? `admin-${installation.name}@factory.local` : "admin@factory.local",
+      password: installation
+        ? await localSecret(resolve(stateDirectory, "admin-password"))
+        : "factory-local-password",
+    },
+  );
   const browserImage = await publishedBrowserImage();
   const sourceImages = await publishedSourceImages();
+  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
   const buildImage =
     process.env["FACTORY_BUILD_RUNTIME_HOST_IMAGE"] ??
+    artifacts?.["build-runtime-host"] ??
     (await readFile(buildRuntimeImageFile, "utf8")).trim();
   const verificationImage =
     process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"] ??
+    artifacts?.["verification-runtime-host"] ??
     (await readFile(verificationRuntimeImageFile, "utf8")).trim();
   requirePinnedImage(buildImage);
   requirePinnedImage(verificationImage);
@@ -771,43 +795,64 @@ async function startServer(runtimeImage: string, forgejoToken?: string) {
     env: {
       ...process.env,
       FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
+      ...(action === "container" &&
+      !runtimeImage.includes("registry.open-factory-envbox-smoke.svc.cluster.local")
+        ? {
+            FACTORY_REGISTRY_CA_FILE:
+              process.env["FACTORY_REGISTRY_CA_FILE"] || "/etc/ssl/certs/ca-certificates.crt",
+          }
+        : {}),
       ...(process.env["FACTORY_OPENBAO_URL"]
         ? {}
-        : await (await localOpenBao(stateDirectory)).start()),
+        : await (
+            await localOpenBao(
+              stateDirectory,
+              action === "container" ? composeArguments : undefined,
+            )
+          ).start()),
       FACTORY_BUILD_RUNTIME_HOST_IMAGE: buildImage,
       FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: verificationImage,
       FACTORY_BROWSER_TOOLS_IMAGE: browserImage,
       ...sourceImages,
-      FACTORY_HOST: "0.0.0.0",
+      FACTORY_HOST: settings.host,
       FACTORY_PORT: String(factoryPort),
       FACTORY_BASE_URL: factoryBaseURL,
-      FACTORY_WIKI_WEBHOOK_URL: `http://host.docker.internal:${factoryPort}`,
+      FACTORY_WIKI_WEBHOOK_URL:
+        process.env["FACTORY_WIKI_WEBHOOK_URL"] ??
+        `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}`,
       FACTORY_WIKI_WEBHOOK_SECRET: await localSecret(
         resolve(stateDirectory, "wiki-webhook-secret"),
       ),
       FACTORY_AUTH_SECRET: authSecret,
-      FACTORY_AUTH_COOKIE_PREFIX: installation ? `factory-${installation.name}` : "factory",
-      FACTORY_ADMIN_EMAIL: installation
-        ? `admin-${installation.name}@factory.local`
-        : "admin@factory.local",
-      FACTORY_ADMIN_PASSWORD: installation
-        ? await localSecret(resolve(stateDirectory, "admin-password"))
-        : "factory-local-password",
+      FACTORY_AUTH_COOKIE_PREFIX: installation
+        ? `factory-${installation.name}`
+        : action === "container"
+          ? `factory-${process.env["COMPOSE_PROJECT_NAME"]}`
+          : "factory",
+      FACTORY_ADMIN_EMAIL: settings.email,
+      FACTORY_ADMIN_PASSWORD: settings.password,
       FACTORY_FORGEJO_API_URL: `${forgejoBaseURL}/api/v1/`,
       FACTORY_FORGEJO_TOKEN: forgejoToken ?? (await readFile(forgejoTokenFile, "utf8")).trim(),
       FACTORY_FORGEJO_OWNER: "factory-mutation",
       FACTORY_FORGEJO_ADMIN_TOKEN: await ensureForgeAdministrator(),
-      FACTORY_FORGE_ISSUER_URL: `http://host.orb.internal:${factoryPort}/api/auth`,
-      FACTORY_FORGE_DISCOVERY_URL: `http://host.orb.internal:${factoryPort}/api/auth/.well-known/openid-configuration`,
+      FACTORY_FORGE_ISSUER_URL: `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}/api/auth`,
+      FACTORY_FORGE_DISCOVERY_URL: `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}/api/auth/.well-known/openid-configuration`,
       FACTORY_ZERO_CACHE_URL: `http://127.0.0.1:${zeroPort}`,
       FACTORY_STARTUP_ID: startupID,
     },
     stdin: "ignore",
     stdout: Bun.file(serverLogFile),
     stderr: Bun.file(serverLogFile),
-    detached: true,
+    detached: action !== "container",
   });
-  server.unref();
+  if (action === "container") {
+    foregroundServer = server;
+    const stop = () => {
+      if (server.exitCode === null) server.kill("SIGTERM");
+    };
+    process.once("SIGTERM", stop);
+    process.once("SIGINT", stop);
+  } else server.unref();
   await writeFile(serverPIDFile, `${server.pid}\n`);
   await writeFile(serverIdentityFile, JSON.stringify({ pid: server.pid, startupID }), {
     mode: 0o600,
@@ -817,11 +862,9 @@ async function startServer(runtimeImage: string, forgejoToken?: string) {
     await ensureLocalForgeIdentity({
       factoryURL: factoryBaseURL,
       forgeURL: forgejoBaseURL,
-      discoveryURL: `http://host.orb.internal:${factoryPort}/api/auth/.well-known/openid-configuration`,
-      email: installation ? `admin-${installation.name}@factory.local` : "admin@factory.local",
-      password: installation
-        ? await localSecret(resolve(stateDirectory, "admin-password"))
-        : "factory-local-password",
+      discoveryURL: `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}/api/auth/.well-known/openid-configuration`,
+      email: settings.email,
+      password: settings.password,
       signingKey: authSecret,
       execute: (args) => forgejoExec(args, true),
       installLogout: () =>
@@ -855,27 +898,75 @@ async function startServer(runtimeImage: string, forgejoToken?: string) {
       `${cause instanceof Error ? cause.message : "Factory startup failed"}. Inspect the protected local log at ${serverLogFile}`,
     );
   }
+}
+
+async function startPlanningCache() {
+  await command([...composeArguments, "up", "-d", "--wait", "zero-cache"], {
+    quiet: Boolean(installation),
+  });
+}
+
+function announceReady() {
   console.log(`Factory is ready at ${factoryBaseURL}`);
+  if (!installation && !process.env["FACTORY_ADMIN_PASSWORD"])
+    console.log(
+      "Local development bootstrap credentials are in README.md. Configure FACTORY_ADMIN_PASSWORD before first startup for shared access; this never resets an existing password.",
+    );
 }
 
 async function up() {
   await preflight();
   await ensureLocalMetricsServer(command);
-  if (!installation) await ensureRegistry();
-  const runtimeImage = installation?.runtimeImage ?? (await publishRuntimeHost());
+  if (action === "container") {
+    const bundle = JSON.parse(await readFile(resolve(root, "runtime-artifacts.json"), "utf8"));
+    if (bundle !== null) await installRuntimeArtifacts(sharedStateDirectory, bundle);
+  }
+  const published = installation ? null : await publishedRuntimeArtifacts(sharedStateDirectory);
+  if (action === "container" && !published)
+    throw new Error(
+      "Use a release Factory image with embedded runtime artifacts, or supply a complete published artifact set in FACTORY_STATE_DIRECTORY",
+    );
+  if (!installation && !published) await ensureRegistry();
+  if (published && action !== "container" && !(await Bun.file(starterImagesFile).exists())) {
+    const architecture = await command(["docker", "info", "--format", "{{.Architecture}}"], {
+      quiet: true,
+    });
+    const platform =
+      architecture === "arm64" || architecture === "aarch64"
+        ? "linux/arm64"
+        : architecture === "amd64" || architecture === "x86_64"
+          ? "linux/amd64"
+          : undefined;
+    await writeFile(
+      starterImagesFile,
+      JSON.stringify(
+        starterImagesSchema.parse({
+          platform,
+          development: upstream.nodeDevelopment.image,
+          support: upstream.node.image,
+        }),
+      ),
+      { mode: 0o600 },
+    );
+  }
+  const runtimeImage =
+    installation?.runtimeImage ?? published?.["runtime-host"] ?? (await publishRuntimeHost());
   await command([...composeArguments, "up", "-d", "--wait", "postgres", "forgejo"], {
     quiet: Boolean(installation),
   });
   await command(["bun", "run", "db:migrate"], { quiet: true });
   const forgejoToken = await ensureForgejo();
-  await command(["bun", "run", "factory:build"], {
-    quiet: Boolean(installation),
-    env: { NODE_ENV: "production" },
-  });
-  await stopServer();
-  await startServer(runtimeImage, forgejoToken);
-  await command([...composeArguments, "up", "-d", "--wait", "zero-cache"], {
-    quiet: Boolean(installation),
+  if (action !== "container") {
+    await command(["bun", "run", "factory:build"], {
+      quiet: Boolean(installation),
+      env: { NODE_ENV: "production" },
+    });
+    await stopServer();
+  }
+  await completeFactoryStartup({
+    startServer: () => startServer(runtimeImage, forgejoToken),
+    startPlanningCache,
+    ready: announceReady,
   });
   if (installation)
     console.log(
@@ -886,14 +977,20 @@ async function up() {
 async function restart() {
   await preflight();
   const runtimeImage =
-    installation?.runtimeImage ?? (await readFile(runtimeImageFile, "utf8")).trim();
+    installation?.runtimeImage ??
+    (await publishedRuntimeArtifacts(sharedStateDirectory))?.["runtime-host"] ??
+    (await readFile(runtimeImageFile, "utf8")).trim();
   if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(runtimeImage))
     throw new Error("Published runtime host is not pinned");
   await publishedBrowserImage();
   await publishedSourceImages();
   await command(["bun", "run", "db:migrate"], { quiet: true });
   await stopServer();
-  await startServer(runtimeImage);
+  await completeFactoryStartup({
+    startServer: () => startServer(runtimeImage),
+    startPlanningCache,
+    ready: announceReady,
+  });
 }
 
 async function status() {
@@ -902,6 +999,7 @@ async function status() {
   }).catch(() => null);
   const runtimeImage =
     installation?.runtimeImage ??
+    (await publishedRuntimeArtifacts(sharedStateDirectory))?.["runtime-host"] ??
     (await readFile(runtimeImageFile, "utf8").catch(() => "not published"));
   console.log(`server: ${response?.ok ? "ready" : "stopped"}`);
   console.log(`runtime host: ${runtimeImage.trim()}`);
@@ -1091,16 +1189,39 @@ async function configureInstallation() {
 }
 
 await mkdir(stateDirectory, { recursive: true });
-const lockFile = resolve(stateDirectory, "operation.lock");
-const lock = await open(lockFile, "wx", 0o600).catch(() => {
-  throw new Error(
-    "Another Factory operation owns this installation; inspect its operation.lock before retrying",
+if (action === "container") {
+  await requireContainerState(stateDirectory, process.env["COMPOSE_PROJECT_NAME"]);
+  // This private state is mounted at its exact host path, also used by Docker
+  // for the OpenBao configuration mount. Never mount the host source repository.
+  await chmod(stateDirectory, 0o700);
+  process.env["CAROOT"] = resolve(stateDirectory, "ca");
+  process.env["FACTORY_LOCAL_DB_PASSWORD"] = await localSecret(
+    resolve(stateDirectory, "database-password"),
   );
-});
+  process.env["FACTORY_LOCAL_ZERO_PASSWORD"] = await localSecret(
+    resolve(stateDirectory, "zero-password"),
+  );
+  process.env["FACTORY_ADMIN_PASSWORD"] ||= await localSecret(
+    resolve(stateDirectory, "admin-password"),
+  );
+  if (!process.env["FACTORY_ADMIN_EMAIL"]) delete process.env["FACTORY_ADMIN_EMAIL"];
+  if (!process.env["FACTORY_HOST"]) delete process.env["FACTORY_HOST"];
+  process.env["DATABASE_URL"] =
+    `postgresql://factory:${process.env["FACTORY_LOCAL_DB_PASSWORD"]}@127.0.0.1:${process.env["FACTORY_LOCAL_POSTGRES_PORT"] || 57432}/factory`;
+}
+const lockFile = resolve(stateDirectory, "operation.lock");
+const lock =
+  action === "container"
+    ? null
+    : await open(lockFile, "wx", 0o600).catch(() => {
+        throw new Error(
+          "Another Factory operation owns this installation; inspect its operation.lock before retrying",
+        );
+      });
 try {
-  await lock.writeFile(String(process.pid));
+  await lock?.writeFile(String(process.pid));
   await configureInstallation();
-  if (action === "up") await up();
+  if (action === "up" || action === "container") await up();
   else if (action === "publish-runtime") {
     await kubectl(["get", "service/registry", "-n", namespace], undefined, true);
     await publishRuntimeHost();
@@ -1110,7 +1231,18 @@ try {
   } else if (action === "restart") await restart();
   else if (action === "status") await status();
   else if (action === "reset") await reset();
+} catch (cause) {
+  if (foregroundServer?.exitCode === null) {
+    foregroundServer.kill("SIGTERM");
+    await foregroundServer.exited;
+  }
+  throw cause;
 } finally {
-  await lock.close();
-  await rm(lockFile, { force: true });
+  if (lock) {
+    await lock.close();
+    await rm(lockFile, { force: true });
+  }
 }
+// Release the startup-operation lock before serving. Docker owns the long-lived
+// foreground process; PID 1 forwards Stop and the child exit is observable.
+if (action === "container" && foregroundServer) process.exitCode = await foregroundServer.exited;
