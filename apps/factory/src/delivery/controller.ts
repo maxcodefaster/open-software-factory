@@ -4,8 +4,8 @@ import {
   ForgeAmbiguousWriteError,
   type ForgeRepository,
 } from "../../../../packages/forge/src/forge";
-import type { RuntimeAttemptView } from "../runtime/types";
 import { createAccessController, projectDevelopmentAuthorityIn } from "../access/controller";
+import type { RuntimeAttemptView } from "../runtime/types";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -427,13 +427,32 @@ export function createDeliveryController(
     `;
   }
 
-  async function cancelVerifications(changeID: string, repository: ForgeRepository) {
+  async function cancelVerifications(
+    changeID: string,
+    repository: ForgeRepository,
+    keepCommitSHA: string | null = null,
+  ) {
     const verifications = await database.client<
       Array<{ id: string; runtimeAttemptID: string | null; runnerID: string | null }>
     >`
-      UPDATE factory.verification SET state = 'cancelled', completed_at = COALESCE(completed_at, now()),
+      UPDATE factory.verification verification SET state = 'cancelled', completed_at = COALESCE(completed_at, now()),
         updated_at = now()
-      WHERE change_id = ${changeID} AND state IN ('pending', 'runner-starting', 'running', 'cancelled')
+      WHERE change_id = ${changeID}
+        AND (${keepCommitSHA}::text IS NULL OR (
+          commit_sha <> ${keepCommitSHA}
+          AND ${keepCommitSHA} = (
+            SELECT commit.commit_sha FROM factory.change_commit_operation commit
+            WHERE commit.change_id = verification.change_id AND commit.state = 'succeeded'
+            ORDER BY commit.sequence DESC LIMIT 1
+          )
+        ))
+        AND (state IN ('pending', 'runner-starting', 'running') OR (
+          state = 'cancelled' AND (runner_id IS NOT NULL OR EXISTS (
+            SELECT 1 FROM factory.runtime_attempt attempt
+            WHERE attempt.id = verification.runtime_attempt_id
+              AND attempt.state NOT IN ('stopped', 'failed')
+          ))
+        ))
       RETURNING id, runtime_attempt_id AS "runtimeAttemptID", runner_id AS "runnerID"
     `;
     for (const verification of verifications) await stopVerification(repository, verification);
@@ -631,6 +650,11 @@ export function createDeliveryController(
         return;
       }
       if (!change.commitSHA || change.state === "failed") return;
+      await cancelVerifications(
+        change.id,
+        repositoryFromURL(change.repositoryURL),
+        change.commitSHA,
+      );
       if (change.state === "delivered") {
         await reconcilePromotion(change, repositoryFromURL(change.repositoryURL));
         return;

@@ -3,7 +3,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { createDeliveryController } from "./controller";
 
-function fixture(delivered = false, repair = false) {
+function fixture(delivered = false, repair = false, superseded = false) {
   const baseSHA = "a".repeat(40);
   const commitSHA = "b".repeat(40);
   let state = delivered ? "delivered" : "active";
@@ -18,11 +18,33 @@ function fixture(delivered = false, repair = false) {
   let rejectPrompt = false;
   let promptCalls = 0;
   let repairAcknowledged = false;
+  let supersededState = "runner-starting";
+  let supersededRunner = "42";
+  let supersededStopped = false;
+  const stoppedAttempts: string[] = [];
+  const deletedRunners: number[] = [];
   const verificationID = crypto.randomUUID();
   const repairCommands: Array<{ id: string; repair: boolean | undefined }> = [];
   const client = Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const query = strings.join("?");
+      if (query.includes("commit_sha <>")) {
+        if (
+          !superseded ||
+          (supersededState === "cancelled" && !supersededRunner && supersededStopped)
+        )
+          return [];
+        expect(values).toContain(commitSHA);
+        supersededState = "cancelled";
+        return [
+          {
+            id: "old-verification",
+            runtimeAttemptID: "old-verification-runtime",
+            runnerID: supersededRunner || null,
+          },
+        ];
+      }
+      if (query.includes("UPDATE factory.verification SET runner_id = NULL")) supersededRunner = "";
       if (query.includes("AS active")) return [{ active: state === "active" }];
       if (query.includes("ticket.title, ticket.description"))
         return [
@@ -111,13 +133,18 @@ function fixture(delivered = false, repair = false) {
       return { headSha: commitSHA };
     },
     deleteBranch: async () => {},
+    deleteRunner: async (_repository: unknown, id: number) => {
+      deletedRunners.push(id);
+    },
   } as unknown as ReturnType<typeof createForgejoClient>;
   const runtime = {
     startVerification: async () => null,
     startStagingReplacement: async () => null,
-    stop: async () => {
+    stop: async (attemptID: string) => {
       stopCalls += 1;
+      stoppedAttempts.push(attemptID);
       if (failStop) throw new Error("stop failed");
+      if (attemptID === "old-verification-runtime") supersededStopped = true;
       return null;
     },
   };
@@ -158,10 +185,36 @@ function fixture(delivered = false, repair = false) {
     rejectPrompt: (value: boolean) => {
       rejectPrompt = value;
     },
+    stoppedAttempts,
+    deletedRunners,
+    supersededState: () => supersededState,
   };
 }
 
 describe("Delivery recovery", () => {
+  test("a newer commit cancels and cleans only the superseded Verification once", async () => {
+    const f = fixture(false, false, true);
+    await f.controller.reconcile("change");
+    expect(f.supersededState()).toBe("cancelled");
+    expect(f.stoppedAttempts).toEqual(["old-verification-runtime"]);
+    expect(f.deletedRunners).toEqual([42]);
+    await f.controller.reconcile("change");
+    expect(f.stoppedAttempts).toEqual(["old-verification-runtime"]);
+    expect(f.deletedRunners).toEqual([42]);
+  });
+  test("superseded cleanup retries a failed Stop without deleting a newer runner", async () => {
+    const f = fixture(false, false, true);
+    f.failStop(true);
+    await f.controller.reconcile("change");
+    expect(f.supersededState()).toBe("cancelled");
+    expect(f.deletedRunners).toEqual([42]);
+    f.failStop(false);
+    await f.controller.reconcile("change");
+    expect(f.stoppedAttempts).toEqual(["old-verification-runtime", "old-verification-runtime"]);
+    expect(f.deletedRunners).toEqual([42]);
+    await f.controller.reconcile("change");
+    expect(f.stoppedAttempts).toHaveLength(2);
+  });
   test("does not acknowledge or dispatch automatic repair after Stop", async () => {
     const f = fixture(false, true);
     f.setSessionState("stopped");
