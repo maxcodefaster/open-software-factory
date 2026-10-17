@@ -390,6 +390,9 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   expect(researchRequests).toBe(0);
   await expect(page.locator(".agent-state")).toHaveText("Working");
   await expect(input).toHaveValue("");
+  // The command response arrives before the cached Change reflects the new turn.
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
   await mkdir(".factory/test-results/implementation-journey", { recursive: true });
   await page.screenshot({
     path: ".factory/test-results/implementation-journey/correction-composer-cleared.png",

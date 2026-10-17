@@ -110,6 +110,7 @@ export type TicketWorkspaceProps = {
   latestRevision?: RequirementRevisionView | undefined;
   latestRequirement?: RequirementContent | undefined;
   pending: boolean;
+  buildInProgress?: boolean;
   epics: readonly Epic[];
   dependencies: TicketDependenciesProps;
   onAssignEpic(epicId: string | null): void;
@@ -399,10 +400,11 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       ticketState: props.current.ticket.state,
       changeState: props.change?.state,
       verificationState: props.change?.verificationState,
-      buildTurnState: props.change?.buildTurnState,
+      buildTurnState: props.buildInProgress ? "running" : props.change?.buildTurnState,
       implementationState: props.change?.implementationState,
     });
   const implementationBusy = () =>
+    props.buildInProgress ||
     ["pending", "dispatching", "running"].includes(props.change?.buildTurnState ?? "") ||
     ["starting", "working"].includes(props.change?.implementationState ?? "");
   const canDeliver = () =>
@@ -1019,7 +1021,8 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                     when={
                       !props.current.ticket.trashedAt &&
                       props.change?.state === "active" &&
-                      props.change.implementationState === "committed"
+                      props.change.implementationState === "committed" &&
+                      !implementationBusy()
                     }
                   >
                     <button

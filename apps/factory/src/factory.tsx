@@ -3364,6 +3364,7 @@ function FactoryWorkspace(props: {
                       latestRevision={latestRevision()}
                       latestRequirement={latestRequirement()}
                       pending={pending()}
+                      buildInProgress={agentTurnBusy()}
                       epics={epicList()}
                       dependencies={{
                         prerequisites: prerequisitesFor(current().ticket.id),
