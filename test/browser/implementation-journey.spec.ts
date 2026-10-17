@@ -389,6 +389,12 @@ test("Review corrections send to the retained Build without IDE; checks and cont
     .toBe("Correct the first action within the original requirements.");
   expect(researchRequests).toBe(0);
   await expect(page.locator(".agent-state")).toHaveText("Working");
+  await expect(input).toHaveValue("");
+  await mkdir(".factory/test-results/implementation-journey", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/correction-composer-cleared.png",
+  });
+  await input.fill("Keep this newer draft while the accepted correction runs.");
   holdRead = true;
   await held.promise;
   await page.getByRole("button", { name: "Stop OpenCode", exact: true }).click();
@@ -406,12 +412,15 @@ test("Review corrections send to the retained Build without IDE; checks and cont
       ),
   );
   await expect(page.locator(".agent-state")).toHaveText("Stopped", { timeout: 100 });
+  await expect(input).toHaveValue("Keep this newer draft while the accepted correction runs.");
   await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
-  await mkdir(".factory/screenshots/implementation-journey", { recursive: true });
+  await mkdir(".factory/test-results/implementation-journey", { recursive: true });
   await page.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
-  await page.screenshot({ path: ".factory/screenshots/implementation-journey/review-desktop.png" });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/review-desktop.png",
+  });
   await page.setViewportSize({ width: 430, height: 900 });
-  await page.screenshot({ path: ".factory/screenshots/implementation-journey/review-narrow.png" });
+  await page.screenshot({ path: ".factory/test-results/implementation-journey/review-narrow.png" });
   const documentBox = await page.locator(".ticket-document").boundingBox();
   expect(documentBox?.width).toBeLessThanOrEqual(430);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);

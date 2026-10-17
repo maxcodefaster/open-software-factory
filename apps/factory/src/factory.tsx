@@ -1542,7 +1542,9 @@ function FactoryWorkspace(props: {
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === change.id) {
         publishAgentView(change.id, value);
-        if (String(new FormData(form).get("message") ?? "").trim() === text) form.reset();
+        // Pending disables the composer, so FormData omits its submitted value.
+        const input = form.elements.namedItem("message") as HTMLTextAreaElement | null;
+        if (input?.value.trim() === text) form.reset();
       }
     });
   }
