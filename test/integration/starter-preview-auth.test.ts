@@ -165,11 +165,23 @@ test("Starter authentication works behind the real scoped App proxy path and ret
     check.stdin.end();
     await new Response(check.stderr).text();
     expect(await check.exited).toBe(0);
+    const directEmail = `${crypto.randomUUID()}@starter.test`;
+    const directPassword = crypto.randomUUID();
     await page.getByRole("button", { name: "Create an account", exact: true }).click();
     await page.getByLabel("Name", { exact: true }).fill("Browser app user");
-    await page.getByLabel("Email", { exact: true }).fill(`${crypto.randomUUID()}@starter.test`);
-    await page.getByLabel("Password", { exact: true }).fill(crypto.randomUUID());
+    await page.getByLabel("Email", { exact: true }).fill(directEmail);
+    await page.getByLabel("Password", { exact: true }).fill(directPassword);
     await page.getByRole("button", { name: "Create account", exact: true }).click();
+    await visible(page.getByRole("heading", { name: "You're home." })).toBeVisible();
+    await page.getByRole("button", { name: "Sign out", exact: true }).click();
+    await visible(page.getByRole("heading", { name: "Welcome back", exact: true })).toBeVisible();
+    await page.screenshot({
+      path: ".factory/test-results/starter-preview-auth/immediate-signout-signin.png",
+      animations: "disabled",
+    });
+    await page.getByLabel("Email", { exact: true }).fill(directEmail);
+    await page.getByLabel("Password", { exact: true }).fill(directPassword);
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await visible(page.getByRole("heading", { name: "You're home." })).toBeVisible();
     await page.reload();
     await visible(page.getByRole("heading", { name: "You're home." })).toBeVisible();

@@ -35,7 +35,10 @@ function App() {
         ? await auth.signUp.email({ email, password, name: String(form.get("name")) })
         : await auth.signIn.email({ email, password });
       if (result.error) setError(result.error.message ?? "Could not sign in.");
-      else await refresh();
+      else {
+        setSignup(false);
+        await refresh();
+      }
     } catch {
       setError("Could not connect. Try again.");
     } finally {
