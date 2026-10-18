@@ -600,11 +600,14 @@ export class RuntimeHub {
       return existing.promise;
     }
     const { promise, resolve, reject } = Promise.withResolvers<ParentOperationResult>();
-    const timer = setTimeout(() => {
-      if (this.#pendingOperations.get(operationID) !== target) return;
-      this.#pendingOperations.delete(operationID);
-      reject(new Error("Runtime parent operation timed out"));
-    }, 60_000);
+    const timer = setTimeout(
+      () => {
+        if (this.#pendingOperations.get(operationID) !== target) return;
+        this.#pendingOperations.delete(operationID);
+        reject(new Error("Runtime parent operation timed out"));
+      },
+      operation.action === "browser-renew" ? 5_000 : 60_000,
+    );
     const target = {
       attemptID,
       action: payload["action"] ?? "",

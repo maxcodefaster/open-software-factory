@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import type { ServerWebSocket } from "bun";
 import { createHash } from "node:crypto";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import {
@@ -12,7 +13,11 @@ import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { observe } from "../fixtures/pinned-opencode";
-import { RuntimeParentOperationError, type RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import {
+  RuntimeHub,
+  RuntimeParentOperationError,
+  type RuntimeSocketData,
+} from "../../apps/factory/src/runtime/hub";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -233,6 +238,140 @@ test("the current Build renews intended browser authority before its first obser
     await scope.dispose();
   }
 });
+
+test("a missing renewal acknowledgement cannot occupy the full browser lease", async () => {
+  const hub = new RuntimeHub(async () => {});
+  const attemptID = crypto.randomUUID();
+  const renewID = crypto.randomUUID();
+  const callID = crypto.randomUUID();
+  const socket = {
+    data: { kind: "connector", role: "parent", attemptID, generation: 1 },
+    send: (raw: string) => raw.length,
+    close: () => {},
+  } as unknown as ServerWebSocket<RuntimeSocketData>;
+  hub.open(socket);
+  let callSettled = false;
+  const renew = hub
+    .parentOperation(attemptID, {
+      operationId: renewID,
+      action: "browser-renew",
+    })
+    .then(
+      () => "acknowledged",
+      (cause: Error) => cause.message,
+    );
+  const call = hub
+    .parentOperation(attemptID, {
+      operationId: callID,
+      action: "browser-call",
+    })
+    .then(
+      () => {
+        callSettled = true;
+      },
+      () => {
+        callSettled = true;
+      },
+    );
+  try {
+    const outcome = await Promise.race([
+      renew,
+      new Promise<string>((resolve) => setTimeout(() => resolve("renewal still waiting"), 6_500)),
+    ]);
+    expect(outcome).toBe("Runtime parent operation timed out");
+    expect(callSettled).toBe(false);
+  } finally {
+    for (const [operationId, action] of [
+      [renewID, "browser-renew"],
+      [callID, "browser-call"],
+    ])
+      hub.message(socket, JSON.stringify({ type: "operation-response", operationId, action }));
+    await Promise.all([renew, call]);
+    hub.close(socket);
+  }
+}, 15_000);
+
+test.each([
+  "Runtime parent operation timed out",
+  "Runtime parent is not ready",
+  "Runtime parent connection changed before dispatch",
+  "Runtime parent operation could not be sent",
+  "Runtime channel disconnected",
+])("a transient renewal loss retains only the current live scope: %s", async (failure) => {
+  const scope = await setup();
+  const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+  try {
+    scope.owned.hub.parentOperation = async (_attempt, payload, beforeSend) => {
+      if (payload.action === "browser-renew") {
+        await beforeSend?.(() => scope.frames.push(payload));
+        throw new Error(failure);
+      }
+      return forward(_attempt, payload, beforeSend);
+    };
+    await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+    expect(
+      await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
+    ).not.toBeNull();
+    expect(scope.frames.map(({ action }) => action)).not.toContain("browser-close");
+    scope.owned.hub.parentOperation = forward;
+    await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-renew", "browser-renew"]);
+    await createChangeAgentStop(scope.owned.database, scope.owned.hub).persist(
+      scope.owned.changeID,
+    );
+    await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+    expect(await scope.browser.authorize(scope.grant.sessionID, scope.authorization)).toBeNull();
+  } finally {
+    await scope.dispose();
+  }
+});
+
+test.each([
+  { failure: "browser execution authority ended", lostCleanup: false },
+  { failure: "browser execution authority ended", lostCleanup: true },
+  { failure: "Runtime parent operation timed out", lostCleanup: false },
+  { failure: "owned-secret-do-not-publish", lostCleanup: false },
+])(
+  "confirmed renewal failure closes without exposing unsafe details: %j",
+  async ({ failure, lostCleanup }) => {
+    const scope = await setup();
+    const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+    try {
+      scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+        if (payload.action === "browser-renew") {
+          await beforeSend?.(() => scope.frames.push(payload));
+          throw new RuntimeParentOperationError("browser-renew", failure);
+        }
+        if (lostCleanup && payload.action === "browser-close")
+          throw new Error("owned-secret-do-not-publish");
+        return forward(attempt, payload, beforeSend);
+      };
+      await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+      expect(await scope.browser.authorize(scope.grant.sessionID, scope.authorization)).toBeNull();
+      const read = async () => {
+        const [row] = await scope.owned.database.client<
+          Array<{ state: string; summary: string | null; cleaned: boolean }>
+        >`SELECT state,outcome_summary AS summary,cleanup_confirmed_at IS NOT NULL AS cleaned
+          FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
+        return row;
+      };
+      const safeSummary =
+        failure === "browser execution authority ended"
+          ? `Inspection ended: ${failure}`
+          : "Exact owned browser and App proxy cleanup confirmed";
+      expect((await read())?.summary).toBe(safeSummary);
+      scope.owned.hub.parentOperation = forward;
+      await scope.browser.closeTurn(scope.turn.id);
+      expect(await read()).toEqual({
+        state: "closed",
+        summary: safeSummary,
+        cleaned: true,
+      });
+    } finally {
+      await scope.dispose();
+    }
+  },
+);
 
 test.each(["Stop", "caller disconnect", "lost response"] as const)(
   "cold browser preparation cannot replay after %s",

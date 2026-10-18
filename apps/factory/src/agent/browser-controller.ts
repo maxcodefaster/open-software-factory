@@ -85,6 +85,17 @@ const safeBrowserFailures = new Set([
   "Browser observation does not match this execution scope",
 ]);
 
+// An unknown renewal acknowledgement does not confirm authority loss. Only the
+// existing ownership heartbeat may try again, through fresh dispatch validation.
+// Confirmed Connector errors and all App calls keep their fail-closed behavior.
+const transientRenewalFailures = new Set([
+  "Runtime parent operation timed out",
+  "Runtime parent is not ready",
+  "Runtime parent connection changed before dispatch",
+  "Runtime parent operation could not be sent",
+  "Runtime channel disconnected",
+]);
+
 export function createBuildBrowserController(
   database: ReturnType<typeof createDatabase>,
   hub: RuntimeHub,
@@ -161,12 +172,17 @@ export function createBuildBrowserController(
     };
   }
 
-  async function close(id: string) {
+  async function close(id: string, cause?: unknown) {
     const previous = closing.get(id);
     if (previous) return previous;
+    const summary =
+      cause instanceof Error && safeBrowserFailures.has(cause.message)
+        ? `Inspection ended: ${cause.message}`
+        : null;
     const work = (async () => {
       await database.client`UPDATE factory.build_browser_session SET state = 'closing',
-        cleanup_intended_at = COALESCE(cleanup_intended_at, now()), outcome_summary = NULL
+        cleanup_intended_at = COALESCE(cleanup_intended_at, now()),
+        outcome_summary = COALESCE(${summary}, outcome_summary)
         WHERE id = ${id} AND state IN ('intended', 'active')`;
       const session = await row(id);
       if (!session || session.state === "closed") return;
@@ -178,13 +194,17 @@ export function createBuildBrowserController(
           operation(session, "browser-close", new Date(0).toISOString()),
         );
         await database.client`UPDATE factory.build_browser_session SET state = 'closed',
-          cleanup_confirmed_at = now(), outcome_summary = 'Exact owned browser and App proxy cleanup confirmed'
+          cleanup_confirmed_at = now(), outcome_summary = CASE
+            WHEN outcome_summary LIKE 'Inspection ended: %' THEN outcome_summary
+            ELSE 'Exact owned browser and App proxy cleanup confirmed' END
           WHERE id = ${id} AND state = 'closing'`;
       } catch {
         // Disconnected is not absent. Keep the exact cleanup intent for the next
         // parent connection, even though independent leases already end access.
         await database.client`UPDATE factory.build_browser_session
-          SET outcome_summary = 'Browser cleanup is unconfirmed; retry exact owned cleanup when the Connector returns'
+          SET outcome_summary = CASE
+            WHEN outcome_summary LIKE 'Inspection ended: %' THEN outcome_summary
+            ELSE 'Browser cleanup is unconfirmed; retry exact owned cleanup when the Connector returns' END
           WHERE id = ${id} AND state = 'closing'`;
       }
     })();
@@ -407,7 +427,7 @@ export function createBuildBrowserController(
               },
             ],
           };
-        await close(session.id);
+        await close(session.id, cause);
         const reason =
           cause instanceof Error && safeBrowserFailures.has(cause.message)
             ? `: ${cause.message}`
@@ -431,8 +451,14 @@ export function createBuildBrowserController(
         if (!current) return;
         try {
           await dispatch(current, ownerToken, "browser-renew");
-        } catch {
-          await close(current.id);
+        } catch (cause) {
+          if (
+            cause instanceof Error &&
+            !(cause instanceof RuntimeParentOperationError) &&
+            transientRenewalFailures.has(cause.message)
+          )
+            return;
+          await close(current.id, cause);
         }
       } finally {
         renewing.delete(turnID);

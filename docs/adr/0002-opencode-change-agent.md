@@ -56,6 +56,11 @@ cannot overwrite a newer lease with its original deadline. Renewal before creati
 no resources. Expiry, Stop and disconnect still end access and require exact owned cleanup.
 The existing Build ownership heartbeat renews browser authority independently of native
 history and usage reads. A slow observation must not expire a browser owned by a live Build.
+Renewal acknowledgements have a five-second deadline, shorter than the browser lease.
+An unknown transport outcome releases the renewal guard so the existing heartbeat can
+revalidate ownership and try again. Confirmed Connector failures still close the session.
+This never revives an expired browser, extends its lease bounds or retries an App action.
+Safe permanent failure reasons survive cleanup; cleanup confirmation is recorded separately.
 Opening an App allows cold Chrome launch before the unchanged upstream navigation timeout.
 Other browser actions retain their existing deadlines. Client and HTTP transport bounds
 include image preparation, container setup and cold launch without extending execution authority.
