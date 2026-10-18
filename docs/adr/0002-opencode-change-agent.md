@@ -77,6 +77,11 @@ claimed by that error. The next snapshot first reads the pinned browser's select
 metadata and requires exactly one selected page at the intended declared App origin.
 Only then may it inspect that page and record checkout provenance. Navigation is not
 repeated, and an absent, foreign or ambiguous page fails closed.
+An initial selected `about:blank` page can be polled through that fixed metadata read
+within the snapshot's existing deadline while the original navigation commits. Read-only
+App requests allow twenty seconds for cold response headers, with twenty-one seconds in
+the Unix bridge. Other methods retain their five-second App and six-second bridge header
+deadlines. The current lease still cancels access; no App request or write is replayed.
 
 IDE edits and agent edits are part of the same Change. A Sandbox can disappear without losing the
 checkout or conversation, while every OpenCode process and inference capability remains

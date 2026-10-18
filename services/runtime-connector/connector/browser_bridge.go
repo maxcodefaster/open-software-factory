@@ -12,8 +12,8 @@ import (
 // Chrome's loopback HTTP proxy has one fixed Unix connection to the App proxy
 // outside its network namespace. It cannot create a TCP connection to an App,
 // the workspace daemon, Factory, or the public network.
-func newBrowserLoopbackBridge(socket string) (*httputil.ReverseProxy, *http.Transport) {
-	transport := &http.Transport{
+func newBrowserLoopbackBridge(socket string) (*httputil.ReverseProxy, *browserHTTPTransport) {
+	transport := newBrowserHTTPTransport(&http.Transport{
 		// Proxy mode retains the absolute request URL across the Unix connection.
 		Proxy: func(*http.Request) (*url.URL, error) {
 			return &url.URL{Scheme: "http", Host: "factory-browser-unix.invalid"}, nil
@@ -24,7 +24,7 @@ func newBrowserLoopbackBridge(socket string) (*httputil.ReverseProxy, *http.Tran
 		ResponseHeaderTimeout: 6 * time.Second,
 		IdleConnTimeout:       15 * time.Second,
 		MaxIdleConns:          8,
-	}
+	}, 21*time.Second)
 	return &httputil.ReverseProxy{
 		Transport: transport,
 		Rewrite: func(*httputil.ProxyRequest) {

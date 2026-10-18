@@ -22,6 +22,7 @@ import (
 var browserImagePattern = regexp.MustCompile(`^(?:[a-zA-Z0-9.:/-]+@)?sha256:[a-f0-9]{64}$`)
 var browserOwnerPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 var browserContainerPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var errBrowserPagePending = errors.New("declared App navigation has not committed a page yet")
 
 type browserRuntimeRequest struct {
 	SessionID      string          `json:"sessionId"`
@@ -441,6 +442,7 @@ func (runtime *browserRuntime) rpc(ctx context.Context, method string, params an
 
 func (runtime *browserRuntime) selectDeclaredPage(raw json.RawMessage, app string) error {
 	var page struct {
+		IsError    bool `json:"isError"`
 		Structured struct {
 			Pages []struct {
 				ID       int    `json:"id"`
@@ -449,22 +451,30 @@ func (runtime *browserRuntime) selectDeclaredPage(raw json.RawMessage, app strin
 			} `json:"pages"`
 		} `json:"structuredContent"`
 	}
-	if json.Unmarshal(raw, &page) != nil {
+	if json.Unmarshal(raw, &page) != nil || page.IsError {
 		return errors.New("browser App page identity unavailable")
 	}
-	selected, pageID := 0, 0
+	selected, pageID, pending := 0, 0, false
 	for _, current := range page.Structured.Pages {
 		if !current.Selected {
 			continue
 		}
 		selected++
-		if current.ID <= 0 || !strings.HasPrefix(current.URL, "http://"+app+".factory.invalid/") {
+		if current.ID <= 0 {
+			return errors.New("browser did not retain the declared App page identity")
+		}
+		if current.URL == "about:blank" {
+			pending = true
+		} else if !strings.HasPrefix(current.URL, "http://"+app+".factory.invalid/") {
 			return errors.New("browser did not retain the declared App page identity")
 		}
 		pageID = current.ID
 	}
 	if selected != 1 {
 		return errors.New("browser did not retain the declared App page identity")
+	}
+	if pending {
+		return errBrowserPagePending
 	}
 	runtime.pageID, runtime.app, runtime.pendingApp = pageID, app, ""
 	return nil
@@ -552,15 +562,27 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 		// A known navigation error can leave a readable page. Establish its
 		// selected declared origin through a fixed read, never another navigation
 		// or an untrusted App-text claim. Share the ordinary snapshot deadline.
-		pages, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": "list_pages", "arguments": map[string]any{}})
-		if err != nil {
-			runtime.cancel()
-			go manager.closeSession(scope)
-			return "", err
+		for {
+			pages, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": "list_pages", "arguments": map[string]any{}})
+			if err != nil {
+				runtime.cancel()
+				go manager.closeSession(scope)
+				return "", err
+			}
+			err = runtime.selectDeclaredPage(pages, runtime.pendingApp)
+			if err == nil {
+				break
+			}
+			if !errors.Is(err, errBrowserPagePending) {
+				return "", err
+			}
+			select {
+			case <-bounded.Done():
+				return "", errBrowserPagePending
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
-		if err := runtime.selectDeclaredPage(pages, runtime.pendingApp); err != nil {
-			return "", err
-		}
+		var err error
 		dispatch, err = resolveBrowserTool(manager.assignment.Channels, runtime.pageID, scope.Call)
 		if err != nil {
 			return "", err

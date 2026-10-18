@@ -71,6 +71,9 @@ func TestBrowserRecoveryRequiresExactlyOneSelectedDeclaredPage(t *testing.T) {
 		}
 	}
 	runtime := &browserRuntime{pendingApp: "web"}
+	if err := runtime.selectDeclaredPage(json.RawMessage(`{"isError":true,"structuredContent":{"pages":[{"id":2,"url":"http://web.factory.invalid/slow","selected":true}]}}`), "web"); err == nil {
+		t.Fatal("failed metadata read claimed a selected App")
+	}
 	if err := runtime.selectDeclaredPage(json.RawMessage(`{"structuredContent":{"pages":[{"id":1,"url":"about:blank","selected":false},{"id":2,"url":"http://web.factory.invalid/slow","selected":true}]}}`), "web"); err != nil {
 		t.Fatal(err)
 	}

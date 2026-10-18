@@ -33,7 +33,7 @@ type browserAppRoute struct {
 type browserAppProxy struct {
 	authority context.Context
 	routes    map[string]browserAppRoute
-	transport *http.Transport
+	transport *browserHTTPTransport
 }
 
 func newBrowserAppProxy(authority context.Context, channels []Channel, primaryIP string) (*browserAppProxy, error) {
@@ -55,13 +55,13 @@ func newBrowserAppProxyDestination(authority context.Context, channels []Channel
 	proxy := &browserAppProxy{
 		authority: authority,
 		routes:    make(map[string]browserAppRoute),
-		transport: &http.Transport{
+		transport: newBrowserHTTPTransport(&http.Transport{
 			Proxy:                 nil,
 			DialContext:           (&net.Dialer{Timeout: 3 * time.Second}).DialContext,
 			ResponseHeaderTimeout: 5 * time.Second,
 			IdleConnTimeout:       15 * time.Second,
 			MaxIdleConns:          8,
-		},
+		}, 20*time.Second),
 	}
 	for _, channel := range channels {
 		if channel.Kind != "app" {

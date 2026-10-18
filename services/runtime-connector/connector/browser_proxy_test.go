@@ -31,12 +31,14 @@ func testBrowserProxy(t *testing.T, ctx context.Context, app *httptest.Server) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy.transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+	dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 		if address != net.JoinHostPort("172.18.0.2", target.Port()) {
 			t.Errorf("proxy dialled unassigned destination %q", address)
 		}
 		return (&net.Dialer{}).DialContext(ctx, network, target.Host)
 	}
+	proxy.transport.ordinary.DialContext = dial
+	proxy.transport.read.DialContext = dial
 	t.Cleanup(proxy.close)
 	return proxy
 }
@@ -60,6 +62,51 @@ func TestBrowserLoopbackProxyReachesAnAppBoundOnlyToLocalhost(t *testing.T) {
 	}
 }
 
+func TestBrowserColdReadHeaderAllowanceDoesNotExtendOrReplayWrites(t *testing.T) {
+	var writes atomic.Int32
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			writes.Add(1)
+		}
+		select {
+		case <-time.After(100 * time.Millisecond):
+			io.WriteString(w, "cold App ready")
+		case <-r.Context().Done():
+		}
+	}))
+	defer app.Close()
+	proxy := testBrowserProxy(t, context.Background(), app)
+	if proxy.transport.ordinary.ResponseHeaderTimeout != 5*time.Second ||
+		proxy.transport.read.ResponseHeaderTimeout != 20*time.Second {
+		t.Fatal("App read/write header deadlines are not independently bounded")
+	}
+	_, bridge := newBrowserLoopbackBridge(filepath.Join(t.TempDir(), "app.sock"))
+	defer bridge.CloseIdleConnections()
+	if bridge.ordinary.ResponseHeaderTimeout != 6*time.Second ||
+		bridge.read.ResponseHeaderTimeout != 21*time.Second {
+		t.Fatal("Unix bridge does not preserve the ordinary write deadline")
+	}
+	// Accelerate the real HTTP boundary while leaving a wide scheduling margin.
+	proxy.transport.ordinary.ResponseHeaderTimeout = 20 * time.Millisecond
+	proxy.transport.read.ResponseHeaderTimeout = 2 * time.Second
+	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPost} {
+		record := httptest.NewRecorder()
+		request := httptest.NewRequest(method, "http://web.factory.invalid/", nil)
+		request.Header.Set("Accept", "text/html")
+		proxy.ServeHTTP(record, request)
+		want := http.StatusOK
+		if method == http.MethodPost {
+			want = http.StatusServiceUnavailable
+		}
+		if record.Code != want {
+			t.Fatalf("%s used the wrong header allowance: %d %s", method, record.Code, record.Body.String())
+		}
+	}
+	if writes.Load() != 1 {
+		t.Fatal("a timed-out write was replayed")
+	}
+}
+
 func TestBrowserProxyPinsAppDestinationAndDoesNotUseEnvironmentProxy(t *testing.T) {
 	var hits atomic.Int32
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -71,7 +118,7 @@ func TestBrowserProxyPinsAppDestinationAndDoesNotUseEnvironmentProxy(t *testing.
 	}))
 	defer app.Close()
 	proxy := testBrowserProxy(t, context.Background(), app)
-	if proxy.transport.Proxy != nil {
+	if proxy.transport.ordinary.Proxy != nil || proxy.transport.read.Proxy != nil {
 		t.Fatal("environment proxy must not control App routing")
 	}
 	for _, origin := range []string{"http://web.factory.invalid", app.URL} {

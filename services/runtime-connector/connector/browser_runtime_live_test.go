@@ -23,14 +23,26 @@ func TestBrowserRuntimeAppFixture(t *testing.T) {
 	if os.Getenv("FACTORY_BROWSER_RUNTIME_APP_FIXTURE") != "1" {
 		t.Skip("internal browser runtime App fixture")
 	}
-	var slowRequests atomic.Uint32
+	var slowRequests, coldRequests atomic.Uint32
 	server := &http.Server{Addr: "127.0.0.1:3000", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var cold uint32
+		if r.URL.Path == "/cold" {
+			cold = coldRequests.Add(1)
+			select {
+			case <-time.After(12 * time.Second):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<!doctype html><title>Exact primary App</title><h1>Only primary loopback</h1><p>Factory browser manager proof</p>
 <label>Keyboard target<input></label><button onclick="document.querySelector('#result').textContent='Keyboard activated'">Apply</button>
 <p id="result">Ready</p><p id="viewport"></p><script>
 function size(){document.querySelector('#viewport').textContent='Viewport '+innerWidth+'x'+innerHeight}
 addEventListener('resize',size);size();console.log('primary App inspected')</script>`)
+		if cold > 0 {
+			fmt.Fprintf(w, "<p>Cold navigation requests %d</p>", cold)
+		}
 		if r.URL.Path == "/slow" {
 			fmt.Fprintf(w, "<p>Slow navigation requests %d</p>", slowRequests.Add(1))
 			w.(http.Flusher).Flush()
@@ -93,7 +105,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	// container creation, MCP initialization and Chrome navigation are in flight.
 	opening := scope
 	opening.ExpiresAt = time.Now().Add(2 * time.Second)
-	opening.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web","path":"/slow"}`)}
+	opening.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web","path":"/cold"}`)}
 	renewContext, stopRenewal := context.WithCancel(connection)
 	renewed := make(chan error, 1)
 	go func() {
@@ -144,7 +156,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	if len(snapshot.Content) == 0 || !strings.Contains(snapshot.Content[0].Text, "Only primary loopback") {
 		t.Fatal("real proxy did not reach the primary's loopback-only App")
 	}
-	if !strings.Contains(snapshot.Content[0].Text, "Slow navigation requests 1") {
+	if !strings.Contains(snapshot.Content[0].Text, "Cold navigation requests 1") {
 		t.Fatal("navigation was repeated instead of observing the existing declared page", snapshot.Content[0].Text)
 	}
 	shot := call("browser_screenshot", `{}`)
@@ -241,9 +253,13 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	// the expiry case. Late goroutines must not create after closeAll has finished.
 	scope.SessionID += "-stop"
 	scope.ExpiresAt = time.Now().Add(25 * time.Second)
-	scope.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web"}`)}
+	scope.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web","path":"/slow"}`)}
 	if _, err := manager.call(connection, scope); err != nil {
 		t.Fatal(err)
+	}
+	streamed := call("browser_snapshot", `{}`)
+	if !strings.Contains(streamed.Content[0].Text, "Slow navigation requests 1") {
+		t.Fatal("streamed first navigation was repeated instead of observed", streamed.Content[0].Text)
 	}
 	scope.Call = browserToolCall{Name: "browser_screenshot", Arguments: json.RawMessage(`{}`)}
 	if _, err := manager.call(connection, scope); err != nil {
@@ -260,7 +276,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("disconnected execution created a browser")
 	}
 	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage,
-		"loopbackApp": true, "startupRenewal": true, "initialNavigationRecovery": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
+		"loopbackApp": true, "startupRenewal": true, "coldAppHeaders": true, "initialNavigationRecovery": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
 	if err := os.WriteFile(filepath.Join(root, "inspection.json"), evidence, 0600); err != nil {
 		t.Fatal(err)
 	}
