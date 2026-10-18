@@ -12,7 +12,7 @@ import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { observe } from "../fixtures/pinned-opencode";
-import type { RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import { RuntimeParentOperationError, type RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -176,6 +176,108 @@ test("runtime browser capability cannot use another turn, generation, Project or
       await scope.browser.authorizeRuntime(scope.owned.attemptID, scope.turn.id, token),
     ).toBeNull();
     expect(scope.frames).toHaveLength(0);
+  } finally {
+    await scope.dispose();
+  }
+});
+
+test("cold image preparation does not retire the unused browser or require a new paid turn", async () => {
+  const scope = await setup();
+  const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+  let preparing = true;
+  try {
+    scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+      if (preparing && payload.action === "browser-call") {
+        await beforeSend?.(() => scope.frames.push(payload));
+        throw new RuntimeParentOperationError(
+          "browser-call",
+          "Browser tools are preparing; retry browser inspection after preparation completes",
+        );
+      }
+      return forward(attempt, payload, beforeSend);
+    };
+    const result = await scope.browser.call(
+      scope.authorized.session,
+      scope.ownerToken,
+      { name: "browser_open", arguments: { app: "app" } },
+      "cold-open",
+    );
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ type: "text", text: expect.stringContaining("No App action ran") }],
+    });
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call"]);
+    expect(
+      await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
+    ).not.toBeNull();
+    const [state] = await scope.owned.database.client<Array<{ state: string }>>`
+      SELECT state FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
+    expect(state?.state).toBe("intended");
+    preparing = false;
+    const ready = await scope.browser.call(
+      scope.authorized.session,
+      scope.ownerToken,
+      { name: "browser_open", arguments: { app: "app" } },
+      "ready-open",
+    );
+    expect(ready.isError).not.toBe(true);
+    expect(ready.structuredContent?.turnId).toBe(scope.turn.id);
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call", "browser-call"]);
+  } finally {
+    await scope.dispose();
+  }
+});
+
+test("a confirmed element interaction failure requires a fresh snapshot, not a new Build", async () => {
+  const scope = await setup();
+  const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+  const fill = { name: "browser_fill", arguments: { uid: "2_0", value: "Owned fixture" } };
+  try {
+    await scope.browser.call(
+      scope.authorized.session,
+      scope.ownerToken,
+      { name: "browser_open", arguments: { app: "app" } },
+      "open",
+    );
+    const active = await scope.browser.authorize(scope.grant.sessionID, scope.authorization);
+    if (!active) throw new Error("Active fixture browser missing");
+    let failFill = true;
+    scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+      const output = await forward(attempt, payload, beforeSend);
+      if (failFill && payload.action === "browser-call") {
+        failFill = false;
+        return {
+          data: JSON.stringify({
+            isError: true,
+            content: [{ type: "text", text: "Element did not become interactive." }],
+          }),
+        };
+      }
+      return output;
+    };
+    expect(
+      (await scope.browser.call(active.session, scope.ownerToken, fill, "failed-fill")).isError,
+    ).toBe(true);
+    expect(
+      await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
+    ).not.toBeNull();
+    await expect(
+      scope.browser.call(active.session, scope.ownerToken, fill, "blocked-repeat"),
+    ).rejects.toThrow("fresh browser_snapshot");
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call", "browser-call"]);
+    await scope.browser.call(
+      active.session,
+      scope.ownerToken,
+      { name: "browser_snapshot", arguments: {} },
+      "observe",
+    );
+    await scope.browser.call(active.session, scope.ownerToken, fill, "new-action");
+    expect(scope.frames.map(({ action }) => action)).toEqual([
+      "browser-call",
+      "browser-call",
+      "browser-call",
+      "browser-call",
+    ]);
   } finally {
     await scope.dispose();
   }

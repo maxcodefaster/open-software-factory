@@ -28,6 +28,10 @@ test("Starter authentication works behind the real scoped App proxy path and ret
       ...globalThis.process.env,
       DATABASE_URL: url.toString(),
       BETTER_AUTH_SECRET: "owned-proxy-secret-not-a-production-key",
+      BETTER_AUTH_URL: `http://localhost:${number}`,
+      // Better Auth disables origin checks under NODE_ENV=test. Exercise the
+      // real development server policy rather than inheriting Bun's test mode.
+      NODE_ENV: "development",
       PORT: String(number),
     };
     const migrate = Bun.spawn(["npm", "run", "db:migrate"], {
@@ -55,6 +59,41 @@ test("Starter authentication works behind the real scoped App proxy path and ret
       origin: `http://${host}`,
     };
     expect((await fetch(`http://127.0.0.1:${number}/`)).status).toBe(200);
+    // The isolated coding browser dials the declared loopback App target and
+    // rewrites Origin to that exact target, not the human runtime hostname.
+    const nativeOrigin = `http://127.0.0.1:${number}`;
+    const nativeSignup = await fetch(`${nativeOrigin}/api/auth/sign-up/email`, {
+      method: "POST",
+      headers: { origin: nativeOrigin, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "Native browser member",
+        email: `native-${id}@starter.test`,
+        password: crypto.randomUUID(),
+      }),
+    });
+    expect(nativeSignup.status).toBe(200);
+    const nativeCookie = nativeSignup.headers
+      .getSetCookie()
+      .map((value) => value.split(";")[0])
+      .join("; ");
+    expect(
+      (await fetch(`${nativeOrigin}/api/session`, { headers: { cookie: nativeCookie } })).status,
+    ).toBe(200);
+    for (const origin of [
+      "https://foreign.example",
+      `http://127.0.0.1:${number === 4300 ? 4301 : 4300}`,
+    ]) {
+      const rejected = await fetch(`${nativeOrigin}/api/auth/sign-up/email`, {
+        method: "POST",
+        headers: { origin, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "Rejected origin",
+          email: `${crypto.randomUUID()}@starter.test`,
+          password: crypto.randomUUID(),
+        }),
+      });
+      expect(rejected.status).toBe(403);
+    }
     const html = await fetch(`http://127.0.0.1:${number}/`, { headers }).then((r) => r.text());
     expect(html).toContain(`<base href="${prefix}/">`);
     expect(html).toContain(`src="${prefix}/src/web.tsx"`);

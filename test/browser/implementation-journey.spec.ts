@@ -380,7 +380,21 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await page.getByRole("button", { name: "Request changes", exact: true }).click();
   const input = page.getByRole("textbox", { name: "Message conversation", exact: true });
   await expect(input).toBeVisible();
-  await expect(page.locator(".agent-state")).toHaveText("Complete");
+  await expect(page.locator(".agent-state")).toHaveText("Submitted for verification");
+  await expect(
+    page.getByText("Review the submitted changes, or describe a correction.", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText("Workspace status unavailable", { exact: true })).toBeVisible();
+  await mkdir(".factory/test-results/implementation-journey", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/source-submitted-not-complete-wide.png",
+  });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/source-submitted-not-complete-narrow.png",
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
+  await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByText("Details", { exact: true })).toHaveCount(0);
   await input.fill("Correct the first action within the original requirements.");
   await input.press("Enter");

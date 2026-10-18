@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   buildAgentHint,
+  buildAgentEmptyMessage,
   buildAgentNeedsStart,
   buildAgentStatus,
   createAgentReadFence,
@@ -110,7 +111,10 @@ test("only a confirmed stopped session shows the resume hint", () => {
   expect(buildAgentStatus(stopped)).toBe("Stopped");
   expect(buildAgentHint(stopped)).toBe("Stopped. Your next message resumes the session.");
   expect(buildAgentStatus(loaded)).toBe("Working");
-  expect(buildAgentStatus(unavailable)).toBe("Complete");
+  expect(buildAgentStatus(unavailable)).toBe("Submitted for verification");
+  expect(buildAgentHint(unavailable)).toBe(
+    "Source submitted. Verification and your review determine whether the Change is ready.",
+  );
 });
 
 test("an unresolved commit is never ordinary input waiting or a promise to resume", () => {
@@ -133,4 +137,12 @@ test("an unresolved commit is never ordinary input waiting or a promise to resum
     commitOperation: { id: crypto.randomUUID(), state: "push-intended" },
   };
   expect(buildAgentStatus(saving)).toBe("Saving commit");
+});
+
+test("submitted source does not invite another initial implementation or duplicate its status hint", () => {
+  expect(buildAgentEmptyMessage(unavailable)).toBe(
+    "Review the submitted changes, or describe a correction.",
+  );
+  expect(buildAgentEmptyMessage(unavailable)).not.toBe(buildAgentHint(unavailable));
+  expect(buildAgentEmptyMessage({ ...unavailable, stopPending: true })).not.toContain("Resume");
 });

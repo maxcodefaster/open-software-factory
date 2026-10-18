@@ -151,3 +151,49 @@ describe("Forgejo branch creation", () => {
     );
   });
 });
+
+test("concurrent main protection creation observes the exact result after Forgejo's duplicate 403", async () => {
+  let reads = 0;
+  const client = createForgejoClient({
+    apiURL: "http://forge/api/v1/",
+    token: "owned-fixture",
+    fetch: async (_input, init) => {
+      if (init?.method === "POST") return response({ message: "protection already exists" }, 403);
+      if (++reads === 1) return response({}, 404);
+      return response({
+        rule_name: "main",
+        enable_push: false,
+        protected_file_patterns: ".forgejo/workflows/factory-verification.yml",
+      });
+    },
+  });
+  expect(await client.ensureDefaultBranchProtection(repository, "main")).toMatchObject({
+    rule_name: "main",
+    enable_push: false,
+  });
+  expect(reads).toBe(2);
+});
+
+test.each(["absent", "writable", "wrong-branch", "unprotected-workflow"])(
+  "a denied protection create does not claim success for %s observed state",
+  async (boundary) => {
+    let reads = 0;
+    const client = createForgejoClient({
+      apiURL: "http://forge/api/v1/",
+      token: "owned-fixture",
+      fetch: async (_input, init) => {
+        if (init?.method === "POST") return response({}, 403);
+        if (++reads === 1 || boundary === "absent") return response({}, 404);
+        return response({
+          rule_name: boundary === "wrong-branch" ? "other" : "main",
+          enable_push: boundary === "writable",
+          protected_file_patterns:
+            boundary === "unprotected-workflow"
+              ? ""
+              : ".forgejo/workflows/factory-verification.yml",
+        });
+      },
+    });
+    await expect(client.ensureDefaultBranchProtection(repository, "main")).rejects.toThrow("403");
+  },
+);

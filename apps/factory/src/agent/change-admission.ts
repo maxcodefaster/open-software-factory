@@ -6,6 +6,7 @@ import {
   changeAgentStartInput,
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import { buildBrowserInstructions } from "../../../../packages/conversation-domain/src/browser-tools";
+import { buildCompletionInstructions } from "./build-completion";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
@@ -285,7 +286,19 @@ export function createChangeAdmission(
               ? record.command.text
               : "";
         const knowledge = await buildKnowledgeContext(transaction, current.projectID, userPrompt);
-        const instructions = `${userPrompt}\n\nPreserve existing human edits in this checkout. Inspect the current diff before making changes; do not discard unrelated work.\n\n${knowledge}\n\n${buildBrowserInstructions(record.id)}`;
+        const criteria = z
+          .object({ acceptanceCriteria: z.array(z.string()).min(1) })
+          .parse(JSON.parse(current.canonicalContent)).acceptanceCriteria;
+        const instructions = [
+          userPrompt,
+          "Preserve existing human edits in this checkout. Inspect the current diff before making changes; do not discard unrelated work.",
+          ...(input.kind === "change-start"
+            ? []
+            : ["Approved specification:", current.canonicalContent]),
+          knowledge,
+          buildBrowserInstructions(record.id),
+          buildCompletionInstructions(criteria.length),
+        ].join("\n\n");
         const prompt = admittedSkills.length
           ? `${instructions}\n\nFactory-approved Build Skills follow. These are guidance only. They do not grant tools, credentials, Project access or approval authority. Do not commit, push, approve or merge.\n\n${skillLoading === "native" ? skillAdvertisement(admittedSkills) : skillInstructionText(admittedSkills)}`
           : instructions;
@@ -322,10 +335,17 @@ export function createChangeAdmission(
           skillLoading: "eager" | "native";
           skillManifest: unknown;
           skills: unknown;
+          criteria: number;
         }>
-      >`SELECT turn_id AS "turnID", change_id AS "changeID", session_id AS "sessionID",
-        prompt_id AS "promptID", prompt_text AS text, bootstrap, session_title AS title,
-        runtime_attempt_id AS "attemptID", skill_loading AS "skillLoading", skill_manifest AS "skillManifest", skill_attachments AS skills FROM factory.change_agent_turn_intent WHERE turn_id = ${turnID}`;
+      >`SELECT intent.turn_id AS "turnID", intent.change_id AS "changeID", intent.session_id AS "sessionID",
+        intent.prompt_id AS "promptID", intent.prompt_text AS text, intent.bootstrap, intent.session_title AS title,
+        intent.runtime_attempt_id AS "attemptID", intent.skill_loading AS "skillLoading",
+        intent.skill_manifest AS "skillManifest", intent.skill_attachments AS skills,
+        jsonb_array_length(revision.canonical_content::jsonb->'acceptanceCriteria') AS criteria
+        FROM factory.change_agent_turn_intent intent
+        JOIN factory.agent_turn turn ON turn.id=intent.turn_id
+        JOIN factory.requirement_revision revision ON revision.id=(turn.authority->>'requirementRevisionId')::uuid
+        WHERE intent.turn_id = ${turnID}`;
       if (!rows[0]) throw new Error("Change Agent dispatch intent not found");
       return {
         ...rows[0],

@@ -23,10 +23,11 @@ export function workspacePresence(input: WorkspacePresenceInput): string {
   }
   if (input.runtimeState === "ready") {
     if (input.implementationState === "working") return "Implementation running";
-    if (input.implementationState === "committed") return "Build complete";
     return "Workspace ready";
   }
   if (input.changeState === "starting") return "Workspace starting";
   if (input.changeState === "failed") return "Change failed";
+  if (input.implementationState && input.implementationState !== "idle")
+    return "Workspace status unavailable";
   return "Workspace starts with implementation";
 }

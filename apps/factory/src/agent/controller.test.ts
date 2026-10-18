@@ -95,6 +95,46 @@ describe("Change Agent turn state", () => {
     ).toEqual({ state: "succeeded" });
   });
 
+  test("a normal native finish cannot submit an explicitly incomplete implementation", () => {
+    expect(
+      classifyAgentTurn(
+        [
+          {
+            id: "assistant-new",
+            type: "assistant",
+            created: 210,
+            completed: 220,
+            finish: "stop",
+            content: [
+              {
+                type: "text",
+                text: [
+                  "The state module is written, but integration and tests are unfinished.",
+                  "```factory-build-result",
+                  JSON.stringify({
+                    status: "incomplete",
+                    summary: "Integration and deferred-response tests are unfinished.",
+                    criteria: [],
+                    checks: [],
+                    remaining: ["Wire the component and run the deferred-response regressions."],
+                  }),
+                  "```",
+                ].join("\n"),
+              },
+            ],
+          },
+          activeUser,
+        ],
+        activeUser.id,
+        false,
+        { prompt: "Factory Build completion report v1: criteria=2", criteria: 2 },
+      ),
+    ).toMatchObject({
+      state: "failed",
+      error: expect.stringContaining("Integration and deferred-response tests are unfinished"),
+    });
+  });
+
   test("reports a completed provider error", () => {
     const error = { message: "model rejected the request" };
     expect(

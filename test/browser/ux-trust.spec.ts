@@ -1102,6 +1102,12 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
     SELECT id FROM factory.change WHERE ticket_id = ${ticketID}
   `;
   if (!change) throw new Error("Missing fixture Change");
+  await page.route(`**/api/changes/${change.id}/source-workspace/ensure`, (route) =>
+    route.fulfill({
+      status: 503,
+      json: { error: "Controlled commit fixture has no source service" },
+    }),
+  );
   const operationID = crypto.randomUUID();
   type CommitPhase = "commit-intended" | "committed" | "push-intended";
   let phase: CommitPhase = "commit-intended";
@@ -1140,6 +1146,9 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
     .getByRole("button")
     .filter({ hasText: "Pending commit recovery" })
     .click();
+  // Build follows the explicit IDE target, not Ticket selection alone. The
+  // source service is intentionally absent in this controller-only UI fixture.
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   const panel = page.locator(".agent-panel");
   const status = panel.locator(".agent-state");
   const draft = panel.getByLabel("Message conversation");
@@ -1147,9 +1156,7 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
   await expect(status).toHaveText("Saving commit");
   const recoveryNotice = panel.getByRole("status", { name: "Commit recovery" });
   await expect(recoveryNotice).toBeVisible({ timeout: 3_000 });
-  await expect(recoveryNotice).toHaveText(
-    "Saving completed Build. New work waits for this commit.",
-  );
+  await expect(recoveryNotice).toHaveText("Saving source changes. New work waits for this commit.");
   await draft.fill("Keep my next instructions while the commit is recovered");
   const directory = ".factory/test-results/ux-trust/commit-recovery-ux";
   await mkdir(directory, { recursive: true });

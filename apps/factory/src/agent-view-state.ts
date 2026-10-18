@@ -22,7 +22,7 @@ const agentStatusLabels = {
   waiting: "Needs input",
   stopped: "Stopped",
   failed: "Failed",
-  committed: "Complete",
+  committed: "Submitted for verification",
 } satisfies Record<AgentView["state"], string>;
 
 export function buildAgentStatus(view: AgentView) {
@@ -39,7 +39,7 @@ export function buildAgentHint(view: AgentView) {
   if (view.commitOperation)
     return view.commitOperation.lastError
       ? "Commit outcome unconfirmed. New Build waits for recovery."
-      : "Saving completed Build. New work waits for this commit.";
+      : "Saving source changes. New work waits for this commit.";
   if (view.state === "working")
     return view.runtimeConnected
       ? "Working in the Ticket Workspace"
@@ -47,6 +47,8 @@ export function buildAgentHint(view: AgentView) {
   if (view.state === "stopped" && !view.sessionAvailable)
     return "Stopped before Build started. Start implementation when ready.";
   if (view.state === "stopped") return "Stopped. Your next message resumes the session.";
+  if (view.state === "committed")
+    return "Source submitted. Verification and your review determine whether the Change is ready.";
   return agentStatusLabels[view.state];
 }
 
@@ -56,6 +58,21 @@ export function buildAgentNeedsStart(view: AgentView) {
     view.state === "failed" ||
     (view.state === "stopped" && !view.sessionAvailable)
   );
+}
+
+export function buildAgentEmptyMessage(view: AgentView) {
+  if (view.stopPending)
+    return "Waiting for Stop confirmation. The admitted work will not be replayed.";
+  if (view.commitOperation) return "Waiting for source submission to settle.";
+  return {
+    idle: "Ask about the Project, or start implementation of this approved Ticket.",
+    starting: "Preparing implementation. Activity will appear here.",
+    working: "Implementation activity will appear here.",
+    waiting: "Review this turn's result before continuing.",
+    failed: "Review the implementation issue above before retrying.",
+    stopped: "Your source is retained. Resume implementation when ready.",
+    committed: "Review the submitted changes, or describe a correction.",
+  }[view.state];
 }
 
 export function retainAgentActivity(

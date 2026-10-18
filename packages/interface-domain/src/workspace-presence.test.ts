@@ -41,7 +41,7 @@ describe("Workspace presence", () => {
       }),
     ).toBe("Workspace stopped");
     expect(workspacePresence({ changeState: "active", implementationState: "working" })).toBe(
-      "Workspace starts with implementation",
+      "Workspace status unavailable",
     );
     expect(
       workspacePresence({
@@ -56,7 +56,10 @@ describe("Workspace presence", () => {
         runtimeState: "ready",
         implementationState: "committed",
       }),
-    ).toBe("Build complete");
+    ).toBe("Workspace ready");
+    expect(workspacePresence({ changeState: "active", implementationState: "committed" })).toBe(
+      "Workspace status unavailable",
+    );
   });
 
   test.each([

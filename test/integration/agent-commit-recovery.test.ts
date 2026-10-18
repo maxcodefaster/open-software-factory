@@ -104,9 +104,14 @@ test.each(["same Workspace", "Stop"])(
   },
 );
 
-test.each([false, true])(
-  "confirmed empty implementation releases commit admission, recovery=%s",
-  async (recovering) => {
+test.each([
+  [false, false],
+  [false, true],
+  [true, false],
+  [true, true],
+])(
+  "empty implementation never restores earlier completion, recovery=%s previousCommit=%s",
+  async (recovering, previousCommit) => {
     const owned = await fixture();
     const controller = owned.controller();
     const recovery = owned.controller();
@@ -137,6 +142,18 @@ test.each([false, true])(
     } as unknown as ServerWebSocket<RuntimeSocketData>;
     owned.hub.open(parent);
     try {
+      if (previousCommit) {
+        await owned.database.client`
+          INSERT INTO factory.change_commit_operation(
+            id, change_id, runtime_attempt_id, sequence, branch_name, expected_parent_sha,
+            commit_sha, observed_remote_sha, commit_message, idempotency_key, state,
+            created_by, completed_at
+          )
+          SELECT ${crypto.randomUUID()}, id, runtime_attempt_id, 1, branch_name, base_sha,
+            ${"e".repeat(40)}, ${"e".repeat(40)}, 'Earlier implementation',
+            ${crypto.randomUUID()}, 'succeeded', created_by, now()
+          FROM factory.change WHERE id = ${owned.changeID}`;
+      }
       const accepted = await controller.prompt(
         owned.changeID,
         "Inspect without changes",
@@ -162,6 +179,8 @@ test.each([false, true])(
           .client`UPDATE factory.change_commit_operation SET state = 'commit-intended', completed_at = NULL,
         last_error = 'Commit outcome not confirmed. New Build waits for recovery. workspace has no changes to commit'
         WHERE id = ${accepted.turn?.id ?? ""}`;
+        await owned.database
+          .client`UPDATE factory.change_agent_session SET state = 'waiting' WHERE change_id = ${owned.changeID}`;
         await recovery.recover();
         await recovery.shutdown();
       }
@@ -169,7 +188,7 @@ test.each([false, true])(
       expect(view.commitOperation).toBeUndefined();
       expect(view.state).toBe(recovering ? "failed" : "waiting");
       if (recovering) expect(view.lastError).toContain("Files were left untouched");
-      else expect(view.lastError).toBeNull();
+      else expect(view.lastError).toContain("No new commit was submitted");
       expect(view.turn?.state).toBe("completed");
       const [operation] = await owned.database.client<Array<{ state: string; sha: string | null }>>`
       SELECT state, commit_sha AS sha FROM factory.change_commit_operation WHERE id = ${accepted.turn?.id ?? ""}`;

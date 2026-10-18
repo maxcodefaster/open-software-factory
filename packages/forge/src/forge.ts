@@ -629,17 +629,34 @@ export function createForgejoClient(options: {
           }),
         });
       } catch (error) {
-        if (!(error instanceof ForgeHttpError && error.status === 422) && !ambiguous(error)) {
-          throw error;
-        }
+        // Forgejo can report a concurrent identical create as 403, not only
+        // 422. Observe once before classifying the failed response. This is
+        // not another write and must prove the exact protected outcome.
         try {
-          return await json(`${repositoryPath(repository)}/branch_protections/${segment(branch)}`);
-        } catch (recoveryError) {
-          if (ambiguous(error)) {
-            throw new ForgeAmbiguousWriteError("Branch protection outcome is unknown");
-          }
-          throw recoveryError;
+          const recovered = await json(
+            `${repositoryPath(repository)}/branch_protections/${segment(branch)}`,
+          );
+          const observed = z
+            .object({
+              rule_name: z.literal(branch),
+              enable_push: z.literal(false),
+              protected_file_patterns: z.string().optional(),
+            })
+            .safeParse(recovered);
+          if (
+            observed.success &&
+            (!protectWorkflow ||
+              (observed.data.protected_file_patterns ?? "")
+                .split(";")
+                .includes(".forgejo/workflows/factory-verification.yml"))
+          )
+            return recovered;
+        } catch {
+          // Missing, denied or lost readback cannot confirm the intended write.
         }
+        if (ambiguous(error))
+          throw new ForgeAmbiguousWriteError("Branch protection outcome is unknown");
+        throw error;
       }
     },
     async protectSetupWorkflow(repository: ForgeRepository, branch: string) {

@@ -715,6 +715,45 @@ test("successful outcome and exact-turn commit intent settle together", async ()
   }
 });
 
+test.each([
+  "I could not finish the integration and tests within this turn.",
+  [
+    "```factory-build-result",
+    JSON.stringify({
+      status: "incomplete",
+      summary: "The controller is not integrated.",
+      criteria: [],
+      checks: [],
+      remaining: ["Connect the component and run the normal checks."],
+    }),
+    "```",
+  ].join("\n"),
+])("an unfinished native stop cannot commit, push or claim completion: %s", async (answer) => {
+  const owned = await fixture();
+  const commandID = crypto.randomUUID();
+  try {
+    owned.finish(answer);
+    await owned
+      .controller()
+      .prompt(owned.changeID, "Finish the approved implementation", owned.userID, commandID);
+    await owned.requested;
+    owned.release();
+    await until(async () => (await owned.controller().get(owned.changeID)).state === "failed");
+    expect(await owned.turn(commandID)).toMatchObject({
+      state: "failed",
+      summary: expect.stringContaining("Implementation incomplete"),
+    });
+    expect(owned.commitCalls).toEqual([]);
+    expect(
+      await owned.database
+        .client`SELECT id FROM factory.change_commit_operation WHERE change_id = ${owned.changeID}`,
+    ).toHaveLength(0);
+    expect(owned.requests()).toBe(1);
+  } finally {
+    await owned.dispose();
+  }
+});
+
 test("Start admission precedes runtime startup and Stop fences a late startup response", async () => {
   const owned = await fixture();
   const commandID = crypto.randomUUID();
@@ -1068,6 +1107,7 @@ test.each(["unchanged", "Stop", "mode version", "generation", "invalid admission
                     type: "assistant",
                     time: { created: 2, completed: 3 },
                     finish: "stop",
+                    content: [{ type: "text", text: owned.completionText }],
                   },
                   { id: intent.promptID, type: "user", text: intent.text, time: { created: 1 } },
                 ]

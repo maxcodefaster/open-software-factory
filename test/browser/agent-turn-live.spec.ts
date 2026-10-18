@@ -211,7 +211,9 @@ test("runs genuine Project and Build turns beside the embedded IDE and Preview",
       { timeout: 360_000 },
     )
     .toBe("completed");
-  await expect(panel.locator(".agent-state")).toHaveText("Complete", { timeout: 15_000 });
+  await expect(panel.locator(".agent-state")).toHaveText("Submitted for verification", {
+    timeout: 15_000,
+  });
   await expect(panel.locator(".agent-message.assistant").last()).toBeVisible();
   await page.screenshot({ path: `${evidenceDirectory}/build-agent.png` });
   await page.getByRole("button", { name: "IDE", exact: true }).click();

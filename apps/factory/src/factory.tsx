@@ -60,6 +60,7 @@ import { createAgentCommandIds } from "./agent-command-ids";
 import {
   type AgentSnapshot,
   buildAgentHint,
+  buildAgentEmptyMessage,
   buildAgentNeedsStart,
   buildAgentStatus,
   createAgentReadFence,
@@ -3034,7 +3035,7 @@ function FactoryWorkspace(props: {
                   <p>
                     {conversationMode() === "build"
                       ? selectedChange()
-                        ? "Ask about the Project, or start implementation of this approved Ticket."
+                        ? buildAgentEmptyMessage(agent())
                         : "Approve the latest Requirement Revision to start Build."
                       : assistantTicketID()
                         ? "Ask about this Ticket, or tell me what needs clarifying."

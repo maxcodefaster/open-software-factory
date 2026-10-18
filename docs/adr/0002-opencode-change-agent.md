@@ -19,6 +19,31 @@ OpenCode may inspect Git, edit files, and run the Project toolchain, but the che
 
 ## Consequences
 
+New admissions include a versioned completion-report contract in their frozen instructions.
+A normal OpenCode `stop` finish proves only that the native turn ended. Before submission,
+Factory requires a valid final report covering every approved acceptance criterion, actual
+passing local checks and no unfinished items. Missing, incomplete, blocked or invalid reports
+retain source and fail the attempt without committing or pushing. A no-change correction
+stays awaiting attention; it never restores an earlier submission's completed status.
+Already admitted instructions keep their original semantics through recovery.
+
+The report is an agent claim, not independent proof of correctness. Forgejo Verification
+still tests the exact submitted commit, and a person still reviews and approves Delivery.
+The interface therefore labels a pushed result as submitted for verification, not complete.
+Factory does not add another inference loop or silently change the model. OpenCode's native
+tool loop owns implementation and local correction; unknown external outcomes still follow
+the existing recovery and explicit-retry rules.
+
+Cold browser-image preparation is a known pre-execution outcome. Its exact Connector
+response leaves the unused browser intent available for another `browser_open` in the
+same admitted turn. It neither confirms App inspection nor justifies repeating an
+uncertain UI mutation. Other failures retain the existing owned cleanup behavior.
+
+A confirmed tool-error response in an already observed App may leave partial UI effects.
+Factory retains that browser but blocks further UI actions until a fresh DOM snapshot
+succeeds. It does not replay the failed interaction. Lost responses, invalid provenance
+and changed authority still require the existing owned cleanup rather than this recovery.
+
 IDE edits and agent edits are part of the same Change. A Sandbox can disappear without losing the
 checkout or conversation, while every OpenCode process and inference capability remains
 generation-bound. Commit and push are auditable Factory operations rather than ambient powers

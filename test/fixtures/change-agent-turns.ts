@@ -81,6 +81,22 @@ export async function fixture(
   let loseResponse = true;
   let statusReads = 0;
   let finished = false;
+  let completionText = [
+    "```factory-build-result",
+    JSON.stringify({
+      status: "ready",
+      summary: "Owned fixture implementation and checks completed.",
+      criteria: (JSON.parse(canonical) as { acceptanceCriteria: string[] }).acceptanceCriteria.map(
+        (_criterion, index) => ({
+          criterion: index + 1,
+          evidence: "Controlled fixture acceptance.",
+        }),
+      ),
+      checks: [{ command: "owned-fixture-check", passed: true }],
+      remaining: [],
+    }),
+    "```",
+  ].join("\n");
   let interruptRequests = 0;
   const commitCalls: string[] = [];
   const payloads: unknown[] = [];
@@ -188,7 +204,7 @@ export async function fixture(
       return Response.json({ data: {} });
     }
     if (path.endsWith("/message") && finished) {
-      const prompt = payloads[0] as { id: string; text: string } | undefined;
+      const prompt = payloads.at(-1) as { id: string; text: string } | undefined;
       return Response.json({
         data: [
           {
@@ -196,17 +212,20 @@ export async function fixture(
             type: "assistant",
             time: { created: 2, completed: 3 },
             finish: "stop",
-            content: installedSkills.map((id) => ({
-              type: "tool",
-              id: `load_${id}`,
-              name: "skill",
-              state: {
-                status: "completed",
-                input: { id },
-                content: [{ type: "text", text: "Exact skill loaded" }],
-              },
-              time: { created: 2, completed: 3 },
-            })),
+            content: [
+              ...installedSkills.map((id) => ({
+                type: "tool",
+                id: `load_${id}`,
+                name: "skill",
+                state: {
+                  status: "completed",
+                  input: { id },
+                  content: [{ type: "text", text: "Exact skill loaded" }],
+                },
+                time: { created: 2, completed: 3 },
+              })),
+              { type: "text", text: completionText },
+            ],
           },
           { id: prompt?.id, type: "user", time: { created: 1 }, text: prompt?.text },
         ],
@@ -270,6 +289,7 @@ export async function fixture(
     sessionID: `ses_owned_${suffix}`,
     controller,
     payloads,
+    completionText,
     hub,
     writers: createChangeWriterController({
       database,
@@ -282,9 +302,10 @@ export async function fixture(
       loseResponse = false;
     },
     statusReads: () => statusReads,
-    finish: () => {
+    finish: (text?: string) => {
       finished = true;
       loseResponse = false;
+      if (text !== undefined) completionText = text;
     },
     commitCalls,
     requested: requested.promise,

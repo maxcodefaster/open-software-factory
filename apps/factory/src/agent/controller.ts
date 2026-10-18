@@ -29,6 +29,11 @@ import { createChangeAgentStop } from "./stop";
 import { waitForBuildSandbox } from "./runtime-readiness";
 import { readTurnObservation } from "./turn-observation";
 import {
+  assessBuildCompletion,
+  buildCompletionText,
+  type BuildCompletionContract,
+} from "./build-completion";
+import {
   type AgentTurnRecord,
   type AgentTurnTransaction,
   createAgentTurnStore,
@@ -65,12 +70,14 @@ type TurnMessage = {
   readonly completed?: number;
   readonly finish?: string;
   readonly error?: unknown;
+  readonly content?: readonly { readonly type: string; readonly text?: string }[];
 };
 
 export function classifyAgentTurn(
   messages: readonly TurnMessage[],
   activeMessageID: string | null,
   sessionRunning: boolean,
+  completionContract?: BuildCompletionContract,
 ) {
   if (!activeMessageID) return { state: "pending" as const };
   const userIndex = messages.findIndex(
@@ -86,7 +93,21 @@ export function classifyAgentTurn(
   if (assistant.error || assistant.finish === "error") {
     return { state: "failed" as const, error: assistant.error };
   }
-  if (assistant.finish === "stop") return { state: "succeeded" as const };
+  if (assistant.finish === "stop") {
+    const completion = assessBuildCompletion(
+      completionContract,
+      assistant.content
+        ?.filter((part) => part.type === "text")
+        .map((part) => part.text ?? "")
+        .join("\n") ?? "",
+    );
+    return completion.ready
+      ? {
+          state: "succeeded" as const,
+          ...(completion.summary ? { summary: completion.summary } : {}),
+        }
+      : { state: "failed" as const, error: completion.error };
+  }
   if (["length", "content-filter", "unknown"].includes(assistant.finish ?? "")) {
     return {
       state: "failed" as const,
@@ -296,7 +317,7 @@ export function projectMessages(
               {
                 id: `${message.id}:${index}`,
                 role: "assistant",
-                text: bounded(content.text, 8_000),
+                text: bounded(buildCompletionText(content.text), 8_000),
                 at: message.time.created,
               },
             ];
@@ -981,7 +1002,7 @@ export function createAgentController(
           "the exact prepared commit was not found; current files were not committed";
       if (emptyCheckout || absentPreparedCommit) {
         const diagnostic = emptyCheckout
-          ? "No source changes; no commit or push was needed."
+          ? "This turn produced no source changes. No new commit was submitted; the current request still needs review."
           : "Prepared commit was not found. Files were left untouched; review the checkout before starting a new Build turn.";
         await turns.observeCommit(operation.id, async (transaction) => {
           const recorded = await transaction<Array<{ id: string }>>`
@@ -990,10 +1011,8 @@ export function createAgentController(
             WHERE id = ${operation.id} AND state = 'commit-intended' AND commit_sha IS NULL RETURNING id`;
           if (!recorded[0]) return;
           await transaction`
-            UPDATE factory.change_agent_session SET state = CASE WHEN ${absentPreparedCommit} THEN 'failed'::factory.change_agent_state WHEN EXISTS (
-              SELECT 1 FROM factory.change_commit_operation previous WHERE previous.change_id = ${operation.changeID} AND previous.state = 'succeeded'
-            ) THEN 'committed'::factory.change_agent_state ELSE 'waiting'::factory.change_agent_state END,
-              last_error = ${absentPreparedCommit ? diagnostic : null}, active_inbox_id = NULL, updated_at = now()
+            UPDATE factory.change_agent_session SET state = ${absentPreparedCommit ? "failed" : "waiting"}::factory.change_agent_state,
+              last_error = ${diagnostic}, active_inbox_id = NULL, updated_at = now()
             WHERE change_id = ${operation.changeID} AND state = 'waiting' AND active_turn_id = ${operation.id}
               AND runtime_attempt_id = ${operation.attemptID} AND NOT stop_pending
               AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent WHERE intent.turn_id = ${operation.id}
@@ -1098,6 +1117,7 @@ export function createAgentController(
     monitors.add(turnID);
     let inactiveObservations = 0;
     try {
+      const intent = await admission.intent(turnID);
       while (!closed) {
         const session = await row(changeID);
         if (!session || !session.sessionID || session.activeTurnID !== turnID) return;
@@ -1144,11 +1164,13 @@ export function createAgentController(
                     completed: message.time.completed,
                     finish: message.finish,
                     error: message.error,
+                    content: message.content,
                   }
                 : {}),
             })),
             session.activeInboxID,
             work.running,
+            { prompt: intent.text, criteria: intent.criteria },
           );
           // History can observe a terminal outcome after the earlier log watermark.
           // Drain again before settlement so the last paid step cannot be missed.
@@ -1179,7 +1201,9 @@ export function createAgentController(
               turnID,
               ownerToken,
               "completed",
-              "OpenCode completed this implementation turn",
+              outcome.summary
+                ? bounded(`Agent reports ready for Verification: ${outcome.summary}`, 2_000)
+                : "OpenCode completed this implementation turn",
               async (sql) => {
                 const accepted = await sql<
                   Array<{ id: string }>

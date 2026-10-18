@@ -7,7 +7,7 @@ import {
   buildBrowserResultInput,
 } from "../../../../packages/conversation-domain/src/browser-tools";
 import { CommandError } from "../command-error";
-import type { RuntimeHub } from "../runtime/hub";
+import { RuntimeParentOperationError, type RuntimeHub } from "../runtime/hub";
 import { projectAuthorityIn } from "../access/controller";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
 import { createAgentTurnStore, type AgentTurnTransaction } from "./turn-store";
@@ -70,6 +70,8 @@ const safeBrowserFailures = new Set([
   "browser checkout HEAD could not be established",
   "browser checkout modification state is unavailable",
   "browser screenshot publication was not confirmed",
+  "Browser tools preparation was stopped",
+  "Browser tools could not prepare the approved image; check registry connectivity and CA trust, then restart the Workspace",
   "Browser observation does not match this execution scope",
 ]);
 
@@ -82,6 +84,9 @@ export function createBuildBrowserController(
   const closing = new Map<string, Promise<void>>();
   const renewing = new Set<string>();
   const dispatchedCalls = new Map<string, Set<string>>();
+  // Browser recovery closes old sessions on process restart. Losing this
+  // ephemeral observation barrier never permits reusing an old browser.
+  const needsObservation = new Set<string>();
 
   function capability(id: string) {
     return createHmac("sha256", secret).update(`factory-build-browser-v1:${id}`).digest("hex");
@@ -156,6 +161,7 @@ export function createBuildBrowserController(
       const session = await row(id);
       if (!session || session.state === "closed") return;
       dispatchedCalls.delete(id);
+      needsObservation.delete(id);
       try {
         await hub.parentOperation(
           session.attemptID,
@@ -287,6 +293,16 @@ export function createBuildBrowserController(
       requestID: string | number,
     ): Promise<BuildBrowserResult> {
       const call = buildBrowserCallInput.parse(input);
+      if (
+        needsObservation.has(session.id) &&
+        !["browser_snapshot", "browser_console", "browser_screenshot", "browser_wait"].includes(
+          call.name,
+        )
+      )
+        throw new CommandError(
+          "conflict",
+          "Inspect a fresh browser_snapshot after the failed interaction before issuing another UI action. Do not replay an unconfirmed mutation.",
+        );
       const calls = dispatchedCalls.get(session.id) ?? new Set<string>();
       const identity = `${typeof requestID}:${requestID}`;
       if (calls.has(identity))
@@ -308,6 +324,19 @@ export function createBuildBrowserController(
         if (!parsed.success) throw new Error("Browser returned an invalid observation schema");
         const result = parsed.data;
         if (result.isError) {
+          if (session.state === "active") {
+            needsObservation.add(session.id);
+            return {
+              isError: true,
+              content: [
+                ...result.content.filter((item) => item.type === "text").slice(0, 15),
+                {
+                  type: "text",
+                  text: "Inspect a fresh browser_snapshot before issuing another UI action. The existing browser remains available; do not replay an unconfirmed mutation.",
+                },
+              ],
+            };
+          }
           await close(session.id);
           return { isError: true, content: result.content.filter((item) => item.type === "text") };
         }
@@ -321,11 +350,31 @@ export function createBuildBrowserController(
         )
           throw new Error("Browser observation does not match this execution scope");
         const inspection = { ...context, changeId: session.changeID };
+        if (call.name === "browser_snapshot") needsObservation.delete(session.id);
         await database.client`UPDATE factory.build_browser_session SET state = 'active',
           create_confirmed_at = COALESCE(create_confirmed_at, now()), inspection_context = ${JSON.stringify(inspection)}::jsonb
           WHERE id = ${session.id} AND state IN ('intended','active')`;
         return { ...result, structuredContent: inspection };
       } catch (cause) {
+        // The pinned Connector returns this before creating a browser or calling
+        // an App. It proves non-execution, unlike a lost response. Keep the
+        // intended session so native tools can retry after the image is ready.
+        if (
+          call.name === "browser_open" &&
+          cause instanceof RuntimeParentOperationError &&
+          cause.action === "browser-call" &&
+          cause.message ===
+            "Browser tools are preparing; retry browser inspection after preparation completes"
+        )
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "Browser tools are preparing. No App action ran. Wait a few seconds, then retry browser_open in this same turn.",
+              },
+            ],
+          };
         await close(session.id);
         const reason =
           cause instanceof Error && safeBrowserFailures.has(cause.message)

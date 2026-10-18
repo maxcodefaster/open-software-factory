@@ -246,7 +246,7 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
     page.locator(".agent-activity.completed").filter({ hasText: "node --check src/server.mjs" }),
   ).toBeVisible();
   await expect(page.getByText(/local syntax check passed/i)).toBeVisible();
-  await expect(page.getByText("Build complete", { exact: true })).toBeVisible();
+  await expect(page.getByText("Workspace ready", { exact: true })).toBeVisible();
 
   const attemptsAfterResume = await context.request.get("/api/runtime-attempts");
   const resumedAttempts = (await attemptsAfterResume.json()) as {

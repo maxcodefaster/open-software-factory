@@ -11,13 +11,18 @@ test("PostgreSQL signup, protected session, invalid password and logout", async 
   });
   const email = `verification-${crypto.randomUUID()}@starter.test`;
   const password = crypto.randomUUID();
-  async function post(path: string, body: unknown, cookie?: string) {
+  async function post(
+    path: string,
+    body: unknown,
+    cookie?: string,
+    origin = "http://localhost:4300",
+  ) {
     return auth.handler(
       new Request(`http://localhost:4300/api/auth/${path}`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
-          origin: "http://localhost:4300",
+          origin,
           ...(cookie ? { cookie } : {}),
         },
         body: JSON.stringify(body),
@@ -37,6 +42,31 @@ test("PostgreSQL signup, protected session, invalid password and logout", async 
     );
     const signin = await post("sign-in/email", { email, password });
     assert.equal(signin.status, 200);
+    assert.equal(
+      (await post("sign-in/email", { email, password }, undefined, "http://127.0.0.1:4300")).status,
+      200,
+    );
+    for (const origin of ["https://foreign.example", "http://127.0.0.1:4301"])
+      assert.equal(
+        (await post("sign-in/email", { email, password }, undefined, origin)).status,
+        403,
+      );
+    const publicAuth = createAuth(database, {
+      secret: process.env.BETTER_AUTH_SECRET ?? "",
+      baseURL: "https://app.example.test",
+    });
+    assert.equal(
+      (
+        await publicAuth.handler(
+          new Request("https://app.example.test/api/auth/sign-in/email", {
+            method: "POST",
+            headers: { "content-type": "application/json", origin: "http://127.0.0.1:4300" },
+            body: JSON.stringify({ email, password }),
+          }),
+        )
+      ).status,
+      403,
+    );
     const cookie = signin.headers
       .getSetCookie()
       .map((value) => value.split(";")[0])
