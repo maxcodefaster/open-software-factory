@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import { factoryProcess, eventually } from "../fixtures/factory-process";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
+import {
+  WikiSourceEvidenceError,
+  WikiTopicPlanError,
+  WikiTopicQualityError,
+} from "../../apps/factory/src/knowledge/generation-failure";
+import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
 
 test.each([false, true])(
   "Wiki generation fences concurrent human revisions, preserves organization and deduplicates no-op updates, progressive=%s",
@@ -32,11 +38,19 @@ test.each([false, true])(
       noop = false,
       failure = false,
       interruptAfterPackage = false;
+    let failureCause: Error = new Error("Provider failure including controlled-private-key");
+    let inventoryReceived: string[] = [];
     const reader = {
       getDefaultBranch: async () => ({ name: "main", headSha: commit }),
       listFiles: async () => [
         { path: "src/main.ts", sha: commit, size: 32 },
         { path: "package.json", sha: "b".repeat(40), size: 10 },
+        { path: "drizzle/0000_auth.sql", sha: commit, size: 32 },
+        { path: "src/web.css", sha: commit, size: 32 },
+        { path: "index.html", sha: commit, size: 32 },
+        { path: ".env.sql", sha: commit, size: 32 },
+        { path: ".env.production.json", sha: commit, size: 32 },
+        { path: "src/credentials.sql", sha: commit, size: 32 },
       ],
       getFileInfo: async (_repo: unknown, path: string) => ({
         sha: path === "package.json" ? "b".repeat(40) : commit,
@@ -45,7 +59,17 @@ test.each([false, true])(
     };
     const wiki = createKnowledgeController(db, reader, async (input) => {
       calls++;
-      if (failure) throw new Error("Provider failure including controlled-private-key");
+      if (failure) throw failureCause;
+      const paths = input.inventory.map((entry) => entry.path);
+      inventoryReceived = paths;
+      for (const path of ["drizzle/0000_auth.sql", "src/web.css", "index.html"])
+        expect(paths).toContain(path);
+      for (const path of [".env.sql", ".env.production.json", "src/credentials.sql"])
+        expect(paths).not.toContain(path);
+      await input.readFiles(["drizzle/0000_auth.sql", "src/web.css", "index.html"]);
+      await expect(input.readFiles([".env.sql"])).rejects.toThrow(
+        "Wiki source read is unavailable",
+      );
       await input.readFiles(["src/main.ts"]);
       const current = input.pages.find((value) => value.id === page);
       if (!current) throw new Error("Missing current Wiki fixture");
@@ -69,7 +93,7 @@ test.each([false, true])(
                 title: current.title,
                 body: `${current.body}\n\nVerified current behavior.`,
                 parentSlug: null,
-                sources: ["src/main.ts"],
+                sources: ["src/main.ts", "drizzle/0000_auth.sql", "src/web.css", "index.html"],
               },
             ],
       };
@@ -92,7 +116,9 @@ test.each([false, true])(
       await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${project},${user},'product-contributor',${user})`;
       await db.client`INSERT INTO factory.knowledge_page(id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by,icon,sort_order) VALUES(${page},${project},'guide','Human guide','Original business purpose.','Original business purpose.',${commit},${user},'home',7)`;
       await Promise.all([wiki.generate(project, user), wiki.generate(project, user)]);
-      expect((await completed())?.["state"]).toBe("succeeded");
+      const initial = await completed();
+      expect(inventoryReceived).toContain("drizzle/0000_auth.sql");
+      expect(initial?.["state"]).toBe("succeeded");
       expect(calls).toBe(2);
       const [saved] = await db.client<
         Array<{ body: string; icon: string; order: number; version: number }>
@@ -154,6 +180,25 @@ test.each([false, true])(
       expect(retained?.body).toBe(
         progressive ? `${saved?.body}\n\nVerified current behavior.` : saved?.body,
       );
+      for (const [index, cause, message] of [
+        ["1", new WikiTopicPlanError("Unknown seed paths: controlled-private-key"), "topic plan"],
+        [
+          "2",
+          new WikiTopicQualityError("private-topic", ["controlled-private-key"]),
+          "source and quality checks",
+        ],
+        ["3", new ModelExecutionBoundError("requests"), "configured model execution bounds"],
+        ["4", new WikiSourceEvidenceError(["controlled-private-key"]), "had not inspected"],
+      ] as const) {
+        failureCause = cause;
+        commit = index.repeat(40);
+        await wiki.generate(project, user);
+        const outcome = await completed();
+        expect(outcome?.["state"]).toBe("failed");
+        expect(outcome?.["failure"]).toContain(message);
+        expect(outcome?.["failure"]).not.toContain("controlled-private-key");
+        expect(await wiki.history(page, user)).toHaveLength(progressive ? 3 : 2);
+      }
       delete process.env["FACTORY_MODEL_API_KEY"];
       commit = "e".repeat(40);
       await wiki.generate(project, user);

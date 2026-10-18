@@ -17,6 +17,7 @@ import { codeReadInput, codeReadResult, readableCodePath } from "./code-read";
 import { createDocumentSearchCache } from "./document-search-cache";
 import { factoryForgeSource } from "./forge-source";
 import { generateWiki, type WikiGenerationInput } from "./generation-agent";
+import { wikiGenerationFailureMessage } from "./generation-failure";
 import { publishWikiPackage, WikiPublicationConflict } from "./publication";
 import { createRepositoryKnowledgeCache } from "./repository-cache";
 import { searchSnippet } from "./search-snippet";
@@ -39,6 +40,9 @@ const sourceExtensions = new Set([
   ".py",
   ".rs",
   ".mod",
+  ".sql",
+  ".css",
+  ".html",
 ]);
 
 function extension(path: string) {
@@ -157,7 +161,10 @@ export function createKnowledgeController(
         !file.path
           .split("/")
           .some((part) => ["node_modules", "vendor", "dist", "build", ".git"].includes(part)) &&
-        !/(^|\/)(.*lock.*|.*\.min\.[jt]s|.*\.map|.*secret.*|.*credentials.*)$/i.test(file.path),
+        !/(^|\/)\.env(?:$|\.)/i.test(file.path) &&
+        !/(^|\/)(.*lock.*|.*\.min\.(?:[jt]s|css)|.*\.map|.*secret.*|.*credentials.*)$/i.test(
+          file.path,
+        ),
     );
     const [previous] = await database.client<Array<{ commit: string }>>`
       SELECT source_commit_sha AS commit FROM factory.knowledge_generation
@@ -361,7 +368,8 @@ export function createKnowledgeController(
       failureMessage =
         "Wiki changed repeatedly during the update. Saved content is retained; retry when edits settle.";
       throw new Error(failureMessage);
-    } catch {
+    } catch (cause) {
+      failureMessage = wikiGenerationFailureMessage(cause, failureMessage);
       await database.client`
         UPDATE factory.knowledge_generation SET state = 'failed',
           failure = ${failureMessage},

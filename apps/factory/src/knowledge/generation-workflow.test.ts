@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
 import { generateWiki } from "./generation-workflow";
 import { WikiPublicationConflict } from "./publication";
+import { knownModelRejection } from "../models/execution-policy";
 
 test.each([
   "success",
@@ -10,6 +11,8 @@ test.each([
   "unsupported-claim",
   "publication-conflict",
   "invalid-research",
+  "unread-research-once",
+  "unread-research-always",
   "duplicate-prose",
   "empty-topic",
   "verbose-overview",
@@ -40,6 +43,8 @@ test.each([
       publications = 0,
       researches = 0,
       plans = 0;
+    const corrections: Array<{ rejectedResult?: { topics?: typeof topics }; correction?: string }> =
+      [];
     const keys = ["FACTORY_MODEL_BASE_URL", "FACTORY_MODEL_API_KEY"];
     const before = keys.map((key) => process.env[key]);
     const server = Bun.serve({
@@ -81,6 +86,7 @@ test.each([
         let output: unknown;
         if (system.includes("Research manifests")) {
           plans++;
+          if (parsed.correction) corrections.push(parsed);
           output = {
             topics: topics.map((topic, index) => ({
               ...topic,
@@ -97,6 +103,11 @@ test.each([
           if (scenario === "verbose-topic-plan" && plans === 2) expect(raw).toContain("800");
         } else if (system.includes("Follow relationships")) {
           researches++;
+          if (parsed.correction && scenario.startsWith("unread-research")) {
+            expect(parsed.correction).toContain("Research cites unread source: src/flow-63.ts");
+            expect(parsed.correction).toContain("use readSource");
+            expect(parsed.rejectedResult.findings[0].paths).toEqual(["src/flow-63.ts"]);
+          }
           expect(publications).toBe(topics.findIndex((topic) => topic.slug === prompt.topic.slug));
           output = {
             findings: [
@@ -105,7 +116,11 @@ test.each([
                   scenario === "invalid-research" && researches === 1
                     ? "x".repeat(1201)
                     : "Verified workflow",
-                paths: prompt.topic.paths.slice(0, 8),
+                paths:
+                  scenario === "unread-research-always" ||
+                  (scenario === "unread-research-once" && researches === 1)
+                    ? ["src/flow-63.ts"]
+                    : prompt.topic.paths.slice(0, 8),
               },
             ],
             uncertainties: [],
@@ -118,9 +133,6 @@ test.each([
                 ? []
                 : [
                     {
-                      id: null,
-                      slug: prompt.topic.slug,
-                      title: prompt.topic.title,
                       body:
                         scenario === "verbose-overview" &&
                         !prompt.issues?.length &&
@@ -129,16 +141,17 @@ test.each([
                           : !prompt.issues?.length && prompt.topic.slug === "overview"
                             ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
                             : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
-                      parentSlug:
-                        scenario === "wrong-parent" && prompt.topic.slug !== "overview"
-                          ? null
-                          : prompt.topic.parentSlug,
+                      ...(scenario === "wrong-parent" && prompt.topic.slug !== "overview"
+                        ? { parentSlug: null }
+                        : {}),
                       sources: prompt.topic.paths,
                     },
                   ],
           };
         } else {
           checks++;
+          expect(system).toContain("normalized publication package, not a raw writer response");
+          expect(system).toContain("Do not flag these fields or request schema changes");
           output = {
             issues:
               scenario === "unsupported-claim" && prompt.topic.slug !== "overview"
@@ -209,8 +222,20 @@ test.each([
         },
       });
       if (scenario === "invalid-plan-always") {
-        await expect(run).rejects.toThrow("Wiki workflow did not complete");
+        await expect(run).rejects.toThrow("Unknown seed paths: src/not-in-the-inventory.ts");
         expect(plans).toBe(2);
+        expect(publications).toBe(0);
+        return;
+      }
+      if (scenario === "execution-bound") {
+        const failure = await run.catch((cause: unknown) => cause);
+        expect(knownModelRejection(failure)).toBe(true);
+        expect(publications).toBe(0);
+        return;
+      }
+      if (scenario === "unread-research-always") {
+        await expect(run).rejects.toThrow("Research cites unread source: src/flow-63.ts");
+        expect(researches).toBe(2);
         expect(publications).toBe(0);
         return;
       }
@@ -218,6 +243,7 @@ test.each([
         ![
           "success",
           "invalid-research",
+          "unread-research-once",
           "verbose-overview",
           "invalid-plan-once",
           "verbose-topic-plan",
@@ -226,8 +252,8 @@ test.each([
         await expect(run).rejects.toThrow(
           scenario === "publication-conflict"
             ? "Controlled revision conflict"
-            : scenario === "execution-bound"
-              ? "Wiki topic failed bounded quality checks"
+            : ["wrong-parent", "empty-topic"].includes(scenario)
+              ? "Structured output validation failed"
               : "Wiki topic failed bounded quality checks",
         );
         expect(publications).toBe(
@@ -237,12 +263,23 @@ test.each([
         return;
       }
       const result = await run;
+      if (scenario === "invalid-plan-once") {
+        expect(corrections).toHaveLength(1);
+        expect(corrections[0]?.rejectedResult?.topics?.[0]?.paths).toEqual([
+          "src/not-in-the-inventory.ts",
+        ]);
+        expect(corrections[0]?.correction).toContain(
+          "Unknown seed paths: src/not-in-the-inventory.ts",
+        );
+      }
       expect(result.pages).toEqual([]);
       expect(read.size).toBe(64);
       expect(publications).toBe(4);
       expect(writes).toBe(5);
       expect(checks).toBe(4);
-      expect(researches).toBe(scenario === "invalid-research" ? 5 : 4);
+      expect(researches).toBe(
+        ["invalid-research", "unread-research-once"].includes(scenario) ? 5 : 4,
+      );
       expect(plans).toBe(["invalid-plan-once", "verbose-topic-plan"].includes(scenario) ? 2 : 1);
     } finally {
       await server.stop(true);
@@ -250,6 +287,130 @@ test.each([
         if (before[index] === undefined) delete process.env[key];
         else process.env[key] = before[index];
       });
+    }
+  },
+  20_000,
+);
+
+test.each(["update", "no-op", "foreign-id", "identity-field"])(
+  "existing Wiki writer keeps Factory-owned identity: %s",
+  async (scenario) => {
+    const id = crypto.randomUUID();
+    const page: WikiPageSnapshot = {
+      id,
+      slug: "original-guide",
+      title: "Original guide",
+      body: "Human business purpose.",
+      version: 2,
+      revisionId: crypto.randomUUID(),
+      parentId: crypto.randomUUID(),
+      state: "active",
+      citations: [],
+    };
+    let publications = 0;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const incoming = (await request.json()) as {
+          messages: Array<{ role: string; content: string }>;
+        };
+        const system = incoming.messages
+          .filter((message) => message.role === "system")
+          .map((message) => message.content)
+          .join("\n");
+        const output = system.includes("Research manifests")
+          ? {
+              topics: [
+                {
+                  slug: "planned-package",
+                  title: "Planned package",
+                  purpose: "Update the existing guide.",
+                  paths: ["src/main.ts"],
+                  pageIDs: [id],
+                  parentSlug: null,
+                },
+              ],
+            }
+          : system.includes("Follow relationships")
+            ? {
+                findings: [{ claim: "Verified current flow.", paths: ["src/main.ts"] }],
+                uncertainties: [],
+              }
+            : system.includes("Write only this topic")
+              ? {
+                  pages:
+                    scenario === "no-op"
+                      ? []
+                      : [
+                          {
+                            id: scenario === "foreign-id" ? crypto.randomUUID() : id,
+                            title: "Updated guide",
+                            body: "Human business purpose.\n\nVerified current flow.",
+                            sources: ["src/main.ts"],
+                            ...(scenario === "identity-field" ? { slug: "renamed-guide" } : {}),
+                          },
+                        ],
+                }
+              : { issues: [] };
+        return Response.json({
+          id: "owned-existing-wiki",
+          object: "chat.completion",
+          created: 1,
+          model: "controlled-wiki",
+          choices: [
+            {
+              index: 0,
+              message: { role: "assistant", content: JSON.stringify(output) },
+              finish_reason: "stop",
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    try {
+      const run = generateWiki({
+        name: "Existing Wiki fixture",
+        commit: "a".repeat(40),
+        modelId: "controlled-wiki",
+        connection: {
+          provider: "openai",
+          baseURL: `http://127.0.0.1:${server.port}/v1`,
+          apiKey: "owned-test-not-a-secret",
+        },
+        pages: [page],
+        inventory: [{ path: "src/main.ts", sha: "a".repeat(40), size: 30 }],
+        changedPaths: ["src/main.ts"],
+        sources: [],
+        signal: AbortSignal.timeout(15_000),
+        readFiles: async (paths) => paths.map((path) => ({ path, content: "Verified flow." })),
+        publish: async (output) => {
+          publications++;
+          if (scenario === "no-op") expect(output.pages).toEqual([]);
+          else {
+            expect(output.pages).toHaveLength(1);
+            expect(output.pages[0]).toEqual({
+              id,
+              slug: "original-guide",
+              title: "Updated guide",
+              body: "Human business purpose.\n\nVerified current flow.",
+              sources: ["src/main.ts"],
+              parentSlug: null,
+            });
+          }
+          return [page];
+        },
+      });
+      if (["foreign-id", "identity-field"].includes(scenario)) {
+        await expect(run).rejects.toThrow("Structured output validation failed");
+        expect(publications).toBe(0);
+      } else {
+        expect(await run).toEqual({ pages: [] });
+        expect(publications).toBe(1);
+      }
+    } finally {
+      await server.stop(true);
     }
   },
   20_000,

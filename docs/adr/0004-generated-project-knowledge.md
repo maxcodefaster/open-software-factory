@@ -10,11 +10,20 @@ Factory automatically configures signed repository push webhooks. Default-branch
 
 One concrete pinned Mastra workflow plans useful topics, investigates source groups, writes pages and checks/repairs specific flaws through bounded loops. Source limits apply per analysis job, with overall execution bounds rather than one global 48-file ceiling. A checked overview may publish before checked topic packages; unfinished text never publishes. Factory owns durable work intent, recovery and exact revision publication, not a second Mastra store, generic scheduler or claims registry. Organize by reader tasks and concepts rather than source files. Important claims need inspected source/test evidence and valid internal links. Iterate on small and multi-component repositories, using observed defects as regressions for accuracy, coverage, readability, useful density, duplication and update locality.
 
-Known-invalid topic plans receive one deliberate correction inside the same generation and shared
-request budget, with the actual task's schema and source-identity constraints. Provider errors and
+Known-invalid topic plans and unread research citations receive one deliberate correction inside
+the same generation and shared request budget, with the rejected result and specific validation
+failure. Research must inspect a cited file and verify its claims before publication. Provider errors and
 unknown outcomes do not take this correction path. Default-branch reconciliation does not commission
 another generation for a source commit already attempted. A new commit or explicit human Retry can
 start another generation; setup's Wiki Retry is an explicit request, not background reconciliation.
+
+Factory binds new page identities and hierarchy to the validated topic plan. Writers supply content
+and inspected sources, not new slugs or parents. Existing-page writers can update only the topic's
+allowed identities; publication preserves their slugs and hierarchy. The checker reviews the
+normalized publication package without treating Factory-supplied metadata as a writer error.
+Source discovery includes SQL migrations and browser styles/markup, but excludes environment files.
+Public failure diagnostics distinguish invalid plans, rejected drafts and execution bounds without
+exposing provider prose, source paths or credentials.
 
 Inspect manifests, entrypoints, source relationships, real flows and focused tests, then update only affected useful pages. Read current human prose and preserve its business framing and hierarchy. AI may automatically correct or remove prose contradicted by current evidence, but absence from code does not disprove human product knowledge. Omission never removes a page; whole-page archival remains human-controlled. Unchanged content creates no revision. Failure retains readable current content.
 
