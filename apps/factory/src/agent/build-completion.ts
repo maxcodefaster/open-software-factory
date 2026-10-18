@@ -42,6 +42,8 @@ export function buildCompletionText(text: string) {
 }
 
 export function buildCompletionInstructions(criteria: number) {
+  if (!Number.isSafeInteger(criteria) || criteria < 1 || criteria > 100)
+    throw new Error("Build completion requires between 1 and 100 approved criteria");
   return [
     `Factory Build completion report v1: criteria=${criteria}`,
     "Keep using your native tools until the approved work and normal repository checks are finished. A final answer ends execution; it is not a progress checkpoint. Do not invent a turn time or token limit.",
@@ -49,15 +51,19 @@ export function buildCompletionInstructions(criteria: number) {
     "Use the repository's normal check command without environment overrides that hide failures. For UI work inspect the declared App with Factory's browser, including its console and screenshot, and report any inspection failure.",
     "If a genuine blocker prevents progress, identify it and preserve the checkout. Do not claim readiness or successful checks you did not run. Partial implementation is incomplete, not ready.",
     "End your final answer with exactly one fenced factory-build-result JSON block. Its fields are status (ready, incomplete or blocked), summary, criteria (one {criterion,evidence} per approved criterion, numbered from 1), checks (actual {command,passed} results), and remaining (unfinished items or blockers).",
-    "criterion is an integer index, not the criterion text. JSON shape, with example descriptions to replace with actual evidence and all approved criteria to include:",
+    "criterion is the one-based position in the approved specification's acceptanceCriteria array, not a new breakdown of the work. Do not split, merge, reorder or renumber criteria, even when one approved item contains several requirements. Cover those requirements together in that item's evidence.",
+    `Use exactly ${criteria} criterion entries, numbered 1 through ${criteria}. Replace every evidence placeholder in this exact-shape template with actual observations:`,
     JSON.stringify({
       status: "ready",
       summary: "Describe the actual result.",
-      criteria: [{ criterion: 1, evidence: "Describe the actual observation for criterion 1." }],
+      criteria: Array.from({ length: criteria }, (_, index) => ({
+        criterion: index + 1,
+        evidence: `Describe the actual observation for approved criterion ${index + 1}.`,
+      })),
       checks: [{ command: "The exact normal check command you ran.", passed: true }],
       remaining: [],
     }),
-    "Use ready only when all criteria and the correction request are satisfied, at least one normal check has passed, no check failed, and remaining is empty. This report is an agent claim; it does not replace independent Verification or human approval.",
+    "Use ready only when all criteria and the correction request are satisfied, at least one normal check has passed on the final code, no check is still failing, and remaining is empty. Report the latest result of each check after fixing earlier failures. This report is an agent claim; it does not replace independent Verification or human approval.",
   ].join("\n");
 }
 
@@ -108,20 +114,28 @@ export function assessBuildCompletion(
   // in Project context or lower-priority Skill advertisements in the prompt.
   const count = completion.criteria;
   const indices = new Set(evidence.criteria.map((item) => item.criterion));
-  if (
-    !Number.isSafeInteger(count) ||
-    count < 1 ||
-    indices.size !== count ||
-    evidence.criteria.length !== count ||
-    evidence.criteria.some((item) => item.criterion > count) ||
-    !evidence.checks.length ||
-    evidence.checks.some((check) => !check.passed) ||
-    evidence.remaining.length
-  )
+  const reasons: string[] = [];
+  if (!Number.isSafeInteger(count) || count < 1 || count > 100)
+    reasons.push("the approved criterion count is invalid");
+  else {
+    const missing = Array.from({ length: count }, (_, index) => index + 1).filter(
+      (index) => !indices.has(index),
+    );
+    if (missing.length) reasons.push(`missing evidence for criteria ${missing.join(", ")}`);
+    if (indices.size !== evidence.criteria.length)
+      reasons.push("criterion evidence contains duplicate numbers");
+    if (evidence.criteria.some((item) => item.criterion > count))
+      reasons.push("criterion evidence includes numbers outside the approved specification");
+  }
+  if (!evidence.checks.length) reasons.push("no passing repository check was reported");
+  const failing = evidence.checks.filter((check) => !check.passed);
+  if (failing.length)
+    reasons.push(`checks still failing: ${failing.map((check) => check.command).join(", ")}`);
+  if (evidence.remaining.length) reasons.push(`unfinished work: ${evidence.remaining.join("; ")}`);
+  if (reasons.length)
     return {
       ready: false as const,
-      error:
-        "Implementation incomplete: readiness requires evidence for every approved criterion, passing checks and no unfinished items. Source is retained; nothing was submitted.",
+      error: `Implementation incomplete: ${reasons.join(". ").slice(0, 1_800)}. Source is retained; nothing was submitted.`,
     };
   return { ready: true as const, summary: evidence.summary };
 }

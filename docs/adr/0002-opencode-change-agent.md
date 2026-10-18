@@ -26,6 +26,12 @@ passing local checks and no unfinished items. Missing, incomplete, blocked or in
 retain source and fail the attempt without committing or pushing. A no-change correction
 stays awaiting attention; it never restores an earlier submission's completed status.
 Already admitted instructions keep their original semantics through recovery.
+Rejected readiness reports identify missing criterion numbers, duplicate or out-of-range
+evidence, failing checks and unfinished work. New instructions include an exact-length
+report template whose numbers refer to the approved array positions, without splitting
+combined criteria. They ask for each check's latest result on the final code, so an earlier
+failure that the Agent fixed is not described as still failing. This changes neither the
+submission gate nor frozen report interpretation.
 
 The report is an agent claim, not independent proof of correctness. Forgejo Verification
 still tests the exact submitted commit, and a person still reviews and approves Delivery.

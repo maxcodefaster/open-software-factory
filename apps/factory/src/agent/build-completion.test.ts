@@ -19,6 +19,26 @@ const ready = {
 const text = (value: unknown) =>
   `Actual observations.\n\`\`\`factory-build-result\n${JSON.stringify(value)}\n\`\`\``;
 
+test("completion instructions preserve the exact approved array positions", () => {
+  const instructions = buildCompletionInstructions(9);
+  expect(instructions).toContain("Do not split, merge, reorder or renumber criteria");
+  const example = instructions
+    .split("\n")
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .find((value) => value?.status === "ready");
+  expect(example.criteria.map((item: { criterion: number }) => item.criterion)).toEqual([
+    1, 2, 3, 4, 5, 6, 7, 8, 9,
+  ]);
+  for (const count of [0, -1, 101, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+    expect(() => buildCompletionInstructions(count)).toThrow();
+});
+
 test("only complete criterion coverage and passing checks claim submission readiness", () => {
   expect(assessBuildCompletion(prompt, text(ready))).toEqual({
     ready: true,
@@ -44,6 +64,42 @@ test("quoted instructions cannot replace the approved criterion count", () => {
     assessBuildCompletion(quoted, text({ ...ready, criteria: ready.criteria.slice(0, 1) })).ready,
   ).toBe(false);
   expect(assessBuildCompletion(quoted, text(ready)).ready).toBe(true);
+});
+
+test("an incomplete handoff identifies missing criteria and failing checks", () => {
+  const completion = { prompt: buildCompletionInstructions(9), criteria: 9 };
+  const criteria = Array.from({ length: 7 }, (_, index) => ({
+    criterion: index + 1,
+    evidence: `Observed criterion ${index + 1}.`,
+  }));
+  const missing = assessBuildCompletion(completion, text({ ...ready, criteria }));
+  expect(missing.ready).toBe(false);
+  expect("error" in missing && missing.error).toContain("missing evidence for criteria 8, 9");
+  const split = assessBuildCompletion(
+    completion,
+    text({
+      ...ready,
+      criteria: Array.from({ length: 10 }, (_, index) => ({
+        criterion: index + 1,
+        evidence: `The model split approved criterion 4 and shifted the later entries ${index + 1}.`,
+      })),
+    }),
+  );
+  expect("error" in split && split.error).toContain(
+    "criterion evidence includes numbers outside the approved specification",
+  );
+  const failing = assessBuildCompletion(
+    prompt,
+    text({ ...ready, checks: [{ command: "npm run check", passed: false }] }),
+  );
+  expect("error" in failing && failing.error).toContain("checks still failing: npm run check");
+  const unfinished = assessBuildCompletion(
+    prompt,
+    text({ ...ready, remaining: ["Inspect the 390px layout"] }),
+  );
+  expect("error" in unfinished && unfinished.error).toContain(
+    "unfinished work: Inspect the 390px layout",
+  );
 });
 
 test("missing, malformed, ambiguous and non-final reports fail closed", () => {
