@@ -20,6 +20,7 @@ test.each([
   "invalid-plan-once",
   "invalid-plan-always",
   "verbose-topic-plan",
+  "source-hungry-checker",
 ])(
   "real Mastra checked progressive workflow: %s",
   async (scenario) => {
@@ -52,9 +53,10 @@ test.each([
       port: 0,
       async fetch(request) {
         const incoming = (await request.json()) as {
+          tool_choice?: string;
           messages: Array<{
             role: string;
-            content: string | Array<{ type: string; text?: string }>;
+            content: string | Array<{ type: string; text?: string }> | null;
           }>;
         };
         const body = {
@@ -63,7 +65,7 @@ test.each([
             content:
               typeof message.content === "string"
                 ? message.content
-                : (message.content.find((part) => part.type === "text")?.text ?? ""),
+                : (message.content?.find((part) => part.type === "text")?.text ?? ""),
           })),
         };
         const system = body.messages
@@ -84,6 +86,7 @@ test.each([
           issues?: string[];
         };
         let output: unknown;
+        let sourceToolCall = false;
         if (system.includes("Research manifests")) {
           plans++;
           if (parsed.correction) corrections.push(parsed);
@@ -150,6 +153,7 @@ test.each([
           };
         } else {
           checks++;
+          sourceToolCall = scenario === "source-hungry-checker" && incoming.tool_choice !== "none";
           expect(system).toContain("normalized publication package, not a raw writer response");
           expect(system).toContain("Do not flag these fields or request schema changes");
           output = {
@@ -169,8 +173,23 @@ test.each([
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content: JSON.stringify(output) },
-              finish_reason: "stop",
+              message: sourceToolCall
+                ? {
+                    role: "assistant",
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: `read-${checks}`,
+                        type: "function",
+                        function: {
+                          name: "readSource",
+                          arguments: JSON.stringify({ paths: prompt.topic.paths.slice(0, 1) }),
+                        },
+                      },
+                    ],
+                  }
+                : { role: "assistant", content: JSON.stringify(output) },
+              finish_reason: sourceToolCall ? "tool_calls" : "stop",
             },
           ],
           usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
@@ -247,6 +266,7 @@ test.each([
           "verbose-overview",
           "invalid-plan-once",
           "verbose-topic-plan",
+          "source-hungry-checker",
         ].includes(scenario)
       ) {
         await expect(run).rejects.toThrow(
@@ -276,7 +296,7 @@ test.each([
       expect(read.size).toBe(64);
       expect(publications).toBe(4);
       expect(writes).toBe(5);
-      expect(checks).toBe(4);
+      expect(checks).toBe(scenario === "source-hungry-checker" ? 8 : 4);
       expect(researches).toBe(
         ["invalid-research", "unread-research-once"].includes(scenario) ? 5 : 4,
       );

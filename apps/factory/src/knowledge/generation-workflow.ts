@@ -57,6 +57,8 @@ Preserve human business framing and hierarchy. Absence from code does not dispro
 Correct evidence-disproven stale paragraphs. Omit unaffected pages. No material change means pages:[].
 No generated timestamps, hashes or Sources footers. Factory supplies provenance.
 Factory binds page identities and parents from the validated plan and current pages.
+Use source tools before the final step when needed. The last step is reserved for your structured
+result, without tools. Report missing evidence or uncertainty rather than inventing unsupported facts.
 Bodies exclude their separate title. Internal Wiki links use #wiki/<slug> only for existing checked pages.
 Do not archive or delete pages. Cite only paths actually read. Never link to not-yet-published pages.`;
 
@@ -139,6 +141,11 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       );
       await usage.begin();
       let failed = true;
+      const guard = nativeStepGuard({
+        signal: activeSignal,
+        maxInputBytes: 1024 * 1024,
+        requests: providerRequests,
+      });
       try {
         const result = await mastra
           .getAgent("wiki")
@@ -148,11 +155,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               maxSteps: steps,
               abortSignal: activeSignal,
               onStepFinish: usage.onStepFinish,
-              prepareStep: nativeStepGuard({
-                signal: activeSignal,
-                maxInputBytes: 1024 * 1024,
-                requests: providerRequests,
-              }),
+              prepareStep: async (step) => {
+                await guard(step);
+                if (step.stepNumber >= steps - 1) return { toolChoice: "none" as const };
+              },
               modelSettings: { maxRetries: 0, maxOutputTokens: 8000 },
               ...(providerOptions ? { providerOptions } : {}),
               structuredOutput: { schema, jsonPromptInjection: "auto" },

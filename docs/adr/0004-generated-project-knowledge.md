@@ -24,6 +24,9 @@ normalized publication package without treating Factory-supplied metadata as a w
 Source discovery includes SQL migrations and browser styles/markup, but excludes environment files.
 Public failure diagnostics distinguish invalid plans, rejected drafts and execution bounds without
 exposing provider prose, source paths or credentials.
+Each model task reserves its final allowed step for the structured result with tools disabled.
+Repeated source reads cannot consume every step and leave the checker without a verdict. This
+does not increase the task or shared request bounds and never permits unsupported claims.
 
 Inspect manifests, entrypoints, source relationships, real flows and focused tests, then update only affected useful pages. Read current human prose and preserve its business framing and hierarchy. AI may automatically correct or remove prose contradicted by current evidence, but absence from code does not disprove human product knowledge. Omission never removes a page; whole-page archival remains human-controlled. Unchanged content creates no revision. Failure retains readable current content.
 
