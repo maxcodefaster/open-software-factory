@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { loadInstallation, installationDirectory } from "../../scripts/factory/installation";
@@ -12,6 +13,7 @@ import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually } from "../fixtures/factory-process";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
 import { verifyCodingSource } from "../fixtures/coding-source";
+import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
 
 const installationName = process.env["FACTORY_CODING_COMPLETION_INSTALLATION"];
 
@@ -371,6 +373,33 @@ test.skipIf(!installationName)(
             "Owned coding proof execution did not Stop",
             180_000,
           );
+          if (result["status"] === "passed") {
+            const sources = createWorkspaceSourceController(
+              database,
+              (await readFile(resolve(directory, "auth-secret"), "utf8")).trim(),
+            );
+            const previousBase = process.env["FACTORY_BASE_URL"];
+            process.env["FACTORY_BASE_URL"] = base;
+            try {
+              await removeOwnedProjectSources(database, projectID, async (workspaceID) => {
+                const [workspace] = await database.client<Array<{ ownerID: string }>>`
+                  SELECT COALESCE(workspace.owner_user_id,project.created_by) AS "ownerID"
+                  FROM factory.development_workspace workspace
+                  JOIN factory.project project ON project.id=workspace.project_id
+                  WHERE workspace.id=${workspaceID} AND workspace.project_id=${projectID}`;
+                if (!workspace) throw new Error("Owned coding source identity disappeared");
+                return sources.stop(workspaceID, workspace.ownerID);
+              });
+              result["ownedSourceStorageRemoved"] = true;
+            } finally {
+              try {
+                await sources.close();
+              } finally {
+                if (previousBase === undefined) delete process.env["FACTORY_BASE_URL"];
+                else process.env["FACTORY_BASE_URL"] = previousBase;
+              }
+            }
+          }
         }
         result["ownedExecutionStopped"] = true;
       } catch (cause) {

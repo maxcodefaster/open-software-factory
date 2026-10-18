@@ -136,18 +136,23 @@ model providers and incur usage. Test fixtures own separate databases, Projects 
 identities; their cleanup must preserve unrelated work. Run the affected checks for a change rather
 than repeating every live journey after a documentation edit.
 
-The unassisted coding acceptance uses its own disposable installation and real model calls:
+The unassisted coding acceptance uses its own disposable installation and real model calls.
+It needs the provider bootstrap variables described in `.env.example`. Settings-only connections
+from another installation are not copied.
 
 ```sh
 mise exec -- bun run factory:up --disposable coding-proof-example
 FACTORY_CODING_COMPLETION_INSTALLATION=coding-proof-example mise exec -- bun run test:live coding-completion.live
-mise exec -- bun run factory:reset --data --disposable coding-proof-example --confirm coding-proof-example
+mise exec -- bun run factory:reset --disposable coding-proof-example --confirm coding-proof-example
 ```
 
 It creates a fresh Starter feature, requires the coding Agent's own browser inspection, and
 independently checks behavior, exact Verification and Delivery without editing generated source.
 Screenshots and results go under `.factory/test-results/coding-completion/`. A passing sample
 is evidence for that task, not a guarantee that every model request will finish unaided.
+Successful runs remove their owned source storage as well as execution resources. Failed runs
+retain source for inspection; the reset guard refuses deletion until that exact retained Workspace
+storage is explicitly cleaned up.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
 Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live
