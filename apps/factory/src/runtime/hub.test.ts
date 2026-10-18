@@ -440,6 +440,36 @@ describe("Runtime parent operation dispatch", () => {
       }
     },
   );
+
+  test("a held renewal guard cannot dispatch after its acknowledgement deadline", async () => {
+    const { hub, frames, operation } = fixture();
+    const release = Promise.withResolvers<void>();
+    const joined = Promise.withResolvers<void>();
+    const result = hub
+      .parentOperation("attempt", { ...operation, action: "browser-renew" }, async (send) => {
+        await release.promise;
+        try {
+          send();
+        } finally {
+          joined.resolve();
+        }
+      })
+      .then(
+        () => "sent",
+        (cause: Error) => cause.message,
+      );
+    try {
+      expect(await result).toBe("Runtime parent operation timed out");
+      release.resolve();
+      await joined.promise;
+      expect(frames).toHaveLength(0);
+    } finally {
+      release.resolve();
+      hub.revoke("attempt");
+      await joined.promise;
+      await result;
+    }
+  }, 15_000);
 });
 
 describe("Runtime edge headers", () => {

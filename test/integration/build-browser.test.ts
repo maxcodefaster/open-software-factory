@@ -329,6 +329,8 @@ test.each([
 test.each([
   { failure: "browser execution authority ended", lostCleanup: false },
   { failure: "browser execution authority ended", lostCleanup: true },
+  { failure: "browser session is no longer active", lostCleanup: true },
+  { failure: "browser renewal does not own this execution", lostCleanup: false },
   { failure: "Runtime parent operation timed out", lostCleanup: false },
   { failure: "owned-secret-do-not-publish", lostCleanup: false },
 ])(
@@ -355,10 +357,13 @@ test.each([
           FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
         return row;
       };
-      const safeSummary =
-        failure === "browser execution authority ended"
-          ? `Inspection ended: ${failure}`
-          : "Exact owned browser and App proxy cleanup confirmed";
+      const safeSummary = [
+        "browser execution authority ended",
+        "browser session is no longer active",
+        "browser renewal does not own this execution",
+      ].includes(failure)
+        ? `Inspection ended: ${failure}`
+        : "Exact owned browser and App proxy cleanup confirmed";
       expect((await read())?.summary).toBe(safeSummary);
       scope.owned.hub.parentOperation = forward;
       await scope.browser.closeTurn(scope.turn.id);

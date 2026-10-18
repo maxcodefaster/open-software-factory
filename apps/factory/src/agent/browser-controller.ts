@@ -52,6 +52,8 @@ const safeBrowserFailures = new Set([
   "browser session does not belong to the active execution owner",
   "browser session requires owned cleanup after parent restart; do not replay a UI mutation",
   "browser session already ended; open a fresh browser session",
+  "browser session is no longer active",
+  "browser renewal does not own this execution",
   "Browser no longer owns this Build execution",
   "Browser execution authority is expiring",
   "Browser requires live Build authority",
