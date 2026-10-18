@@ -29,7 +29,15 @@ export function providerCatalogue() {
     return {
       provider,
       label: upstream.name,
-      models: upstream.models.filter((id) => modelIdInput.safeParse(id).success),
+      // The upstream catalogue includes image, embedding and Realtime models.
+      // These are not candidates for Factory's text/tool conversation roles.
+      // Explicit deployment/connection model IDs remain separately configurable.
+      models: upstream.models.filter(
+        (id) =>
+          modelIdInput.safeParse(id).success &&
+          (provider !== "openai" ||
+            !/^(?:chatgpt-image|gpt-image|gpt-realtime|text-embedding)(?:-|$)/.test(id)),
+      ),
     };
   });
 }

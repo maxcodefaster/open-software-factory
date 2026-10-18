@@ -181,7 +181,7 @@ test("runtime browser capability cannot use another turn, generation, Project or
   }
 });
 
-test("cold image preparation does not retire the unused browser or require a new paid turn", async () => {
+test("one browser_open waits for confirmed cold preparation without another model turn", async () => {
   const scope = await setup();
   const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
   let preparing = true;
@@ -189,6 +189,7 @@ test("cold image preparation does not retire the unused browser or require a new
     scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
       if (preparing && payload.action === "browser-call") {
         await beforeSend?.(() => scope.frames.push(payload));
+        preparing = false;
         throw new RuntimeParentOperationError(
           "browser-call",
           "Browser tools are preparing; retry browser inspection after preparation completes",
@@ -202,31 +203,81 @@ test("cold image preparation does not retire the unused browser or require a new
       { name: "browser_open", arguments: { app: "app" } },
       "cold-open",
     );
-    expect(result).toMatchObject({
-      isError: true,
-      content: [{ type: "text", text: expect.stringContaining("No App action ran") }],
-    });
-    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call"]);
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent?.turnId).toBe(scope.turn.id);
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call", "browser-call"]);
     expect(
       await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
     ).not.toBeNull();
     const [state] = await scope.owned.database.client<Array<{ state: string }>>`
       SELECT state FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
-    expect(state?.state).toBe("intended");
-    preparing = false;
-    const ready = await scope.browser.call(
-      scope.authorized.session,
-      scope.ownerToken,
-      { name: "browser_open", arguments: { app: "app" } },
-      "ready-open",
-    );
-    expect(ready.isError).not.toBe(true);
-    expect(ready.structuredContent?.turnId).toBe(scope.turn.id);
-    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call", "browser-call"]);
+    expect(state?.state).toBe("active");
   } finally {
     await scope.dispose();
   }
 });
+
+test("the current Build renews intended browser authority before its first observation", async () => {
+  const scope = await setup();
+  try {
+    await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-renew"]);
+    const [state] = await scope.owned.database.client<Array<{ state: string; confirmed: boolean }>>`
+      SELECT state, create_confirmed_at IS NOT NULL AS confirmed FROM factory.build_browser_session
+      WHERE id = ${scope.grant.sessionID}`;
+    expect(state).toEqual({ state: "intended", confirmed: false });
+    expect(
+      await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
+    ).not.toBeNull();
+  } finally {
+    await scope.dispose();
+  }
+});
+
+test.each(["Stop", "caller disconnect", "lost response"] as const)(
+  "cold browser preparation cannot replay after %s",
+  async (boundary) => {
+    const scope = await setup();
+    const abort = new AbortController();
+    const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+    let calls = 0;
+    try {
+      scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+        if (payload.action !== "browser-call") return forward(attempt, payload, beforeSend);
+        await beforeSend?.(() => {
+          calls++;
+          scope.frames.push(payload);
+        });
+        if (boundary === "lost response") throw new Error("Owned response was lost");
+        if (boundary === "caller disconnect") abort.abort();
+        else {
+          await createChangeAgentStop(scope.owned.database, scope.owned.hub).persist(
+            scope.owned.changeID,
+          );
+        }
+        throw new RuntimeParentOperationError(
+          "browser-call",
+          "Browser tools are preparing; retry browser inspection after preparation completes",
+        );
+      };
+      await expect(
+        scope.browser.call(
+          scope.authorized.session,
+          scope.ownerToken,
+          { name: "browser_open", arguments: { app: "app" } },
+          `cold-${boundary}`,
+          abort.signal,
+        ),
+      ).rejects.toMatchObject({ code: "conflict" });
+      expect(calls).toBe(1);
+      const [session] = await scope.owned.database.client<Array<{ state: string }>>`
+        SELECT state FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
+      expect(session?.state).toBe("closed");
+    } finally {
+      await scope.dispose();
+    }
+  },
+);
 
 test("a confirmed element interaction failure requires a fresh snapshot, not a new Build", async () => {
   const scope = await setup();
@@ -399,7 +450,7 @@ test("a complete JSON prefix without body EOF cannot dispatch after the input de
   } finally {
     await scope.dispose();
   }
-}, 8_000);
+});
 
 test.each(["Stop", "completion"] as const)(
   "Build lifecycle prepares before prompt and closes its browser on %s",
@@ -471,6 +522,68 @@ test.each(["Stop", "completion"] as const)(
   },
   15_000,
 );
+
+test("Build heartbeat renews browser authority while native history observation is stalled", async () => {
+  const owned = await fixture(undefined, undefined, installation.connect());
+  const browser = createBuildBrowserController(owned.database, owned.hub, "owned-stalled-history");
+  const blocked = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let renewals = 0;
+  const request = owned.hub.request.bind(owned.hub);
+  const operation = owned.hub.parentOperation.bind(owned.hub);
+  owned.hub.request = async (...args) => {
+    if (new URL(args[2].url).pathname.endsWith("/log")) {
+      const [turn] = await owned.database.client<Array<{ state: string }>>`
+        SELECT state FROM factory.agent_turn WHERE change_id=${owned.changeID} ORDER BY created_at DESC LIMIT 1`;
+      if (turn?.state === "running") {
+        blocked.resolve();
+        await release.promise;
+      }
+    }
+    return request(...args);
+  };
+  owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+    if (payload.action === "browser-renew" || payload.action === "browser-close") {
+      await beforeSend?.(() => {});
+      if (payload.action === "browser-renew") renewals++;
+      return {};
+    }
+    return operation(attempt, payload, beforeSend);
+  };
+  const controller = createAgentController(
+    owned.database,
+    owned.hub,
+    { startPersisted: async () => null },
+    browser,
+    owned.writers,
+  );
+  owned.acceptResponse();
+  try {
+    await controller.prompt(
+      owned.changeID,
+      "Inspect the declared App",
+      owned.userID,
+      crypto.randomUUID(),
+    );
+    await owned.requested;
+    owned.release();
+    await blocked.promise;
+    const before = renewals;
+    await observe(
+      () => Promise.resolve(renewals),
+      (count) => count > before,
+      "Browser authority was not renewed while native history was stalled",
+      12_000,
+    );
+    expect(owned.requests()).toBe(1);
+  } finally {
+    release.resolve();
+    owned.release();
+    await controller.stop(owned.changeID);
+    await controller.shutdown();
+    await owned.dispose();
+  }
+}, 20_000);
 
 test("browser facade denies human origins, arbitrary MCP, raw URLs, oversized chunks and duplicate mutations", async () => {
   const scope = await setup();

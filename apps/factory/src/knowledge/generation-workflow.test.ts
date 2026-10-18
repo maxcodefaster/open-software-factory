@@ -14,6 +14,9 @@ test.each([
   "empty-topic",
   "verbose-overview",
   "execution-bound",
+  "invalid-plan-once",
+  "invalid-plan-always",
+  "verbose-topic-plan",
 ])(
   "real Mastra checked progressive workflow: %s",
   async (scenario) => {
@@ -35,7 +38,8 @@ test.each([
     let writes = 0,
       checks = 0,
       publications = 0,
-      researches = 0;
+      researches = 0,
+      plans = 0;
     const keys = ["FACTORY_MODEL_BASE_URL", "FACTORY_MODEL_API_KEY"];
     const before = keys.map((key) => process.env[key]);
     const server = Bun.serve({
@@ -75,8 +79,23 @@ test.each([
           issues?: string[];
         };
         let output: unknown;
-        if (system.includes("Research manifests")) output = { topics };
-        else if (system.includes("Follow relationships")) {
+        if (system.includes("Research manifests")) {
+          plans++;
+          output = {
+            topics: topics.map((topic, index) => ({
+              ...topic,
+              ...(index === 0 &&
+              (scenario === "invalid-plan-always" ||
+                (scenario === "invalid-plan-once" && plans === 1))
+                ? { paths: ["src/not-in-the-inventory.ts"] }
+                : {}),
+              ...(index === 1 && scenario === "verbose-topic-plan" && plans === 1
+                ? { purpose: "x".repeat(801) }
+                : {}),
+            })),
+          };
+          if (scenario === "verbose-topic-plan" && plans === 2) expect(raw).toContain("800");
+        } else if (system.includes("Follow relationships")) {
           researches++;
           expect(publications).toBe(topics.findIndex((topic) => topic.slug === prompt.topic.slug));
           output = {
@@ -189,7 +208,21 @@ test.each([
           return pages;
         },
       });
-      if (!["success", "invalid-research", "verbose-overview"].includes(scenario)) {
+      if (scenario === "invalid-plan-always") {
+        await expect(run).rejects.toThrow("Wiki workflow did not complete");
+        expect(plans).toBe(2);
+        expect(publications).toBe(0);
+        return;
+      }
+      if (
+        ![
+          "success",
+          "invalid-research",
+          "verbose-overview",
+          "invalid-plan-once",
+          "verbose-topic-plan",
+        ].includes(scenario)
+      ) {
         await expect(run).rejects.toThrow(
           scenario === "publication-conflict"
             ? "Controlled revision conflict"
@@ -210,6 +243,7 @@ test.each([
       expect(writes).toBe(5);
       expect(checks).toBe(4);
       expect(researches).toBe(scenario === "invalid-research" ? 5 : 4);
+      expect(plans).toBe(["invalid-plan-once", "verbose-topic-plan"].includes(scenario) ? 2 : 1);
     } finally {
       await server.stop(true);
       keys.forEach((key, index) => {

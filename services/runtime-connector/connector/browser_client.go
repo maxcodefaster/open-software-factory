@@ -18,6 +18,16 @@ import (
 // OpenCode API 2 does not yet expose its published MCP registration routes.
 // Its existing shell and image-read tools use this fixed client instead. The
 // client never accepts an endpoint, credential, file path or generic MCP call.
+func browserClientTimeout(name string) time.Duration {
+	if name == "browser_open" {
+		// The server can wait for the existing 180-second cold image preparation,
+		// then allow 25-second container setup and 25-second cold Chrome open,
+		// with transport margin. Execution still needs renewed short leases.
+		return 245 * time.Second
+	}
+	return 45 * time.Second
+}
+
 func RunBuildBrowserClient(ctx context.Context, turnID string, input io.Reader, output io.Writer) error {
 	return runBuildBrowserClient(ctx, turnID, os.Getenv("FACTORY_BUILD_BROWSER_URL"), os.Getenv("FACTORY_BUILD_BROWSER_TOKEN"), input, output)
 }
@@ -65,7 +75,7 @@ func runBuildBrowserClient(ctx context.Context, turnID, endpoint, token string, 
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, browserClientTimeout(call.Name))
 	defer cancel()
 	target.Path += "/" + turnID
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))

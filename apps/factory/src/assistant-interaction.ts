@@ -15,8 +15,32 @@ export function composerKeyDown(event: KeyboardEvent) {
 export function followConversation(element: HTMLDivElement) {
   let following = true;
   let frame = 0;
+  let touchY: number | undefined;
+  const stopFollowing = () => {
+    following = false;
+  };
   const scroll = () => {
-    following = element.scrollHeight - element.scrollTop - element.clientHeight <= 24;
+    // Collapsing an answered question can move the viewport before our next
+    // frame. Only user input detaches following; layout scrolls do not.
+    if (element.scrollHeight - element.scrollTop - element.clientHeight <= 24) following = true;
+  };
+  const wheel = (event: WheelEvent) => {
+    if (event.deltaY < 0) stopFollowing();
+  };
+  const key = (event: KeyboardEvent) => {
+    if (["ArrowUp", "PageUp", "Home"].includes(event.key) || (event.key === " " && event.shiftKey))
+      stopFollowing();
+  };
+  const pointer = (event: PointerEvent) => {
+    if (event.target === element) stopFollowing();
+  };
+  const touchStart = (event: TouchEvent) => {
+    touchY = event.touches[0]?.clientY;
+  };
+  const touchMove = (event: TouchEvent) => {
+    const next = event.touches[0]?.clientY;
+    if (next !== undefined && touchY !== undefined && next > touchY) stopFollowing();
+    touchY = next;
   };
   const update = () => {
     cancelAnimationFrame(frame);
@@ -29,6 +53,11 @@ export function followConversation(element: HTMLDivElement) {
   const resize = new ResizeObserver(update);
   resize.observe(element);
   element.addEventListener("scroll", scroll, { passive: true });
+  element.addEventListener("wheel", wheel, { passive: true });
+  element.addEventListener("keydown", key);
+  element.addEventListener("pointerdown", pointer);
+  element.addEventListener("touchstart", touchStart, { passive: true });
+  element.addEventListener("touchmove", touchMove, { passive: true });
   update();
   return {
     reset() {
@@ -40,6 +69,11 @@ export function followConversation(element: HTMLDivElement) {
       mutations.disconnect();
       resize.disconnect();
       element.removeEventListener("scroll", scroll);
+      element.removeEventListener("wheel", wheel);
+      element.removeEventListener("keydown", key);
+      element.removeEventListener("pointerdown", pointer);
+      element.removeEventListener("touchstart", touchStart);
+      element.removeEventListener("touchmove", touchMove);
     },
   };
 }

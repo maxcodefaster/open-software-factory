@@ -53,9 +53,11 @@ test("an uncertain background Interview stays visible without resending inferenc
     await page.getByRole("button").filter({ hasText: "Interrupted interview" }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Agent panel" });
-    await expect(panel.getByRole("alert")).toContainText("No request was resent", {
+    await expect(panel.getByRole("alert")).toContainText("no request was resent", {
       timeout: 2000,
     });
+    await expect(panel.getByRole("alert")).toContainText("could not confirm");
+    await expect(panel.getByRole("alert")).toContainText("separate AI request");
     await expect(panel.getByLabel("Message conversation")).toBeVisible();
     expect(inferenceRequests).toBe(0);
   } finally {

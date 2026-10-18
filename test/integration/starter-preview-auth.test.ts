@@ -11,6 +11,7 @@ const ClientSocket = WebSocket as typeof WebSocket & {
 test("Starter authentication works behind the real scoped App proxy path and retains only its own session", async () => {
   const process = await factoryProcess();
   const database = process.connect();
+  const databaseName = `starter_${process.id.replaceAll("-", "")}`;
   let server: ReturnType<typeof Bun.spawn> | undefined;
   let proxy: ReturnType<typeof Bun.serve> | undefined;
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
@@ -21,9 +22,9 @@ test("Starter authentication works behind the real scoped App proxy path and ret
   const host = `${id.replaceAll("-", "")}.app.runtime.localhost:3000`;
   const prefix = `/runtime/${id}/preview/app`;
   try {
-    await database.client`CREATE DATABASE starter`;
+    await database.client`CREATE DATABASE ${database.client(databaseName)}`;
     const url = new URL(process.databaseURL);
-    url.pathname = "/starter";
+    url.pathname = `/${databaseName}`;
     const env = {
       ...globalThis.process.env,
       DATABASE_URL: url.toString(),

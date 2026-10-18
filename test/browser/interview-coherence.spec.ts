@@ -10,7 +10,7 @@ import { createDatabase } from "../../packages/db/src/client";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
-const evidenceDirectory = ".factory/screenshots/interview-coherence";
+const evidenceDirectory = ".factory/test-results/interview-coherence";
 const ticketTitle = "Clarify the release summary";
 const options = [
   { id: "developer", label: "Developer", description: "Writes and ships the change" },
@@ -84,7 +84,7 @@ test("loads exact Sansita display typography while keeping interface text in Int
 
 async function openTicketAgent(page: Page) {
   await openProject(page);
-  await page.getByRole("region", { name: "requirements" }).getByRole("button").click();
+  await page.getByRole("button", { name: new RegExp(ticketTitle) }).click();
   await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
     ticketTitle,
   );
@@ -101,6 +101,26 @@ async function openTicketAgent(page: Page) {
     .toBeGreaterThanOrEqual(0);
   return panel;
 }
+
+test("proposal introductions render safe Markdown instead of literal formatting", async ({
+  page,
+}) => {
+  if (!database) throw new Error("Fixture database unavailable");
+  const conversationID = crypto.randomUUID();
+  await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,created_by,mode)
+    VALUES(${conversationID},${projectID},${ticketID},${userID},'plan')`;
+  await database.client`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload)
+    VALUES(${crypto.randomUUID()},${conversationID},1,'requirement','project-agent','plan',
+    ${'Review **the proposal**.\n\n- Keep the tracker\n\n<img src="invalid" onerror="alert(1)">'},
+    '{}'::jsonb)`;
+  const panel = await openTicketAgent(page);
+  const proposal = panel.locator(".conversation-requirement");
+  await expect(proposal.locator("strong")).toHaveText("the proposal", { timeout: 2000 });
+  await expect(proposal.locator("li")).toHaveText("Keep the tracker");
+  await expect(proposal.locator("img")).toHaveCount(0);
+  await expect(proposal).toContainText('<img src="invalid"');
+  await page.screenshot({ path: `${evidenceDirectory}/proposal-markdown.png` });
+});
 
 for (const outcome of ["complete", "error"] as const) {
   test(`streams Markdown in the selected context and cleans up on ${outcome}`, async ({ page }) => {
@@ -204,6 +224,26 @@ for (const outcome of ["complete", "error"] as const) {
       await expect
         .poll(() => history.evaluate((element) => element.scrollHeight > element.clientHeight))
         .toBe(true);
+      await history.evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll"));
+      });
+      await page.evaluate(
+        ({ turnId, text }) =>
+          (window as unknown as { emitProjectAnswer: (event: object) => void }).emitProjectAnswer({
+            type: "answer",
+            turnId,
+            text: `${text}\n\nNext question after a layout change.`,
+          }),
+        { turnId, text: longText },
+      );
+      await expect
+        .poll(() =>
+          history.evaluate(
+            (element) => element.scrollHeight - element.scrollTop - element.clientHeight,
+          ),
+        )
+        .toBeLessThanOrEqual(24);
       await history.hover();
       await page.mouse.wheel(0, -4000);
       await expect.poll(() => history.evaluate((element) => element.scrollTop)).toBe(0);
@@ -303,110 +343,127 @@ async function captureAnswer(page: Page) {
   return () => submitted;
 }
 
-test("IDE tabs retain their own Ticket conversation after switching and minimizing", async ({
-  page,
-}) => {
-  if (!database) throw new Error("Fixture database unavailable");
-  const revisionID = crypto.randomUUID(),
-    approvalID = crypto.randomUUID(),
-    changeID = crypto.randomUUID();
-  const canonical = JSON.stringify({
-    summary: "Release summary",
-    acceptanceCriteria: ["Readable summary"],
-    nonGoals: [],
-  });
-  await database.client`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${canonical},${createHash("sha256").update(canonical).digest("hex")},${userID})`;
-  await database.client`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${userID})`;
-  await database.client`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${"a".repeat(40)},'active',${userID})`;
-  await database.client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at) VALUES(${crypto.randomUUID()},${changeID},'owned','interview',${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${"a".repeat(40)},${`owned:${changeID}`},'succeeded',${"a".repeat(40)},now())`;
-  const buildView = {
-    state: "stopped",
-    sessionAvailable: true,
-    runtimeConnected: true,
-    runtimeState: "ready",
-    messages: [],
-    messagesAvailable: true,
-    stopPending: false,
-    stopId: null,
-  };
-  await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
-    const response = await route.fetch();
-    const body = (await response.json()) as { changes: Array<Record<string, unknown>> };
-    await route.fulfill({
-      json: { changes: body.changes.map((change) => ({ ...change, runtimeState: "ready" })) },
+for (const buildState of ["stopped", "failed"] as const)
+  test(`IDE tabs retain their own Ticket conversation after switching and minimizing from ${buildState}`, async ({
+    page,
+  }) => {
+    if (!database) throw new Error("Fixture database unavailable");
+    const revisionID = crypto.randomUUID(),
+      approvalID = crypto.randomUUID(),
+      changeID = crypto.randomUUID();
+    const canonical = JSON.stringify({
+      summary: "Release summary",
+      acceptanceCriteria: ["Readable summary"],
+      nonGoals: [],
     });
+    await database.client`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${canonical},${createHash("sha256").update(canonical).digest("hex")},${userID})`;
+    await database.client`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${userID})`;
+    await database.client`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${"a".repeat(40)},'active',${userID})`;
+    await database.client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at) VALUES(${crypto.randomUUID()},${changeID},'owned','interview',${`factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`},${"a".repeat(40)},${`owned:${changeID}`},'succeeded',${"a".repeat(40)},now())`;
+    const buildView = {
+      state: buildState,
+      ...(buildState === "failed"
+        ? {
+            turn: {
+              id: crypto.randomUUID(),
+              commandId: crypto.randomUUID(),
+              state: "failed",
+              engine: "opencode",
+              mode: "build",
+              modelId: "owned-model",
+              skills: [],
+              summary: "The previous implementation needs correction.",
+            },
+          }
+        : {}),
+      sessionAvailable: true,
+      runtimeConnected: true,
+      runtimeState: "ready",
+      messages: [],
+      messagesAvailable: true,
+      stopPending: false,
+      stopId: null,
+    };
+    await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
+      const response = await route.fetch();
+      const body = (await response.json()) as { changes: Array<Record<string, unknown>> };
+      await route.fulfill({
+        json: { changes: body.changes.map((change) => ({ ...change, runtimeState: "ready" })) },
+      });
+    });
+    await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+      route.fulfill({ json: buildView }),
+    );
+    let buildPrompt: unknown;
+    await page.route(`**/api/changes/${changeID}/agent/prompt`, (route) => {
+      buildPrompt = route.request().postDataJSON();
+      return route.fulfill({ status: 503, json: { error: "Owned Build dispatch interrupted" } });
+    });
+    await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
+      route.fulfill({ status: 503, json: { error: "Owned source test does not start compute" } }),
+    );
+    await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
+      route.fulfill({ status: 503, json: { error: "Owned IDE test does not start compute" } }),
+    );
+    await page.route("**/api/workspaces/*/source", (route) =>
+      route.fulfill({
+        json: {
+          workspaceID: crypto.randomUUID(),
+          serviceID: "owned-source",
+          epoch: 1,
+          state: "preparing",
+          failure: null,
+        },
+      }),
+    );
+    const conversationID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,created_by,mode) VALUES(${conversationID},${projectID},${ticketID},${userID},'investigate')`;
+    await database.client`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload) VALUES(${crypto.randomUUID()},${conversationID},1,'agent-message','project-agent','investigate','Retained Ticket research','{}'::jsonb)`;
+    await page.route(`**/api/changes/${changeID}/source-workspace/ensure`, (route) =>
+      route.fulfill({
+        json: {
+          workspaceID: crypto.randomUUID(),
+          serviceID: "owned-source",
+          epoch: 1,
+          state: "preparing",
+          failure: null,
+        },
+      }),
+    );
+    const panel = await openTicketAgent(page);
+    await expect(panel).toContainText("Retained Ticket research");
+    await page.getByRole("button", { name: "IDE", exact: true }).click();
+    const ide = page.getByRole("tab", { name: `IDE · ${ticketTitle}`, exact: true });
+    await expect(ide).toBeVisible();
+    await expect(panel).toContainText("Retained Ticket research");
+    const message = panel.getByLabel("Message conversation");
+    await expect(message).toHaveAttribute(
+      "placeholder",
+      buildState === "failed"
+        ? "Describe what to fix in the retained code…"
+        : "Ask a question or describe the next change…",
+    );
+    await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
+    await message.fill("Continue this exact Change");
+    await message.press("Enter");
+    await expect
+      .poll(() => buildPrompt)
+      .toMatchObject({ text: "Continue this exact Change", commandId: expect.any(String) });
+    await expect(message).toHaveValue("Continue this exact Change");
+    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await expect(panel).not.toContainText("Retained Ticket research");
+    await ide.click();
+    await expect(panel).toContainText("Retained Ticket research");
+    await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
+    await expect(panel).toContainText("Retained Ticket research");
+    await page.getByRole("button", { name: "Choose IDE instance", exact: true }).click();
+    await page.getByRole("menuitem", { name: /My workspace/ }).click();
+    await expect(panel).not.toContainText("Retained Ticket research");
+    await expect(panel.getByLabel("Message conversation")).toHaveAttribute(
+      "placeholder",
+      "Describe the change you want to plan…",
+    );
   });
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({ json: buildView }),
-  );
-  let buildPrompt: unknown;
-  await page.route(`**/api/changes/${changeID}/agent/prompt`, (route) => {
-    buildPrompt = route.request().postDataJSON();
-    return route.fulfill({ status: 503, json: { error: "Owned Build dispatch interrupted" } });
-  });
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Owned source test does not start compute" } }),
-  );
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Owned IDE test does not start compute" } }),
-  );
-  await page.route("**/api/workspaces/*/source", (route) =>
-    route.fulfill({
-      json: {
-        workspaceID: crypto.randomUUID(),
-        serviceID: "owned-source",
-        epoch: 1,
-        state: "preparing",
-        failure: null,
-      },
-    }),
-  );
-  const conversationID = crypto.randomUUID();
-  await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,created_by,mode) VALUES(${conversationID},${projectID},${ticketID},${userID},'investigate')`;
-  await database.client`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload) VALUES(${crypto.randomUUID()},${conversationID},1,'agent-message','project-agent','investigate','Retained Ticket research','{}'::jsonb)`;
-  await page.route(`**/api/changes/${changeID}/source-workspace/ensure`, (route) =>
-    route.fulfill({
-      json: {
-        workspaceID: crypto.randomUUID(),
-        serviceID: "owned-source",
-        epoch: 1,
-        state: "preparing",
-        failure: null,
-      },
-    }),
-  );
-  const panel = await openTicketAgent(page);
-  await expect(panel).toContainText("Retained Ticket research");
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
-  const ide = page.getByRole("tab", { name: `IDE · ${ticketTitle}`, exact: true });
-  await expect(ide).toBeVisible();
-  await expect(panel).toContainText("Retained Ticket research");
-  const message = panel.getByLabel("Message conversation");
-  await expect(message).toHaveAttribute(
-    "placeholder",
-    "Ask a question or describe the next change…",
-  );
-  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
-  await message.fill("Continue this exact Change");
-  await message.press("Enter");
-  await expect
-    .poll(() => buildPrompt)
-    .toMatchObject({ text: "Continue this exact Change", commandId: expect.any(String) });
-  await expect(message).toHaveValue("Continue this exact Change");
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-  await expect(panel).not.toContainText("Retained Ticket research");
-  await ide.click();
-  await expect(panel).toContainText("Retained Ticket research");
-  await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-  await expect(panel).toContainText("Retained Ticket research");
-  await page.getByRole("button", { name: "Choose IDE instance", exact: true }).click();
-  await page.getByRole("menuitem", { name: /My workspace/ }).click();
-  await expect(panel).not.toContainText("Retained Ticket research");
-  await expect(panel.getByLabel("Message conversation")).toHaveAttribute(
-    "placeholder",
-    "Describe the change you want to plan…",
-  );
-});
 
 test("keeps truthful pending Interview feedback in the transcript and retains a failed answer", async ({
   page,
@@ -512,11 +569,12 @@ test("offers one single-select answer path and reveals custom input only when se
   await insertQuestion({
     type: "single-select",
     prompt: "Who needs the release summary?",
-    options,
+    options: [...options, { id: "other", label: "Something else", description: "" }],
     allowCustom: true,
   });
   const panel = await openTicketAgent(page);
   const question = panel.locator(".conversation-question");
+  await expect(question.getByRole("radio", { name: "Something else", exact: true })).toHaveCount(1);
   const next = question.getByRole("button", { name: "Continue" });
   await expect(next).toBeDisabled();
   await expect(question.getByLabel("Custom answer")).toBeHidden();

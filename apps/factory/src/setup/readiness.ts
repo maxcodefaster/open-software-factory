@@ -14,7 +14,7 @@ export function createSetupReadiness(input: {
   signingKey: string;
   protection(projectID: string): Promise<void>;
   hook(projectID: string): Promise<void>;
-  wiki(projectID: string, userID: string): Promise<string>;
+  wiki(projectID: string, userID: string, automatic: boolean): Promise<string>;
   prepare(projectID: string): Promise<{ development: string; preview: string }>;
   preview(projectID: string, userID: string): Promise<string>;
   requiredVariables?(projectID: string): Promise<readonly string[]>;
@@ -151,7 +151,13 @@ export function createSetupReadiness(input: {
     });
   }
 
-  async function run(projectID: string, userID: string, starter: boolean, recovering: boolean) {
+  async function run(
+    projectID: string,
+    userID: string,
+    starter: boolean,
+    recovering: boolean,
+    retryWiki: boolean,
+  ) {
     const connection = await sql.reserve();
     try {
       const [lock] = await connection<
@@ -172,7 +178,7 @@ export function createSetupReadiness(input: {
             await input.hook(projectID);
             return undefined;
           }),
-          task(projectID, userID, "wiki", () => input.wiki(projectID, userID)),
+          task(projectID, userID, "wiki", () => input.wiki(projectID, userID, !retryWiki)),
         ]);
         // Imported code never starts before its configuration is confirmed.
         const configured = (await status(projectID, userID)).some(
@@ -213,10 +219,16 @@ export function createSetupReadiness(input: {
     }
   }
 
-  function start(projectID: string, userID: string, starter: boolean, recovering = false) {
+  function start(
+    projectID: string,
+    userID: string,
+    starter: boolean,
+    recovering = false,
+    retryWiki = false,
+  ) {
     const active = running.get(projectID);
     if (active) return active;
-    const work = run(projectID, userID, starter, recovering).finally(() =>
+    const work = run(projectID, userID, starter, recovering, retryWiki).finally(() =>
       running.delete(projectID),
     );
     running.set(projectID, work);
@@ -227,7 +239,7 @@ export function createSetupReadiness(input: {
     await status(projectID, userID);
     await sql`UPDATE factory.project_setup_readiness SET state='pending',failure=NULL,operation_id=NULL
       WHERE project_id=${projectID} AND task=${name} AND state='failed'`;
-    await start(projectID, userID, starter);
+    await start(projectID, userID, starter, false, name === "wiki");
   }
   async function recover() {
     const projects = await sql<{ id: string; userID: string; starter: boolean }[]>`SELECT

@@ -23,6 +23,12 @@ export function needsTheiaTestBuild(source: string) {
     );
 }
 
+export function needsStarterTestDependencies(selected: readonly string[]) {
+  return selected.some((path) =>
+    ["/starter.test.ts", "/starter-preview-auth.test.ts"].some((suffix) => path.endsWith(suffix)),
+  );
+}
+
 export function prerequisiteFingerprint(files: readonly { path: string; content: string }[]) {
   const hash = new Bun.CryptoHasher("sha256");
   for (const file of [...files].sort((a, b) => a.path.localeCompare(b.path))) {
@@ -60,7 +66,7 @@ export async function prepareTestPrerequisites(
   const theia = (
     await Promise.all(selected.map((path) => readFile(resolve(root, path), "utf8")))
   ).some(needsTheiaTestBuild);
-  const starter = selected.some((path) => path.endsWith("/starter-preview-auth.test.ts"));
+  const starter = needsStarterTestDependencies(selected);
   if (!theia && !starter) return;
   const cache = resolve(root, ".factory/cache/test-prerequisites");
   await mkdir(cache, { recursive: true });

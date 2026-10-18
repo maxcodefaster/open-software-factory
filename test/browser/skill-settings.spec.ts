@@ -101,6 +101,18 @@ test("product contributors author corporate guidance; managers review sharing an
     await login(author, authorEmail, password);
     await selectProject(author);
     const personal = await open(author, "Personal");
+    await personal
+      .getByRole("combobox", { name: "Choices for", exact: true })
+      .selectOption("build");
+    const interviewSkill = personal.getByRole("article", {
+      name: "Requirements interview",
+      exact: true,
+    });
+    await expect(interviewSkill).toContainText("Investigate & Plan only");
+    await expect(interviewSkill).not.toContainText("Build only");
+    await personal
+      .getByRole("combobox", { name: "Choices for", exact: true })
+      .selectOption("planning");
     await expect(personal.getByRole("button", { name: "New skill", exact: true })).toBeVisible();
     await personal.getByRole("button", { name: "New skill", exact: true }).click();
     const editor = personal.getByRole("form", { name: "Skill editor" });

@@ -13,6 +13,21 @@ test("native catalogue comes from pinned Mastra and contains only Factory-suppor
   });
 });
 
+test("conversation model choices omit known non-conversation OpenAI model families", () => {
+  const models = providerCatalogue().find((entry) => entry.provider === "openai")?.models;
+  expect(models).toContain("gpt-4.1");
+  for (const id of [
+    "chatgpt-image-latest",
+    "gpt-image-1",
+    "gpt-image-2",
+    "gpt-realtime-2.1",
+    "text-embedding-3-large",
+    "text-embedding-3-small",
+    "text-embedding-ada-002",
+  ])
+    expect(models).not.toContain(id);
+});
+
 test("endpoint policy rejects credentials, plaintext, native path spoofing and unapproved origins", () => {
   expect(validateModelEndpoint({ provider: "anthropic", endpoint: null })).toBe(
     nativeEndpoints.anthropic,

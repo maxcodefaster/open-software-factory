@@ -3184,11 +3184,13 @@ function FactoryWorkspace(props: {
                           name="message"
                           aria-label="Message conversation"
                           placeholder={
-                            agent().state === "stopped"
-                              ? "Ask a question or describe the next change…"
-                              : agentTurnBusy()
-                                ? "Prepare your next instructions, or Stop to change direction…"
-                                : "Ask a question or describe the next change…"
+                            agent().state === "failed"
+                              ? "Describe what to fix in the retained code…"
+                              : agent().state === "stopped"
+                                ? "Ask a question or describe the next change…"
+                                : agentTurnBusy()
+                                  ? "Prepare your next instructions, or Stop to change direction…"
+                                  : "Ask a question or describe the next change…"
                           }
                           disabled={pending()}
                         />

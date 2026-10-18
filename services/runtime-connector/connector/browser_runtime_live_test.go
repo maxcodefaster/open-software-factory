@@ -71,6 +71,40 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	defer disconnect()
 	scope := browserRuntimeRequest{SessionID: owned, TurnID: "turn-" + owned, AgentSessionID: "ses_fixture",
 		OwnerID: strings.Repeat("b", 64), ExpiresAt: time.Now().Add(25 * time.Second)}
+	// Exercise real startup across an initial lease, not only fast warm calls.
+	// The same controller renewal must keep both fixed containers alive while
+	// container creation, MCP initialization and Chrome navigation are in flight.
+	opening := scope
+	opening.ExpiresAt = time.Now().Add(2 * time.Second)
+	opening.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web"}`)}
+	renewContext, stopRenewal := context.WithCancel(connection)
+	renewed := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewContext.Done():
+				renewed <- nil
+				return
+			case <-ticker.C:
+				renewal := opening
+				renewal.ExpiresAt = time.Now().Add(25 * time.Second)
+				if err := manager.renew(renewal); err != nil {
+					renewed <- err
+					return
+				}
+			}
+		}
+	}()
+	_, opened := manager.call(connection, opening)
+	stopRenewal()
+	if err := <-renewed; err != nil {
+		t.Fatal("renewing real browser startup", err)
+	}
+	if opened != nil {
+		t.Fatal("opening real browser across its initial lease", opened)
+	}
 	call := func(name, arguments string) browserMCPContent {
 		t.Helper()
 		scope.ExpiresAt = time.Now().Add(25 * time.Second)
@@ -85,7 +119,6 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		}
 		return result
 	}
-	call("browser_open", `{"app":"web"}`)
 	snapshot := call("browser_snapshot", `{}`)
 	if len(snapshot.Content) == 0 || !strings.Contains(snapshot.Content[0].Text, "Only primary loopback") {
 		t.Fatal("real proxy did not reach the primary's loopback-only App")
@@ -165,7 +198,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("disconnected execution created a browser")
 	}
 	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage,
-		"loopbackApp": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
+		"loopbackApp": true, "startupRenewal": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
 	if err := os.WriteFile(filepath.Join(root, "inspection.json"), evidence, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -173,8 +206,9 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 
 func TestBrowserRuntimeManagerLive(t *testing.T) {
 	imageReference := os.Getenv("FACTORY_BROWSER_PROOF_IMAGE")
-	if imageReference == "" {
-		t.Skip("requires explicitly built browser proof image and local runtime-host image")
+	parentReference := os.Getenv("FACTORY_BROWSER_PROOF_PARENT_IMAGE")
+	if imageReference == "" || parentReference == "" {
+		t.Skip("requires explicit browser and parent proof images")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -187,7 +221,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	image := docker("image", "inspect", "--format", "{{.Id}}", imageReference)
-	parentImage := docker("image", "inspect", "--format", "{{.Id}}", "registry.localhost:5443/open-factory/runtime-host:local")
+	parentImage := docker("image", "inspect", "--format", "{{.Id}}", parentReference)
 	owned := "factory-browser-manager-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	root, err := filepath.Abs("../../../.factory/test-results/browser-tools/" + owned)
 	if err != nil || os.MkdirAll(root, 0700) != nil {

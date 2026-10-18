@@ -45,6 +45,95 @@ func TestBrowserFailedNavigationDoesNotClaimCheckoutOrAppContext(t *testing.T) {
 	}
 }
 
+func TestBrowserRenewalCanKeepAnInFlightCallAlive(t *testing.T) {
+	manager, scope := browserRuntimeFixture(t)
+	manager.docker = func(context.Context, ...string) ([]byte, error) { return nil, nil }
+	scope.ExpiresAt = time.Now().Add(300 * time.Millisecond)
+	directory := manager.directory(scope.SessionID)
+	if err := os.MkdirAll(filepath.Join(directory, "config"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeBrowserAuthority(directory, scope); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime := &browserRuntime{scope: scope, directory: directory, ctx: ctx, cancel: cancel,
+		command: &exec.Cmd{}, input: browserDiscardInput{io.Discard}, responses: make(chan browserMCPReply, 1)}
+	manager.sessions[scope.SessionID] = runtime
+	lease, end, err := browserAuthorityContext(ctx, filepath.Join(directory, "config", "authority.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer end()
+	go func() {
+		<-lease.Done()
+		cancel()
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, err := manager.call(ctx, scope)
+		done <- err
+	}()
+	// Wait until the actual call owns the browser lock, as during cold startup
+	// or a slow page load. Renewal must not queue behind that same call.
+	deadline := time.Now().Add(100 * time.Millisecond)
+	for runtime.mu.TryLock() {
+		runtime.mu.Unlock()
+		if time.Now().After(deadline) {
+			t.Fatal("browser call did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	renewed := make(chan error, 1)
+	renewal := scope
+	renewal.ExpiresAt = time.Now().Add(25 * time.Second)
+	go func() { renewed <- manager.renew(renewal) }()
+	select {
+	case err := <-renewed:
+		if err != nil {
+			t.Fatal("renewal failed", err)
+		}
+	case err := <-done:
+		t.Fatalf("browser execution authority ended while an authorized renewal waited: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("renewal blocked behind the browser call")
+	}
+	// Return a known tool error so no checkout or browser identity is fabricated.
+	runtime.responses <- browserMCPReply{ID: 1, Result: json.RawMessage(`{"isError":true,"content":[{"type":"text","text":"fixture observation"}]}`)}
+	if err := <-done; err != nil {
+		t.Fatal("renewed browser call failed", err)
+	}
+}
+
+func TestBrowserOpenAllowsColdChromeStartupBeforeItsNavigationDeadline(t *testing.T) {
+	manager, scope := browserRuntimeFixture(t)
+	manager.docker = func(context.Context, ...string) ([]byte, error) { return nil, nil }
+	t.Cleanup(func() {
+		if err := manager.closeAll(); err != nil {
+			t.Error(err)
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runtime := &browserRuntime{scope: scope, directory: manager.directory(scope.SessionID),
+		ctx: ctx, cancel: cancel, command: &exec.Cmd{}, input: browserDiscardInput{io.Discard},
+		responses: make(chan browserMCPReply, 1)}
+	manager.sessions[scope.SessionID] = runtime
+	// new_page's ten-second navigation deadline does not include cold Chrome
+	// launch. Exercise the real RPC wait rather than only testing a duration.
+	go func() {
+		select {
+		case <-time.After(16 * time.Second):
+			runtime.responses <- browserMCPReply{ID: 1, Result: json.RawMessage(`{"isError":true,"content":[{"type":"text","text":"Known fixture navigation outcome after cold launch"}]}`)}
+		case <-ctx.Done():
+		}
+	}()
+	if _, err := manager.call(ctx, scope); err != nil {
+		t.Fatalf("cold browser_open was interrupted before its known result: %v", err)
+	}
+}
+
 func TestBrowserObservationUsesTheExactSharedCheckoutWithoutPrimaryGit(t *testing.T) {
 	workspace, commit := commitRepository(t)
 	manager, scope := browserRuntimeFixture(t)

@@ -109,6 +109,7 @@ import { createDeveloperIDERoutes } from "./workspace/developer-ide-routes";
 import { createDeveloperIDERuntime } from "./workspace/developer-ide-runtime";
 import { createWorkspaceSourceController } from "./workspace/source-controller";
 import { createWorkspaceSourceRoutes } from "./workspace/source-routes";
+import { appTimeoutResponse } from "./runtime/app-timeout";
 import { handleZeroMutate, handleZeroQuery } from "./zero/http";
 
 const { FACTORY_ADMIN_PASSWORD, FACTORY_AUTH_SECRET, FACTORY_HOST, FACTORY_ZERO_CACHE_URL } =
@@ -460,8 +461,8 @@ const setupReadiness = createSetupReadiness({
       await database.client`SELECT hook_state FROM factory.wiki_source_update WHERE project_id=${projectID}`;
     if (hook?.["hook_state"] !== "ready") throw new Error("Repository hook needs retry");
   },
-  wiki: async (projectID, userID) => {
-    const generation = await knowledgeController.generate(projectID, userID, true);
+  wiki: async (projectID, userID, automatic) => {
+    const generation = await knowledgeController.generate(projectID, userID, automatic);
     if (!generation) throw new Error("Wiki generation was not admitted");
     return z.uuid().parse(generation["id"]);
   },
@@ -1491,7 +1492,7 @@ async function route(request: Request) {
       return json({ error: "Invalid command. Check the entered values." }, 400);
     console.error(cause);
     if (cause instanceof SystemContractError) return json({ error: cause.message }, 422);
-    return json({ error: "Factory command failed" }, 500);
+    return appTimeoutResponse(request, cause) ?? json({ error: "Factory command failed" }, 500);
   }
 }
 
@@ -1512,6 +1513,10 @@ const servers = serveFactory<FactorySocketData>(factoryHost, {
   idleTimeout: 180,
   async fetch(request, server) {
     const url = new URL(request.url);
+    if (/^\/internal\/build-browser\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/.test(url.pathname))
+      // Cold image preparation has its own 180-second bound, followed by the
+      // bounded container and cold Chrome setup. Do not time out transport first.
+      server.timeout(request, 270);
     if (
       developerIDEEdge.matches(url.pathname) &&
       request.headers.get("upgrade")?.toLowerCase() === "websocket"

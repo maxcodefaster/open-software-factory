@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   type BuildBrowserCall,
@@ -30,6 +31,15 @@ function ownerIdentity(token: string) {
 function browserIdentity(turnID: string, ownerID: string) {
   const hex = createHash("sha256").update(`factory-browser-v1:${turnID}:${ownerID}`).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+function browserPreparing(cause: unknown) {
+  return (
+    cause instanceof RuntimeParentOperationError &&
+    cause.action === "browser-call" &&
+    cause.message ===
+      "Browser tools are preparing; retry browser inspection after preparation completes"
+  );
 }
 
 // Exact static Connector failures only. Never forward arbitrary runtime,
@@ -191,7 +201,9 @@ export function createBuildBrowserController(
     ownerToken: string,
     action: "browser-call" | "browser-renew",
     call?: BuildBrowserCall,
+    signal?: AbortSignal,
   ) {
+    signal?.throwIfAborted();
     let expiresAt: string | undefined;
     const admitted = await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
       expiresAt = await currentIn(sql, session, ownerToken);
@@ -207,6 +219,7 @@ export function createBuildBrowserController(
             "conflict",
             "Browser dispatch lease expired while awaiting authority",
           );
+        signal?.throwIfAborted();
         // Recheck Stop/current scope at the actual frame send, then release the
         // transaction before awaiting the browser. The lease cannot be extended
         // by a delayed frame or an unconfirmed outcome.
@@ -215,6 +228,33 @@ export function createBuildBrowserController(
       if (!allowed)
         throw new CommandError("conflict", "Browser Build authority changed before dispatch");
     });
+  }
+
+  async function dispatchCall(
+    session: BrowserSession,
+    ownerToken: string,
+    call: BuildBrowserCall,
+    signal?: AbortSignal,
+  ) {
+    // Match the Connector's existing 180-second image-preparation bound.
+    // Each probe gets a fresh short authority lease. Only the exact confirmed
+    // pre-execution response permits another probe; no App action is replayed.
+    const preparationDeadline = performance.now() + 180_000;
+    for (;;) {
+      try {
+        return await dispatch(session, ownerToken, "browser-call", call, signal);
+      } catch (cause) {
+        if (
+          call.name !== "browser_open" ||
+          !browserPreparing(cause) ||
+          performance.now() >= preparationDeadline
+        )
+          throw cause;
+        await delay(Math.min(1_000, preparationDeadline - performance.now()), undefined, {
+          signal,
+        });
+      }
+    }
   }
 
   return {
@@ -291,6 +331,7 @@ export function createBuildBrowserController(
       ownerToken: string,
       input: unknown,
       requestID: string | number,
+      signal?: AbortSignal,
     ): Promise<BuildBrowserResult> {
       const call = buildBrowserCallInput.parse(input);
       if (
@@ -318,7 +359,8 @@ export function createBuildBrowserController(
       calls.add(identity);
       dispatchedCalls.set(session.id, calls);
       try {
-        const output = await dispatch(session, ownerToken, "browser-call", call);
+        const output = await dispatchCall(session, ownerToken, call, signal);
+        signal?.throwIfAborted();
         if (!output.data) throw new Error("Browser result unavailable");
         const parsed = buildBrowserResultInput.safeParse(JSON.parse(output.data));
         if (!parsed.success) throw new Error("Browser returned an invalid observation schema");
@@ -359,19 +401,13 @@ export function createBuildBrowserController(
         // The pinned Connector returns this before creating a browser or calling
         // an App. It proves non-execution, unlike a lost response. Keep the
         // intended session so native tools can retry after the image is ready.
-        if (
-          call.name === "browser_open" &&
-          cause instanceof RuntimeParentOperationError &&
-          cause.action === "browser-call" &&
-          cause.message ===
-            "Browser tools are preparing; retry browser inspection after preparation completes"
-        )
+        if (call.name === "browser_open" && browserPreparing(cause))
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: "Browser tools are preparing. No App action ran. Wait a few seconds, then retry browser_open in this same turn.",
+                text: "Browser tools did not finish preparation within their startup window. No App action ran. Check runtime image preparation before another browser_open.",
               },
             ],
           };
@@ -393,7 +429,7 @@ export function createBuildBrowserController(
       try {
         const [session] = await database.client<Array<{ id: string }>>`
           SELECT id FROM factory.build_browser_session WHERE turn_id = ${turnID}
-            AND owner_id = ${ownerIdentity(ownerToken)} AND state = 'active'`;
+            AND owner_id = ${ownerIdentity(ownerToken)} AND state IN ('intended', 'active')`;
         if (!session) return;
         const current = await row(session.id);
         if (!current) return;

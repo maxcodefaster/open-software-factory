@@ -4,10 +4,11 @@ import { factoryProcess } from "../fixtures/factory-process";
 test("turnkey Starter installs its Drizzle schema and verifies real Better Auth sessions", async () => {
   const process = await factoryProcess();
   const database = process.connect();
+  const databaseName = `starter_${process.id.replaceAll("-", "")}`;
   try {
-    await database.client`CREATE DATABASE starter`;
+    await database.client`CREATE DATABASE ${database.client(databaseName)}`;
     const url = new URL(process.databaseURL);
-    url.pathname = "/starter";
+    url.pathname = `/${databaseName}`;
     for (const script of ["db:migrate", "db:migrate", "check"]) {
       const child = Bun.spawn(["npm", "run", script], {
         cwd: "templates/starter-app",

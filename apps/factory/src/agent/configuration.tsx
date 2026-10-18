@@ -10,6 +10,7 @@ import {
 } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
 import { apiRequest } from "../api-client";
+import { projectFailureNotice } from "./failure-notice";
 
 export function AgentBlockers(props: {
   projectID: string | undefined;
@@ -84,8 +85,7 @@ export function AgentBlockers(props: {
         }
       >
         <p class="agent-configuration-note" role="alert">
-          The assistant could not finish this response. Your work is saved. No request was resent.
-          Send a new message when you are ready to continue.
+          {props.turn ? projectFailureNotice(props.turn) : ""}
         </p>
       </Show>
       <Show when={blocked() || error()}>

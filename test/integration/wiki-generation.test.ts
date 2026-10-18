@@ -138,6 +138,16 @@ test.each([false, true])(
       await wiki.reconcile(project);
       expect((await completed())?.["state"]).toBe("failed");
       expect((await wiki.generation(project))?.["failure"]).not.toContain("controlled-private-key");
+      const failedGeneration = await wiki.generation(project);
+      const failedCalls = calls;
+      await wiki.reconcile(project);
+      await wiki.settle();
+      expect((await wiki.generation(project))?.["id"]).toBe(failedGeneration?.["id"]);
+      expect(calls).toBe(failedCalls);
+      await wiki.generate(project, user);
+      await wiki.settle();
+      expect((await wiki.generation(project))?.["id"]).not.toBe(failedGeneration?.["id"]);
+      expect(calls).toBe(failedCalls + 1);
       const [retained] = await db.client<
         Array<{ body: string }>
       >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${page}`;

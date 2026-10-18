@@ -49,13 +49,23 @@ export function buildAgentHint(view: AgentView) {
   if (view.state === "stopped") return "Stopped. Your next message resumes the session.";
   if (view.state === "committed")
     return "Source submitted. Verification and your review determine whether the Change is ready.";
+  if (view.state === "failed" && !buildAgentNeedsStart(view))
+    return "The previous attempt failed. Your next message starts a new Build turn with the retained code.";
   return agentStatusLabels[view.state];
 }
 
 export function buildAgentNeedsStart(view: AgentView) {
+  const retainedFailure =
+    view.state === "failed" &&
+    view.turn?.state === "failed" &&
+    view.sessionAvailable &&
+    view.runtimeConnected &&
+    view.runtimeState === "ready" &&
+    !view.stopPending &&
+    !view.commitOperation;
   return (
     view.state === "idle" ||
-    view.state === "failed" ||
+    (view.state === "failed" && !retainedFailure) ||
     (view.state === "stopped" && !view.sessionAvailable)
   );
 }

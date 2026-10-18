@@ -8,6 +8,7 @@ import {
   retainAgentActivity,
 } from "./agent-view-state";
 import type { AgentView } from "./api-contracts";
+import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
 
 test("an older activity read cannot undo Stop or another settled command", () => {
   const fence = createAgentReadFence();
@@ -46,6 +47,32 @@ test("startup Stop offers Start rather than a nonexistent Session resume", () =>
     "Stopped before Build started. Start implementation when ready.",
   );
   expect(buildAgentNeedsStart({ ...view, sessionAvailable: true })).toBe(false);
+});
+
+test("a known failed turn in a ready retained Session accepts new Build instructions", () => {
+  const view: AgentView = {
+    ...loaded,
+    state: "failed",
+    runtimeState: "ready",
+    turn: turnObservationInput.parse({
+      id: crypto.randomUUID(),
+      commandId: crypto.randomUUID(),
+      state: "failed",
+      engine: "opencode",
+      mode: "build",
+      modelId: "owned-model",
+      skills: [],
+    }),
+  };
+  expect(buildAgentNeedsStart(view)).toBe(false);
+  expect(buildAgentHint(view)).toContain("next message");
+  for (const blocked of [
+    { ...view, sessionAvailable: false },
+    { ...view, runtimeState: "stopped" },
+    { ...view, runtimeConnected: false },
+    { ...view, turn: { ...view.turn!, state: "uncertain" as const } },
+  ])
+    expect(buildAgentNeedsStart(blocked)).toBe(true);
 });
 
 test("interrupted connection does not claim work is observed running or restart it", () => {

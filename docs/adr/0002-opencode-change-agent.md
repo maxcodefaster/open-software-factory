@@ -34,10 +34,29 @@ Factory does not add another inference loop or silently change the model. OpenCo
 tool loop owns implementation and local correction; unknown external outcomes still follow
 the existing recovery and explicit-retry rules.
 
-Cold browser-image preparation is a known pre-execution outcome. Its exact Connector
-response leaves the unused browser intent available for another `browser_open` in the
-same admitted turn. It neither confirms App inspection nor justifies repeating an
-uncertain UI mutation. Other failures retain the existing owned cleanup behavior.
+Cold browser-image preparation is a known pre-execution outcome. One `browser_open` waits
+through the Connector's existing image-preparation window, probing only after its exact
+confirmed non-execution response. Every probe rechecks current Build ownership, Stop,
+permissions and runtime identity before receiving a fresh short execution lease. Other
+failures never authorize a replay. Caller disconnect ends further preparation probes.
+The fixed client's open-call deadline includes image preparation, container setup and cold
+Chrome launch; mutation deadlines are unchanged. Native shell guidance allows that client to wait.
+This avoids spending additional model turns guessing whether the browser is ready.
+An actual preparation failure still confirms no App inspection and does not justify
+repeating an uncertain UI mutation. Owned cleanup behavior otherwise remains unchanged.
+The current Build also renews intended browser sessions during cold startup. Connector
+renewal does not wait on the lock held by container creation or a browser call, and startup
+cannot overwrite a newer lease with its original deadline. Renewal before creation starts
+no resources. Expiry, Stop and disconnect still end access and require exact owned cleanup.
+The existing Build ownership heartbeat renews browser authority independently of native
+history and usage reads. A slow observation must not expire a browser owned by a live Build.
+Opening an App allows cold Chrome launch before the unchanged upstream navigation timeout.
+Other browser actions retain their existing deadlines. Client and HTTP transport bounds
+include image preparation, container setup and cold launch without extending execution authority.
+After a known failed turn, a ready retained Session accepts explicitly submitted new Build
+instructions in the IDE. It does not silently route those instructions to checkout-free
+research or repeat the failed input. Uncertain execution, pending Stop and commit recovery
+still require resolution before new Build work.
 
 A confirmed tool-error response in an already observed App may leave partial UI effects.
 Factory retains that browser but blocks further UI actions until a fresh DOM snapshot

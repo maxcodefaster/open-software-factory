@@ -1,12 +1,9 @@
-import { mkdir, mkdtemp, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import upstream from "../../upstream.json";
 import { buildModelID } from "./change-agent-turns";
-
-const runtimeImage =
-  "registry.localhost:5443/open-factory/build-runtime-host@sha256:1a824718e94c0b4ecfae9414ec570fee7176f4763c1163361c82eac991461891";
 
 export async function docker(...args: string[]) {
   const process = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -35,7 +32,7 @@ export async function observe<T>(
 }
 
 export async function pinnedOpenCode(
-  artifactImage = process.env["FACTORY_OPENCODE_TEST_IMAGE"] ?? runtimeImage,
+  artifactImage?: string,
   browserClient?: { path: string; endpoint: string; token: string; turnID: string },
   serverBinary = process.env["FACTORY_OPENCODE_SERVER_TEST_BINARY"],
   providerBaseURL?: string,
@@ -46,10 +43,31 @@ export async function pinnedOpenCode(
     files: Array<{ path: string; body: string; digest: string; executable: boolean }>;
   },
 ) {
-  const packaged = process.env["FACTORY_OPENCODE_PACKAGED_SERVER"] === "1";
+  artifactImage ??=
+    process.env["FACTORY_OPENCODE_TEST_IMAGE"] ??
+    (await readFile(resolve(".factory/build-runtime-host-image"), "utf8")).trim();
+  // The default proof runs the same packaged OpenCode 2 server as Build.
+  // Only an explicitly supplied candidate binary uses the upgrade harness.
+  const packaged = !serverBinary;
   const nativeServer = Boolean(serverBinary || packaged);
   if (!/^(?:[a-zA-Z0-9.:/-]+@)?sha256:[a-f0-9]{64}$/.test(artifactImage))
     throw new Error("Owned OpenCode artifact requires an exact image digest");
+  if (artifactImage.includes("@")) {
+    // Publication uses a host port-forward alias. The identical manifest can
+    // already be local without its cluster-only DNS name being a local alias.
+    // Resolve only the exact digest, never a mutable tag or an older artifact.
+    const digest = artifactImage.split("@").at(-1);
+    const images = (await docker("image", "ls", "--digests", "--format", "{{json .}}"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { Repository: string; Digest: string });
+    const local = images.find((image) => image.Digest === digest && image.Repository !== "<none>");
+    if (!local)
+      throw new Error(
+        "Publish the exact OpenCode runtime artifact into local Docker before this native proof",
+      );
+    artifactImage = `${local.Repository}@${digest}`;
+  }
   const id = crypto.randomUUID();
   const source = `factory-owned-opencode-artifact-${id}`;
   const container = `factory-owned-opencode-process-${id}`;
@@ -72,7 +90,7 @@ export async function pinnedOpenCode(
   }
   try {
     const label = `factory.owned-process-test=${id}`;
-    await docker("create", "--name", source, "--label", label, artifactImage);
+    await docker("create", "--pull=never", "--name", source, "--label", label, artifactImage);
     created.push(source);
     if (skillManifest)
       await Bun.write(resolve(scratch, "admitted-skills.json"), JSON.stringify(skillManifest));

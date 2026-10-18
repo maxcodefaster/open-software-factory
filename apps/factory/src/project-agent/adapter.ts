@@ -251,6 +251,8 @@ Use single-select when
 one choice is needed, multi-select when several choices may apply, and free-text when options would
 distort the answer. Keep option sets short, give every option a distinct ID within its question,
 and always allow a custom answer for choice questions.
+Factory supplies the custom-answer control. Do not add generic "Other" or "Something else"
+placeholder options; each proposed option must name a substantive decision.
 Ask only questions that resolve a real uncertainty. Propose the requirement once the supplied
 context is sufficient, including immediately for detailed input. Do not force a question count.
 Assess whether a Product Contributor understands the user problem and intended outcome, and whether

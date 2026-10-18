@@ -9,6 +9,7 @@ import type { RequirementContent } from "../../../packages/requirement-domain/sr
 import type { AgentMessage, ConversationEntry } from "./api-contracts";
 import { markdownHTML } from "./markdown";
 import { composerKeyDown, resizeComposer } from "./assistant-interaction";
+import { interviewOptions } from "./interview-options";
 
 export function conversationQuestion(entry: ConversationEntry): InterviewQuestion | undefined {
   const parsed = interviewQuestionInput.safeParse(entry.payload["question"]);
@@ -33,9 +34,15 @@ function InterviewAnswerForm(props: {
     /* Use admitted pending answer or an empty form. */
   }
   const choiceQuestion = question.type === "free-text" ? undefined : question;
-  const [selected, setSelected] = createSignal<string[]>(restored?.selectedOptionIds ?? []);
+  const choices = interviewOptions(question);
+  const restoredCustom = restored?.selectedOptionIds.some((id) =>
+    choices.customOptionIds.includes(id),
+  );
+  const [selected, setSelected] = createSignal<string[]>(
+    restored?.selectedOptionIds.filter((id) => !choices.customOptionIds.includes(id)) ?? [],
+  );
   const [customEnabled, setCustomEnabled] = createSignal(
-    question.type === "free-text" || !!restored?.customText,
+    question.type === "free-text" || !!restored?.customText || !!restoredCustom,
   );
   const [customText, setCustomText] = createSignal(restored?.customText ?? "");
   function retain(answer: InterviewAnswer) {
@@ -66,7 +73,7 @@ function InterviewAnswerForm(props: {
     <form onSubmit={props.onSubmit}>
       <Show when={choiceQuestion}>
         <fieldset class="interview-options" aria-label="Answer options">
-          <For each={choiceQuestion?.options ?? []}>
+          <For each={choices.options}>
             {(option) => (
               <label>
                 <input
@@ -103,7 +110,12 @@ function InterviewAnswerForm(props: {
                 }}
               />
               <span>
-                {question.type === "single-select" ? "Something else" : "Add another answer"}
+                <strong>
+                  {question.type === "single-select" ? "Something else" : "Add another answer"}
+                </strong>
+                <Show when={choices.customDescription}>
+                  <small>{choices.customDescription}</small>
+                </Show>
               </span>
             </label>
           </Show>
@@ -235,7 +247,7 @@ export function ConversationEntryCard(props: {
   if (entry.kind === "requirement") {
     return (
       <article class="conversation-requirement">
-        <p>{entry.body}</p>
+        <div class="markdown-body" innerHTML={markdownHTML(entry.body)} />
         <Show when={entry.payload["epicProposal"] || !props.requirementVisible}>
           <button
             type="button"

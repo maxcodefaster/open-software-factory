@@ -37,7 +37,11 @@ await writeFile(
         models: {
           [modelID]: {
             name: "Controlled response",
-            capabilities: { tools: true, input: ["text"], output: ["text"] },
+            capabilities: {
+              tools: true,
+              input: process.env.FACTORY_PROCESS_BROWSER_TURN ? ["text", "image"] : ["text"],
+              output: ["text"],
+            },
             limit: { context: 200000, output: 32000 },
           },
         },
@@ -87,6 +91,7 @@ function complete(response, coding = true) {
                   ? {
                       command: `printf '%s' '{"name":"browser_screenshot","arguments":{}}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${browserTurn}`,
                       description: "Capture the fixed declared App screenshot",
+                      timeout: 270000,
                     }
                   : { path: `/tmp/factory-build-browser-${browserTurn}/screenshot.jpg` },
               ),

@@ -38,6 +38,8 @@ type browserRuntime struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	mu        sync.Mutex
+	authority sync.Mutex
+	expiresAt time.Time
 	input     io.WriteCloser
 	responses chan browserMCPReply
 	command   *exec.Cmd
@@ -178,6 +180,29 @@ func writeBrowserAuthority(directory string, request browserRuntimeRequest) erro
 	return nil
 }
 
+func (runtime *browserRuntime) renewAuthority(scope browserRuntimeRequest, renewal bool) error {
+	// Browser calls hold mu while starting containers and awaiting MCP. Renewal
+	// must progress independently or a slow authorized call expires itself.
+	runtime.authority.Lock()
+	defer runtime.authority.Unlock()
+	if !sameBrowserScope(runtime.scope, scope) || runtime.ctx.Err() != nil {
+		return errors.New("browser renewal does not own this execution")
+	}
+	if !runtime.expiresAt.IsZero() && !time.Now().Before(runtime.expiresAt) {
+		return errors.New("browser execution authority ended")
+	}
+	// An explicit renewal may shorten authority. A call admitted before a newer
+	// renewal must not overwrite it with its stale startup deadline.
+	if renewal || runtime.expiresAt.IsZero() {
+		runtime.expiresAt = scope.ExpiresAt
+	}
+	scope.ExpiresAt = runtime.expiresAt
+	if err := os.MkdirAll(filepath.Join(runtime.directory, "config"), 0755); err != nil {
+		return errors.New("browser socket/configuration directory unavailable")
+	}
+	return writeBrowserAuthority(runtime.directory, scope)
+}
+
 func browserCreateArguments(assignment Assignment, primaryID, directory string, scope browserRuntimeRequest, proxy bool) ([]string, error) {
 	if !browserImagePattern.MatchString(assignment.BrowserToolsImage) || !browserContainerPattern.MatchString(primaryID) ||
 		!filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
@@ -292,7 +317,7 @@ func (manager *browserRuntimeManager) start(runtime *browserRuntime) error {
 	if err := os.WriteFile(filepath.Join(runtime.directory, "config", "apps.json"), config, 0444); err != nil {
 		return errors.New("browser App assignment could not be written")
 	}
-	if err := writeBrowserAuthority(runtime.directory, runtime.scope); err != nil {
+	if err := runtime.renewAuthority(runtime.scope, false); err != nil {
 		return err
 	}
 	recordedScope, _ := json.Marshal(runtime.scope)
@@ -447,6 +472,9 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 		manager.sessions[scope.SessionID] = runtime
 	}
 	manager.mu.Unlock()
+	if err := runtime.renewAuthority(scope, true); err != nil {
+		return "", err
+	}
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	if !sameBrowserScope(runtime.scope, scope) || runtime.ctx.Err() != nil {
@@ -471,10 +499,13 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 			manager.closeSession(scope)
 		}()
 	}
-	if err := writeBrowserAuthority(runtime.directory, scope); err != nil {
-		return "", err
+	timeout := 15 * time.Second
+	if scope.Call.Name == "browser_open" {
+		// Upstream's ten-second navigation timeout starts after cold Chrome
+		// launch. Keep both inside one bounded open without replaying navigation.
+		timeout = 25 * time.Second
 	}
-	bounded, end := context.WithTimeout(runtime.ctx, 15*time.Second)
+	bounded, end := context.WithTimeout(runtime.ctx, timeout)
 	defer end()
 	raw, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": dispatch.Name, "arguments": dispatch.Arguments})
 	if err != nil {
@@ -539,14 +570,14 @@ func (manager *browserRuntimeManager) renew(scope browserRuntimeRequest) error {
 	runtime := manager.sessions[scope.SessionID]
 	manager.mu.Unlock()
 	if runtime == nil {
-		return errors.New("browser session is no longer active")
+		// An intended session can be renewed before its first call, including
+		// while the exact image is preparing. Do not create execution or a lease.
+		if _, err := os.Stat(filepath.Join(manager.directory(scope.SessionID), "ended")); err == nil {
+			return errors.New("browser session is no longer active")
+		}
+		return nil
 	}
-	runtime.mu.Lock()
-	defer runtime.mu.Unlock()
-	if !sameBrowserScope(runtime.scope, scope) || runtime.ctx.Err() != nil {
-		return errors.New("browser renewal does not own this execution")
-	}
-	return writeBrowserAuthority(runtime.directory, scope)
+	return runtime.renewAuthority(scope, true)
 }
 
 func (manager *browserRuntimeManager) closeSession(scope browserRuntimeRequest) error {
@@ -578,6 +609,10 @@ func (manager *browserRuntimeManager) closeSession(scope browserRuntimeRequest) 
 		return errors.New("browser end directory unavailable")
 	}
 	{
+		if runtime != nil {
+			runtime.authority.Lock()
+			defer runtime.authority.Unlock()
+		}
 		expired := scope
 		expired.ExpiresAt = time.Now().Add(-time.Second)
 		if err := writeBrowserAuthority(directory, expired); err != nil {

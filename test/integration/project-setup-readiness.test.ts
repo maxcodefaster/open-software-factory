@@ -15,6 +15,7 @@ test("setup readiness separates protected environments, observes exact work and 
   const stored = new Map<string, StoredEnvironment>();
   let hooks = 0;
   let wikis = 0;
+  const wikiCalls: boolean[] = [];
   let protections = 0;
   const release = Promise.withResolvers<void>();
   const entered = Promise.withResolvers<void>();
@@ -54,11 +55,13 @@ test("setup readiness separates protected environments, observes exact work and 
           throw new Error("private diagnostics");
         }
       },
-      wiki: async () => {
+      wiki: async (_projectID: string, _userID: string, automatic: boolean) => {
         wikis++;
+        wikiCalls.push(automatic);
+        const id = wikis === 1 ? wikiID : crypto.randomUUID();
         await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by)
-          VALUES(${wikiID},${projectID},${revision},${manager})`;
-        return wikiID;
+          VALUES(${id},${projectID},${revision},${manager})`;
+        return id;
       },
       prepare: async () => {
         const result = { development: crypto.randomUUID(), preview: crypto.randomUUID() };
@@ -107,6 +110,16 @@ test("setup readiness separates protected environments, observes exact work and 
     await coordinator.retry(projectID, manager, "hook", true);
     expect(hooks).toBe(2);
     expect(wikis).toBe(1);
+    expect(wikiCalls).toEqual([true]);
+    await database.client`UPDATE factory.knowledge_generation SET state='failed',completed_at=now()
+      WHERE id=${wikiID}`;
+    await coordinator.retry(projectID, manager, "wiki", true);
+    expect(wikiCalls).toEqual([true, false]);
+    const retriedWiki = (await coordinator.status(projectID, manager)).find(
+      (row) => row.task === "wiki",
+    );
+    expect(retriedWiki?.operationID).not.toBe(wikiID);
+    expect(retriedWiki?.state).toBe("running");
     const importID = crypto.randomUUID();
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${importID},${`owned-${importID}`},'Owned import','https://example.invalid/import','main','.devcontainer/devcontainer.json',${manager})`;
@@ -170,6 +183,11 @@ test("setup readiness separates protected environments, observes exact work and 
     await database.client`UPDATE factory.knowledge_generation SET state='succeeded',completed_at=now(),page_count=0,conflict_count=0 WHERE id=${wikiID}`;
     expect(
       (await coordinator.status(projectID, manager)).find((row) => row.task === "wiki")?.state,
+    ).toBe("running");
+    await database.client`UPDATE factory.knowledge_generation SET state='succeeded',completed_at=now(),page_count=0,conflict_count=0
+      WHERE id=${retriedWiki!.operationID!}`;
+    expect(
+      (await coordinator.status(projectID, manager)).find((row) => row.task === "wiki")?.state,
     ).toBe("ready");
     // Unacknowledged work after a genuine restart remains human-retryable.
     await database.client`UPDATE factory.project_setup_readiness SET state='running',operation_id=NULL WHERE project_id=${projectID} AND task='hook'`;
@@ -178,7 +196,7 @@ test("setup readiness separates protected environments, observes exact work and 
       (await coordinator.status(projectID, manager)).find((row) => row.task === "hook")?.state,
     ).toBe("failed");
     expect(hooks).toBe(2);
-    expect(wikis).toBe(1);
+    expect(wikis).toBe(2);
   } finally {
     release.resolve();
     await database.client.end({ timeout: 2 });

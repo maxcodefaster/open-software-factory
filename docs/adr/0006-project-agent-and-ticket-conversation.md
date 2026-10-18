@@ -16,6 +16,11 @@ Investigate returns cited answers; Plan may also return independent question rou
 proposal or an editable Epic/member proposal. Known Project/Ticket context is frozen at admission;
 later navigation cannot retarget submitted work. Ambiguous intended targets require clarification.
 Factory displays one question at a time and advances within a round without another inference.
+Question controls do not turn general planning into a single-Ticket Requirements Interview.
+Answers retain the scope of the request which produced their question, including after paused
+research. Only explicit Requirements entry imposes the single-Ticket output contract.
+Choice questions expose one custom-answer control; a generic model-provided Other or Something
+else placeholder uses that control instead of appearing as a second, non-editable fallback.
 The last answer, a custom choice outside a prefetched option set, or an explicit correction requests
 fresh clarification against current intent. Ordinary independent answers advance without inference.
 

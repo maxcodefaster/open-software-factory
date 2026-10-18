@@ -9,7 +9,19 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestBrowserClientColdPreparationDoesNotExtendMutationDeadlines(t *testing.T) {
+	if browserClientTimeout("browser_open") != 245*time.Second {
+		t.Fatal("browser_open does not allow cold preparation plus the ordinary execution lease")
+	}
+	for _, name := range []string{"browser_click", "browser_fill", "browser_snapshot", "browser_screenshot"} {
+		if browserClientTimeout(name) != 45*time.Second {
+			t.Fatal("cold startup widened an ordinary browser action deadline")
+		}
+	}
+}
 
 func TestBrowserClientFixedCallsNoRedirectOrMutationReplay(t *testing.T) {
 	const turn = "11111111-1111-4111-a111-111111111111"

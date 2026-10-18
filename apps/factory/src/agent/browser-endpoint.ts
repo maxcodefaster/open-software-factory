@@ -103,7 +103,13 @@ export function createBuildBrowserEndpoint(
         if (!call.success) return fail(-32602, "Unsupported browser tool or arguments");
         try {
           return reply(
-            await controller.call(authorized.session, authorized.ownerToken, call.data, rpc.id),
+            await controller.call(
+              authorized.session,
+              authorized.ownerToken,
+              call.data,
+              rpc.id,
+              request.signal,
+            ),
           );
         } catch (cause) {
           return reply({

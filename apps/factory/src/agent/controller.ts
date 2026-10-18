@@ -511,7 +511,7 @@ export function createAgentController(
       const changeID = owned.command.changeId;
       const intent = await admission.intent(turnID);
       renew = setInterval(() => {
-        void turns.renew(turnID, ownerToken).catch(() => {});
+        void renewExecution(turnID, ownerToken).catch(() => {});
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
@@ -705,7 +705,7 @@ export function createAgentController(
       const changeID = owned.command.changeId;
       const intent = await admission.intent(turnID);
       renewal = setInterval(() => {
-        void turns.renew(turnID, ownerToken).catch(() => {});
+        void renewExecution(turnID, ownerToken).catch(() => {});
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
@@ -1112,6 +1112,12 @@ export function createAgentController(
     return created[0].id;
   }
 
+  async function renewExecution(turnID: string, ownerToken: string) {
+    const renewed = await turns.renew(turnID, ownerToken);
+    if (renewed) await browser?.renewTurn(turnID, ownerToken);
+    return renewed;
+  }
+
   async function monitor(changeID: string, userID: string, turnID: string, ownerToken: string) {
     if (closed || monitors.has(turnID)) return;
     monitors.add(turnID);
@@ -1126,7 +1132,7 @@ export function createAgentController(
           return;
         }
         if (session.state !== "working") return;
-        if (!(await turns.renew(turnID, ownerToken))) {
+        if (!(await renewExecution(turnID, ownerToken))) {
           const current = await turns.get(turnID);
           // A completed Stop or another owner is not a new Stop request. Actual
           // revoked execution is fenced before asking the engine to settle.
@@ -1138,7 +1144,6 @@ export function createAgentController(
         }
         const latestSession = await row(changeID);
         if (latestSession?.state !== "working" || latestSession.activeTurnID !== turnID) return;
-        await browser?.renewTurn(turnID, ownerToken);
         if (["failed", "stopped", "cleanup-failed"].includes(session.runtimeState)) {
           throw new Error("The Ticket Workspace stopped during implementation");
         }

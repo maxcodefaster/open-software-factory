@@ -380,7 +380,13 @@ export function SkillLibrary(props: {
                     <div class="skill-library-controls">
                       <Show
                         when={(current() ?? latest())?.content.roles.includes(role())}
-                        fallback={<small>Build only</small>}
+                        fallback={
+                          <small>
+                            {(current() ?? latest())?.content.roles.includes("build")
+                              ? "Build only"
+                              : "Investigate & Plan only"}
+                          </small>
+                        }
                       >
                         <label>
                           {locked()

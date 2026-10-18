@@ -460,7 +460,10 @@ export function createKnowledgeController(
         if (automatic) {
           const [handled] = await sql<
             Array<{ id: string }>
-          >`SELECT id FROM factory.knowledge_generation WHERE project_id=${projectID} AND source_commit_sha=${current.commitSha} AND state='succeeded' LIMIT 1`;
+          >`SELECT id FROM factory.knowledge_generation WHERE project_id=${projectID} AND source_commit_sha=${current.commitSha} LIMIT 1`;
+          // Reconciliation observes an attempted source revision. It must not
+          // keep commissioning paid generations after a definite failure.
+          // A new source commit or an explicit human Retry can start new work.
           if (handled) return undefined;
         }
         const id = crypto.randomUUID();

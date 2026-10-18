@@ -1,9 +1,18 @@
 import { expect, test } from "bun:test";
 import {
   needsTheiaTestBuild,
+  needsStarterTestDependencies,
   prerequisiteFingerprint,
   verificationEnvironment,
 } from "./test-prerequisites";
+
+test("both Starter proof entrypoints prepare the template's locked dependencies", () => {
+  expect(needsStarterTestDependencies(["test/integration/starter.test.ts"])).toBe(true);
+  expect(needsStarterTestDependencies(["test/integration/starter-preview-auth.test.ts"])).toBe(
+    true,
+  );
+  expect(needsStarterTestDependencies(["test/integration/agent-read.test.ts"])).toBe(false);
+});
 
 test("ordinary verification strips live model access without mutating the caller's environment", () => {
   const environment = {

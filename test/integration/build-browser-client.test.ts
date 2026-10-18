@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rmdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
+import { projectMessages } from "../../apps/factory/src/agent/controller";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
@@ -74,20 +75,7 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
     const error = await new Response(compile.stderr).text();
     if ((await compile.exited) !== 0)
       throw new Error(`Owned connector compilation failed: ${error}`);
-    const inspect = Bun.spawn(
-      [
-        "docker",
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        "registry.localhost:5443/open-factory/runtime-host:local",
-      ],
-      { stdout: "pipe", stderr: "ignore" },
-    );
-    const image = (await new Response(inspect.stdout).text()).trim();
-    if ((await inspect.exited) !== 0) throw new Error("Pinned process image is unavailable");
-    upstream = await pinnedOpenCode(image, {
+    upstream = await pinnedOpenCode(undefined, {
       path,
       turnID,
       endpoint: `http://host.orb.internal:${server.port}/fixed`,
@@ -121,6 +109,14 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
       (state) => state.providerRequests >= 3,
       "Native shell/image-read tool cycle did not complete",
     );
+    if (state.imageRequests !== 1)
+      console.error(
+        "Owned native browser diagnostic",
+        JSON.stringify({
+          browserRequests: calls.length,
+          messages: projectMessages(await target.client.message.list({ sessionID, limit: 20 })),
+        }),
+      );
     expect(state.imageRequests).toBe(1);
     expect(calls).toHaveLength(1);
     expect(new Set(calls).size).toBe(1);
@@ -130,4 +126,4 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
     await unlink(path).catch(() => {});
     await rmdir(directory);
   }
-}, 45_000);
+}, 180_000);

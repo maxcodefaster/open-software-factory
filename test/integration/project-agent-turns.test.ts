@@ -209,6 +209,54 @@ async function fixture(
   };
 }
 
+test.each([false, true])(
+  "answering a planning question retains its original single-Ticket interview scope: %s",
+  async (singleTicket) => {
+    const owned = await fixture({
+      kind: "round",
+      message: "One unresolved decision",
+      questions: [
+        { type: "free-text", prompt: "What should the follow-up include?", placeholder: "" },
+      ],
+      citations: [],
+    });
+    const ticketID = singleTicket ? crypto.randomUUID() : undefined;
+    try {
+      if (ticketID)
+        await owned.database
+          .client`INSERT INTO factory.ticket(id,project_id,title,description,created_by)
+          VALUES(${ticketID},${owned.projectID},'Selected requirement','One selected Ticket',${owned.userID})`;
+      const controller = owned.controller();
+      await controller.setMode(owned.projectID, ticketID, "plan", owned.userID);
+      owned.release();
+      const first = await controller.message(
+        owned.projectID,
+        ticketID,
+        singleTicket ? "Clarify this Ticket" : "Plan an Epic with two related follow-ups",
+        owned.userID,
+        crypto.randomUUID(),
+        singleTicket ? "requirements-interview" : undefined,
+      );
+      const question = first?.entries.findLast((entry) => entry.kind === "question");
+      if (!question) throw new Error("Missing planning question");
+      await controller.answer(
+        owned.projectID,
+        ticketID,
+        question.id,
+        { selectedOptionIds: [], customText: "Private saved views and filtered CSV export" },
+        owned.userID,
+        crypto.randomUUID(),
+      );
+      expect(owned.requests()).toBe(2);
+      for (const body of owned.requestedBodies)
+        expect(body.includes("This task clarifies one selected Ticket.")).toBe(singleTicket);
+    } finally {
+      await owned.dispose();
+    }
+  },
+  30_000,
+);
+
 test("each live answer snapshot validates account access once through its durable owner", async () => {
   const owned = await fixture(
     { kind: "answer", message: "Hello world", citations: [] },

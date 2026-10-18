@@ -47,6 +47,7 @@ import {
 import { persistProjectOutput } from "./effects";
 import { createEpicConfirmation } from "./epic-confirmation";
 import { canAdvanceInterviewRound } from "./interview-round";
+import { isRequirementsInterview } from "./interview-intent";
 import { readResearch, searchResearch } from "./research";
 import { ProjectAgentOutputError } from "./structured-output";
 import { admittedProjectContext, admittedTicketContext } from "./ticket-context";
@@ -479,7 +480,11 @@ export function createProjectAgentController(
     if (!owner?.ownerToken) return;
     const token = owner.ownerToken;
     const { command, authority } = owner;
-    if (!command.conversationId || authority.mode === "build")
+    if (
+      !command.conversationId ||
+      authority.mode === "build" ||
+      (command.kind !== "project-message" && command.kind !== "project-answer")
+    )
       throw new Error("Project turn required");
     const conversationID = command.conversationId;
     let connection: ResolvedModelConnection;
@@ -626,9 +631,7 @@ export function createProjectAgentController(
       }
       try {
         output = await generateProjectResponse({
-          requirementsInterview:
-            command.kind === "project-answer" ||
-            (command.kind === "project-message" && command.intent === "requirements-interview"),
+          requirementsInterview: isRequirementsInterview(command, history),
           mode:
             command.kind === "project-message" && command.intent === "project-research"
               ? "investigate"
