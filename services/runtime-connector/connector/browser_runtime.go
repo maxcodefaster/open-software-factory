@@ -33,21 +33,22 @@ type browserRuntimeRequest struct {
 }
 
 type browserRuntime struct {
-	scope     browserRuntimeRequest
-	directory string
-	ctx       context.Context
-	cancel    context.CancelFunc
-	mu        sync.Mutex
-	authority sync.Mutex
-	expiresAt time.Time
-	input     io.WriteCloser
-	responses chan browserMCPReply
-	command   *exec.Cmd
-	wait      chan error
-	sequence  int
-	pageID    int
-	app       string
-	closed    bool
+	scope      browserRuntimeRequest
+	directory  string
+	ctx        context.Context
+	cancel     context.CancelFunc
+	mu         sync.Mutex
+	authority  sync.Mutex
+	expiresAt  time.Time
+	input      io.WriteCloser
+	responses  chan browserMCPReply
+	command    *exec.Cmd
+	wait       chan error
+	sequence   int
+	pageID     int
+	app        string
+	pendingApp string
+	closed     bool
 }
 
 type browserRuntimeManager struct {
@@ -438,6 +439,37 @@ func (runtime *browserRuntime) rpc(ctx context.Context, method string, params an
 	}
 }
 
+func (runtime *browserRuntime) selectDeclaredPage(raw json.RawMessage, app string) error {
+	var page struct {
+		Structured struct {
+			Pages []struct {
+				ID       int    `json:"id"`
+				URL      string `json:"url"`
+				Selected bool   `json:"selected"`
+			} `json:"pages"`
+		} `json:"structuredContent"`
+	}
+	if json.Unmarshal(raw, &page) != nil {
+		return errors.New("browser App page identity unavailable")
+	}
+	selected, pageID := 0, 0
+	for _, current := range page.Structured.Pages {
+		if !current.Selected {
+			continue
+		}
+		selected++
+		if current.ID <= 0 || !strings.HasPrefix(current.URL, "http://"+app+".factory.invalid/") {
+			return errors.New("browser did not retain the declared App page identity")
+		}
+		pageID = current.ID
+	}
+	if selected != 1 {
+		return errors.New("browser did not retain the declared App page identity")
+	}
+	runtime.pageID, runtime.app, runtime.pendingApp = pageID, app, ""
+	return nil
+}
+
 func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRuntimeRequest) (string, error) {
 	if manager.preparation != nil {
 		if err := manager.preparation.ready(); err != nil {
@@ -480,9 +512,18 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 	if !sameBrowserScope(runtime.scope, scope) || runtime.ctx.Err() != nil {
 		return "", errors.New("browser session does not belong to the active execution owner")
 	}
-	dispatch, err := resolveBrowserTool(manager.assignment.Channels, runtime.pageID, scope.Call)
-	if err != nil {
-		return "", err
+	recoveringNavigation := runtime.pendingApp != ""
+	var dispatch browserToolDispatch
+	if recoveringNavigation {
+		if scope.Call.Name != "browser_snapshot" {
+			return "", errors.New("inspect a fresh browser_snapshot before another browser action")
+		}
+	} else {
+		var err error
+		dispatch, err = resolveBrowserTool(manager.assignment.Channels, runtime.pageID, scope.Call)
+		if err != nil {
+			return "", err
+		}
 	}
 	if runtime.command == nil {
 		if err := manager.start(runtime); err != nil {
@@ -507,6 +548,24 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 	}
 	bounded, end := context.WithTimeout(runtime.ctx, timeout)
 	defer end()
+	if recoveringNavigation {
+		// A known navigation error can leave a readable page. Establish its
+		// selected declared origin through a fixed read, never another navigation
+		// or an untrusted App-text claim. Share the ordinary snapshot deadline.
+		pages, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": "list_pages", "arguments": map[string]any{}})
+		if err != nil {
+			runtime.cancel()
+			go manager.closeSession(scope)
+			return "", err
+		}
+		if err := runtime.selectDeclaredPage(pages, runtime.pendingApp); err != nil {
+			return "", err
+		}
+		dispatch, err = resolveBrowserTool(manager.assignment.Channels, runtime.pageID, scope.Call)
+		if err != nil {
+			return "", err
+		}
+	}
 	raw, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": dispatch.Name, "arguments": dispatch.Arguments})
 	if err != nil {
 		runtime.cancel()
@@ -518,6 +577,9 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 		return "", err
 	}
 	if result.IsError {
+		if scope.Call.Name == "browser_open" {
+			runtime.pendingApp = dispatch.App
+		}
 		// A failed navigation has no selected App or successful observation. Keep
 		// bounded error text, not a fabricated checkout context or screenshot.
 		text := result.Content[:0]
@@ -531,25 +593,8 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 		return string(encoded), err
 	}
 	if scope.Call.Name == "browser_open" && !result.IsError {
-		var page struct {
-			Structured struct {
-				Pages []struct {
-					ID       int    `json:"id"`
-					URL      string `json:"url"`
-					Selected bool   `json:"selected"`
-				} `json:"pages"`
-			} `json:"structuredContent"`
-		}
-		if json.Unmarshal(raw, &page) != nil {
-			return "", errors.New("browser App page identity unavailable")
-		}
-		for _, current := range page.Structured.Pages {
-			if current.Selected && current.ID > 0 && strings.HasPrefix(current.URL, "http://"+dispatch.App+".factory.invalid/") {
-				runtime.pageID, runtime.app = current.ID, dispatch.App
-			}
-		}
-		if runtime.app != dispatch.App || runtime.pageID <= 0 {
-			return "", errors.New("browser did not retain the declared App page identity")
+		if err := runtime.selectDeclaredPage(raw, dispatch.App); err != nil {
+			return "", err
 		}
 	}
 	result.StructuredContent, err = manager.observationContext(bounded, scope, runtime.app)

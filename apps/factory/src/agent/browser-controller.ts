@@ -366,21 +366,17 @@ export function createBuildBrowserController(
         if (!parsed.success) throw new Error("Browser returned an invalid observation schema");
         const result = parsed.data;
         if (result.isError) {
-          if (session.state === "active") {
-            needsObservation.add(session.id);
-            return {
-              isError: true,
-              content: [
-                ...result.content.filter((item) => item.type === "text").slice(0, 15),
-                {
-                  type: "text",
-                  text: "Inspect a fresh browser_snapshot before issuing another UI action. The existing browser remains available; do not replay an unconfirmed mutation.",
-                },
-              ],
-            };
-          }
-          await close(session.id);
-          return { isError: true, content: result.content.filter((item) => item.type === "text") };
+          needsObservation.add(session.id);
+          return {
+            isError: true,
+            content: [
+              ...result.content.filter((item) => item.type === "text").slice(0, 15),
+              {
+                type: "text",
+                text: "Inspect a fresh browser_snapshot before issuing another UI action. The existing browser remains available for observation, but no successful inspection is claimed by this error. Do not repeat navigation or replay an unconfirmed mutation.",
+              },
+            ],
+          };
         }
         const context = result.structuredContent;
         if (

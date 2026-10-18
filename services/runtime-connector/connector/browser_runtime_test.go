@@ -43,6 +43,40 @@ func TestBrowserFailedNavigationDoesNotClaimCheckoutOrAppContext(t *testing.T) {
 		len(result.Content) != 1 || result.Content[0].Text != "Declared App navigation exceeded its deadline" {
 		t.Fatalf("failed navigation claimed an observation: %s", output)
 	}
+	if runtime.pendingApp != "web" || runtime.pageID != 0 || runtime.app != "" {
+		t.Fatal("failed navigation fabricated a confirmed page instead of retaining its exact intended App")
+	}
+	scope.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web"}`)}
+	if _, err := manager.call(ctx, scope); err == nil || !strings.Contains(err.Error(), "browser_snapshot") {
+		t.Fatal("failed navigation could be replayed before observation", err)
+	}
+}
+
+func TestBrowserRecoveryRequiresExactlyOneSelectedDeclaredPage(t *testing.T) {
+	for _, pages := range []string{
+		`[]`,
+		`[{"id":2,"url":"about:blank","selected":true}]`,
+		`[{"id":2,"url":"http://foreign.factory.invalid/","selected":true}]`,
+		`[{"id":2,"url":"http://web.factory.invalid.evil/","selected":true}]`,
+		`[{"id":2,"url":"http://web.factory.invalid/","selected":false}]`,
+		`[{"id":0,"url":"http://web.factory.invalid/","selected":true}]`,
+		`[{"id":2,"url":"http://web.factory.invalid/","selected":true},{"id":3,"url":"http://web.factory.invalid/other","selected":true}]`,
+	} {
+		runtime := &browserRuntime{pageID: 1, app: "previous", pendingApp: "web"}
+		if err := runtime.selectDeclaredPage(json.RawMessage(`{"structuredContent":{"pages":`+pages+`}}`), "web"); err == nil {
+			t.Fatal("unconfirmed or foreign page was adopted", pages)
+		}
+		if runtime.pageID != 1 || runtime.app != "previous" || runtime.pendingApp != "web" {
+			t.Fatal("rejected observation changed the current page binding")
+		}
+	}
+	runtime := &browserRuntime{pendingApp: "web"}
+	if err := runtime.selectDeclaredPage(json.RawMessage(`{"structuredContent":{"pages":[{"id":1,"url":"about:blank","selected":false},{"id":2,"url":"http://web.factory.invalid/slow","selected":true}]}}`), "web"); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.pageID != 2 || runtime.app != "web" || runtime.pendingApp != "" {
+		t.Fatal("exact declared page was not adopted after the read-only observation")
+	}
 }
 
 func TestBrowserRenewalCanKeepAnInFlightCallAlive(t *testing.T) {

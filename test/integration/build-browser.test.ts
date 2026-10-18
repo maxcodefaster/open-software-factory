@@ -794,7 +794,7 @@ for (const failure of [
   });
 }
 
-test("failed App inspection returns bounded error text without claiming successful provenance", async () => {
+test("a confirmed first navigation failure permits only fresh observation before new actions", async () => {
   const scope = await setup();
   try {
     const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
@@ -815,16 +815,39 @@ test("failed App inspection returns bounded error text without claiming successf
       { name: "browser_open", arguments: { app: "app" } },
       1,
     );
-    expect(result).toEqual({
-      isError: true,
-      content: [{ type: "text", text: "Declared App navigation exceeded its deadline" }],
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0]).toEqual({
+      type: "text",
+      text: "Declared App navigation exceeded its deadline",
     });
-    const [closed] = await scope.owned.database.client<
+    const [retained] = await scope.owned.database.client<
       Array<{ state: string; context: unknown; created: boolean; cleaned: boolean }>
     >`
       SELECT state, inspection_context AS context, create_confirmed_at IS NOT NULL AS created, cleanup_confirmed_at IS NOT NULL AS cleaned
       FROM factory.build_browser_session WHERE id = ${scope.grant.sessionID}`;
-    expect(closed).toEqual({ state: "closed", context: null, created: false, cleaned: true });
+    expect(retained).toEqual({ state: "intended", context: null, created: false, cleaned: false });
+    expect(
+      await scope.browser.authorize(scope.grant.sessionID, scope.authorization),
+    ).not.toBeNull();
+    await expect(
+      scope.browser.call(
+        scope.authorized.session,
+        scope.ownerToken,
+        { name: "browser_open", arguments: { app: "app" } },
+        "do-not-repeat-navigation",
+      ),
+    ).rejects.toThrow("fresh browser_snapshot");
+    expect(scope.frames.map(({ action }) => action)).toEqual(["browser-call"]);
+    scope.owned.hub.parentOperation = forward;
+    const observation = await scope.browser.call(
+      scope.authorized.session,
+      scope.ownerToken,
+      { name: "browser_snapshot", arguments: {} },
+      "inspect-existing-page",
+    );
+    expect(observation.isError).not.toBe(true);
+    expect(observation.structuredContent?.app).toBe("app");
   } finally {
     await scope.dispose();
   }

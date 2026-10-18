@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,6 +23,7 @@ func TestBrowserRuntimeAppFixture(t *testing.T) {
 	if os.Getenv("FACTORY_BROWSER_RUNTIME_APP_FIXTURE") != "1" {
 		t.Skip("internal browser runtime App fixture")
 	}
+	var slowRequests atomic.Uint32
 	server := &http.Server{Addr: "127.0.0.1:3000", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<!doctype html><title>Exact primary App</title><h1>Only primary loopback</h1><p>Factory browser manager proof</p>
@@ -29,6 +31,14 @@ func TestBrowserRuntimeAppFixture(t *testing.T) {
 <p id="result">Ready</p><p id="viewport"></p><script>
 function size(){document.querySelector('#viewport').textContent='Viewport '+innerWidth+'x'+innerHeight}
 addEventListener('resize',size);size();console.log('primary App inspected')</script>`)
+		if r.URL.Path == "/slow" {
+			fmt.Fprintf(w, "<p>Slow navigation requests %d</p>", slowRequests.Add(1))
+			w.(http.Flusher).Flush()
+			select {
+			case <-time.After(12 * time.Second):
+			case <-r.Context().Done():
+			}
+		}
 	})}
 	defer server.Close()
 	if err := server.ListenAndServe(); err != nil {
@@ -83,7 +93,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	// container creation, MCP initialization and Chrome navigation are in flight.
 	opening := scope
 	opening.ExpiresAt = time.Now().Add(2 * time.Second)
-	opening.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web"}`)}
+	opening.Call = browserToolCall{Name: "browser_open", Arguments: json.RawMessage(`{"app":"web","path":"/slow"}`)}
 	renewContext, stopRenewal := context.WithCancel(connection)
 	renewed := make(chan error, 1)
 	go func() {
@@ -104,13 +114,17 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 			}
 		}
 	}()
-	_, opened := manager.call(connection, opening)
+	initial, opened := manager.call(connection, opening)
 	stopRenewal()
 	if err := <-renewed; err != nil {
 		t.Fatal("renewing real browser startup", err)
 	}
 	if opened != nil {
 		t.Fatal("opening real browser across its initial lease", opened)
+	}
+	var initialResult browserMCPContent
+	if json.Unmarshal([]byte(initial), &initialResult) != nil || !initialResult.IsError || initialResult.StructuredContent != nil {
+		t.Fatal("slow first navigation did not retain a confirmed error without App provenance", initial)
 	}
 	call := func(name, arguments string) browserMCPContent {
 		t.Helper()
@@ -129,6 +143,9 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	snapshot := call("browser_snapshot", `{}`)
 	if len(snapshot.Content) == 0 || !strings.Contains(snapshot.Content[0].Text, "Only primary loopback") {
 		t.Fatal("real proxy did not reach the primary's loopback-only App")
+	}
+	if !strings.Contains(snapshot.Content[0].Text, "Slow navigation requests 1") {
+		t.Fatal("navigation was repeated instead of observing the existing declared page", snapshot.Content[0].Text)
 	}
 	shot := call("browser_screenshot", `{}`)
 	if shot.StructuredContent == nil || shot.StructuredContent.TurnID != scope.TurnID || shot.StructuredContent.SessionID != scope.SessionID ||
@@ -243,7 +260,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("disconnected execution created a browser")
 	}
 	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage,
-		"loopbackApp": true, "startupRenewal": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
+		"loopbackApp": true, "startupRenewal": true, "initialNavigationRecovery": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
 	if err := os.WriteFile(filepath.Join(root, "inspection.json"), evidence, 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -72,6 +72,11 @@ A confirmed tool-error response in an already observed App may leave partial UI 
 Factory retains that browser but blocks further UI actions until a fresh DOM snapshot
 succeeds. It does not replay the failed interaction. Lost responses, invalid provenance
 and changed authority still require the existing owned cleanup rather than this recovery.
+This also covers a confirmed first-navigation error. No successful App observation is
+claimed by that error. The next snapshot first reads the pinned browser's selected-page
+metadata and requires exactly one selected page at the intended declared App origin.
+Only then may it inspect that page and record checkout provenance. Navigation is not
+repeated, and an absent, foreign or ambiguous page fails closed.
 
 IDE edits and agent edits are part of the same Change. A Sandbox can disappear without losing the
 checkout or conversation, while every OpenCode process and inference capability remains
