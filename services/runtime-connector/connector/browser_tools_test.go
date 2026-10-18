@@ -17,6 +17,8 @@ func TestBrowserToolAllowlistAndFixedBounds(t *testing.T) {
 		{"browser_click", `{"uid":"1_12"}`, "click"},
 		{"browser_fill", `{"uid":"1_12","value":"New title"}`, "fill"},
 		{"browser_wait", `{"text":"Saved"}`, "wait_for"},
+		{"browser_resize", `{"width":390,"height":720}`, "resize_page"},
+		{"browser_press_key", `{"key":"Tab"}`, "press_key"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			call, err := resolveBrowserTool(channels, 2, browserToolCall{Name: test.name, Arguments: json.RawMessage(test.arguments)})
@@ -28,6 +30,12 @@ func TestBrowserToolAllowlistAndFixedBounds(t *testing.T) {
 			}
 			if test.name == "browser_screenshot" && (call.Arguments["fullPage"] != false || call.Arguments["format"] != "jpeg" || call.Arguments["quality"] != 75) {
 				t.Fatal("screenshot bounds were not fixed")
+			}
+			if test.name == "browser_resize" && (call.Arguments["width"] != 390 || call.Arguments["height"] != 720) {
+				t.Fatal("viewport dimensions changed during dispatch")
+			}
+			if test.name == "browser_press_key" && call.Arguments["key"] != "Tab" {
+				t.Fatal("keyboard intent changed during dispatch")
 			}
 		})
 	}
@@ -53,6 +61,14 @@ func TestBrowserToolsRejectURLsFilesScriptsUnknownArgumentsAndPages(t *testing.T
 		{"browser_console", `{"pageSize":10000}`},
 		{"browser_click", `{"uid":"1_2","pageId":999}`},
 		{"browser_fill", `{"uid":"../file","value":"new"}`},
+		{"browser_resize", `{"width":319,"height":720}`},
+		{"browser_resize", `{"width":1281,"height":720}`},
+		{"browser_resize", `{"width":390,"height":721}`},
+		{"browser_resize", `{"width":390,"height":0}`},
+		{"browser_resize", `{"width":390.5,"height":720}`},
+		{"browser_resize", `{"width":390,"height":720,"pageId":999}`},
+		{"browser_press_key", `{"key":"Control+L"}`},
+		{"browser_press_key", `{"key":"Enter","text":"script"}`},
 		{"browser_snapshot", `null`},
 		{"browser_snapshot", `{} {}`},
 	} {
@@ -64,6 +80,14 @@ func TestBrowserToolsRejectURLsFilesScriptsUnknownArgumentsAndPages(t *testing.T
 	}
 	if _, err := resolveBrowserTool(channels, 0, browserToolCall{Name: "browser_snapshot", Arguments: json.RawMessage(`{}`)}); err == nil {
 		t.Fatal("inspection without an opened App was allowed")
+	}
+	for _, call := range []browserToolCall{
+		{Name: "browser_resize", Arguments: json.RawMessage(`{"width":390,"height":720}`)},
+		{Name: "browser_press_key", Arguments: json.RawMessage(`{"key":"Enter"}`)},
+	} {
+		if _, err := resolveBrowserTool(channels, 0, call); err == nil {
+			t.Fatal("viewport or keyboard control without an opened App was allowed")
+		}
 	}
 }
 

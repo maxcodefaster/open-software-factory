@@ -16,7 +16,7 @@ func TestBrowserClientColdPreparationDoesNotExtendMutationDeadlines(t *testing.T
 	if browserClientTimeout("browser_open") != 245*time.Second {
 		t.Fatal("browser_open does not allow cold preparation plus the ordinary execution lease")
 	}
-	for _, name := range []string{"browser_click", "browser_fill", "browser_snapshot", "browser_screenshot"} {
+	for _, name := range []string{"browser_click", "browser_fill", "browser_snapshot", "browser_screenshot", "browser_resize", "browser_press_key"} {
 		if browserClientTimeout(name) != 45*time.Second {
 			t.Fatal("cold startup widened an ordinary browser action deadline")
 		}

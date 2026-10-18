@@ -141,6 +141,34 @@ func resolveBrowserTool(channels []Channel, pageID int, call browserToolCall) (b
 		upstream.Name = "wait_for"
 		upstream.Arguments["text"] = []string{arguments.Text}
 		upstream.Arguments["timeout"] = 5000
+	case "browser_resize":
+		var arguments struct {
+			Width  int `json:"width"`
+			Height int `json:"height"`
+		}
+		if decode(&arguments) != nil || arguments.Width < 320 || arguments.Width > 1280 ||
+			arguments.Height < 240 || arguments.Height > 720 {
+			return browserToolDispatch{}, denied
+		}
+		upstream.Name = "resize_page"
+		upstream.Arguments["width"] = arguments.Width
+		upstream.Arguments["height"] = arguments.Height
+	case "browser_press_key":
+		var arguments struct {
+			Key string `json:"key"`
+		}
+		if decode(&arguments) != nil {
+			return browserToolDispatch{}, denied
+		}
+		switch arguments.Key {
+		case "Tab", "Shift+Tab", "Enter", "Space", "Escape", "ArrowUp", "ArrowDown",
+			"ArrowLeft", "ArrowRight", "Home", "End":
+		default:
+			return browserToolDispatch{}, denied
+		}
+		upstream.Name = "press_key"
+		upstream.Arguments["key"] = arguments.Key
+		upstream.Arguments["includeSnapshot"] = false
 	default:
 		return browserToolDispatch{}, denied
 	}

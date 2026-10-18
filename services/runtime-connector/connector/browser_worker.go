@@ -118,7 +118,7 @@ func browserWorkerArguments(channels []Channel) ([]string, error) {
 		"--no-usage-statistics", "--no-performance-crux", "--no-source-maps",
 		"--no-javascript-evaluation", "--no-category-performance", "--no-category-memory",
 		"--no-category-extensions", "--no-category-webmcp", "--no-category-third-party",
-		"--no-category-pwa", "--no-category-emulation", "--no-category-network",
+		"--no-category-pwa", "--no-category-network",
 		"--experimental-structured-content",
 		"--redact-network-headers", "--screenshot-format=jpeg", "--screenshot-quality=75",
 		"--screenshot-max-width=1280", "--screenshot-max-height=720",

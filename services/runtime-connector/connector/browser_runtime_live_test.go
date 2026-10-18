@@ -1,14 +1,17 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image/jpeg"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,7 +24,11 @@ func TestBrowserRuntimeAppFixture(t *testing.T) {
 	}
 	server := &http.Server{Addr: "127.0.0.1:3000", Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		fmt.Fprint(w, `<!doctype html><title>Exact primary App</title><h1>Only primary loopback</h1><p>Factory browser manager proof</p><script>console.log('primary App inspected')</script>`)
+		fmt.Fprint(w, `<!doctype html><title>Exact primary App</title><h1>Only primary loopback</h1><p>Factory browser manager proof</p>
+<label>Keyboard target<input></label><button onclick="document.querySelector('#result').textContent='Keyboard activated'">Apply</button>
+<p id="result">Ready</p><p id="viewport"></p><script>
+function size(){document.querySelector('#viewport').textContent='Viewport '+innerWidth+'x'+innerHeight}
+addEventListener('resize',size);size();console.log('primary App inspected')</script>`)
 	})}
 	defer server.Close()
 	if err := server.ListenAndServe(); err != nil {
@@ -139,6 +146,44 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 			}
 		}
 	}
+	input := regexp.MustCompile(`uid=([0-9]+_[0-9]+) textbox "Keyboard target"`).FindStringSubmatch(snapshot.Content[0].Text)
+	if len(input) != 2 {
+		t.Fatal("keyboard fixture input unavailable", snapshot.Content[0].Text)
+	}
+	call("browser_click", fmt.Sprintf(`{"uid":%q}`, input[1]))
+	call("browser_press_key", `{"key":"Tab"}`)
+	focused := call("browser_snapshot", `{}`)
+	if !regexp.MustCompile(`button "Apply"[^\n]*focused`).MatchString(focused.Content[0].Text) {
+		t.Fatal("Tab did not focus the next control", focused.Content[0].Text)
+	}
+	call("browser_press_key", `{"key":"Enter"}`)
+	call("browser_wait", `{"text":"Keyboard activated"}`)
+	call("browser_resize", `{"width":390,"height":720}`)
+	call("browser_wait", `{"text":"Viewport 390x720"}`)
+	mobile := call("browser_screenshot", `{}`)
+	mobileImage := false
+	for _, content := range mobile.Content {
+		if content.Type != "image" {
+			continue
+		}
+		data, err := base64.StdEncoding.DecodeString(content.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		config, err := jpeg.DecodeConfig(bytes.NewReader(data))
+		if err != nil || config.Width != 390 || config.Height != 720 {
+			t.Fatal("mobile screenshot did not use the requested viewport", config, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "manager-mobile.jpg"), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		mobileImage = true
+	}
+	if !mobileImage {
+		t.Fatal("mobile screenshot image unavailable")
+	}
+	call("browser_resize", `{"width":1280,"height":720}`)
+	call("browser_wait", `{"text":"Viewport 1280x720"}`)
 	browserName, proxyName := browserRuntimeNames(scope.SessionID)
 	// A compromised browser or proxy cannot extend its own authority by writing
 	// the shared lease. Verify the actual mount, not merely create flags.
@@ -198,7 +243,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("disconnected execution created a browser")
 	}
 	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage,
-		"loopbackApp": true, "startupRenewal": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
+		"loopbackApp": true, "startupRenewal": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
 	if err := os.WriteFile(filepath.Join(root, "inspection.json"), evidence, 0600); err != nil {
 		t.Fatal(err)
 	}
