@@ -19,6 +19,8 @@ import {
   WikiSourceEvidenceError,
   WikiTopicPlanError,
   WikiTopicQualityError,
+  rejectedWikiStructuredResult,
+  WikiStructuredResultError,
 } from "./generation-failure";
 
 const topicSchema = z.object({
@@ -185,6 +187,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       )
         throw cause;
       activeSignal.throwIfAborted();
+      rejectedResult ??= rejectedWikiStructuredResult(cause);
       const bounds =
         id === "topic-planner"
           ? "Each topic purpose is at most 800 characters, with at most 16 existing seed paths and 12 existing pageIDs. Topics must have unique slugs and cannot claim the same pageID."
@@ -193,16 +196,19 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             : id === "checker"
               ? "Return at most 12 concise issues, each at most 800 characters."
               : "Respect the declared page and source bounds and this topic's writing instructions.";
-      const repaired = (
-        await generate(
-          `Your result did not pass this task's local validation. ${bounds} ${cause instanceof WikiTopicPlanError || cause instanceof WikiSourceEvidenceError ? cause.message : "Respect every declared array/string bound."} Correct the result using the original input and inspected source. For unread citations, use readSource to inspect those files before verifying their claims, or remove unsupported claims. Do not invent content or omit useful facts merely to satisfy the format.`,
-        )
-      ).object;
+      let repaired: unknown;
+      try {
+        repaired = (
+          await generate(
+            `Your result did not pass this task's local validation. ${bounds} ${cause instanceof Error ? cause.message : "Respect every declared array/string bound."} Correct the rejectedResult using the original input and inspected source. For unread citations, use readSource to inspect those files before verifying their claims, or remove unsupported claims. Do not invent content or omit useful facts merely to satisfy the format.`,
+          )
+        ).object;
+      } catch (repairFailure) {
+        if (isStructuredOutputFailure(repairFailure)) throw new WikiStructuredResultError();
+        throw repairFailure;
+      }
       const checked = schema.safeParse(repaired);
-      if (!checked.success)
-        throw new Error(
-          `Wiki structured result is incomplete: ${checked.error.issues.map((issue) => `${issue.path.join(".") || "root"}:${issue.code}`).join(", ")}`,
-        );
+      if (!checked.success) throw new WikiStructuredResultError();
       validate?.(checked.data);
       return checked.data;
     }

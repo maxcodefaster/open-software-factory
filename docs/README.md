@@ -174,6 +174,8 @@ ref and history. It does not temporarily remove protection to force branch delet
 
 Knowledge Pages have stable identities, ordered hierarchy, immutable revisions and recoverable
 autosave. Generation reads one exact repository commit and fences concurrent human changes.
+Publication also merges existing human text against a separate generated baseline; overlapping
+edits keep the saved page rather than trusting a model to preserve its wording.
 Omission never deletes a page. Editable Wiki and read-only Repository Documents remain separate;
 code-derived reads and provenance require development authority. Signed forge events persist update
 intent, and missed-event reconciliation confirms current source without a second code database.

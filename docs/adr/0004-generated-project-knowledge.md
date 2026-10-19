@@ -10,7 +10,7 @@ Factory automatically configures signed repository push webhooks. Default-branch
 
 One concrete pinned Mastra workflow plans useful topics, investigates source groups, writes pages and checks/repairs specific flaws through bounded loops. Source limits apply per analysis job, with overall execution bounds rather than one global 48-file ceiling. A checked overview may publish before checked topic packages; unfinished text never publishes. Factory owns durable work intent, recovery and exact revision publication, not a second Mastra store, generic scheduler or claims registry. Organize by reader tasks and concepts rather than source files. Important claims need inspected source/test evidence and valid internal links. Iterate on small and multi-component repositories, using observed defects as regressions for accuracy, coverage, readability, useful density, duplication and update locality.
 
-Known-invalid topic plans and unread research citations receive one deliberate correction inside
+Known-invalid structured results, topic plans and unread research citations receive one deliberate correction inside
 the same generation and shared request budget, with the rejected result and specific validation
 failure. Research must inspect a cited file and verify its claims before publication. Provider errors and
 unknown outcomes do not take this correction path. Default-branch reconciliation does not commission
@@ -32,7 +32,15 @@ Each model task reserves its final allowed step for the structured result with t
 Repeated source reads cannot consume every step and leave the checker without a verdict. This
 does not increase the task or shared request bounds and never permits unsupported claims.
 
-Inspect manifests, entrypoints, source relationships, real flows and focused tests, then update only affected useful pages. Read current human prose and preserve its business framing and hierarchy. AI may automatically correct or remove prose contradicted by current evidence, but absence from code does not disprove human product knowledge. Omission never removes a page; whole-page archival remains human-controlled. Unchanged content creates no revision. Failure retains readable current content.
+Inspect manifests, entrypoints, source relationships, real flows and focused tests, then update only affected useful pages. Read current human prose and preserve its business framing and hierarchy. AI may automatically correct or remove generated prose contradicted by current evidence, but absence from code does not disprove human product knowledge. Omission never removes a page; whole-page archival remains human-controlled. Unchanged content creates no revision. Failure retains readable current content.
+
+Publication retains human text edits separately from the generated baseline. Notes outside that
+baseline survive a rewritten introduction or ending verbatim. Disjoint inline edits use the existing
+document merge, including removing repeated human edits from the next generated baseline rather
+than adopting them as model-owned text. Overlap, ambiguity or an oversized combined page fails that
+package atomically and keeps the human revision for review. Model instructions are not the
+preservation mechanism. A rejected structured result and its local validation reason are transient
+correction input, not published diagnostics; they remain subject to the existing step input bound.
 
 Publication fences the exact current revision and retries against fresh input after concurrent edits. A focused cursor is not a lock. Pristine editors adopt new content; dirty drafts preserve text/cursor, merge non-overlapping edits and offer Compare changes for actual conflicts. Restore creates a new immutable revision. History renders the selected Markdown document with human/AI attribution and time. Development-authorized readers can open exact Git provenance; Product Contributors receive no technical source links or paths.
 

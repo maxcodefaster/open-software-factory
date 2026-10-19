@@ -4,6 +4,8 @@ import type {
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
 import { projectAuthorityIn } from "../access/controller";
+import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
+import { WikiHumanEditConflict } from "./generation-failure";
 
 export class WikiPublicationConflict extends Error {}
 
@@ -27,9 +29,18 @@ export async function publishWikiPackage(
       await transaction`SELECT id FROM factory.knowledge_generation WHERE id=${input.generationID} AND attempt_id=${input.attemptID} AND state='running' FOR UPDATE`;
     if (!intent) throw new WikiPublicationConflict("Wiki execution no longer owns publication");
     const locked = await transaction<
-      Array<{ id: string; version: number; revisionId: string | null; state: string }>
+      Array<{
+        id: string;
+        version: number;
+        revisionId: string | null;
+        state: string;
+        body: string;
+        generatedBody: string;
+      }>
     >`
-      SELECT id,version::integer AS version,current_revision_id AS "revisionId",state FROM factory.knowledge_page WHERE project_id=${input.projectID} ORDER BY id FOR UPDATE
+      SELECT id,version::integer AS version,current_revision_id AS "revisionId",state,
+        current_body AS body,generated_body AS "generatedBody"
+      FROM factory.knowledge_page WHERE project_id=${input.projectID} ORDER BY id FOR UPDATE
     `;
     if (
       locked.length !== input.pages.length ||
@@ -60,7 +71,12 @@ export async function publishWikiPackage(
     let count = 0;
     for (const generated of input.output.pages) {
       const page = input.pages.find((page) => page.id === generated.id);
-      if (page && page.title === generated.title && page.body === generated.body) continue;
+      const previous = locked.find((page) => page.id === generated.id);
+      const merged = previous
+        ? mergeGeneratedDocument(previous.generatedBody, previous.body, generated.body)
+        : { body: generated.body, generatedBody: generated.body, conflict: false };
+      if (merged.conflict) throw new WikiHumanEditConflict();
+      if (page && page.title === generated.title && page.body === merged.body) continue;
       const pageID = page?.id ?? identity(generated.slug),
         revisionID = crypto.randomUUID();
       const citations = JSON.stringify(
@@ -70,8 +86,8 @@ export async function publishWikiPackage(
         Array<{ ordinal: number }>
       >`SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal FROM factory.knowledge_revision WHERE page_id=${pageID}`;
       await transaction`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,citations,generation_id,created_by)
-        VALUES(${revisionID},${pageID},${Number(next?.ordinal ?? 1)},'generated',${generated.title},${generated.body},${generated.body},${input.commitSha},${citations}::jsonb,${input.generationID},${input.userID})`;
-      await transaction`UPDATE factory.knowledge_page SET title=${generated.title},version=version+${page ? 1 : 0},current_revision_id=${revisionID},current_body=${generated.body},generated_body=${generated.body},source_commit_sha=${input.commitSha},citations=${citations}::jsonb,updated_at=now() WHERE id=${pageID}`;
+        VALUES(${revisionID},${pageID},${Number(next?.ordinal ?? 1)},'generated',${generated.title},${merged.body},${merged.generatedBody},${input.commitSha},${citations}::jsonb,${input.generationID},${input.userID})`;
+      await transaction`UPDATE factory.knowledge_page SET title=${generated.title},version=version+${page ? 1 : 0},current_revision_id=${revisionID},current_body=${merged.body},generated_body=${merged.generatedBody},source_commit_sha=${input.commitSha},citations=${citations}::jsonb,updated_at=now() WHERE id=${pageID}`;
       if (!page) {
         await transaction`UPDATE factory.knowledge_page SET parent_id=${generated.parentSlug ? identity(generated.parentSlug) : null} WHERE id=${pageID}`;
         await transaction`INSERT INTO factory.knowledge_page_alias(project_id,slug,page_id) VALUES(${input.projectID},${generated.slug},${pageID})`;

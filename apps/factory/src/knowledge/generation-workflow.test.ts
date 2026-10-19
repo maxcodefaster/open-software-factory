@@ -11,6 +11,8 @@ test.each([
   "unsupported-claim",
   "publication-conflict",
   "invalid-research",
+  "repair-needs-rejected-research",
+  "provider-failure-not-repaired",
   "unread-research-once",
   "unread-research-always",
   "duplicate-prose",
@@ -43,7 +45,8 @@ test.each([
       checks = 0,
       publications = 0,
       researches = 0,
-      plans = 0;
+      plans = 0,
+      receivedRequests = 0;
     const corrections: Array<{ rejectedResult?: { topics?: typeof topics }; correction?: string }> =
       [];
     const keys = ["FACTORY_MODEL_BASE_URL", "FACTORY_MODEL_API_KEY"];
@@ -52,6 +55,12 @@ test.each([
       hostname: "127.0.0.1",
       port: 0,
       async fetch(request) {
+        receivedRequests++;
+        if (scenario === "provider-failure-not-repaired")
+          return Response.json(
+            { error: { message: "Controlled unavailable provider" } },
+            { status: 503 },
+          );
         const incoming = (await request.json()) as {
           tool_choice?: string;
           messages: Array<{
@@ -106,6 +115,9 @@ test.each([
           if (scenario === "verbose-topic-plan" && plans === 2) expect(raw).toContain("800");
         } else if (system.includes("Follow relationships")) {
           researches++;
+          const rejectedResearchAvailable =
+            parsed.rejectedResult?.findings?.[0]?.claim?.length === 1201 &&
+            parsed.correction?.includes("findings.0.claim");
           if (parsed.correction && scenario.startsWith("unread-research")) {
             expect(parsed.correction).toContain("Research cites unread source: src/flow-63.ts");
             expect(parsed.correction).toContain("use readSource");
@@ -116,7 +128,10 @@ test.each([
             findings: [
               {
                 claim:
-                  scenario === "invalid-research" && researches === 1
+                  (scenario === "invalid-research" && researches === 1) ||
+                  (scenario === "repair-needs-rejected-research" &&
+                    researches <= 2 &&
+                    !rejectedResearchAvailable)
                     ? "x".repeat(1201)
                     : "Verified workflow",
                 paths:
@@ -240,6 +255,12 @@ test.each([
           return pages;
         },
       });
+      if (scenario === "provider-failure-not-repaired") {
+        await expect(run).rejects.toBeDefined();
+        expect(receivedRequests).toBe(1);
+        expect(publications).toBe(0);
+        return;
+      }
       if (scenario === "invalid-plan-always") {
         await expect(run).rejects.toThrow("Unknown seed paths: src/not-in-the-inventory.ts");
         expect(plans).toBe(2);
@@ -262,6 +283,7 @@ test.each([
         ![
           "success",
           "invalid-research",
+          "repair-needs-rejected-research",
           "unread-research-once",
           "verbose-overview",
           "invalid-plan-once",
@@ -298,7 +320,11 @@ test.each([
       expect(writes).toBe(5);
       expect(checks).toBe(scenario === "source-hungry-checker" ? 8 : 4);
       expect(researches).toBe(
-        ["invalid-research", "unread-research-once"].includes(scenario) ? 5 : 4,
+        ["invalid-research", "repair-needs-rejected-research", "unread-research-once"].includes(
+          scenario,
+        )
+          ? 5
+          : 4,
       );
       expect(plans).toBe(["invalid-plan-once", "verbose-topic-plan"].includes(scenario) ? 2 : 1);
     } finally {

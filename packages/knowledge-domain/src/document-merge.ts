@@ -52,6 +52,47 @@ export function mergeDocumentText(base: string, local: string, remote: string) {
   return { text, conflict: false };
 }
 
+/** Keep the human edit separate from the next generated baseline, not just today's visible text. */
+export function mergeGeneratedDocument(base: string, human: string, generated: string) {
+  const conflict = () => ({ body: human, generatedBody: base, conflict: true });
+  const result = (body: string, generatedBody: string) =>
+    !body.length || !generatedBody.length || body.length > 120_000 || generatedBody.length > 120_000
+      ? conflict()
+      : { body, generatedBody, conflict: false };
+  if (human === base) return result(generated, generated);
+
+  const start = human.indexOf(base);
+  if (base.length && start >= 0 && start === human.lastIndexOf(base)) {
+    const before = human.slice(0, start);
+    const after = human.slice(start + base.length);
+    // Notes outside the generated document do not overlap a rewritten first/last
+    // paragraph. Character merging alone treats their boundary offsets as conflicts.
+    if ((!before || before.endsWith("\n\n")) && (!after || after.startsWith("\n\n"))) {
+      let next = generated;
+      for (const block of [before.replace(/\n+$/, ""), after.replace(/^\n+/, "")]) {
+        if (!block) continue;
+        const index = next.indexOf(block);
+        if (
+          index >= 0 &&
+          (index === 0 || next.slice(0, index).endsWith("\n\n")) &&
+          (index + block.length === next.length ||
+            next.slice(index + block.length).startsWith("\n\n"))
+        )
+          next = (next.slice(0, index) + next.slice(index + block.length)).trim();
+      }
+      next = next.trim();
+      return result(before + next + after, next);
+    }
+  }
+  const merged = mergeDocumentText(base, human, generated);
+  if (merged.conflict) return conflict();
+  // The writer may already have repeated the human edit. Undo that edit only in
+  // the stored generated baseline, so the next generation still sees its owner.
+  const baseline = mergeDocumentText(human, base, generated);
+  if (baseline.conflict) return conflict();
+  return result(merged.text, baseline.text);
+}
+
 export function withoutRepeatedTitle(body: string, title: string) {
   const heading = /^\s*#{1,6}\s+(.+?)[ \t]*#*[ \t]*(?:\n|$)/.exec(body);
   return heading?.[1]?.trim() === title.trim()

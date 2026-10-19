@@ -1,3 +1,19 @@
+import { isStructuredOutputFailure } from "../project-agent/structured-output";
+
+export class WikiHumanEditConflict extends Error {
+  constructor() {
+    super("Wiki generation overlaps human text edits");
+    this.name = "WikiHumanEditConflict";
+  }
+}
+
+export class WikiStructuredResultError extends Error {
+  constructor() {
+    super("Structured output validation failed for the Wiki result");
+    this.name = "WikiStructuredResultError";
+  }
+}
+
 export class WikiTopicPlanError extends Error {
   constructor(message: string) {
     super(message);
@@ -25,6 +41,10 @@ export class WikiSourceEvidenceError extends Error {
 // These are Factory-owned failures. Never publish model prose, provider errors,
 // source paths, request bodies or credentials as a generation diagnostic.
 export function wikiGenerationFailureMessage(cause: unknown, fallback: string) {
+  if (cause instanceof WikiHumanEditConflict)
+    return "A Wiki update overlaps human edits. That page was not overwritten. Review its text before retrying.";
+  if (cause instanceof WikiStructuredResultError || isStructuredOutputFailure(cause))
+    return "The Wiki result did not match its required format. Saved pages are retained; retry the update.";
   if (cause instanceof WikiTopicPlanError)
     return "The Wiki topic plan references unavailable source or pages. Saved pages are retained; retry the update.";
   if (cause instanceof WikiTopicQualityError)
@@ -38,4 +58,19 @@ export function wikiGenerationFailureMessage(cause: unknown, fallback: string) {
     current = "cause" in current ? current.cause : undefined;
   }
   return fallback;
+}
+
+export function rejectedWikiStructuredResult(cause: unknown): unknown {
+  if (!isStructuredOutputFailure(cause) || !cause || typeof cause !== "object") return undefined;
+  const details = "details" in cause ? cause.details : undefined;
+  const value =
+    details && typeof details === "object" && "value" in details ? details.value : undefined;
+  // Match the existing per-step input bound. Do not truncate a rejected result
+  // or let diagnostics bypass the next model step's normal byte guard.
+  if (typeof value !== "string" || Buffer.byteLength(value) > 1024 * 1024) return undefined;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
 }
