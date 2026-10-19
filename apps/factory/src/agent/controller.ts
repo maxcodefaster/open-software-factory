@@ -26,6 +26,8 @@ import {
   promptRecordedOpenCodeInput,
 } from "./opencode-client";
 import { observeOpenCodeUsage } from "./opencode-usage";
+import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
+import { connectOpenCodeBrowser } from "./opencode-browser";
 import { createChangeAgentStop } from "./stop";
 import { waitForBuildSandbox } from "./runtime-readiness";
 import { readTurnObservation } from "./turn-observation";
@@ -196,6 +198,7 @@ type ProjectToolState = {
 };
 
 type ProjectMessageContent = {
+  id?: string | undefined;
   type: string;
   text?: string | undefined;
   name?: string | undefined;
@@ -313,11 +316,15 @@ export function projectMessages(
         ];
       }
       if (message.type === "assistant") {
-        return (message.content ?? []).flatMap<AgentProjectedMessage>((content, index) => {
+        let textOrdinal = 0;
+        let toolOrdinal = 0;
+        return (message.content ?? []).flatMap<AgentProjectedMessage>((content) => {
+          const ordinal =
+            content.type === "text" ? textOrdinal++ : content.type === "tool" ? toolOrdinal++ : 0;
           if (content.type === "text" && content.text?.trim()) {
             return [
               {
-                id: `${message.id}:${index}`,
+                id: `${message.id}:text:${ordinal}`,
                 role: "assistant",
                 text: bounded(buildCompletionText(content.text), 8_000),
                 at: message.time.created,
@@ -327,16 +334,20 @@ export function projectMessages(
           if (content.type === "tool" && content.name && content.state && content.time) {
             const status = activityStatus(content.state.status);
             if (!status) return [];
+            const browserPrefix = "factory_browser_browser_";
+            const browserAction = content.name.startsWith(browserPrefix)
+              ? content.name.slice(browserPrefix.length)
+              : undefined;
             const input = status === "streaming" ? null : content.state.input;
             const detail = toolDetail(content.state);
             return [
               {
-                id: `${message.id}:${index}`,
+                id: `${message.id}:tool:${content.id ?? ordinal}`,
                 role: "tool",
-                text: bounded(toolSummary(content.name, input), 500),
+                text: bounded(toolSummary(browserAction ?? content.name, input), 500),
                 at: content.time.created,
                 activity: {
-                  name: content.name,
+                  name: browserAction ? "browser" : content.name,
                   status,
                   ...(detail ? { detail } : {}),
                 },
@@ -381,6 +392,32 @@ export function createAgentController(
   writers?: Pick<ReturnType<typeof createChangeWriterController>, "prepareAgent">,
 ) {
   const monitors = new Set<string>();
+  const observationController = new AbortController();
+  const nativeEvents = createOpenCodeEvents((attemptID) => opencode(hub, attemptID));
+  const activityListeners = new Map<
+    string,
+    Set<{
+      notify(): void;
+      attemptID?: string;
+      detach?: () => void;
+    }>
+  >();
+  function notifyActivity(changeID?: string) {
+    for (const [id, listeners] of activityListeners)
+      if (!changeID || id === changeID) for (const listener of listeners) listener.notify();
+  }
+  function bindActivity(changeID: string, attemptID?: string) {
+    if (closed) return;
+    for (const listener of activityListeners.get(changeID) ?? []) {
+      if (listener.attemptID === attemptID) continue;
+      const detach = attemptID ? nativeEvents.subscribe(attemptID, listener.notify) : undefined;
+      listener.detach?.();
+      if (attemptID) listener.attemptID = attemptID;
+      else delete listener.attemptID;
+      if (detach) listener.detach = detach;
+      else delete listener.detach;
+    }
+  }
   const starters = new Set<string>();
   const recovering = new Set<string>();
   const committing = new Map<string, Promise<void>>();
@@ -427,7 +464,12 @@ export function createAgentController(
 
   function run(work: Promise<void>) {
     background.add(work);
-    void work.catch(() => {}).finally(() => background.delete(work));
+    void work
+      .catch(() => {})
+      .finally(() => {
+        background.delete(work);
+        notifyActivity();
+      });
   }
 
   async function row(changeID: string) {
@@ -678,7 +720,13 @@ export function createAgentController(
         throw new CommandError("conflict", "Build authority changed before prompt submission");
       await ensureOpenCodeMessageBoundary(client, intent.sessionID);
       await usageJournal.prepare(turnID, client, intent.sessionID);
-      await browser?.prepare(turnID, ownerToken);
+      const browserGrant = await browser?.prepare(turnID, ownerToken);
+      if (intent.browserTransport === "mcp" && browserGrant)
+        await connectOpenCodeBrowser(
+          client,
+          browserGrant.runtimeEndpoint,
+          browserGrant.runtimeBearer,
+        );
       const inbox = await promptRecordedOpenCodeInput(client, intent, true);
       if (inbox.id !== intent.promptID)
         throw new Error("OpenCode returned another prompt identity");
@@ -792,7 +840,13 @@ export function createAgentController(
           throw new Error("Recovered OpenCode session does not match its recorded configuration");
         await confirmNativeSession(changeID, turnID, intent.attemptID, intent.sessionID);
         await usageJournal.drain(turnID, client, intent.sessionID);
-        await browser?.prepare(turnID, ownerToken);
+        const browserGrant = await browser?.prepare(turnID, ownerToken);
+        if (intent.browserTransport === "mcp" && browserGrant)
+          await connectOpenCodeBrowser(
+            client,
+            browserGrant.runtimeEndpoint,
+            browserGrant.runtimeBearer,
+          );
         const [work, messages] = await Promise.all([
           observeOpenCodeWork(client, intent.sessionID),
           client.message.list({ sessionID: intent.sessionID, limit: 100 }),
@@ -1164,9 +1218,19 @@ export function createAgentController(
     if (closed || monitors.has(turnID)) return;
     monitors.add(turnID);
     let inactiveObservations = 0;
+    const wake = createActivityWake(observationController.signal);
+    let detach: (() => void) | undefined;
     try {
       const intent = await admission.intent(turnID);
+      const initial = await row(changeID);
+      if (!initial?.sessionID) return;
+      const client = opencode(hub, initial.runtimeAttemptID);
+      detach = nativeEvents.subscribe(initial.runtimeAttemptID, (type) => {
+        // Token deltas update the panel, not durable usage/settlement reads.
+        if (!type.endsWith(".delta") && type !== "session.tool.progress") wake.notify();
+      });
       while (!closed) {
+        const revision = wake.revision();
         const session = await row(changeID);
         if (!session || !session.sessionID || session.activeTurnID !== turnID) return;
         if (session.state === "stopped") {
@@ -1194,11 +1258,14 @@ export function createAgentController(
           continue;
         }
         try {
-          const client = opencode(hub, session.runtimeAttemptID);
-          await usageJournal.drain(turnID, client, session.sessionID);
-          const [work, messages] = await Promise.all([
-            observeOpenCodeWork(client, session.sessionID),
-            client.message.list({ sessionID: session.sessionID, limit: 100 }),
+          if (session.runtimeAttemptID !== initial.runtimeAttemptID) return;
+          const work = await observeOpenCodeWork(client, session.sessionID);
+          const [, messages] = await Promise.all([
+            usageJournal.drain(turnID, client, session.sessionID, work.sessionIDs),
+            client.message.list(
+              { sessionID: session.sessionID, limit: 100 },
+              { signal: AbortSignal.timeout(5_000) },
+            ),
           ]);
           await recordNativeSkillLoads(turnID, ownerToken, session.activeInboxID, messages.data);
           const outcome = classifyAgentTurn(
@@ -1272,6 +1339,7 @@ export function createAgentController(
                 "conflict",
                 "Build outcome no longer owns its current authority",
               );
+            notifyActivity(changeID);
             await reconcileCommit(turnID);
             return;
           }
@@ -1296,11 +1364,16 @@ export function createAgentController(
           )
             throw cause;
         }
-        await Bun.sleep(1_000);
+        if (inactiveObservations) await Bun.sleep(1_000);
+        else await wake.wait(revision, 15_000);
+        if (!closed) await Bun.sleep(100);
       }
     } finally {
+      detach?.();
+      wake.dispose();
       await browser?.closeTurn(turnID);
       monitors.delete(turnID);
+      notifyActivity(changeID);
     }
   }
 
@@ -1337,8 +1410,29 @@ export function createAgentController(
     // disposed. Durable intent remains recoverable; this does not issue Stop.
     async shutdown() {
       closed = true;
+      observationController.abort();
+      await nativeEvents.shutdown();
       while (background.size) await Promise.allSettled([...background]);
       await browser?.recover();
+    },
+    subscribeActivity(changeID: string, notify: () => void) {
+      if (closed) return () => {};
+      const listeners = activityListeners.get(changeID) ?? new Set();
+      const listener: {
+        notify(): void;
+        attemptID?: string;
+        detach?: () => void;
+      } = { notify };
+      listeners.add(listener);
+      activityListeners.set(changeID, listeners);
+      return () => {
+        listener.detach?.();
+        listeners.delete(listener);
+        if (!listeners.size) activityListeners.delete(changeID);
+      };
+    },
+    runtimeActivityChanged() {
+      notifyActivity();
     },
     async recover() {
       if (closed) return;
@@ -1557,6 +1651,7 @@ export function createAgentController(
 
     async stop(changeID: string) {
       await stop.persist(changeID);
+      notifyActivity(changeID);
       await browser?.closeChange(changeID);
       try {
         if (!(await stop.confirm(changeID))) run(reconcileStop(changeID));
@@ -1603,7 +1698,8 @@ export function createAgentController(
         AND NOT EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${changeID} AND (stop_pending OR state='stopped'))
         ORDER BY pause.created_at DESC LIMIT 1`;
       const session = await row(changeID);
-      if (!session)
+      if (!session) {
+        bindActivity(changeID);
         return {
           state:
             turn?.state === "stopped"
@@ -1625,6 +1721,7 @@ export function createAgentController(
           codingPause: codingPause ?? null,
           computeWait: waiting?.reason ?? null,
         };
+      }
       let messages: ReturnType<typeof projectMessages> = [];
       let messagesAvailable = false;
       let activityAttemptID = session.runtimeAttemptID;
@@ -1643,6 +1740,9 @@ export function createAgentController(
           activityRuntimeState = retained.state;
         }
       }
+      if (session.sessionConfirmed && session.sessionID && activityRuntimeState === "ready")
+        bindActivity(changeID, activityAttemptID);
+      else bindActivity(changeID);
       if (
         history &&
         session.sessionConfirmed &&

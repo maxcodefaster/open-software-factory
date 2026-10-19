@@ -73,6 +73,7 @@ import {
   retainAgentActivity,
 } from "./agent-view-state";
 import { apiRequest, emptyResponseSchema } from "./api-client";
+import { observeAgentActivity } from "./agent-activity-stream";
 import type { Epic } from "./api-contracts";
 import {
   type AgentView,
@@ -344,7 +345,7 @@ function FactoryWorkspace(props: {
   let lastAgentSnapshot: AgentSnapshot | undefined;
   const [observedAgentChangeID, setObservedAgentChangeID] = createSignal<string>();
   const agentReadFence = createAgentReadFence();
-  let lastAgentHistory = { changeID: "", at: 0 };
+  const [agentActivityRevision, setAgentActivityRevision] = createSignal(0);
   function publishAgentView(
     changeID: string,
     view: AgentView,
@@ -352,7 +353,10 @@ function FactoryWorkspace(props: {
     historyRequested = true,
   ) {
     if (read && !agentReadFence.current(read)) return;
-    if (!read) agentReadFence.commandPublished();
+    if (!read) {
+      agentReadFence.commandPublished();
+      setAgentActivityRevision((revision) => revision + 1);
+    }
     try {
       if (view.turn) {
         acknowledgeCommand(agentCommandScope("change-start", changeID), view.turn.commandId);
@@ -385,7 +389,6 @@ function FactoryWorkspace(props: {
   }
   function resetAgentView() {
     agentReadFence.commandPublished();
-    lastAgentHistory = { changeID: "", at: 0 };
     lastAgentSnapshot = undefined;
     setObservedAgentChangeID(undefined);
     setAgent({
@@ -880,24 +883,17 @@ function FactoryWorkspace(props: {
     }
     const changeID = selectedChange()?.id;
     if (changeID) {
-      const read = agentReadFence.beginRead();
-      const historyInterval = ["starting", "working"].includes(agent().state) ? 2_000 : 10_000;
-      const history =
-        agentOpen() &&
-        (lastAgentHistory.changeID !== changeID ||
-          Date.now() - lastAgentHistory.at >= historyInterval);
+      const observeStatus = !agentOpen();
+      const read = observeStatus ? agentReadFence.beginRead() : undefined;
       const [agentView, deliveryView] = await Promise.all([
-        apiRequest(
-          agentViewSchema,
-          `/api/changes/${changeID}/agent${history ? "" : "?history=0"}`,
-          { signal },
-        ),
+        observeStatus
+          ? apiRequest(agentViewSchema, `/api/changes/${changeID}/agent?history=0`, { signal })
+          : Promise.resolve(undefined),
         apiRequest(deliveryViewSchema, `/api/changes/${changeID}/delivery`, { signal }),
       ]);
       if (selectedChange()?.id !== changeID) return;
-      if (agentView && agentReadFence.current(read)) {
-        if (history && agentView.messagesAvailable) lastAgentHistory = { changeID, at: Date.now() };
-        publishAgentView(changeID, agentView, read, history);
+      if (agentView && read && agentReadFence.current(read)) {
+        publishAgentView(changeID, agentView, read, false);
       }
       setDelivery(deliveryView);
     } else if (!changeID) {
@@ -914,6 +910,45 @@ function FactoryWorkspace(props: {
     onError: setSyncError,
   });
   const refreshLifecycleState = lifecyclePoller.refresh;
+
+  const agentActivityTarget = createMemo(() =>
+    agentOpen() && selectedChange()?.id ? `${selectedChange()?.id}:${agentActivityRevision()}` : "",
+  );
+  createEffect(
+    () => agentActivityTarget(),
+    (target) => {
+      const changeID = target.split(":")[0];
+      if (!changeID) return;
+      const observedChangeID = changeID;
+      const controller = new AbortController();
+      let detach: (() => void) | undefined;
+      function synchronize() {
+        detach?.();
+        detach = undefined;
+        if (document.hidden || controller.signal.aborted) return;
+        const read = agentReadFence.beginRead();
+        detach = observeAgentActivity({
+          changeID: observedChangeID,
+          signal: controller.signal,
+          snapshot: (view) => {
+            if (selectedChange()?.id === changeID && agentOpen())
+              publishAgentView(observedChangeID, view, read);
+          },
+          disconnected: () => {
+            if (selectedChange()?.id === changeID && agentReadFence.current(read))
+              setAgent((view) => ({ ...view, messagesAvailable: false }));
+          },
+        });
+      }
+      synchronize();
+      document.addEventListener("visibilitychange", synchronize);
+      return () => {
+        controller.abort();
+        detach?.();
+        document.removeEventListener("visibilitychange", synchronize);
+      };
+    },
+  );
 
   async function refreshTicketDetail(ticketID = selectedTicketID()) {
     const generation = ++ticketReadGeneration;
@@ -966,7 +1001,6 @@ function FactoryWorkspace(props: {
     () => [agentOpen(), selectedProjectID(), assistantTicketID()] as const,
     ([open, projectID, ticketID]) => {
       if (!open || !projectID) return;
-      lastAgentHistory = { changeID: "", at: 0 };
       void refreshLifecycleState();
       let stopped = false;
       let timer: ReturnType<typeof setTimeout>;

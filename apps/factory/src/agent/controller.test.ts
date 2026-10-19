@@ -158,6 +158,49 @@ describe("Change Agent turn state", () => {
 });
 
 describe("Change Agent activity projection", () => {
+  test("native browser activity keeps its identity without putting its namespace in the compact label", () => {
+    const [message] = projectMessages({
+      data: [
+        {
+          id: "assistant_native",
+          type: "assistant",
+          time: { created: 1 },
+          content: [
+            {
+              id: "call_snapshot",
+              type: "tool",
+              name: "factory_browser_browser_screenshot",
+              state: { status: "completed" },
+              time: { created: 1 },
+            },
+          ],
+        },
+      ],
+    });
+    expect(message).toMatchObject({
+      id: "assistant_native:tool:call_snapshot",
+      text: "screenshot",
+      activity: { name: "browser", status: "completed" },
+    });
+  });
+  test("tool identities and text slots survive inserted reasoning and tool reordering", () => {
+    const text = { type: "text", text: "Working" };
+    const tool = {
+      type: "tool",
+      id: "native_call",
+      name: "read",
+      state: { status: "running", input: { path: "owned.ts" } },
+      time: { created: 2 },
+    };
+    const project = (content: unknown[]) =>
+      projectMessages({
+        data: [{ id: "assistant_owned", type: "assistant", time: { created: 1 }, content }],
+      });
+    const before = project([text, tool]);
+    const after = project([{ type: "reasoning", text: "Thinking" }, tool, text]);
+    expect(before.map((part) => part.id).sort()).toEqual(after.map((part) => part.id).sort());
+    expect(after.find((part) => part.role === "tool")?.id).toBe("assistant_owned:tool:native_call");
+  });
   test("uses exact admitted human messages rather than injected Skill and browser instructions", () => {
     const messages = projectMessages(
       {
@@ -204,7 +247,7 @@ describe("Change Agent activity projection", () => {
     });
     expect(agentMessageSchema.array().parse(projected)).toEqual([
       {
-        id: "assistant-pending:0",
+        id: "assistant-pending:tool:0",
         role: "tool",
         text: "Read src/version.txt",
         at: 1,
@@ -286,7 +329,7 @@ describe("Change Agent activity projection", () => {
 
     expect(messages).toEqual([
       {
-        id: "assistant-1:0",
+        id: "assistant-1:tool:tool-write",
         role: "tool",
         text: "Updated src/version.txt",
         at: 210,
@@ -297,7 +340,7 @@ describe("Change Agent activity projection", () => {
         },
       },
       {
-        id: "assistant-1:1",
+        id: "assistant-1:tool:tool-check",
         role: "tool",
         text: "bun test",
         at: 225,

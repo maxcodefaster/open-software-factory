@@ -6,9 +6,7 @@ import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/open
 import { projectMessages } from "../../apps/factory/src/agent/controller";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
-
-const jpeg =
-  "/9j/2wCEAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDIBCQkJDAsMGA0NGDIhHCEyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMv/AABEIAAEAAQMBIgACEQEDEQH/xAGiAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgsQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+gEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoLEQACAQIEBAMEBwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APn+iiigD//Z";
+import { ownedBrowserJPEG as jpeg } from "../fixtures/browser-image";
 
 test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actual image read tool", async () => {
   const directory = await realpath(
@@ -71,6 +69,7 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
       });
     },
   });
+  let sessionID = "";
   try {
     const error = await new Response(compile.stderr).text();
     if ((await compile.exited) !== 0)
@@ -87,7 +86,7 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
       (models) =>
         models.data.some((model) => model.providerID === "factory" && model.id === buildModelID),
     );
-    const sessionID = `ses_owned_browser_${turnID.replaceAll("-", "")}`;
+    sessionID = `ses_owned_browser_${turnID.replaceAll("-", "")}`;
     await target.client.session.create({
       id: sessionID,
       title: "Owned browser image read",
@@ -120,6 +119,17 @@ test("pinned OpenCode API 2 sees a fixed browser CLI screenshot through its actu
     expect(state.imageRequests).toBe(1);
     expect(calls).toHaveLength(1);
     expect(new Set(calls).size).toBe(1);
+  } catch (cause) {
+    if (upstream)
+      console.error("Owned retained browser diagnostic", {
+        calls: calls.length,
+        control: await upstream.control(),
+        messages: sessionID
+          ? projectMessages(await upstream.client.message.list({ sessionID, limit: 20 }))
+          : [],
+        ...(await upstream.diagnostics()),
+      });
+    throw cause;
   } finally {
     await upstream?.dispose();
     await server.stop(true);

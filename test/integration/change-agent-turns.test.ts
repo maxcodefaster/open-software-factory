@@ -281,6 +281,41 @@ test("Build admission rejects Requirements committed while waiting for the Ticke
   }
 });
 
+test("running Build observation waits for native activity rather than polling history every second", async () => {
+  const owned = await fixture();
+  const controller = owned.controller();
+  const commandID = crypto.randomUUID();
+  const request = owned.hub.request.bind(owned.hub);
+  let reads = 0;
+  let running = true;
+  owned.hub.request = async (attempt, channel, input, path) => {
+    if (new URL(input.url).pathname.endsWith("/active")) {
+      reads++;
+      return Response.json({ data: running ? { [owned.sessionID]: { type: "running" } } : {} });
+    }
+    return request(attempt, channel, input, path);
+  };
+  try {
+    owned.acceptResponse();
+    await controller.prompt(owned.changeID, "Observe native activity", owned.userID, commandID);
+    await owned.requested;
+    owned.release();
+    await until(async () => reads > 0, 300);
+    await Bun.sleep(200);
+    const initial = reads;
+    await Bun.sleep(1_200);
+    expect(reads).toBe(initial);
+    expect((await owned.turn(commandID))?.state).toBe("running");
+    running = false;
+    owned.finish();
+    await until(async () => (await controller.get(owned.changeID)).state === "committed", 300);
+    expect(owned.requests()).toBe(1);
+    expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
+  } finally {
+    await owned.dispose();
+  }
+}, 20_000);
+
 test("ordinary monitoring settles an inactive promoted input without a terminal outcome as uncertain", async () => {
   const owned = await fixture();
   const commandID = crypto.randomUUID();
@@ -341,6 +376,8 @@ test("a cancelled read-only observation keeps monitoring the same Build without 
     );
     await owned.requested;
     owned.release();
+    await until(async () => reads >= 1, 300);
+    owned.publishActivity();
     await until(async () => reads >= 2, 300);
     expect((await owned.turn(commandID))?.state).toBe("running");
     expect(owned.requests()).toBe(1);
@@ -354,8 +391,8 @@ test("a cancelled read-only observation keeps monitoring the same Build without 
   }
 }, 20_000);
 
-// Keep the real one-second cadence. Its four observations, owned database setup
-// and commit/cleanup need the same allowance as the adjacent reconnect proof.
+// Activity changes invalidate native observations. Only a second consecutive
+// inactive observation uses the one-second ambiguity check.
 test("nonconsecutive inactive snapshots do not strand or prematurely settle running work", async () => {
   const owned = await fixture();
   const commandID = crypto.randomUUID();
@@ -381,6 +418,10 @@ test("nonconsecutive inactive snapshots do not strand or prematurely settle runn
       .prompt(owned.changeID, "Observe transient activity", owned.userID, commandID);
     await owned.requested;
     owned.release();
+    for (let expected = 1; expected < 4; expected++) {
+      await until(async () => activeReads >= expected, 300);
+      owned.publishActivity();
+    }
     await until(async () => activeReads >= 4, 500);
     expect((await owned.turn(commandID))?.state).toBe("running");
     completed = true;
@@ -972,7 +1013,8 @@ test("recorded pending input recovers through another controller without a dupli
     >`SELECT prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id = ${admitted.turn.id}`;
     expect(intent[0]?.text).toBe(retainedIntent.text);
     expect(retainedIntent.text).toStartWith("Persist this input before process loss\n\n");
-    expect(retainedIntent.text).toContain(`browser-client ${admitted.turn.id}`);
+    expect(retainedIntent.text).toContain("factory_browser_browser_open");
+    expect(retainedIntent.text).not.toContain("browser-client");
     await expect(
       Promise.resolve(
         owned.database

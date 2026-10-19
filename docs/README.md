@@ -188,9 +188,14 @@ bounded background refresh runs; network requests never hold an inference or bud
 Environment managers can read masked metadata without Developer access. Settlement and recovery
 recheck their current management/account authority before publishing an externally written version.
 
-Agent status polls omit native message history when the panel is closed. Visible history refreshes
-at two seconds while starting/working and ten seconds after settlement. Opening the panel requests
-fresh history; a command-result fence rejects older reads. Wiki bodies subscribe only while a Wiki
+Coding activity uses one shared native OpenCode SSE connection per observed Runtime Attempt.
+The authorized Side Panel receives coalesced replacement snapshots, reconciles history on reconnect
+and detaches when closed or hidden. It does not poll visible history. Native activity invalidates
+Build observations; a fifteen-second reconciliation check covers missed events without replaying
+inference. Independent ownership/browser renewal, ordered Stop and durable usage settlement remain
+required. Closed-panel lifecycle reads omit native history, and command-result fences reject older
+streams or reads. Native tool identities survive history updates without deduplicating legitimate
+repeated text. Wiki bodies subscribe only while a Wiki
 tab exists, including minimized tabs with retained drafts. Repository inventory refreshes on the
 generation identity/state rather than every status tick. The signed-out entry loads no document editor.
 Infrastructure commands have bounded combined output and deadlines; timeout leaves the external

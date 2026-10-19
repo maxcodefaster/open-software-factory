@@ -103,9 +103,40 @@ export async function fixture(
   const cancelledInputs = new Set<string>();
   let installedSkills: string[] = [];
   const hub = new RuntimeHub(async () => {});
+  const activityStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
+  const publishActivity = () => {
+    const frame = new TextEncoder().encode(
+      `data: ${JSON.stringify({ id: `evt_${crypto.randomUUID()}`, type: "server.connected", data: {} })}\n\n`,
+    );
+    for (const stream of activityStreams) stream.enqueue(frame);
+  };
   hub.connected = () => true;
   hub.request = async (_attempt, _channel, request) => {
     const path = new URL(request.url).pathname;
+    if (path === "/api/experimental/mcp/factory_browser" && request.method === "PUT")
+      return new Response(null, { status: 204 });
+    if (path === "/api/mcp")
+      return Response.json({
+        data: [{ name: "factory_browser", status: { status: "connected" } }],
+      });
+    if (path === "/api/event")
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            activityStreams.add(controller);
+            publishActivity();
+            request.signal.addEventListener(
+              "abort",
+              () => {
+                activityStreams.delete(controller);
+                controller.close();
+              },
+              { once: true },
+            );
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
     if (path === "/api/info") return Response.json({ data: { version: "2.0.27" } });
     if (path === "/api/skill")
       return Response.json({
@@ -291,6 +322,7 @@ export async function fixture(
     payloads,
     completionText,
     hub,
+    publishActivity,
     writers: createChangeWriterController({
       database,
       agentUsername: "owned-control",
@@ -306,6 +338,7 @@ export async function fixture(
       finished = true;
       loseResponse = false;
       if (text !== undefined) completionText = text;
+      publishActivity();
     },
     commitCalls,
     requested: requested.promise,

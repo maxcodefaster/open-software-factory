@@ -1,14 +1,22 @@
 import { expect, test } from "bun:test";
 import { decodeOpenCodeAdmission } from "../../apps/factory/src/agent/opencode-client";
+import { createOpenCodeEvents } from "../../apps/factory/src/agent/opencode-events";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { connectorBoundary } from "../fixtures/connector-boundary";
-import { pinnedOpenCode } from "../fixtures/pinned-opencode";
+import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 test("Connector interruption follows native prompt admission despite response/control loss", async () => {
   const process = await pinnedOpenCode();
   try {
     const boundary = await connectorBoundary(process);
+    const events = createOpenCodeEvents(() => boundary.client);
+    const observed: string[] = [];
+    const detach = events.subscribe("owned", (type) => observed.push(type));
     try {
+      await observe(
+        async () => observed,
+        (types) => types.includes("server.connected"),
+      );
       for (const loss of ["none", "stream-close", "reconnect"] as const) {
         const input = {
           sessionID: `ses_owned_${crypto.randomUUID().replaceAll("-", "")}`,
@@ -56,7 +64,10 @@ test("Connector interruption follows native prompt admission despite response/co
           await prompt;
         }
       }
+      expect(observed).toContain("session.created");
     } finally {
+      detach();
+      await events.shutdown();
       await boundary.dispose();
     }
   } finally {

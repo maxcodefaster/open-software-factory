@@ -112,7 +112,8 @@ test.each([
         WHERE id = ${owned.attemptID}`;
       if (prerequisite === "session-missing")
         await owned.database
-          .client`UPDATE factory.change_agent_session SET opencode_session_id = NULL
+          .client`UPDATE factory.change_agent_session SET opencode_session_id = NULL,
+            native_session_confirmed_at = NULL
         WHERE change_id = ${owned.changeID}`;
       if (prerequisite === "generation-changed")
         await owned.database.client`UPDATE factory.change SET runtime_attempt_id = NULL

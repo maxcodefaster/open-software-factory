@@ -71,6 +71,7 @@ import { createUIPreferenceController } from "./preferences/controller";
 import { projectModelConnection } from "./project-agent/adapter";
 import { createProjectAgentController } from "./project-agent/controller";
 import { projectResponseStream } from "./project-agent/stream-response";
+import { agentActivityResponse } from "./agent/activity-response";
 import { createProjectRoute } from "./routes/projects";
 import { createTerminalWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
@@ -192,6 +193,7 @@ const skillRoutes = createSkillRoutes(createSkillController(database));
 const usageRoutes = createUsageRoutes(database, factoryAuth);
 const runtimeHub = new RuntimeHub(async (attemptID, phase, error) => {
   await runtimeController.status(attemptID, phase, error);
+  agentController?.runtimeActivityChanged();
   if (phase === "ready" && agentController) await agentController.recoverRuntimeCommits(attemptID);
   if (phase === "ready" && agentController) await agentController.dispatchRuntimePending(attemptID);
   if (phase === "ready" && buildBrowserController) await buildBrowserController.recover(attemptID);
@@ -963,7 +965,7 @@ async function route(request: Request) {
       return new Response(null, { status: 405 });
     }
     const agentRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/agent(?:\/(start|resume|prompt|request-changes|stop|check-stop))?$/,
+      /^\/api\/changes\/([0-9a-f-]+)\/agent(?:\/(activity|start|resume|prompt|request-changes|stop|check-stop))?$/,
     );
     const writerRoute = url.pathname.match(/^\/api\/changes\/([0-9a-f-]{36})\/writer$/);
     if (writerRoute?.[1]) {
@@ -985,6 +987,18 @@ async function route(request: Request) {
       if (!session) return json({ error: "Authentication required" }, 401);
       const [, changeID, action] = agentRoute;
       if (!changeID) return json({ error: "Change is required" }, 400);
+      if (action === "activity" && request.method === "GET")
+        return agentActivityResponse({
+          signal: request.signal,
+          authorize: async () => {
+            const current = await requireSession(request);
+            if (!current || current.user.id !== session.user.id)
+              throw new CommandError("forbidden", "Build activity access ended");
+            await accessController.authorizeAPI(request, current.user.id);
+          },
+          read: () => agentController.get(changeID),
+          subscribe: async (notify) => agentController.subscribeActivity(changeID, notify),
+        });
       if (!action && request.method === "GET")
         return json(
           await agentController.get(changeID, undefined, url.searchParams.get("history") !== "0"),

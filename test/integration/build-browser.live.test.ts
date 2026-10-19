@@ -54,7 +54,9 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
           observations.requests++;
           observations.snapshot ||= text.includes("Delivery dashboard") && text.includes("uid=");
           observations.console ||= text.includes("browser-defect-fixture-ready");
-          observations.checkout ||= text.includes("Factory observation: turn=");
+          observations.checkout ||=
+            text.includes("Factory observation: turn=") ||
+            (text.includes("headCommit") && text.includes("runtimeAttemptId"));
           // Retain only recognized integration failures, never arbitrary tool output.
           for (const error of [
             "browser container operation was not confirmed",
@@ -129,7 +131,7 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
           }
           await inspect(body);
           if (runtimeProbe) {
-            const turn = /browser-client ([a-f0-9-]{36})/.exec(text)?.[1];
+            const turn = /Current Build turn: ([a-f0-9-]{36})/.exec(text)?.[1];
             if (!turn)
               return Response.json(
                 { error: "Probe requires the admitted browser instruction" },
@@ -142,21 +144,12 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
               { name: "browser_screenshot", arguments: {} },
             ];
             const call = calls[observations.requests - 1];
-            const imagePath = /\/tmp\/factory-build-browser-[a-f0-9-]{36}\/screenshot\.jpg/.exec(
-              text,
-            )?.[0];
             const tool = call
               ? {
-                  name: "shell",
-                  arguments: JSON.stringify({
-                    command: `printf '%s' '${JSON.stringify(call)}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${turn}`,
-                    description:
-                      "Inspect the exact declared App through the fixed Factory browser client",
-                  }),
+                  name: `factory_browser_${call.name}`,
+                  arguments: JSON.stringify(call.arguments),
                 }
-              : observations.requests === 5 && imagePath
-                ? { name: "read", arguments: JSON.stringify({ path: imagePath }) }
-                : undefined;
+              : undefined;
             if (!tool) {
               if (images.size > 0)
                 await new Promise<void>((resolve) => {
@@ -310,7 +303,7 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
             summary:
               "Fix the Continue button overlapping Delivery dashboard in src/browser-page.html. The manual fixture template reader in src/server.mjs is intentional and must be retained.",
             acceptanceCriteria: [
-              "Before editing, use the fixed Factory browser-client to open declared App app, inspect its DOM and console, capture a screenshot and read that JPEG with the native read tool. Reproduce the overlap visually.",
+              "Before editing, use the native Factory browser tools to open declared App app, inspect its DOM and console, capture a screenshot and inspect the returned image. Reproduce the overlap visually.",
               "Continue is in normal document flow below Delivery dashboard, not positioned over the heading. Edit only src/browser-page.html; keep the page readable and the fixture template reader intact.",
               "After editing, use browser_open again on App app, inspect DOM and console, capture and read a second screenshot. Describe the finding with the returned turn/App/checkout context. No scripts or arbitrary URLs in browser tools.",
               "node --check src/server.mjs passes. Do not restart the App: the fixture reads browser-page.html on each HTTP request.",

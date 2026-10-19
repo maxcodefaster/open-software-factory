@@ -290,6 +290,7 @@ export function createChangeAdmission(
       {
         mode: "build",
         submissionPolicy: "native",
+        browserTransport: "mcp",
         modelId: modelID,
         ...(modelConnection ? { modelConnection } : {}),
         ...(codingReasoning ? { codingReasoning } : {}),
@@ -377,12 +378,14 @@ export function createChangeAdmission(
           skills: unknown;
           criteria: number;
           submissionPolicy: "native" | null;
+          browserTransport: "mcp" | null;
         }>
       >`SELECT intent.turn_id AS "turnID", intent.change_id AS "changeID", intent.session_id AS "sessionID",
         intent.prompt_id AS "promptID", intent.prompt_text AS text, intent.bootstrap, intent.session_title AS title,
         intent.runtime_attempt_id AS "attemptID", intent.skill_loading AS "skillLoading",
         intent.skill_manifest AS "skillManifest", intent.skill_attachments AS skills,
         turn.authority->>'submissionPolicy' AS "submissionPolicy",
+        turn.authority->>'browserTransport' AS "browserTransport",
         jsonb_array_length(revision.canonical_content::jsonb->'acceptanceCriteria') AS criteria
         FROM factory.change_agent_turn_intent intent
         JOIN factory.agent_turn turn ON turn.id=intent.turn_id

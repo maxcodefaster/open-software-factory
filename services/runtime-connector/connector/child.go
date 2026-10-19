@@ -413,16 +413,31 @@ func (runtime *childRuntime) handleHTTPRequest(ctx context.Context, message Mess
 	}); err != nil {
 		return false
 	}
-	limited := io.LimitReader(response.Body, maxResponseBytes+1)
+	// Native subscriptions have no lifetime byte limit. Each frame is still
+	// bounded and synchronously forwarded; Factory cancels slow readers at its
+	// bounded receive buffer. Ordinary responses retain their total byte limit.
+	parts := strings.Split(request.URL.Path, "/")
+	followingLog := len(parts) == 5 && parts[1] == "api" && parts[2] == "session" &&
+		parts[3] != "" && parts[4] == "log" && request.URL.Query().Get("follow") == "true"
+	nativeStream := channel.Kind == "agent" && message.Method == http.MethodGet &&
+		response.StatusCode == http.StatusOK &&
+		strings.EqualFold(strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]), "text/event-stream") &&
+		(request.URL.Path == "/api/event" || followingLog)
+	var reader io.Reader = response.Body
+	if !nativeStream {
+		reader = io.LimitReader(response.Body, maxResponseBytes+1)
+	}
 	buffer := make([]byte, 32<<10)
 	total := 0
 	for {
-		count, readErr := limited.Read(buffer)
+		count, readErr := reader.Read(buffer)
 		if count > 0 {
-			total += count
-			if total > maxResponseBytes {
-				runtime.sendError(message.StreamID, "channel response exceeded limit")
-				return false
+			if !nativeStream {
+				total += count
+				if total > maxResponseBytes {
+					runtime.sendError(message.StreamID, "channel response exceeded limit")
+					return false
+				}
 			}
 			if err := runtime.send(Message{
 				Type:     "stream-data",

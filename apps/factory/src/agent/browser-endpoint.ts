@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   buildBrowserCallInput,
   buildBrowserToolCatalogue,
+  type BuildBrowserResult,
 } from "../../../../packages/conversation-domain/src/browser-tools";
 import { CommandError } from "../command-error";
 import { json } from "../http";
@@ -13,6 +14,50 @@ const rpcInput = z.strictObject({
   method: z.string().min(1).max(100),
   params: z.record(z.string(), z.unknown()).optional(),
 });
+const toolCallInput = z.strictObject({
+  name: z.string(),
+  arguments: z.record(z.string(), z.unknown()),
+  _meta: z.record(z.string(), z.unknown()).optional(),
+});
+
+export function decodeBuildBrowserCall(params: unknown) {
+  const envelope = toolCallInput.safeParse(params);
+  if (!envelope.success) return null;
+  // Native MCP adds session/progress metadata. It is not tool input and cannot
+  // select Factory authority; only the authenticated endpoint determines that.
+  const call = buildBrowserCallInput.safeParse({
+    name: envelope.data.name,
+    arguments: envelope.data.arguments,
+  });
+  return call.success ? call.data : null;
+}
+
+export function browserMcpResult(result: BuildBrowserResult): BuildBrowserResult {
+  if (result.isError || !result.structuredContent) return result;
+  // OpenCode retains structuredContent but sends explicit content to the model.
+  // Keep trusted checkout provenance visible beside images, within the same
+  // text bound, rather than relying on hidden MCP result metadata.
+  const text = [
+    `Factory observation: ${JSON.stringify(result.structuredContent)}`,
+    ...result.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+  ].join("\n");
+  const notice = "\n[Factory truncated this App observation]";
+  const bytes = Buffer.from(text);
+  let end = 32_768 - Buffer.byteLength(notice);
+  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end--;
+  const images = result.content.filter((part) => part.type === "image");
+  if (images.length > 1) throw new Error("Browser observation contains too many images");
+  return {
+    ...result,
+    content: [
+      {
+        type: "text",
+        text: bytes.length > 32_768 ? bytes.subarray(0, end).toString() + notice : text,
+      },
+      ...images,
+    ],
+  };
+}
 
 async function readRPC(request: Request) {
   if (Number(request.headers.get("content-length")) > 16_384) return null;
@@ -50,7 +95,10 @@ async function readRPC(request: Request) {
 // Minimal stateless Streamable HTTP for Factory's fixed facade. No user-facing
 // registration, SSE log stream, generic resource access or host transport.
 export function createBuildBrowserEndpoint(
-  controller: ReturnType<typeof createBuildBrowserController>,
+  controller: Pick<
+    ReturnType<typeof createBuildBrowserController>,
+    "authorize" | "authorizeRuntime" | "call"
+  >,
 ) {
   return async (request: Request, target: string | { attemptID: string; turnID: string }) => {
     if (request.headers.has("origin"))
@@ -99,16 +147,18 @@ export function createBuildBrowserEndpoint(
         return reply({ tools: buildBrowserToolCatalogue });
       }
       case "tools/call": {
-        const call = buildBrowserCallInput.safeParse(rpc.params);
-        if (!call.success) return fail(-32602, "Unsupported browser tool or arguments");
+        const call = decodeBuildBrowserCall(rpc.params);
+        if (!call) return fail(-32602, "Unsupported browser tool or arguments");
         try {
           return reply(
-            await controller.call(
-              authorized.session,
-              authorized.ownerToken,
-              call.data,
-              rpc.id,
-              request.signal,
+            browserMcpResult(
+              await controller.call(
+                authorized.session,
+                authorized.ownerToken,
+                call,
+                rpc.id,
+                request.signal,
+              ),
             ),
           );
         } catch (cause) {

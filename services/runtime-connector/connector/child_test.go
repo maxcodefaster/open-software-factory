@@ -534,6 +534,96 @@ func TestChildForwardsHTTPAndWebSocket(t *testing.T) {
 	}
 }
 
+func TestChildBoundsFiniteResponsesWithoutTruncatingNativeEventStreams(t *testing.T) {
+	for _, test := range []struct {
+		name, kind, method, path, contentType string
+		streaming                             bool
+	}{
+		{"events", "agent", "GET", "/api/event", "text/event-stream; charset=utf-8", true},
+		{"following-log", "agent", "GET", "/api/session/ses_owned/log?follow=true", "text/event-stream", true},
+		{"finite-log", "agent", "GET", "/api/session/ses_owned/log?follow=false", "text/event-stream", false},
+		{"app", "app", "GET", "/api/event", "text/event-stream", false},
+		{"wrong-type", "agent", "GET", "/api/event", "application/json", false},
+		{"other-path", "agent", "GET", "/api/info", "text/event-stream", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payloadSize := maxResponseBytes + 1024
+			application := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", test.contentType)
+				_, _ = io.CopyN(w, &repeatedByteReader{}, int64(payloadSize))
+			}))
+			defer application.Close()
+			result := make(chan error, 1)
+			upgrader := websocket.Upgrader{}
+			control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				connection, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					result <- err
+					return
+				}
+				defer connection.Close()
+				total := 0
+				for {
+					var message Message
+					if err := connection.ReadJSON(&message); err != nil {
+						result <- err
+						return
+					}
+					if message.Type == "stream-data" {
+						data, err := base64.StdEncoding.DecodeString(message.Data)
+						if err != nil {
+							result <- err
+							return
+						}
+						total += len(data)
+					}
+					if message.Type == "stream-end" || message.Type == "stream-error" {
+						if test.streaming && (message.Type != "stream-end" || total != payloadSize) {
+							result <- fmt.Errorf("native stream truncated after %d bytes: %s", total, message.Error)
+						} else if !test.streaming && (message.Type != "stream-error" || total > maxResponseBytes) {
+							result <- fmt.Errorf("finite response lost its bound: %d bytes, %s", total, message.Type)
+						} else {
+							result <- nil
+						}
+						return
+					}
+				}
+			}))
+			defer control.Close()
+			connection, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(control.URL, "http"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			runtime := childRuntime{
+				assignment: Assignment{Channels: []Channel{{Name: "owned", Kind: test.kind, Target: application.URL}}},
+				control:    &controlConnection{connection: connection},
+				httpClient: application.Client(),
+			}
+			runtime.handleHTTPRequest(context.Background(), Message{
+				StreamID: "owned", Channel: "owned", Method: test.method, Path: test.path,
+			})
+			select {
+			case err := <-result:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("stream did not settle")
+			}
+		})
+	}
+}
+
+type repeatedByteReader struct{}
+
+func (*repeatedByteReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = 'x'
+	}
+	return len(p), nil
+}
+
 func exerciseChildControl(connection *websocket.Conn) error {
 	var hello Message
 	if err := connection.ReadJSON(&hello); err != nil {

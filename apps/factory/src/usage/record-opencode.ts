@@ -10,7 +10,12 @@ type Client = ReturnType<typeof createOpenCodeClient>;
 
 export function createRecordedOpenCodeUsage(database: Database) {
   const journal = createUsageJournal(database);
-  async function drain(turnID: string, client: Client, root: string) {
+  async function drain(
+    turnID: string,
+    client: Client,
+    root: string,
+    sessionIDs?: readonly string[],
+  ) {
     const operationID = `turn:${turnID}`;
     const admitted =
       await database.client`SELECT id FROM factory.usage_operation WHERE id=${operationID}`;
@@ -22,7 +27,7 @@ export function createRecordedOpenCodeUsage(database: Database) {
       JOIN factory.change_agent_turn_intent current_intent ON current_intent.turn_id::text=substring(current.id from 6)
       WHERE intent.change_id=current_intent.change_id AND operation.created_at>current.created_at
       ORDER BY operation.created_at LIMIT 1`;
-    for (const sessionID of await listOpenCodeSessionTree(client, root)) {
+    for (const sessionID of sessionIDs ?? (await listOpenCodeSessionTree(client, root))) {
       const [boundary] = next
         ? await database.client<
             Array<{ start_sequence: string }>

@@ -11,6 +11,7 @@ import { CommandError } from "../command-error";
 import { RuntimeParentOperationError, type RuntimeHub } from "../runtime/hub";
 import { projectAuthorityIn } from "../access/controller";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
+import { runtimeFactoryURL } from "../runtime/endpoints";
 import { createAgentTurnStore, type AgentTurnTransaction } from "./turn-store";
 
 type BrowserSession = {
@@ -298,7 +299,14 @@ export function createBuildBrowserController(
       const session = allowed ? await row(id) : undefined;
       if (!session || !["intended", "active"].includes(session.state))
         throw new CommandError("conflict", "Browser requires the current admitted Build execution");
-      return { sessionID: session.id, bearer: capability(session.id) };
+      return {
+        sessionID: session.id,
+        bearer: capability(session.id),
+        runtimeEndpoint: runtimeFactoryURL(
+          `/internal/build-browser/${session.attemptID}/${turnID}`,
+        ),
+        runtimeBearer: runtimeBuildBrowserToken(secret, session.attemptID, session.generation),
+      };
     },
 
     async authorize(id: string, authorization: string | null) {

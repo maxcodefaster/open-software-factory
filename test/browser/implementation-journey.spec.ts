@@ -4,6 +4,8 @@ import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { fulfillAgentView, streamedAgentView } from "../support/agent-activity-route";
+import type { AgentView } from "../../apps/factory/src/api-contracts";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -121,8 +123,8 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
   await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
     route.fulfill({ json: { changes: [change] } }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
       json: {
         state: "starting",
         sessionAvailable: true,
@@ -367,8 +369,8 @@ test("an admitted Coding-options request with a lost response reconnects to its 
       },
     }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
       json: {
         state: "starting",
         sessionAvailable: false,
@@ -471,8 +473,8 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
       },
     }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
       json: {
         state: "failed",
         sessionAvailable: true,
@@ -596,10 +598,10 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
       },
     }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, async (route) => {
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, async (route) => {
     agentReads++;
     if (holdingFirstObservation) await firstObservation.promise;
-    return route.fulfill({ json: view() });
+    return fulfillAgentView(route, { json: view() });
   });
   await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
   await page.route(`**/api/changes/${changeID}/writer`, (route) =>
@@ -817,8 +819,8 @@ for (const role of ["developer", "product-contributor"] as const) {
           },
         }),
       );
-      await member.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-        route.fulfill({
+      await member.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+        fulfillAgentView(route, {
           json: {
             state: "committed",
             sessionAvailable: true,
@@ -950,8 +952,8 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
       },
     }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
       json: {
         state: "failed",
         sessionAvailable: true,
@@ -1044,6 +1046,140 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
   });
 });
 
+test("Coding uses one live read, reconciles reconnects without duplicates, and detaches a closed panel", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const changeID = crypto.randomUUID();
+  const view: AgentView = {
+    state: "failed",
+    runtimeState: "ready",
+    sessionAvailable: true,
+    runtimeConnected: true,
+    messagesAvailable: true,
+    stopPending: false,
+    stopId: null,
+    messages: [
+      {
+        id: "assistant_owned:tool:call_owned",
+        role: "tool",
+        text: "bun test",
+        at: 1,
+        activity: { name: "shell", status: "running" },
+      },
+    ],
+  };
+  const stream = await streamedAgentView(view, new URL(page.url()).origin);
+  let statusReads = 0;
+  let mutations = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
+      mutations++;
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-stream",
+            baseSha: "a".repeat(40),
+            state: "active",
+            branchState: "succeeded",
+            implementationState: "failed",
+            buildTurnState: "failed",
+            runtimeState: "ready",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) => {
+    statusReads++;
+    return route.fulfill({ json: view });
+  });
+  await page.route(`**/api/changes/${changeID}/agent/activity`, (route) =>
+    route.continue({ url: stream.url }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
+    route.fulfill({
+      json: {
+        state: "agent",
+        epoch: 1,
+        canWrite: false,
+        yours: false,
+        commandID: null,
+      },
+    }),
+  );
+  const workspaceID = crypto.randomUUID();
+  const source = {
+    workspaceID,
+    serviceID: "owned-live-activity",
+    epoch: 1,
+    state: "preparing",
+    failure: null,
+  };
+  await page.route(`**/api/changes/${changeID}/source-workspace/ensure`, (route) =>
+    route.fulfill({ json: source }),
+  );
+  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) =>
+    route.fulfill({ json: source }),
+  );
+  try {
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button")
+      .click();
+    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    const rows = page.locator("details.agent-activity");
+    await expect(rows).toHaveCount(1);
+    const reads = statusReads;
+    await page.waitForTimeout(1_200);
+    expect(stream.requests()).toBe(1);
+    expect(statusReads).toBe(reads);
+    const message = view.messages[0];
+    if (!message) throw new Error("Owned tool activity missing");
+    const completed: AgentView = {
+      ...view,
+      messages: [
+        {
+          ...message,
+          activity: { name: "shell", status: "completed", detail: "12 passed" },
+        },
+      ],
+    };
+    stream.publish(completed);
+    stream.publish(completed);
+    await expect(rows).toHaveCount(1);
+    await rows.locator("summary").click();
+    await expect(rows.locator(".activity-output")).toHaveText("12 passed");
+    await mkdir(".factory/test-results/opencode-integration-fix-20261019", { recursive: true });
+    await page.screenshot({
+      path: ".factory/test-results/opencode-integration-fix-20261019/live-tool-wide.png",
+    });
+    stream.disconnect();
+    await expect.poll(stream.requests).toBe(2);
+    await expect(rows).toHaveCount(1);
+    await expect(rows).toHaveAttribute("open", "");
+    await expect(rows.locator(".activity-output")).toHaveText("12 passed");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: ".factory/test-results/opencode-integration-fix-20261019/live-tool-reconnected-narrow.png",
+    });
+    await page.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
+    await expect.poll(stream.readers).toBe(0);
+    expect(mutations).toBe(0);
+  } finally {
+    await stream.dispose();
+  }
+});
+
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
   page,
 }) => {
@@ -1086,14 +1222,14 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
     route.fulfill({ json: { changes: [change] } }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, async (route) => {
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, async (route) => {
     const snapshot = { ...agent, state };
     if (holdRead) {
       holdRead = false;
       held.resolve();
       await release.promise;
     }
-    await route.fulfill({ json: snapshot });
+    await fulfillAgentView(route, { json: snapshot });
   });
   await page.route(`**/api/changes/${changeID}/agent/stop`, (route) => {
     state = "stopped";
@@ -1185,7 +1321,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await page.getByRole("button", { name: "Stop OpenCode", exact: true }).click();
   await expect(page.locator(".agent-state")).toHaveText("Stopped");
   const oldResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === `/api/changes/${changeID}/agent`,
+    (response) => new URL(response.url()).pathname === `/api/changes/${changeID}/agent/activity`,
   );
   release.resolve();
   await oldResponse;

@@ -15,9 +15,9 @@ import (
 	"time"
 )
 
-// OpenCode API 2 does not yet expose its published MCP registration routes.
-// Its existing shell and image-read tools use this fixed client instead. The
-// client never accepts an endpoint, credential, file path or generic MCP call.
+// Retained admissions may still contain fixed CLI instructions. New Build turns
+// use native MCP registration. This client remains only for those immutable
+// older inputs and accepts no endpoint, credential, path or generic MCP call.
 func browserClientTimeout(name string) time.Duration {
 	if name == "browser_open" {
 		// The server can wait for the existing 180-second cold image preparation,

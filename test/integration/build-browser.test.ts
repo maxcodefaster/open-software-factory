@@ -637,7 +637,9 @@ test.each(["Stop", "completion"] as const)(
       >`SELECT state FROM factory.build_browser_session WHERE turn_id = ${turn.id}`;
       expect(prepared?.state).toBe("intended");
       const intent = await createChangeAdmission(owned.database, buildModelID).intent(turn.id);
-      expect(intent.text).toContain(`browser-client ${turn.id}`);
+      expect(intent.browserTransport).toBe("mcp");
+      expect(intent.text).toContain(`Current Build turn: ${turn.id}`);
+      expect(intent.text).not.toContain("browser-client");
       if (outcome === "Stop") await controller.stop(owned.changeID);
       else owned.finish();
       owned.release();

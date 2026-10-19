@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
-import { createDatabase } from "../../packages/db/src/client";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
@@ -180,8 +179,9 @@ test("a held Stop cannot interrupt newer work admitted into the same Session", a
 });
 
 test("Stop confirmation works with a single database connection", async () => {
-  const owned = await fixture();
-  const database = createDatabase(1);
+  const process = await factoryProcess();
+  const database = process.connect(1);
+  const owned = await fixture(undefined, undefined, database);
   let confirming: Promise<unknown> | undefined;
   try {
     const stop = createChangeAgentStop(database, owned.hub);
@@ -190,9 +190,9 @@ test("Stop confirmation works with a single database connection", async () => {
     expect(await Promise.race([confirming, Bun.sleep(500).then(() => "hung")])).toBe(true);
     expect(owned.interrupts()).toBe(1);
   } finally {
-    await database.client.end({ timeout: 0 });
     await confirming?.catch(() => undefined);
     await owned.dispose();
+    await process.dispose();
   }
 });
 

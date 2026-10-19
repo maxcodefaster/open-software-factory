@@ -8,6 +8,7 @@ import {
 } from "../../packages/conversation-domain/src/conversation";
 import { createDatabase } from "../../packages/db/src/client";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { fulfillAgentView } from "../support/agent-activity-route";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
 const evidenceDirectory = ".factory/test-results/interview-coherence";
@@ -391,8 +392,8 @@ for (const buildState of ["stopped", "failed"] as const)
         json: { changes: body.changes.map((change) => ({ ...change, runtimeState: "ready" })) },
       });
     });
-    await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-      route.fulfill({ json: buildView }),
+    await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+      fulfillAgentView(route, { json: buildView }),
     );
     let buildPrompt: unknown;
     await page.route(`**/api/changes/${changeID}/agent/prompt`, (route) => {

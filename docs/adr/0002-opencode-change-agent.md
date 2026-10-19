@@ -44,8 +44,15 @@ through the Connector's existing image-preparation window, probing only after it
 confirmed non-execution response. Every probe rechecks current Build ownership, Stop,
 permissions and runtime identity before receiving a fresh short execution lease. Other
 failures never authorize a replay. Caller disconnect ends further preparation probes.
-The fixed client's open-call deadline includes image preparation, container setup and cold
-Chrome launch; mutation deadlines are unchanged. Native shell guidance allows that client to wait.
+The browser transport's open-call deadline includes image preparation, container setup and cold
+Chrome launch; mutation deadlines are unchanged. Retained CLI instructions allow that client to wait.
+New admissions register Factory's fixed MCP facade through the pinned native OpenCode API.
+Registration is an in-memory, location-scoped override, not a Project configuration write.
+Its endpoint freezes the Runtime Attempt and Turn; the existing gateway still checks current
+owner, generation, lease and declared App for every call. Images reach the model in native tool
+results. The shell/JSON/file-read client remains only for older immutable admission instructions,
+not as a second path advertised to new work. Native registration never exposes an agent-facing
+generic MCP registry or weakens browser isolation.
 This avoids spending additional model turns guessing whether the browser is ready.
 An actual preparation failure still confirms no App inspection and does not justify
 repeating an uncertain UI mutation. Owned cleanup behavior otherwise remains unchanged.
@@ -93,3 +100,12 @@ IDE edits and agent edits are part of the same Change. A Sandbox can disappear w
 checkout or conversation, while every OpenCode process and inference capability remains
 generation-bound. Commit and push are auditable Factory operations rather than ambient powers
 available to arbitrary shell commands. A pushed commit enters exact-commit Verification.
+
+Native SSE is an ephemeral observation channel, not an admission or completion signal. Factory
+shares one subscription per observed Runtime Attempt and reconnects read-only after transport loss.
+The Side Panel receives authorized, bounded pending replacement snapshots, not a retained token
+queue. Reconnect reads native history again; stable tool identities prevent duplicate activity.
+Native events wake lifecycle and durable-usage observation, with a low-frequency reconciliation
+check for missed events. An idle native event alone cannot authorize commit or release a writer.
+Ownership renewal, ordered Stop, settled descendants/shells and final durable usage reconciliation
+remain independent of the browser connection.

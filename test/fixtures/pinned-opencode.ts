@@ -204,6 +204,7 @@ export async function pinnedOpenCode(
         heldCodingRequests: number;
         browserTools: string[];
         imageRequests: number;
+        browserContextRequests: number;
       }>;
     };
     await observe(

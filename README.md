@@ -41,6 +41,11 @@ Failed first preparation retains source and offers an explicit Retry.
 Build works toward the approved requirements and ends with an ordinary summary, without a required
 JSON checklist. A normal native finish submits changed source for independent Verification,
 not as proof of completion. Exact-commit checks and human Delivery approval remain separate.
+Coding activity streams through authenticated Factory access, with history reconciliation after
+reconnect and no repeated model request. New Build turns use native OpenCode MCP tools for the
+restricted development browser, including inline screenshots. Already admitted CLI instructions
+remain executable without rewriting their frozen input. Neither transport grants arbitrary MCP
+registration, URLs, scripts or access to human browser sessions.
 
 The local listener defaults to `0.0.0.0` so OrbStack-hosted runtimes can call Factory.
 Set `FACTORY_HOST` explicitly to narrow that listener, noting that loopback-only access may prevent

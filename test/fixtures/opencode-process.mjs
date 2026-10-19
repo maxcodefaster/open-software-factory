@@ -43,7 +43,7 @@ await writeFile(
             name: "Controlled response",
             capabilities: {
               tools: true,
-              input: process.env.FACTORY_PROCESS_BROWSER_TURN ? ["text", "image"] : ["text"],
+              input: ["text", "image"],
               output: ["text"],
             },
             limit: { context: 200000, output: 32000 },
@@ -61,11 +61,13 @@ let generation = 0;
 let providerRequests = 0;
 let browserTools = [];
 let imageRequests = 0;
+let browserContextRequests = 0;
 let hold = true;
 let reportUsage = false;
 let failure;
 let spawnChild = false;
 let runTool = false;
+let nativeBrowser = false;
 const held = new Map();
 function complete(response, coding = true) {
   if (response.destroyed) return;
@@ -73,34 +75,39 @@ function complete(response, coding = true) {
   const browserTurn = process.env.FACTORY_PROCESS_BROWSER_TURN;
   const step = providerRequests;
   const call =
-    runTool && coding
+    nativeBrowser && coding && step === 1
       ? {
-          name: "shell",
-          arguments: JSON.stringify({ command: "true", description: "Owned budget boundary" }),
+          name: browserTools.find((name) => name.endsWith("browser_screenshot")),
+          arguments: "{}",
         }
-      : spawnChild
+      : runTool && coding
         ? {
-            name: "subagent",
-            arguments: JSON.stringify({
-              agent: "general",
-              description: "Owned child usage",
-              prompt: "Return one short answer. No tools.",
-            }),
+            name: "shell",
+            arguments: JSON.stringify({ command: "true", description: "Owned budget boundary" }),
           }
-        : browserTurn && step <= 2
+        : spawnChild
           ? {
-              name: step === 1 ? "shell" : "read",
-              arguments: JSON.stringify(
-                step === 1
-                  ? {
-                      command: `printf '%s' '{"name":"browser_screenshot","arguments":{}}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${browserTurn}`,
-                      description: "Capture the fixed declared App screenshot",
-                      timeout: 270000,
-                    }
-                  : { path: `/tmp/factory-build-browser-${browserTurn}/screenshot.jpg` },
-              ),
+              name: "subagent",
+              arguments: JSON.stringify({
+                agent: "general",
+                description: "Owned child usage",
+                prompt: "Return one short answer. No tools.",
+              }),
             }
-          : undefined;
+          : browserTurn && step <= 2
+            ? {
+                name: step === 1 ? "shell" : "read",
+                arguments: JSON.stringify(
+                  step === 1
+                    ? {
+                        command: `printf '%s' '{"name":"browser_screenshot","arguments":{}}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${browserTurn}`,
+                        description: "Capture the fixed declared App screenshot",
+                        timeout: 270000,
+                      }
+                    : { path: `/tmp/factory-build-browser-${browserTurn}/screenshot.jpg` },
+                ),
+              }
+            : undefined;
   if (spawnChild) spawnChild = false;
   if (coding) runTool = false;
   const deltas = call
@@ -165,6 +172,7 @@ function start() {
 
 const control = createServer(async (request, response) => {
   try {
+    if (request.url === "/control/browser-mcp" && request.method === "POST") nativeBrowser = true;
     if (request.url === "/control/usage" && request.method === "POST") reportUsage = true;
     if (request.url === "/control/deny" && request.method === "POST")
       failure =
@@ -185,6 +193,9 @@ const control = createServer(async (request, response) => {
         )
       )
         imageRequests += 1;
+      const messages = JSON.stringify(input.messages);
+      if (messages.includes("headCommit") && messages.includes("runtimeAttemptId"))
+        browserContextRequests += 1;
       browserTools = (input.tools ?? [])
         .map((tool) => tool.function?.name)
         .filter((name) => typeof name === "string" && name.includes("browser"));
@@ -230,6 +241,7 @@ const control = createServer(async (request, response) => {
         "/control/fail",
         "/control/child",
         "/control/tool",
+        "/control/browser-mcp",
       ].includes(request.url)
     ) {
       response.writeHead(404);
@@ -247,6 +259,7 @@ const control = createServer(async (request, response) => {
         heldCodingRequests: [...held.values()].filter(Boolean).length,
         browserTools,
         imageRequests,
+        browserContextRequests,
       }),
     );
   } catch (error) {

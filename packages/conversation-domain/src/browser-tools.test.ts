@@ -8,6 +8,14 @@ test("Build browser instructions distinguish System Contract App IDs from runtim
   expect(instructions).toContain("primaryApp web must be opened as app, not web");
 });
 
+test("native browser guidance uses tools and inline images without the CLI detour", () => {
+  const instructions = buildBrowserInstructions("owned-turn");
+  expect(instructions).toContain("factory_browser_browser_open");
+  expect(instructions).toContain("Inspect the image directly");
+  expect(instructions).not.toContain("browser-client");
+  expect(instructions).not.toContain("270000");
+  expect(instructions).toContain("Never repeat an unconfirmed UI mutation");
+});
 test("Build browser exposes bounded mobile viewport and keyboard controls", () => {
   for (const call of [
     { name: "browser_resize", arguments: { width: 390, height: 720 } },
