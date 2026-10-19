@@ -1,4 +1,5 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import type { createChangeWriterController } from "../access/writer-controller";
@@ -1384,9 +1385,18 @@ export function createAgentController(
       for (const turn of pending) run(execute(turn.id));
     },
 
-    async start(changeID: string, userID: string, commandId: string) {
+    async start(
+      changeID: string,
+      userID: string,
+      commandId: string,
+      codingReasoning?: CodingReasoning,
+    ) {
       if (closed) throw new Error("Agent controller is closed");
-      const accepted = await admission.admit(changeID, userID, { kind: "change-start", commandId });
+      const accepted = await admission.admit(changeID, userID, {
+        kind: "change-start",
+        commandId,
+        ...(codingReasoning ? { codingReasoning } : {}),
+      });
       if (!accepted.replayed) run(execute(accepted.turn.id));
       return this.get(changeID, accepted.turn.id);
     },

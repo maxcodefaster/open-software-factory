@@ -2,6 +2,7 @@ import { z } from "zod";
 import { agentTurnStates } from "./agent-turn";
 import { conversationModeInput } from "./conversation";
 import { turnUsageInput, unavailableTurnUsage } from "./turn-usage";
+import { codingReasoningInput } from "./model-settings";
 
 export const projectAgentProgressInput = z.object({
   phase: z.enum(["guidance", "thinking", "searching", "reading", "validating"]),
@@ -18,6 +19,7 @@ export const turnObservationInput = z.object({
   engine: z.enum(["mastra", "opencode"]),
   mode: conversationModeInput,
   modelId: z.string(),
+  codingReasoning: codingReasoningInput.optional(),
   usage: turnUsageInput.default(unavailableTurnUsage),
   progress: projectAgentProgressInput.optional(),
   skills: z

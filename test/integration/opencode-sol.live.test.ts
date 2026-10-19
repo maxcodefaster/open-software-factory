@@ -7,13 +7,17 @@ import {
 } from "../../apps/factory/src/agent/opencode-client";
 import { openCodeModelConfiguration } from "../../packages/runtime-kubernetes/src/opencode-model";
 import { pinnedOpenCode } from "../fixtures/pinned-opencode";
+import { codingReasoningInput } from "../../packages/conversation-domain/src/model-settings";
 
 test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
-  "pinned OpenCode implements and tests an owned goal using Azure Sol and medium reasoning",
+  "pinned OpenCode implements and tests an owned goal using Azure Sol and selected reasoning",
   async () => {
     const apiKey = process.env["FACTORY_MODEL_API_KEY"];
     const baseURL = process.env["FACTORY_MODEL_BASE_URL"];
     const modelID = process.env["FACTORY_AGENT_MODEL_ID"];
+    const reasoningEffort = codingReasoningInput.parse(
+      process.env["FACTORY_OPENCODE_SOL_REASONING"] ?? "medium",
+    );
     if (!apiKey || !baseURL || modelID !== "gpt-6.1-sol")
       throw new Error("Explicit Azure Sol connection required for this live proof");
     const endpoint = new URL(baseURL);
@@ -23,7 +27,7 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
     const directory = resolve(".factory/test-results/opencode-sol", id);
     await mkdir(directory, { recursive: true });
     const requests: Array<{ path: string; model: string; reasoning: string }> = [];
-    const configuration = openCodeModelConfiguration({ modelID, reasoningEffort: "medium" });
+    const configuration = openCodeModelConfiguration({ modelID, reasoningEffort });
     const capability = crypto.randomUUID();
     const proxy = Bun.serve({
       hostname: "0.0.0.0",
@@ -35,7 +39,11 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
         if (request.headers.get("authorization") !== `Bearer ${capability}`)
           return new Response(null, { status: 401 });
         const body = await request.json();
-        if (body.model !== modelID || body.reasoning?.effort !== "medium" || body.store !== false)
+        if (
+          body.model !== modelID ||
+          body.reasoning?.effort !== reasoningEffort ||
+          body.store !== false
+        )
           return new Response(null, { status: 403 });
         requests.push({ path, model: body.model, reasoning: body.reasoning.effort });
         const response = await fetch(`${baseURL.replace(/\/$/, "")}/responses`, {
@@ -149,7 +157,7 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
       );
       expect(await behavior.exited).toBe(0);
       expect(requests.length).toBeGreaterThan(1);
-      expect(requests.every((request) => request.reasoning === "medium")).toBe(true);
+      expect(requests.every((request) => request.reasoning === reasoningEffort)).toBe(true);
       succeeded = true;
     } finally {
       await owned?.dispose();

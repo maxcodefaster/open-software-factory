@@ -56,6 +56,11 @@ import {
 import { useZero, useZeroQuery, ZeroProvider } from "../../../packages/zero-solid/src";
 import { takeSettingsReturn } from "./access/settings-return";
 import { AgentBlockers } from "./agent/configuration";
+import { BuildModelControls } from "./agent/build-model-controls";
+import {
+  codingReasoningInput,
+  type CodingReasoning,
+} from "../../../packages/conversation-domain/src/model-settings";
 import { createAgentCommandIds } from "./agent-command-ids";
 import {
   type AgentSnapshot,
@@ -317,6 +322,9 @@ function FactoryWorkspace(props: {
   const [desktopBackgroundKey, setDesktopBackgroundKey] = createSignal(
     props.uiPreference.desktopBackgroundKey,
   );
+  const [codingReasoningChoices, setCodingReasoningChoices] = createSignal<
+    Record<string, CodingReasoning | undefined>
+  >({});
   const [agent, setAgent] = createSignal<AgentView>({
     state: "idle",
     messages: [],
@@ -422,6 +430,27 @@ function FactoryWorkspace(props: {
   function acknowledgeCommand(scope: string, ...commandIds: string[]) {
     if (agentCommandIds.forget(scope, ...commandIds))
       setCommandAcknowledgements((value) => value + 1);
+  }
+  function chosenCodingReasoning() {
+    commandAcknowledgements();
+    const changeID = selectedChange()?.id;
+    if (!changeID) return undefined;
+    const choices = codingReasoningChoices();
+    if (Object.hasOwn(choices, changeID)) return choices[changeID];
+    try {
+      const pending = agentCommandIds.latest(agentCommandScope("change-start", changeID));
+      if (!pending) return undefined;
+      const saved = z
+        .object({
+          changeID: z.literal(changeID),
+          codingReasoning: codingReasoningInput.optional(),
+        })
+        .safeParse(JSON.parse(pending.input));
+      return saved.success ? saved.data.codingReasoning : undefined;
+    } catch {
+      // Unreadable recovery storage still blocks admission in forInput.
+      return undefined;
+    }
   }
   function acknowledgeConversation(value: ConversationView) {
     const messages: string[] = [];
@@ -553,6 +582,7 @@ function FactoryWorkspace(props: {
             agentPanelElement,
             () => setAgentOpen(false),
             agentOverlayOpener,
+            () => !agentOpen(),
           );
         }
       });
@@ -1426,11 +1456,16 @@ function FactoryWorkspace(props: {
     const scope = agentCommandScope("change-start", change.id);
     await mutate(async () => {
       if (!(await prepareBuildConversation(change.id))) return;
-      const commandId = agentCommandIds.forInput(scope, change.id);
+      const codingReasoning = agent().turn ? undefined : chosenCodingReasoning();
+      const input = { ...(codingReasoning ? { codingReasoning } : {}) };
+      const commandId = agentCommandIds.forInput(
+        scope,
+        codingReasoning ? JSON.stringify({ changeID: change.id, ...input }) : change.id,
+      );
       const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent/start`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId }),
+        body: JSON.stringify({ commandId, ...input }),
       });
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
@@ -3049,13 +3084,7 @@ function FactoryWorkspace(props: {
               <div class="assistant-context-row">
                 <AgentBlockers
                   projectID={selectedProjectID()}
-                  mode={
-                    canPromptBuild()
-                      ? "build"
-                      : assistantTicketID() && selectedChange()
-                        ? "investigate"
-                        : "plan"
-                  }
+                  mode={conversationMode()}
                   settingsOpen={workspaceView() === "settings"}
                   onSettings={openSettings}
                   turn={
@@ -3110,132 +3139,136 @@ function FactoryWorkspace(props: {
                     allowance is available.
                   </p>
                 </Show>
+                <Show when={!agentCanRun()}>
+                  <p class="agent-unavailable">
+                    {selectedChange()?.state === "branch-pending"
+                      ? "Preparing the Change branch. Implementation will be available when it is ready."
+                      : `This Change is ${selectedChange()?.state ?? "unavailable"}. OpenCode is read-only.`}
+                  </p>
+                </Show>
                 <Show when={agentCanRun() && !agent().codingPause}>
-                  <Show
-                    when={agentCanRun()}
-                    fallback={
-                      <div class="agent-unavailable">
-                        This Change is {selectedChange()?.state}. OpenCode remains read-only.
-                      </div>
-                    }
+                  <form
+                    class="agent-composer build-composer"
+                    onSubmit={(event) => {
+                      if (!canPromptBuild()) {
+                        event.preventDefault();
+                        void startAgent();
+                      } else void promptAgent(event);
+                    }}
+                    onReset={(event) => {
+                      const input = event.currentTarget.querySelector("textarea");
+                      queueMicrotask(() => {
+                        if (input) resizeComposer(input);
+                      });
+                    }}
                   >
-                    <Show
-                      when={
-                        correctionTarget() === selectedChange()?.id ||
-                        !buildAgentNeedsStart(agent())
-                      }
-                      fallback={
-                        <>
-                          <Show when={agent().state === "stopped" && !agent().stopPending}>
-                            <p class="agent-activity-notice" role="status">
-                              {buildAgentHint(agent())}
-                            </p>
-                          </Show>
-                          <button
-                            type="button"
-                            class="primary-button agent-start"
-                            disabled={
-                              pending() ||
-                              !props.modelRelayConfigured ||
-                              agentNeedsResolution() ||
-                              !!agent().commitOperation ||
-                              agent().stopPending ||
-                              blockersFor(selectedTicketID() ?? "").length > 0
-                            }
-                            title={
-                              props.modelRelayConfigured
-                                ? agent().stopPending
-                                  ? "Wait for Stop confirmation before starting new Build work"
-                                  : agent().commitOperation
-                                    ? "Wait for the current commit operation to be recovered"
-                                    : agentNeedsResolution()
-                                      ? "Stop the unresolved turn before an explicit retry"
-                                      : undefined
-                                : "Connect a Factory model before starting implementation"
-                            }
-                            onClick={() => void startAgent()}
-                          >
-                            <Icon name="play" />
-                            {agent().state === "failed"
-                              ? "Retry implementation"
-                              : "Start implementation"}
-                          </button>
-                        </>
-                      }
-                    >
-                      <form
-                        class="agent-composer"
-                        onSubmit={promptAgent}
-                        onReset={(event) => {
-                          const input = event.currentTarget.querySelector("textarea");
-                          queueMicrotask(() => {
-                            if (input) resizeComposer(input);
-                          });
+                    <Show when={canPromptBuild()}>
+                      <textarea
+                        rows={1}
+                        onKeyDown={composerKeyDown}
+                        onInput={(event) => resizeComposer(event.currentTarget)}
+                        ref={(element) =>
+                          restoreMessageDraft(element, () =>
+                            agentCommandScope("change-prompt", selectedChange()?.id),
+                          )
+                        }
+                        name="message"
+                        aria-label="Message conversation"
+                        placeholder={
+                          agent().state === "failed"
+                            ? "Describe what to fix in the retained code…"
+                            : agent().state === "stopped"
+                              ? "Ask a question or describe the next change…"
+                              : agentTurnBusy()
+                                ? "Prepare your next instructions, or Stop to change direction…"
+                                : "Ask a question or describe the next change…"
+                        }
+                        disabled={pending()}
+                      />
+                    </Show>
+                    <div class="agent-compose-toolbar">
+                      <BuildModelControls
+                        projectID={selectedProjectID()}
+                        changeID={selectedChange()?.id}
+                        turn={agent().turn}
+                        sessionAvailable={agent().sessionAvailable}
+                        disabled={
+                          pending() ||
+                          agentTurnBusy() ||
+                          agentNeedsResolution() ||
+                          Boolean(agent().commitOperation) ||
+                          agent().stopPending
+                        }
+                        reasoning={chosenCodingReasoning()}
+                        onChange={(value) => {
+                          const changeID = selectedChange()?.id;
+                          if (changeID)
+                            setCodingReasoningChoices((previous) => ({
+                              ...previous,
+                              [changeID]: value,
+                            }));
                         }}
-                      >
-                        <textarea
-                          rows={1}
-                          onKeyDown={composerKeyDown}
-                          onInput={(event) => resizeComposer(event.currentTarget)}
-                          ref={(element) =>
-                            restoreMessageDraft(element, () =>
-                              agentCommandScope("change-prompt", selectedChange()?.id),
-                            )
-                          }
-                          name="message"
-                          aria-label="Message conversation"
-                          placeholder={
-                            agent().state === "failed"
-                              ? "Describe what to fix in the retained code…"
-                              : agent().state === "stopped"
-                                ? "Ask a question or describe the next change…"
-                                : agentTurnBusy()
-                                  ? "Prepare your next instructions, or Stop to change direction…"
-                                  : "Ask a question or describe the next change…"
-                          }
-                          disabled={pending()}
-                        />
-                        <div>
-                          <small>{buildAgentHint(agent())}</small>
-                          <div class="composer-actions">
-                            <Show when={["starting", "working", "waiting"].includes(agent().state)}>
-                              <button
-                                type="button"
-                                class="agent-control"
-                                aria-label="Stop OpenCode"
-                                onClick={() => void stopAgent()}
-                              >
-                                <Icon name="stop" /> Stop
-                              </button>
-                            </Show>
+                      />
+                      <div class="composer-actions">
+                        <Show
+                          when={agentNeedsResolution() || agentTurnBusy()}
+                          fallback={
                             <button
                               type="submit"
                               class="agent-control primary"
-                              aria-label="Send message"
+                              aria-label={
+                                !canPromptBuild()
+                                  ? agent().state === "failed"
+                                    ? "Retry implementation"
+                                    : "Start implementation"
+                                  : "Send message"
+                              }
                               disabled={
                                 pending() ||
-                                agentTurnBusy() ||
                                 agentNeedsResolution() ||
-                                !!agent().commitOperation ||
+                                Boolean(agent().commitOperation) ||
                                 agent().stopPending ||
+                                (!canPromptBuild() && !props.modelRelayConfigured) ||
                                 blockersFor(selectedTicketID() ?? "").length > 0
                               }
+                              title={
+                                !props.modelRelayConfigured
+                                  ? "Connect a Factory model before starting implementation"
+                                  : buildAgentHint(agent())
+                              }
                             >
-                              <Icon name="play" />
-                              <span class="sr-only">
-                                {agent().state === "stopped" ? "Resume" : "Send"}
-                              </span>
+                              <Icon name={canPromptBuild() ? "send" : "play"} />
+                              <Show
+                                when={!canPromptBuild()}
+                                fallback={
+                                  <span class="sr-only">
+                                    {agent().state === "stopped" ? "Resume" : "Send"}
+                                  </span>
+                                }
+                              >
+                                {agent().state === "failed" ? "Retry" : "Start"}
+                              </Show>
                             </button>
-                          </div>
-                        </div>
-                      </form>
-                    </Show>
-                    <Show when={agentNeedsResolution()}>
-                      <button type="button" class="agent-control" onClick={() => void stopAgent()}>
-                        <Icon name="stop" /> Stop unresolved turn
-                      </button>
-                    </Show>
-                  </Show>
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="agent-control"
+                            aria-label={
+                              agentNeedsResolution() ? "Stop unresolved turn" : "Stop OpenCode"
+                            }
+                            disabled={pending() || agent().stopPending}
+                            onClick={() => void stopAgent()}
+                          >
+                            <Icon name="stop" />
+                            <span class="sr-only">
+                              {agentNeedsResolution() ? "Stop unresolved turn" : "Stop"}
+                            </span>
+                          </button>
+                        </Show>
+                      </div>
+                    </div>
+                  </form>
                   <Show when={!props.modelRelayConfigured}>
                     <p class="agent-configuration-note">
                       Model connection required before implementation can start.
@@ -3243,7 +3276,7 @@ function FactoryWorkspace(props: {
                   </Show>
                 </Show>
               </Show>
-              <Show when={!canPromptBuild() && !interviewOwnsComposer()}>
+              <Show when={conversationMode() !== "build" && !interviewOwnsComposer()}>
                 <form
                   class="agent-composer conversation-composer"
                   onSubmit={sendConversationMessage}
@@ -3266,14 +3299,14 @@ function FactoryWorkspace(props: {
                     placeholder={conversationPlaceholder()}
                     disabled={assistantPending() || !selectedProject()}
                   />
-                  <div>
+                  <div class="agent-compose-toolbar">
                     <button
                       type="submit"
                       class="agent-control primary"
                       aria-label="Send message"
                       disabled={assistantPending() || !selectedProject()}
                     >
-                      <Icon name="play" />
+                      <Icon name="send" />
                       <span class="sr-only">Send</span>
                     </button>
                   </div>

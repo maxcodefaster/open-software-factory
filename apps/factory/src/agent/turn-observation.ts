@@ -14,18 +14,22 @@ export async function readTurnObservation(database: Database, target: Target) {
       state: string;
       summary: string | null;
       authority: unknown;
+      provider: string | null;
     }>
   >`
-    SELECT id, command_id AS "commandId", state, outcome_summary AS summary, authority
-    FROM factory.agent_turn
+    SELECT turn.id, turn.command_id AS "commandId", turn.state, turn.outcome_summary AS summary, turn.authority,
+      connection.provider
+    FROM factory.agent_turn turn LEFT JOIN factory.model_connection_version connection
+      ON connection.connection_id::text=turn.authority->'modelConnection'->>'connectionID'
+      AND connection.version::text=turn.authority->'modelConnection'->>'version'
     WHERE (${"changeID" in target ? target.changeID : null}::uuid IS NOT NULL
-      AND change_id = ${"changeID" in target ? target.changeID : null}
+      AND turn.change_id = ${"changeID" in target ? target.changeID : null}
       AND (${"turnID" in target ? (target.turnID ?? null) : null}::uuid IS NULL
-        OR id = ${"turnID" in target ? (target.turnID ?? null) : null}))
+        OR turn.id = ${"turnID" in target ? (target.turnID ?? null) : null}))
       OR (${"conversationID" in target ? target.conversationID : null}::uuid IS NOT NULL
-        AND conversation_id = ${"conversationID" in target ? target.conversationID : null}
-        AND change_id IS NULL)
-    ORDER BY created_at DESC, id DESC LIMIT 1`;
+        AND turn.conversation_id = ${"conversationID" in target ? target.conversationID : null}
+        AND turn.change_id IS NULL)
+    ORDER BY turn.created_at DESC, turn.id DESC LIMIT 1`;
   const row = rows[0];
   if (!row) return undefined;
   const authority = agentTurnAuthorityInput.parse(row.authority);
@@ -53,6 +57,11 @@ export async function readTurnObservation(database: Database, target: Target) {
     engine: authority.mode === "build" ? "opencode" : "mastra",
     mode: authority.mode,
     modelId: authority.modelId,
+    ...(authority.mode === "build" &&
+    authority.codingReasoning &&
+    (row.provider ?? process.env["FACTORY_MODEL_PROVIDER"] ?? "openai") === "openai"
+      ? { codingReasoning: authority.codingReasoning }
+      : {}),
     skills,
   });
 }

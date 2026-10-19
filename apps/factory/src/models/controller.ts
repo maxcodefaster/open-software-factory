@@ -21,6 +21,7 @@ import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { providerCatalogue } from "./native";
+import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
 
 export async function codingReasoningIn(sql: AgentTurnTransaction) {
   await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
@@ -122,6 +123,11 @@ export function createModelSettingsController(
       models,
       connection: {
         configured: Boolean(connections.length || (baseURL && apiKey)),
+        buildProvider: modelProvider.parse(
+          connections.find((entry) => entry.role === "build")?.provider ??
+            process.env["FACTORY_MODEL_PROVIDER"] ??
+            "openai",
+        ),
         host: connections[0]
           ? new URL(connections[0].endpoint).host
           : baseURL

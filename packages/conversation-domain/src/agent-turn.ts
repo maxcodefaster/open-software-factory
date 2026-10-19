@@ -4,12 +4,17 @@ import { modelConnectionReference } from "./model-connection";
 import { skillRevisionIDsInput } from "./skills";
 import { codingReasoningInput } from "./model-settings";
 
-export const changeAgentStartInput = z.object({ commandId: z.uuid() }).strict();
-export const changeAgentResumeInput = changeAgentStartInput
+const changeAgentCommandInput = z.object({ commandId: z.uuid() }).strict();
+export const changeAgentStartInput = changeAgentCommandInput
+  .extend({
+    codingReasoning: codingReasoningInput.optional(),
+  })
+  .strict();
+export const changeAgentResumeInput = changeAgentCommandInput
   .extend({ pausedTurnId: z.uuid() })
   .strict();
 export const changeAgentStopConfirmationInput = z.object({ stopId: z.uuid() }).strict();
-export const changeAgentPromptInput = changeAgentStartInput
+export const changeAgentPromptInput = changeAgentCommandInput
   .extend({
     text: z.string().trim().min(1).max(8_000),
   })
@@ -49,7 +54,13 @@ export const agentTurnCommandInput = z.discriminatedUnion("kind", [
       answer: interviewAnswerInput,
     })
     .strict(),
-  z.object({ ...changeFields, kind: z.literal("change-start") }).strict(),
+  z
+    .object({
+      ...changeFields,
+      kind: z.literal("change-start"),
+      codingReasoning: codingReasoningInput.optional(),
+    })
+    .strict(),
   z
     .object({
       ...changeFields,

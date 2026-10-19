@@ -13,8 +13,13 @@ account access or quota; bounded model probes and provider-reported headers do. 
 fallback changes an admitted model or paid request. OpenCode receives only a Build-bound Factory
 capability; native provider traffic passes through the authorized relay without protocol conversion.
 
-New OpenAI Build admissions freeze an administrator-selected reasoning effort of at least
-medium and use the pinned native Responses adapter. The relay rejects a different effort or
+New OpenAI Build admissions freeze a reasoning effort of at least medium and use the pinned
+native Responses adapter. The administrator sets the default beside the Coding model; a person
+may select another allowed effort in chat before the first Build. Model and reasoning defaults
+are adopted together only after the exact access probe succeeds. Probe intent retains the
+requested effort, and changed command replays cannot silently adopt another value.
+The chat shows the fixed admitted value after work starts rather than offering an ineffective
+runtime override. The relay rejects a different effort or
 transport rather than rewriting the request. Admin changes apply to new Changes and probes,
 not running work or retained historical configurations. Other providers retain their concrete
 native adapters and options. A successful access probe proves a real native tool call, not

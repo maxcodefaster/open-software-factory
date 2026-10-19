@@ -63,6 +63,7 @@
   margin: var(--space-2) 0 0;
 }
 .settings-content .settings-scope-description {
+  margin-inline: 0;
   padding-inline: var(--space-6);
   color: var(--color-ink-muted);
   font-size: var(--text-sm);

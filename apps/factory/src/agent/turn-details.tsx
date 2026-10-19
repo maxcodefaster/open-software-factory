@@ -1,5 +1,6 @@
 import { For, Show } from "solid-js";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
+import { reasoningLabels } from "../models/reasoning";
 
 const measured = (value: number | null) => (value === null ? "Unknown" : value.toLocaleString());
 
@@ -26,6 +27,14 @@ export function TurnDetails(props: { turn: TurnObservation | undefined }) {
             </dd>
             <dt>Model</dt>
             <dd>{turn().modelId}</dd>
+            <Show when={turn().codingReasoning}>
+              {(reasoning) => (
+                <>
+                  <dt>Reasoning</dt>
+                  <dd>{reasoningLabels[reasoning()]}</dd>
+                </>
+              )}
+            </Show>
             <dt>Skills</dt>
             <dd>
               <Show when={turn().skills.length} fallback="No Skills admitted">

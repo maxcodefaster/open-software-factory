@@ -18,6 +18,7 @@ export type IconName =
   | "minimize"
   | "more"
   | "play"
+  | "send"
   | "preview"
   | "settings"
   | "search"
@@ -84,6 +85,9 @@ export function Icon(props: { name: IconName }) {
         </Match>
         <Match when={props.name === "play"}>
           <path d="m9 7 8 5-8 5V7Z" />
+        </Match>
+        <Match when={props.name === "send"}>
+          <path d="M12 19V5m-6 6 6-6 6 6" />
         </Match>
         <Match when={props.name === "preview"}>
           <rect x="3" y="5" width="18" height="14" rx="2" />

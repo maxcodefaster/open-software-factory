@@ -19,7 +19,7 @@ import {
   modelRoleConnectionView,
   type ModelProbeResult,
 } from "../../../../packages/conversation-domain/src/model-connection";
-import { codingReasoningIn, modelEnvironment } from "./controller";
+import { codingReasoningIn, createModelSettingsController, modelEnvironment } from "./controller";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { deploymentModelConnections } from "./deployment";
 import { recordedMastraUsage } from "../usage/record-mastra";
@@ -188,10 +188,12 @@ export function createModelConnections(
             role: string;
             settingsVersion: number;
             createdBy: string;
+            reasoningEffort: CodingReasoning | null;
           }>
         >`
           SELECT state, result, connection_id AS "connectionID", connection_version::float8 AS version, model_id AS "modelId", role,
-            settings_version::float8 AS "settingsVersion", created_by AS "createdBy" FROM factory.model_role_probe WHERE command_id=${input.commandID}`;
+            settings_version::float8 AS "settingsVersion", created_by AS "createdBy",
+            reasoning_effort AS "reasoningEffort" FROM factory.model_role_probe WHERE command_id=${input.commandID}`;
         if (previous) {
           if (
             previous.createdBy !== userID ||
@@ -199,7 +201,8 @@ export function createModelConnections(
             previous.version !== input.version ||
             previous.modelId !== input.modelId ||
             previous.role !== input.role ||
-            previous.settingsVersion !== input.settingsVersion
+            previous.settingsVersion !== input.settingsVersion ||
+            previous.reasoningEffort !== (input.reasoningEffort ?? null)
           )
             throw conflict();
           if (previous.state === "probing")
@@ -213,10 +216,17 @@ export function createModelConnections(
           Array<{ version: number }>
         >`SELECT version::float8 AS version FROM factory.model_defaults WHERE singleton`;
         if ((defaults?.version ?? 0) !== input.settingsVersion) throw conflict();
-        if (input.role === "build") reasoningEffort = await codingReasoningIn(sql);
-        if ((await current(sql, input.connectionID))?.version !== input.version) throw conflict();
-        await sql`INSERT INTO factory.model_role_probe(command_id, role, connection_id, connection_version, model_id, settings_version, created_by, state)
-          VALUES (${input.commandID}, ${input.role}, ${input.connectionID}, ${input.version}, ${input.modelId}, ${input.settingsVersion}, ${userID}, 'probing')`;
+        if (input.role === "build")
+          reasoningEffort = input.reasoningEffort ?? (await codingReasoningIn(sql));
+        const selected = await current(sql, input.connectionID);
+        if (selected?.version !== input.version) throw conflict();
+        if (input.reasoningEffort && selected.provider !== "openai")
+          throw new CommandError(
+            "conflict",
+            "Reasoning selection is available for OpenAI Coding models only.",
+          );
+        await sql`INSERT INTO factory.model_role_probe(command_id, role, connection_id, connection_version, model_id, settings_version, created_by, state, reasoning_effort)
+          VALUES (${input.commandID}, ${input.role}, ${input.connectionID}, ${input.version}, ${input.modelId}, ${input.settingsVersion}, ${userID}, 'probing', ${input.reasoningEffort ?? null})`;
         return undefined;
       });
       if (admitted) return admitted;
@@ -265,14 +275,18 @@ export function createModelConnections(
             model_id=EXCLUDED.model_id, updated_by=EXCLUDED.updated_by, updated_at=now()`;
         if (defaults) {
           const column = input.role === "planning" ? "planning_model_id" : "build_model_id";
-          const rules = defaults.rules;
-          if (rules) rules[input.role] = { ...rules[input.role], models: [input.modelId] };
-          await sql`UPDATE factory.model_defaults SET ${sql(column)}=${input.modelId}, role_rules=${rules ? JSON.stringify(rules) : null}::jsonb, version=version+1, updated_by=${userID}, updated_at=now() WHERE singleton`;
+          const { rules } = await createModelSettingsController(database).get(sql);
+          rules[input.role].models = [...new Set([...rules[input.role].models, input.modelId])];
+          if (input.role === "build") rules.build.reasoningEffort = reasoningEffort;
+          await sql`UPDATE factory.model_defaults SET ${sql(column)}=${input.modelId}, role_rules=${JSON.stringify(rules)}::jsonb, version=version+1, updated_by=${userID}, updated_at=now() WHERE singleton`;
         } else {
           const environment = modelEnvironment();
-          await sql`INSERT INTO factory.model_defaults(singleton, version, planning_model_id, build_model_id, updated_by)
+          const { rules } = await createModelSettingsController(database).get(sql);
+          rules[input.role].models = [...new Set([...rules[input.role].models, input.modelId])];
+          if (input.role === "build") rules.build.reasoningEffort = reasoningEffort;
+          await sql`INSERT INTO factory.model_defaults(singleton, version, planning_model_id, build_model_id, updated_by, role_rules)
             VALUES (true, 1, ${input.role === "planning" ? input.modelId : environment.planningModelId},
-              ${input.role === "build" ? input.modelId : environment.buildModelId}, ${userID})`;
+              ${input.role === "build" ? input.modelId : environment.buildModelId}, ${userID}, ${JSON.stringify(rules)}::jsonb)`;
         }
       });
       return result;

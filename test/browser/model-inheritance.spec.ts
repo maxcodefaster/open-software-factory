@@ -133,26 +133,38 @@ test("Project managers set model defaults and locks; developers select and Reset
     });
     await expect(lockedDialog.getByRole("combobox", { name: /^Build/ })).toBeDisabled();
     await expect(lockedBuild.getByText("Locked by Project Manager", { exact: true })).toBeVisible();
-    await mkdir(".factory/screenshots", { recursive: true });
+    await mkdir(".factory/test-results/model-inheritance", { recursive: true });
     await developer.setViewportSize({ width: 1440, height: 960 });
-    await developer.screenshot({ path: ".factory/screenshots/model-inheritance-wide.png" });
+    await developer.screenshot({ path: ".factory/test-results/model-inheritance/wide.png" });
     await developer.setViewportSize({ width: 390, height: 844 });
     expect(
       await developer.evaluate(() => document.documentElement.scrollWidth),
     ).toBeLessThanOrEqual(390);
-    for (const control of await lockedDialog.locator("select, button").all()) {
-      const box = await control.boundingBox();
-      if (!box) continue;
-      expect(box.x).toBeGreaterThanOrEqual(0);
-      expect(box.x + box.width).toBeLessThanOrEqual(390);
+    // Mobile navigation is intentionally horizontally scrollable. The form
+    // controls must fit without relying on that navigation's scroll position.
+    for (const control of await lockedDialog
+      .locator(".settings-content select, .settings-content button")
+      .all()) {
+      if (!(await control.boundingBox())) continue;
+      await expect
+        .poll(async () => (await control.boundingBox())?.x ?? 0)
+        .toBeGreaterThanOrEqual(0);
+      await expect
+        .poll(async () => {
+          const box = await control.boundingBox();
+          return box ? box.x + box.width : 0;
+        })
+        .toBeLessThanOrEqual(390);
     }
-    await developer.screenshot({ path: ".factory/screenshots/model-inheritance-narrow.png" });
+    await developer.screenshot({ path: ".factory/test-results/model-inheritance/narrow.png" });
     await managerBuild.getByText("Build permissions", { exact: true }).click();
     await manager.setViewportSize({ width: 1440, height: 960 });
     await managerDialog.evaluate((element) => {
       element.scrollTop = 0;
     });
-    await manager.screenshot({ path: ".factory/screenshots/model-project-manager.png" });
+    await manager.screenshot({
+      path: ".factory/test-results/model-inheritance/project-manager.png",
+    });
     await developer.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     await expect(lockedDialog).toBeHidden();
     expect(errors).toEqual([]);

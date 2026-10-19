@@ -261,3 +261,126 @@ test("restart recovers stored provider write without resubmitting or losing acti
     await process.dispose();
   }
 }, 60_000);
+
+test("Coding model and reasoning adopt atomically after the exact probe and fence changed replays", async () => {
+  const process = await factoryProcess();
+  const database = process.connect();
+  const manager = crypto.randomUUID();
+  const stored = new Map<string, StoredModelConnection>();
+  const observed: unknown[] = [];
+  let status: ModelProbeResult["status"] = "ready";
+  const controller = createModelConnections(
+    database,
+    {
+      configured: true,
+      read: async (key) => stored.get(key),
+      create: async (key, value) => {
+        stored.set(key, value);
+      },
+    },
+    "owned-atomic-reasoning",
+    [],
+    async ({ modelId, reasoningEffort }) => {
+      observed.push({ modelId, reasoningEffort });
+      return {
+        status,
+        modelId,
+        toolCall: status === "ready",
+        structuredOutput: false,
+        limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
+      };
+    },
+  );
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES (${manager},'Owned manager',${`${manager}@reasoning.test`},true)`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES (${manager})`;
+    const connection = await controller.save(manager, {
+      commandID: crypto.randomUUID(),
+      connectionID: crypto.randomUUID(),
+      version: 0,
+      provider: "openai",
+      endpoint: null,
+      apiKey: "owned-not-a-real-key",
+    });
+    const input = {
+      commandID: crypto.randomUUID(),
+      connectionID: connection.connectionID,
+      version: 1,
+      settingsVersion: 0,
+      role: "build" as const,
+      modelId: "owned-sol",
+      reasoningEffort: "high" as const,
+      confirmInference: true as const,
+    };
+    expect((await controller.selectRole(manager, input, new AbortController().signal)).status).toBe(
+      "ready",
+    );
+    expect(observed).toEqual([{ modelId: "owned-sol", reasoningEffort: "high" }]);
+    const settings = createModelSettingsController(database);
+    const adopted = await settings.get();
+    expect(adopted.buildModelId).toBe("owned-sol");
+    expect(adopted.rules.build.reasoningEffort).toBe("high");
+    expect((await controller.selectRole(manager, input, new AbortController().signal)).status).toBe(
+      "ready",
+    );
+    await expect(
+      controller.selectRole(
+        manager,
+        { ...input, reasoningEffort: "max" },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("changed");
+    expect(observed).toHaveLength(1);
+    status = "unsupported";
+    await controller.selectRole(
+      manager,
+      {
+        ...input,
+        commandID: crypto.randomUUID(),
+        settingsVersion: adopted.version,
+        modelId: "unsupported-model",
+        reasoningEffort: "max",
+      },
+      new AbortController().signal,
+    );
+    expect(await settings.get()).toEqual(adopted);
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.model_role_probe SET reasoning_effort='max' WHERE command_id=${input.commandID}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    const permitted = await settings.set(
+      {
+        version: adopted.version,
+        planningModelId: adopted.planningModelId,
+        buildModelId: adopted.buildModelId,
+        rules: {
+          ...adopted.rules,
+          build: { ...adopted.rules.build, models: ["owned-sol", "gpt-4"], allowOverride: false },
+        },
+      },
+      manager,
+    );
+    status = "ready";
+    await controller.selectRole(
+      manager,
+      {
+        ...input,
+        commandID: crypto.randomUUID(),
+        settingsVersion: permitted.version,
+        reasoningEffort: "max",
+      },
+      new AbortController().signal,
+    );
+    const changed = await settings.get();
+    expect(changed.rules.build).toEqual({
+      models: ["owned-sol", "gpt-4"],
+      allowOverride: false,
+      reasoningEffort: "max",
+    });
+  } finally {
+    await database.client.end();
+    await process.dispose();
+  }
+}, 60_000);

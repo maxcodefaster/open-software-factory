@@ -53,17 +53,19 @@ test("first-run model setup has no placeholder defaults and keeps its primary ac
     }),
   );
   const settings = await openFactoryModels(page);
-  await expect(settings.getByRole("region", { name: "Role access" })).toContainText(
+  await expect(settings.getByRole("region", { name: "Coding", exact: true })).toContainText(
     "Not configured",
+  );
+  await expect(settings.getByLabel("Used for", { exact: true })).toHaveCount(0);
+  await expect(settings.getByRole("checkbox", { name: /^Use deployment connection/ })).toHaveCount(
+    0,
   );
   await expect(settings).not.toContainText("factory-planning-model");
   await expect(settings).not.toContainText("factory-coding-model");
   for (const control of [
-    settings.getByLabel("Used for", { exact: true }),
-    settings.getByLabel("Provider", { exact: true }),
-    settings.getByLabel("API key", { exact: true }),
-    settings.getByLabel("Model", { exact: true }),
-    settings.getByRole("button", { name: "Save and check", exact: true }),
+    settings.getByRole("heading", { name: "Planning & knowledge", exact: true }),
+    settings.getByRole("heading", { name: "Coding", exact: true }),
+    settings.getByRole("button", { name: "Add connection", exact: true }),
   ]) {
     await expect(control).toBeInViewport();
   }
@@ -71,10 +73,9 @@ test("first-run model setup has no placeholder defaults and keeps its primary ac
   await page.screenshot({ path: ".factory/test-results/model-settings/first-run-desktop.png" });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
-  await settings.getByLabel("Model", { exact: true }).fill("example-model");
-  await settings
-    .getByRole("button", { name: "Save and check", exact: true })
-    .scrollIntoViewIfNeeded();
+  await settings.getByRole("button", { name: "Add connection", exact: true }).click();
+  await expect(settings.getByLabel("API key", { exact: true })).toHaveAttribute("type", "password");
+  await expect(settings.getByText(/Keys encrypted in OpenBao/)).toBeVisible();
   await page.screenshot({ path: ".factory/test-results/model-settings/first-run-narrow.png" });
   expect(errors).toEqual([]);
 });
@@ -140,11 +141,14 @@ test("a newly adopted connection stays selected while its check runs and after t
     });
   });
   const settings = await openFactoryModels(page);
-  await settings.getByRole("checkbox", { name: /^Use deployment connection/ }).check();
-  await settings.getByRole("button", { name: "Save and check", exact: true }).click();
+  const planning = settings.getByRole("region", { name: "Planning & knowledge", exact: true });
+  await planning.locator(".model-role-connection summary").click();
+  await planning.getByLabel("Connection", { exact: true }).selectOption(selected.connectionID);
+  await planning.getByLabel("Model", { exact: true }).selectOption("example-model");
+  await planning.getByRole("button", { name: "Save & check", exact: true }).click();
   await probing.promise;
   try {
-    await expect(settings.getByLabel("Connection", { exact: true })).toHaveValue(
+    await expect(planning.getByLabel("Connection", { exact: true })).toHaveValue(
       selected.connectionID,
       { timeout: 1000 },
     );
@@ -152,14 +156,14 @@ test("a newly adopted connection stays selected while its check runs and after t
     finish.resolve();
   }
   await expect(
-    settings.getByRole("status").filter({ hasText: "Model ready for new work." }),
+    planning.getByRole("status").filter({ hasText: "Model saved. Access checked." }),
   ).toBeVisible();
-  await expect(settings.getByLabel("Connection", { exact: true })).toHaveValue(
+  await expect(planning.getByLabel("Connection", { exact: true })).toHaveValue(
     selected.connectionID,
   );
   await expect(
-    settings.getByLabel("Connection", { exact: true }).locator("option:checked"),
-  ).toHaveText("new-model.example");
+    planning.getByLabel("Connection", { exact: true }).locator("option:checked"),
+  ).toContainText("new-model.example");
 });
 
 test("model administration is readable and keyboard accessible at desktop and narrow widths", async ({
@@ -168,12 +172,26 @@ test("model administration is readable and keyboard accessible at desktop and na
   test.setTimeout(60000);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await mkdir(".factory/screenshots", { recursive: true });
+  await mkdir(".factory/test-results/model-settings", { recursive: true });
   await page.setViewportSize({ width: 1440, height: 960 });
   const settings = await openFactoryModels(page);
   const initial = await page.request.get("/api/model-connections");
   expect(initial.ok()).toBe(true);
   const connections = await initial.json();
+  await expect
+    .poll(() =>
+      settings.locator(".settings-scope-description").evaluate((element) => {
+        const rows = element.closest(".settings-content")?.querySelector(".model-defaults");
+        return rows
+          ? Math.abs(
+              rows.getBoundingClientRect().x -
+                element.getBoundingClientRect().x -
+                Number.parseFloat(getComputedStyle(element).paddingLeft),
+            )
+          : Number.POSITIVE_INFINITY;
+      }),
+    )
+    .toBeLessThanOrEqual(1);
   for (const role of connections.roles) {
     const expected =
       role.active?.modelId ??
@@ -182,25 +200,24 @@ test("model administration is readable and keyboard accessible at desktop and na
           entry.role === role.role && entry.configured,
       )?.modelId ??
       "Not configured";
-    await expect(settings.getByRole("region", { name: "Role access" })).toContainText(expected);
+    const card = settings.getByRole("region", {
+      name: role.role === "build" ? "Coding" : "Planning & knowledge",
+      exact: true,
+    });
+    if (expected === "Not configured") await expect(card).toContainText(expected);
+    else await expect(card.getByLabel("Model", { exact: true })).toHaveValue(expected);
   }
-  await expect(settings.getByRole("region", { name: "Role access" })).toContainText(
-    "Implementation",
-  );
+  const connectionsPanel = settings.locator(".model-credentials");
+  if (!(await connectionsPanel.evaluate((element) => (element as HTMLDetailsElement).open)))
+    await connectionsPanel.locator("summary").first().click();
+  await settings.getByRole("button", { name: "Add connection", exact: true }).click();
   await expect(settings.getByLabel("API key", { exact: true })).toHaveAttribute("type", "password");
   await expect(settings.getByLabel("API key", { exact: true })).toHaveValue("");
-  await settings.getByLabel("Used for", { exact: true }).focus();
-  await expect(settings.getByLabel("Used for", { exact: true })).toBeFocused();
+  await settings.getByLabel("Provider", { exact: true }).focus();
   await page.keyboard.press("Tab");
-  await expect(settings.getByLabel("Provider", { exact: true })).toBeFocused();
-  await page.keyboard.press("Tab");
-  const deployment = settings.getByRole("checkbox", { name: /^Use deployment connection/ });
-  if (await deployment.isVisible()) {
-    await expect(deployment).toBeFocused();
-  }
-  await settings.getByLabel("Used for", { exact: true }).selectOption("build");
-  await expect(settings.getByLabel("Used for", { exact: true })).toHaveValue("build");
-  await page.screenshot({ path: ".factory/screenshots/model-settings-wide.png" });
+  await expect(settings.getByLabel("API key", { exact: true })).toBeFocused();
+  await settings.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.screenshot({ path: ".factory/test-results/model-settings/models-wide.png" });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   for (const control of await settings
@@ -211,7 +228,7 @@ test("model administration is readable and keyboard accessible at desktop and na
     expect(box.x).toBeGreaterThanOrEqual(0);
     expect(box.x + box.width).toBeLessThanOrEqual(390);
   }
-  await page.screenshot({ path: ".factory/screenshots/model-settings-narrow.png" });
+  await page.screenshot({ path: ".factory/test-results/model-settings/models-narrow.png" });
   await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
   await expect(settings).toBeHidden();
   expect(errors).toEqual([]);
@@ -265,7 +282,7 @@ test("model permissions save with exact version and retain the draft on conflict
   await planning.locator("summary").click();
   const override = planning.getByLabel("Allow Project and personal overrides");
   await override.uncheck();
-  await settings.getByRole("button", { name: "Save model settings" }).click();
+  await settings.getByRole("button", { name: "Save permissions" }).click();
   await expect(settings.getByText("Defaults saved", { exact: true })).toBeVisible();
   expect(writes).toEqual([
     {
@@ -280,7 +297,7 @@ test("model permissions save with exact version and retain the draft on conflict
   ]);
   conflict = true;
   await override.check();
-  await settings.getByRole("button", { name: "Save model settings" }).click();
+  await settings.getByRole("button", { name: "Save permissions" }).click();
   await expect(settings.getByRole("alert")).toHaveText(
     "Model settings changed elsewhere. Reload before saving.",
   );
@@ -300,15 +317,57 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
   let version = 4;
   let reasoningEffort = "medium";
   let conflict = false;
+  const connectionID = crypto.randomUUID();
+  const writes: unknown[] = [];
+  await page.route("**/api/model-connections", (route) =>
+    route.fulfill({
+      json: {
+        providers: [{ provider: "openai", label: "OpenAI", models: ["plan", "gpt-6.1-sol"] }],
+        connections: [
+          {
+            connectionID,
+            version: 1,
+            provider: "openai",
+            endpoint: "https://owned.openai.azure.com/openai/v1",
+            configured: true,
+            pendingCommandID: null,
+          },
+        ],
+        roles: [
+          { role: "planning", active: { connectionID, version: 1, modelId: "plan" }, check: null },
+          {
+            role: "build",
+            active: { connectionID, version: 1, modelId: "gpt-6.1-sol" },
+            check: null,
+          },
+        ],
+        deployment: [],
+      },
+    }),
+  );
+  await page.route("**/api/model-connections/role", (route) => {
+    const value = route.request().postDataJSON();
+    writes.push(value);
+    if (conflict)
+      return route.fulfill({ status: 409, json: { error: "Settings changed elsewhere" } });
+    expect(value.settingsVersion).toBe(version);
+    expect(value.role).toBe("build");
+    expect(value.connectionID).toBe(connectionID);
+    expect(value.modelId).toBe("gpt-6.1-sol");
+    reasoningEffort = value.reasoningEffort;
+    version++;
+    return route.fulfill({
+      json: {
+        status: "ready",
+        modelId: value.modelId,
+        toolCall: true,
+        structuredOutput: false,
+        limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
+      },
+    });
+  });
   await page.route("**/api/model-settings", async (route) => {
-    if (route.request().method() === "PUT") {
-      const value = route.request().postDataJSON();
-      if (conflict)
-        return route.fulfill({ status: 409, json: { error: "Settings changed elsewhere" } });
-      expect(value.version).toBe(version);
-      reasoningEffort = value.rules.build.reasoningEffort;
-      version++;
-    }
+    expect(route.request().method()).toBe("GET");
     return route.fulfill({
       json: {
         version,
@@ -325,7 +384,8 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
     });
   });
   const settings = await openFactoryModels(page);
-  const select = settings.getByLabel("Coding reasoning", { exact: true });
+  const coding = settings.getByRole("region", { name: "Coding", exact: true });
+  const select = coding.getByLabel("Reasoning", { exact: true });
   await expect(select).toHaveValue("medium");
   expect(
     await select
@@ -333,16 +393,17 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
       .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value)),
   ).toEqual(["medium", "high", "xhigh", "max"]);
   await select.selectOption("high");
-  await settings.getByRole("button", { name: "Save model settings", exact: true }).click();
-  await expect(settings.getByText("Defaults saved", { exact: true })).toBeVisible();
+  await coding.getByRole("button", { name: "Save & check", exact: true }).click();
+  await expect(coding.getByText("Model saved. Access checked.", { exact: true })).toBeVisible();
   expect(reasoningEffort).toBe("high");
   conflict = true;
   await select.selectOption("xhigh");
-  await settings.getByRole("button", { name: "Save model settings", exact: true }).click();
+  await coding.getByRole("button", { name: "Save & check", exact: true }).click();
   await expect(settings.getByRole("alert")).toHaveText("Settings changed elsewhere");
   await expect(select).toHaveValue("xhigh");
   await settings.getByRole("button", { name: "Reload settings" }).click();
   await expect(select).toHaveValue("high");
+  expect(writes).toHaveLength(2);
   await mkdir(".factory/test-results/model-settings", { recursive: true });
   await select.scrollIntoViewIfNeeded();
   await page.screenshot({ path: ".factory/test-results/model-settings/coding-reasoning-wide.png" });
@@ -352,4 +413,67 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
   await page.screenshot({
     path: ".factory/test-results/model-settings/coding-reasoning-narrow.png",
   });
+});
+
+test("connection setup is separate from model calls, recovers a rejected endpoint and never repopulates a saved key", async ({
+  page,
+}) => {
+  let saved: Record<string, unknown> | undefined;
+  const writes: Array<{ commandID: string }> = [];
+  let roleCalls = 0;
+  await page.route("**/api/model-connections", (route) =>
+    route.fulfill({
+      json: {
+        providers: [{ provider: "openai", label: "OpenAI", models: ["example-model"] }],
+        connections: saved ? [saved] : [],
+        roles: [],
+        deployment: [],
+      },
+    }),
+  );
+  await page.route("**/api/model-connections/role", (route) => {
+    roleCalls++;
+    return route.abort("failed");
+  });
+  await page.route(/\/api\/model-connections\/[0-9a-f-]{36}$/, (route) => {
+    if (route.request().method() === "GET")
+      return route.fulfill({ status: 404, json: { error: "No connection write was admitted" } });
+    const value = route.request().postDataJSON();
+    writes.push(value);
+    if (writes.length === 1)
+      return route.fulfill({ status: 409, json: { error: "Model endpoint must use HTTPS" } });
+    saved = {
+      connectionID: value.connectionID,
+      version: 1,
+      provider: value.provider,
+      endpoint: value.endpoint,
+      configured: true,
+      pendingCommandID: null,
+    };
+    return route.fulfill({ json: saved });
+  });
+  const settings = await openFactoryModels(page);
+  await settings.getByRole("button", { name: "Add connection", exact: true }).click();
+  const key = settings.getByLabel("API key", { exact: true });
+  await key.fill("owned-fake-provider-key");
+  await settings.getByText("Custom endpoint, including Azure", { exact: true }).click();
+  const endpoint = settings.getByLabel("Approved HTTPS endpoint", { exact: true });
+  await endpoint.fill("http://owned.invalid/v1");
+  await settings.getByRole("button", { name: "Save connection", exact: true }).click();
+  await expect(settings.getByRole("alert")).toHaveText("Model endpoint must use HTTPS");
+  await expect(endpoint).toBeEnabled();
+  await expect(key).toBeEnabled();
+  await endpoint.fill("https://owned.openai.azure.com/openai/v1");
+  await settings.getByRole("button", { name: "Save connection", exact: true }).click();
+  await expect(
+    settings.getByRole("status").filter({ hasText: "Connection encrypted in OpenBao." }),
+  ).toBeVisible();
+  expect(roleCalls).toBe(0);
+  expect(writes).toHaveLength(2);
+  expect(writes[1]?.commandID).not.toBe(writes[0]?.commandID);
+  await settings.getByRole("button", { name: /^Update key for/ }).click();
+  await expect(key).toHaveValue("");
+  await expect(key).toHaveAttribute("type", "password");
+  await settings.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(key).toHaveCount(0);
 });

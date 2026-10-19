@@ -36,7 +36,11 @@ export const modelSettingsView = modelDefaultsInput.extend({
   rules: modelRulesInput,
   source: z.enum(["environment", "administrator"]),
   models: z.array(modelIdInput),
-  connection: z.object({ configured: z.boolean(), host: z.string().nullable() }),
+  connection: z.object({
+    configured: z.boolean(),
+    host: z.string().nullable(),
+    buildProvider: z.enum(["openai", "anthropic", "deepseek"]).default("openai"),
+  }),
 });
 export type ModelSettingsView = z.infer<typeof modelSettingsView>;
 

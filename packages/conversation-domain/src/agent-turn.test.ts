@@ -37,6 +37,22 @@ test("Build HTTP commands require stable identity and bounded strict input", () 
     commandId: command.commandId,
   });
   expect(
+    changeAgentStartInput.parse({ commandId: command.commandId, codingReasoning: "high" })
+      .codingReasoning,
+  ).toBe("high");
+  for (const codingReasoning of ["none", "low", "invalid"]) {
+    expect(
+      changeAgentStartInput.safeParse({ commandId: command.commandId, codingReasoning }).success,
+    ).toBe(false);
+  }
+  expect(
+    changeAgentPromptInput.safeParse({
+      commandId: command.commandId,
+      text: "Continue",
+      codingReasoning: "high",
+    }).success,
+  ).toBe(false);
+  expect(
     changeAgentPromptInput.parse({ commandId: command.commandId, text: "  Build this  " }).text,
   ).toBe("Build this");
   expect(

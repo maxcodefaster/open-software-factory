@@ -178,13 +178,37 @@ test("admission freezes models across changed defaults and command replay", asyn
       ).admit(another.changeID, another.userID, {
         kind: "change-start",
         commandId: crypto.randomUUID(),
+        codingReasoning: "max",
       });
       expect(start.turn.authority.modelId).toBe(alternative);
-      expect(start.turn.authority).toMatchObject({ codingReasoning: "high" });
+      expect(start.turn.authority).toMatchObject({ codingReasoning: "max" });
+      expect(start.turn.command).toMatchObject({ codingReasoning: "max" });
+      await expect(
+        createChangeAdmission(another.database, alternative).admit(
+          another.changeID,
+          another.userID,
+          {
+            kind: "change-start",
+            commandId: start.turn.command.commandId,
+            codingReasoning: "medium",
+          },
+        ),
+      ).rejects.toThrow("different input");
       const secondTurns = createAgentTurnStore(another.database);
       const claimed = await secondTurns.claimPending(start.turn.id);
       if (!claimed?.ownerToken) throw new Error("Owned new Change was not claimed");
       await secondTurns.failPending(claimed.id, claimed.ownerToken, "Owned model admission");
+      await expect(
+        createChangeAdmission(another.database, alternative).admit(
+          another.changeID,
+          another.userID,
+          {
+            kind: "change-start",
+            commandId: crypto.randomUUID(),
+            codingReasoning: "medium",
+          },
+        ),
+      ).rejects.toThrow("original reasoning");
     } finally {
       await another.dispose();
     }

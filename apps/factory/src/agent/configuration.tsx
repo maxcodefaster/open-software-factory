@@ -1,4 +1,4 @@
-import { createEffect, createSignal, Show } from "solid-js";
+import { createEffect, createSignal, Show, onCleanup } from "solid-js";
 import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
 import {
   type InheritedModelSettingsView,
@@ -25,13 +25,21 @@ export function AgentBlockers(props: {
   }>();
   const [error, setError] = createSignal("");
   const [refresh, setRefresh] = createSignal(0);
+  let loadedScope: string | undefined;
+  let currentRequest: AbortController | undefined;
+  onCleanup(() => currentRequest?.abort());
   createEffect(
     () => [props.projectID, props.settingsOpen, props.turn?.id, refresh()] as const,
-    ([projectID, settingsOpen]) => {
+    ([projectID, settingsOpen, turnID, revision]) => {
+      const scope = JSON.stringify([projectID, settingsOpen, turnID, revision]);
+      if (scope === loadedScope) return;
+      loadedScope = scope;
+      currentRequest?.abort();
       setConfiguration(undefined);
       setError("");
       if (!projectID || settingsOpen) return;
       const abort = new AbortController();
+      currentRequest = abort;
       void Promise.all([
         apiRequest(inheritedModelSettingsView, `/api/projects/${projectID}/model-settings`, {
           signal: abort.signal,
@@ -51,7 +59,6 @@ export function AgentBlockers(props: {
                 : "Configuration unavailable. Open Agent settings to check access.",
             );
         });
-      return () => abort.abort();
     },
   );
   const role = () => (props.mode === "build" ? "build" : "planning");

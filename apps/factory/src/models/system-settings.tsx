@@ -6,7 +6,6 @@ import {
 import {
   type ModelSettingsView,
   modelSettingsView,
-  codingReasoningInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import { apiRequest } from "../api-client";
 import { ModelConnectionSettings } from "./connection-settings";
@@ -16,6 +15,7 @@ export function SystemModelSettings(props: { active?: boolean }) {
   const [planning, setPlanning] = createSignal("");
   const [build, setBuild] = createSignal("");
   const [busy, setBusy] = createSignal(false);
+  const [connectionBusy, setConnectionBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [saved, setSaved] = createSignal(false);
   const [rules, setRules] = createSignal<ModelSettingsView["rules"]>();
@@ -89,56 +89,29 @@ export function SystemModelSettings(props: { active?: boolean }) {
 
   return (
     <div class="model-settings-body">
-      <ModelConnectionSettings
-        settingsVersion={settings()?.version ?? 0}
-        onChange={() => void load()}
-      />
       <Show
         when={settings()}
         fallback={<p role="status">{busy() ? "Loading models…" : "Models could not be loaded."}</p>}
       >
         {(current) => (
           <>
+            <ModelConnectionSettings
+              settings={current()}
+              disabled={busy() || dirty()}
+              onBusy={setConnectionBusy}
+              onChange={load}
+            />
             <Show when={current().connection.configured}>
-              <form onSubmit={(event) => void save(event)}>
-                <p class="model-settings-note">
-                  Existing Changes keep their original Build model and reasoning. Running turns are
-                  never reconfigured.
-                </p>
-                <div class="model-role">
-                  <label for="coding-reasoning">Coding reasoning</label>
-                  <select
-                    id="coding-reasoning"
-                    aria-describedby="coding-reasoning-help"
-                    value={rules()?.build.reasoningEffort ?? "medium"}
-                    disabled={busy()}
-                    onChange={(event) => {
-                      const reasoningEffort = codingReasoningInput.parse(event.currentTarget.value);
-                      setRules((previous) => ({
-                        ...(previous ?? current().rules),
-                        build: { ...(previous ?? current().rules).build, reasoningEffort },
-                      }));
-                      setSaved(false);
-                    }}
-                  >
-                    <For each={codingReasoningInput.options}>
-                      {(value) => <option value={value}>{value}</option>}
-                    </For>
-                  </select>
-                  <small id="coding-reasoning-help" class="model-settings-note">
-                    OpenAI Coding uses at least medium reasoning. New Changes and access checks use
-                    this setting. Other providers keep their native settings.
-                  </small>
-                </div>
-                <details class="model-policy">
-                  <summary>Model override permissions</summary>
+              <details class="model-policy">
+                <summary>Model override permissions</summary>
+                <form onSubmit={(event) => void save(event)}>
                   <For each={modelRoles}>
                     {(role) => (
                       <SystemRoleRules
                         role={role}
                         models={current().models}
                         rule={rules()?.[role] ?? current().rules[role]}
-                        busy={busy()}
+                        busy={busy() || connectionBusy()}
                         onChange={(value) => {
                           setRules((previous) => ({
                             ...(previous ?? current().rules),
@@ -149,29 +122,30 @@ export function SystemModelSettings(props: { active?: boolean }) {
                       />
                     )}
                   </For>
-                </details>
-                <footer class="model-settings-actions">
-                  <span role="status">
-                    {saved()
-                      ? "Defaults saved"
-                      : current().source === "environment"
-                        ? "Using environment defaults"
-                        : "Administrator defaults"}
-                  </span>
-                  <button
-                    type="submit"
-                    class="primary-button"
-                    disabled={
-                      busy() ||
-                      (!dirty() && current().source !== "environment") ||
-                      !current().models.includes(planning()) ||
-                      !current().models.includes(build())
-                    }
-                  >
-                    {busy() ? "Saving…" : "Save model settings"}
-                  </button>
-                </footer>
-              </form>
+                  <footer class="model-settings-actions">
+                    <span role="status">
+                      {saved()
+                        ? "Defaults saved"
+                        : current().source === "environment"
+                          ? "Using environment defaults"
+                          : "Administrator defaults"}
+                    </span>
+                    <button
+                      type="submit"
+                      class="primary-button"
+                      disabled={
+                        busy() ||
+                        connectionBusy() ||
+                        (!dirty() && current().source !== "environment") ||
+                        !current().models.includes(planning()) ||
+                        !current().models.includes(build())
+                      }
+                    >
+                      {busy() ? "Saving…" : "Save permissions"}
+                    </button>
+                  </footer>
+                </form>
+              </details>
             </Show>
           </>
         )}

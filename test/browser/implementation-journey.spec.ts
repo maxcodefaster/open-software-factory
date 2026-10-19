@@ -118,7 +118,9 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
     implementationState: "starting",
     buildTurnState: "pending",
   };
-  await page.route("**/api/changes?*", (route) => route.fulfill({ json: { changes: [change] } }));
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({ json: { changes: [change] } }),
+  );
   await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
     route.fulfill({
       json: {
@@ -212,7 +214,7 @@ test("an implementing Ticket never offers another Implement while its Change rea
   const db = createDatabase(1);
   try {
     await db.client`UPDATE factory.ticket SET state='in-progress' WHERE id=${ticketID}`;
-    await page.route("**/api/changes?*", async (route) => {
+    await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
       await release.promise;
       await route.fulfill({ json: { changes: [] } });
     });
@@ -238,7 +240,7 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
   page,
 }) => {
   const changeID = crypto.randomUUID();
-  await page.route("**/api/changes?*", (route) =>
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
     route.fulfill({
       json: {
         changes: [
@@ -288,6 +290,242 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
   await expect(
     page.getByRole("button", { name: "Retry implementation", exact: true }),
   ).toBeEnabled();
+  const toolbar = page.locator(".agent-panel .agent-compose-toolbar");
+  await expect
+    .poll(() =>
+      toolbar.evaluate((element) => {
+        const retry = element.querySelector<HTMLButtonElement>(
+          '[aria-label="Retry implementation"]',
+        );
+        if (!retry) return Number.POSITIVE_INFINITY;
+        return Math.abs(
+          element.getBoundingClientRect().right - retry.getBoundingClientRect().right,
+        );
+      }),
+    )
+    .toBeLessThanOrEqual(2);
+  await expect(
+    page.locator(".agent-panel").getByRole("button", { name: "Send message", exact: true }),
+  ).toHaveCount(0);
+  await expect(page.locator(".agent-panel").getByLabel("Message conversation")).toHaveCount(0);
+});
+
+test("chat selects reasoning for the first Build, then shows the admitted value and only one execution action", async ({
+  page,
+}) => {
+  test.setTimeout(60000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const changeID = crypto.randomUUID();
+  const turnID = crypto.randomUUID();
+  let state = "idle";
+  let configurationReads = 0;
+  let agentReads = 0;
+  let commandId = crypto.randomUUID();
+  const starts: Array<{ commandId: string; codingReasoning?: string }> = [];
+  const view = () => ({
+    state,
+    sessionAvailable: state !== "idle",
+    runtimeConnected: true,
+    messagesAvailable: true,
+    messages: [],
+    stopPending: false,
+    stopId: null,
+    ...(state === "idle"
+      ? {}
+      : {
+          turn: {
+            id: turnID,
+            commandId,
+            engine: "opencode",
+            mode: "build",
+            modelId: "gpt-6.1-sol",
+            codingReasoning: "high",
+            state: state === "working" ? "running" : state === "waiting" ? "completed" : "stopped",
+            skills: [],
+          },
+        }),
+  });
+  const sessionSnapshot = await (await page.request.get("/api/session")).json();
+  const configurationSnapshot = await (
+    await page.request.get(`/api/projects/${projectID}/model-settings`)
+  ).json();
+  configurationSnapshot.system.connection.buildProvider = "openai";
+  configurationSnapshot.system.rules.build.reasoningEffort = "medium";
+  configurationSnapshot.effective.build.modelId = "gpt-6.1-sol";
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: { ...sessionSnapshot, modelRelayConfigured: true },
+    }),
+  );
+  await page.route(`**/api/projects/${projectID}/model-settings`, (route) => {
+    configurationReads++;
+    return route.fulfill({ json: configurationSnapshot });
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-reasoning",
+            baseSha: "a".repeat(40),
+            state: "active",
+            branchState: "succeeded",
+            runtimeState: "ready",
+            implementationState: state,
+            buildTurnState:
+              state === "idle" ? undefined : state === "working" ? "running" : "stopped",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) => {
+    agentReads++;
+    return route.fulfill({ json: view() });
+  });
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
+    route.fulfill({
+      json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+    }),
+  );
+  await page.route(`**/api/projects/${projectID}/conversation/mode`, (route) =>
+    route.fulfill({
+      json: {
+        id: crypto.randomUUID(),
+        projectId: projectID,
+        ticketId: ticketID,
+        mode: "build",
+        version: 1,
+        entries: [],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent/start`, (route) => {
+    const input = route.request().postDataJSON();
+    starts.push(input);
+    if (starts.length === 1) return route.abort("connectionreset");
+    commandId = input.commandId;
+    state = "working";
+    return route.fulfill({ json: view() });
+  });
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  const panel = page.locator(".agent-panel");
+  const reasoning = panel.getByLabel("Reasoning", { exact: true });
+  await expect(reasoning).toBeEnabled();
+  await expect(reasoning.locator("option:checked")).toHaveText(/gpt-6.1-sol.*Medium.*default/, {
+    timeout: 3000,
+  });
+  await reasoning.selectOption("high");
+  await expect(
+    panel.getByRole("button", { name: "Start implementation", exact: true }),
+  ).toBeEnabled();
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0);
+  async function expectToolbar(action: string) {
+    const toolbar = panel.locator(".agent-compose-toolbar");
+    const button = toolbar.getByRole("button", { name: action, exact: true });
+    await expect(button).toBeVisible();
+    await expect
+      .poll(() =>
+        toolbar.evaluate((element) => {
+          const selection = element.querySelector("select")?.getBoundingClientRect();
+          const action = element.querySelector("button")?.getBoundingClientRect();
+          const bounds = element.getBoundingClientRect();
+          return selection && action
+            ? {
+                sameLine:
+                  Math.abs(selection.y + selection.height / 2 - action.y - action.height / 2) <= 2,
+                selectionBeforeAction: selection.right <= action.x,
+                actionAtRight: Math.abs(bounds.right - action.right) <= 2,
+              }
+            : {};
+        }),
+      )
+      .toEqual({ sameLine: true, selectionBeforeAction: true, actionAtRight: true });
+    expect(await toolbar.locator("button").count()).toBe(1);
+  }
+  await expectToolbar("Start implementation");
+  await mkdir(".factory/test-results/implementation-journey", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/chat-reasoning-start.png",
+  });
+  await panel.getByRole("button", { name: "Start implementation", exact: true }).click();
+  await expect.poll(() => starts.length).toBe(1);
+  await expect(
+    panel.getByRole("button", { name: "Start implementation", exact: true }),
+  ).toBeEnabled();
+  await page.reload();
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  await expect(reasoning).toHaveValue("high");
+  expect(starts).toHaveLength(1);
+  await panel.getByRole("button", { name: "Start implementation", exact: true }).click();
+  await expect.poll(() => starts.length).toBe(2);
+  await expect(reasoning).toBeDisabled();
+  await expect(reasoning).toHaveValue("high");
+  expect(starts).toEqual([
+    { commandId: expect.any(String), codingReasoning: "high" },
+    { commandId: starts[0]?.commandId, codingReasoning: "high" },
+  ]);
+  await expect(
+    panel.getByRole("button", { name: "Start implementation", exact: true }),
+  ).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Stop OpenCode", exact: true })).toHaveCount(1);
+  await expectToolbar("Stop OpenCode");
+  state = "stopped";
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeEnabled({
+    timeout: 10000,
+  });
+  await expect(reasoning).toHaveValue("high");
+  await expect(reasoning).toBeDisabled();
+  await expect(panel).toContainText("Fixed for this Change.");
+  await expectToolbar("Send message");
+  const inputBox = await panel.getByLabel("Message conversation").boundingBox();
+  const footerBox = await panel.locator(".agent-compose-toolbar").boundingBox();
+  expect(inputBox && footerBox && inputBox.width >= footerBox.width - 2).toBe(true);
+  await expect(
+    panel.getByRole("button", { name: "Retry implementation", exact: true }),
+  ).toHaveCount(0);
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/chat-reasoning-retained.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(reasoning).toBeVisible();
+  await expectToolbar("Send message");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/chat-reasoning-narrow.png",
+  });
+  state = "waiting";
+  await expect(panel.locator(".agent-state")).toHaveText("Needs input");
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
+  await expect(panel.getByRole("button", { name: "Stop OpenCode", exact: true })).toHaveCount(0);
+  await expectToolbar("Send message");
+  const readsBeforePolling = configurationReads;
+  const observedBeforePolling = agentReads;
+  await expect.poll(() => agentReads).toBeGreaterThan(observedBeforePolling + 1);
+  expect(configurationReads).toBe(readsBeforePolling);
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/chat-waiting-for-instructions.png",
+  });
+  await page.unrouteAll({ behavior: "wait" });
+  expect(errors).toEqual([]);
 });
 
 test("tool activity is one collapsed line, keyboard expandable and compact at narrow widths", async ({
@@ -301,7 +539,7 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
       json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
     }),
   );
-  await page.route("**/api/changes?*", (route) =>
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
     route.fulfill({
       json: {
         changes: [
@@ -454,7 +692,9 @@ test("Review corrections send to the retained Build without IDE; checks and cont
     version: 1,
     entries: [],
   };
-  await page.route("**/api/changes?*", (route) => route.fulfill({ json: { changes: [change] } }));
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({ json: { changes: [change] } }),
+  );
   await page.route(`**/api/changes/${changeID}/agent{,?*}`, async (route) => {
     const snapshot = { ...agent, state };
     if (holdRead) {
@@ -527,6 +767,13 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByText("Details", { exact: true })).toHaveCount(0);
   await input.fill("Correct the first action within the original requirements.");
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect(input).toBeFocused();
   await input.press("Enter");
   await expect
     .poll(() => received?.text)

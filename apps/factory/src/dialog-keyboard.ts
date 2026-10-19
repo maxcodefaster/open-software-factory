@@ -1,4 +1,9 @@
-export function bindDialogKeyboard(element: HTMLElement, close: () => void, opener?: HTMLElement) {
+export function bindDialogKeyboard(
+  element: HTMLElement,
+  close: () => void,
+  opener?: HTMLElement,
+  restoreFocus: () => boolean = () => true,
+) {
   const previous =
     opener ?? (document.activeElement instanceof HTMLElement ? document.activeElement : undefined);
   const controls = () =>
@@ -39,7 +44,7 @@ export function bindDialogKeyboard(element: HTMLElement, close: () => void, open
   return () => {
     document.removeEventListener("keydown", keydown);
     requestAnimationFrame(() => {
-      if (previous?.isConnected) previous.focus({ preventScroll: true });
+      if (restoreFocus() && previous?.isConnected) previous.focus({ preventScroll: true });
     });
   };
 }

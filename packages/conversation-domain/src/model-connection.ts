@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { modelIdInput } from "./model-settings";
+import { codingReasoningInput, modelIdInput } from "./model-settings";
 
 export const modelProvider = z.enum(["openai", "anthropic", "deepseek"]);
 export type ModelProvider = z.output<typeof modelProvider>;
@@ -75,9 +75,14 @@ export const modelRoleConnectionInput = modelConnectionReference
     settingsVersion: z.number().int().nonnegative(),
     role: z.enum(["planning", "build"]),
     modelId: modelIdInput,
+    reasoningEffort: codingReasoningInput.optional(),
     confirmInference: z.literal(true),
   })
-  .strict();
+  .strict()
+  .refine((input) => input.role === "build" || input.reasoningEffort === undefined, {
+    message: "Reasoning selection is only available for Coding",
+    path: ["reasoningEffort"],
+  });
 
 export const modelRoleConnectionView = z
   .object({

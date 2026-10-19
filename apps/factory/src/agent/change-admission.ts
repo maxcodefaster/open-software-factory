@@ -28,10 +28,11 @@ import { codingBudgetIn } from "../usage/policy";
 import { buildKnowledgeContext } from "./knowledge-context";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 import { codingReasoningIn } from "../models/controller";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 
 type Database = ReturnType<typeof createDatabase>;
 export type ChangeAgentInput =
-  | { kind: "change-start"; commandId: string }
+  | { kind: "change-start"; commandId: string; codingReasoning?: CodingReasoning }
   | { kind: "change-prompt" | "change-repair"; commandId: string; text: string; resume?: boolean };
 
 type ChangeContext = {
@@ -120,7 +121,11 @@ export function createChangeAdmission(
     userID: string,
     input: ChangeAgentInput,
   ) {
-    if (input.kind === "change-start") changeAgentStartInput.parse({ commandId: input.commandId });
+    if (input.kind === "change-start")
+      changeAgentStartInput.parse({
+        commandId: input.commandId,
+        codingReasoning: input.codingReasoning,
+      });
     else changeAgentPromptInput.parse({ commandId: input.commandId, text: input.text });
     await sql`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${input.commandId}`}))`;
     const previous = await turns.getByCommand(input.commandId, sql);
@@ -197,7 +202,26 @@ export function createChangeAdmission(
       ? firstAuthority?.mode === "build"
         ? firstAuthority.codingReasoning
         : undefined
-      : await codingReasoningIn(sql);
+      : input.kind === "change-start" && input.codingReasoning
+        ? input.codingReasoning
+        : await codingReasoningIn(sql);
+    if (input.kind === "change-start" && input.codingReasoning) {
+      if (firstTurn && input.codingReasoning !== codingReasoning)
+        throw new CommandError(
+          "conflict",
+          "This Change keeps its original reasoning. Start a new Change to choose different reasoning.",
+        );
+      const [connection] = modelConnection
+        ? await sql<Array<{ provider: string }>>`
+        SELECT provider FROM factory.model_connection_version
+        WHERE connection_id=${modelConnection.connectionID} AND version=${modelConnection.version}`
+        : [];
+      if ((connection?.provider ?? process.env["FACTORY_MODEL_PROVIDER"] ?? "openai") !== "openai")
+        throw new CommandError(
+          "conflict",
+          "Reasoning selection is available for OpenAI Coding models only.",
+        );
+    }
     if (budget.allowed && budget.effective.codingUSD !== null) {
       const [connection] = modelConnection
         ? await sql<Array<{ provider: string }>>`

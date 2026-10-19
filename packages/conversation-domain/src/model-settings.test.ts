@@ -1,5 +1,27 @@
 import { expect, test } from "bun:test";
 import { approvedModelCatalogue, modelDefaultsInput, modelRulesInput } from "./model-settings";
+import { modelRoleConnectionInput } from "./model-connection";
+
+test("model checks accept Coding reasoning only for the Coding role and enforce its floor", () => {
+  const input = {
+    commandID: crypto.randomUUID(),
+    connectionID: crypto.randomUUID(),
+    version: 1,
+    settingsVersion: 0,
+    role: "build",
+    modelId: "gpt-6.1-sol",
+    confirmInference: true,
+  };
+  expect(
+    modelRoleConnectionInput.parse({ ...input, reasoningEffort: "high" }).reasoningEffort,
+  ).toBe("high");
+  for (const reasoningEffort of ["low", "none", "invalid"])
+    expect(modelRoleConnectionInput.safeParse({ ...input, reasoningEffort }).success).toBe(false);
+  expect(
+    modelRoleConnectionInput.safeParse({ ...input, role: "planning", reasoningEffort: "high" })
+      .success,
+  ).toBe(false);
+});
 
 test("Coding reasoning defaults to medium and cannot be disabled or lowered", () => {
   const rules = {

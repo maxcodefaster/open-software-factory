@@ -26,9 +26,12 @@ password `factory-local-password`; these are development defaults. Configure pro
 in Settings. Optional environment bootstrap is described in [.env.example](.env.example); put real
 credentials in the ignored `.env` file.
 
-Factory's Models settings include Coding reasoning, with medium as the minimum for new OpenAI
-Builds and access checks. New Changes freeze their model, connection and reasoning; changing
-defaults never reconfigures an admitted Change. OpenAI Coding uses the native Responses adapter.
+Factory's Models settings show separate Planning & knowledge and Coding choices. Each has a
+connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
+minimum. Save & check adopts the Coding model and reasoning together only after a successful
+access check. API keys are managed separately and encrypted in OpenBao. Before the first Build,
+the chat can choose reasoning for that Change. Existing Changes show their fixed admitted value;
+changing defaults never reconfigures them. OpenAI Coding uses the native Responses adapter.
 Build works toward the approved requirements and ends with an ordinary summary, without a required
 JSON checklist. A normal native finish submits changed source for independent Verification,
 not as proof of completion. Exact-commit checks and human Delivery approval remain separate.
@@ -179,6 +182,8 @@ fixture, implements and tests a small goal through Azure `gpt-6.1-sol` at medium
 and checks the result independently without a final JSON form. Set `FACTORY_OPENCODE_SOL_LIVE=1`
 and explicitly configure `FACTORY_MODEL_BASE_URL`, `FACTORY_MODEL_API_KEY` and
 `FACTORY_AGENT_MODEL_ID` before running `mise exec -- bun run test:live opencode-sol.live`.
+Set `FACTORY_OPENCODE_SOL_REASONING=high` to prove a higher selected effort instead of the
+default medium.
 It keeps the real provider credential outside the fixture and removes its owned containers.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.

@@ -994,7 +994,12 @@ async function route(request: Request) {
         const parsed = changeAgentStartInput.safeParse(await request.json().catch(() => null));
         if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
         return json(
-          await agentController.start(changeID, session.user.id, parsed.data.commandId),
+          await agentController.start(
+            changeID,
+            session.user.id,
+            parsed.data.commandId,
+            parsed.data.codingReasoning,
+          ),
           202,
         );
       }

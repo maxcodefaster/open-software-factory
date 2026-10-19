@@ -1556,6 +1556,7 @@ test("keeps Build ready, working and stopped states compact across workspace wid
     .getByRole("button")
     .filter({ hasText: "Build state visual check" })
     .click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
   for (const nextState of ["idle", "working", "stopped"] as const) {
     state = nextState;
     if (state === "idle") {
@@ -1566,11 +1567,16 @@ test("keeps Build ready, working and stopped states compact across workspace wid
       await expect(panel.getByRole("button", { name: "Stop OpenCode" })).toHaveCount(
         state === "working" ? 1 : 0,
       );
-      await expect(panel.getByRole("button", { name: "Send message" })).toHaveText(
-        state === "working" ? /Send/ : /Resume/,
-      );
+      if (state === "working") {
+        await expect(panel.getByRole("button", { name: "Send message" })).toHaveCount(0);
+      } else {
+        await expect(panel.getByRole("button", { name: "Send message" })).toHaveText(/Resume/);
+      }
       if (state === "stopped")
-        await expect(panel).toContainText("Your next message resumes the session.");
+        await expect(panel.getByRole("button", { name: "Send message" })).toHaveAttribute(
+          "title",
+          "Stopped. Your next message resumes the session.",
+        );
     }
     const stateBounds = await panel.locator(".agent-state").boundingBox();
     await expect(panel.locator(".agent-state")).not.toHaveClass(/sr-only/);
