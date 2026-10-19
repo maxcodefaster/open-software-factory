@@ -206,7 +206,7 @@ async function kubectl(arguments_: string[], input?: string, quiet = false) {
   return command(kubernetesCommand(arguments_), input === undefined ? { quiet } : { input, quiet });
 }
 
-async function ensureRegistry() {
+async function requireRegistryStorage() {
   const [existingRegistry, existingStorage] = await Promise.all(
     ["deployment/registry", "persistentvolumeclaim/registry-data"].map((resource) =>
       kubectl(
@@ -220,6 +220,10 @@ async function ensureRegistry() {
     existingRegistry ? JSON.parse(existingRegistry) : null,
     existingStorage ? JSON.parse(existingStorage) : null,
   );
+}
+
+async function ensureRegistry() {
+  await requireRegistryStorage();
   await kubectl(
     ["create", "namespace", namespace, "--dry-run=client", "-o", "json"],
     undefined,
@@ -1277,6 +1281,7 @@ try {
   await configureInstallation();
   if (action === "up" || action === "container") await up();
   else if (action === "publish-runtime") {
+    await requireRegistryStorage();
     await kubectl(["get", "service/registry", "-n", namespace], undefined, true);
     await publishRuntimeHost();
     console.log(
