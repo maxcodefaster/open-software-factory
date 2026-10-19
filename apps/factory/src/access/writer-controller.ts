@@ -41,17 +41,20 @@ export function createChangeWriterController(options: {
     }
   }
   async function stopped(attemptID: string | null) {
-    if (!attemptID) return;
+    if (!attemptID) return true;
     await options.runtime.stop(attemptID);
     const deadline = performance.now() + (options.stopDeadlineMs ?? 45_000);
-    while ((await options.runtime.get(attemptID))?.state !== "stopped") {
+    for (;;) {
+      const state = (await options.runtime.get(attemptID))?.state;
+      if (state === "stopped") return true;
       if (performance.now() < deadline) {
         await Bun.sleep(100);
         continue;
       }
+      if (state === "stop-intended" || state === "stopping") return false;
       throw new CommandError(
         "conflict",
-        "Stopping previous commands. Retry editing takeover when compute has stopped.",
+        "Previous Workspace compute has not stopped. Check its cleanup status before retrying.",
       );
     }
   }
@@ -98,7 +101,7 @@ export function createChangeWriterController(options: {
         const writer = await database.client.begin((sql) => lockChangeWriterIn(sql, changeID));
         if (writer.turnID !== turnID || !["agent-preparing", "agent"].includes(writer.state))
           throw new CommandError("conflict", "Agent writing authority changed before execution");
-        if (writer.state === "agent") return;
+        if (writer.state === "agent") return true;
         // An old interactive shell can retain child jobs, Docker execs and services.
         // Confirm full compute teardown rather than pretending shell-PID kill fences it.
         await database.client.begin(async (sql) => {
@@ -112,7 +115,7 @@ export function createChangeWriterController(options: {
           await options.fenceSource?.(changeID, current.epoch, false);
           await options.protect(changeID, []);
         });
-        if (writer.fenceRequired) await stopped(writer.fenceAttemptID);
+        if (writer.fenceRequired && !(await stopped(writer.fenceAttemptID))) return false;
         await database.client.begin(async (sql) => {
           const current = await lockChangeWriterIn(sql, changeID);
           if (
@@ -128,6 +131,7 @@ export function createChangeWriterController(options: {
           await options.protect(changeID, [options.agentUsername]);
           await sql`UPDATE factory.change_writer SET state='agent',fence_required=false,updated_at=now() WHERE change_id=${changeID}`;
         });
+        return true;
       });
     },
     async takeOver(
@@ -212,7 +216,11 @@ export function createChangeWriterController(options: {
             "conflict",
             "Waiting for confirmed Agent Stop before editing takeover",
           );
-        await stopped(intended.fenceAttemptID);
+        if (!(await stopped(intended.fenceAttemptID)))
+          throw new CommandError(
+            "conflict",
+            "Stopping previous commands. Retry editing takeover when compute has stopped.",
+          );
         await database.client.begin(async (sql) => {
           const current = await lockChangeWriterIn(sql, changeID);
           await projectDevelopmentAuthorityIn(sql, userID, current.projectID);

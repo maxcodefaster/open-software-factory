@@ -515,7 +515,10 @@ export function createAgentController(
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
-      await writers.prepareAgent(changeID, turnID);
+      if (!(await writers.prepareAgent(changeID, turnID))) {
+        await turns.releasePending(turnID, ownerToken);
+        return;
+      }
       if (!(await turns.validateExecution(turnID, ownerToken)))
         throw new CommandError("conflict", "Build authority changed before runtime startup");
       let current = await currentChange(changeID);
@@ -709,7 +712,11 @@ export function createAgentController(
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
-      await writers.prepareAgent(changeID, turnID);
+      if (!(await writers.prepareAgent(changeID, turnID)))
+        throw new CommandError(
+          "conflict",
+          "Previous Workspace commands have not stopped during execution recovery",
+        );
       const skillRevisionIDs = owned.authority.skillRevisionIds;
       let queueWakeRequested = false;
       for (let observation = 0; observation < 30 && !closed; observation += 1) {
@@ -1357,8 +1364,16 @@ export function createAgentController(
         Array<{ id: string }>
       >`SELECT turn.id FROM factory.agent_turn turn
         JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
-        JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
-        WHERE turn.state='pending' AND attempt.state='ready'
+        LEFT JOIN factory.runtime_attempt attempt ON attempt.id=intent.runtime_attempt_id
+        WHERE turn.state='pending' AND (
+          attempt.state='ready'
+          OR (intent.runtime_attempt_id IS NULL AND EXISTS(
+            SELECT 1 FROM factory.change_writer writer
+            JOIN factory.runtime_attempt previous ON previous.id=writer.fence_attempt_id
+            WHERE writer.change_id=turn.change_id AND writer.turn_id=turn.id
+              AND writer.state='agent-preparing' AND writer.fence_required
+              AND previous.state='stopped'
+          )))
           AND (turn.owner_token IS NULL OR turn.owner_expires_at<=clock_timestamp())
           AND NOT EXISTS(SELECT 1 FROM factory.coding_pause WHERE turn_id=turn.id AND resumed_by_turn_id IS NULL)
         ORDER BY turn.created_at LIMIT 16`;
@@ -1632,7 +1647,9 @@ export function createAgentController(
             ? `Execution outcome uncertain. Stop or resolve this turn before new Build work. ${turn.summary ?? ""}`
             : failed
               ? (turn?.summary ?? session.lastError)
-              : session.lastError,
+              : turn?.state === "pending" && turn.id !== session.activeTurnID
+                ? null
+                : session.lastError,
         commitSHA: operations[0]?.commitSHA ?? null,
         ...(pendingCommits[0] ? { commitOperation: pendingCommits[0] } : {}),
         messages,

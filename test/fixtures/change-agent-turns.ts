@@ -350,8 +350,11 @@ export async function fixture(
           await sql`SET LOCAL session_replication_role = replica`;
           await sql`DELETE FROM factory.change_writer WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_commit_operation WHERE change_id = ${changeID}`;
-          await sql`DELETE FROM factory.runtime_artifact_intent WHERE runtime_attempt_id=${attemptID}`;
-          await sql`DELETE FROM factory.runtime_attempt WHERE id = ${attemptID} AND project_id = ${projectID}`;
+          // Recovery may create another immutable attempt in this exact owned
+          // Project. The guard above rejects every actually created runtime.
+          await sql`DELETE FROM factory.runtime_artifact_intent WHERE runtime_attempt_id IN
+            (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
           await sql`DELETE FROM factory.development_workspace WHERE id = ${workspaceID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.change WHERE id = ${changeID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.requirement_approval WHERE id = ${approvalID} AND approved_by = ${userID}`;

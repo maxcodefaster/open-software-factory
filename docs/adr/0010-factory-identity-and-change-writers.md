@@ -34,6 +34,15 @@ Whole writer transitions serialize per Change; stale completion observations do 
 handoff while holding the same lock. Branch protection precedes creation and initially allows only
 the Factory control identity, since native creation is itself a protected write.
 
+A new admitted Build can wait for confirmed teardown of its previous writer without
+failing the turn. A bounded observation releases only its pending execution lease;
+the recorded turn, prompt and writer fence remain unchanged. Reconciliation resumes
+that same undispatched turn only after its exact predecessor is observed stopped.
+Source and branch writes remain fenced throughout the wait, and a later human Stop
+prevents continuation. Uncertain or already dispatched inference is not replayed
+through this path. Stale failure text from a prior turn is not the new admission's
+current error.
+
 Factory browser logout first destroys its own session, then navigates to an installation-owned
 static page served by Forgejo's native custom-assets handler. That page uses native same-origin
 logout and verifies the session ended before returning. No proxy cookie impersonation, disabled

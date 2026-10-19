@@ -5,31 +5,38 @@ import type {
   AgentTurnAuthority,
   AgentTurnCommand,
 } from "../../packages/conversation-domain/src/agent-turn";
-import { createDatabase } from "../../packages/db/src/client";
+import { factoryProcess } from "../fixtures/factory-process";
 
 async function fixture() {
-  const database = createDatabase();
+  const processFixture = await factoryProcess();
+  const database = processFixture.connect();
   const userID = crypto.randomUUID();
   const projectID = crypto.randomUUID();
   const conversationID = crypto.randomUUID();
   const suffix = projectID.slice(0, 8);
-  await database.client.begin(async (transaction) => {
-    await transaction`
+  await database.client
+    .begin(async (transaction) => {
+      await transaction`
       INSERT INTO auth."user"(id, name, email, email_verified)
       VALUES (${userID}, 'Owned Admission Regression', ${`admission-${suffix}@factory.local`}, true)
     `;
-    await transaction`
+      await transaction`
       INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${projectID}, ${`admission-${suffix}`}, 'Owned Admission Regression',
         'https://example.invalid/admission.git', 'main', '.devcontainer/devcontainer.json', ${userID})
     `;
-    await transaction`
+      await transaction`
       INSERT INTO factory.ticket_conversation(id, project_id, created_by)
       VALUES (${conversationID}, ${projectID}, ${userID})
     `;
-    await transaction`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      await transaction`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${projectID},${userID},'developer',${userID})`;
-  });
+    })
+    .catch(async (cause) => {
+      await database.client.end();
+      await processFixture.dispose();
+      throw cause;
+    });
   const command = {
     kind: "project-message",
     commandId: crypto.randomUUID(),
@@ -59,6 +66,7 @@ async function fixture() {
         });
       } finally {
         await database.client.end();
+        await processFixture.dispose();
       }
     },
   };

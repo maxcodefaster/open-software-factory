@@ -4,10 +4,140 @@ import {
   claimAgentWriterIn,
   workspaceWriteAuthorityIn,
 } from "../../apps/factory/src/access/change-writer";
-import { fixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { createAgentController } from "../../apps/factory/src/agent/controller";
+
+test.each(["continue", "stop"] as const)(
+  "an admitted Build waits for previous writer teardown before %s without a new command",
+  async (action) => {
+    const processFixture = await factoryProcess();
+    const owned = await fixture(undefined, undefined, processFixture.connect());
+    const admission = createChangeAdmission(owned.database, buildModelID);
+    const turns = createAgentTurnStore(owned.database);
+    let stopped = false;
+    let stopCalls = 0;
+    let starts = 0;
+    const grants: string[][] = [];
+    const writers = createChangeWriterController({
+      database: owned.database,
+      agentUsername: "owned-control",
+      stopDeadlineMs: 1,
+      runtime: {
+        stop: async () => {
+          stopCalls++;
+          await owned.database
+            .client`UPDATE factory.runtime_attempt SET state='stopping' WHERE id=${owned.attemptID} AND state='ready'`;
+        },
+        get: async () => ({ state: stopped ? "stopped" : "stopping" }),
+      },
+      stopAgent: async () => {},
+      protect: async (_changeID, writers) => {
+        grants.push([...writers]);
+      },
+    });
+    const replacementID = crypto.randomUUID();
+    const controller = createAgentController(
+      owned.database,
+      owned.hub,
+      {
+        startPersisted: async () => {
+          starts++;
+          await owned.database.client`INSERT INTO factory.runtime_attempt(
+          id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,
+          kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          SELECT ${replacementID},project_id,change_id,workspace_id,generation+1,revision,'ready',kubernetes_namespace,
+            'never-created-replacement',parent_connector_token_hash,child_connector_token_hash,now(),created_by
+          FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+          await owned.database
+            .client`UPDATE factory.change SET runtime_attempt_id=${replacementID} WHERE id=${owned.changeID}`;
+          return null;
+        },
+      },
+      undefined,
+      writers,
+    );
+    try {
+      const first = await admission.admit(owned.changeID, owned.userID, {
+        kind: "change-start",
+        commandId: crypto.randomUUID(),
+      });
+      await owned.writers.prepareAgent(owned.changeID, first.turn.id);
+      const claimed = await turns.claimPending(first.turn.id);
+      if (!claimed?.ownerToken) throw Error("Owned predecessor lease missing");
+      await owned.database
+        .client`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${owned.attemptID} WHERE turn_id=${first.turn.id}`;
+      expect(
+        await turns.failPending(first.turn.id, claimed.ownerToken, "Owned known failure"),
+      ).toBe(true);
+      await owned.database
+        .client`UPDATE factory.change_agent_session SET state='failed',active_turn_id=${first.turn.id},last_error='Owned known failure' WHERE change_id=${owned.changeID}`;
+      const commandID = crypto.randomUUID();
+      await controller.prompt(
+        owned.changeID,
+        "Continue the retained source",
+        owned.userID,
+        commandID,
+      );
+      const pending = await eventually(
+        async () => {
+          const [turn] = await owned.database.client<
+            { id: string; state: string; owner: string | null }[]
+          >`
+          SELECT id,state,owner_token AS owner FROM factory.agent_turn WHERE command_id=${commandID}`;
+          return turn;
+        },
+        (turn) => stopCalls > 0 && !!turn && turn.owner === null,
+        "Writer handoff did not release its bounded observation",
+      );
+      expect(pending?.state).toBe("pending");
+      expect(await controller.get(owned.changeID, undefined, false)).toMatchObject({
+        state: "starting",
+        lastError: null,
+      });
+      expect(owned.requests()).toBe(0);
+      expect(starts).toBe(0);
+      expect(grants.at(-1)).toEqual([]);
+      await controller.dispatchReadyPending();
+      expect(owned.requests()).toBe(0);
+      expect(stopCalls).toBe(1);
+      if (action === "stop") await controller.stop(owned.changeID);
+      stopped = true;
+      await owned.database
+        .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+      owned.acceptResponse();
+      owned.release();
+      await controller.dispatchReadyPending();
+      if (action === "stop") {
+        expect((await owned.turn(commandID))?.state).toBe("stopped");
+        expect(owned.requests()).toBe(0);
+        expect(starts).toBe(0);
+        return;
+      }
+      await eventually(
+        async () => owned.requests(),
+        (count) => count === 1,
+        "Confirmed teardown did not continue the same admitted Build",
+      );
+      expect((await owned.turn(commandID))?.id).toBe(pending?.id);
+      expect(starts).toBe(1);
+      expect(grants.at(-1)).toEqual(["owned-control"]);
+      await controller.dispatchReadyPending();
+      expect(owned.requests()).toBe(1);
+    } finally {
+      owned.release();
+      await controller.shutdown();
+      try {
+        await owned.dispose();
+      } finally {
+        await processFixture.dispose();
+      }
+    }
+  },
+  30_000,
+);
 
 test.each(["active", "failed"] as const)(
   "retrying an assigned startup failure on a %s Change fences its old Sandbox before granting a new Agent writer",
@@ -65,9 +195,7 @@ test.each(["active", "failed"] as const)(
         commandId: crypto.randomUUID(),
       });
       const controller = createChangeWriterController(options);
-      await expect(controller.prepareAgent(owned.changeID, retry.turn.id)).rejects.toThrow(
-        "compute has stopped",
-      );
+      expect(await controller.prepareAgent(owned.changeID, retry.turn.id)).toBe(false);
       expect(stops).toEqual([owned.attemptID]);
       expect(grants.at(-1)).toEqual([]);
       expect((await turns.get(first.turn.id))?.state).toBe("failed");
@@ -290,9 +418,7 @@ test("Ticket writer fences saves, requires settled Stop and compute teardown, an
       ),
     ).rejects.toThrow("observation-only");
     stopped = false;
-    await expect(controller.prepareAgent(owned.changeID, turnID)).rejects.toThrow(
-      "compute has stopped",
-    );
+    expect(await controller.prepareAgent(owned.changeID, turnID)).toBe(false);
     expect(await controller.view(owned.changeID, owned.userID)).toMatchObject({
       state: "agent-preparing",
       canWrite: false,
