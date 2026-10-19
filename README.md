@@ -136,6 +136,16 @@ model providers and incur usage. Test fixtures own separate databases, Projects 
 identities; their cleanup must preserve unrelated work. Run the affected checks for a change rather
 than repeating every live journey after a documentation edit.
 
+The independent editor proof builds and uses separate local artifacts. It opens canonical source
+without Project compute or model inference, switches retained buffers, verifies original-Workspace
+saves and rejects stale saves. Its containers and volumes have exact cleanup ownership.
+
+```sh
+mise exec -- docker buildx build --load --file deploy/workspace-files/Dockerfile --tag factory-source:editor-proof .
+mise exec -- docker buildx build --load --file deploy/runtime-host/Dockerfile --target developer-ide --tag factory-editor:editor-proof .
+FACTORY_RUN_INDEPENDENT_EDITOR_PROOF=1 FACTORY_SOURCE_PROOF_IMAGE=factory-source:editor-proof FACTORY_EDITOR_PROOF_IMAGE=factory-editor:editor-proof mise exec -- bun --no-env-file test test/support/independent-editor.live.test.ts
+```
+
 The unassisted coding acceptance uses its own disposable installation and real model calls.
 It needs the provider bootstrap variables described in `.env.example`. Settings-only connections
 from another installation are not copied.

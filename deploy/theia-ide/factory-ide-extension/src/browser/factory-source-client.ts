@@ -73,6 +73,28 @@ export class FactorySourceClient implements SourceTransport {
     return new URL(`__factory/workspaces/${workspaceID}/source/${operation}`, this.base);
   }
 
+  async presentation(workspaceID: string): Promise<{ workspaceID: string; label: string }> {
+    const response = await this.fetcher(this.url(workspaceID, "context"), {
+      credentials: "same-origin",
+      cache: "no-store",
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) throw new SourceResponseError(response.status);
+    const value: unknown = await response.json();
+    if (
+      !value ||
+      typeof value !== "object" ||
+      !("workspaceID" in value) ||
+      value.workspaceID !== workspaceID ||
+      !("label" in value) ||
+      typeof value.label !== "string" ||
+      !value.label.trim() ||
+      value.label.length > 512
+    )
+      throw new Error("Workspace presentation is invalid");
+    return { workspaceID, label: value.label };
+  }
+
   async request(
     workspaceID: string,
     operation: SourceOperation,

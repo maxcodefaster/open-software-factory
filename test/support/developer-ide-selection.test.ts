@@ -94,7 +94,10 @@ test("Workspace selection acknowledges the new Explorer only after its root is i
     },
   });
   const source = new FactoryWorkspaceSelection();
-  Object.assign(source, { factoryOrigin: "http://factory.localhost" });
+  Object.assign(source, {
+    factoryOrigin: "http://factory.localhost",
+    workspaceLabels: { async prepare() {} },
+  });
   try {
     const a = "11111111-1111-4111-8111-111111111111";
     const b = "22222222-2222-4222-8222-222222222222";

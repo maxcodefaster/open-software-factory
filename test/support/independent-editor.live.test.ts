@@ -134,13 +134,15 @@ test.skipIf(!enabled)(
   "real independent Theia opens and saves canonical source without execution",
   async () => {
     const proofID = randomUUID();
+    const workspaceA = randomUUID();
+    const workspaceB = randomUUID();
     const label = `factory.dev.independent-editor-proof=${proofID}`;
     const artifacts = resolve(root, ".factory/test-results/independent-editor", proofID);
     await mkdir(artifacts, { recursive: true });
     const sourceImage = await docker(
       "image",
       "inspect",
-      "factory-slice17-workspace-files:proof",
+      process.env["FACTORY_SOURCE_PROOF_IMAGE"] ?? "factory-slice17-workspace-files:proof",
       "--format",
       "{{.Id}}",
     );
@@ -157,7 +159,7 @@ test.skipIf(!enabled)(
     // The names and exact immutable image identities are recorded before creates.
     await writeFile(
       resolve(artifacts, "intent.json"),
-      JSON.stringify({ proofID, sourceImage, editorImage, editorName }),
+      JSON.stringify({ proofID, sourceImage, editorImage, editorName, workspaceA, workspaceB }),
     );
     const sources = new Map<string, SourceFixture>();
     let proxy: ReturnType<typeof Bun.serve<ProxySocket>> | undefined;
@@ -168,7 +170,8 @@ test.skipIf(!enabled)(
     let failed = false;
     const shutdown = new AbortController();
     try {
-      for (const [index, workspaceID] of ["workspace-a", "workspace-b"].entries()) {
+      for (const [index, workspaceID] of [workspaceA, workspaceB].entries()) {
+        const fixtureName = index === 0 ? "workspace-a" : "workspace-b";
         const token = randomBytes(32).toString("hex");
         fixtureSecrets.add(token);
         const serviceID = `source-${index}`;
@@ -180,8 +183,8 @@ test.skipIf(!enabled)(
         );
         volumes.push(volume);
         await docker("volume", "create", "--label", label, volume);
-        const authored = `export const workspace = '${workspaceID}';\n`;
-        const initialize = `const fs=require('fs');fs.mkdirSync('/data/source',{mode:0o755});fs.mkdirSync('/data/control',{mode:0o755});fs.chownSync('/data/source',101000,101000);for(const [name,content] of [['app.ts',${JSON.stringify(authored)}],['unopened.txt','canonical search fixture ${workspaceID}']]){fs.writeFileSync('/data/source/'+name,content);fs.chownSync('/data/source/'+name,101000,101000)}fs.writeFileSync('/data/control/access.json',JSON.stringify(${JSON.stringify({ workspaceId: workspaceID, serviceId: serviceID, epoch: 1, token })}),{mode:0o444});`;
+        const authored = `export const workspace = '${fixtureName}';\n`;
+        const initialize = `const fs=require('fs');fs.mkdirSync('/data/source',{mode:0o755});fs.mkdirSync('/data/control',{mode:0o755});fs.chownSync('/data/source',101000,101000);for(const [name,content] of [['app.ts',${JSON.stringify(authored)}],['unopened.txt','canonical search fixture ${fixtureName}']]){fs.writeFileSync('/data/source/'+name,content);fs.chownSync('/data/source/'+name,101000,101000)}fs.writeFileSync('/data/control/access.json',JSON.stringify(${JSON.stringify({ workspaceId: workspaceID, serviceId: serviceID, epoch: 1, token })}),{mode:0o444});`;
         await docker(
           "run",
           "--rm",
@@ -298,9 +301,32 @@ test.skipIf(!enabled)(
           const url = new URL(request.url);
           if (url.pathname === "/_proof")
             return new Response(
-              `<!doctype html><button id="a" onclick="pick('workspace-a')">A</button><button id="b" onclick="pick('workspace-b')">B</button><iframe style="position:absolute;inset:40px 0 0;width:100%;height:calc(100% - 40px);border:0" src="/?workspace=workspace-a"></iframe><script>function pick(workspaceID){document.querySelector('iframe').contentWindow.postMessage({type:'factory:select-workspace',workspaceID},location.origin)}</script>`,
+              `<!doctype html><button id="a" onclick="pick('${workspaceA}')">A</button><button id="b" onclick="pick('${workspaceB}')">B</button><iframe style="position:absolute;inset:40px 0 0;width:100%;height:calc(100% - 40px);border:0" src="/?workspace=${workspaceA}"></iframe><script>function pick(workspaceID){document.querySelector('iframe').contentWindow.postMessage({type:'factory:select-workspace',workspaceID},location.origin)}</script>`,
               { headers: { "content-type": "text/html" } },
             );
+          const presentation = url.pathname.match(
+            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/source\/context$/,
+          );
+          if (presentation?.[1]) {
+            if (!sources.has(presentation[1])) return new Response(null, { status: 403 });
+            return Response.json({
+              workspaceID: presentation[1],
+              label: presentation[1] === workspaceA ? "Personal · Fixture A" : "Ticket · Fixture B",
+            });
+          }
+          const context = url.pathname.match(
+            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/(writer|runtime)$/,
+          );
+          if (context?.[1]) {
+            if (!sources.has(context[1])) return new Response(null, { status: 403 });
+            if (request.method !== "GET")
+              throw new Error("Source-only proof must not start compute or take editing authority");
+            return Response.json(
+              context[2] === "writer"
+                ? { state: "human", canWrite: true, yours: true, epoch: 1 }
+                : { workspaceID: context[1], attemptID: null, state: "stopped", failure: null },
+            );
+          }
           const sourcePath = url.pathname.match(
             /^\/__factory\/workspaces\/([a-z0-9-]+)\/source\/(stat|list|read|write|mkdir|rename|delete|search|events)$/,
           );
@@ -380,20 +406,74 @@ test.skipIf(!enabled)(
       page.on("console", (message) => {
         if (message.type() === "error") browserErrors.push(message.text().slice(0, 2000));
       });
+      const pageStarted = performance.now();
       await page.goto(`${proxy.url}_proof`);
       const frame = page.frameLocator("iframe");
-      await browserExpect(frame.getByText("Editor settings", { exact: true })).toBeVisible();
+      await browserExpect(frame.getByText("Editor settings", { exact: true })).toBeVisible({
+        timeout: 30_000,
+      });
+      const editorReadyMS = Math.round(performance.now() - pageStarted);
+      await writeFile(resolve(artifacts, "startup.json"), JSON.stringify({ editorReadyMS }));
       await browserExpect(frame.getByText("Save: manual", { exact: true })).toBeVisible();
+      await browserExpect(frame.getByText("Personal · Fixture A", { exact: true })).toBeVisible();
+      expect(
+        await frame
+          .locator("#theia-left-side-panel")
+          .evaluate((element) => element.getBoundingClientRect().width),
+      ).toBeGreaterThanOrEqual(200);
+      const validStatusLabels = async () => {
+        const invalid = await frame
+          .locator("#theia-statusBar [aria-label]")
+          .evaluateAll((elements) =>
+            elements
+              .map((element) => element.getAttribute("aria-label"))
+              .filter((label) => label?.includes("[object ")),
+          );
+        expect(invalid).toEqual([]);
+      };
+      await validStatusLabels();
+      await browserExpect(frame.locator("#status-bar-session-preference-status")).toHaveAttribute(
+        "aria-label",
+        /These settings are overridden for this session/,
+      );
+      await frame.locator("#status-bar-session-preference-status").click();
+      await browserExpect(
+        frame.getByText("These settings are overridden for this session", { exact: true }),
+      ).toBeVisible();
+      await page.screenshot({ path: resolve(artifacts, "readable-session-preferences.png") });
       await frame.getByText("Editor settings", { exact: true }).click();
       await browserExpect(frame.locator(".theia-settings-container")).toBeVisible();
       await page.screenshot({ path: resolve(artifacts, "editor-preferences.png") });
       await frame.locator("#files").getByText("app.ts", { exact: true }).dblclick();
       await browserExpect(frame.locator(".monaco-editor").first()).toBeVisible();
       await browserExpect(frame.locator(".view-lines").first()).toContainText("workspace-a");
+      await browserExpect(frame.locator("#status-bar-factory-buffer-workspace")).toHaveText(
+        "File · Personal · Fixture A",
+      );
+      await validStatusLabels();
+      const explorer = frame.locator("#theia-left-side-panel");
+      const initialExplorerWidth = await explorer.evaluate(
+        (element) => element.getBoundingClientRect().width,
+      );
+      const sidebar = await frame.locator("#theia-left-content-panel").boundingBox();
+      if (!sidebar) throw new Error("The real Explorer resize boundary is unavailable");
+      // The pinned Lumino sash has a zero-width box and a visible CSS hit area.
+      const sashX = sidebar.x + sidebar.width;
+      const sashY = sidebar.y + Math.min(120, sidebar.height / 2);
+      await page.mouse.move(sashX, sashY);
+      await page.mouse.down();
+      await page.mouse.move(sashX + 72, sashY, { steps: 8 });
+      await page.mouse.up();
+      await browserExpect
+        .poll(() => explorer.evaluate((element) => element.getBoundingClientRect().width))
+        .toBeGreaterThan(initialExplorerWidth + 40);
+      const resizedExplorerWidth = await explorer.evaluate(
+        (element) => element.getBoundingClientRect().width,
+      );
       const editor = frame.locator(".monaco-editor:visible");
       await browserExpect(editor).toHaveAttribute(
         "data-uri",
-        "factory-workspace://workspace-a/app.ts",
+        `factory-workspace://${workspaceA}/app.ts`,
       );
       const input = editor.locator("[role='textbox']:not([aria-hidden='true'])");
       const mac = await frame.locator("body").evaluate(() => navigator.platform.startsWith("Mac"));
@@ -406,9 +486,13 @@ test.skipIf(!enabled)(
       const switched = performance.now();
       await page.locator("#b").click();
       await browserExpect(
-        frame.locator('[id="factory-workspace://workspace-b/app.ts"]'),
+        frame.locator(`[id="factory-workspace://${workspaceB}/app.ts"]`),
       ).toBeVisible();
-      await frame.locator('[id="factory-workspace://workspace-b/app.ts"]').dblclick();
+      await browserExpect(frame.getByText("Ticket · Fixture B", { exact: true })).toBeVisible();
+      expect(
+        await explorer.evaluate((element) => element.getBoundingClientRect().width),
+      ).toBeGreaterThanOrEqual(resizedExplorerWidth - 2);
+      await frame.locator(`[id="factory-workspace://${workspaceB}/app.ts"]`).dblclick();
       await browserExpect(
         frame.locator(".view-lines").filter({ hasText: "workspace-b" }).first(),
       ).toBeVisible();
@@ -416,21 +500,36 @@ test.skipIf(!enabled)(
       expect(switchMS).toBeLessThan(3000);
       await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
         "data-uri",
-        "factory-workspace://workspace-b/app.ts",
+        `factory-workspace://${workspaceB}/app.ts`,
       );
       expect(await frame.locator("body").evaluate(() => performance.timeOrigin)).toBe(documentID);
       await page.screenshot({ path: resolve(artifacts, "selected-source.png") });
+      await browserExpect(frame.locator("#status-bar-factory-buffer-workspace")).toHaveText(
+        "File · Ticket · Fixture B",
+      );
+      const retainedTab = frame.locator(".lm-TabBar-tab").filter({ hasText: "app.ts" }).first();
+      await retainedTab.click();
+      await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+        "data-uri",
+        `factory-workspace://${workspaceA}/app.ts`,
+      );
+      await browserExpect(frame.locator("#status-bar-factory-buffer-workspace")).toHaveText(
+        "File · Personal · Fixture A",
+      );
+      await browserExpect(frame.getByText("Ticket · Fixture B", { exact: true })).toBeVisible();
+      await page.screenshot({ path: resolve(artifacts, "retained-buffer-workspace.png") });
       await page.locator("#a").click();
       await browserExpect(
-        frame.locator('[id="factory-workspace://workspace-a/app.ts"]'),
+        frame.locator(`[id="factory-workspace://${workspaceA}/app.ts"]`),
       ).toBeVisible();
-      await frame.locator('[id="factory-workspace://workspace-a/app.ts"]').dblclick();
+      await browserExpect(frame.getByText("Personal · Fixture A", { exact: true })).toBeVisible();
+      await frame.locator(`[id="factory-workspace://${workspaceA}/app.ts"]`).dblclick();
       await browserExpect(frame.locator(".monaco-editor:visible .view-lines")).toContainText(
         "unsaved workspace-a edit",
       );
       await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
         "data-uri",
-        "factory-workspace://workspace-a/app.ts",
+        `factory-workspace://${workspaceA}/app.ts`,
       );
       await frame
         .locator(".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])")
@@ -440,14 +539,14 @@ test.skipIf(!enabled)(
           async () =>
             sourceRequests.filter(
               (request) =>
-                request.workspaceID === "workspace-a" &&
+                request.workspaceID === workspaceA &&
                 request.operation === "write" &&
                 request.status === 200,
             ).length,
         )
         .toBe(1);
-      const original = sources.get("workspace-a");
-      const alternate = sources.get("workspace-b");
+      const original = sources.get(workspaceA);
+      const alternate = sources.get(workspaceB);
       if (!original || !alternate) throw new Error("Expected exact source fixtures");
       const canonical = async (source: SourceFixture) =>
         docker(
@@ -475,7 +574,7 @@ test.skipIf(!enabled)(
         .poll(() =>
           sourceRequests.some(
             (request) =>
-              request.workspaceID === "workspace-a" &&
+              request.workspaceID === workspaceA &&
               request.operation === "search" &&
               request.status === 200,
           ),
@@ -489,7 +588,7 @@ test.skipIf(!enabled)(
       expect(
         sourceRequests.some(
           (request) =>
-            request.workspaceID === "workspace-a" &&
+            request.workspaceID === workspaceA &&
             request.operation === "search" &&
             request.status === 200,
         ),
@@ -540,16 +639,33 @@ test.skipIf(!enabled)(
           sourceWithoutExecution: true,
           sourceImage,
           editorImage,
+          editorReadyMS,
           switchMS,
           dirtyBufferPreserved: true,
           canonicalSave: true,
           canonicalSearch: true,
           externalWatch: true,
           staleSavePreservesHumanBuffer: true,
+          workspaceNamesAndCaptions: true,
+          usableExplorerMinimum: true,
+          readableStatusAccessibility: true,
+          richStatusHoverPreserved: true,
+          explorerUserResizePreserved: true,
+          activeBufferWorkspaceVisible: true,
         }),
       );
     } catch (error) {
       failed = true;
+      const logs = Bun.spawn(["docker", "logs", "--tail", "120", editorName], {
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [output, diagnostic] = await Promise.all([
+        new Response(logs.stdout).text(),
+        new Response(logs.stderr).text(),
+        logs.exited,
+      ]);
+      await writeFile(resolve(artifacts, "editor.log"), redacted(`${output}\n${diagnostic}`));
       if (capturedPage) {
         await capturedPage
           .screenshot({ path: resolve(artifacts, "failed-source.png") })
@@ -557,6 +673,14 @@ test.skipIf(!enabled)(
         const frames = await Promise.all(
           capturedPage.frames().map(async (frame) => ({
             url: frame.url(),
+            document: await frame
+              .locator("body")
+              .evaluate((element) => ({
+                readyState: element.ownerDocument.readyState,
+                classes: element.className,
+                children: element.children.length,
+              }))
+              .catch(() => null),
             text: (
               await frame
                 .locator("body")
@@ -573,8 +697,8 @@ test.skipIf(!enabled)(
       console.error(JSON.stringify({ proofID, browserErrors, sourceRequests }));
       throw error;
     } finally {
-      shutdown.abort();
       await browser.close();
+      shutdown.abort();
       await proxy?.stop(true);
       await cleanOwnedFixtures(proofID, containers, volumes, artifacts, failed);
       for (const source of sources.values()) fixtureSecrets.delete(source.token);

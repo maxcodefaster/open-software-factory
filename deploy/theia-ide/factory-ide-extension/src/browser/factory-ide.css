@@ -2,6 +2,25 @@
   display: none !important;
 }
 
+#status-bar-factory-buffer-workspace {
+  max-width: min(220px, 35vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Hidden embedded startup must not persist the upstream 100px minimum as a
+   barely usable Explorer. Wider saved layouts and normal sash resizing remain. */
+#theia-left-side-panel {
+  min-width: 200px;
+}
+
+@media (max-width: 600px) {
+  #theia-left-side-panel {
+    min-width: 140px;
+  }
+}
+
 .lm-TabBar.theia-app-centers .lm-TabBar-tab,
 .lm-TabBar.theia-app-bottom .lm-TabBar-tab {
   border-radius: 0;

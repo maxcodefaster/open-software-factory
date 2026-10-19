@@ -31,6 +31,8 @@ const sourcePreparationTimeoutMS = 300_000;
 interface SourceRow {
   workspaceID: string;
   projectID: string;
+  projectName: string;
+  ticketTitle: string | null;
   ownerID: string | null;
   kind: string;
   namespace: string;
@@ -48,6 +50,7 @@ interface SourceRow {
 }
 export interface SourceWorkspaceView {
   readonly workspaceID: string;
+  readonly label: string;
   readonly state: WorkspaceSourceState;
   readonly serviceID: string;
   readonly epoch: number;
@@ -89,6 +92,7 @@ export function createWorkspaceSourceController(
   ): Promise<SourceRow | null> {
     const [source] = await sql<SourceRow[]>`
       SELECT workspace.id AS "workspaceID", workspace.project_id AS "projectID", workspace.kind,
+        project.name AS "projectName",ticket.title AS "ticketTitle",
         workspace.owner_user_id AS "ownerID", workspace.kubernetes_namespace AS namespace,
         workspace.source_revision AS revision, project.repository_url AS "repositoryURL",
         source.access_epoch::text AS epoch,source.state,source.files_image AS "filesImage",
@@ -96,13 +100,19 @@ export function createWorkspaceSourceController(
         source.namespace_uid AS "namespaceUID",source.claim_uid AS "claimUID",source.pod_uid AS "podUID",
         source.storage_node AS "storageNode",source.failure
       FROM factory.workspace_source source JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
-      JOIN factory.project project ON project.id=workspace.project_id WHERE source.workspace_id=${workspaceID}`;
+      JOIN factory.project project ON project.id=workspace.project_id
+      LEFT JOIN factory.ticket ticket ON ticket.id=workspace.ticket_id
+      WHERE source.workspace_id=${workspaceID}`;
     return source ?? null;
   }
   function view(source: SourceRow): SourceWorkspaceView {
     const identity = workspaceSourceIdentity(source.workspaceID, Number(source.epoch));
     return {
       workspaceID: source.workspaceID,
+      label:
+        source.kind === "personal"
+          ? `Personal · ${source.projectName}`
+          : `Ticket · ${source.ticketTitle ?? source.projectName}`,
       state: source.state,
       serviceID: identity.serviceID,
       epoch: identity.epoch,

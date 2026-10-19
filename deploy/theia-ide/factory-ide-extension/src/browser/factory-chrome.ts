@@ -8,7 +8,9 @@ import { factoryTheme } from "./factory-theme";
 import { bindFactoryFrameFocus } from "./factory-frame-focus";
 import { PreferenceService } from "@theia/core/lib/common/preferences";
 import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
-import { FactoryWorkspaceFiles } from "./factory-workspace-files";
+import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
+import { FactoryWorkspaceFiles, workspaceScheme } from "./factory-workspace-files";
+import { FactoryWorkspaceLabels } from "./factory-workspace-labels";
 
 @injectable()
 export class FactoryChromeContribution implements FrontendApplicationContribution {
@@ -17,6 +19,8 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
   #unbindFrameFocus: (() => void) | undefined;
   #preferenceSubscription: Disposable | undefined;
   #sourceSubscription: Disposable | undefined;
+  #editorSubscription: Disposable | undefined;
+  #labelSubscription: Disposable | undefined;
   #stopped = false;
 
   constructor(
@@ -26,9 +30,15 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
     @inject(PreferenceService) private readonly preferences: PreferenceService,
     @inject(StatusBar) private readonly statusBar: StatusBar,
     @inject(FactoryWorkspaceFiles) private readonly files: FactoryWorkspaceFiles,
+    @inject(EditorManager) private readonly editors: EditorManager,
+    @inject(FactoryWorkspaceLabels) private readonly labels: FactoryWorkspaceLabels,
   ) {}
 
   onDidInitializeLayout(): void {
+    const updateBufferWorkspace = () => this.#bufferWorkspace();
+    this.#editorSubscription = this.editors.onCurrentEditorChanged(updateBufferWorkspace);
+    this.#labelSubscription = this.labels.onDidChange(updateBufferWorkspace);
+    this.#bufferWorkspace();
     this.#sourceSubscription = this.files.onWatchConnectionChanged((disconnected) => {
       if (!disconnected.size) {
         this.statusBar.removeElement("factory-source-connection");
@@ -81,13 +91,31 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
     });
   }
 
+  #bufferWorkspace() {
+    const resource = this.editors.currentEditor?.editor.uri;
+    if (!resource || resource.scheme !== workspaceScheme) {
+      void this.statusBar.removeElement("factory-buffer-workspace");
+      return;
+    }
+    const label = this.labels.getDetails(resource) ?? `Source · ${resource.authority.slice(0, 8)}`;
+    void this.statusBar.setElement("factory-buffer-workspace", {
+      text: `File · ${label}`,
+      tooltip: `This file belongs to ${label}. Switching the Explorer does not move it to another Workspace.`,
+      alignment: StatusBarAlignment.LEFT,
+      priority: 98,
+    });
+  }
+
   onStop(): void {
     this.#stopped = true;
     this.#preferenceSubscription?.dispose();
     this.#sourceSubscription?.dispose();
+    this.#editorSubscription?.dispose();
+    this.#labelSubscription?.dispose();
     void this.statusBar.removeElement("factory-source-connection");
     void this.statusBar.removeElement("factory-editor-settings");
     void this.statusBar.removeElement("factory-editor-save-mode");
+    void this.statusBar.removeElement("factory-buffer-workspace");
     this.#unbindFrameFocus?.();
     this.#resizeObserver?.disconnect();
     this.#themeRegistration?.dispose();

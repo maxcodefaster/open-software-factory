@@ -1,6 +1,9 @@
 import { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
 import { bindViewContribution } from "@theia/core/lib/browser/shell/view-contribution";
 import { WidgetFactory } from "@theia/core/lib/browser/widget-manager";
+import { ApplicationShellOptions } from "@theia/core/lib/browser/shell/application-shell";
+import { LabelProviderContribution } from "@theia/core/lib/browser/label-provider";
+import { StatusBar, StatusBarImpl } from "@theia/core/lib/browser/status-bar/status-bar";
 import { ContainerModule } from "@theia/core/shared/inversify";
 import { FileServiceContribution } from "@theia/filesystem/lib/browser/file-service";
 import { SearchInWorkspaceServer } from "@theia/search-in-workspace/lib/common/search-in-workspace-interface";
@@ -12,6 +15,8 @@ import { FileNavigatorTree } from "@theia/navigator/lib/browser/navigator-tree";
 import { FileNavigatorModel } from "@theia/navigator/lib/browser/navigator-model";
 import { FactoryWorkspaceNavigator } from "./factory-workspace-navigator";
 import { FactoryWorkspaceTree } from "./factory-workspace-tree";
+import { FactoryWorkspaceLabels } from "./factory-workspace-labels";
+import { FactoryStatusBar } from "./factory-status-bar";
 import { FactoryWorkspaceSelection } from "./factory-workspace-selection";
 import { FactorySourceClient } from "./factory-source-client";
 import { FactoryWorkspaceFileContribution, FactoryWorkspaceFiles } from "./factory-workspace-files";
@@ -32,6 +37,12 @@ import {
 import "./factory-ide.css";
 
 export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
+  rebind(ApplicationShellOptions).toConstantValue({ leftPanel: { initialSizeRatio: 0.28 } });
+  bind(FactoryStatusBar).toSelf().inSingletonScope();
+  rebind(StatusBarImpl).toService(FactoryStatusBar);
+  rebind(StatusBar).toService(FactoryStatusBar);
+  bind(FactoryWorkspaceLabels).toSelf().inSingletonScope();
+  bind(LabelProviderContribution).toService(FactoryWorkspaceLabels);
   rebind(WorkspaceService).to(FactoryWorkspaceSelection).inSingletonScope();
   rebind(FileNavigatorWidget).toDynamicValue(({ container }) => {
     const navigator = createFileNavigatorContainer(container);

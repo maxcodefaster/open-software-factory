@@ -165,6 +165,14 @@ export function createDeveloperIDEEdge(
         return json({ error: "Editor origin is invalid" }, 403);
       if (suffix === "/__factory/context" && request.method === "GET")
         return json({ factoryOrigin, userID, epoch });
+      const presentation = suffix.match(
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/source\/context$/,
+      );
+      if (presentation?.[1]) {
+        if (request.method !== "GET") return new Response(null, { status: 405 });
+        const source = await sources.get(presentation[1], userID);
+        return json({ workspaceID: source.workspaceID, label: source.label });
+      }
       const controller = new AbortController();
       const onAbort = () => controller.abort();
       request.signal.addEventListener("abort", onAbort, { once: true });

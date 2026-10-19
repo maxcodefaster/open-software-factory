@@ -86,6 +86,7 @@ test("source connection warming leaves application reads and Stop available with
   });
   try {
     const initial = await sources.ensurePersonal(fixture.projectID, fixture.developerID);
+    expect(initial.label).toBe("Personal · Independent source");
     await connecting.promise;
     const read = sources.get(initial.workspaceID, fixture.developerID);
     void read.catch(() => {});
@@ -544,6 +545,9 @@ test("admitted Contributor execution survives slow first-volume placement withou
       "Developer access required",
     );
     expect((await sources.get(identity.workspaceID, developerID)).state).toBe("ready");
+    expect((await sources.get(identity.workspaceID, developerID)).label).toBe(
+      "Ticket · Source admission",
+    );
     await database.client`UPDATE factory.runtime_attempt SET state='stop-intended',stop_intended_at=now() WHERE id=${runtime.attemptID}`;
     await expect(sources.prepareExecution(runtime.attemptID)).rejects.toThrow("no longer active");
     expect(creates).toBe(1);
