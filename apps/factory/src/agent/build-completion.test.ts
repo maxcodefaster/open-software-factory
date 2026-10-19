@@ -47,6 +47,14 @@ test("UI guidance asks for the changed workflow rather than only its entry scree
   expect(instructions).toContain("Distinguish browser-observed behavior from source inspection");
 });
 
+test("fixable App findings stay in the native implementation loop rather than become a handoff", () => {
+  const instructions = buildCompletionInstructions(2);
+  expect(instructions).toContain("Fixable findings in the approved code");
+  expect(instructions).toContain("not a genuine blocker");
+  expect(instructions).toContain("instead of ending incomplete with a to-do");
+  expect(instructions).toContain("unrelated non-blocking advisories separate from acceptance");
+});
+
 test("only complete criterion coverage and passing checks claim submission readiness", () => {
   expect(assessBuildCompletion(prompt, text(ready))).toEqual({
     ready: true,
