@@ -872,7 +872,14 @@ async function route(request: Request) {
       if (!projectID) return json({ error: "Project is required" }, 400);
       if (request.method === "GET") return json(await knowledgeController.generation(projectID));
       if (request.method === "POST") {
-        return json(await knowledgeController.generate(projectID, session.user.id), 202);
+        const generation = await knowledgeController.generate(projectID, session.user.id);
+        if (generation)
+          await setupReadiness.observeWikiRetry(
+            projectID,
+            session.user.id,
+            z.uuid().parse(generation["id"]),
+          );
+        return json(generation, 202);
       }
       return new Response(null, { status: 405 });
     }

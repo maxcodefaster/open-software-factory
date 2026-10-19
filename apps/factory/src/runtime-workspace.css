@@ -49,10 +49,28 @@
   background: var(--material-document-popover);
   color: var(--color-ink-muted);
   font-size: var(--text-sm);
+  max-inline-size: calc(100% - var(--space-6));
 }
 
-.editor-retry {
+.editor-recovery {
   position: absolute;
   inset-inline-start: var(--space-3);
   inset-block-end: var(--space-3);
+  max-inline-size: calc(100% - var(--space-6));
+  padding: var(--space-3);
+  border-radius: var(--radius-xs);
+  background: var(--material-document-popover);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+
+.editor-recovery p {
+  margin: 0 0 var(--space-2);
+  overflow-wrap: anywhere;
+}
+
+.editor-recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
 }

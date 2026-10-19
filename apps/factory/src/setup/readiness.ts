@@ -5,7 +5,7 @@ import {
   type SetupTaskView,
   setupTask,
 } from "../../../../packages/project-domain/src/setup";
-import { createAccessController } from "../access/controller";
+import { createAccessController, projectAuthorityIn } from "../access/controller";
 import type { createEnvironmentController } from "../environments/controller";
 
 export function createSetupReadiness(input: {
@@ -45,6 +45,26 @@ export function createSetupReadiness(input: {
       SetupTaskView[]
     >`SELECT task,state,command_id AS "commandID",operation_id AS "operationID",failure
       FROM factory.project_setup_readiness WHERE project_id=${projectID} ORDER BY task`;
+  }
+
+  async function observeWikiRetry(projectID: string, userID: string, generationID: string) {
+    await sql.begin(async (transaction) => {
+      await projectAuthorityIn(transaction, userID, projectID);
+      // Only the authenticated retry's returned operation can replace a failed
+      // setup observation. Ordinary reads and newer background work cannot.
+      await transaction`UPDATE factory.project_setup_readiness task
+        SET operation_id=generation.id,
+          state=CASE generation.state WHEN 'succeeded' THEN 'ready' WHEN 'failed' THEN 'failed' ELSE 'running' END,
+          failure=CASE WHEN generation.state='failed' THEN 'Wiki generation needs retry.' ELSE NULL END,
+          updated_at=now()
+        FROM factory.knowledge_generation generation
+        WHERE task.project_id=${projectID} AND task.task='wiki'
+          AND generation.id=${generationID} AND generation.project_id=task.project_id
+          AND (task.state='failed' OR (task.state='running' AND EXISTS(
+            SELECT 1 FROM factory.knowledge_generation previous
+            WHERE previous.id=task.operation_id AND previous.project_id=task.project_id AND previous.state='failed'
+          )))`;
+    });
   }
 
   async function seed(projectID: string, userID: string) {
@@ -248,5 +268,5 @@ export function createSetupReadiness(input: {
     for (const project of projects)
       void start(project.id, project.userID, project.starter, true).catch(() => {});
   }
-  return { status, start, retry, recover };
+  return { status, start, retry, recover, observeWikiRetry };
 }

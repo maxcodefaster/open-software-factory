@@ -3,6 +3,9 @@ import { apiRequest } from "./api-client";
 import { developerIDEViewSchema, sourceWorkspaceViewSchema } from "./api-contracts";
 import { developmentPreviewMessage, type DevelopmentPreviewMessage } from "./ide-messages";
 import { selectedSourcePreparation } from "./selected-source-preparation";
+import { recoverWorkspaceSource } from "./source-recovery";
+import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
+import { z } from "zod";
 
 export function DeveloperIDEWorkspace(props: {
   userID: string;
@@ -19,7 +22,11 @@ export function DeveloperIDEWorkspace(props: {
   const [availableSource, setAvailableSource] = createSignal<string>();
   const [editorError, setEditorError] = createSignal("");
   const [sourceError, setSourceError] = createSignal("");
-  const [retry, setRetry] = createSignal(0);
+  const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
+  const [sourceRecovering, setSourceRecovering] = createSignal(false);
+  const [editorRetry, setEditorRetry] = createSignal(0);
+  const [sourceRetry, setSourceRetry] = createSignal(0);
+  let sourceRecovery: AbortController | undefined;
   const preparation = selectedSourcePreparation(async (projectID) => {
     await apiRequest(
       sourceWorkspaceViewSchema,
@@ -35,7 +42,61 @@ export function DeveloperIDEWorkspace(props: {
     ([projectID, allowed, preparingSelection]) =>
       preparation.select(allowed && !preparingSelection ? projectID : undefined),
   );
-  onCleanup(() => preparation.close());
+  onCleanup(() => {
+    preparation.close();
+    sourceRecovery?.abort();
+  });
+  createEffect(
+    () => [props.workspaceID, props.allowed] as const,
+    () => {
+      sourceRecovery?.abort();
+      sourceRecovery = undefined;
+      setSourceRecovering(false);
+    },
+  );
+  async function retrySource(restart: boolean) {
+    const workspaceID = props.workspaceID;
+    if (!workspaceID || !props.allowed || sourceRecovering()) return;
+    const cancel = new AbortController();
+    sourceRecovery = cancel;
+    const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(150_000)]);
+    setSourceRecovering(true);
+    setAvailableSource(undefined);
+    try {
+      await recoverWorkspaceSource(workspaceID, restart, signal, {
+        stop: (id, signal) =>
+          apiRequest(z.undefined(), `/api/workspaces/${id}/source/stop`, {
+            method: "POST",
+            signal,
+          }),
+        read: (id, signal) =>
+          apiRequest(sourceWorkspaceViewSchema, `/api/workspaces/${id}/source`, { signal }),
+        ensure: (id, signal) =>
+          apiRequest(sourceWorkspaceViewSchema, `/api/workspaces/${id}/source/ensure`, {
+            method: "POST",
+            signal,
+          }),
+        wait: pause,
+      });
+      if (!cancel.signal.aborted) setSourceRetry((value) => value + 1);
+    } catch (cause) {
+      if (!cancel.signal.aborted) {
+        setSourceState(undefined);
+        setSourceError(
+          signal.aborted
+            ? "File access recovery is taking longer than expected. Your files are retained; retry to check its recorded state."
+            : cause instanceof Error
+              ? cause.message
+              : "File access could not recover.",
+        );
+      }
+    } finally {
+      if (sourceRecovery === cancel) {
+        sourceRecovery = undefined;
+        setSourceRecovering(false);
+      }
+    }
+  }
   let frame: HTMLIFrameElement | undefined;
   const editorOrigin = () => {
     const current = attachment();
@@ -45,7 +106,7 @@ export function DeveloperIDEWorkspace(props: {
     return url.origin;
   };
   createEffect(
-    () => [attachment()?.epoch, ready(), retry()] as const,
+    () => [attachment()?.epoch, ready(), editorRetry()] as const,
     ([epoch, editorReady]) => {
       if (!epoch || editorReady) return;
       const timer = setTimeout(
@@ -56,7 +117,7 @@ export function DeveloperIDEWorkspace(props: {
     },
   );
   createEffect(
-    () => [props.projectID, props.allowed, retry()] as const,
+    () => [props.projectID, props.allowed, editorRetry()] as const,
     ([projectID, allowed]) => {
       if (!projectID || !allowed) return;
       const cancel = new AbortController();
@@ -100,9 +161,10 @@ export function DeveloperIDEWorkspace(props: {
     },
   );
   createEffect(
-    () => [props.workspaceID, props.allowed, retry()] as const,
+    () => [props.workspaceID, props.allowed, sourceRetry()] as const,
     ([workspaceID, allowed]) => {
       setAvailableSource(undefined);
+      setSourceState(undefined);
       if (!workspaceID || !allowed) return;
       const cancel = new AbortController();
       setSourceError("");
@@ -114,6 +176,7 @@ export function DeveloperIDEWorkspace(props: {
             `/api/workspaces/${workspaceID}/source`,
             { signal: cancel.signal },
           );
+          if (!cancel.signal.aborted) setSourceState(source.state);
           if (source.state === "ready") {
             if (!cancel.signal.aborted) setAvailableSource(workspaceID);
             return;
@@ -220,23 +283,59 @@ export function DeveloperIDEWorkspace(props: {
             </div>
           )}
         </Show>
-        <Show when={ready() && (!props.workspaceID || selected() !== props.workspaceID)}>
+        <Show
+          when={
+            !sourceError() && ready() && (!props.workspaceID || selected() !== props.workspaceID)
+          }
+        >
           <div class="editor-source-status" role="status">
-            {sourceError() || "Preparing Workspace files…"}
+            Preparing Workspace files…
           </div>
         </Show>
         <Show when={editorError() || sourceError()}>
-          <button
-            class="editor-retry quiet-button"
-            type="button"
-            onClick={() => {
-              if (editorError() && !ready() && frame && attachment())
-                frame.src = attachment()?.url ?? frame.src;
-              setRetry((value) => value + 1);
-            }}
-          >
-            Retry editor connection
-          </button>
+          <div class="editor-recovery">
+            <Show when={sourceError()}>
+              <p role="status">{sourceError()}</p>
+            </Show>
+            <div class="editor-recovery-actions">
+              <Show when={sourceError()}>
+                <button
+                  class="quiet-button"
+                  type="button"
+                  disabled={sourceRecovering()}
+                  title="Checks the recorded file-access attempt without stopping it."
+                  onClick={() => void retrySource(false)}
+                >
+                  {sourceRecovering() ? "Recovering file access…" : "Retry file access"}
+                </button>
+                <Show when={sourceState() === "failed" || sourceState() === "stop-intended"}>
+                  <button
+                    class="quiet-button"
+                    type="button"
+                    disabled={sourceRecovering()}
+                    title="Stops and reopens file access. Keeps your files, running Apps and editor buffers."
+                    onClick={() => void retrySource(true)}
+                  >
+                    Restart file access
+                  </button>
+                </Show>
+              </Show>
+              <Show when={editorError()}>
+                <button
+                  class="quiet-button"
+                  type="button"
+                  disabled={sourceRecovering()}
+                  onClick={() => {
+                    if (!ready() && frame && attachment())
+                      frame.src = attachment()?.url ?? frame.src;
+                    setEditorRetry((value) => value + 1);
+                  }}
+                >
+                  Retry editor connection
+                </button>
+              </Show>
+            </div>
+          </div>
         </Show>
       </div>
     </div>

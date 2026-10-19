@@ -203,3 +203,116 @@ test("setup readiness separates protected environments, observes exact work and 
     await process.dispose();
   }
 }, 30_000);
+
+test.each(["failed", "running"] as const)(
+  "an explicit Wiki retry hands failed setup readiness to that exact generation without commissioning another, observed=%s",
+  async (setupState) => {
+    const forge = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const path = new URL(request.url).pathname;
+        if (path === "/api/v1/repos/owned-process-fixture/fixture")
+          return Response.json({
+            name: "fixture",
+            owner: { login: "owned-process-fixture" },
+            default_branch: "main",
+          });
+        if (path.endsWith("/branches/main"))
+          return Response.json({ name: "main", commit: { id: "a".repeat(40) } });
+        if (path.includes("/git/trees/"))
+          return Response.json({ tree: [], truncated: false, total_count: 0 });
+        return new Response(null, { status: 404 });
+      },
+    });
+    const forgeBase = `http://127.0.0.1:${forge.port}`;
+    const fixture = await factoryProcess(undefined, {
+      FACTORY_FORGEJO_API_URL: `${forgeBase}/api/v1/`,
+    });
+    const database = fixture.connect();
+    const projectID = crypto.randomUUID();
+    const original = crypto.randomUUID(),
+      retried = crypto.randomUUID();
+    const email = `wiki-retry-${projectID}@factory.invalid`;
+    const password = "owned-readiness-password-not-a-secret";
+    const request = (path: string, cookie: string, body?: unknown) =>
+      fetch(`${fixture.base}${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        headers: { cookie, origin: fixture.base, "content-type": "application/json" },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    try {
+      await fixture.start();
+      const admin = await fixture.signIn();
+      const create = await request("/api/admin/users", admin, {
+        name: "Wiki retry Developer",
+        email,
+        password,
+      });
+      expect(create.status).toBe(201);
+      const { id: userID } = await create.json();
+      const signIn = await request("/api/auth/sign-in/email", "", { email, password });
+      expect(signIn.ok).toBe(true);
+      const cookie = signIn.headers
+        .getSetCookie()
+        .map((part) => part.split(";")[0])
+        .join("; ");
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${`wiki-retry-${projectID}`},'Wiki retry fixture',${`${forgeBase}/owned-process-fixture/fixture`},'main','.devcontainer/devcontainer.json',${userID})`;
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+      VALUES(${projectID},${userID},'developer',false,${userID})`;
+      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state,completed_at,failure)
+      VALUES(${original},${projectID},${"a".repeat(40)},${userID},'failed',now(),'Original retained failure')`;
+      await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,command_id,state,operation_id,failure)
+      VALUES(${projectID},'wiki',${crypto.randomUUID()},${setupState},${original},'Wiki generation needs retry.')`;
+      // Already admitted work is returned by Generate. No source or provider request
+      // is needed to test the authenticated retry's exact operation handoff.
+      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state)
+      VALUES(${retried},${projectID},${"a".repeat(40)},${userID},'running')`;
+      const status = async () => {
+        const response = await request(`/api/projects/${projectID}/setup`, cookie);
+        expect(response.ok).toBe(true);
+        return (await response.json()).find((task: { task: string }) => task.task === "wiki");
+      };
+      if (setupState === "failed") expect((await status()).operationID).toBe(original);
+      else {
+        const [unobserved] = await database.client<
+          Array<{ state: string }>
+        >`SELECT state FROM factory.project_setup_readiness
+        WHERE project_id=${projectID} AND task='wiki'`;
+        expect(unobserved?.state).toBe("running");
+      }
+      const retry = await request(`/api/projects/${projectID}/knowledge/generation`, cookie, {});
+      expect(retry.status).toBe(202);
+      expect((await retry.json()).id).toBe(retried);
+      const linked = await status();
+      expect(linked.operationID).toBe(retried);
+      expect(linked.state).toBe("running");
+      await database.client`UPDATE factory.knowledge_generation SET state='succeeded',completed_at=now(),
+      page_count=0,conflict_count=0 WHERE id=${retried}`;
+      const ready = await status();
+      expect(ready.state).toBe("ready");
+      expect(ready.failure).toBeNull();
+      const [retained] = await database.client<
+        Array<{ state: string; failure: string }>
+      >`SELECT state,failure FROM factory.knowledge_generation WHERE id=${original}`;
+      expect(retained?.state).toBe("failed");
+      expect(retained?.failure).toBe("Original retained failure");
+      expect(
+        (
+          await database.client`SELECT id FROM factory.knowledge_generation WHERE project_id=${projectID}`
+        ).length,
+      ).toBe(2);
+      // Later unrelated generations never replace the explicitly linked operation.
+      await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state,completed_at)
+      VALUES(${crypto.randomUUID()},${projectID},${"b".repeat(40)},${userID},'failed',now())`;
+      expect((await status()).operationID).toBe(retried);
+      expect((await status()).state).toBe("ready");
+    } finally {
+      await database.client.end({ timeout: 2 });
+      await fixture.dispose();
+      await forge.stop(true);
+    }
+  },
+  30_000,
+);

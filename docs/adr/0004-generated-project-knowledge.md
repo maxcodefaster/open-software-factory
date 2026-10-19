@@ -16,6 +16,10 @@ failure. Research must inspect a cited file and verify its claims before publica
 unknown outcomes do not take this correction path. Default-branch reconciliation does not commission
 another generation for a source commit already attempted. A new commit or explicit human Retry can
 start another generation; setup's Wiki Retry is an explicit request, not background reconciliation.
+An authenticated Wiki retry hands a failed setup observation to the exact generation returned by
+that command, including already-admitted work. The original failure remains in generation history.
+Ordinary status reads never adopt unrelated newer generations, and a completed setup step is not
+reopened by later Wiki work.
 
 Factory binds new page identities and hierarchy to the validated topic plan. Writers supply content
 and inspected sources, not new slugs or parents. Existing-page writers can update only the topic's

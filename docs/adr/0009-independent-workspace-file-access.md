@@ -34,6 +34,12 @@ pending Project. This preparation admits neither Apps nor Build. An explicit ret
 re-observes the same resource intent and access epoch, confirms exact resources and warms authenticated
 file access before readiness. Stop and changed authority still fence the result.
 
+Failed file access has an explicit Restart action. It confirms Stop before preparing the next
+source-access epoch on the same retained Workspace storage. It does not restart the developer IDE
+or Apps, discard browser buffers, or change execution Runtime Attempts. Cancellation or an
+unconfirmed Stop cannot proceed to a new source-access start. An ordinary connection retry only
+re-observes the recorded source intent.
+
 The file service and assigned runtime mount the same source inodes on the same storage node.
 The mounted filesystem provides ordinary local POSIX and file-watch semantics. Its durable backing
 may be a supported replicated block volume; physical node-local disk is not a durability guarantee.
