@@ -67,13 +67,42 @@ test("a known failed turn in a ready retained Session accepts new Build instruct
   };
   expect(buildAgentNeedsStart(view)).toBe(false);
   expect(buildAgentHint(view)).toContain("next message");
-  for (const blocked of [
-    { ...view, sessionAvailable: false },
+  for (const unavailable of [
     { ...view, runtimeState: "stopped" },
     { ...view, runtimeConnected: false },
+    { ...view, runtimeState: "failed", runtimeConnected: false },
+  ])
+    expect(buildAgentNeedsStart(unavailable)).toBe(false);
+  for (const blocked of [
+    { ...view, sessionAvailable: false },
     { ...view, turn: { ...view.turn!, state: "uncertain" as const } },
+    { ...view, stopPending: true },
+    {
+      ...view,
+      commitOperation: { id: crypto.randomUUID(), state: "commit-intended" as const },
+    },
   ])
     expect(buildAgentNeedsStart(blocked)).toBe(true);
+});
+
+test("a stopped Sandbox does not turn a retained failed Build into Project research", () => {
+  const view: AgentView = {
+    ...loaded,
+    state: "failed",
+    runtimeState: "stopped",
+    runtimeConnected: false,
+    turn: turnObservationInput.parse({
+      id: crypto.randomUUID(),
+      commandId: crypto.randomUUID(),
+      state: "failed",
+      engine: "opencode",
+      mode: "build",
+      modelId: "owned-model",
+      skills: [],
+    }),
+  };
+  expect(buildAgentNeedsStart(view)).toBe(false);
+  expect(buildAgentHint(view)).toContain("retained code");
 });
 
 test("interrupted connection does not claim work is observed running or restart it", () => {

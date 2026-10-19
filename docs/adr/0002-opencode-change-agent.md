@@ -73,9 +73,11 @@ The fixed facade exposes bounded viewport resizing and a navigation/activation k
 This lets the Agent inspect 390px layouts and keyboard behavior rather than infer them from CSS.
 Both controls require the current declared App and the same Build authority as clicks and fills.
 They grant no script evaluation, arbitrary key chords, URLs, files or upstream MCP registration.
-After a known failed turn, a ready retained Session accepts explicitly submitted new Build
-instructions in the IDE. It does not silently route those instructions to checkout-free
-research or repeat the failed input. Uncertain execution, pending Stop and commit recovery
+After a known failed turn, a retained Session accepts explicitly submitted new Build
+instructions in the IDE even when compute is stopped or disconnected. Factory confirms
+the previous writer's teardown and prepares compute before execution. It does not silently
+route those instructions to checkout-free research, require another initial specification
+prompt, or repeat the failed input. Uncertain execution, pending Stop and commit recovery
 still require resolution before new Build work.
 
 A confirmed tool-error response in an already observed App may leave partial UI effects.

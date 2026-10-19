@@ -59,8 +59,6 @@ export function buildAgentNeedsStart(view: AgentView) {
     view.state === "failed" &&
     view.turn?.state === "failed" &&
     view.sessionAvailable &&
-    view.runtimeConnected &&
-    view.runtimeState === "ready" &&
     !view.stopPending &&
     !view.commitOperation;
   return (

@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
+import type { AgentView } from "../../apps/factory/src/api-contracts";
+import { turnObservationInput } from "../../packages/conversation-domain/src/turn-observation";
 
-test("initial Build preparation is not a history outage, but a lost existing session still is", async () => {
+test("Build preparation distinguishes lost history and retains correction routing after compute stops", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
   const database = fixture.connect();
   const browser = await chromium.launch({
@@ -21,6 +23,22 @@ test("initial Build preparation is not a history outage, but a lost existing ses
   const slug = `build-startup-${projectID.slice(0, 8)}`;
   let sessionAvailable = false;
   let mutations = 0;
+  let state: AgentView["state"] = "starting";
+  let runtimeState = "starting";
+  let turn: AgentView["turn"];
+  const prompts: Array<{ text: string; commandId: string }> = [];
+  let researchRequests = 0;
+  const view = () => ({
+    state,
+    runtimeState,
+    messagesAvailable: false,
+    sessionAvailable,
+    runtimeConnected: false,
+    stopPending: false,
+    stopId: null,
+    messages: [],
+    ...(turn ? { turn } : {}),
+  });
   let page: import("@playwright/test").Page | undefined;
   try {
     await fixture.startPlanningCache();
@@ -58,6 +76,11 @@ test("initial Build preparation is not a history outage, but a lost existing ses
       })),
     );
     page = await context.newPage();
+    await page.route("**/api/session", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({ response, json: { ...body, modelRelayConfigured: true } });
+    });
     page.on("request", (request) => {
       if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
         mutations++;
@@ -69,19 +92,18 @@ test("initial Build preparation is not a history outage, but a lost existing ses
       route.fulfill({ status: 503, json: { error: "No IDE in controlled fixture" } }),
     );
     await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-      route.fulfill({
-        json: {
-          state: "starting",
-          runtimeState: "starting",
-          messagesAvailable: false,
-          sessionAvailable,
-          runtimeConnected: false,
-          stopPending: false,
-          stopId: null,
-          messages: [],
-        },
-      }),
+      route.fulfill({ json: view() }),
     );
+    await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
+      researchRequests++;
+      return route.fulfill({ status: 409, json: { error: "Build must not become research" } });
+    });
+    await page.route(`**/api/changes/${changeID}/agent/prompt`, async (route) => {
+      prompts.push(route.request().postDataJSON());
+      state = "starting";
+      turn = { ...turn!, state: "pending" };
+      await route.fulfill({ status: 202, json: view() });
+    });
     await page.goto(fixture.base);
     await page.getByRole("button", { name: "Open project menu", exact: true }).click();
     await page.getByRole("button").filter({ hasText: slug }).click();
@@ -107,6 +129,39 @@ test("initial Build preparation is not a history outage, but a lost existing ses
       path: ".factory/test-results/build-startup-browser/existing-session-unavailable.png",
     });
     if (mutations) throw Error("Status observation must not restart Build");
+    state = "failed";
+    runtimeState = "stopped";
+    turn = turnObservationInput.parse({
+      id: crypto.randomUUID(),
+      commandId: crypto.randomUUID(),
+      state: "failed",
+      engine: "opencode",
+      mode: "build",
+      modelId: "controlled-model",
+      skills: [],
+    });
+    await visible(panel.locator(".agent-state")).toHaveText("Failed");
+    await visible(
+      panel.getByRole("button", { name: "Retry implementation", exact: true }),
+    ).toHaveCount(0);
+    const correction = "Fix the retained code without restarting the original specification.";
+    await panel.getByLabel("Message conversation").fill(correction);
+    await page.setViewportSize({ width: 390, height: 844 });
+    const narrowPanel = page.getByRole("dialog", { name: "Agent panel", exact: true });
+    await visible(narrowPanel).toBeVisible();
+    await page.screenshot({
+      path: ".factory/test-results/build-startup-browser/retained-correction-narrow.png",
+    });
+    await narrowPanel.getByRole("button", { name: "Send message", exact: true }).click();
+    await visible.poll(() => prompts.length).toBe(1);
+    await visible(
+      narrowPanel.getByRole("button", { name: "Send message", exact: true }),
+    ).toBeDisabled();
+    if (prompts[0]?.text !== correction || researchRequests || mutations !== 1)
+      throw Error("Correction must make exactly one scoped Build request, never research or Start");
+    await page.screenshot({
+      path: ".factory/test-results/build-startup-browser/retained-correction-sent.png",
+    });
   } catch (cause) {
     if (page) {
       await mkdir(".factory/test-results/build-startup-browser", { recursive: true });
