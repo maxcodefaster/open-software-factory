@@ -546,6 +546,163 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   expect(errors).toEqual([]);
 });
 
+for (const role of ["developer", "product-contributor"] as const) {
+  test(`the ${role} sees model controls only with developer access in Coding`, async ({
+    page,
+    browser,
+  }) => {
+    test.setTimeout(90_000);
+    const password = "owned-coding-model-scope-password";
+    const email = `coding-model-${projectID}@factory.local`;
+    const created = await page.request.post("/api/admin/users", {
+      headers: { origin: "http://127.0.0.1:3000" },
+      data: { name: `Coding model ${role}`, email, password },
+    });
+    expect(created.status()).toBe(201);
+    const user: { id: string } = await created.json();
+    const context = await browser.newContext({
+      baseURL: new URL(page.url()).origin,
+      viewport: { width: 1440, height: 900 },
+      reducedMotion: "reduce",
+    });
+    const member = await context.newPage();
+    const errors: string[] = [];
+    member.on("pageerror", (error) => errors.push(error.message));
+    const changeID = crypto.randomUUID();
+    const turnID = crypto.randomUUID();
+    const commandID = crypto.randomUUID();
+    let hasChange = false;
+    try {
+      const membership = await page.request.post(`/api/projects/${projectID}/members`, {
+        headers: { origin: "http://127.0.0.1:3000" },
+        // Managing a Project does not grant developer access.
+        data: { email, role, manageProject: role === "product-contributor" },
+      });
+      expect(membership.ok()).toBe(true);
+      for (const resource of ["source-workspace", "developer-ide"]) {
+        await member.route(`**/api/projects/${projectID}/${resource}/ensure`, (route) =>
+          route.fulfill({ status: 503, json: { error: "No runtime in model control fixture" } }),
+        );
+      }
+      await member.route(`**/api/changes?projectId=${projectID}`, (route) =>
+        route.fulfill({
+          json: {
+            changes: hasChange
+              ? [
+                  {
+                    id: changeID,
+                    projectId: projectID,
+                    ticketId: ticketID,
+                    branchName: "factory/owned-model-scope",
+                    baseSha: "a".repeat(40),
+                    state: "active",
+                    branchState: "succeeded",
+                    verificationState: "succeeded",
+                    implementationState: "committed",
+                    buildTurnState: "completed",
+                  },
+                ]
+              : [],
+          },
+        }),
+      );
+      await member.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+        route.fulfill({
+          json: {
+            state: "committed",
+            sessionAvailable: true,
+            runtimeConnected: false,
+            messagesAvailable: true,
+            messages: [],
+            stopPending: false,
+            stopId: null,
+            turn: {
+              id: turnID,
+              commandId: commandID,
+              engine: "opencode",
+              mode: "build",
+              modelId: "gpt-6.1-sol",
+              codingReasoning: "medium",
+              state: "completed",
+              skills: [],
+            },
+          },
+        }),
+      );
+      await member.route(`**/api/changes/${changeID}/delivery`, (route) =>
+        route.fulfill({ json: {} }),
+      );
+      await member.goto("/");
+      await member.getByLabel("Email", { exact: true }).fill(email);
+      await member.getByLabel("Password", { exact: true }).fill(password);
+      await member.getByRole("button", { name: "Sign in", exact: true }).click();
+      await selectProject(member);
+      await member
+        .getByRole("region", { name: "requirements", exact: true })
+        .getByRole("button")
+        .click();
+      await member.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+      const panel = member.locator(".agent-panel");
+      const controls = panel.locator(".agent-model-controls");
+      await expect(panel.getByLabel("Message conversation", { exact: true })).toHaveAttribute(
+        "placeholder",
+        "Clarify this Ticket's requirements…",
+      );
+      await expect(controls).toHaveCount(0);
+      const evidence = ".factory/test-results/coding-model-scope";
+      await mkdir(evidence, { recursive: true });
+      await member.screenshot({ path: `${evidence}/${role}-plan.png` });
+      hasChange = true;
+      await member.reload();
+      await selectProject(member);
+      await member.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
+      await member.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+      await expect(panel.getByLabel("Message conversation", { exact: true })).toHaveAttribute(
+        "placeholder",
+        "Ask about this Ticket…",
+      );
+      await expect(controls).toHaveCount(0);
+      await member.screenshot({ path: `${evidence}/${role}-investigate.png` });
+      await member.getByRole("button", { name: "Request changes", exact: true }).click();
+      await expect(panel.locator(".agent-state")).toHaveText("Submitted for verification");
+      await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
+      if (role === "developer") {
+        await expect(panel.getByLabel("Reasoning", { exact: true })).toBeVisible();
+        await expect(panel.getByLabel("Reasoning", { exact: true })).toBeDisabled();
+      } else {
+        await expect(controls).toHaveCount(0);
+        await expect(panel.locator("select")).toHaveCount(0);
+        await expect(member.getByRole("button", { name: "Open IDE", exact: true })).toHaveCount(0);
+      }
+      await member.screenshot({ path: `${evidence}/${role}-coding.png` });
+      await member.setViewportSize({ width: 390, height: 844 });
+      await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
+      expect(await member.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        390,
+      );
+      await member.screenshot({ path: `${evidence}/${role}-coding-narrow.png` });
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+      await deleteFactoryProject(projectID);
+      projectID = "";
+      const db = createDatabase(1);
+      try {
+        await db.client.begin(async (sql) => {
+          await sql`DELETE FROM factory.forge_grant_intent WHERE user_id=${user.id}`;
+          await sql`DELETE FROM auth.account WHERE user_id=${user.id}`;
+          await sql`DELETE FROM factory.forge_account_intent WHERE user_id=${user.id}`;
+          await sql`DELETE FROM factory.developer_ide WHERE user_id=${user.id} AND state='stopped'`;
+          await sql`DELETE FROM auth."user" WHERE id=${user.id} AND email=${email}
+            AND NOT EXISTS(SELECT 1 FROM factory.project_membership WHERE user_id=${user.id})`;
+        });
+      } finally {
+        await db.client.end();
+      }
+    }
+  });
+}
+
 test("tool activity is one collapsed line, keyboard expandable and compact at narrow widths", async ({
   page,
 }) => {

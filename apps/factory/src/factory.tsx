@@ -3196,32 +3196,36 @@ function FactoryWorkspace(props: {
                       />
                     </Show>
                     <div class="agent-compose-toolbar">
-                      <Show
-                        when={agentViewLoaded()}
-                        fallback={<span class="agent-model-controls">Loading implementation…</span>}
-                      >
-                        <BuildModelControls
-                          projectID={selectedProjectID()}
-                          changeID={selectedChange()?.id}
-                          turn={agent().turn}
-                          sessionAvailable={agent().sessionAvailable}
-                          disabled={
-                            pending() ||
-                            agentTurnBusy() ||
-                            agentNeedsResolution() ||
-                            Boolean(agent().commitOperation) ||
-                            agent().stopPending
+                      <Show when={canDevelopProject()}>
+                        <Show
+                          when={agentViewLoaded()}
+                          fallback={
+                            <span class="agent-model-controls">Loading implementation…</span>
                           }
-                          reasoning={chosenCodingReasoning()}
-                          onChange={(value) => {
-                            const changeID = selectedChange()?.id;
-                            if (changeID)
-                              setCodingReasoningChoices((previous) => ({
-                                ...previous,
-                                [changeID]: value,
-                              }));
-                          }}
-                        />
+                        >
+                          <BuildModelControls
+                            projectID={selectedProjectID()}
+                            changeID={selectedChange()?.id}
+                            turn={agent().turn}
+                            sessionAvailable={agent().sessionAvailable}
+                            disabled={
+                              pending() ||
+                              agentTurnBusy() ||
+                              agentNeedsResolution() ||
+                              Boolean(agent().commitOperation) ||
+                              agent().stopPending
+                            }
+                            reasoning={chosenCodingReasoning()}
+                            onChange={(value) => {
+                              const changeID = selectedChange()?.id;
+                              if (changeID)
+                                setCodingReasoningChoices((previous) => ({
+                                  ...previous,
+                                  [changeID]: value,
+                                }));
+                            }}
+                          />
+                        </Show>
                       </Show>
                       <div class="composer-actions">
                         <Show

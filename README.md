@@ -30,8 +30,10 @@ Factory's Models settings show separate Planning & knowledge and Coding choices.
 connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
 minimum. Save & check adopts the Coding model and reasoning together only after a successful
 access check. API keys are managed separately and encrypted in OpenBao. Before the first Build,
-the chat can choose reasoning for that Change. Existing Changes show their fixed admitted value;
-changing defaults never reconfigures them. OpenAI Coding uses the native Responses adapter.
+developers can choose reasoning for that Change in the Coding chat. Planning and research chats,
+and contributor correction chats, have no model switcher. Existing Changes show developers their
+fixed admitted value; changing defaults never reconfigures them. OpenAI Coding uses the native
+Responses adapter.
 Build works toward the approved requirements and ends with an ordinary summary, without a required
 JSON checklist. A normal native finish submits changed source for independent Verification,
 not as proof of completion. Exact-commit checks and human Delivery approval remain separate.
