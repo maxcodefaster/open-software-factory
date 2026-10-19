@@ -3,6 +3,18 @@ import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { eventually } from "./factory-process";
 import type { createDatabase } from "../../packages/db/src/client";
+import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+
+export async function recordedEditorIdentity(
+  database: ReturnType<typeof createDatabase>,
+  userID: string,
+) {
+  const [editor] = await database.client<Array<{ resourceID: string; epoch: string }>>`
+    SELECT resource_id AS "resourceID",service_epoch::text AS epoch
+    FROM factory.developer_ide WHERE user_id=${userID}`;
+  if (!editor) return undefined;
+  return developerIDEIdentity(userID, Number(editor.epoch), editor.resourceID);
+}
 
 export async function removeOwnedProjectSources(
   database: ReturnType<typeof createDatabase>,

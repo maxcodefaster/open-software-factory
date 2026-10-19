@@ -8,7 +8,6 @@ import { createForgejoClient } from "../../packages/forge/src/forge";
 import { createForgejoAccess, forgeUsername } from "../../packages/forge/src/access";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { changeIdentity } from "../../packages/change-domain/src/change";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
 import {
   developerIDEViewSchema,
   runtimeAttemptSchema,
@@ -18,6 +17,7 @@ import { factoryProcess, eventually } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal } from "../fixtures/runtime-access";
 import {
   editorFixtureNamespaces,
+  recordedEditorIdentity,
   removeOwnedProjectSources,
   removeStoppedEditorSourceNamespace,
 } from "../fixtures/editor-source-resources";
@@ -356,10 +356,13 @@ test.skipIf(process.env["FACTORY_RUN_CHANGE_WRITER_RUNTIME_PROOF"] !== "1")(
         const [editor] = await database.client<
           { uid: string }[]
         >`SELECT namespace_uid AS uid FROM factory.developer_ide WHERE user_id=${userID}`;
-        await removeStoppedEditorSourceNamespace(developerIDEIdentity(userID, 1).namespace, {
-          ownerID: userID,
-          ...(editor?.uid ? { uid: editor.uid } : {}),
-        });
+        const identity = await recordedEditorIdentity(database, userID);
+        expect(identity).toBeDefined();
+        if (identity)
+          await removeStoppedEditorSourceNamespace(identity.namespace, {
+            ownerID: userID,
+            ...(editor?.uid ? { uid: editor.uid } : {}),
+          });
       }
       if (repoCreated) {
         expect(await forge.setupRepository(repository, id)).not.toBeNull();

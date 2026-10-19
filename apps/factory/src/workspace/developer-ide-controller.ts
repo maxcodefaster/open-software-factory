@@ -1,6 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createDeveloperIDEClient,
+  DeveloperIDEIntentConflict,
   type DeveloperIDEClient,
   type DeveloperIDEObservation,
 } from "../../../../packages/runtime-kubernetes/src/developer-ide";
@@ -17,6 +18,7 @@ type Database = ReturnType<typeof createDatabase>;
 type IDEQuery = Database["client"] | AgentTurnTransaction;
 interface IDERow {
   userID: string;
+  resourceID: string;
   epoch: string;
   state: DeveloperIDEState;
   image: string;
@@ -52,12 +54,12 @@ export function createDeveloperIDEController(
   async function row(userID: string, sql: IDEQuery = database.client) {
     const [current] = await sql<
       IDERow[]
-    >`SELECT user_id AS "userID", service_epoch::text AS epoch,state,image,namespace_uid AS "namespaceUID",pod_uid AS "podUID",failure FROM factory.developer_ide WHERE user_id=${userID}`;
+    >`SELECT user_id AS "userID",resource_id AS "resourceID",service_epoch::text AS epoch,state,image,namespace_uid AS "namespaceUID",pod_uid AS "podUID",failure FROM factory.developer_ide WHERE user_id=${userID}`;
     return current ?? null;
   }
   function resources(current: IDERow): DeveloperIDEResources {
     return {
-      identity: developerIDEIdentity(current.userID, Number(current.epoch)),
+      identity: developerIDEIdentity(current.userID, Number(current.epoch), current.resourceID),
       image: current.image,
       namespaceUID: current.namespaceUID,
       podUID: current.podUID,
@@ -109,7 +111,13 @@ export function createDeveloperIDEController(
       });
       await record(current, observed, sql);
       return !observed.ready && !observed.failed;
-    } catch {
+    } catch (cause) {
+      if (cause instanceof DeveloperIDEIntentConflict) {
+        await sql`UPDATE factory.developer_ide SET state=CASE WHEN state='stop-intended' THEN state ELSE 'failed' END,
+          failure='Editor resources conflict with this recorded intent. Existing resources were not changed. Restart the editor to prepare a separate service.',
+          updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
+        return false;
+      }
       await sql`UPDATE factory.developer_ide SET state=CASE WHEN state='ready' THEN 'failed' ELSE state END,failure='Editor resources are unavailable. Factory is checking the recorded intent.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
       return (await row(userID, sql))?.state !== "stop-intended";
     } finally {
@@ -164,7 +172,10 @@ export function createDeveloperIDEController(
         if (!current)
           await sql`INSERT INTO factory.developer_ide(user_id,state,image) VALUES(${userID},'create-intended',${image})`;
         else if (current.state === "stopped")
-          await sql`UPDATE factory.developer_ide SET service_epoch=service_epoch+1,state='create-intended',image=${image},pod_uid=NULL,failure=NULL,create_intended_at=now(),create_observed_at=NULL,stop_intended_at=NULL,stopped_at=NULL,last_active_at=now(),updated_at=now() WHERE user_id=${userID}`;
+          await sql`UPDATE factory.developer_ide SET service_epoch=service_epoch+1,
+            resource_id=CASE WHEN resource_id=user_id THEN gen_random_uuid() ELSE resource_id END,
+            namespace_uid=CASE WHEN resource_id=user_id THEN NULL ELSE namespace_uid END,
+            state='create-intended',image=${image},pod_uid=NULL,failure=NULL,create_intended_at=now(),create_observed_at=NULL,stop_intended_at=NULL,stopped_at=NULL,last_active_at=now(),updated_at=now() WHERE user_id=${userID}`;
         else if (current.state === "failed")
           // Explicit Retry observes the same immutable intent. A preparation deadline
           // does not establish that its Pod failed or permit a replacement epoch.

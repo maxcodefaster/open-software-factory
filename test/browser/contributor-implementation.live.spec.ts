@@ -4,7 +4,7 @@ import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { signIn, deleteFactoryProject, stopProjectRuntimes } from "../support/factory-fixture";
 import { fixtureNamespace, removeFixtureNamespace } from "../support/owned-namespace";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
 import { luminance, rgb } from "../support/visual-contrast";
 
 const origin = "http://127.0.0.1:3000";
@@ -339,7 +339,9 @@ for (const restore of [false, true])
               Array<{ state: string }>
             >`SELECT state FROM factory.developer_ide WHERE user_id=${user.id}`;
             if (!editor) continue;
-            const identity = developerIDEIdentity(user.id, 1);
+            const identity = await recordedEditorIdentity(db, user.id);
+            expect(identity).toBeDefined();
+            if (!identity) continue;
             const namespace = await fixtureNamespace(identity.namespace, user.id);
             expect(
               (

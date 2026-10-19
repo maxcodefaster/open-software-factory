@@ -1,7 +1,10 @@
 import { expect } from "bun:test";
 import { type Browser, expect as visible } from "@playwright/test";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
-import { removeEditorFixtureNamespaceInChild } from "./editor-source-resources";
+import type { createDatabase } from "../../packages/db/src/client";
+import {
+  recordedEditorIdentity,
+  removeEditorFixtureNamespaceInChild,
+} from "./editor-source-resources";
 import { eventually } from "./factory-process";
 
 export async function starterSetupDesktop(input: {
@@ -9,6 +12,7 @@ export async function starterSetupDesktop(input: {
   base: string;
   cookie: string;
   projectID: string;
+  database: ReturnType<typeof createDatabase>;
 }) {
   const { browser, base, cookie, projectID } = input;
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
@@ -19,6 +23,8 @@ export async function starterSetupDesktop(input: {
     const current = await fetch(`${base}/api/developer-ide`, { headers: { cookie: ideCookie } });
     const editor = await current.json();
     if (!editor) return;
+    const identity = await recordedEditorIdentity(input.database, ideUserID);
+    if (!identity) return;
     const stopped = await fetch(`${base}/api/developer-ide/stop`, {
       method: "POST",
       headers: { cookie: ideCookie, origin: base },
@@ -37,10 +43,7 @@ export async function starterSetupDesktop(input: {
       "Owned Starter editor did not Stop",
       60_000,
     );
-    await removeEditorFixtureNamespaceInChild(
-      developerIDEIdentity(ideUserID, editor.epoch).namespace,
-      { ownerID: ideUserID },
-    );
+    await removeEditorFixtureNamespaceInChild(identity.namespace, { ownerID: ideUserID });
   }
   try {
     await context.addCookies(

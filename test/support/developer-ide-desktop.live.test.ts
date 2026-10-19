@@ -8,13 +8,13 @@ import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
 import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { eventually } from "../fixtures/factory-process";
 import {
   editorFixtureNamespaces,
   finishedPrebuildNamespace,
   removeEditorFixtureNamespaceInChild,
+  recordedEditorIdentity,
 } from "../fixtures/editor-source-resources";
 import { deleteFactoryProject } from "./factory-fixture";
 import { proveDesktopRuntime } from "../fixtures/developer-ide-desktop-runtime";
@@ -87,7 +87,6 @@ test.skipIf(!enabled)(
         resolve(artifacts, "intent.json"),
         JSON.stringify({ proofID, userID, projects }),
       );
-      ownedNamespaces.set(developerIDEIdentity(userID, 1).namespace, { ownerID: userID });
       for (const [index, projectID] of projects.entries()) {
         await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`desktop-editor-${proofID}-${index}`},${`Editor proof ${index + 1}`},${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${admin})`;
         expect(
@@ -382,7 +381,7 @@ test.skipIf(!enabled)(
             Array<{ uid: string | null }>
           >`SELECT namespace_uid AS uid FROM factory.developer_ide WHERE user_id=${userID}`;
           if (editorOwnership)
-            ownedNamespaces.set(developerIDEIdentity(userID, 1).namespace, {
+            ownedNamespaces.set((await recordedEditorIdentity(database, userID))!.namespace, {
               ownerID: userID,
               ...(editorOwnership.uid ? { uid: editorOwnership.uid } : {}),
             });

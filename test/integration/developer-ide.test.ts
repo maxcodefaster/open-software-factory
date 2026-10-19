@@ -4,12 +4,12 @@ import type {
   DeveloperIDEClient,
   DeveloperIDEObservation,
 } from "../../packages/runtime-kubernetes/src/developer-ide";
+import { DeveloperIDEIntentConflict } from "../../packages/runtime-kubernetes/src/developer-ide";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
-async function fixture(maxConnections = 10) {
+async function fixture(maxConnections = 10, developerID = crypto.randomUUID()) {
   const owned = await factoryProcess();
   const database = owned.connect(maxConnections);
-  const developerID = crypto.randomUUID();
   const contributorID = crypto.randomUUID();
   const projects = [crypto.randomUUID(), crypto.randomUUID()] as const;
   for (const id of [developerID, contributorID])
@@ -38,6 +38,126 @@ async function fixture(maxConnections = 10) {
     },
   };
 }
+
+test("separate installations never share an editor namespace even with the same administrator identity", async () => {
+  const administratorID = crypto.randomUUID();
+  const first = await fixture(10, administratorID);
+  const second = await fixture(10, administratorID);
+  const namespaces: string[] = [];
+  const adapter: DeveloperIDEClient = {
+    async prepare(input) {
+      namespaces.push(input.identity.namespace);
+      return {
+        namespaceUID: `namespace-${namespaces.length}`,
+        podUID: `pod-${namespaces.length}`,
+        ready: true,
+        failed: false,
+      };
+    },
+    async observe() {
+      throw new Error("Initial creation should not re-observe an unrecorded Pod");
+    },
+    async endpoint() {
+      return "http://127.0.0.1:4400";
+    },
+    async stop() {},
+    close() {},
+  };
+  const controllers = [
+    createDeveloperIDEController(first.database, adapter),
+    createDeveloperIDEController(second.database, adapter),
+  ];
+  try {
+    await controllers[0]!.ensure(first.projectID, administratorID);
+    await controllers[1]!.ensure(second.projectID, administratorID);
+    await eventually(
+      async () => Promise.all(controllers.map((controller) => controller.get(administratorID))),
+      (views) => views.every((view) => view.state === "ready"),
+      "Both independent editor intents must become ready",
+    );
+    expect(namespaces).toHaveLength(2);
+    expect(new Set(namespaces).size).toBe(2);
+  } finally {
+    for (const controller of controllers) await controller.close();
+    await second.dispose();
+    await first.dispose();
+  }
+}, 30_000);
+
+test("a retained conflicting editor changes resource identity only after explicit confirmed Stop", async () => {
+  const owned = await fixture();
+  const { database, developerID, projectID } = owned;
+  const image = `registry.invalid/editor@sha256:${"3".repeat(64)}`;
+  await database.client`INSERT INTO factory.developer_ide(user_id,resource_id,state,image,namespace_uid)
+    VALUES(${developerID},${developerID},'failed',${image},'retained-namespace')`;
+  const attempts: Array<{ namespace: string; resourceID: string }> = [];
+  let stops = 0;
+  const adapter: DeveloperIDEClient = {
+    async prepare(input) {
+      attempts.push(input.identity);
+      if (input.identity.resourceID === developerID)
+        throw new DeveloperIDEIntentConflict("occupied");
+      expect(stops).toBe(1);
+      expect(input.namespaceUID).toBeNull();
+      return {
+        namespaceUID: "separate-namespace",
+        podUID: "separate-pod",
+        ready: true,
+        failed: false,
+      };
+    },
+    async observe() {
+      throw new DeveloperIDEIntentConflict("occupied");
+    },
+    async endpoint() {
+      return "http://127.0.0.1:4400";
+    },
+    async stop(input) {
+      expect(input.identity.resourceID).toBe(developerID);
+      expect(input.podUID).toBeNull();
+      stops++;
+    },
+    close() {},
+  };
+  const editors = createDeveloperIDEController(database, adapter);
+  try {
+    await editors.ensure(projectID, developerID);
+    await eventually(
+      () => editors.get(developerID),
+      (view) => view.state === "failed",
+      "A known identity conflict must fail without waiting for the startup deadline",
+    );
+    expect((await editors.get(developerID)).failure).toContain(
+      "Existing resources were not changed",
+    );
+    expect(stops).toBe(0);
+    expect(attempts[0]?.resourceID).toBe(developerID);
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.developer_ide SET resource_id=${crypto.randomUUID()}
+          WHERE user_id=${developerID}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await editors.stop(developerID);
+    await eventually(
+      () => editors.get(developerID),
+      (view) => view.state === "stopped",
+      "The uncreated intent must be confirmed stopped",
+    );
+    await editors.ensure(projectID, developerID);
+    await eventually(
+      () => editors.get(developerID),
+      (view) => view.state === "ready",
+      "A separate resource identity must be ready after confirmed Stop",
+    );
+    expect(attempts[1]?.resourceID).not.toBe(developerID);
+    expect(attempts[1]?.namespace).not.toBe(attempts[0]?.namespace);
+    expect((await editors.get(developerID)).epoch).toBe(2);
+  } finally {
+    await editors.close();
+    await owned.dispose();
+  }
+}, 20_000);
 
 test("editor preparation keeps the application pool available with one connection", async () => {
   const owned = await fixture(1);

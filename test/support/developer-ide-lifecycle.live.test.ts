@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
 import { createDeveloperIDEClient } from "../../packages/runtime-kubernetes/src/developer-ide";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 
@@ -54,7 +54,9 @@ function requireOwnedEditorNamespace(
 test.skipIf(!enabled)(
   "authenticated Developer IDE has one real warm backend independent of Projects and compute",
   async () => {
-    const image = (await readFile(".factory/developer-ide-image", "utf8")).trim();
+    const image =
+      process.env["FACTORY_TEST_DEVELOPER_IDE_IMAGE"] ??
+      (await readFile(".factory/developer-ide-image", "utf8")).trim();
     const fixture = await factoryProcess(undefined, { FACTORY_DEVELOPER_IDE_IMAGE: image });
     const database = fixture.connect();
     const kubernetes = createKubernetesClient();
@@ -89,7 +91,6 @@ test.skipIf(!enabled)(
       });
       expect(userResponse.status).toBe(201);
       userID = z.object({ id: z.uuid() }).parse(await userResponse.json()).id;
-      namespace = developerIDEIdentity(userID, 1).namespace;
       for (const id of [projectID, secondProjectID]) {
         await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${id},${`editor-${id}`},'Independent editor proof','https://forge.invalid/editor.git','main','.devcontainer/devcontainer.json',${userID})`;
         expect(
@@ -111,6 +112,9 @@ test.skipIf(!enabled)(
           await api(`/api/projects/${projectID}/developer-ide/ensure`, developerCookie, {})
         ).json(),
       );
+      const identity = await recordedEditorIdentity(database, userID);
+      if (!identity) throw new Error("Missing recorded editor identity");
+      namespace = identity.namespace;
       await writeFile(
         resolve(artifacts, "intent.json"),
         JSON.stringify({
@@ -135,7 +139,7 @@ test.skipIf(!enabled)(
       >`SELECT namespace_uid AS "namespaceUID",pod_uid AS "podUID" FROM factory.developer_ide WHERE user_id=${userID}`;
       if (!outcome) throw new Error("Editor create outcome not recorded");
       namespaceUID = outcome.namespaceUID;
-      const resources = { identity: developerIDEIdentity(userID, 1), image, ...outcome };
+      const resources = { identity, image, ...outcome };
       const endpoint = await client.endpoint(resources);
       const native = await fetch(endpoint, { signal: AbortSignal.timeout(15_000) });
       expect(native.status).toBe(200);
@@ -233,6 +237,7 @@ test.skipIf(!enabled)(
       client.close();
       try {
         if (userID) {
+          namespace ??= (await recordedEditorIdentity(database, userID))?.namespace;
           if (fixture.processes.at(-1)?.exitCode !== null) await fixture.start();
           await api("/api/developer-ide/stop", developerCookie, {}).catch(() => null);
           const ownedUserID = userID;

@@ -51,6 +51,9 @@ receives them. Retrying work requires a new explicit request; reconnecting never
 Failed file access and editor services have separate Restart actions. Each confirms Stop before
 starting another access epoch, without restarting Apps or Builds. Restarting the editor can lose
 unsaved editor changes; restarting file access retains editor buffers.
+Editor resources use a persisted random identity, separate from the account ID, so installations
+sharing the emergency administrator ID cannot adopt each other's editor. Existing editor identities
+remain unchanged until explicit Stop and restart.
 
 The local listener defaults to `0.0.0.0` so OrbStack-hosted runtimes can call Factory.
 Set `FACTORY_HOST` explicitly to narrow that listener, noting that loopback-only access may prevent

@@ -8,10 +8,10 @@ import {
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
-import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
 import {
   editorFixtureNamespaces as namespaces,
   removeStoppedEditorSourceNamespace,
+  recordedEditorIdentity,
 } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
@@ -75,7 +75,6 @@ test.skipIf(!enabled)(
       });
       expect(createdUser.status).toBe(201);
       userID = z.object({ id: z.uuid() }).parse(await createdUser.json()).id;
-      ownedNamespaces.set(developerIDEIdentity(userID, 1).namespace, { ownerID: userID });
       for (const projectID of projects) {
         await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`editor-browser-${projectID}`},'Editor browser proof',${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${userID})`;
         expect(
@@ -98,6 +97,9 @@ test.skipIf(!enabled)(
       expect(
         (await api(`/api/projects/${projectID}/developer-ide/ensure`, developerCookie, {})).ok,
       ).toBe(true);
+      const editorIdentity = await recordedEditorIdentity(database, userID);
+      if (!editorIdentity) throw new Error("Missing recorded editor intent");
+      ownedNamespaces.set(editorIdentity.namespace, { ownerID: userID });
       await eventually(
         async () =>
           developerIDEViewSchema.parse(
@@ -349,6 +351,8 @@ test.skipIf(!enabled)(
           );
         }
         if (userID) {
+          const editorIdentity = await recordedEditorIdentity(database, userID);
+          if (editorIdentity) ownedNamespaces.set(editorIdentity.namespace, { ownerID: userID });
           await api("/api/developer-ide/stop", developerCookie, {});
           await eventually(
             async () =>

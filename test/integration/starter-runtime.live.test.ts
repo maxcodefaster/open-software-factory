@@ -113,7 +113,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
         projectID = created.projectID;
       }
       if (process.env["FACTORY_RUN_STARTER_DESKTOP_PROOF"] === "1")
-        await starterSetupDesktop({ browser, base: factory.base, cookie, projectID });
+        await starterSetupDesktop({ browser, base: factory.base, cookie, projectID, database });
       if (process.env["FACTORY_STARTER_RESTART_PREVIEW"] === "1") {
         if (!retained) throw new Error("Preview recovery requires the exact retained installation");
         const [preview] = await database.client<{ id: string; state: string }[]>`

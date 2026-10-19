@@ -47,6 +47,8 @@ function intendedFields(actual: unknown, expected: unknown): boolean {
   }
   return actual === expected;
 }
+export class DeveloperIDEIntentConflict extends Error {}
+
 function namespaceOwner(
   input: DeveloperIDEResources,
   namespace: { uid: string; labels: Record<string, string> },
@@ -56,7 +58,7 @@ function namespaceOwner(
     namespace.labels["factory.dev/runtime-owner"] !== input.identity.userID ||
     (input.namespaceUID && input.namespaceUID !== namespace.uid)
   )
-    throw new Error("Developer IDE namespace ownership differs from intent");
+    throw new DeveloperIDEIntentConflict("Developer IDE namespace ownership differs from intent");
 }
 export function validateDeveloperIDEObservation(
   input: DeveloperIDEResources,
@@ -80,7 +82,7 @@ export function validateDeveloperIDEObservation(
       ),
     )
   )
-    throw new Error("Developer IDE Pod differs from persisted intent");
+    throw new DeveloperIDEIntentConflict("Developer IDE Pod differs from persisted intent");
   return {
     namespaceUID: namespace.uid,
     podUID: pod.metadata.uid,
@@ -109,6 +111,7 @@ async function command(args: string[], input?: unknown) {
 
 export function createDeveloperIDEClient(
   kubernetes: KubernetesClient = createKubernetesClient(),
+  execute: typeof command = command,
 ): DeveloperIDEClient {
   const forwards = new Map<
     string,
@@ -117,7 +120,7 @@ export function createDeveloperIDEClient(
   async function observe(input: DeveloperIDEResources) {
     const [namespace, raw] = await Promise.all([
       kubernetes.getNamespace(input.identity.namespace),
-      command(["get", "pod", input.identity.podName, "-n", input.identity.namespace, "-o", "json"]),
+      execute(["get", "pod", input.identity.podName, "-n", input.identity.namespace, "-o", "json"]),
     ]);
     if (namespace) namespaceOwner(input, namespace);
     if (!raw || !namespace) return null;
@@ -196,9 +199,14 @@ export function createDeveloperIDEClient(
     },
     async stop(input) {
       disconnect(input);
-      const existing = await observe(input);
+      const existing = await observe(input).catch((cause: unknown) => {
+        // An incompatible resource at this name cannot be the unrecorded create.
+        // Confirm only our intent is absent; never delete or adopt the other Pod.
+        if (cause instanceof DeveloperIDEIntentConflict && !input.podUID) return null;
+        throw cause;
+      });
       if (!existing) return;
-      await command(
+      await execute(
         [
           "delete",
           "--raw",
