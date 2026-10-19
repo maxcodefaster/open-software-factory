@@ -87,9 +87,14 @@ async function agentConfiguration(
       "Configure FACTORY_BROWSER_TOOLS_IMAGE with the pinned Build browser image before starting implementation",
     );
   const [admitted] = await database.client<
-    Array<{ modelID: string; provider: "openai" | "anthropic" | "deepseek" | null }>
+    Array<{
+      modelID: string;
+      provider: "openai" | "anthropic" | "deepseek" | null;
+      reasoningEffort: "medium" | "high" | "xhigh" | "max" | null;
+    }>
   >`
-    SELECT turn.authority->>'modelId' AS "modelID", version.provider
+    SELECT turn.authority->>'modelId' AS "modelID", version.provider,
+      turn.authority->>'codingReasoning' AS "reasoningEffort"
     FROM factory.agent_turn turn LEFT JOIN factory.model_connection_version version
       ON version.connection_id::text=turn.authority->'modelConnection'->>'connectionID'
       AND version.version::text=turn.authority->'modelConnection'->>'version'
@@ -101,6 +106,7 @@ async function agentConfiguration(
     modelID,
     modelIDs: admitted ? [modelID] : modelEnvironment().models,
     provider: admitted?.provider ?? "openai",
+    ...(admitted?.reasoningEffort ? { reasoningEffort: admitted.reasoningEffort } : {}),
     browserToolsImage,
     browserURL: runtimeFactoryURL(`/internal/build-browser/${attemptID}`),
     browserToken: runtimeBuildBrowserToken(secret, attemptID, generation),

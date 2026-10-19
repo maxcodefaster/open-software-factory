@@ -8,7 +8,7 @@
   and the relevant `docs/adr` decision when changing that boundary. Read what the task needs.
 - Maintained Markdown is limited to `README.md`, `AGENTS.md` and numbered ADRs in `docs/adr`.
   Put generated evidence under `.factory/test-results/`; do not add checkpoint or audit reports.
-- Use one implementation writer. Preserve changes made by others and use `apply_patch` for manual edits.
+- Preserve changes made by others and use `apply_patch` for manual edits.
 - Keep `/Users/max/Code/software-factory` read-only. Port isolated behavior only within the requested
   scope and bring its tests with it.
 
@@ -32,7 +32,9 @@
   caused by the change. Rerun checks when relevant changes or uncertain results warrant it.
 - Use configured paid models and live proofs when they help implement or verify the requested work.
   Do not skip necessary verification solely because it incurs model usage or ask for a separate
-  budget discussion for routine calls. Keep paid calls in explicit live lanes, not default tests.
+  budget discussion for routine calls. The requested implementation or verification authorizes
+  routine model calls; do not invent a second approval step. Keep paid calls in explicit live lanes,
+  not default tests.
 - Honor explicit user spending/time limits and required approvals. Do not invent additional token,
   time or spending caps, maintain countdowns or report usage unless requested or required by tooling.
   This guidance does not change Factory's product-level execution limits or admission/retry rules.

@@ -23,20 +23,22 @@ export function ProjectModelSettings(props: {
   const [saved, setSaved] = createSignal(false);
   const url = () => `/api/projects/${props.projectID}/model-settings`;
   let disposed = false;
-  const dirty = () =>
-    JSON.stringify(management() ? project() : personal()) !==
-    JSON.stringify(management() ? view()?.project : view()?.personal);
+  const dirty = (manage = management()) =>
+    JSON.stringify(manage ? project() : personal()) !==
+    JSON.stringify(manage ? view()?.project : view()?.personal);
   function publish(value: InheritedModelSettingsView) {
     setView(value);
     setProject(value.project);
     setPersonal(value.personal);
   }
-  async function load() {
-    const projectID = props.projectID;
+  async function load(projectID = props.projectID) {
     setBusy(true);
     setError("");
     try {
-      const value = await apiRequest(inheritedModelSettingsView, url());
+      const value = await apiRequest(
+        inheritedModelSettingsView,
+        `/api/projects/${projectID}/model-settings`,
+      );
       if (!disposed && projectID === props.projectID) publish(value);
     } catch (cause) {
       if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
@@ -91,17 +93,18 @@ export function ProjectModelSettings(props: {
         : personal()?.buildModelId;
   }
   createEffect(
-    () => props.active,
-    (active) => {
-      if (active && view() && !busy() && !dirty()) void load();
+    () => ({ active: props.active, management: props.management, projectID: props.projectID }),
+    ({ active, management, projectID }) => {
+      if (active && view() && !busy() && !dirty(management && view()?.canManageProject === true))
+        void load(projectID);
     },
   );
   createEffect(
     () => props.projectID,
-    () => {
+    (projectID) => {
       disposed = false;
       setView(undefined);
-      void load();
+      void load(projectID);
       return () => {
         disposed = true;
       };

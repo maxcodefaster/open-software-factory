@@ -728,25 +728,71 @@ test.each([
     }),
     "```",
   ].join("\n"),
-])("an unfinished native stop cannot commit, push or claim completion: %s", async (answer) => {
+])(
+  "a frozen report-contract admission still cannot submit an unfinished native stop: %s",
+  async (answer) => {
+    const owned = await fixture();
+    const commandID = crypto.randomUUID();
+    try {
+      owned.finish(answer);
+      const admission = createChangeAdmission(owned.database, buildModelID);
+      const accepted = await admission.admit(owned.changeID, owned.userID, {
+        kind: "change-prompt",
+        commandId: commandID,
+        text: "Finish the approved implementation",
+      });
+      // Model a retained, never-dispatched historical admission through its
+      // fixture input. Production code cannot rewrite admitted instructions.
+      await owned.database.client.begin(async (sql) => {
+        await sql`SET LOCAL session_replication_role = 'replica'`;
+        await sql`UPDATE factory.change_agent_turn_intent
+        SET prompt_text=prompt_text || E'\\nFactory Build completion report v1: criteria=1'
+        WHERE turn_id=${accepted.turn.id}`;
+        await sql`UPDATE factory.agent_turn SET authority=authority-'submissionPolicy'
+          WHERE id=${accepted.turn.id}`;
+      });
+      await owned
+        .controller()
+        .prompt(owned.changeID, "Finish the approved implementation", owned.userID, commandID);
+      await owned.controller().recover();
+      await owned.requested;
+      owned.release();
+      await until(async () => (await owned.controller().get(owned.changeID)).state === "failed");
+      expect(await owned.turn(commandID)).toMatchObject({
+        state: "failed",
+        summary: expect.stringContaining("Implementation incomplete"),
+      });
+      expect(owned.commitCalls).toEqual([]);
+      expect(
+        await owned.database
+          .client`SELECT id FROM factory.change_commit_operation WHERE change_id = ${owned.changeID}`,
+      ).toHaveLength(0);
+      expect(owned.requests()).toBe(1);
+    } finally {
+      await owned.dispose();
+    }
+  },
+);
+
+test("a new goal submits ordinary native output for Verification without treating submission as Delivery", async () => {
   const owned = await fixture();
   const commandID = crypto.randomUUID();
   try {
-    owned.finish(answer);
+    owned.finish("Changed the implementation and ran its checks. Review the remaining UI details.");
     await owned
       .controller()
-      .prompt(owned.changeID, "Finish the approved implementation", owned.userID, commandID);
+      .prompt(owned.changeID, "Work toward the approved goal", owned.userID, commandID);
     await owned.requested;
     owned.release();
-    await until(async () => (await owned.controller().get(owned.changeID)).state === "failed");
+    await until(async () => (await owned.controller().get(owned.changeID)).state === "committed");
     expect(await owned.turn(commandID)).toMatchObject({
-      state: "failed",
-      summary: expect.stringContaining("Implementation incomplete"),
+      state: "completed",
+      summary: expect.stringContaining("not approved for Delivery"),
     });
-    expect(owned.commitCalls).toEqual([]);
+    expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
     expect(
-      await owned.database
-        .client`SELECT id FROM factory.change_commit_operation WHERE change_id = ${owned.changeID}`,
+      await owned.database.client`SELECT id FROM factory.delivery_approval
+      WHERE change_id=${owned.changeID}`,
     ).toHaveLength(0);
     expect(owned.requests()).toBe(1);
   } finally {

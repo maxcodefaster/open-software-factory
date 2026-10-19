@@ -7,6 +7,7 @@ import type { ModelProbeResult } from "../../../../packages/conversation-domain/
 import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
 import { nativeAgentPolicy, nativeStepGuard } from "./execution-policy";
 import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "./native";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 
 const output = z
   .object({ verified: z.literal(true), value: z.literal("factory-connection-ok") })
@@ -73,6 +74,7 @@ export async function probeModel(input: {
   signal: AbortSignal;
   role?: "planning" | "build";
   usageSink?: MastraUsageSink;
+  reasoningEffort?: CodingReasoning;
 }): Promise<ModelProbeResult> {
   if (input.role === "build") {
     const { probeBuildModel } = await import("./build-probe");

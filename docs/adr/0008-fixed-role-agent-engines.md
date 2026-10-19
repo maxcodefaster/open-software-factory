@@ -13,6 +13,13 @@ account access or quota; bounded model probes and provider-reported headers do. 
 fallback changes an admitted model or paid request. OpenCode receives only a Build-bound Factory
 capability; native provider traffic passes through the authorized relay without protocol conversion.
 
+New OpenAI Build admissions freeze an administrator-selected reasoning effort of at least
+medium and use the pinned native Responses adapter. The relay rejects a different effort or
+transport rather than rewriting the request. Admin changes apply to new Changes and probes,
+not running work or retained historical configurations. Other providers retain their concrete
+native adapters and options. A successful access probe proves a real native tool call, not
+just that an account can list a deployment.
+
 Run the exact published OpenCode server with native durable event persistence enabled. The CLI
 does not expose this setting and its sequence-only log cannot recover usage after interruption.
 Retain the upstream server, native assets and lockfile unchanged rather than forking OpenCode or

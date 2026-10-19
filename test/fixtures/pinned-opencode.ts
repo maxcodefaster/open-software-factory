@@ -42,6 +42,7 @@ export async function pinnedOpenCode(
     digest: string;
     files: Array<{ path: string; body: string; digest: string; executable: boolean }>;
   },
+  nativeProvider?: { modelID: string; package: string; settings: Record<string, unknown> },
 ) {
   artifactImage ??=
     process.env["FACTORY_OPENCODE_TEST_IMAGE"] ??
@@ -84,7 +85,7 @@ export async function pinnedOpenCode(
         name,
       );
       if (owner !== id) throw new Error("Owned process cleanup refused");
-      await docker("rm", "--force", name);
+      await docker("rm", "--force", "--volumes", name);
       created.splice(created.indexOf(name), 1);
     }
   }
@@ -113,7 +114,10 @@ export async function pinnedOpenCode(
       "--label",
       label,
       "--env",
-      `FACTORY_PROCESS_MODEL_ID=${buildModelID}`,
+      `FACTORY_PROCESS_MODEL_ID=${nativeProvider?.modelID ?? buildModelID}`,
+      ...(nativeProvider
+        ? ["--env", `FACTORY_PROCESS_NATIVE_PROVIDER=${JSON.stringify(nativeProvider)}`]
+        : []),
       ...(providerBaseURL ? ["--env", `FACTORY_PROCESS_PROVIDER_URL=${providerBaseURL}`] : []),
       ...(nativeServer ? ["--env", "FACTORY_PROCESS_NATIVE_SERVER=1"] : []),
       ...(skillManifest

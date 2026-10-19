@@ -1182,7 +1182,11 @@ export function createAgentController(
             })),
             session.activeInboxID,
             work.running,
-            { prompt: intent.text, criteria: intent.criteria },
+            {
+              prompt: intent.text,
+              criteria: intent.criteria,
+              ...(intent.submissionPolicy === "native" ? { policy: "native" as const } : {}),
+            },
           );
           // History can observe a terminal outcome after the earlier log watermark.
           // Drain again before settlement so the last paid step cannot be missed.
@@ -1215,7 +1219,7 @@ export function createAgentController(
               "completed",
               outcome.summary
                 ? bounded(`Agent reports ready for Verification: ${outcome.summary}`, 2_000)
-                : "OpenCode completed this implementation turn",
+                : "OpenCode ended this Build turn. Changed source is submitted for independent Verification, not approved for Delivery.",
               async (sql) => {
                 const accepted = await sql<
                   Array<{ id: string }>

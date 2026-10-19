@@ -14,12 +14,21 @@ import {
   type ModelSettingsView,
   type modelDefaultsInput,
   modelRulesInput,
+  codingReasoningInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { providerCatalogue } from "./native";
+
+export async function codingReasoningIn(sql: AgentTurnTransaction) {
+  await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
+  const [stored] = await sql<Array<{ reasoning: string | null }>>`
+    SELECT role_rules->'build'->>'reasoningEffort' AS reasoning
+    FROM factory.model_defaults WHERE singleton`;
+  return codingReasoningInput.parse(stored?.reasoning ?? "medium");
+}
 
 export function modelEnvironment() {
   const planningModelId =
@@ -88,12 +97,12 @@ export function createModelSettingsController(
       SELECT version::float8 AS version, planning_model_id AS "planningModelId",
         build_model_id AS "buildModelId", role_rules AS rules FROM factory.model_defaults WHERE singleton
     `;
-    const rules = stored?.rules
-      ? modelRulesInput.parse(stored.rules)
-      : {
-          planning: { models: permitted("planning"), allowOverride: true },
-          build: { models: permitted("build"), allowOverride: true },
-        };
+    const rules = modelRulesInput.parse(
+      stored?.rules ?? {
+        planning: { models: permitted("planning"), allowOverride: true },
+        build: { models: permitted("build"), allowOverride: true },
+      },
+    );
     for (const binding of connections)
       rules[binding.role].models = rules[binding.role].models.filter((id) =>
         permitted(binding.role).includes(id),
@@ -264,7 +273,7 @@ export function createModelSettingsController(
         return inherited(sql, projectID, userID);
       });
     },
-    async set(input: z.infer<typeof modelDefaultsInput>, userID: string) {
+    async set(input: z.input<typeof modelDefaultsInput>, userID: string) {
       return database.client.begin(async (sql) => {
         await lock(sql, true);
         const [administrator] =

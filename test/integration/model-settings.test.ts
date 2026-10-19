@@ -65,8 +65,29 @@ test("administrator commands enforce auth, origin, catalogue and CAS and survive
     expect(initial.source).toBe("environment");
     expect(initial.planningModelId).toBe(planning);
     expect(initial.buildModelId).toBe(build);
+    expect(initial.rules.build.reasoningEffort).toBe("medium");
     expect(JSON.stringify(initial)).not.toContain("owned-unused-model-token");
-    const body = { version: 0, planningModelId: alternative, buildModelId: alternative };
+    const body = {
+      version: 0,
+      planningModelId: alternative,
+      buildModelId: alternative,
+      rules: {
+        ...initial.rules,
+        build: { ...initial.rules.build, reasoningEffort: "high" },
+      },
+    };
+    expect(
+      (
+        await fetch(url, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({
+            ...body,
+            rules: { ...body.rules, build: { ...body.rules.build, reasoningEffort: "none" } },
+          }),
+        })
+      ).status,
+    ).toBe(400);
     expect(
       (
         await fetch(url, {
@@ -101,6 +122,7 @@ test("administrator commands enforce auth, origin, catalogue and CAS and survive
     const saved = modelSettingsView.parse(await (await fetch(url, { headers })).json());
     expect(saved.version).toBe(1);
     expect(saved.source).toBe("administrator");
+    expect(saved.rules.build.reasoningEffort).toBe("high");
     await process.kill(first);
     await process.start();
     expect(modelSettingsView.parse(await (await fetch(url, { headers })).json())).toEqual(saved);
@@ -129,12 +151,24 @@ test("admission freezes models across changed defaults and command replay", asyn
       commandId,
     });
     expect(first.turn.authority.modelId).toBe(build);
+    expect(first.turn.authority).toMatchObject({ codingReasoning: "medium" });
+    const firstIntent = await admission.intent(first.turn.id);
+    expect(firstIntent.text).toContain("Factory Build goal v1:");
+    expect(firstIntent.text).not.toContain("factory-build-result");
     const turns = createAgentTurnStore(database);
     const owner = await turns.claimPending(first.turn.id);
     if (!owner?.ownerToken) throw new Error("Owned turn was not claimed");
     await turns.failPending(owner.id, owner.ownerToken, "Owned admission only");
     await settings.set(
-      { version: 0, planningModelId: alternative, buildModelId: alternative },
+      {
+        version: 0,
+        planningModelId: alternative,
+        buildModelId: alternative,
+        rules: {
+          planning: { models, allowOverride: true },
+          build: { models, allowOverride: true, reasoningEffort: "high" },
+        },
+      },
       administrator,
     );
     const another = await fixture(undefined, undefined, process.connect());
@@ -146,6 +180,7 @@ test("admission freezes models across changed defaults and command replay", asyn
         commandId: crypto.randomUUID(),
       });
       expect(start.turn.authority.modelId).toBe(alternative);
+      expect(start.turn.authority).toMatchObject({ codingReasoning: "high" });
       const secondTurns = createAgentTurnStore(another.database);
       const claimed = await secondTurns.claimPending(start.turn.id);
       if (!claimed?.ownerToken) throw new Error("Owned new Change was not claimed");
@@ -171,12 +206,14 @@ test("admission freezes models across changed defaults and command replay", asyn
     });
     expect(replay.turn.id).toBe(first.turn.id);
     expect(replay.turn.authority.modelId).toBe(build);
+    expect(replay.turn.authority).toMatchObject({ codingReasoning: "medium" });
     const next = await admission.admit(owned.changeID, owned.userID, {
       kind: "change-prompt",
       commandId: crypto.randomUUID(),
       text: "Continue",
     });
     expect(next.turn.authority.modelId).toBe(build);
+    expect(next.turn.authority).toMatchObject({ codingReasoning: "medium" });
     const nextOwner = await turns.claimPending(next.turn.id);
     if (!nextOwner?.ownerToken) throw new Error("Owned next turn was not claimed");
     await turns.failPending(nextOwner.id, nextOwner.ownerToken, "Owned admission only");
@@ -270,37 +307,31 @@ test("relay streams the active exact model and rejects revoked/runtime/token aut
     const request = (
       model = build,
       token = runtimeModelToken(secret, attemptID, 1),
-      body = JSON.stringify({ model, stream: true }),
+      body = JSON.stringify({ model, stream: true, reasoning: { effort: "medium" } }),
     ) =>
       new Request("http://factory.invalid/internal/model", {
         method: "POST",
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body,
       });
-    expect((await relay(request(alternative), owned.attemptID, "chat/completions")).status).toBe(
-      403,
-    );
-    expect(
-      (await relay(request(build, "invalid"), owned.attemptID, "chat/completions")).status,
-    ).toBe(401);
+    expect((await relay(request(alternative), owned.attemptID, "responses")).status).toBe(403);
+    expect((await relay(request(build, "invalid"), owned.attemptID, "responses")).status).toBe(401);
     expect(
       (
         await relay(
           request(build, runtimeModelToken(secret, owned.attemptID, 2)),
           owned.attemptID,
-          "chat/completions",
+          "responses",
         )
       ).status,
     ).toBe(401);
     expect(
-      (await relay(request(build, undefined, "not-json"), owned.attemptID, "chat/completions"))
-        .status,
+      (await relay(request(build, undefined, "not-json"), owned.attemptID, "responses")).status,
     ).toBe(400);
     expect((await relay(request(), owned.attemptID, "models")).status).toBe(404);
     const oversized = JSON.stringify({ model: build, padding: "x".repeat(4_194_304) });
     expect(
-      (await relay(request(build, undefined, oversized), owned.attemptID, "chat/completions"))
-        .status,
+      (await relay(request(build, undefined, oversized), owned.attemptID, "responses")).status,
     ).toBe(413);
     const streamed = new Request("http://factory.invalid/internal/model", {
       method: "POST",
@@ -313,14 +344,43 @@ test("relay streams the active exact model and rejects revoked/runtime/token aut
         },
       }),
     });
-    expect((await relay(streamed, owned.attemptID, "chat/completions")).status).toBe(413);
+    expect((await relay(streamed, owned.attemptID, "responses")).status).toBe(413);
+    for (const effort of [undefined, "none", "low", "high"]) {
+      expect(
+        (
+          await relay(
+            request(build, undefined, JSON.stringify({ model: build, reasoning: { effort } })),
+            owned.attemptID,
+            "responses",
+          )
+        ).status,
+      ).toBe(403);
+    }
+    expect((await relay(request(), owned.attemptID, "chat/completions")).status).toBe(403);
+    expect(
+      (
+        await relay(
+          request(
+            build,
+            undefined,
+            JSON.stringify({
+              model: build,
+              reasoning: { effort: "medium" },
+              input: [{ type: "configuration_update", reasoning: { effort: "low" } }],
+            }),
+          ),
+          owned.attemptID,
+          "responses",
+        )
+      ).status,
+    ).toBe(403);
     expect(calls).toBe(0);
-    const response = await relay(request(), owned.attemptID, "chat/completions");
+    const response = await relay(request(), owned.attemptID, "responses");
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("data: owned-stream\n\n");
     expect(response.headers.get("x-secret-header")).toBeNull();
     expect(calls).toBe(1);
-    const dispatched = relay(request(), owned.attemptID, "chat/completions");
+    const dispatched = relay(request(), owned.attemptID, "responses");
     await inFlight.promise;
     await database.client`UPDATE factory.change_agent_session SET state = 'stopped' WHERE change_id = ${owned.changeID}`;
     expect((await relay(request(), owned.attemptID, "responses")).status).toBe(403);

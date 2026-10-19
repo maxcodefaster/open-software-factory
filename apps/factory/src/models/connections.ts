@@ -19,7 +19,8 @@ import {
   modelRoleConnectionView,
   type ModelProbeResult,
 } from "../../../../packages/conversation-domain/src/model-connection";
-import { modelEnvironment } from "./controller";
+import { codingReasoningIn, modelEnvironment } from "./controller";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import { deploymentModelConnections } from "./deployment";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { createUsageJournal } from "../usage/journal";
@@ -173,6 +174,7 @@ export function createModelConnections(
       signal: AbortSignal,
     ) {
       const input = modelRoleConnectionInput.parse(value);
+      let reasoningEffort: CodingReasoning = "medium";
       const admitted = await database.client.begin(async (sql) => {
         await sql`SELECT pg_advisory_xact_lock(hashtext('factory-model-settings'))`;
         await manager(sql, userID);
@@ -211,6 +213,7 @@ export function createModelConnections(
           Array<{ version: number }>
         >`SELECT version::float8 AS version FROM factory.model_defaults WHERE singleton`;
         if ((defaults?.version ?? 0) !== input.settingsVersion) throw conflict();
+        if (input.role === "build") reasoningEffort = await codingReasoningIn(sql);
         if ((await current(sql, input.connectionID))?.version !== input.version) throw conflict();
         await sql`INSERT INTO factory.model_role_probe(command_id, role, connection_id, connection_version, model_id, settings_version, created_by, state)
           VALUES (${input.commandID}, ${input.role}, ${input.connectionID}, ${input.version}, ${input.modelId}, ${input.settingsVersion}, ${userID}, 'probing')`;
@@ -223,6 +226,7 @@ export function createModelConnections(
         modelId: input.modelId,
         signal,
         role: input.role,
+        ...(input.role === "build" ? { reasoningEffort } : {}),
         usageSink: recordedMastraUsage(database, {
           engine: input.role === "build" ? "opencode" : "mastra",
           id: `probe:${input.commandID}`,

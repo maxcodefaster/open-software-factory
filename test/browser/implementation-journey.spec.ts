@@ -273,6 +273,11 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
     }),
   );
   await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
+    route.fulfill({
+      json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+    }),
+  );
   await selectProject(page);
   await page
     .getByRole("region", { name: "implementation", exact: true })
@@ -283,6 +288,131 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
   await expect(
     page.getByRole("button", { name: "Retry implementation", exact: true }),
   ).toBeEnabled();
+});
+
+test("tool activity is one collapsed line, keyboard expandable and compact at narrow widths", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  const command = "node --test src/support/lifecycle.test.mjs ".repeat(8);
+  const output = Array.from({ length: 80 }, (_, index) => `Test ${index + 1} passed`).join("\n");
+  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
+    route.fulfill({
+      json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+    }),
+  );
+  await page.route("**/api/changes?*", (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-tool-ui",
+            baseSha: "a".repeat(40),
+            state: "failed",
+            branchState: "succeeded",
+            runtimeState: "failed",
+            implementationState: "failed",
+            buildTurnState: "failed",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+    route.fulfill({
+      json: {
+        state: "failed",
+        sessionAvailable: true,
+        runtimeConnected: false,
+        messagesAvailable: true,
+        messages: [
+          {
+            id: "owned-tool-one",
+            role: "tool",
+            text: command,
+            at: Date.now(),
+            activity: { name: "shell", status: "completed", detail: output },
+          },
+          {
+            id: "owned-tool-two",
+            role: "tool",
+            text: "Read src/web.tsx",
+            at: Date.now() + 1,
+            activity: { name: "read", status: "completed" },
+          },
+          {
+            id: "owned-tool-three",
+            role: "tool",
+            text: "node --test invalid.mjs",
+            at: Date.now() + 2,
+            activity: {
+              name: "shell",
+              status: "error",
+              detail: "The named test file was not found.",
+            },
+          },
+        ],
+        stopPending: false,
+        stopId: null,
+        lastError: "Owned stopped UI fixture",
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  const rows = page.locator("details.agent-activity");
+  await expect(rows).toHaveCount(3);
+  const row = rows.first();
+  const summary = row.locator("summary");
+  await expect(row).not.toHaveAttribute("open");
+  await expect(row.locator(".activity-output")).toBeHidden();
+  const collapsed = await row.boundingBox();
+  expect(collapsed?.height).toBeLessThanOrEqual(32);
+  expect(
+    await row
+      .locator(".activity-command")
+      .evaluate((element) => element.scrollWidth > element.clientWidth),
+  ).toBe(true);
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(row).toHaveAttribute("open", "");
+  await expect(row.locator(".activity-command-full")).toHaveText(command.trim());
+  await expect(row.locator(".activity-output")).toBeVisible();
+  expect(
+    await row
+      .locator(".activity-output")
+      .evaluate((element) => element.scrollHeight > element.clientHeight),
+  ).toBe(true);
+  await mkdir(".factory/test-results/implementation-journey", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/tool-expanded-wide.png",
+  });
+  await page.keyboard.press("Space");
+  await expect(row).not.toHaveAttribute("open");
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/tool-collapsed-wide.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(summary).toBeVisible();
+  expect((await row.boundingBox())?.height).toBeLessThanOrEqual(32);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/tool-collapsed-narrow.png",
+  });
+  await summary.click();
+  await expect(row.locator(".activity-output")).toBeVisible();
+  await page.screenshot({
+    path: ".factory/test-results/implementation-journey/tool-expanded-narrow.png",
+  });
 });
 
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
@@ -444,6 +574,8 @@ test("Review corrections send to the retained Build without IDE; checks and cont
 });
 
 test("Settings is a retained Project-bound workspace tab with no modal", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
   await selectProject(page);
   await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -481,6 +613,7 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   await page.screenshot({
     path: ".factory/screenshots/implementation-journey/settings-narrow.png",
   });
+  expect(errors).toEqual([]);
 });
 
 test("post-start human edits and selected History retain immutable scope without dispatch", async ({

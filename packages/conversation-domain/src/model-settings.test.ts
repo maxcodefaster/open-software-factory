@@ -1,5 +1,22 @@
 import { expect, test } from "bun:test";
-import { approvedModelCatalogue, modelDefaultsInput } from "./model-settings";
+import { approvedModelCatalogue, modelDefaultsInput, modelRulesInput } from "./model-settings";
+
+test("Coding reasoning defaults to medium and cannot be disabled or lowered", () => {
+  const rules = {
+    planning: { models: ["plan"], allowOverride: true },
+    build: { models: ["build"], allowOverride: true },
+  };
+  expect(modelRulesInput.parse(rules).build).toHaveProperty("reasoningEffort", "medium");
+  for (const reasoningEffort of ["medium", "high", "xhigh", "max"]) {
+    expect(
+      modelRulesInput.parse({ ...rules, build: { ...rules.build, reasoningEffort } }).build,
+    ).toHaveProperty("reasoningEffort", reasoningEffort);
+  }
+  for (const reasoningEffort of ["none", "minimal", "low", "", null])
+    expect(
+      modelRulesInput.safeParse({ ...rules, build: { ...rules.build, reasoningEffort } }).success,
+    ).toBe(false);
+});
 
 test("catalogue includes environment defaults and deduplicates explicit choices", () => {
   expect(

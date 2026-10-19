@@ -31,7 +31,15 @@ function completion(delta: Record<string, unknown>, finishReason: string | null)
   };
 }
 
-function toolCall(id: string, name: string, input: Record<string, unknown>) {
+function toolCall(id: string, name: string, input: Record<string, unknown>, responses = false) {
+  if (responses)
+    return fakeResponsesOutput({
+      type: "function_call",
+      id: `fc_${id}`,
+      call_id: id,
+      name,
+      arguments: JSON.stringify(input),
+    });
   return stream([
     completion(
       {
@@ -51,7 +59,14 @@ function toolCall(id: string, name: string, input: Record<string, unknown>) {
   ]);
 }
 
-function text(value: string) {
+function text(value: string, responses = false) {
+  if (responses)
+    return fakeResponsesOutput({
+      type: "message",
+      id: "msg_factory_controlled",
+      role: "assistant",
+      content: [{ type: "output_text", text: value, annotations: [] }],
+    });
   return stream([completion({ role: "assistant", content: value }, null), completion({}, "stop")]);
 }
 
@@ -94,12 +109,14 @@ Bun.serve({
       waiters.clear();
       return new Response(null, { status: 204 });
     }
-    if (url.pathname !== "/v1/chat/completions" || request.method !== "POST") {
+    const responses = url.pathname === "/v1/responses";
+    if ((!responses && url.pathname !== "/v1/chat/completions") || request.method !== "POST") {
       return new Response("Not found", { status: 404 });
     }
     requests += 1;
     const body = (await request.json()) as {
       messages?: Array<{ role?: string; tool_call_id?: string; content?: string }>;
+      input?: Array<{ type?: string }>;
       tools?: unknown[];
     };
     if (
@@ -131,24 +148,37 @@ Bun.serve({
         ],
       });
     }
-    if (!body.tools?.length) return text("Factory test session");
+    if (!body.tools?.length) return text("Factory test session", responses);
     tools = body.tools;
     agentRequests += 1;
     if (!(await waitForRelease(request))) return new Response(null, { status: 499 });
-    const completedTools = body.messages?.filter((message) => message.role === "tool") ?? [];
+    const completedTools = responses
+      ? (body.input?.filter((item) => item.type === "function_call_output") ?? [])
+      : (body.messages?.filter((message) => message.role === "tool") ?? []);
     if (completedTools.length === 0) {
-      return toolCall("call_factory_write", "write", {
-        path: "src/version.txt",
-        content: "agent\n",
-      });
+      return toolCall(
+        "call_factory_write",
+        "write",
+        {
+          path: "src/version.txt",
+          content: "agent\n",
+        },
+        responses,
+      );
     }
     if (completedTools.length === 1) {
-      return toolCall("call_factory_check", "shell", {
-        command: "node --check src/server.mjs",
-      });
+      return toolCall(
+        "call_factory_check",
+        "shell",
+        {
+          command: "node --check src/server.mjs",
+        },
+        responses,
+      );
     }
-    return text("Implementation complete. The local syntax check passed.");
+    return text("Implementation complete. The local syntax check passed.", responses);
   },
 });
 
 console.log(`fake model ready on ${port}`);
+import { fakeResponsesOutput } from "./fake-openai-responses";

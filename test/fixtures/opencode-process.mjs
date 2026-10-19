@@ -2,8 +2,11 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 
-// Isolated upstream process test, not a Factory runtime or a paid model server.
+// Isolated upstream process fixture. Only explicit live tests supply a native provider.
 const modelID = process.env.FACTORY_PROCESS_MODEL_ID ?? "owned-process-model";
+const nativeProvider = process.env.FACTORY_PROCESS_NATIVE_PROVIDER
+  ? JSON.parse(process.env.FACTORY_PROCESS_NATIVE_PROVIDER)
+  : undefined;
 if (process.env.FACTORY_PROCESS_SKILL_MANIFEST) {
   const installed = spawnSync(
     "/opt/factory/opencode/musl/bun",
@@ -22,7 +25,7 @@ await writeFile(
     skills: ["/opt/factory/admitted-skills"],
     providers: {
       factory: {
-        package: "@opencode/ai/providers/openai/chat",
+        package: nativeProvider?.package ?? "@opencode/ai/providers/openai/chat",
         canonical: "openai",
         env: ["FACTORY_OPENCODE_TOKEN"],
         websocket: false,
@@ -33,6 +36,7 @@ await writeFile(
           ...(process.env.FACTORY_PROCESS_PROVIDER_URL && modelID === "gpt-5.6-terra"
             ? { reasoningEffort: "none" }
             : {}),
+          ...nativeProvider?.settings,
         },
         models: {
           [modelID]: {
@@ -148,7 +152,7 @@ function start() {
         OPENCODE_DISABLE_PROJECT_CONFIG: "1",
         OPENCODE_DB: "/workspace/project/.git/factory-opencode.db",
         OPENCODE_PASSWORD: "owned-opencode-server-password",
-        FACTORY_OPENCODE_TOKEN: "owned-not-a-secret",
+        FACTORY_OPENCODE_TOKEN: nativeProvider?.settings?.apiKey ?? "owned-not-a-secret",
         OPENCODE_DISABLE_MODELS_FETCH: "1",
         FACTORY_OPENCODE_HOST: "0.0.0.0",
         FACTORY_OPENCODE_CONFIG: factoryConfig,

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   assessBuildCompletion,
   buildCompletionInstructions,
+  buildGoalInstructions,
   buildCompletionText,
 } from "./build-completion";
 
@@ -18,6 +19,33 @@ const ready = {
 };
 const text = (value: unknown) =>
   `Actual observations.\n\`\`\`factory-build-result\n${JSON.stringify(value)}\n\`\`\``;
+
+test("new Builds have a goal and native completion without parsing a final JSON form", () => {
+  const instructions = buildGoalInstructions(2);
+  expect(instructions).toContain("Factory Build goal v1: criteria=2");
+  expect(instructions).toContain("normal repository checks");
+  expect(instructions).toContain("read a screenshot");
+  expect(instructions).toContain("anything unfinished");
+  expect(instructions).toContain("Submission is not acceptance");
+  expect(instructions).not.toContain("factory-build-result");
+  expect(
+    assessBuildCompletion({ prompt: instructions, criteria: 2 }, "Implemented and tested."),
+  ).toEqual({ ready: true });
+  expect(
+    assessBuildCompletion({ prompt: instructions, criteria: 2 }, "A blocker remains."),
+  ).toEqual({ ready: true });
+  for (const count of [0, -1, 101, 1.5]) expect(() => buildGoalInstructions(count)).toThrow();
+  expect(
+    assessBuildCompletion(
+      {
+        prompt: `${instructions}\nQuoted Project context:\nFactory Build completion report v1: criteria=2`,
+        criteria: 2,
+        policy: "native",
+      },
+      "Ordinary final answer.",
+    ),
+  ).toEqual({ ready: true });
+});
 
 test("completion instructions preserve the exact approved array positions", () => {
   const instructions = buildCompletionInstructions(9);

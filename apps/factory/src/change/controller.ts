@@ -57,6 +57,17 @@ export function createChangeController(
   });
   const running = new Set<string>();
   const cancellationObservers = new Set<string>();
+  const retries = new Map<string, ReturnType<typeof setTimeout>>();
+
+  function retry(changeID: string, delay: number) {
+    clearTimeout(retries.get(changeID));
+    const timer = setTimeout(() => {
+      retries.delete(changeID);
+      void reconcile(changeID);
+    }, delay);
+    timer.unref();
+    retries.set(changeID, timer);
+  }
 
   function observeCancellation(changeID: string) {
     if (cancellationObservers.has(changeID)) return;
@@ -102,6 +113,10 @@ export function createChangeController(
 
   async function reconcile(changeID: string) {
     if (running.has(changeID)) return;
+    // Explicit recovery supersedes a previously scheduled retry. A successful
+    // reconciliation must not leave that callback using an obsolete lifetime.
+    clearTimeout(retries.get(changeID));
+    retries.delete(changeID);
     running.add(changeID);
     try {
       for (;;) {
@@ -167,7 +182,7 @@ export function createChangeController(
                   last_error = ${cause.message}, updated_at = now()
                 WHERE id = ${operation.operationID} AND state = 'executing'
               `;
-              setTimeout(() => void reconcile(changeID), delay * 1_000).unref();
+              retry(changeID, delay * 1_000);
               return;
             }
             const message = cause instanceof Error ? cause.message : "branch creation failed";
@@ -212,7 +227,7 @@ export function createChangeController(
                 updated_at = now()
               WHERE id = ${operation.operationID} AND state = 'executing'
             `;
-            setTimeout(() => void reconcile(changeID), 1_000).unref();
+            retry(changeID, 1_000);
             return;
           }
         } finally {

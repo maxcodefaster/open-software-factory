@@ -159,24 +159,22 @@ export function ChangeAgentMessage(props: { message: AgentMessage }) {
       }
     >
       {(activity) => (
-        <article class={`agent-activity ${activity().status}`}>
-          <div class="agent-activity-heading">
-            <span class="activity-indicator" />
-            <div>
-              <small>{activity().name}</small>
-              <strong>{props.message.text}</strong>
-            </div>
+        <details class={`agent-activity ${activity().status}`}>
+          <summary class="agent-activity-heading">
+            <span class="activity-indicator" aria-hidden="true" />
+            <span class="activity-name">{activity().name}</span>
+            <span class="activity-command" title={props.message.text}>
+              {props.message.text}
+            </span>
             <span class="activity-status">{activity().status}</span>
+          </summary>
+          <div class="agent-activity-content">
+            <pre class="activity-command-full">{props.message.text}</pre>
+            <Show when={activity().detail}>
+              {(detail) => <pre class="activity-output">{detail()}</pre>}
+            </Show>
           </div>
-          <Show when={activity().detail}>
-            {(detail) => (
-              <details>
-                <summary>Output</summary>
-                <pre>{detail()}</pre>
-              </details>
-            )}
-          </Show>
-        </article>
+        </details>
       )}
     </Show>
   );

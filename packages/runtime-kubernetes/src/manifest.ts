@@ -1,6 +1,8 @@
 import type { SystemContract } from "../../system-contract/src/system-contract";
 import { renderEnvboxPod } from "./envbox-pod";
 import { verificationSupervisor } from "./verification-process";
+import { openCodeModelConfiguration } from "./opencode-model";
+import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
 
 export interface RuntimeManifestInput {
   readonly attemptID: string;
@@ -35,6 +37,7 @@ export interface RuntimeManifestInput {
     readonly modelID: string;
     readonly modelIDs: readonly string[];
     readonly provider?: "openai" | "anthropic" | "deepseek";
+    readonly reasoningEffort?: CodingReasoning;
     readonly browserToolsImage: string;
     readonly browserURL: string;
     readonly browserToken: string;
@@ -148,12 +151,7 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
                   model: `factory/${input.agent.modelID}`,
                   providers: {
                     factory: {
-                      package:
-                        input.agent.provider === "anthropic"
-                          ? "@opencode/ai/providers/anthropic"
-                          : input.agent.provider === "deepseek"
-                            ? "@opencode/ai/providers/deepseek"
-                            : "@opencode/ai/providers/openai/chat",
+                      package: openCodeModelConfiguration(input.agent).package,
                       canonical: input.agent.provider ?? "openai",
                       env: ["FACTORY_OPENCODE_TOKEN"],
                       websocket: false,
@@ -161,10 +159,7 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
                       settings: {
                         baseURL: input.agent.modelBaseURL,
                         apiKey: input.agent.modelToken,
-                        ...(input.agent.modelID === "gpt-5.6-terra" &&
-                        (input.agent.provider ?? "openai") === "openai"
-                          ? { reasoningEffort: "none" }
-                          : {}),
+                        ...openCodeModelConfiguration(input.agent).settings,
                       },
                       models: Object.fromEntries(
                         input.agent.modelIDs.map((id) => [id, { name: id }]),

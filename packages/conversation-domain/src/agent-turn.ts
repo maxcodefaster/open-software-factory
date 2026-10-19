@@ -2,6 +2,7 @@ import { z } from "zod";
 import { interviewAnswerInput } from "./conversation";
 import { modelConnectionReference } from "./model-connection";
 import { skillRevisionIDsInput } from "./skills";
+import { codingReasoningInput } from "./model-settings";
 
 export const changeAgentStartInput = z.object({ commandId: z.uuid() }).strict();
 export const changeAgentResumeInput = changeAgentStartInput
@@ -85,6 +86,8 @@ export const agentTurnAuthorityInput = z.discriminatedUnion("mode", [
       requirementRevisionId: z.uuid(),
       modelId: z.string().trim().min(1).max(200),
       modelConnection: modelConnectionReference.optional(),
+      codingReasoning: codingReasoningInput.optional(),
+      submissionPolicy: z.literal("native").optional(),
       skillRevisionIds: skillRevisionIDsInput.default([]),
     })
     .strict(),

@@ -70,10 +70,14 @@ test("commissioned Coding finishes its in-flight call, blocks subsequent inferen
           headers: {
             authorization: `Bearer ${runtimeModelToken("owned-relay-secret", owned.attemptID, 1)}`,
           },
-          body: JSON.stringify({ model: "owned-model", messages: [] }),
+          body: JSON.stringify({
+            model: "owned-model",
+            input: [],
+            reasoning: { effort: "medium" },
+          }),
         }),
         owned.attemptID,
-        "chat/completions",
+        "responses",
       );
     const inFlight = request();
     await eventually(

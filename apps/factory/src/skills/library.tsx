@@ -47,10 +47,10 @@ export function SkillLibrary(props: {
   );
   const suffix = () => (props.projectId ? `?project=${props.projectId}` : "");
   let sequence = 0;
-  async function load() {
+  async function load(url = `/api/skills${suffix()}`) {
     const request = ++sequence;
     try {
-      const next = await apiRequest(skillLibraryView, `/api/skills${suffix()}`);
+      const next = await apiRequest(skillLibraryView, url);
       if (request === sequence) setView(next);
     } catch (cause) {
       if (request === sequence)
@@ -58,10 +58,10 @@ export function SkillLibrary(props: {
     }
   }
   createEffect(
-    () => [props.projectId, props.scope, props.active] as const,
-    () => {
-      if (props.active !== false) {
-        void load();
+    () => ({ url: `/api/skills${suffix()}`, scope: props.scope, active: props.active }),
+    ({ url, active }) => {
+      if (active !== false) {
+        void load(url);
       }
       return () => {
         sequence++;

@@ -1,7 +1,7 @@
 import { LLM, LLMClient, Tool, ToolChoice } from "@opencode/ai";
 import { model as anthropicModel } from "@opencode/ai/providers/anthropic";
 import { model as deepseekModel } from "@opencode/ai/providers/deepseek";
-import { model as openaiModel } from "@opencode/ai/providers/openai/chat";
+import { model as openaiModel } from "@opencode/ai/providers/openai/responses";
 import { RequestExecutor } from "@opencode/ai/route";
 import { Effect, Layer, Schema } from "effect";
 import type { ModelProbeResult } from "../../../../packages/conversation-domain/src/model-connection";
@@ -9,6 +9,11 @@ import type { ResolvedModelConnection } from "./native";
 import { modelProbeFailure, reportedModelLimits } from "./probe";
 import type { MastraUsageSink } from "../usage/mastra";
 import { unknownCounters, usageCounters } from "../../../../packages/conversation-domain/src/usage";
+import { openCodeModelConfiguration } from "../../../../packages/runtime-kubernetes/src/opencode-model";
+import {
+  codingReasoningInput,
+  type CodingReasoning,
+} from "../../../../packages/conversation-domain/src/model-settings";
 
 // The exact native provider modules used by OpenCode 2, without starting compute
 // or copying the provider protocol. One inference, no retries and no fallback.
@@ -17,8 +22,9 @@ export async function probeBuildModel(input: {
   modelId: string;
   signal: AbortSignal;
   usageSink?: MastraUsageSink;
+  reasoningEffort?: CodingReasoning;
 }): Promise<ModelProbeResult> {
-  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(15_000)]);
+  const signal = AbortSignal.any([input.signal, AbortSignal.timeout(60_000)]);
   let limits = reportedModelLimits(undefined);
   let toolCall = false;
   let admitted = false;
@@ -27,9 +33,11 @@ export async function probeBuildModel(input: {
     const settings = {
       apiKey: input.connection.apiKey,
       ...(input.connection.baseURL ? { baseURL: input.connection.baseURL } : {}),
-      ...(input.modelId === "gpt-5.6-terra" && (input.connection.provider ?? "openai") === "openai"
-        ? { reasoningEffort: "none" as const }
-        : {}),
+      ...openCodeModelConfiguration({
+        ...input.connection,
+        modelID: input.modelId,
+        reasoningEffort: codingReasoningInput.parse(input.reasoningEffort ?? "medium"),
+      }).settings,
     };
     const model =
       input.connection.provider === "anthropic"
@@ -55,7 +63,7 @@ export async function probeBuildModel(input: {
           system:
             "Call factory_connection_probe once with verified:true and value:factory-connection-ok. Do nothing else.",
           prompt: "Check native Build transport.",
-          generation: { maxTokens: 128 },
+          generation: { maxTokens: 4_096 },
           tools: Tool.toDefinitions({ factory_connection_probe: tool }),
           toolChoice: ToolChoice.named("factory_connection_probe"),
         }),

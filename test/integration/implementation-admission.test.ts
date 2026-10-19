@@ -211,6 +211,10 @@ test("Implement atomically freezes requirements and Build before branch create; 
     await expect(
       changes.start(ticketID, userID, { ...commission, revisionID: crypto.randomUUID() }),
     ).rejects.toMatchObject({ code: "conflict" });
+    // Manual recovery succeeded before the original two-second retry. Closing
+    // this fixture must not leave that stale callback using a disposed client.
+    await database.client.end();
+    await Bun.sleep(2_200);
   } finally {
     releaseCreate.resolve();
     for (const [key, value] of Object.entries(savedEnvironment)) {

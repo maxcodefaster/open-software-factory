@@ -24,7 +24,7 @@ const report = z.strictObject({
 
 const contract = /^Factory Build completion report v1: criteria=(\d+)$/gm;
 const reportBlock = /^```factory-build-result\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
-export type BuildCompletionContract = { prompt: string; criteria: number };
+export type BuildCompletionContract = { prompt: string; criteria: number; policy?: "native" };
 
 export function buildCompletionText(text: string) {
   const blocks = [...text.matchAll(reportBlock)];
@@ -69,12 +69,29 @@ export function buildCompletionInstructions(criteria: number) {
   ].join("\n");
 }
 
+export function buildGoalInstructions(criteria: number) {
+  if (!Number.isSafeInteger(criteria) || criteria < 1 || criteria > 100)
+    throw new Error("Build goal requires between 1 and 100 approved criteria");
+  return [
+    `Factory Build goal v1: criteria=${criteria}`,
+    "Your goal is to satisfy the approved specification and the current correction request in this checkout. Treat every approved acceptance criterion as part of that goal, without adding unrelated work.",
+    "Use your native planning tools when useful to keep track of implementation and verification. Continue using native tools until the work and normal repository checks are finished or a genuine blocker prevents progress. Do not invent a turn time or token limit.",
+    "Before finishing, inspect the current diff and actual component integration. An unused module or a test environment override that hides failures does not satisfy the goal. Fix findings within the approved scope and rerun the affected checks.",
+    "For UI changes exercise the changed workflow in the declared App using Factory's browser. A landing or sign-in screen alone does not verify a feature behind it. Use exactly owned synthetic accounts and records, check required account transitions, empty/error states, keyboard behavior and narrow layout, inspect the console and read a screenshot of the changed screen.",
+    "If blocked, preserve the checkout and clearly describe the actual blocker and unfinished work. Do not claim checks or browser observations that did not happen.",
+    "Finish with an ordinary concise summary of what changed, what you actually tested, and anything unfinished. No JSON completion form is required. Your native final answer ends this attempt; it is not a progress checkpoint.",
+    "Do not commit, push, approve or merge. Factory submits changed source for independent exact-commit Verification after native execution settles. Submission is not acceptance of the goal or human Delivery approval.",
+  ].join("\n");
+}
+
 export function assessBuildCompletion(
   completion: BuildCompletionContract | undefined,
   text: string,
 ) {
-  // Frozen admissions without this contract keep their original semantics.
-  // Reconnect must not impose new instructions on already dispatched work.
+  // "ready" here means eligible for submission, never acceptance or Delivery.
+  // Native-goal admissions have no report contract. Historical admissions keep
+  // their frozen interpretation; reconnect must not change dispatched work.
+  if (completion?.policy === "native") return { ready: true as const };
   if (!completion || ![...completion.prompt.matchAll(contract)].length)
     return { ready: true as const };
   const blocks = [...text.matchAll(reportBlock)];

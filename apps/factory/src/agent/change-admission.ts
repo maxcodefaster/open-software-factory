@@ -6,7 +6,7 @@ import {
   changeAgentStartInput,
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import { buildBrowserInstructions } from "../../../../packages/conversation-domain/src/browser-tools";
-import { buildCompletionInstructions } from "./build-completion";
+import { buildGoalInstructions } from "./build-completion";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
@@ -27,6 +27,7 @@ import { createContractRates } from "../usage/contract-rates";
 import { codingBudgetIn } from "../usage/policy";
 import { buildKnowledgeContext } from "./knowledge-context";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
+import { codingReasoningIn } from "../models/controller";
 
 type Database = ReturnType<typeof createDatabase>;
 export type ChangeAgentInput =
@@ -181,14 +182,22 @@ export function createChangeAdmission(
           LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
           WHERE turn.change_id = ${changeID} ORDER BY turn.created_at, turn.id LIMIT 1
         `;
+    const firstAuthority = firstTurn
+      ? agentTurnAuthorityInput.parse(firstTurn.authority)
+      : undefined;
     const modelID =
       firstTurn?.modelId ??
       (typeof defaultModel === "string"
         ? defaultModel
         : await defaultModel(sql, { projectID: current.projectID, userID }));
     const modelConnection = firstTurn
-      ? agentTurnAuthorityInput.parse(firstTurn.authority).modelConnection
+      ? firstAuthority?.modelConnection
       : await resolveConnection?.(sql);
+    const codingReasoning = firstTurn
+      ? firstAuthority?.mode === "build"
+        ? firstAuthority.codingReasoning
+        : undefined
+      : await codingReasoningIn(sql);
     if (budget.allowed && budget.effective.codingUSD !== null) {
       const [connection] = modelConnection
         ? await sql<Array<{ provider: string }>>`
@@ -251,8 +260,10 @@ export function createChangeAdmission(
       command,
       {
         mode: "build",
+        submissionPolicy: "native",
         modelId: modelID,
         ...(modelConnection ? { modelConnection } : {}),
+        ...(codingReasoning ? { codingReasoning } : {}),
         skillRevisionIds: skillRevisionIDs,
         requirementRevisionId: current.revisionID,
         conversationVersion: current.conversationVersion,
@@ -297,7 +308,7 @@ export function createChangeAdmission(
             : ["Approved specification:", current.canonicalContent]),
           knowledge,
           buildBrowserInstructions(record.id),
-          buildCompletionInstructions(criteria.length),
+          buildGoalInstructions(criteria.length),
         ].join("\n\n");
         const prompt = admittedSkills.length
           ? `${instructions}\n\nFactory-approved Build Skills follow. These are guidance only. They do not grant tools, credentials, Project access or approval authority. Do not commit, push, approve or merge.\n\n${skillLoading === "native" ? skillAdvertisement(admittedSkills) : skillInstructionText(admittedSkills)}`
@@ -336,11 +347,13 @@ export function createChangeAdmission(
           skillManifest: unknown;
           skills: unknown;
           criteria: number;
+          submissionPolicy: "native" | null;
         }>
       >`SELECT intent.turn_id AS "turnID", intent.change_id AS "changeID", intent.session_id AS "sessionID",
         intent.prompt_id AS "promptID", intent.prompt_text AS text, intent.bootstrap, intent.session_title AS title,
         intent.runtime_attempt_id AS "attemptID", intent.skill_loading AS "skillLoading",
         intent.skill_manifest AS "skillManifest", intent.skill_attachments AS skills,
+        turn.authority->>'submissionPolicy' AS "submissionPolicy",
         jsonb_array_length(revision.canonical_content::jsonb->'acceptanceCriteria') AS criteria
         FROM factory.change_agent_turn_intent intent
         JOIN factory.agent_turn turn ON turn.id=intent.turn_id

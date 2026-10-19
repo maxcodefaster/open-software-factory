@@ -3925,9 +3925,17 @@ dt,
 }
 
 .agent-activity {
-  padding: var(--space-3) var(--space-3);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
+  flex-shrink: 0;
+  min-width: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+}
+
+.agent-activity + .agent-activity {
+  margin-top: calc(-1 * var(--space-2));
+}
+
+.agent-activity[open] {
   background: var(--material-card);
 }
 
@@ -3944,52 +3952,73 @@ dt,
 
 .agent-activity-heading {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto auto auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1-5);
+  min-height: 28px;
+  padding: var(--space-1) var(--space-1-5);
+  cursor: pointer;
+  list-style: none;
+  line-height: 1.25;
 }
 
-.factory-desktop .agent-activity-heading > div {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-0-5);
+.agent-activity-heading::-webkit-details-marker {
+  display: none;
 }
 
-.agent-activity-heading small,
+.agent-activity-heading::before {
+  content: "›";
+  color: var(--muted-ink);
+}
+
+.agent-activity[open] > .agent-activity-heading::before {
+  transform: rotate(90deg);
+}
+
+.agent-activity-heading:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.activity-name,
 .activity-status {
   color: var(--muted-ink);
-  font: var(--weight-medium) var(--text-xs) var(--font-technical);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  font: var(--text-xs) / 1.25 var(--font-technical);
 }
 
-.factory-desktop .agent-activity-heading strong {
+.activity-name {
+  max-width: 7rem;
   overflow: hidden;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.agent-activity details {
-  margin: var(--space-2) 0 0 var(--space-4);
-  border-top: 1px solid var(--hairline);
-  padding-top: var(--space-2);
+.activity-command {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-ink);
+  font: var(--text-xs) / 1.25 var(--font-technical);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-activity summary {
-  color: var(--muted-ink);
-  cursor: pointer;
-  font-size: var(--text-xs);
+.agent-activity-content {
+  border-top: 1px solid var(--hairline);
+  padding: var(--space-1-5);
 }
 
 .agent-activity pre {
-  max-height: 12rem;
-  margin: var(--space-2) 0 0;
+  max-height: 15rem;
+  margin: 0;
   overflow: auto;
   color: var(--ink);
-  font: var(--text-xs) / var(--leading-body) var(--font-technical);
+  font: var(--text-xs) / 1.35 var(--font-technical);
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-activity .activity-output {
+  margin-top: var(--space-1-5);
 }
 
 .agent-message small {

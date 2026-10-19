@@ -15,35 +15,29 @@ The Ticket Workspace volume retains OpenCode session state across Sandbox restar
 
 Factory keeps raw model-provider credentials outside the Sandbox. OpenCode receives a generation-bound inference capability for a Factory model relay, so shell commands and Project code cannot read or reuse the upstream credential.
 
-OpenCode may inspect Git, edit files, and run the Project toolchain, but the checkout contains no reusable forge credential. When the agent finishes an implementation attempt and its local checks pass, Factory pauses agent writes, asks the Runtime Connector to create one commit, records the intended commit and push, and performs one controlled push to the Change branch. No separate submission action is required. Factory recovers an unclear push result by comparing the branch head with that commit. The Change Agent cannot approve requirements, approve delivery, merge, or mutate Factory product state.
+OpenCode may inspect Git, edit files, and run the Project toolchain, but the checkout contains no reusable forge credential. When native execution ends normally and all owned work settles, Factory pauses agent writes, asks the Runtime Connector to create one commit, records the intended commit and push, and performs one controlled push to the Change branch for Verification. No separate submission action is required. Factory recovers an unclear push result by comparing the branch head with that commit. The Change Agent cannot approve requirements, approve delivery, merge, or mutate Factory product state.
 
 ## Consequences
 
-New admissions include a versioned completion-report contract in their frozen instructions.
-A normal OpenCode `stop` finish proves only that the native turn ended. Before submission,
-Factory requires a valid final report covering every approved acceptance criterion, actual
-passing local checks and no unfinished items. Missing, incomplete, blocked or invalid reports
-retain source and fail the attempt without committing or pushing. A no-change correction
-stays awaiting attention; it never restores an earlier submission's completed status.
-Already admitted instructions keep their original semantics through recovery.
-Rejected readiness reports identify missing criterion numbers, duplicate or out-of-range
-evidence, failing checks and unfinished work. New instructions include an exact-length
-report template whose numbers refer to the approved array positions, without splitting
-combined criteria. They ask for each check's latest result on the final code, so an earlier
-failure that the Agent fixed is not described as still failing. This changes neither the
-submission gate nor frozen report interpretation.
-UI guidance asks the Agent to exercise the changed workflow with exactly owned synthetic
-fixtures and inspect that screen, rather than count only a landing or sign-in screenshot.
-Evidence distinguishes browser observations, source inspection and automated tests. This
-guidance adds no new report fields or automatic inference, and existing admissions retain
-their frozen instructions.
+New admissions express the approved specification and current correction as the Build goal.
+OpenCode's native planning and tool loop owns implementation, local checks and browser inspection.
+The final answer is ordinary prose, without a mandatory JSON completion form. A self-reported
+checklist was neither independent evidence nor a reliable way to detect the end of native work.
 
-The report is an agent claim, not independent proof of correctness. Forgejo Verification
-still tests the exact submitted commit, and a person still reviews and approves Delivery.
-The interface therefore labels a pushed result as submitted for verification, not complete.
-Factory does not add another inference loop or silently change the model. OpenCode's native
-tool loop owns implementation and local correction; unknown external outcomes still follow
-the existing recovery and explicit-retry rules.
+A normal OpenCode `stop` finish proves only that the native turn ended. After all owned
+descendants and shells settle, changed source can be submitted for independent Verification.
+This does not prove local checks passed, the acceptance criteria are satisfied or the feature
+is complete. Even an attempt reporting unfinished work may produce a reviewable submission;
+it cannot approve itself. Native errors, interrupted or uncertain execution and unchanged
+corrections retain their existing failure and recovery behavior.
+
+Forgejo Verification still tests the exact submitted commit, and a person still reviews and
+approves Delivery. The interface labels a pushed result as submitted for verification, not
+complete. UI instructions still require the changed workflow with exactly owned synthetic
+fixtures, console checks and an inspected screenshot, rather than just a landing or sign-in page.
+Factory adds no outer inference loop and does not restart the model until a goal appears met.
+Already frozen report-contract admissions retain their original parsing and submission rules;
+an old failed turn is never retroactively promoted under the new policy.
 
 Cold browser-image preparation is a known pre-execution outcome. One `browser_open` waits
 through the Connector's existing image-preparation window, probing only after its exact

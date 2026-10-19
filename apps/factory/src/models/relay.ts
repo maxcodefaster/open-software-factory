@@ -55,11 +55,13 @@ export function createModelRelay(
         ownerToken: string;
         modelId: string;
         modelConnection: ModelConnectionReference | null;
+        codingReasoning: string | null;
         sessionID: string;
         projectID: string;
       }>
     >`
-      SELECT turn.id,turn.project_id AS "projectID", turn.owner_token AS "ownerToken", turn.authority->>'modelId' AS "modelId", turn.authority->'modelConnection' AS "modelConnection",session.opencode_session_id AS "sessionID"
+      SELECT turn.id,turn.project_id AS "projectID", turn.owner_token AS "ownerToken", turn.authority->>'modelId' AS "modelId", turn.authority->'modelConnection' AS "modelConnection",
+        turn.authority->>'codingReasoning' AS "codingReasoning",session.opencode_session_id AS "sessionID"
       FROM factory.change_agent_session session
       JOIN factory.agent_turn turn ON turn.id = session.active_turn_id
       JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
@@ -107,6 +109,31 @@ export function createModelRelay(
         )
       : connection;
     const provider = "provider" in resolved ? resolved.provider : "openai";
+    if (provider === "openai" && active.codingReasoning) {
+      const reasoning = "reasoning" in body ? body.reasoning : null;
+      const input = "input" in body && Array.isArray(body.input) ? body.input : [];
+      const changedEffort = input.some((item: unknown) => {
+        if (
+          !item ||
+          typeof item !== "object" ||
+          !("type" in item) ||
+          item.type !== "configuration_update"
+        )
+          return false;
+        if (!("reasoning" in item) || !item.reasoning || typeof item.reasoning !== "object")
+          return true;
+        return !("effort" in item.reasoning) || item.reasoning.effort !== active.codingReasoning;
+      });
+      if (
+        suffix !== "responses" ||
+        changedEffort ||
+        !reasoning ||
+        typeof reasoning !== "object" ||
+        !("effort" in reasoning) ||
+        reasoning.effort !== active.codingReasoning
+      )
+        return json({ error: "Coding reasoning does not match the admitted Build" }, 403);
+    }
     if (
       (provider === "anthropic" && suffix !== "messages") ||
       (provider !== "anthropic" && suffix === "messages")

@@ -15,8 +15,13 @@ export const modelListInput = z
 export const modelRuleInput = z
   .object({ models: modelListInput, allowOverride: z.boolean() })
   .strict();
+export const codingReasoningInput = z.enum(["medium", "high", "xhigh", "max"]);
+export type CodingReasoning = z.infer<typeof codingReasoningInput>;
 export const modelRulesInput = z
-  .object({ planning: modelRuleInput, build: modelRuleInput })
+  .object({
+    planning: modelRuleInput,
+    build: modelRuleInput.extend({ reasoningEffort: codingReasoningInput.default("medium") }),
+  })
   .strict();
 export const modelDefaultsInput = z
   .object({

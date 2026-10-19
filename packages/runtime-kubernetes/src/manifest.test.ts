@@ -193,82 +193,92 @@ describe("runtime Kubernetes resources", () => {
     });
   });
 
-  test("adds OpenCode only to an explicitly agent-enabled Ticket Sandbox", () => {
-    const resources = renderRuntimeResources({
-      attemptID: "01234567-89ab-5def-8123-456789abcdef",
-      generation: 2,
-      namespace: "factory-workspace-0123456789ab",
-      podName: "runtime-2",
-      projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
-      repositoryURL: "https://forge.example/factory/project.git",
-      revision: "a".repeat(40),
-      devcontainerPath: ".devcontainer/devcontainer.json",
-      composeProjectName: "factory_0123456789ab",
-      connectorToken: "one-use-token",
-      childConnectorToken: "one-use-child-token",
-      controlURL: "ws://factory.example/runtime/connect",
-      runtimeHostImage: "registry.example/runtime-host@sha256:0123",
-      registryCA: "certificate",
-      agent: {
-        modelBaseURL: "http://host.orb.internal:3000/internal/model/attempt/v1",
-        modelToken: "generation-token",
-        modelID: "gpt-5.6-terra",
-        modelIDs: ["gpt-5.6-terra", "approved-alternative"],
-        browserToolsImage: `registry.factory/browser-tools@sha256:${"a".repeat(64)}`,
-        browserURL: "http://host.orb.internal:3000/internal/build-browser/attempt",
-        browserToken: "owned-browser-generation-token",
-      },
-      systemContract,
-    });
-    const assignment = JSON.parse(
-      String(
-        resources.find((resource) => resource.kind === "Secret")?.stringData?.["assignment.json"],
-      ),
-    );
-    expect(assignment.channels).toContainEqual({
-      name: "agent",
-      kind: "agent",
-      target: "http://127.0.0.1:4096",
-      healthPath: "/api/health",
-    });
-    const agentProcess = assignment.processes.find(
-      (process: { name: string }) => process.name === "agent",
-    );
-    const agentCommand = agentProcess.command[2];
-    expect(agentProcess.command.slice(0, 2)).toEqual(["sh", "-c"]);
-    expect(agentCommand).toContain(
-      "/opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs",
-    );
-    expect(agentProcess.env.FACTORY_OPENCODE_CONFIG).toContain("gpt-5.6-terra");
-    expect(
-      JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.settings
-        .reasoningEffort,
-    ).toBe("none");
-    expect(assignment.browserToolsImage).toBe(
-      `registry.factory/browser-tools@sha256:${"a".repeat(64)}`,
-    );
-    expect(agentProcess.env.FACTORY_BUILD_BROWSER_COMMAND).toBe("/tmp/factory-runtime-connector-2");
-    expect(agentProcess.env.FACTORY_BUILD_BROWSER_TOKEN).toBe("owned-browser-generation-token");
-    expect(
-      assignment.processes
-        .filter((process: { name: string }) => process.name !== "agent")
-        .every(
-          (process: { env?: Record<string, string> }) =>
-            !process.env?.["FACTORY_BUILD_BROWSER_TOKEN"],
+  test.each([undefined, "medium", "high"] as const)(
+    "adds OpenCode with the frozen Coding configuration: %s",
+    (reasoningEffort) => {
+      const resources = renderRuntimeResources({
+        attemptID: "01234567-89ab-5def-8123-456789abcdef",
+        generation: 2,
+        namespace: "factory-workspace-0123456789ab",
+        podName: "runtime-2",
+        projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
+        repositoryURL: "https://forge.example/factory/project.git",
+        revision: "a".repeat(40),
+        devcontainerPath: ".devcontainer/devcontainer.json",
+        composeProjectName: "factory_0123456789ab",
+        connectorToken: "one-use-token",
+        childConnectorToken: "one-use-child-token",
+        controlURL: "ws://factory.example/runtime/connect",
+        runtimeHostImage: "registry.example/runtime-host@sha256:0123",
+        registryCA: "certificate",
+        agent: {
+          modelBaseURL: "http://host.orb.internal:3000/internal/model/attempt/v1",
+          modelToken: "generation-token",
+          modelID: "gpt-5.6-terra",
+          modelIDs: ["gpt-5.6-terra", "approved-alternative"],
+          ...(reasoningEffort ? { reasoningEffort } : {}),
+          browserToolsImage: `registry.factory/browser-tools@sha256:${"a".repeat(64)}`,
+          browserURL: "http://host.orb.internal:3000/internal/build-browser/attempt",
+          browserToken: "owned-browser-generation-token",
+        },
+        systemContract,
+      });
+      const assignment = JSON.parse(
+        String(
+          resources.find((resource) => resource.kind === "Secret")?.stringData?.["assignment.json"],
         ),
-    ).toBe(true);
-    expect(JSON.stringify(assignment)).not.toContain("FACTORY_MODEL_API_KEY");
-    expect(JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.models).toEqual({
-      "gpt-5.6-terra": { name: "gpt-5.6-terra" },
-      "approved-alternative": { name: "approved-alternative" },
-    });
-    expect(JSON.stringify(assignment)).not.toContain("FACTORY_FORGEJO_TOKEN");
-    expect(JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.package).toBe(
-      "@opencode/ai/providers/openai/chat",
-    );
-    expect(agentProcess.env.OPENCODE_PASSWORD).toBe("generation-token");
-    expect(agentCommand).not.toContain("opencode web");
-    expect(agentCommand).toContain("FACTORY_OPENCODE_CONFIG");
-    expect(agentCommand).toContain("OPENCODE_DB=/workspace/project/.git/factory-opencode.db");
-  });
+      );
+      expect(assignment.channels).toContainEqual({
+        name: "agent",
+        kind: "agent",
+        target: "http://127.0.0.1:4096",
+        healthPath: "/api/health",
+      });
+      const agentProcess = assignment.processes.find(
+        (process: { name: string }) => process.name === "agent",
+      );
+      const agentCommand = agentProcess.command[2];
+      expect(agentProcess.command.slice(0, 2)).toEqual(["sh", "-c"]);
+      expect(agentCommand).toContain(
+        "/opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs",
+      );
+      expect(agentProcess.env.FACTORY_OPENCODE_CONFIG).toContain("gpt-5.6-terra");
+      expect(
+        JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.settings
+          .reasoningEffort,
+      ).toBe(reasoningEffort ?? "none");
+      expect(assignment.browserToolsImage).toBe(
+        `registry.factory/browser-tools@sha256:${"a".repeat(64)}`,
+      );
+      expect(agentProcess.env.FACTORY_BUILD_BROWSER_COMMAND).toBe(
+        "/tmp/factory-runtime-connector-2",
+      );
+      expect(agentProcess.env.FACTORY_BUILD_BROWSER_TOKEN).toBe("owned-browser-generation-token");
+      expect(
+        assignment.processes
+          .filter((process: { name: string }) => process.name !== "agent")
+          .every(
+            (process: { env?: Record<string, string> }) =>
+              !process.env?.["FACTORY_BUILD_BROWSER_TOKEN"],
+          ),
+      ).toBe(true);
+      expect(JSON.stringify(assignment)).not.toContain("FACTORY_MODEL_API_KEY");
+      expect(JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.models).toEqual(
+        {
+          "gpt-5.6-terra": { name: "gpt-5.6-terra" },
+          "approved-alternative": { name: "approved-alternative" },
+        },
+      );
+      expect(JSON.stringify(assignment)).not.toContain("FACTORY_FORGEJO_TOKEN");
+      expect(JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.package).toBe(
+        reasoningEffort
+          ? "@opencode/ai/providers/openai/responses"
+          : "@opencode/ai/providers/openai/chat",
+      );
+      expect(agentProcess.env.OPENCODE_PASSWORD).toBe("generation-token");
+      expect(agentCommand).not.toContain("opencode web");
+      expect(agentCommand).toContain("FACTORY_OPENCODE_CONFIG");
+      expect(agentCommand).toContain("OPENCODE_DB=/workspace/project/.git/factory-opencode.db");
+    },
+  );
 });

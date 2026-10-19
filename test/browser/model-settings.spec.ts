@@ -19,6 +19,8 @@ async function openFactoryModels(page: Page) {
 test("first-run model setup has no placeholder defaults and keeps its primary action in view", async ({
   page,
 }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 720 });
   const models = ["factory-planning-model", "factory-coding-model"];
   await page.route("**/api/model-settings", (route) =>
@@ -74,6 +76,7 @@ test("first-run model setup has no placeholder defaults and keeps its primary ac
     .getByRole("button", { name: "Save and check", exact: true })
     .scrollIntoViewIfNeeded();
   await page.screenshot({ path: ".factory/test-results/model-settings/first-run-narrow.png" });
+  expect(errors).toEqual([]);
 });
 
 test("a newly adopted connection stays selected while its check runs and after the catalogue refresh", async ({
@@ -262,7 +265,7 @@ test("model permissions save with exact version and retain the draft on conflict
   await planning.locator("summary").click();
   const override = planning.getByLabel("Allow Project and personal overrides");
   await override.uncheck();
-  await settings.getByRole("button", { name: "Save permissions" }).click();
+  await settings.getByRole("button", { name: "Save model settings" }).click();
   await expect(settings.getByText("Defaults saved", { exact: true })).toBeVisible();
   expect(writes).toEqual([
     {
@@ -271,13 +274,13 @@ test("model permissions save with exact version and retain the draft on conflict
       buildModelId: "approved-build",
       rules: {
         planning: { models: modelIDs, allowOverride: false },
-        build: { models: modelIDs, allowOverride: true },
+        build: { models: modelIDs, allowOverride: true, reasoningEffort: "medium" },
       },
     },
   ]);
   conflict = true;
   await override.check();
-  await settings.getByRole("button", { name: "Save permissions" }).click();
+  await settings.getByRole("button", { name: "Save model settings" }).click();
   await expect(settings.getByRole("alert")).toHaveText(
     "Model settings changed elsewhere. Reload before saving.",
   );
@@ -289,4 +292,64 @@ test("model permissions save with exact version and retain the draft on conflict
   await settings.getByRole("button", { name: "Reload settings" }).click();
   await expect(override).not.toBeChecked();
   expect(errors).toEqual([]);
+});
+
+test("Coding reasoning is adjustable without permitting low or disabled reasoning and retains conflicts", async ({
+  page,
+}) => {
+  let version = 4;
+  let reasoningEffort = "medium";
+  let conflict = false;
+  await page.route("**/api/model-settings", async (route) => {
+    if (route.request().method() === "PUT") {
+      const value = route.request().postDataJSON();
+      if (conflict)
+        return route.fulfill({ status: 409, json: { error: "Settings changed elsewhere" } });
+      expect(value.version).toBe(version);
+      reasoningEffort = value.rules.build.reasoningEffort;
+      version++;
+    }
+    return route.fulfill({
+      json: {
+        version,
+        source: "administrator",
+        planningModelId: "plan",
+        buildModelId: "gpt-6.1-sol",
+        models: ["plan", "gpt-6.1-sol"],
+        rules: {
+          planning: { models: ["plan"], allowOverride: true },
+          build: { models: ["gpt-6.1-sol"], allowOverride: true, reasoningEffort },
+        },
+        connection: { configured: true, host: "owned.openai.azure.com" },
+      },
+    });
+  });
+  const settings = await openFactoryModels(page);
+  const select = settings.getByLabel("Coding reasoning", { exact: true });
+  await expect(select).toHaveValue("medium");
+  expect(
+    await select
+      .locator("option")
+      .evaluateAll((options) => options.map((option) => (option as HTMLOptionElement).value)),
+  ).toEqual(["medium", "high", "xhigh", "max"]);
+  await select.selectOption("high");
+  await settings.getByRole("button", { name: "Save model settings", exact: true }).click();
+  await expect(settings.getByText("Defaults saved", { exact: true })).toBeVisible();
+  expect(reasoningEffort).toBe("high");
+  conflict = true;
+  await select.selectOption("xhigh");
+  await settings.getByRole("button", { name: "Save model settings", exact: true }).click();
+  await expect(settings.getByRole("alert")).toHaveText("Settings changed elsewhere");
+  await expect(select).toHaveValue("xhigh");
+  await settings.getByRole("button", { name: "Reload settings" }).click();
+  await expect(select).toHaveValue("high");
+  await mkdir(".factory/test-results/model-settings", { recursive: true });
+  await select.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: ".factory/test-results/model-settings/coding-reasoning-wide.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await select.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({
+    path: ".factory/test-results/model-settings/coding-reasoning-narrow.png",
+  });
 });
