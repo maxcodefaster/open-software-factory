@@ -7,6 +7,8 @@ metadata:
     app.kubernetes.io/name: open-factory-registry
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: open-factory-registry
@@ -35,7 +37,23 @@ spec:
           secret:
             secretName: registry-tls
         - name: data
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: registry-data
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: registry-data
+  namespace: open-factory-envbox-smoke
+  labels:
+    app.kubernetes.io/name: open-factory-registry
+    app.kubernetes.io/managed-by: open-software-factory
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi
 ---
 apiVersion: v1
 kind: Service

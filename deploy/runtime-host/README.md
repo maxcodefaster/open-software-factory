@@ -24,7 +24,19 @@ Publication updates the local digest files without restarting Factory or replaci
 identities. `factory:restart` loads those pins for new Attempts; existing artifact intents remain fixed.
 Runtime manifests use registry digest references, never publication tags.
 
-Normal `factory:up` reuses a complete published set instead of rebuilding all roles. The manual
+The local Registry keeps artifacts on its retained `registry-data` claim, not in a Pod's temporary
+filesystem. Publication refuses to replace an existing temporary store with an empty claim.
+Preserve that Registry's contents on the claim before adopting the persistent layout; do not reset
+Workspaces or replace frozen Runtime Attempt image references to repair missing images.
+
+Startup, restart and local Factory image builds check every role's remote manifest without pulling
+or warming an image cache. The local Registry check uses its approved CA and verifies the exact
+manifest digest. Missing images fail with the artifact name before replacing the running Factory
+server; local Registry failures also identify the HTTP status. Restore the exact artifacts, or publish
+a complete generation and restart to select it for new Attempts. Publication adopts its complete
+generation atomically only after all six role manifests and the Starter images are confirmed.
+
+Normal `factory:up` reuses an available published set instead of rebuilding all roles. The manual
 [distribution workflow](../../.github/workflows/images.yaml) builds amd64/arm64 roles and embeds
 their exact multi-architecture digests in the Factory image. A release bundle replaces defaults
 atomically during container startup; it cannot change a persisted Runtime Attempt. See

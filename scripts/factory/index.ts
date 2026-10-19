@@ -4,7 +4,14 @@ import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
 import upstream from "../../upstream.json";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
-import { installRuntimeArtifacts, publishedRuntimeArtifacts } from "./artifacts";
+import {
+  installRuntimeArtifacts,
+  publishedRuntimeArtifacts,
+  runtimeArtifactsSchema,
+  type RuntimeArtifacts,
+} from "./artifacts";
+import { inspectRegistryArtifact, requireAvailableRuntimeArtifacts } from "./artifact-availability";
+import { requireSafeRegistryStorage } from "./registry-storage";
 import { requireContainerState } from "./container-state";
 import { ensureLocalForgeIdentity } from "./forge-identity";
 import { installForgeBrowserLogout } from "./forge-logout";
@@ -65,15 +72,17 @@ if (disposableName && action === "publish-runtime")
 if (!["up", "container", "restart", "reset", "status", "publish-runtime"].includes(action ?? ""))
   throw new Error("Unknown Factory action");
 if (disposableName && action === "up") requireModelConfiguration(process.env);
+const installationArtifacts =
+  disposableName && action === "up" ? await publishedRuntimeArtifacts(sharedStateDirectory) : null;
 const installation = disposableName
   ? action === "up"
     ? await createInstallation(root, disposableName, {
-        runtimeImage: (
-          await readFile(resolve(sharedStateDirectory, "runtime-host-image"), "utf8")
-        ).trim(),
-        browserImage: (
-          await readFile(resolve(sharedStateDirectory, "browser-tools-image"), "utf8")
-        ).trim(),
+        runtimeImage:
+          installationArtifacts?.["runtime-host"] ??
+          (await readFile(resolve(sharedStateDirectory, "runtime-host-image"), "utf8")).trim(),
+        browserImage:
+          installationArtifacts?.["browser-tools"] ??
+          (await readFile(resolve(sharedStateDirectory, "browser-tools-image"), "utf8")).trim(),
       })
     : await loadInstallation(root, disposableName)
   : null;
@@ -198,6 +207,19 @@ async function kubectl(arguments_: string[], input?: string, quiet = false) {
 }
 
 async function ensureRegistry() {
+  const [existingRegistry, existingStorage] = await Promise.all(
+    ["deployment/registry", "persistentvolumeclaim/registry-data"].map((resource) =>
+      kubectl(
+        ["get", resource, "-n", namespace, "--ignore-not-found", "-o", "json"],
+        undefined,
+        true,
+      ),
+    ),
+  );
+  requireSafeRegistryStorage(
+    existingRegistry ? JSON.parse(existingRegistry) : null,
+    existingStorage ? JSON.parse(existingStorage) : null,
+  );
   await kubectl(
     ["create", "namespace", namespace, "--dry-run=client", "-o", "json"],
     undefined,
@@ -264,6 +286,8 @@ async function publishRuntimeHost() {
   try {
     await waitForRegistry({ forward, host: registryHost, caFile: rootCA });
     let runtimeReference = "";
+    const published: Record<string, string> = {};
+    const outputs: Array<{ path: string; reference: string }> = [];
     for (const artifact of [
       {
         name: "runtime-host",
@@ -337,7 +361,14 @@ async function publishRuntimeHost() {
       if (!digest?.match(/^sha256:[a-f0-9]{64}$/))
         throw new Error(`${artifact.name} build returned no exact pushed digest`);
       const reference = `registry.${namespace}.svc.cluster.local:5000/open-factory/${artifact.name}@${digest}`;
-      await writeFile(artifact.state, `${reference}\n`);
+      await inspectRegistryArtifact({
+        name: artifact.name,
+        reference,
+        origin: `https://${registryHost}`,
+        caFile: rootCA,
+      });
+      published[artifact.name] = reference;
+      outputs.push({ path: artifact.state, reference });
       if (artifact.name === "runtime-host") runtimeReference = reference;
     }
     // Copy upstream native manifests unchanged. No rebuilt base image or
@@ -391,9 +422,10 @@ async function publishRuntimeHost() {
         starterImagesSchema.parse({ platform, development: references[0], support: references[1] }),
       ),
     );
-    // Publication owns the individual build outputs. Drop an older release
-    // bundle only after all native artifacts have been published successfully.
-    await rm(resolve(sharedStateDirectory, "runtime-artifacts.json"), { force: true });
+    // Adopt the complete remotely observed generation atomically. Interrupted
+    // publication must not combine old and new individual image files.
+    await installRuntimeArtifacts(sharedStateDirectory, published);
+    for (const output of outputs) await writeFile(output.path, `${output.reference}\n`);
     return runtimeReference;
   } finally {
     forward.kill();
@@ -763,7 +795,30 @@ async function publishedSourceImages() {
   };
 }
 
-async function startServer(runtimeImage: string, forgejoToken?: string) {
+async function configuredRuntimeArtifacts(runtimeImage: string) {
+  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
+  const sourceImages = await publishedSourceImages();
+  return runtimeArtifactsSchema.parse({
+    "runtime-host": runtimeImage,
+    "browser-tools": await publishedBrowserImage(),
+    "workspace-files": sourceImages.FACTORY_WORKSPACE_FILES_IMAGE,
+    "developer-ide": sourceImages.FACTORY_DEVELOPER_IDE_IMAGE,
+    "build-runtime-host":
+      process.env["FACTORY_BUILD_RUNTIME_HOST_IMAGE"] ??
+      artifacts?.["build-runtime-host"] ??
+      (await readFile(buildRuntimeImageFile, "utf8")).trim(),
+    "verification-runtime-host":
+      process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"] ??
+      artifacts?.["verification-runtime-host"] ??
+      (await readFile(verificationRuntimeImageFile, "utf8")).trim(),
+  });
+}
+
+async function startServer(
+  runtimeImage: string,
+  forgejoToken: string | undefined,
+  artifacts: RuntimeArtifacts,
+) {
   const settings = localServerSettings(
     installation
       ? {
@@ -778,19 +833,6 @@ async function startServer(runtimeImage: string, forgejoToken?: string) {
         : "factory-local-password",
     },
   );
-  const browserImage = await publishedBrowserImage();
-  const sourceImages = await publishedSourceImages();
-  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
-  const buildImage =
-    process.env["FACTORY_BUILD_RUNTIME_HOST_IMAGE"] ??
-    artifacts?.["build-runtime-host"] ??
-    (await readFile(buildRuntimeImageFile, "utf8")).trim();
-  const verificationImage =
-    process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"] ??
-    artifacts?.["verification-runtime-host"] ??
-    (await readFile(verificationRuntimeImageFile, "utf8")).trim();
-  requirePinnedImage(buildImage);
-  requirePinnedImage(verificationImage);
   const authSecret = await localSecret(authSecretFile);
   const startupID = crypto.randomUUID();
   await writeFile(serverLogFile, "", { mode: 0o600 });
@@ -815,10 +857,11 @@ async function startServer(runtimeImage: string, forgejoToken?: string) {
               action === "container" ? composeArguments : undefined,
             )
           ).start()),
-      FACTORY_BUILD_RUNTIME_HOST_IMAGE: buildImage,
-      FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: verificationImage,
-      FACTORY_BROWSER_TOOLS_IMAGE: browserImage,
-      ...sourceImages,
+      FACTORY_BUILD_RUNTIME_HOST_IMAGE: artifacts["build-runtime-host"],
+      FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: artifacts["verification-runtime-host"],
+      FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
+      FACTORY_WORKSPACE_FILES_IMAGE: artifacts["workspace-files"],
+      FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],
       FACTORY_HOST: settings.host,
       FACTORY_EXECUTION_RESERVE_TARGET: settings.executionReserveTarget,
       FACTORY_PORT: String(factoryPort),
@@ -925,7 +968,10 @@ async function up() {
   await ensureLocalMetricsServer(command);
   if (action === "container") {
     const bundle = JSON.parse(await readFile(resolve(root, "runtime-artifacts.json"), "utf8"));
-    if (bundle !== null) await installRuntimeArtifacts(sharedStateDirectory, bundle);
+    if (bundle !== null) {
+      await requireAvailableRuntimeArtifacts(bundle);
+      await installRuntimeArtifacts(sharedStateDirectory, bundle);
+    }
   }
   const published = installation ? null : await publishedRuntimeArtifacts(sharedStateDirectory);
   if (action === "container" && !published)
@@ -957,6 +1003,8 @@ async function up() {
   }
   const runtimeImage =
     installation?.runtimeImage ?? published?.["runtime-host"] ?? (await publishRuntimeHost());
+  const artifacts = await configuredRuntimeArtifacts(runtimeImage);
+  await requireAvailableRuntimeArtifacts(artifacts);
   await command([...composeArguments, "up", "-d", "--wait", "postgres", "forgejo"], {
     quiet: Boolean(installation),
   });
@@ -970,7 +1018,7 @@ async function up() {
     await stopServer();
   }
   await completeFactoryStartup({
-    startServer: () => startServer(runtimeImage, forgejoToken),
+    startServer: () => startServer(runtimeImage, forgejoToken, artifacts),
     startPlanningCache,
     ready: announceReady,
   });
@@ -988,12 +1036,12 @@ async function restart() {
     (await readFile(runtimeImageFile, "utf8")).trim();
   if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(runtimeImage))
     throw new Error("Published runtime host is not pinned");
-  await publishedBrowserImage();
-  await publishedSourceImages();
+  const artifacts = await configuredRuntimeArtifacts(runtimeImage);
+  await requireAvailableRuntimeArtifacts(artifacts);
   await command(["bun", "run", "db:migrate"], { quiet: true });
   await stopServer();
   await completeFactoryStartup({
-    startServer: () => startServer(runtimeImage),
+    startServer: () => startServer(runtimeImage, undefined, artifacts),
     startPlanningCache,
     ready: announceReady,
   });

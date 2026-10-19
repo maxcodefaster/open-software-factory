@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { publishedRuntimeArtifacts } from "./artifacts";
+import { requireAvailableRuntimeArtifacts } from "./artifact-availability";
 
 const root = resolve(import.meta.dir, "../..");
 const directory = resolve(process.env["FACTORY_STATE_DIRECTORY"] || resolve(root, ".factory"));
@@ -8,6 +9,7 @@ if (!artifacts)
   throw new Error(
     "Publish the complete runtime artifact set before building a local distribution image",
   );
+await requireAvailableRuntimeArtifacts(artifacts);
 const child = Bun.spawn(
   [
     "docker",

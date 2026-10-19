@@ -50,7 +50,9 @@ Disposable installations keep their own generated administrator identity and pri
 instead of inheriting the normal installation's administrator overrides.
 
 Startup provisions the local database, Forgejo, planning cache and encrypted OpenBao, reuses a
-complete set of pinned runtime artifacts or publishes them once, applies migrations and builds Factory. Cold artifact builds
+complete set of pinned runtime artifacts after checking their remote manifests or publishes them
+once, applies migrations and builds Factory. Missing artifacts fail before replacing a running
+Factory server; a valid digest file alone is not readiness. Cold artifact builds
 and Sandbox preparation can take several minutes. Installation data and exact artifact references
 live under the ignored `.factory/` directory.
 

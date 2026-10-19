@@ -16,6 +16,7 @@ export const runtimeArtifactsSchema = z.record(
   z.enum(runtimeArtifactNames),
   z.string().regex(/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/),
 );
+export type RuntimeArtifacts = z.infer<typeof runtimeArtifactsSchema>;
 
 // Publish one complete generation atomically. These are defaults for future
 // creates; persisted Runtime Attempts keep their own immutable image references.
