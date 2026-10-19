@@ -4,6 +4,7 @@ import {
   buildAgentEmptyMessage,
   buildAgentNeedsStart,
   buildAgentStatus,
+  buildAgentActivityNotice,
   createAgentReadFence,
   retainAgentActivity,
 } from "./agent-view-state";
@@ -172,4 +173,30 @@ test("submitted source does not invite another initial implementation or duplica
   );
   expect(buildAgentEmptyMessage(unavailable)).not.toBe(buildAgentHint(unavailable));
   expect(buildAgentEmptyMessage({ ...unavailable, stopPending: true })).not.toContain("Resume");
+});
+
+test("preparing a first Build does not report a nonexistent history outage", () => {
+  for (const state of ["idle", "starting"] as const) {
+    expect(
+      buildAgentActivityNotice({
+        ...unavailable,
+        state,
+        sessionAvailable: false,
+        runtimeState: "starting",
+      }),
+    ).toBeUndefined();
+  }
+  expect(buildAgentActivityNotice(unavailable)).toBe("Live activity temporarily unavailable.");
+  expect(
+    buildAgentActivityNotice({
+      ...unavailable,
+      state: "starting",
+      sessionAvailable: false,
+      messages: loaded.messages,
+    }),
+  ).toBe("Live activity unavailable. Showing last known output.");
+  expect(buildAgentActivityNotice(loaded)).toBeUndefined();
+  expect(
+    buildAgentActivityNotice({ ...unavailable, state: "failed", sessionAvailable: false }),
+  ).toBe("Live activity temporarily unavailable.");
 });

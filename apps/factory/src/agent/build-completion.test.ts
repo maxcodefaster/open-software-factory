@@ -39,6 +39,14 @@ test("completion instructions preserve the exact approved array positions", () =
     expect(() => buildCompletionInstructions(count)).toThrow();
 });
 
+test("UI guidance asks for the changed workflow rather than only its entry screen", () => {
+  const instructions = buildCompletionInstructions(2);
+  expect(instructions).toContain("Exercise the changed user workflow");
+  expect(instructions).toContain("A landing or sign-in screen alone");
+  expect(instructions).toContain("synthetic accounts");
+  expect(instructions).toContain("Distinguish browser-observed behavior from source inspection");
+});
+
 test("only complete criterion coverage and passing checks claim submission readiness", () => {
   expect(assessBuildCompletion(prompt, text(ready))).toEqual({
     ready: true,

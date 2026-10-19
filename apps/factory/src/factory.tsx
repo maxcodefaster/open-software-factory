@@ -61,6 +61,7 @@ import {
   type AgentSnapshot,
   buildAgentHint,
   buildAgentEmptyMessage,
+  buildAgentActivityNotice,
   buildAgentNeedsStart,
   buildAgentStatus,
   createAgentReadFence,
@@ -2818,13 +2819,13 @@ function FactoryWorkspace(props: {
             </Show>
             <Show
               when={
-                conversationMode() === "build" && selectedChange() && !agent().messagesAvailable
+                conversationMode() === "build" &&
+                selectedChange() &&
+                buildAgentActivityNotice(agent())
               }
             >
               <p class="agent-activity-notice" role="status">
-                {agent().messages.length
-                  ? "Live activity unavailable. Showing last known output."
-                  : "Live activity temporarily unavailable."}
+                {buildAgentActivityNotice(agent())}
               </p>
             </Show>
             <Show

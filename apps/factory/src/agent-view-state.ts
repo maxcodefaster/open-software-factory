@@ -85,6 +85,19 @@ export function buildAgentEmptyMessage(view: AgentView) {
   }[view.state];
 }
 
+export function buildAgentActivityNotice(view: AgentView) {
+  if (view.messagesAvailable) return undefined;
+  if (
+    !view.sessionAvailable &&
+    view.messages.length === 0 &&
+    (view.state === "idle" || view.state === "starting")
+  )
+    return undefined;
+  return view.messages.length
+    ? "Live activity unavailable. Showing last known output."
+    : "Live activity temporarily unavailable.";
+}
+
 export function retainAgentActivity(
   previous: AgentSnapshot | undefined,
   changeID: string,

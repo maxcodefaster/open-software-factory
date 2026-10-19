@@ -32,6 +32,11 @@ report template whose numbers refer to the approved array positions, without spl
 combined criteria. They ask for each check's latest result on the final code, so an earlier
 failure that the Agent fixed is not described as still failing. This changes neither the
 submission gate nor frozen report interpretation.
+UI guidance asks the Agent to exercise the changed workflow with exactly owned synthetic
+fixtures and inspect that screen, rather than count only a landing or sign-in screenshot.
+Evidence distinguishes browser observations, source inspection and automated tests. This
+guidance adds no new report fields or automatic inference, and existing admissions retain
+their frozen instructions.
 
 The report is an agent claim, not independent proof of correctness. Forgejo Verification
 still tests the exact submitted commit, and a person still reviews and approves Delivery.
