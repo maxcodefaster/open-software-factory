@@ -11,9 +11,13 @@ export type TicketCheckDetails = {
 export function TicketChecks(props: {
   details: TicketCheckDetails | undefined;
   building: boolean;
+  unsubmitted?: boolean | undefined;
 }) {
+  const unsubmitted = () => props.unsubmitted && Boolean(props.details?.verificationState);
+  const passed = () => !unsubmitted() && props.details?.verificationState === "succeeded";
   const label = () => {
     if (props.building) return "Implementation in progress";
+    if (unsubmitted()) return "Corrections not submitted";
     switch (props.details?.verificationState) {
       case "succeeded":
         return "Checks passed";
@@ -32,23 +36,30 @@ export function TicketChecks(props: {
   };
   const busy = () =>
     props.building ||
-    ["pending", "runner-starting", "running"].includes(props.details?.verificationState ?? "");
+    (!unsubmitted() &&
+      ["pending", "runner-starting", "running"].includes(props.details?.verificationState ?? ""));
   return (
     <Show when={label()}>
       <details class="ticket-checks">
         <summary>
           <span
-            class={`check-indicator ${busy() ? "busy" : props.details?.verificationState === "succeeded" ? "passed" : "attention"}`}
+            class={`check-indicator ${busy() ? "busy" : passed() ? "passed" : "attention"}`}
             aria-hidden="true"
           >
-            {busy() ? "" : props.details?.verificationState === "succeeded" ? "✓" : "!"}
+            {busy() ? "" : passed() ? "✓" : "!"}
           </span>
           <span>{label()}</span>
         </summary>
         <div class="ticket-check-details">
           <Show
             when={props.building}
-            fallback={<p>Checks verify the exact implemented version.</p>}
+            fallback={
+              <p>
+                {unsubmitted()
+                  ? "Earlier checks do not verify the retained corrections. Finish and submit them before review."
+                  : "Checks verify the exact implemented version."}
+              </p>
+            }
           >
             <p>Earlier check results do not approve these corrections.</p>
           </Show>

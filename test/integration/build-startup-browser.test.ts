@@ -94,6 +94,30 @@ test("Build preparation distinguishes lost history and retains correction routin
     await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
       route.fulfill({ json: view() }),
     );
+    await page.route("**/api/changes?*", async (route) => {
+      const response = await route.fetch();
+      const body = await response.json();
+      await route.fulfill({
+        response,
+        json: {
+          ...body,
+          changes: body.changes.map((change: { id: string }) =>
+            change.id === changeID
+              ? { ...change, implementationState: state, buildTurnState: turn?.state }
+              : change,
+          ),
+        },
+      });
+    });
+    await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
+      route.fulfill({
+        json: {
+          verificationState: "succeeded",
+          verificationCommitSha: "b".repeat(40),
+          verificationSummary: "The earlier submitted commit passed its exact checks.",
+        },
+      }),
+    );
     await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
       researchRequests++;
       return route.fulfill({ status: 409, json: { error: "Build must not become research" } });
@@ -140,6 +164,29 @@ test("Build preparation distinguishes lost history and retains correction routin
       modelId: "controlled-model",
       skills: [],
     });
+    await visible(panel.locator(".agent-state")).toHaveText("Failed");
+    await page.getByRole("button", { name: "Ticket", exact: true }).click();
+    const checks = page.locator(".ticket-checks");
+    await visible(checks.locator("summary")).toContainText("Corrections not submitted");
+    await visible(checks.locator(".check-indicator")).not.toHaveClass(/passed/);
+    await checks.locator("summary").click();
+    await visible(checks).toContainText(
+      "Earlier checks do not verify the retained corrections. Finish and submit them before review.",
+    );
+    await visible(page.getByRole("button", { name: "Approve delivery", exact: true })).toHaveCount(
+      0,
+    );
+    await page.screenshot({
+      path: ".factory/test-results/build-startup-browser/unsubmitted-corrections-prior-checks.png",
+    });
+    state = "committed";
+    turn = { ...turn, state: "completed" };
+    await visible(checks.locator("summary")).toContainText("Checks passed");
+    await visible(checks.locator(".check-indicator")).toHaveClass(/passed/);
+    state = "failed";
+    turn = { ...turn, state: "failed" };
+    await visible(checks.locator("summary")).toContainText("Corrections not submitted");
+    await page.getByRole("button", { name: "IDE", exact: true }).click();
     await visible(panel.locator(".agent-state")).toHaveText("Failed");
     await visible(
       panel.getByRole("button", { name: "Retry implementation", exact: true }),

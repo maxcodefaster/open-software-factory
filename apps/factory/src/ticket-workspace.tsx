@@ -1190,6 +1190,12 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
               <TicketChecks
                 details={props.delivery}
                 building={implementationBusy() && !props.computeWait && !props.codingPause}
+                unsubmitted={
+                  props.change?.state === "active" &&
+                  ((props.change.implementationState !== undefined &&
+                    props.change.implementationState !== "committed") ||
+                    ["failed", "stopped", "uncertain"].includes(props.change.buildTurnState ?? ""))
+                }
               />
               <Show when={props.codingPause}>
                 <div class="agent-activity-notice coding-pause-notice" role="status">
