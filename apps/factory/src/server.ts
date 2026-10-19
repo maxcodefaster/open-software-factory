@@ -1201,12 +1201,25 @@ async function route(request: Request) {
       if (!ticketID) return json({ error: "Ticket is required" }, 400);
       const parsed = implementationInput.safeParse(await request.json().catch(() => null));
       if (!parsed.success) return json({ error: "Implementation request is invalid" }, 400);
+      if (parsed.data.codingReasoning) {
+        const [ticket] = await database.client<Array<{ projectID: string }>>`
+          SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
+        if (!ticket) throw new CommandError("not-found", "Ticket not found");
+        await accessController.requireDevelopment(session.user.id, ticket.projectID);
+      }
       return json(
         await changeController.start(ticketID, session.user.id, {
           commandID: parsed.data.commandId,
           revisionID: parsed.data.revisionId,
+          ...(parsed.data.codingReasoning ? { codingReasoning: parsed.data.codingReasoning } : {}),
           admitBuild: (sql, changeID) =>
-            agentController.admitStartIn(sql, changeID, session.user.id, parsed.data.commandId),
+            agentController.admitStartIn(
+              sql,
+              changeID,
+              session.user.id,
+              parsed.data.commandId,
+              parsed.data.codingReasoning,
+            ),
         }),
         202,
       );

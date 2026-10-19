@@ -207,6 +207,217 @@ test("Implement is one explicit recoverable action and does not open IDE or Assi
   await expect(page.getByRole("combobox", { name: "Ticket Epic" })).toHaveCount(0);
 });
 
+test("developer Coding options choose reasoning before the normal atomic Implement command and retain a lost response", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const requests: Array<{ commandId: string; revisionId: string; codingReasoning?: string }> = [];
+  const codingTitle =
+    "Implement the staff support inbox with personal request tracking, open and done filters, keyboard access, and safe account switching";
+  const fixtureDatabase = createDatabase(1);
+  try {
+    await fixtureDatabase.client`UPDATE factory.ticket SET title=${codingTitle} WHERE id=${ticketID}`;
+  } finally {
+    await fixtureDatabase.client.end();
+  }
+  const sessionSnapshot = await (await page.request.get("/api/session")).json();
+  const configuration = await (
+    await page.request.get(`/api/projects/${projectID}/model-settings`)
+  ).json();
+  configuration.system.connection.buildProvider = "openai";
+  configuration.system.rules.build.reasoningEffort = "medium";
+  configuration.effective.build.modelId = "gpt-6.1-sol";
+  await page.route("**/api/session", (route) =>
+    route.fulfill({ json: { ...sessionSnapshot, modelRelayConfigured: true } }),
+  );
+  await page.route(`**/api/projects/${projectID}/model-settings`, (route) =>
+    route.fulfill({ json: configuration }),
+  );
+  await page.route(`**/api/tickets/${ticketID}/implement`, (route) => {
+    requests.push(route.request().postDataJSON());
+    return requests.length === 1
+      ? route.abort("connectionreset")
+      : route.fulfill({ status: 202, json: {} });
+  });
+  await selectProject(page);
+  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  async function openOptions() {
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page
+      .getByRole("menuitem", { name: "Coding options…", exact: true })
+      .click({ timeout: 3_000 });
+  }
+  await openOptions();
+  const panel = page.locator(".agent-panel");
+  const reasoning = panel.getByLabel("Reasoning", { exact: true });
+  await expect(reasoning).toBeEnabled({ timeout: 3_000 });
+  await expect(panel.locator(".agent-implementation-title")).toHaveText(codingTitle);
+  await expect(panel.locator(".agent-implementation-title")).toHaveAttribute("title", codingTitle);
+  await expect(panel).toContainText("Start approves this specification and begins implementation.");
+  await expect(page.getByRole("button", { name: "Implement", exact: true })).toHaveCount(0);
+  expect(requests).toEqual([]);
+  await panel.getByRole("button", { name: "Back to conversation", exact: true }).click();
+  await expect(reasoning).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeVisible();
+  expect(requests).toEqual([]);
+  await openOptions();
+  await expect(reasoning).toBeEnabled();
+  await reasoning.selectOption("high");
+  const toolbar = panel.locator(".agent-compose-toolbar");
+  const start = toolbar.getByRole("button", { name: "Start implementation", exact: true });
+  await expect(start).toBeEnabled();
+  await expect(toolbar.locator("button")).toHaveCount(1);
+  await expect(panel.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0);
+  await mkdir(".factory/test-results/implementation-options", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/implementation-options/before-start-wide.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(start).toBeVisible();
+  const positions = await toolbar.evaluate((element) => {
+    const selection = element.querySelector("select");
+    const button = element.querySelector("button");
+    if (!selection || !button) return {};
+    const select = selection.getBoundingClientRect();
+    const action = button.getBoundingClientRect();
+    return { before: select.right <= action.left, sameLine: Math.abs(select.y - action.y) < 8 };
+  });
+  expect(positions).toEqual({ before: true, sameLine: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({
+    path: ".factory/test-results/implementation-options/before-start-narrow.png",
+  });
+  await start.click();
+  await expect.poll(() => requests.length).toBe(1);
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(reasoning).toHaveValue("high");
+  await page.reload();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await selectProject(page);
+  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await openOptions();
+  await expect(reasoning).toHaveValue("high");
+  expect(requests).toHaveLength(1);
+  await start.click();
+  await expect.poll(() => requests.length).toBe(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(requests[0]).toMatchObject({ revisionId: revisionID, codingReasoning: "high" });
+  await expect(start).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+  const db = createDatabase(1);
+  try {
+    expect(
+      await db.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${ticketID}`,
+    ).toHaveLength(0);
+    expect(await db.client`SELECT id FROM factory.change WHERE ticket_id=${ticketID}`).toHaveLength(
+      0,
+    );
+  } finally {
+    await db.client.end();
+  }
+  expect(errors).toEqual([]);
+});
+
+test("an admitted Coding-options request with a lost response reconnects to its exact Build without sending again", async ({
+  page,
+}) => {
+  test.setTimeout(40_000);
+  const changeID = crypto.randomUUID();
+  const turnID = crypto.randomUUID();
+  const requests: Array<{ commandId: string; codingReasoning: string }> = [];
+  let admitted = false;
+  const session = await (await page.request.get("/api/session")).json();
+  const configuration = await (
+    await page.request.get(`/api/projects/${projectID}/model-settings`)
+  ).json();
+  configuration.system.connection.buildProvider = "openai";
+  configuration.effective.build.modelId = "gpt-6.1-sol";
+  await page.route("**/api/session", (route) =>
+    route.fulfill({ json: { ...session, modelRelayConfigured: true } }),
+  );
+  await page.route(`**/api/projects/${projectID}/model-settings`, (route) =>
+    route.fulfill({ json: configuration }),
+  );
+  await page.route(`**/api/tickets/${ticketID}/implement`, (route) => {
+    requests.push(route.request().postDataJSON());
+    admitted = true;
+    return route.abort("connectionreset");
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: admitted
+          ? [
+              {
+                id: changeID,
+                projectId: projectID,
+                ticketId: ticketID,
+                branchName: "factory/owned-options-recovery",
+                baseSha: "a".repeat(40),
+                state: "starting",
+                branchState: "succeeded",
+                runtimeState: "starting",
+                implementationState: "starting",
+                buildTurnState: "pending",
+              },
+            ]
+          : [],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+    route.fulfill({
+      json: {
+        state: "starting",
+        sessionAvailable: false,
+        runtimeConnected: false,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+        turn: {
+          id: turnID,
+          commandId: requests[0]?.commandId,
+          engine: "opencode",
+          mode: "build",
+          modelId: "gpt-6.1-sol",
+          codingReasoning: "high",
+          state: "pending",
+          skills: [],
+        },
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await selectProject(page);
+  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Coding options…", exact: true }).click();
+  const panel = page.locator(".agent-panel");
+  const reasoning = panel.getByLabel("Reasoning", { exact: true });
+  await expect(reasoning).toBeEnabled();
+  await reasoning.selectOption("high");
+  await panel.getByRole("button", { name: "Start implementation", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(1);
+  await expect(reasoning).toBeVisible({ timeout: 10_000 });
+  await expect(reasoning).toBeDisabled({ timeout: 10_000 });
+  await expect(reasoning).toHaveValue("high");
+  await expect(panel.getByRole("button", { name: "Stop OpenCode", exact: true })).toBeVisible();
+  await expect(reasoning).toBeVisible({ timeout: 3_000 });
+  await expect(reasoning).toBeDisabled();
+  await expect(reasoning).toHaveValue("high");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(
+    panel.getByRole("button", { name: "Start implementation", exact: true }),
+  ).toHaveCount(0);
+  expect(requests).toHaveLength(1);
+  await page.screenshot({
+    path: ".factory/test-results/implementation-options/confirmed-after-lost-response.png",
+  });
+});
+
 test("an implementing Ticket never offers another Implement while its Change read is delayed", async ({
   page,
 }) => {
@@ -649,6 +860,11 @@ for (const role of ["developer", "product-contributor"] as const) {
         "Clarify this Ticket's requirements…",
       );
       await expect(controls).toHaveCount(0);
+      await member.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await expect(
+        member.getByRole("menuitem", { name: "Coding options…", exact: true }),
+      ).toHaveCount(role === "developer" ? 1 : 0);
+      await member.getByRole("button", { name: "Ticket actions", exact: true }).click();
       const evidence = ".factory/test-results/coding-model-scope";
       await mkdir(evidence, { recursive: true });
       await member.screenshot({ path: `${evidence}/${role}-plan.png` });

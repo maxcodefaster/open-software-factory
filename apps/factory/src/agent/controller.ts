@@ -1515,8 +1515,18 @@ export function createAgentController(
       return this.get(changeID, turnID);
     },
 
-    admitStartIn(sql: AgentTurnTransaction, changeID: string, userID: string, commandId: string) {
-      return admission.admitIn(sql, changeID, userID, { kind: "change-start", commandId });
+    admitStartIn(
+      sql: AgentTurnTransaction,
+      changeID: string,
+      userID: string,
+      commandId: string,
+      codingReasoning?: CodingReasoning,
+    ) {
+      return admission.admitIn(sql, changeID, userID, {
+        kind: "change-start",
+        commandId,
+        ...(codingReasoning ? { codingReasoning } : {}),
+      });
     },
 
     async dispatchPending(changeID: string) {

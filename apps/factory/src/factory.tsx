@@ -307,6 +307,13 @@ function FactoryWorkspace(props: {
   const [boardHistoryOpen, setBoardHistoryOpen] = createSignal(false);
   const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [correctionTarget, setCorrectionTarget] = createSignal<string>();
+  const [implementationPreparation, setImplementationPreparation] = createSignal<{
+    projectID: string;
+    ticketID: string;
+    revisionID: string;
+    reasoning: CodingReasoning | undefined;
+    failure: string | undefined;
+  }>();
   const canManageProject = () =>
     props.session.systemManager ||
     memberships
@@ -350,6 +357,24 @@ function FactoryWorkspace(props: {
       if (view.turn) {
         acknowledgeCommand(agentCommandScope("change-start", changeID), view.turn.commandId);
         acknowledgeCommand(agentCommandScope("change-prompt", changeID), view.turn.commandId);
+        const prepared = implementationPreparation();
+        if (
+          prepared &&
+          prepared.projectID === selectedProjectID() &&
+          prepared.ticketID === selectedTicketID() &&
+          prepared.ticketID === assistantTicketID() &&
+          prepared.revisionID === detail()?.revisions[0]?.id &&
+          selectedChange()?.id === changeID &&
+          canDevelopProject() &&
+          view.turn.engine === "opencode"
+        ) {
+          const scope = `implement:${prepared.ticketID}`;
+          if (agentCommandIds.latest(scope)?.commandId === view.turn.commandId) {
+            acknowledgeCommand(scope, view.turn.commandId);
+            setCorrectionTarget(changeID);
+            setImplementationPreparation(undefined);
+          }
+        }
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
@@ -1420,22 +1445,89 @@ function FactoryWorkspace(props: {
     });
   }
 
-  async function implementTicket(revisionID: string) {
+  function openCodingOptions(revisionID: string) {
+    const projectID = selectedProjectID();
     const ticket = detail()?.ticket;
-    if (!ticket) return;
+    if (!projectID || !ticket || !canDevelopProject() || selectedChange()) return;
+    const previous = implementationPreparation();
+    let reasoning =
+      previous?.projectID === projectID &&
+      previous.ticketID === ticket.id &&
+      previous.revisionID === revisionID
+        ? previous.reasoning
+        : undefined;
+    try {
+      const saved = agentCommandIds.latest(`implement:${ticket.id}`);
+      if (saved) {
+        const input = z
+          .object({
+            ticketID: z.literal(ticket.id),
+            revisionID: z.literal(revisionID),
+            codingReasoning: codingReasoningInput.optional(),
+          })
+          .safeParse(JSON.parse(saved.input));
+        if (input.success) reasoning = input.data.codingReasoning;
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
+      return;
+    }
+    setImplementationPreparation({
+      projectID,
+      ticketID: ticket.id,
+      revisionID,
+      reasoning,
+      failure: undefined,
+    });
+    setAgentOpen(true);
+  }
+
+  async function implementTicket(revisionID: string, codingReasoning?: CodingReasoning) {
+    const projectID = selectedProjectID();
+    const ticket = detail()?.ticket;
+    if (!ticket || !projectID) return;
+    const prepared = preparingImplementation();
     const scope = `implement:${ticket.id}`;
     await mutate(async () => {
+      const options = codingReasoning ? { codingReasoning } : {};
       const commandId = agentCommandIds.forInput(
         scope,
-        JSON.stringify({ ticketID: ticket.id, revisionID }),
+        JSON.stringify({ ticketID: ticket.id, revisionID, ...options }),
       );
-      await apiRequest(emptyResponseSchema, `/api/tickets/${ticket.id}/implement`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, revisionId: revisionID }),
-      });
+      try {
+        await apiRequest(emptyResponseSchema, `/api/tickets/${ticket.id}/implement`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId, revisionId: revisionID, ...options }),
+        });
+      } catch (cause) {
+        if (!prepared) throw cause;
+        setImplementationPreparation((current) =>
+          current?.projectID === projectID &&
+          current.ticketID === ticket.id &&
+          current.revisionID === revisionID
+            ? {
+                ...current,
+                failure:
+                  cause instanceof Error ? cause.message : "Implementation response unavailable.",
+              }
+            : current,
+        );
+        return;
+      }
       acknowledgeCommand(scope, commandId);
       await refreshServerState();
+      if (
+        prepared &&
+        implementationPreparation() === prepared &&
+        selectedProjectID() === projectID &&
+        selectedTicketID() === ticket.id &&
+        assistantTicketID() === ticket.id
+      ) {
+        setImplementationPreparation(undefined);
+        const change = changeFor(ticket.id);
+        if (change) setCorrectionTarget(change.id);
+      }
     });
   }
 
@@ -1894,8 +1986,24 @@ function FactoryWorkspace(props: {
   };
   const agentViewLoaded = () =>
     Boolean(selectedChange()?.id && observedAgentChangeID() === selectedChange()?.id);
+  const preparingImplementation = () => {
+    const prepared = implementationPreparation();
+    return prepared &&
+      prepared.projectID === selectedProjectID() &&
+      prepared.ticketID === selectedTicketID() &&
+      prepared.ticketID === assistantTicketID() &&
+      prepared.revisionID === detail()?.revisions[0]?.id &&
+      detail()?.ticket.state === "ready" &&
+      !detail()?.ticket.trashedAt &&
+      !detail()?.ticket.convertedToEpicId &&
+      canDevelopProject() &&
+      !selectedChange()
+      ? prepared
+      : undefined;
+  };
   const conversationMode = (): ConversationMode =>
-    correctionTarget() && assistantTicketID() && correctionTarget() === selectedChange()?.id
+    preparingImplementation() ||
+    (correctionTarget() && assistantTicketID() && correctionTarget() === selectedChange()?.id)
       ? "build"
       : assistantContext({
           view: workspaceView(),
@@ -2761,7 +2869,14 @@ function FactoryWorkspace(props: {
           ref={agentPanelElement}
         >
           <header>
-            <span class="sr-only">Assistant</span>
+            <Show
+              when={preparingImplementation()}
+              fallback={<span class="sr-only">Assistant</span>}
+            >
+              <span class="agent-implementation-title" title={detail()?.ticket.title}>
+                {detail()?.ticket.title}
+              </span>
+            </Show>
             <button
               type="button"
               class="bare-icon window-minimize-control"
@@ -2781,6 +2896,18 @@ function FactoryWorkspace(props: {
             )}
           </Show>
           <Show when={!setupVisible()}>
+            <Show when={preparingImplementation()}>
+              <div class="agent-status">
+                <span class="agent-state">Ready to build</span>
+                <button
+                  type="button"
+                  class="quiet-button"
+                  onClick={() => setImplementationPreparation(undefined)}
+                >
+                  Back to conversation
+                </button>
+              </div>
+            </Show>
             <Show when={conversationMode() === "build" && selectedChange()}>
               <div class="agent-status">
                 <span class="agent-state">
@@ -3077,11 +3204,13 @@ function FactoryWorkspace(props: {
                   <Icon name="agent" />
                   <p>
                     {conversationMode() === "build"
-                      ? !agentViewLoaded()
-                        ? "Loading implementation…"
-                        : selectedChange()
-                          ? buildAgentEmptyMessage(agent())
-                          : "Approve the latest Requirement Revision to start Build."
+                      ? preparingImplementation()
+                        ? "Choose reasoning for this Ticket's first Build."
+                        : !agentViewLoaded()
+                          ? "Loading implementation…"
+                          : selectedChange()
+                            ? buildAgentEmptyMessage(agent())
+                            : "Approve the latest Requirement Revision to start Build."
                       : assistantTicketID()
                         ? "Ask about this Ticket, or tell me what needs clarifying."
                         : "Ask about the Project, or describe a change you want to work on."}
@@ -3097,9 +3226,11 @@ function FactoryWorkspace(props: {
                   settingsOpen={workspaceView() === "settings"}
                   onSettings={openSettings}
                   turn={
-                    conversationMode() === "build" && selectedChange()
-                      ? agent().turn
-                      : conversation()?.turn
+                    preparingImplementation()
+                      ? undefined
+                      : conversationMode() === "build" && selectedChange()
+                        ? agent().turn
+                        : conversation()?.turn
                   }
                 />
               </div>
@@ -3132,6 +3263,7 @@ function FactoryWorkspace(props: {
               <Show when={conversationMode() === "build"}>
                 <Show
                   when={
+                    !preparingImplementation() &&
                     agent().lastError &&
                     !agent().codingPause &&
                     !(
@@ -3142,24 +3274,38 @@ function FactoryWorkspace(props: {
                 >
                   <p class="inline-error">{agent().lastError}</p>
                 </Show>
-                <Show when={agent().codingPause}>
+                <Show when={!preparingImplementation() && agent().codingPause}>
                   <p class="agent-activity-notice" role="status">
                     Coding is paused. Existing code is retained. Resume from the Ticket after its
                     allowance is available.
                   </p>
                 </Show>
-                <Show when={agentViewLoaded() && !agentCanRun()}>
+                <Show when={!preparingImplementation() && agentViewLoaded() && !agentCanRun()}>
                   <p class="agent-unavailable">
                     {selectedChange()?.state === "branch-pending"
                       ? "Preparing the Change branch. Implementation will be available when it is ready."
                       : `This Change is ${selectedChange()?.state ?? "unavailable"}. OpenCode is read-only.`}
                   </p>
                 </Show>
-                <Show when={agentCanRun() && !agent().codingPause}>
+                <Show when={preparingImplementation()}>
+                  <Show when={preparingImplementation()?.failure}>
+                    <p class="inline-error" role="alert">
+                      {preparingImplementation()?.failure}
+                    </p>
+                  </Show>
+                  <p class="agent-activity-notice">
+                    Start approves this specification and begins implementation.
+                  </p>
+                </Show>
+                <Show when={preparingImplementation() || (agentCanRun() && !agent().codingPause)}>
                   <form
                     class="agent-composer build-composer"
                     onSubmit={(event) => {
-                      if (!canPromptBuild()) {
+                      const prepared = preparingImplementation();
+                      if (prepared) {
+                        event.preventDefault();
+                        void implementTicket(prepared.revisionID, prepared.reasoning);
+                      } else if (!canPromptBuild()) {
                         event.preventDefault();
                         void startAgent();
                       } else void promptAgent(event);
@@ -3198,7 +3344,7 @@ function FactoryWorkspace(props: {
                     <div class="agent-compose-toolbar">
                       <Show when={canDevelopProject()}>
                         <Show
-                          when={agentViewLoaded()}
+                          when={preparingImplementation() || agentViewLoaded()}
                           fallback={
                             <span class="agent-model-controls">Loading implementation…</span>
                           }
@@ -3206,17 +3352,28 @@ function FactoryWorkspace(props: {
                           <BuildModelControls
                             projectID={selectedProjectID()}
                             changeID={selectedChange()?.id}
-                            turn={agent().turn}
-                            sessionAvailable={agent().sessionAvailable}
+                            turn={preparingImplementation() ? undefined : agent().turn}
+                            sessionAvailable={
+                              !preparingImplementation() && agent().sessionAvailable
+                            }
                             disabled={
                               pending() ||
-                              agentTurnBusy() ||
-                              agentNeedsResolution() ||
-                              Boolean(agent().commitOperation) ||
-                              agent().stopPending
+                              (!preparingImplementation() &&
+                                (agentTurnBusy() ||
+                                  agentNeedsResolution() ||
+                                  Boolean(agent().commitOperation) ||
+                                  agent().stopPending))
                             }
-                            reasoning={chosenCodingReasoning()}
+                            reasoning={
+                              preparingImplementation()?.reasoning ?? chosenCodingReasoning()
+                            }
                             onChange={(value) => {
+                              if (preparingImplementation()) {
+                                setImplementationPreparation((previous) =>
+                                  previous ? { ...previous, reasoning: value } : previous,
+                                );
+                                return;
+                              }
                               const changeID = selectedChange()?.id;
                               if (changeID)
                                 setCodingReasoningChoices((previous) => ({
@@ -3229,31 +3386,39 @@ function FactoryWorkspace(props: {
                       </Show>
                       <div class="composer-actions">
                         <Show
-                          when={agentNeedsResolution() || agentTurnBusy()}
+                          when={
+                            !preparingImplementation() &&
+                            (agentNeedsResolution() || agentTurnBusy())
+                          }
                           fallback={
                             <button
                               type="submit"
                               class="agent-control primary"
                               aria-label={
-                                !canPromptBuild()
-                                  ? agent().state === "failed"
-                                    ? "Retry implementation"
-                                    : "Start implementation"
-                                  : "Send message"
+                                preparingImplementation()
+                                  ? "Start implementation"
+                                  : !canPromptBuild()
+                                    ? agent().state === "failed"
+                                      ? "Retry implementation"
+                                      : "Start implementation"
+                                    : "Send message"
                               }
                               disabled={
                                 pending() ||
-                                !agentViewLoaded() ||
-                                agentNeedsResolution() ||
-                                Boolean(agent().commitOperation) ||
-                                agent().stopPending ||
+                                (!preparingImplementation() &&
+                                  (!agentViewLoaded() ||
+                                    agentNeedsResolution() ||
+                                    Boolean(agent().commitOperation) ||
+                                    agent().stopPending)) ||
                                 (!canPromptBuild() && !props.modelRelayConfigured) ||
                                 blockersFor(selectedTicketID() ?? "").length > 0
                               }
                               title={
                                 !props.modelRelayConfigured
                                   ? "Connect a Factory model before starting implementation"
-                                  : buildAgentHint(agent())
+                                  : preparingImplementation()
+                                    ? "Start this specification with the selected reasoning"
+                                    : buildAgentHint(agent())
                               }
                             >
                               <Icon name={canPromptBuild() ? "send" : "play"} />
@@ -3265,7 +3430,9 @@ function FactoryWorkspace(props: {
                                   </span>
                                 }
                               >
-                                {agent().state === "failed" ? "Retry" : "Start"}
+                                {!preparingImplementation() && agent().state === "failed"
+                                  ? "Retry"
+                                  : "Start"}
                               </Show>
                             </button>
                           }
@@ -3442,7 +3609,11 @@ function FactoryWorkspace(props: {
                       }}
                       onTrash={() => void ticketTrashCommand(current().ticket.id, "trash")}
                       onRestore={() => void ticketTrashCommand(current().ticket.id, "restore")}
-                      onImplement={(revisionID) => void implementTicket(revisionID)}
+                      onImplement={(revisionID) =>
+                        void implementTicket(revisionID, preparingImplementation()?.reasoning)
+                      }
+                      onCodingOptions={openCodingOptions}
+                      codingOptionsOpen={Boolean(preparingImplementation() && agentOpen())}
                       implementationAvailable={props.modelRelayConfigured}
                       codingPause={agent().codingPause}
                       computeWait={agent().computeWait}

@@ -125,6 +125,8 @@ export type TicketWorkspaceProps = {
   onTrash(): void;
   onRestore(): void;
   onImplement(revisionID: string): void;
+  onCodingOptions(revisionID: string): void;
+  codingOptionsOpen: boolean;
   implementationAvailable: boolean;
   codingPause?: { reason: string; turnID: string } | null | undefined;
   computeWait?: string | null | undefined;
@@ -934,6 +936,24 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     }
   }
 
+  const canImplement = () =>
+    Boolean(
+      !props.current.ticket.trashedAt &&
+        !props.current.ticket.convertedToEpicId &&
+        props.current.ticket.state === "ready" &&
+        props.latestRevision &&
+        !props.change &&
+        !proposal(),
+    );
+  const implementationDisabled = () =>
+    props.pending ||
+    hasChanges() ||
+    Boolean(
+      currentDocument() && currentDocument()?.requirementRevisionId !== props.latestRevision?.id,
+    ) ||
+    !props.implementationAvailable ||
+    props.dependencies.prerequisites.some((prerequisite) => !prerequisite.delivered);
+
   return (
     <div class={`ticket-layout${historyOpen() ? " has-inspector" : ""}`}>
       <div class="ticket-editor-frame">
@@ -1119,31 +1139,11 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       Create follow-up
                     </button>
                   </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      !props.current.ticket.convertedToEpicId &&
-                      props.current.ticket.state === "ready" &&
-                      props.latestRevision &&
-                      !props.change &&
-                      !proposal()
-                    }
-                  >
+                  <Show when={canImplement() && !props.codingOptionsOpen}>
                     <button
                       type="button"
                       class="primary-button"
-                      disabled={
-                        props.pending ||
-                        hasChanges() ||
-                        Boolean(
-                          currentDocument() &&
-                            currentDocument()?.requirementRevisionId !== props.latestRevision?.id,
-                        ) ||
-                        !props.implementationAvailable ||
-                        props.dependencies.prerequisites.some(
-                          (prerequisite) => !prerequisite.delivered,
-                        )
-                      }
+                      disabled={implementationDisabled()}
                       onClick={() =>
                         props.latestRevision && props.onImplement(props.latestRevision.id)
                       }
@@ -1159,6 +1159,13 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                     }
                   >
                     <TicketSecondaryActions
+                      onCodingOptions={
+                        props.canDevelop && canImplement()
+                          ? () =>
+                              props.latestRevision && props.onCodingOptions(props.latestRevision.id)
+                          : undefined
+                      }
+                      codingOptionsDisabled={implementationDisabled()}
                       converted={Boolean(props.current.ticket.convertedToEpicId)}
                       epics={props.epics}
                       epicID={props.current.ticket.epicId}

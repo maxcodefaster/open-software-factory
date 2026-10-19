@@ -3370,6 +3370,16 @@ dt,
   border: 0;
 }
 
+.agent-implementation-title {
+  min-width: 0;
+  max-width: calc(100% - var(--window-control-size) - var(--space-2));
+  overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .agent-input-shell {
   display: flex;
   flex-direction: column;

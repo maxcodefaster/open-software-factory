@@ -23,6 +23,8 @@ export function TicketSecondaryActions(props: {
   historyOpen: boolean;
   onHistory(): void;
   converted: boolean;
+  onCodingOptions?: (() => void) | undefined;
+  codingOptionsDisabled?: boolean | undefined;
 }) {
   const [view, setView] = createSignal<ActionView | undefined>();
   const [query, setQuery] = createSignal("");
@@ -107,6 +109,21 @@ export function TicketSecondaryActions(props: {
               </button>
             </Show>
             <Show when={!props.converted}>
+              <Show when={props.onCodingOptions}>
+                <button
+                  type="button"
+                  role="menuitem"
+                  class="quiet-button"
+                  disabled={props.pending || props.codingOptionsDisabled}
+                  onClick={() => {
+                    finish();
+                    props.onCodingOptions?.();
+                  }}
+                >
+                  <Icon name="agent" />
+                  <span>Coding options…</span>
+                </button>
+              </Show>
               <button
                 type="button"
                 role="menuitem"

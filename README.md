@@ -30,8 +30,10 @@ Factory's Models settings show separate Planning & knowledge and Coding choices.
 connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
 minimum. Save & check adopts the Coding model and reasoning together only after a successful
 access check. API keys are managed separately and encrypted in OpenBao. Before the first Build,
-developers can choose reasoning for that Change in the Coding chat. Planning and research chats,
-and contributor correction chats, have no model switcher. Existing Changes show developers their
+developers can open Ticket actions → Coding options to choose reasoning in the Coding chat before
+commissioning the first Build. Opening or leaving those options starts no model work. The normal
+Implement action still commissions work in one click with the configured defaults. Planning and
+research chats, and contributor correction chats, have no model switcher. Existing Changes show developers their
 fixed admitted value; changing defaults never reconfigures them. OpenAI Coding uses the native
 Responses adapter.
 An intended Session ID is not a resumable Coding session until OpenCode confirms its creation.

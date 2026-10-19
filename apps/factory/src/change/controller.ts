@@ -13,6 +13,7 @@ import type { ChangeView, RequirementApprovalView, RequirementRevisionView } fro
 import type { RuntimeAttemptView } from "../runtime/types";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { codingBudgetIn } from "../usage/policy";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import {
   createRequirementRevision,
   type RequirementContent,
@@ -26,6 +27,7 @@ type RuntimeController = {
 type ImplementationAdmission = {
   commandID: string;
   revisionID: string;
+  codingReasoning?: CodingReasoning;
   admitBuild(sql: AgentTurnTransaction, changeID: string): Promise<unknown>;
 };
 
@@ -429,14 +431,22 @@ export function createChangeController(
         async function admitBuild(change: string) {
           if (!implementation) return;
           const [bootstrap] = await sql<
-            Array<{ commandID: string }>
-          >`SELECT turn.command_id AS "commandID"
+            Array<{ commandID: string; reasoning: string | null }>
+          >`SELECT turn.command_id AS "commandID", turn.authority->>'codingReasoning' AS reasoning
             FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
             WHERE turn.change_id = ${change} AND intent.bootstrap ORDER BY turn.created_at LIMIT 1`;
           // A second viewer commissioning already-admitted work does not start a
           // second inference. The original command can still replay its exact input.
           if (!bootstrap || bootstrap.commandID === implementation.commandID)
             await implementation.admitBuild(sql, change);
+          else if (
+            implementation.codingReasoning &&
+            implementation.codingReasoning !== bootstrap.reasoning
+          )
+            throw new CommandError(
+              "conflict",
+              "This Change keeps its original reasoning. Start a new Change to choose different reasoning.",
+            );
         }
         const existing = await sql<Array<{ id: string }>>`
           SELECT id, state FROM factory.change WHERE ticket_id = ${ticketID}

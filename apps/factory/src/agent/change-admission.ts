@@ -11,7 +11,7 @@ import type { ModelConnectionReference } from "../../../../packages/conversation
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { claimAgentWriterIn } from "../access/change-writer";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import { requireDeliveredPrerequisites } from "../change/dependencies";
 import { CommandError } from "../command-error";
 import { createSkillController } from "../skills/controller";
@@ -146,11 +146,15 @@ export function createChangeAdmission(
         resume?: boolean;
       };
       const command = agentTurnCommandInput.parse({ ...previous.command, ...replayedInput });
-      await projectAuthorityIn(sql, userID, command.projectId);
+      if (input.kind === "change-start" && input.codingReasoning)
+        await projectDevelopmentAuthorityIn(sql, userID, command.projectId);
+      else await projectAuthorityIn(sql, userID, command.projectId);
       return turns.admitIn(sql, command, previous.authority);
     }
     const current = await context(sql, changeID);
-    await projectAuthorityIn(sql, userID, current.projectID);
+    if (input.kind === "change-start" && input.codingReasoning)
+      await projectDevelopmentAuthorityIn(sql, userID, current.projectID);
+    else await projectAuthorityIn(sql, userID, current.projectID);
     const paused = await sql`SELECT pause.turn_id FROM factory.coding_pause pause
       JOIN factory.agent_turn turn ON turn.id=pause.turn_id
       WHERE turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL`;
