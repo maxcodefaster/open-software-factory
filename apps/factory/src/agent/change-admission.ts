@@ -78,7 +78,8 @@ export function createChangeAdmission(
         revision.id AS "revisionID", ticket.title, ticket.description,
         revision.canonical_content AS "canonicalContent", conversation.id AS "conversationID",
         conversation.mode, conversation.version::float8 AS "conversationVersion",
-        session.opencode_session_id AS "sessionID", session.state AS "sessionState",
+        CASE WHEN session.native_session_confirmed_at IS NOT NULL
+          THEN session.opencode_session_id END AS "sessionID", session.state AS "sessionState",
         session.stop_pending AS "stopPending"
       FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
       JOIN factory.requirement_approval approval ON approval.id = change.requirement_approval_id

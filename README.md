@@ -34,6 +34,8 @@ developers can choose reasoning for that Change in the Coding chat. Planning and
 and contributor correction chats, have no model switcher. Existing Changes show developers their
 fixed admitted value; changing defaults never reconfigures them. OpenAI Coding uses the native
 Responses adapter.
+An intended Session ID is not a resumable Coding session until OpenCode confirms its creation.
+Failed first preparation retains source and offers an explicit Retry.
 Build works toward the approved requirements and ends with an ordinary summary, without a required
 JSON checklist. A normal native finish submits changed source for independent Verification,
 not as proof of completion. Exact-commit checks and human Delivery approval remain separate.

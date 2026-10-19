@@ -566,7 +566,9 @@ test("editable Epic preview keeps focus, restores drafts and confirms every memb
       },
       {
         key: "summary",
-        title: "Summarize invoices",
+        title:
+          "Summarize invoices with customer references, currency and all totals " +
+          "so staff can review the complete result on a narrow screen",
         description: "Understand totals",
         existingTicketId: null,
         expectedVersion: null,
@@ -590,16 +592,57 @@ test("editable Epic preview keeps focus, restores drafts and confirms every memb
   await criterion.fill("A contributor");
   await criterion.pressSequentially(" downloads a CSV");
   await expect(criterion).toBeFocused();
+  const longCriterion =
+    "A contributor downloads a CSV with the full invoice reference, customer display name, " +
+    "currency and total. The result remains readable without scrolling individual fields, " +
+    "including when reviewing the complete proposal on a narrow phone screen.";
+  await criterion.fill(longCriterion);
   await page.reload();
   await selectProject(page);
   await page.locator(".ticket-card-body").filter({ hasText: "Invoice intent" }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   await page.getByRole("button", { name: "Review proposed work", exact: true }).click();
   await expect(title).toHaveValue("Export invoices safely");
-  await expect(criterion).toHaveValue("A contributor downloads a CSV");
-  await page.screenshot({ path: `${captures}/epic-proposal-desktop.png` });
-  await page.setViewportSize({ width: 780, height: 900 });
-  await page.screenshot({ path: `${captures}/epic-proposal-narrow.png` });
+  await expect(criterion).toHaveValue(longCriterion);
+  const evidence = ".factory/test-results/epic-proposal-review";
+  await mkdir(evidence, { recursive: true });
+  for (const width of [1440, 780, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const proposal = page.getByRole("region", { name: "Proposed Epic", exact: true });
+    const body = page.locator(".workspace-view-body");
+    await expect
+      .poll(
+        async () => {
+          const content = await proposal.boundingBox();
+          const available = await body.boundingBox();
+          return content && available ? Math.abs(content.width - available.width) : Infinity;
+        },
+        { timeout: 3000 },
+      )
+      .toBeLessThanOrEqual(1);
+    await criterion.scrollIntoViewIfNeeded();
+    await expect
+      .poll(() =>
+        criterion.evaluate((element) => ({
+          horizontal: element.scrollWidth <= element.clientWidth + 1,
+          vertical: element.scrollHeight <= element.clientHeight + 1,
+        })),
+      )
+      .toEqual({ horizontal: true, vertical: true });
+    const memberTitle = page.getByRole("textbox", { name: "Member 2 title", exact: true });
+    await memberTitle.scrollIntoViewIfNeeded();
+    expect(
+      await memberTitle.evaluate(
+        (element) =>
+          element.scrollWidth <= element.clientWidth + 1 &&
+          element.scrollHeight <= element.clientHeight + 1,
+      ),
+    ).toBe(true);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({ path: `${evidence}/${width}.png`, animations: "disabled" });
+  }
   await page.getByRole("button", { name: "Confirm work", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
     "Export invoices safely",

@@ -11,7 +11,9 @@ import {
 } from "../../../../packages/runtime-domain/src/identity";
 import {
   createKubernetesClient,
+  KubernetesObservationUnavailableError,
   type KubernetesClient,
+  type RuntimePodObservation,
   readRuntimeRegistryCA,
   requireRuntimePodArtifacts,
 } from "../../../../packages/runtime-kubernetes/src/client";
@@ -575,7 +577,16 @@ export function createRuntimeController(
         `;
         const current = attempt[0];
         if (current?.state !== "starting") return;
-        const pod = await kubernetes.getPod(namespace, podName);
+        let pod: RuntimePodObservation | null;
+        try {
+          pod = await kubernetes.getPod(namespace, podName);
+        } catch (cause) {
+          if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
+          // An unavailable read says nothing about the owned Pod. Reobserve
+          // within this startup window; do not clean up or replay its create.
+          await Bun.sleep(1_000);
+          continue;
+        }
         if (!pod) break;
         if (pod.phase === "Failed" || pod.phase === "Succeeded") {
           if (!current.uid || current.uid !== pod.uid) {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { createKubernetesClient } from "./client";
+import { createKubernetesClient, KubernetesObservationUnavailableError } from "./client";
 
 const namespace = {
   apiVersion: "v1",
@@ -18,6 +18,52 @@ const resources = [
   { apiVersion: "v1", kind: "Secret", metadata: { name: "assignment" } },
   { apiVersion: "v1", kind: "Pod", metadata: { name: "source" } },
 ];
+
+test.each([
+  "Unable to connect to the server: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+  "Unable to connect to the server: dial tcp: i/o timeout",
+  "The connection to the server 127.0.0.1:6443 was refused",
+  "Error from server (ServiceUnavailable): the server is currently unable to handle the request",
+])(
+  "a Pod read preserves unavailable observation instead of proving Pod failure: %s",
+  async (stderr) => {
+    const client = createKubernetesClient(async () => ({ stdout: "", stderr, exitCode: 1 }));
+    try {
+      await client.getPod("owned-namespace", "owned-pod");
+      throw new Error("Expected unavailable observation");
+    } catch (cause) {
+      expect(cause).toBeInstanceOf(Error);
+      expect((cause as Error).name).toBe("KubernetesObservationUnavailableError");
+    }
+  },
+);
+
+test("a bounded Pod-read subprocess timeout is still an unavailable observation", async () => {
+  const client = createKubernetesClient(async () => {
+    throw new Error("Infrastructure command timed out; outcome is unconfirmed");
+  });
+  await expect(client.getPod("owned-namespace", "owned-pod")).rejects.toBeInstanceOf(
+    KubernetesObservationUnavailableError,
+  );
+});
+
+test.each([
+  "Error from server (Forbidden): pods is forbidden",
+  "You must be logged in to the server",
+  "Infrastructure command output exceeded its bound",
+])(
+  "a non-transport Pod read error is not retried as a transient observation: %s",
+  async (stderr) => {
+    const client = createKubernetesClient(async () => ({ stdout: "", stderr, exitCode: 1 }));
+    try {
+      await client.getPod("owned-namespace", "owned-pod");
+      throw new Error("Expected Pod read rejection");
+    } catch (cause) {
+      expect(cause).toBeInstanceOf(Error);
+      expect(cause).not.toBeInstanceOf(KubernetesObservationUnavailableError);
+    }
+  },
+);
 
 test("resource creation uses one ordered apply after confirming its Namespace identity", async () => {
   const calls: Array<{ args: string[]; input?: string }> = [];

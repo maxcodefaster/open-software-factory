@@ -2337,7 +2337,8 @@ dt,
 }
 
 .runtime-workspace,
-.inbox-workspace {
+.inbox-workspace,
+.epic-proposal-workspace {
   grid-column: 1 / -1;
 }
 
@@ -3030,8 +3031,11 @@ dt,
   color: var(--muted-ink);
   font-size: var(--text-sm);
 }
-.epic-proposal-member input:not([type="checkbox"]) {
+.epic-proposal-workspace textarea {
   width: 100%;
+  min-height: var(--space-8);
+  field-sizing: content;
+  resize: none;
   border: 0;
   background: transparent;
 }

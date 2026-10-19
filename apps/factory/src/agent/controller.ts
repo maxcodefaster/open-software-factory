@@ -55,6 +55,7 @@ type AgentRow = {
   runtimeState: string;
   state: "starting" | "working" | "waiting" | "stopped" | "failed" | "committed";
   sessionID: string | null;
+  sessionConfirmed: boolean;
   activeInboxID: string | null;
   lastError: string | null;
   activeTurnID: string | null;
@@ -436,6 +437,7 @@ export function createAgentController(
         change.branch_name AS "branchName", change.base_sha AS "baseSHA",
         session.runtime_attempt_id AS "runtimeAttemptID", attempt.state AS "runtimeState",
         session.state, session.opencode_session_id AS "sessionID",
+        session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed",
         session.active_inbox_id AS "activeInboxID", session.last_error AS "lastError",
         session.active_turn_id AS "activeTurnID", session.stop_pending AS "stopPending",
         session.stop_id AS "stopID"
@@ -446,6 +448,25 @@ export function createAgentController(
       WHERE session.change_id = ${changeID}
     `;
     return rows[0] ?? null;
+  }
+
+  async function confirmNativeSession(
+    changeID: string,
+    turnID: string,
+    attemptID: string,
+    sessionID: string,
+  ) {
+    const confirmed = await database.client`
+      UPDATE factory.change_agent_session
+      SET native_session_confirmed_at = COALESCE(native_session_confirmed_at, now())
+      WHERE change_id = ${changeID} AND active_turn_id = ${turnID}
+        AND runtime_attempt_id = ${attemptID} AND opencode_session_id = ${sessionID}
+    `;
+    if (confirmed.count !== 1)
+      throw new CommandError(
+        "conflict",
+        "Native Session confirmation no longer matches this Build",
+      );
   }
 
   async function currentChange(changeID: string) {
@@ -466,6 +487,14 @@ export function createAgentController(
     const change = rows[0];
     if (!change) throw new CommandError("not-found", "Change not found");
     if (!["active", "starting"].includes(change.changeState)) {
+      if (
+        change.changeState === "failed" &&
+        ["failed", "stopped", "cleanup-failed"].includes(change.runtimeState ?? "")
+      )
+        throw new CommandError(
+          "unavailable",
+          "The implementation Workspace failed to start. Source is retained. Retry implementation from this Ticket.",
+        );
       throw new CommandError("conflict", "Change is not active");
     }
     return change;
@@ -543,6 +572,9 @@ export function createAgentController(
           change_id, runtime_attempt_id, opencode_session_id, state, created_by, active_turn_id
         ) VALUES (${changeID}, ${attemptID}, ${intent.sessionID}, 'starting', ${userID}, ${turnID})
         ON CONFLICT (change_id) DO UPDATE SET runtime_attempt_id = EXCLUDED.runtime_attempt_id,
+          native_session_confirmed_at = CASE
+            WHEN factory.change_agent_session.opencode_session_id IS NOT DISTINCT FROM EXCLUDED.opencode_session_id
+              THEN factory.change_agent_session.native_session_confirmed_at END,
           opencode_session_id = EXCLUDED.opencode_session_id, state = 'starting', active_turn_id = EXCLUDED.active_turn_id,
           active_inbox_id = NULL, last_error = NULL, updated_at = now()`;
         return true;
@@ -641,6 +673,7 @@ export function createAgentController(
       ) {
         throw new Error("The retained OpenCode session does not match its recorded configuration");
       }
+      await confirmNativeSession(changeID, turnID, attemptID, intent.sessionID);
       if (!(await turns.validateExecution(turnID, ownerToken)))
         throw new CommandError("conflict", "Build authority changed before prompt submission");
       await ensureOpenCodeMessageBoundary(client, intent.sessionID);
@@ -757,6 +790,7 @@ export function createAgentController(
           retained.model.id !== owned.authority.modelId
         )
           throw new Error("Recovered OpenCode session does not match its recorded configuration");
+        await confirmNativeSession(changeID, turnID, intent.attemptID, intent.sessionID);
         await usageJournal.drain(turnID, client, intent.sessionID);
         await browser?.prepare(turnID, ownerToken);
         const [work, messages] = await Promise.all([
@@ -1599,7 +1633,12 @@ export function createAgentController(
           activityRuntimeState = retained.state;
         }
       }
-      if (history && session.sessionID && activityRuntimeState === "ready") {
+      if (
+        history &&
+        session.sessionConfirmed &&
+        session.sessionID &&
+        activityRuntimeState === "ready"
+      ) {
         try {
           const page = await opencode(hub, activityAttemptID).message.list(
             { sessionID: session.sessionID, limit: 100 },
@@ -1668,7 +1707,7 @@ export function createAgentController(
         ...(pendingCommits[0] ? { commitOperation: pendingCommits[0] } : {}),
         messages,
         messagesAvailable,
-        sessionAvailable: Boolean(session.sessionID),
+        sessionAvailable: Boolean(session.sessionID && session.sessionConfirmed),
         runtimeConnected: hub.connected(activityAttemptID),
         stopPending: session.stopPending,
         stopId: session.stopPending ? session.stopID : null,

@@ -66,8 +66,9 @@ export function EpicProposalWorkspace(props: {
             Confirm work
           </button>
         </header>
-        <input
+        <textarea
           class="ticket-draft-title"
+          rows={1}
           aria-label="Epic title"
           value={proposal().epic.title}
           onInput={(event) =>
@@ -94,8 +95,9 @@ export function EpicProposalWorkspace(props: {
                     <small>Existing Ticket · content retained</small>
                   </Show>
                 </header>
-                <input
+                <textarea
                   class="ticket-inline-title"
+                  rows={1}
                   aria-label={`Member ${index() + 1} title`}
                   readonly={Boolean(item().existingTicketId)}
                   value={item().title}
@@ -122,8 +124,9 @@ export function EpicProposalWorkspace(props: {
                     {(criterionIndex) => (
                       <div class="specification-list-item">
                         <span class="requirement-marker">·</span>
-                        <input
+                        <textarea
                           class="specification-rich-text"
+                          rows={1}
                           aria-label={`Member ${index() + 1} criterion ${criterionIndex + 1}`}
                           value={item().requirement.acceptanceCriteria[criterionIndex] ?? ""}
                           onInput={(event) =>

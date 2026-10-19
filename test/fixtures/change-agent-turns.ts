@@ -67,8 +67,8 @@ export async function fixture(
         VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'ready',
         ${`owned-build-${suffix}`}, 'never-created', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
       await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptID} WHERE id = ${changeID}`;
-      await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id, state, created_by)
-      VALUES (${changeID}, ${attemptID}, ${`ses_owned_${suffix}`}, 'committed', ${userID})`;
+      await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id, state, native_session_confirmed_at, created_by)
+      VALUES (${changeID}, ${attemptID}, ${`ses_owned_${suffix}`}, 'committed', now(), ${userID})`;
     })
     .catch(async (cause: unknown) => {
       await database.client.end();

@@ -40,6 +40,142 @@ afterAll(() => {
   }
 });
 
+test.each(["reconnect", "Stop"] as const)(
+  "startup observation timeout preserves live compute until %s without replaying creates",
+  async (outcome) => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const unavailable = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let reads = 0;
+    let creates = 0;
+    let deletions = 0;
+    let exists = false;
+    let manifest: Array<{ kind: string; metadata: { labels: Record<string, string> } }> = [];
+    const failedRead = createKubernetesClient(async () => ({
+      stdout: "",
+      stderr:
+        "Unable to connect to the server: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+      exitCode: 1,
+    }));
+    let controller: ReturnType<typeof createRuntimeController> | undefined;
+    let attemptID: string | undefined;
+    try {
+      const owned = await fixture(undefined, undefined, database);
+      controller = createRuntimeController(
+        database,
+        new RuntimeHub(async () => {}),
+        "owned-startup-observation-secret",
+        {
+          prepareExecution: async () => {
+            throw new Error("Verification must not prepare development source");
+          },
+        },
+        {
+          ...createKubernetesClient(),
+          apply: async (resources) => {
+            creates++;
+            exists = true;
+            manifest = resources as typeof manifest;
+            return { namespaceUID: "owned-observation-namespace" };
+          },
+          getNamespace: async () =>
+            exists ? { uid: "owned-observation-namespace", labels: {} } : null,
+          getPod: async (namespace, podName) => {
+            reads++;
+            if (reads === 2) {
+              unavailable.resolve();
+              await release.promise;
+              return failedRead.getPod(namespace, podName);
+            }
+            return exists
+              ? {
+                  uid: "owned-observation-pod",
+                  phase: "Running",
+                  labels:
+                    manifest.find((resource) => resource.kind === "Pod")?.metadata.labels ?? {},
+                  envboxImage: upstream.envbox.image,
+                  runtimeHostImage: configuration.FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE,
+                }
+              : null;
+          },
+          deleteNamespace: async () => {
+            deletions++;
+            exists = false;
+          },
+          deletePod: async () => {
+            throw new Error("Unavailable observation must not replace a Pod");
+          },
+        },
+        async () => "",
+      );
+      const verificationID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,
+        runner_name,runner_uuid,runner_token,action_run_id,created_by)
+        VALUES(${verificationID},${owned.changeID},${"d".repeat(40)},1,'owned-observation',
+          ${crypto.randomUUID()},'owned-observation-token',1,${owned.userID})`;
+      const attempt = await controller.startVerification(verificationID, owned.userID);
+      if (!attempt) throw new Error("Owned runtime intent missing");
+      attemptID = attempt.id;
+      await unavailable.promise;
+      if (outcome === "Stop") await controller.stop(attemptID);
+      release.resolve();
+      if (outcome === "reconnect") {
+        await eventually(
+          async () => ({
+            reads,
+            state: (await controller?.get(attemptID ?? ""))?.state,
+          }),
+          (value) => value.reads >= 3 || value.state !== "starting",
+          "Startup observation did not settle",
+        );
+        const retained = await controller.get(attemptID);
+        expect(retained?.state).toBe("starting");
+        expect(deletions).toBe(0);
+        await controller.status(attemptID, "ready");
+        expect((await controller.get(attemptID))?.state).toBe("ready");
+      } else {
+        await eventually(
+          async () => (await controller?.get(attemptID ?? ""))?.state,
+          (state) => state === "stopped",
+          "Stop did not settle during unavailable observation",
+        );
+      }
+      expect(creates).toBe(1);
+      expect(
+        (
+          await database.client`SELECT kubernetes_uid FROM factory.runtime_attempt WHERE id=${attemptID}`
+        )[0]?.["kubernetes_uid"],
+      ).toBe("owned-observation-pod");
+    } finally {
+      release.resolve();
+      try {
+        if (attemptID && controller) {
+          if ((await controller.get(attemptID))?.state === "stopping")
+            await eventually(
+              async () => (await controller?.get(attemptID ?? ""))?.state,
+              (state) => state === "failed" || state === "stopped",
+              "Failed observer cleanup did not settle",
+            );
+          await controller.stop(attemptID);
+          await eventually(
+            async () => (await controller?.get(attemptID ?? ""))?.state,
+            (state) => state === "stopped",
+            "Owned observer fixture cleanup did not settle",
+          );
+          // The startup loop reads its persisted Stop on its one-second cadence.
+          // Keep the owned database alive until that final read can finish.
+          await Bun.sleep(1_500);
+        }
+      } finally {
+        await database.client.end({ timeout: 2 });
+        await host.dispose();
+      }
+    }
+  },
+  30_000,
+);
+
 test.each(["live", "observation unavailable", "reconnected during observation"] as const)(
   "connector reconnect delay preserves a %s Sandbox and its capabilities",
   async (scenario) => {

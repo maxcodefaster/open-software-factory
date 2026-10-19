@@ -132,6 +132,91 @@ test("explicit Build retry recovers a failed pre-Session runtime without rewriti
   }
 });
 
+test("a reserved native Session is not presented as resumable before acknowledged creation", async () => {
+  const owned = await fixture();
+  const firstCommand = crypto.randomUUID();
+  let recovering = false;
+  let nativeCreates = 0;
+  let nativeSession: { id: string; location: { directory: string }; model: unknown } | undefined;
+  const request = owned.hub.request.bind(owned.hub);
+  owned.hub.request = async (attempt, channel, input, path) => {
+    const pathname = new URL(input.url).pathname;
+    if (pathname === "/api/session" && input.method === "POST") {
+      nativeCreates++;
+      nativeSession = await input.json();
+      return Response.json({ data: nativeSession });
+    }
+    if (nativeSession && pathname === `/api/session/${nativeSession.id}`)
+      return Response.json({ data: nativeSession });
+    if (nativeSession && pathname.endsWith("/log"))
+      return new Response(
+        `data: ${JSON.stringify({ type: "log.synced", aggregateID: nativeSession.id, seq: 1 })}\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    return request(attempt, channel, input, path);
+  };
+  const controller = owned.controller(async () => {
+    if (recovering) {
+      await owned.database
+        .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
+      await owned.database
+        .client`UPDATE factory.change SET state='active' WHERE id=${owned.changeID}`;
+    }
+    return null;
+  });
+  try {
+    await owned.database
+      .client`DELETE FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
+    await owned.database
+      .client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${owned.attemptID}`;
+    await owned.database
+      .client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,state,observed_head_sha,completed_at)
+      SELECT ${crypto.randomUUID()},id,'owned','fixture',branch_name,base_sha,${crypto.randomUUID()},'succeeded',base_sha,now()
+      FROM factory.change WHERE id=${owned.changeID}`;
+    await controller.start(owned.changeID, owned.userID, firstCommand);
+    await until(async () =>
+      Boolean(
+        (
+          await owned.database
+            .client`SELECT change_id FROM factory.change_agent_session WHERE change_id=${owned.changeID}`
+        )[0],
+      ),
+    );
+    expect((await controller.get(owned.changeID, undefined, false)).sessionAvailable).toBe(false);
+    expect(nativeCreates).toBe(0);
+    await owned.database
+      .client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${owned.attemptID}`;
+    await owned.database
+      .client`UPDATE factory.change SET state='failed' WHERE id=${owned.changeID}`;
+    await until(async () => (await owned.turn(firstCommand))?.state === "failed", 2000);
+    const failed = await controller.get(owned.changeID, undefined, false);
+    expect(failed.sessionAvailable).toBe(false);
+    expect(failed.lastError).toContain("Workspace failed to start");
+    expect(owned.requests()).toBe(0);
+    const previous = await owned.turn(firstCommand);
+    // The fixture writer's Stop transport is inert. Observe its owned fence
+    // as stopped before testing the next native bootstrap.
+    await owned.database
+      .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    recovering = true;
+    const retryCommand = crypto.randomUUID();
+    const retry = await controller.start(owned.changeID, owned.userID, retryCommand);
+    await until(
+      async () =>
+        owned.requests() > 0 ||
+        ["failed", "stopped", "uncertain"].includes((await owned.turn(retryCommand))?.state ?? ""),
+      2000,
+    );
+    expect(owned.requests(), JSON.stringify(await owned.turn(retryCommand))).toBe(1);
+    expect(nativeCreates).toBe(1);
+    expect((await controller.get(owned.changeID, undefined, false)).sessionAvailable).toBe(true);
+    expect(await owned.turn(firstCommand)).toEqual(previous);
+    expect(retry.turn?.id).not.toBe(previous?.id);
+  } finally {
+    await owned.dispose();
+  }
+}, 30_000);
+
 async function newerRequirements(
   sql: AgentTurnTransaction,
   owned: Awaited<ReturnType<typeof fixture>>,
@@ -269,7 +354,8 @@ test("a cancelled read-only observation keeps monitoring the same Build without 
   }
 }, 20_000);
 
-// Four real one-second monitoring intervals plus PostgreSQL commit and cleanup exceed a five-second budget.
+// Keep the real one-second cadence. Its four observations, owned database setup
+// and commit/cleanup need the same allowance as the adjacent reconnect proof.
 test("nonconsecutive inactive snapshots do not strand or prematurely settle running work", async () => {
   const owned = await fixture();
   const commandID = crypto.randomUUID();
@@ -310,7 +396,7 @@ test("nonconsecutive inactive snapshots do not strand or prematurely settle runn
     await owned.controller().stop(owned.changeID);
     await owned.dispose();
   }
-}, 10_000);
+}, 20_000);
 
 test("a Build mode round trip cannot restore pending dispatch authority", async () => {
   const owned = await fixture();
@@ -1179,16 +1265,14 @@ test.each(["unchanged", "Stop", "mode version", "generation", "invalid admission
         state: boundary === "unchanged" ? "committed" : boundary === "Stop" ? "stopped" : "failed",
       });
       // Competing read-only recovery owners may briefly reclaim the same
-      // uncertain record before their authority check rejects it. Wait for
-      // durable settlement, not only the earlier Session projection.
-      await until(
-        async () =>
-          ["completed", "stopped", "uncertain"].includes(
-            (await owned.turn(commandID))?.state ?? "",
-          ),
-        300,
-      );
-      expect((await owned.turn(commandID))?.state).toBe(
+      // uncertain record. Assert the settlement snapshot we actually observed,
+      // not a second read that can race the next owner's authority check.
+      let observedSettlement: string | undefined;
+      await until(async () => {
+        observedSettlement = (await owned.turn(commandID))?.state;
+        return ["completed", "stopped", "uncertain"].includes(observedSettlement ?? "");
+      }, 300);
+      expect(observedSettlement).toBe(
         boundary === "unchanged" ? "completed" : boundary === "Stop" ? "stopped" : "uncertain",
       );
       expect(observations).toBeGreaterThan(0);

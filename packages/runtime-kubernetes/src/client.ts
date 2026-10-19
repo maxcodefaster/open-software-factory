@@ -10,6 +10,21 @@ export interface RuntimePodObservation {
   readonly envboxImage: string;
   readonly runtimeHostImage: string;
 }
+export class KubernetesObservationUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "KubernetesObservationUnavailableError";
+  }
+}
+
+function podReadFailure(message: string) {
+  const unavailable =
+    /context deadline exceeded|timed out|i\/o timeout|TLS handshake timeout|Client\.Timeout|connection[^\n]*(?:refused|reset)|ECONNREFUSED|ECONNRESET|network is unreachable|no route to host|ServiceUnavailable|TooManyRequests/i;
+  return unavailable.test(message)
+    ? new KubernetesObservationUnavailableError(`Kubernetes observation failed: ${message}`)
+    : new Error(`Kubernetes observation failed: ${message}`);
+}
+
 export function requireRuntimePodArtifacts(pod: RuntimePodObservation, runtimeHostImage: string) {
   if (pod.envboxImage !== upstream.envbox.image || pod.runtimeHostImage !== runtimeHostImage)
     throw new Error("Runtime Pod artifacts differ from immutable create intent");
@@ -94,10 +109,14 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
       return { namespaceUID };
     },
     async getPod(namespace, podName) {
-      const result = await run(["get", "pod", podName, "-n", namespace, "-o", "json"]);
+      const result = await run(["get", "pod", podName, "-n", namespace, "-o", "json"]).catch(
+        (cause: unknown) => {
+          throw podReadFailure(cause instanceof Error ? cause.message : "Pod read failed");
+        },
+      );
       if (result.exitCode !== 0) {
         if (result.stderr.includes("NotFound") || result.stderr.includes("not found")) return null;
-        throw new Error(`Kubernetes observation failed: ${result.stderr}`);
+        throw podReadFailure(result.stderr);
       }
       const pod = JSON.parse(result.stdout) as {
         metadata?: { uid?: string; labels?: Record<string, string> };
