@@ -16,6 +16,7 @@ import { createAgentTurnStore, type AgentTurnTransaction } from "./turn-store";
 
 type BrowserSession = {
   id: string;
+  ordinal: number;
   turnID: string;
   changeID: string;
   attemptID: string;
@@ -29,8 +30,9 @@ function ownerIdentity(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-function browserIdentity(turnID: string, ownerID: string) {
-  const hex = createHash("sha256").update(`factory-browser-v1:${turnID}:${ownerID}`).digest("hex");
+function browserIdentity(turnID: string, ownerID: string, ordinal = 1) {
+  const key = `factory-browser-v1:${turnID}:${ownerID}${ordinal > 1 ? `:${ordinal}` : ""}`;
+  const hex = createHash("sha256").update(key).digest("hex");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
@@ -99,6 +101,14 @@ const transientRenewalFailures = new Set([
   "Runtime channel disconnected",
 ]);
 
+const reopenableFailures = new Set([
+  "browser execution authority ended",
+  "browser session is no longer active",
+  "browser control connection ended",
+  "browser session already ended; open a fresh browser session",
+  "browser session requires owned cleanup after parent restart; do not replay a UI mutation",
+]);
+
 export function createBuildBrowserController(
   database: ReturnType<typeof createDatabase>,
   hub: RuntimeHub,
@@ -118,13 +128,18 @@ export function createBuildBrowserController(
 
   async function row(id: string) {
     const [session] = await database.client<BrowserSession[]>`
-      SELECT id, turn_id AS "turnID", change_id AS "changeID", runtime_attempt_id AS "attemptID",
+      SELECT id, ordinal, turn_id AS "turnID", change_id AS "changeID", runtime_attempt_id AS "attemptID",
         generation::float8 AS generation, agent_session_id AS "agentSessionID", owner_id AS "ownerID", state
       FROM factory.build_browser_session WHERE id = ${id}`;
     return session;
   }
 
-  async function currentIn(sql: AgentTurnTransaction, session: BrowserSession, ownerToken: string) {
+  async function currentIn(
+    sql: AgentTurnTransaction,
+    session: BrowserSession,
+    ownerToken: string,
+    allowClosed = false,
+  ) {
     const started = performance.now();
     const [current] = await sql<Array<{ remainingMS: number; projectID: string; userID: string }>>`
       SELECT turn.project_id AS "projectID", turn.created_by AS "userID",
@@ -135,7 +150,9 @@ export function createBuildBrowserController(
       JOIN factory.change_agent_session session ON session.change_id = browser.change_id
       JOIN factory.change change ON change.id = browser.change_id
       JOIN factory.runtime_attempt attempt ON attempt.id = browser.runtime_attempt_id
-      WHERE browser.id = ${session.id} AND browser.state IN ('intended', 'active')
+      WHERE browser.id = ${session.id}
+        AND (browser.state IN ('intended', 'active') OR
+          (${allowClosed} AND browser.state = 'closed' AND browser.reopen_allowed))
         AND turn.id = ${session.turnID} AND turn.owner_token = ${ownerToken}
         AND turn.owner_expires_at > clock_timestamp() AND turn.state IN ('dispatching', 'running')
         AND intent.runtime_attempt_id = browser.runtime_attempt_id AND intent.change_id = browser.change_id
@@ -182,14 +199,16 @@ export function createBuildBrowserController(
       cause instanceof Error && safeBrowserFailures.has(cause.message)
         ? `Inspection ended: ${cause.message}`
         : null;
+    const reopenAllowed =
+      cause instanceof RuntimeParentOperationError && reopenableFailures.has(cause.message);
     const work = (async () => {
       await database.client`UPDATE factory.build_browser_session SET state = 'closing',
+        reopen_allowed = ${reopenAllowed},
         cleanup_intended_at = COALESCE(cleanup_intended_at, now()),
         outcome_summary = COALESCE(${summary}, outcome_summary)
         WHERE id = ${id} AND state IN ('intended', 'active')`;
       const session = await row(id);
       if (!session || session.state === "closed") return;
-      dispatchedCalls.delete(id);
       needsObservation.delete(id);
       try {
         await hub.parentOperation(
@@ -280,6 +299,59 @@ export function createBuildBrowserController(
     }
   }
 
+  async function authorizeSession(id: string, authorization: string | null, allowClosed = false) {
+    const expected = `Bearer ${capability(id)}`;
+    if (
+      !authorization ||
+      Buffer.byteLength(authorization) !== Buffer.byteLength(expected) ||
+      !timingSafeEqual(Buffer.from(authorization), Buffer.from(expected))
+    )
+      return null;
+    const session = await row(id);
+    if (
+      !session ||
+      !(
+        ["intended", "active"].includes(session.state) ||
+        (allowClosed && session.state === "closed")
+      )
+    )
+      return null;
+    const [owner] = await database.client<Array<{ token: string }>>`
+      SELECT owner_token AS token FROM factory.agent_turn WHERE id = ${session.turnID}
+        AND owner_token IS NOT NULL AND owner_expires_at > clock_timestamp()
+        AND state IN ('dispatching', 'running')`;
+    if (!owner || ownerIdentity(owner.token) !== session.ownerID) return null;
+    try {
+      const allowed = await turns.validateExecution(session.turnID, owner.token, async (sql) => {
+        await currentIn(sql, session, owner.token, allowClosed);
+      });
+      return allowed ? { session, ownerToken: owner.token } : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function reopen(previous: BrowserSession, ownerToken: string) {
+    const ordinal = previous.ordinal + 1;
+    const id = browserIdentity(previous.turnID, previous.ownerID, ordinal);
+    const allowed = await turns.validateExecution(previous.turnID, ownerToken, async (sql) => {
+      await currentIn(sql, previous, ownerToken, true);
+      await sql`INSERT INTO factory.build_browser_session(
+        id,ordinal,turn_id,change_id,runtime_attempt_id,generation,agent_session_id,owner_id)
+        SELECT ${id},${ordinal},turn_id,change_id,runtime_attempt_id,generation,agent_session_id,owner_id
+        FROM factory.build_browser_session WHERE id=${previous.id}
+          AND state='closed' AND reopen_allowed AND cleanup_confirmed_at IS NOT NULL
+        ON CONFLICT DO NOTHING`;
+    });
+    const next = allowed ? await row(id) : undefined;
+    if (!next || !["intended", "active"].includes(next.state))
+      throw new CommandError(
+        "conflict",
+        "A fresh browser requires confirmed cleanup and current Build authority",
+      );
+    return next;
+  }
+
   return {
     async prepare(turnID: string, ownerToken: string) {
       const id = browserIdentity(turnID, ownerIdentity(ownerToken));
@@ -294,7 +366,7 @@ export function createBuildBrowserController(
             intent.session_id, ${ownerIdentity(ownerToken)}
           FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
           JOIN factory.runtime_attempt attempt ON attempt.id = intent.runtime_attempt_id
-          WHERE turn.id = ${turnID} ON CONFLICT (turn_id, owner_id) DO NOTHING`;
+          WHERE turn.id = ${turnID} ON CONFLICT (turn_id, owner_id, ordinal) DO NOTHING`;
       });
       const session = allowed ? await row(id) : undefined;
       if (!session || !["intended", "active"].includes(session.state))
@@ -310,28 +382,7 @@ export function createBuildBrowserController(
     },
 
     async authorize(id: string, authorization: string | null) {
-      const expected = `Bearer ${capability(id)}`;
-      if (
-        !authorization ||
-        Buffer.byteLength(authorization) !== Buffer.byteLength(expected) ||
-        !timingSafeEqual(Buffer.from(authorization), Buffer.from(expected))
-      )
-        return null;
-      const session = await row(id);
-      if (!session || !["intended", "active"].includes(session.state)) return null;
-      const [owner] = await database.client<Array<{ token: string }>>`
-        SELECT owner_token AS token FROM factory.agent_turn WHERE id = ${session.turnID}
-          AND owner_token IS NOT NULL AND owner_expires_at > clock_timestamp()
-          AND state IN ('dispatching', 'running')`;
-      if (!owner || ownerIdentity(owner.token) !== session.ownerID) return null;
-      try {
-        const allowed = await turns.validateExecution(session.turnID, owner.token, async (sql) => {
-          await currentIn(sql, session, owner.token);
-        });
-        return allowed ? { session, ownerToken: owner.token } : null;
-      } catch {
-        return null;
-      }
+      return authorizeSession(id, authorization);
     },
 
     async authorizeRuntime(attemptID: string, turnID: string, authorization: string | null) {
@@ -352,8 +403,11 @@ export function createBuildBrowserController(
       const [session] = await database.client<Array<{ id: string }>>`
         SELECT id FROM factory.build_browser_session WHERE runtime_attempt_id = ${attemptID}
           AND turn_id = ${turnID} AND generation = ${current.generation}
-          AND owner_id = ${ownerIdentity(current.ownerToken)} AND state IN ('intended', 'active')`;
-      return session ? this.authorize(session.id, `Bearer ${capability(session.id)}`) : null;
+          AND owner_id = ${ownerIdentity(current.ownerToken)}
+        ORDER BY ordinal DESC LIMIT 1`;
+      return session
+        ? authorizeSession(session.id, `Bearer ${capability(session.id)}`, true)
+        : null;
     },
 
     async call(
@@ -364,17 +418,9 @@ export function createBuildBrowserController(
       signal?: AbortSignal,
     ): Promise<BuildBrowserResult> {
       const call = buildBrowserCallInput.parse(input);
-      if (
-        needsObservation.has(session.id) &&
-        !["browser_snapshot", "browser_console", "browser_screenshot", "browser_wait"].includes(
-          call.name,
-        )
-      )
-        throw new CommandError(
-          "conflict",
-          "Inspect a fresh browser_snapshot after the failed interaction before issuing another UI action. Do not replay an unconfirmed mutation.",
-        );
-      const calls = dispatchedCalls.get(session.id) ?? new Set<string>();
+      const callKey = `${session.turnID}:${session.ownerID}`;
+      const calls = dispatchedCalls.get(callKey) ?? new Set<string>();
+      dispatchedCalls.set(callKey, calls);
       const identity = `${typeof requestID}:${requestID}`;
       if (calls.has(identity))
         throw new CommandError(
@@ -386,8 +432,29 @@ export function createBuildBrowserController(
           "conflict",
           "This turn reached its 128 browser-call limit. Continue in a new authorized turn.",
         );
+      const reopening = session.state === "closed";
+      if (reopening) {
+        if (call.name !== "browser_open")
+          throw new CommandError(
+            "conflict",
+            "The previous browser ended. Use browser_open to start a fresh inspection, then inspect browser_snapshot. Never replay an unconfirmed App action.",
+          );
+        calls.add(identity);
+        session = await reopen(session, ownerToken);
+      }
+      const freshInspection =
+        session.ordinal > 1 && session.state === "intended" && call.name === "browser_open";
+      if (
+        needsObservation.has(session.id) &&
+        !["browser_snapshot", "browser_console", "browser_screenshot", "browser_wait"].includes(
+          call.name,
+        )
+      )
+        throw new CommandError(
+          "conflict",
+          "Inspect a fresh browser_snapshot after the failed interaction before issuing another UI action. Do not replay an unconfirmed mutation.",
+        );
       calls.add(identity);
-      dispatchedCalls.set(session.id, calls);
       try {
         const output = await dispatchCall(session, ownerToken, call, signal);
         signal?.throwIfAborted();
@@ -419,10 +486,25 @@ export function createBuildBrowserController(
           throw new Error("Browser observation does not match this execution scope");
         const inspection = { ...context, changeId: session.changeID };
         if (call.name === "browser_snapshot") needsObservation.delete(session.id);
+        if (freshInspection) needsObservation.add(session.id);
         await database.client`UPDATE factory.build_browser_session SET state = 'active',
           create_confirmed_at = COALESCE(create_confirmed_at, now()), inspection_context = ${JSON.stringify(inspection)}::jsonb
           WHERE id = ${session.id} AND state IN ('intended','active')`;
-        return { ...result, structuredContent: inspection };
+        return {
+          ...result,
+          structuredContent: inspection,
+          ...(freshInspection
+            ? {
+                content: [
+                  ...result.content,
+                  {
+                    type: "text" as const,
+                    text: "Factory opened a fresh browser after confirmed cleanup. Previous cookies and UI state were not restored. Inspect browser_snapshot before another action; do not replay any unconfirmed mutation.",
+                  },
+                ],
+              }
+            : {}),
+        };
       } catch (cause) {
         // The pinned Connector returns this before creating a browser or calling
         // an App. It proves non-execution, unlike a lost response. Keep the
@@ -476,9 +558,10 @@ export function createBuildBrowserController(
     },
 
     async closeTurn(turnID: string) {
-      const sessions = await database.client<Array<{ id: string }>>`
-        SELECT id FROM factory.build_browser_session WHERE turn_id = ${turnID} AND state <> 'closed'`;
+      const sessions = await database.client<Array<{ id: string; ownerID: string }>>`
+        SELECT id,owner_id AS "ownerID" FROM factory.build_browser_session WHERE turn_id = ${turnID}`;
       await Promise.all(sessions.map(({ id }) => close(id)));
+      for (const session of sessions) dispatchedCalls.delete(`${turnID}:${session.ownerID}`);
     },
 
     async closeChange(changeID: string) {

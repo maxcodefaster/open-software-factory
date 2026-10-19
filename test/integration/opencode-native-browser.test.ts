@@ -21,6 +21,7 @@ test("pinned native MCP registration delivers browser images without a shell/rea
   let protectedCalls = 0;
   const session = {
     id: crypto.randomUUID(),
+    ordinal: 1,
     turnID: crypto.randomUUID(),
     changeID: crypto.randomUUID(),
     attemptID: crypto.randomUUID(),

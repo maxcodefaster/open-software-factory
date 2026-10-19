@@ -222,6 +222,184 @@ test("one browser_open waits for confirmed cold preparation without another mode
   }
 });
 
+test.each([false, true])(
+  "a still-authorized Build can explicitly reopen only after confirmed browser cleanup: lost cleanup %s",
+  async (lostCleanup) => {
+    const scope = await setup();
+    const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+    try {
+      await scope.browser.call(
+        scope.authorized.session,
+        scope.ownerToken,
+        { name: "browser_open", arguments: { app: "app" } },
+        "first-open",
+      );
+      scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+        if (payload.action === "browser-renew")
+          throw new RuntimeParentOperationError(
+            "browser-renew",
+            "browser session is no longer active",
+          );
+        if (lostCleanup && payload.action === "browser-close")
+          throw new Error("Cleanup acknowledgement unavailable");
+        return forward(attempt, payload, beforeSend);
+      };
+      await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+      scope.owned.hub.parentOperation = forward;
+      const response = await scope.endpoint(
+        new Request("http://factory.test/internal/browser", {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "explicit-reopen",
+            method: "tools/call",
+            params: { name: "browser_open", arguments: { app: "app" } },
+          }),
+        }),
+        { attemptID: scope.owned.attemptID, turnID: scope.turn.id },
+      );
+      if (lostCleanup) {
+        expect(response.status).toBe(403);
+        expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(1);
+        return;
+      }
+      expect(response.status).toBe(200);
+      const result = await response.json();
+      expect(result.result.isError).not.toBe(true);
+      expect(result.result.structuredContent.sessionId).not.toBe(scope.grant.sessionID);
+      const ordinals = await scope.owned.database.client<Array<{ ordinal: number; state: string }>>`
+        SELECT ordinal,state FROM factory.build_browser_session
+        WHERE turn_id=${scope.turn.id} ORDER BY ordinal`;
+      expect([...ordinals]).toEqual([
+        { ordinal: 1, state: "closed" },
+        { ordinal: 2, state: "active" },
+      ]);
+      await expect(
+        scope.owned.database.client`
+        UPDATE factory.build_browser_session SET ordinal=9
+        WHERE id=${result.result.structuredContent.sessionId}`.execute(),
+      ).rejects.toThrow("immutable");
+      expect(await scope.browser.authorize(scope.grant.sessionID, scope.authorization)).toBeNull();
+      const authorization = await scope.browser.authorizeRuntime(
+        scope.owned.attemptID,
+        scope.turn.id,
+        `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+      );
+      if (!authorization) throw new Error("New inspection unavailable");
+      await expect(
+        scope.owned.database.client`
+          UPDATE factory.build_browser_session SET reopen_allowed=true
+          WHERE id=${authorization.session.id}`.execute(),
+      ).rejects.toThrow("immutable");
+      await expect(
+        scope.browser.call(
+          authorization.session,
+          scope.ownerToken,
+          { name: "browser_open", arguments: { app: "app" } },
+          "first-open",
+        ),
+      ).rejects.toThrow("already dispatched");
+      await expect(
+        scope.browser.call(
+          authorization.session,
+          scope.ownerToken,
+          { name: "browser_click", arguments: { uid: "1_2" } },
+          "premature-click",
+        ),
+      ).rejects.toThrow("fresh browser_snapshot");
+      await scope.browser.call(
+        authorization.session,
+        scope.ownerToken,
+        { name: "browser_snapshot", arguments: {} },
+        "fresh-snapshot",
+      );
+      await createChangeAgentStop(scope.owned.database, scope.owned.hub).persist(
+        scope.owned.changeID,
+      );
+      expect(
+        await scope.browser.authorizeRuntime(
+          scope.owned.attemptID,
+          scope.turn.id,
+          `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+        ),
+      ).toBeNull();
+    } finally {
+      scope.owned.hub.parentOperation = forward;
+      await scope.dispose();
+    }
+  },
+);
+
+test("the 128-call bound spans explicitly reopened browser sessions", async () => {
+  const scope = await setup();
+  const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+  try {
+    const turns = createAgentTurnStore(scope.owned.database);
+    for (let index = 0; index < 126; index++) {
+      if (index % 16 === 0) expect(await turns.renew(scope.turn.id, scope.ownerToken)).toBe(true);
+      await scope.browser.call(
+        scope.authorized.session,
+        scope.ownerToken,
+        {
+          name: index === 0 ? "browser_open" : "browser_snapshot",
+          arguments: index === 0 ? { app: "app" } : {},
+        },
+        `first-${index}`,
+      );
+    }
+    scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+      if (payload.action === "browser-renew")
+        throw new RuntimeParentOperationError(
+          "browser-renew",
+          "browser session is no longer active",
+        );
+      return forward(attempt, payload, beforeSend);
+    };
+    await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+    scope.owned.hub.parentOperation = forward;
+    const current = await scope.browser.authorizeRuntime(
+      scope.owned.attemptID,
+      scope.turn.id,
+      `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+    );
+    if (!current) throw new Error("Current native authority unavailable");
+    await scope.browser.call(
+      current.session,
+      scope.ownerToken,
+      { name: "browser_open", arguments: { app: "app" } },
+      "reopen-127",
+    );
+    const opened = await scope.browser.authorizeRuntime(
+      scope.owned.attemptID,
+      scope.turn.id,
+      `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+    );
+    if (!opened) throw new Error("Fresh inspection unavailable");
+    await scope.browser.call(
+      opened.session,
+      scope.ownerToken,
+      { name: "browser_snapshot", arguments: {} },
+      "snapshot-128",
+    );
+    await expect(
+      scope.browser.call(
+        opened.session,
+        scope.ownerToken,
+        { name: "browser_snapshot", arguments: {} },
+        "over-limit",
+      ),
+    ).rejects.toThrow("128 browser-call limit");
+    expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(128);
+  } finally {
+    scope.owned.hub.parentOperation = forward;
+    await scope.dispose();
+  }
+}, 60_000);
+
 test("the current Build renews intended browser authority before its first observation", async () => {
   const scope = await setup();
   try {
@@ -365,6 +543,17 @@ test.each([
         ? `Inspection ended: ${failure}`
         : "Exact owned browser and App proxy cleanup confirmed";
       expect((await read())?.summary).toBe(safeSummary);
+      const nativeRecovery = await scope.browser.authorizeRuntime(
+        scope.owned.attemptID,
+        scope.turn.id,
+        `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+      );
+      expect(Boolean(nativeRecovery)).toBe(
+        !lostCleanup &&
+          ["browser execution authority ended", "browser session is no longer active"].includes(
+            failure,
+          ),
+      );
       scope.owned.hub.parentOperation = forward;
       await scope.browser.closeTurn(scope.turn.id);
       expect(await read()).toEqual({

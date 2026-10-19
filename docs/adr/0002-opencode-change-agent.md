@@ -72,6 +72,19 @@ An unknown transport outcome releases the renewal guard so the existing heartbea
 revalidate ownership and try again. Confirmed Connector failures still close the session.
 This never revives an expired browser, extends its lease bounds or retries an App action.
 Safe permanent failure reasons survive cleanup; cleanup confirmation is recorded separately.
+After a confirmed Connector expiry or control-connection failure and exact browser cleanup,
+a still-authorized native Build can explicitly open a fresh inspection without another model turn.
+Factory latches that specific recovery permission at closure, separate from diagnostic prose.
+Normal completion, Stop, invalid provenance and unknown failures grant no such permission.
+Factory persists the next browser ordinal and deterministic
+identity before external creation. The old session remains closed and immutable. A partial unique
+constraint permits only one unclosed browser per Turn and owner; the database also requires the
+previous exact scope's confirmed cleanup before a successor. No successor is admitted after Stop,
+lease expiry, changed permission or runtime identity. Legacy session-specific capabilities do not
+gain access to successors. Native access stays bound to the same Turn and runtime generation.
+This is a new read-only navigation, not a replay or restoration of the old page, cookies or actions.
+A fresh snapshot must precede further UI actions, and request deduplication and the 128-call bound
+span all browser sessions in that Turn.
 Opening an App allows cold Chrome launch before the unchanged upstream navigation timeout.
 Other browser actions retain their existing deadlines. Client and HTTP transport bounds
 include image preparation, container setup and cold launch without extending execution authority.
