@@ -335,6 +335,7 @@ function FactoryWorkspace(props: {
     stopId: null,
   });
   let lastAgentSnapshot: AgentSnapshot | undefined;
+  const [observedAgentChangeID, setObservedAgentChangeID] = createSignal<string>();
   const agentReadFence = createAgentReadFence();
   let lastAgentHistory = { changeID: "", at: 0 };
   function publishAgentView(
@@ -355,11 +356,13 @@ function FactoryWorkspace(props: {
     }
     lastAgentSnapshot = retainAgentActivity(lastAgentSnapshot, changeID, view, historyRequested);
     setAgent(lastAgentSnapshot.view);
+    setObservedAgentChangeID(changeID);
   }
   function resetAgentView() {
     agentReadFence.commandPublished();
     lastAgentHistory = { changeID: "", at: 0 };
     lastAgentSnapshot = undefined;
+    setObservedAgentChangeID(undefined);
     setAgent({
       state: "idle",
       messages: [],
@@ -1889,6 +1892,8 @@ function FactoryWorkspace(props: {
     const ticketID = selectedTicketID();
     return ticketID ? changeFor(ticketID) : undefined;
   };
+  const agentViewLoaded = () =>
+    Boolean(selectedChange()?.id && observedAgentChangeID() === selectedChange()?.id);
   const conversationMode = (): ConversationMode =>
     correctionTarget() && assistantTicketID() && correctionTarget() === selectedChange()?.id
       ? "build"
@@ -2779,9 +2784,11 @@ function FactoryWorkspace(props: {
             <Show when={conversationMode() === "build" && selectedChange()}>
               <div class="agent-status">
                 <span class="agent-state">
-                  {agent().state === "idle" && !agentCanRun()
-                    ? "Build unavailable"
-                    : buildAgentStatus(agent())}
+                  {!agentViewLoaded()
+                    ? "Loading implementation…"
+                    : agent().state === "idle" && !agentCanRun()
+                      ? "Build unavailable"
+                      : buildAgentStatus(agent())}
                 </span>
                 <span class={`runtime-presence ${ticketWorkspaceReady() ? "ready" : ""}`}>
                   <i />
@@ -3070,9 +3077,11 @@ function FactoryWorkspace(props: {
                   <Icon name="agent" />
                   <p>
                     {conversationMode() === "build"
-                      ? selectedChange()
-                        ? buildAgentEmptyMessage(agent())
-                        : "Approve the latest Requirement Revision to start Build."
+                      ? !agentViewLoaded()
+                        ? "Loading implementation…"
+                        : selectedChange()
+                          ? buildAgentEmptyMessage(agent())
+                          : "Approve the latest Requirement Revision to start Build."
                       : assistantTicketID()
                         ? "Ask about this Ticket, or tell me what needs clarifying."
                         : "Ask about the Project, or describe a change you want to work on."}
@@ -3139,7 +3148,7 @@ function FactoryWorkspace(props: {
                     allowance is available.
                   </p>
                 </Show>
-                <Show when={!agentCanRun()}>
+                <Show when={agentViewLoaded() && !agentCanRun()}>
                   <p class="agent-unavailable">
                     {selectedChange()?.state === "branch-pending"
                       ? "Preparing the Change branch. Implementation will be available when it is ready."
@@ -3187,28 +3196,33 @@ function FactoryWorkspace(props: {
                       />
                     </Show>
                     <div class="agent-compose-toolbar">
-                      <BuildModelControls
-                        projectID={selectedProjectID()}
-                        changeID={selectedChange()?.id}
-                        turn={agent().turn}
-                        sessionAvailable={agent().sessionAvailable}
-                        disabled={
-                          pending() ||
-                          agentTurnBusy() ||
-                          agentNeedsResolution() ||
-                          Boolean(agent().commitOperation) ||
-                          agent().stopPending
-                        }
-                        reasoning={chosenCodingReasoning()}
-                        onChange={(value) => {
-                          const changeID = selectedChange()?.id;
-                          if (changeID)
-                            setCodingReasoningChoices((previous) => ({
-                              ...previous,
-                              [changeID]: value,
-                            }));
-                        }}
-                      />
+                      <Show
+                        when={agentViewLoaded()}
+                        fallback={<span class="agent-model-controls">Loading implementation…</span>}
+                      >
+                        <BuildModelControls
+                          projectID={selectedProjectID()}
+                          changeID={selectedChange()?.id}
+                          turn={agent().turn}
+                          sessionAvailable={agent().sessionAvailable}
+                          disabled={
+                            pending() ||
+                            agentTurnBusy() ||
+                            agentNeedsResolution() ||
+                            Boolean(agent().commitOperation) ||
+                            agent().stopPending
+                          }
+                          reasoning={chosenCodingReasoning()}
+                          onChange={(value) => {
+                            const changeID = selectedChange()?.id;
+                            if (changeID)
+                              setCodingReasoningChoices((previous) => ({
+                                ...previous,
+                                [changeID]: value,
+                              }));
+                          }}
+                        />
+                      </Show>
                       <div class="composer-actions">
                         <Show
                           when={agentNeedsResolution() || agentTurnBusy()}
@@ -3225,6 +3239,7 @@ function FactoryWorkspace(props: {
                               }
                               disabled={
                                 pending() ||
+                                !agentViewLoaded() ||
                                 agentNeedsResolution() ||
                                 Boolean(agent().commitOperation) ||
                                 agent().stopPending ||

@@ -321,6 +321,8 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   let state = "idle";
   let configurationReads = 0;
   let agentReads = 0;
+  const firstObservation = Promise.withResolvers<void>();
+  let holdingFirstObservation = true;
   let commandId = crypto.randomUUID();
   const starts: Array<{ commandId: string; codingReasoning?: string }> = [];
   const view = () => ({
@@ -383,8 +385,9 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
       },
     }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) => {
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, async (route) => {
     agentReads++;
+    if (holdingFirstObservation) await firstObservation.promise;
     return route.fulfill({ json: view() });
   });
   await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
@@ -422,6 +425,18 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const panel = page.locator(".agent-panel");
   const reasoning = panel.getByLabel("Reasoning", { exact: true });
+  try {
+    await expect(panel.locator(".agent-state")).toHaveText("Loading implementation…", {
+      timeout: 2000,
+    });
+    await expect(
+      panel.getByRole("button", { name: "Start implementation", exact: true }),
+    ).toBeDisabled();
+    await expect(reasoning).toHaveCount(0);
+  } finally {
+    holdingFirstObservation = false;
+    firstObservation.resolve();
+  }
   await expect(reasoning).toBeEnabled();
   await expect(reasoning.locator("option:checked")).toHaveText(/gpt-6.1-sol.*Medium.*default/, {
     timeout: 3000,
@@ -496,6 +511,9 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   await expect(reasoning).toBeDisabled();
   await expect(panel).toContainText("Fixed for this Change.");
   await expectToolbar("Send message");
+  await panel.getByLabel("Message conversation").focus();
+  await expect(panel.locator(".agent-input-shell")).toHaveCSS("outline-style", "solid");
+  await expect(panel.locator(".agent-input-shell")).toHaveCSS("outline-width", "2px");
   const inputBox = await panel.getByLabel("Message conversation").boundingBox();
   const footerBox = await panel.locator(".agent-compose-toolbar").boundingBox();
   expect(inputBox && footerBox && inputBox.width >= footerBox.width - 2).toBe(true);

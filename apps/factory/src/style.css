@@ -3381,6 +3381,10 @@ dt,
   min-height: 0;
   padding: var(--space-1);
 }
+.agent-input-shell:has(textarea:focus-visible) {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
 
 .agent-input-shell:not(:has(> .assistant-context-row > *, > :not(.assistant-context-row))) {
   display: none;
