@@ -9,6 +9,47 @@ const readCases = (["committed", "stopped"] as const).flatMap((state) =>
   (["before headers", "during body", "not stalled"] as const).map((stall) => ({ state, stall })),
 );
 
+test("admitted human instructions remain readable when native history is unavailable before dispatch", async () => {
+  const owned = await fixture();
+  const request = owned.hub.request.bind(owned.hub);
+  try {
+    const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
+      owned.changeID,
+      owned.userID,
+      {
+        kind: "change-prompt",
+        commandId: crypto.randomUUID(),
+        text: "Keep this exact correction even if source preparation fails.",
+      },
+    );
+    const intent = await createChangeAdmission(owned.database, buildModelID).intent(turn.id);
+    owned.hub.request = async (attempt, channel, input, path) =>
+      new URL(input.url).pathname.endsWith("/message")
+        ? Response.json({ error: "Source Pod is unavailable" }, { status: 503 })
+        : request(attempt, channel, input, path);
+    const controller = owned.controller();
+    expect(await controller.get(owned.changeID)).toMatchObject({
+      messagesAvailable: false,
+      messages: [],
+      admittedMessages: [
+        {
+          id: intent.promptID,
+          role: "user",
+          text: "Keep this exact correction even if source preparation fails.",
+          at: expect.any(Number),
+        },
+      ],
+    });
+    expect(await controller.get(owned.changeID, undefined, false)).not.toHaveProperty(
+      "admittedMessages",
+    );
+    expect(owned.requests()).toBe(0);
+  } finally {
+    owned.hub.request = request;
+    await owned.dispose();
+  }
+});
+
 test("completed history can be read from the same retained Workspace without rebinding execution", async () => {
   const owned = await fixture();
   const replacementID = crypto.randomUUID();

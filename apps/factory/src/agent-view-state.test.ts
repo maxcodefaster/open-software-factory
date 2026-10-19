@@ -41,6 +41,26 @@ const unavailable: AgentView = {
   messages: [],
 };
 
+test("a status-only refresh keeps admitted input while a stopped Workspace is not described as a live outage", () => {
+  const admittedMessages = [
+    {
+      id: "saved-input",
+      role: "user" as const,
+      text: "Retain the original correction.",
+      at: 1,
+    },
+  ];
+  const previous = { changeID: "owned", view: { ...loaded, admittedMessages } };
+  const retained = retainAgentActivity(previous, "owned", unavailable, false);
+  expect(retained.view.admittedMessages).toEqual(admittedMessages);
+  expect(
+    retainAgentActivity(previous, "other", unavailable, false).view.admittedMessages,
+  ).toBeUndefined();
+  expect(buildAgentActivityNotice({ ...unavailable, runtimeState: "stopped" })).toBe(
+    "Activity will load when the Workspace resumes.",
+  );
+});
+
 test("startup Stop offers Start rather than a nonexistent Session resume", () => {
   const view: AgentView = { ...loaded, state: "stopped", sessionAvailable: false };
   expect(buildAgentNeedsStart(view)).toBe(true);

@@ -217,7 +217,7 @@ export function validateSourceObservation(
           pod.status.containerStatuses.some(
             (container) => container.name === "source" && container.state.running !== undefined,
           ))),
-    failed: pod.status?.phase === "Failed",
+    failed: pod.status?.phase === "Failed" || pod.status?.phase === "Succeeded",
   };
 }
 

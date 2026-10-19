@@ -56,6 +56,30 @@ function resources() {
   }));
 }
 
+test.each(["Succeeded", "Failed"])(
+  "a terminal %s source daemon requires explicit recovery instead of endless preparation",
+  async (phase) => {
+    const observed = resources().map((resource) =>
+      resource.kind === "Pod"
+        ? { ...resource, status: { phase, conditions: [{ type: "Ready", status: "False" }] } }
+        : resource,
+    );
+    const client = createWorkspaceSourceClient(createKubernetesClient(), async () =>
+      JSON.stringify({ items: observed }),
+    );
+    try {
+      expect(await client.observe(input)).toMatchObject({
+        ready: false,
+        failed: true,
+        podUID: input.podUID,
+        claimUID: input.claimUID,
+      });
+    } finally {
+      client.close();
+    }
+  },
+);
+
 test("prepared source uses its fully validated observation without reading assignment twice", async () => {
   const observed = resources();
   const calls: string[][] = [];

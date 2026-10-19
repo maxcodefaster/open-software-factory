@@ -1,6 +1,25 @@
 import { expect, test } from "bun:test";
 import { conversationTimeline } from "./conversation-timeline";
 
+test("one admitted command is not shown again beside its conversation journal or native promotion", () => {
+  const entries = [
+    {
+      id: "journal",
+      ordinal: 1,
+      kind: "user-message",
+      createdAt: "2026-10-19T12:00:00Z",
+      payload: { commandId: "command-one" },
+    },
+  ];
+  const messages = [
+    { id: "native-one", at: 1 },
+    { id: "native-one", at: 2, commandId: "command-one" },
+    { id: "native-two", at: 3, commandId: "command-two" },
+  ];
+  const timeline = conversationTimeline(entries, messages);
+  expect(timeline.map((item) => item.id)).toEqual(["change-agent:native-two", "journal"]);
+});
+
 test("overlapping snapshots render one item per identity without removing legitimate repeated text", () => {
   const entry = {
     id: "human",

@@ -4,6 +4,7 @@ import { developerIDEViewSchema, sourceWorkspaceViewSchema } from "./api-contrac
 import { developmentPreviewMessage, type DevelopmentPreviewMessage } from "./ide-messages";
 import { selectedSourcePreparation } from "./selected-source-preparation";
 import { recoverWorkspaceSource } from "./source-recovery";
+import { confirmAccessStopped } from "./access-stop";
 import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
 import { z } from "zod";
 
@@ -24,9 +25,12 @@ export function DeveloperIDEWorkspace(props: {
   const [sourceError, setSourceError] = createSignal("");
   const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
+  const [editorRecovering, setEditorRecovering] = createSignal(false);
+  const [editorState, setEditorState] = createSignal<WorkspaceSourceState>();
   const [editorRetry, setEditorRetry] = createSignal(0);
   const [sourceRetry, setSourceRetry] = createSignal(0);
   let sourceRecovery: AbortController | undefined;
+  let editorRecovery: AbortController | undefined;
   const preparation = selectedSourcePreparation(async (projectID) => {
     await apiRequest(
       sourceWorkspaceViewSchema,
@@ -45,7 +49,17 @@ export function DeveloperIDEWorkspace(props: {
   onCleanup(() => {
     preparation.close();
     sourceRecovery?.abort();
+    editorRecovery?.abort();
   });
+  createEffect(
+    () => [props.projectID, props.allowed] as const,
+    () => {
+      editorRecovery?.abort();
+      editorRecovery = undefined;
+      setEditorRecovering(false);
+      setEditorState(undefined);
+    },
+  );
   createEffect(
     () => [props.workspaceID, props.allowed] as const,
     () => {
@@ -56,7 +70,7 @@ export function DeveloperIDEWorkspace(props: {
   );
   async function retrySource(restart: boolean) {
     const workspaceID = props.workspaceID;
-    if (!workspaceID || !props.allowed || sourceRecovering()) return;
+    if (!workspaceID || !props.allowed || sourceRecovering() || editorRecovering()) return;
     const cancel = new AbortController();
     sourceRecovery = cancel;
     const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(150_000)]);
@@ -97,6 +111,45 @@ export function DeveloperIDEWorkspace(props: {
       }
     }
   }
+  async function restartEditor() {
+    const projectID = props.projectID;
+    if (!projectID || !props.allowed || editorRecovering() || sourceRecovering()) return;
+    if (
+      !window.confirm(
+        "Restart your editor? Unsaved editor changes may be lost. Running Apps and Builds will continue.",
+      )
+    )
+      return;
+    const cancel = new AbortController();
+    editorRecovery = cancel;
+    const signal = AbortSignal.any([cancel.signal, AbortSignal.timeout(150_000)]);
+    setEditorRecovering(true);
+    setEditorError("");
+    try {
+      await confirmAccessStopped(
+        signal,
+        {
+          stop: (signal) =>
+            apiRequest(z.undefined(), "/api/developer-ide/stop", { method: "POST", signal }),
+          read: (signal) => apiRequest(developerIDEViewSchema, "/api/developer-ide", { signal }),
+          wait: pause,
+        },
+        "Editor Stop was not confirmed. Nothing was restarted.",
+      );
+      if (!signal.aborted && props.projectID === projectID && props.allowed)
+        setEditorRetry((value) => value + 1);
+    } catch (cause) {
+      if (!cancel.signal.aborted)
+        setEditorError(
+          cause instanceof Error ? cause.message : "Editor restart could not be confirmed.",
+        );
+    } finally {
+      if (editorRecovery === cancel) {
+        editorRecovery = undefined;
+        setEditorRecovering(false);
+      }
+    }
+  }
   let frame: HTMLIFrameElement | undefined;
   const editorOrigin = () => {
     const current = attachment();
@@ -133,6 +186,7 @@ export function DeveloperIDEWorkspace(props: {
         );
         const deadline = performance.now() + 150_000;
         while (!cancel.signal.aborted) {
+          setEditorState(current.state);
           if (current.state === "ready") {
             if (attachment()?.epoch !== current.epoch) {
               setReady(false);
@@ -252,7 +306,11 @@ export function DeveloperIDEWorkspace(props: {
           when={attachment()}
           fallback={
             <div class="empty-workspace" role="status">
-              <p>{editorError() || "Preparing your editor…"}</p>
+              <p>
+                {editorRecovering()
+                  ? "Restarting your editor…"
+                  : editorError() || "Preparing your editor…"}
+              </p>
             </div>
           }
         >
@@ -275,9 +333,13 @@ export function DeveloperIDEWorkspace(props: {
                 }}
                 onError={() => setEditorError("Could not connect to the editor. Retry opening it.")}
               />
-              <Show when={!ready() || editorError()}>
+              <Show when={!ready() || editorError() || editorRecovering()}>
                 <div class="runtime-frame-state empty-workspace" role="status">
-                  <p>{editorError() || "Opening your editor…"}</p>
+                  <p>
+                    {editorRecovering()
+                      ? "Restarting your editor…"
+                      : editorError() || "Opening your editor…"}
+                  </p>
                 </div>
               </Show>
             </div>
@@ -292,7 +354,7 @@ export function DeveloperIDEWorkspace(props: {
             Preparing Workspace files…
           </div>
         </Show>
-        <Show when={editorError() || sourceError()}>
+        <Show when={editorError() || sourceError() || editorRecovering()}>
           <div class="editor-recovery">
             <Show when={sourceError()}>
               <p role="status">{sourceError()}</p>
@@ -302,7 +364,7 @@ export function DeveloperIDEWorkspace(props: {
                 <button
                   class="quiet-button"
                   type="button"
-                  disabled={sourceRecovering()}
+                  disabled={sourceRecovering() || editorRecovering()}
                   title="Checks the recorded file-access attempt without stopping it."
                   onClick={() => void retrySource(false)}
                 >
@@ -312,7 +374,7 @@ export function DeveloperIDEWorkspace(props: {
                   <button
                     class="quiet-button"
                     type="button"
-                    disabled={sourceRecovering()}
+                    disabled={sourceRecovering() || editorRecovering()}
                     title="Stops and reopens file access. Keeps your files, running Apps and editor buffers."
                     onClick={() => void retrySource(true)}
                   >
@@ -320,11 +382,11 @@ export function DeveloperIDEWorkspace(props: {
                   </button>
                 </Show>
               </Show>
-              <Show when={editorError()}>
+              <Show when={editorError() || editorRecovering()}>
                 <button
                   class="quiet-button"
                   type="button"
-                  disabled={sourceRecovering()}
+                  disabled={sourceRecovering() || editorRecovering()}
                   onClick={() => {
                     if (!ready() && frame && attachment())
                       frame.src = attachment()?.url ?? frame.src;
@@ -333,6 +395,17 @@ export function DeveloperIDEWorkspace(props: {
                 >
                   Retry editor connection
                 </button>
+                <Show when={["failed", "stopped", "stop-intended"].includes(editorState() ?? "")}>
+                  <button
+                    class="quiet-button"
+                    type="button"
+                    disabled={sourceRecovering() || editorRecovering()}
+                    title="Stops your editor before starting another epoch. Running Apps and Builds are not restarted."
+                    onClick={() => void restartEditor()}
+                  >
+                    {editorRecovering() ? "Restarting editor…" : "Restart editor"}
+                  </button>
+                </Show>
               </Show>
             </div>
           </div>

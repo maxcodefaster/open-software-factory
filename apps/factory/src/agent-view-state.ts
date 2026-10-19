@@ -91,6 +91,10 @@ export function buildAgentActivityNotice(view: AgentView) {
     (view.state === "idle" || view.state === "starting")
   )
     return undefined;
+  if (view.runtimeState === "stopped" && view.sessionAvailable)
+    return view.messages.length
+      ? "Showing the last activity from this retained session."
+      : "Activity will load when the Workspace resumes.";
   return view.messages.length
     ? "Live activity unavailable. Showing last known output."
     : "Live activity temporarily unavailable.";
@@ -114,6 +118,9 @@ export function retainAgentActivity(
         (!historyRequested || !view.messagesAvailable) && previous?.changeID === changeID
           ? previous.view.messages
           : view.messages,
+      ...(!historyRequested && previous?.changeID === changeID && previous.view.admittedMessages
+        ? { admittedMessages: previous.view.admittedMessages }
+        : {}),
     },
   };
 }

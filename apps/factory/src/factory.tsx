@@ -2453,7 +2453,9 @@ function FactoryWorkspace(props: {
   const visibleConversation = createMemo(() =>
     conversationTimeline(
       conversation()?.entries ?? [],
-      assistantTicketID() && selectedChange() ? agent().messages : [],
+      assistantTicketID() && selectedChange()
+        ? [...agent().messages, ...(agent().admittedMessages ?? [])]
+        : [],
     ),
   );
 

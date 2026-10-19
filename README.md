@@ -46,6 +46,11 @@ reconnect and no repeated model request. New Build turns use native OpenCode MCP
 restricted development browser, including inline screenshots. Already admitted CLI instructions
 remain executable without rewriting their frozen input. Neither transport grants arbitrary MCP
 registration, URLs, scripts or access to human browser sessions.
+Admitted corrections remain in the conversation even if source preparation fails before OpenCode
+receives them. Retrying work requires a new explicit request; reconnecting never resends it.
+Failed file access and editor services have separate Restart actions. Each confirms Stop before
+starting another access epoch, without restarting Apps or Builds. Restarting the editor can lose
+unsaved editor changes; restarting file access retains editor buffers.
 
 The local listener defaults to `0.0.0.0` so OrbStack-hosted runtimes can call Factory.
 Set `FACTORY_HOST` explicitly to narrow that listener, noting that loopback-only access may prevent

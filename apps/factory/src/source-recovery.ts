@@ -1,4 +1,5 @@
 import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
+import { confirmAccessStopped } from "./access-stop";
 
 export async function recoverWorkspaceSource(
   workspaceID: string,
@@ -12,18 +13,16 @@ export async function recoverWorkspaceSource(
   },
 ) {
   signal.throwIfAborted();
-  if (restart) {
-    await commands.stop(workspaceID, signal);
-    for (;;) {
-      signal.throwIfAborted();
-      const source = await commands.read(workspaceID, signal);
-      signal.throwIfAborted();
-      if (source.state === "stopped") break;
-      if (source.state === "failed")
-        throw new Error("File access Stop was not confirmed. Your files are retained.");
-      await commands.wait(signal);
-    }
-  }
+  if (restart)
+    await confirmAccessStopped(
+      signal,
+      {
+        stop: (signal) => commands.stop(workspaceID, signal),
+        read: (signal) => commands.read(workspaceID, signal),
+        wait: commands.wait,
+      },
+      "File access Stop was not confirmed. Your files are retained.",
+    );
   signal.throwIfAborted();
   await commands.ensure(workspaceID, signal);
   signal.throwIfAborted();

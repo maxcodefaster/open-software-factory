@@ -13,7 +13,7 @@ export function conversationTimeline<
     payload?: Record<string, unknown>;
     inReplyToEntryId?: string | null | undefined;
   },
-  TMessage extends { id: string; at: number },
+  TMessage extends { id: string; at: number; commandId?: string | undefined },
 >(entries: TEntry[], messages: TMessage[]): ConversationTimelineItem<TEntry, TMessage>[] {
   // Overlapping history pages may repeat identities. Keep the latest snapshot,
   // never deduplicate by text: distinct commands can intentionally say the same thing.
@@ -29,32 +29,39 @@ export function conversationTimeline<
     if (supersedesClarification({ ...entry, kind: entry.kind ?? "" }))
       latestClarification = Math.max(latestClarification, entry.ordinal);
   }
+  const displayedEntries = entries.filter(
+    (entry) =>
+      entry.kind !== "mode-change" &&
+      !(
+        entry.kind === "question" &&
+        !answered.has(entry.id) &&
+        latestClarification > entry.ordinal
+      ) &&
+      !(
+        entry.kind === "answer" &&
+        entry.inReplyToEntryId &&
+        questions.has(entry.inReplyToEntryId)
+      ) &&
+      !(entry.kind === "user-message" && entry.payload?.["intent"] === "requirements-interview"),
+  );
+  const journalCommands = new Set(
+    displayedEntries.flatMap((entry) =>
+      entry.kind === "user-message" && typeof entry.payload?.["commandId"] === "string"
+        ? [entry.payload["commandId"]]
+        : [],
+    ),
+  );
+  messages = messages.filter(
+    (message) => !message.commandId || !journalCommands.has(message.commandId),
+  );
   const timeline: ConversationTimelineItem<TEntry, TMessage>[] = [
-    ...entries
-      .filter(
-        (entry) =>
-          entry.kind !== "mode-change" &&
-          !(
-            entry.kind === "question" &&
-            !answered.has(entry.id) &&
-            latestClarification > entry.ordinal
-          ) &&
-          !(
-            entry.kind === "answer" &&
-            entry.inReplyToEntryId &&
-            questions.has(entry.inReplyToEntryId)
-          ) &&
-          !(
-            entry.kind === "user-message" && entry.payload?.["intent"] === "requirements-interview"
-          ),
-      )
-      .map((entry) => ({
-        kind: "conversation" as const,
-        id: entry.id,
-        at: Number.isNaN(Date.parse(entry.createdAt)) ? 0 : Date.parse(entry.createdAt),
-        order: entry.ordinal,
-        entry,
-      })),
+    ...displayedEntries.map((entry) => ({
+      kind: "conversation" as const,
+      id: entry.id,
+      at: Number.isNaN(Date.parse(entry.createdAt)) ? 0 : Date.parse(entry.createdAt),
+      order: entry.ordinal,
+      entry,
+    })),
     ...messages.map((message, index) => ({
       kind: "change-agent" as const,
       id: `change-agent:${message.id}`,

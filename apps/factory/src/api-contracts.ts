@@ -203,6 +203,7 @@ export type Change = z.infer<typeof changeSchema>;
 
 export const agentMessageSchema = z.object({
   id: z.string(),
+  commandId: z.uuid().optional(),
   role: z.enum(["user", "assistant", "tool"]),
   text: z.string(),
   at: z.number(),
@@ -231,6 +232,7 @@ export const agentViewSchema = z.object({
     })
     .optional(),
   messages: z.array(agentMessageSchema),
+  admittedMessages: z.array(agentMessageSchema.extend({ role: z.literal("user") })).optional(),
   messagesAvailable: z.boolean(),
   sessionAvailable: z.boolean(),
   runtimeConnected: z.boolean(),

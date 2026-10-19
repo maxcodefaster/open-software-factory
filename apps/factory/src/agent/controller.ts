@@ -1691,6 +1691,38 @@ export function createAgentController(
       >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
         JOIN factory.change change ON change.runtime_attempt_id=waiting.attempt_id WHERE change.id=${changeID}`;
       const turn = await readTurnObservation(database, { changeID, ...(turnID ? { turnID } : {}) });
+      const intents = history
+        ? await database.client<
+            Array<{
+              turnID: string;
+              commandID: string;
+              sessionID: string;
+              promptID: string;
+              bootstrap: boolean;
+              text: string | null;
+              at: number;
+            }>
+          >`SELECT intent.turn_id AS "turnID", turn.command_id AS "commandID", intent.session_id AS "sessionID",
+              intent.prompt_id AS "promptID", intent.bootstrap, turn.input->>'text' AS text,
+              EXTRACT(EPOCH FROM turn.created_at)::float8 * 1000 AS at
+            FROM factory.change_agent_turn_intent intent
+            JOIN factory.agent_turn turn ON turn.id = intent.turn_id
+            WHERE intent.change_id = ${changeID}
+            ORDER BY intent.created_at DESC, intent.turn_id DESC LIMIT 100`
+        : [];
+      const admittedMessages = intents.toReversed().flatMap((intent) =>
+        !intent.bootstrap && intent.text !== null
+          ? [
+              {
+                id: intent.promptID,
+                commandId: intent.commandID,
+                role: "user" as const,
+                text: bounded(intent.text, 8_000),
+                at: intent.at,
+              },
+            ]
+          : [],
+      );
       const [codingPause] = await database.client<Array<{ reason: string; turnID: string }>>`
         SELECT pause.reason,pause.turn_id AS "turnID" FROM factory.coding_pause pause
         JOIN factory.agent_turn turn ON turn.id=pause.turn_id WHERE turn.change_id=${changeID}
@@ -1713,6 +1745,7 @@ export function createAgentController(
           lastError: turn?.summary ?? null,
           commitOperation: undefined,
           messages: [],
+          ...(admittedMessages.length ? { admittedMessages } : {}),
           messagesAvailable: true,
           sessionAvailable: false,
           runtimeConnected: false,
@@ -1754,22 +1787,18 @@ export function createAgentController(
             { sessionID: session.sessionID, limit: 100 },
             { signal: AbortSignal.timeout(2_000) },
           );
-          const intents = await database.client<
-            Array<{ turnID: string; promptID: string; bootstrap: boolean; text: string | null }>
-          >`SELECT intent.turn_id AS "turnID", intent.prompt_id AS "promptID", intent.bootstrap,
-              turn.input->>'text' AS text
-            FROM factory.change_agent_turn_intent intent
-            JOIN factory.agent_turn turn ON turn.id = intent.turn_id
-            WHERE intent.change_id = ${changeID} AND intent.session_id = ${session.sessionID}
-            ORDER BY intent.created_at DESC, intent.turn_id DESC LIMIT 100`;
+          const sessionIntents = intents.filter((intent) => intent.sessionID === session.sessionID);
           messages = projectMessages(
             page,
             new Map(
-              intents.map((intent) => [intent.promptID, intent.bootstrap ? null : intent.text]),
+              sessionIntents.map((intent) => [
+                intent.promptID,
+                intent.bootstrap ? null : intent.text,
+              ]),
             ),
           );
           if (turn) {
-            const intent = intents.find((intent) => intent.turnID === turn.id);
+            const intent = sessionIntents.find((intent) => intent.turnID === turn.id);
             if (intent) turn.usage = observeOpenCodeUsage(page.data, intent.promptID);
           }
           messagesAvailable = true;
@@ -1816,6 +1845,7 @@ export function createAgentController(
         commitSHA: operations[0]?.commitSHA ?? null,
         ...(pendingCommits[0] ? { commitOperation: pendingCommits[0] } : {}),
         messages,
+        ...(admittedMessages.length ? { admittedMessages } : {}),
         messagesAvailable,
         sessionAvailable: Boolean(session.sessionID && session.sessionConfirmed),
         runtimeConnected: hub.connected(activityAttemptID),

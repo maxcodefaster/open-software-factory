@@ -1180,6 +1180,219 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
   }
 });
 
+test("admitted instructions remain visible before native dispatch and appear once after promotion", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  const commandId = crypto.randomUUID();
+  const text = "Repair the signed-in inbox lifecycle without losing this correction.";
+  const admitted = {
+    id: "msg_saved_correction",
+    commandId,
+    role: "user" as const,
+    text,
+    at: Date.now(),
+  };
+  const view: AgentView = {
+    state: "failed",
+    runtimeState: "stopped",
+    sessionAvailable: true,
+    runtimeConnected: false,
+    messagesAvailable: false,
+    messages: [],
+    admittedMessages: [admitted],
+    stopPending: false,
+    stopId: null,
+    lastError: "Source Pod is no longer ready",
+  };
+  const stream = await streamedAgentView(view, new URL(page.url()).origin);
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-input",
+            baseSha: "a".repeat(40),
+            state: "active",
+            branchState: "succeeded",
+            implementationState: "failed",
+            buildTurnState: "failed",
+            runtimeState: "stopped",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+    route.fulfill({ json: view }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent/activity`, (route) =>
+    route.continue({ url: stream.url }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
+    route.fulfill({
+      json: {
+        state: "agent",
+        epoch: 1,
+        canWrite: false,
+        yours: false,
+        commandID: null,
+      },
+    }),
+  );
+  try {
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button")
+      .click();
+    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    const panel = page.locator(".agent-panel");
+    await expect(panel.getByText(text, { exact: true })).toHaveCount(1);
+    await expect(panel).toContainText("Activity will load when the Workspace resumes.");
+    await mkdir(".factory/test-results/opencode-integration-fix-20261019", { recursive: true });
+    await page.screenshot({
+      path: ".factory/test-results/opencode-integration-fix-20261019/admitted-input-retained.png",
+    });
+    stream.publish({
+      ...view,
+      state: "working",
+      runtimeState: "ready",
+      runtimeConnected: true,
+      messagesAvailable: true,
+      messages: [
+        {
+          id: admitted.id,
+          role: "user",
+          text: `${text}\nInternal injected native instructions.`,
+          at: admitted.at + 1,
+        },
+      ],
+    });
+    await expect(panel.locator(".agent-state")).toHaveText("Working");
+    await expect(panel.getByText(text, { exact: true })).toHaveCount(1);
+    await expect(panel).not.toContainText("Internal injected native instructions.");
+  } finally {
+    await stream.dispose();
+  }
+});
+
+test("a failed editor has an explicit restart that waits for confirmed Stop without restarting Apps or Build", async ({
+  page,
+}) => {
+  let editorState: "failed" | "stop-intended" | "stopped" | "ready" = "failed";
+  let ensures = 0;
+  let stops = 0;
+  const runtimeCommands: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(agent\/|ticket-workspace\/|personal-workspace\/|runtime\/)/.test(
+        new URL(request.url()).pathname,
+      )
+    )
+      runtimeCommands.push(new URL(request.url()).pathname);
+  });
+  const editor = () => ({
+    serviceID: "owned-editor",
+    epoch: editorState === "ready" ? 2 : 1,
+    state: editorState,
+    failure:
+      editorState === "failed" ? "Editor preparation failed. Stop and retry the editor." : null,
+  });
+  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
+    ensures++;
+    if (editorState === "stopped") editorState = "ready";
+    return route.fulfill({ json: editor() });
+  });
+  await page.route("**/api/developer-ide", (route) => route.fulfill({ json: editor() }));
+  await page.route("**/api/developer-ide/stop", (route) => {
+    stops++;
+    editorState = "stop-intended";
+    return route.fulfill({ status: 202, body: "" });
+  });
+  await page.route("**/api/developer-ide/access?*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><html><body>Owned recovered editor</body></html>",
+    }),
+  );
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  const restart = page.getByRole("button", { name: "Restart editor", exact: true });
+  await expect(restart).toBeVisible();
+  const initialEnsures = ensures;
+  await mkdir(".factory/test-results/opencode-integration-fix-20261019", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/opencode-integration-fix-20261019/editor-restart-available.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({
+    path: ".factory/test-results/opencode-integration-fix-20261019/editor-restart-narrow.png",
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toContain("Unsaved editor changes may be lost");
+    await dialog.accept();
+  });
+  await restart.click();
+  await expect.poll(() => stops).toBe(1);
+  await page.waitForTimeout(300);
+  expect(ensures).toBe(initialEnsures);
+  editorState = "stopped";
+  await expect.poll(() => ensures).toBe(initialEnsures + 1);
+  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
+    "data-editor-epoch",
+    "2",
+  );
+  expect(runtimeCommands).toEqual([]);
+});
+
+test("a failed editor Stop leaves restart unconfirmed without ensuring another epoch", async ({
+  page,
+}) => {
+  let ensures = 0;
+  let stops = 0;
+  const editor = {
+    serviceID: "owned-editor",
+    epoch: 1,
+    state: "failed",
+    failure: "Editor preparation failed. Stop and retry the editor.",
+  };
+  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
+    ensures++;
+    return route.fulfill({ json: editor });
+  });
+  await page.route("**/api/developer-ide", (route) => route.fulfill({ json: editor }));
+  await page.route("**/api/developer-ide/stop", (route) => {
+    stops++;
+    return route.fulfill({ status: 202, body: "" });
+  });
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  const restart = page.getByRole("button", { name: "Restart editor", exact: true });
+  await expect(restart).toBeVisible();
+  const initialEnsures = ensures;
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await restart.click();
+  expect(stops).toBe(0);
+  expect(ensures).toBe(initialEnsures);
+  page.once("dialog", (dialog) => dialog.accept());
+  await restart.click();
+  await expect(
+    page.getByText("Editor Stop was not confirmed. Nothing was restarted."),
+  ).toBeVisible();
+  expect(stops).toBe(1);
+  expect(ensures).toBe(initialEnsures);
+  await expect(restart).toBeEnabled();
+});
+
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
   page,
 }) => {
