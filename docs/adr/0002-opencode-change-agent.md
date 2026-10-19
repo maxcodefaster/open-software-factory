@@ -53,6 +53,11 @@ owner, generation, lease and declared App for every call. Images reach the model
 results. The shell/JSON/file-read client remains only for older immutable admission instructions,
 not as a second path advertised to new work. Native registration never exposes an agent-facing
 generic MCP registry or weakens browser isolation.
+The pinned server propagates MCP changes into an already used tool registry through a
+100-ms debounce. Factory allows that metadata propagation and performs a fresh connected-state
+read before submitting the paid prompt. A connected MCP receipt alone is not that barrier.
+The owned native proof first uses the Session without MCP, then registers the facade and submits
+its next turn immediately. No paid probe, failed first turn or automatic inference retry is used.
 This avoids spending additional model turns guessing whether the browser is ready.
 An actual preparation failure still confirms no App inspection and does not justify
 repeating an uncertain UI mutation. Owned cleanup behavior otherwise remains unchanged.

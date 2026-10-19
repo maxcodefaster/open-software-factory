@@ -24,6 +24,11 @@ export async function connectOpenCodeBrowser(
     },
     { signal: AbortSignal.timeout(30_000) },
   );
+  // In pinned 2.0.27 a warm native tool registry consumes MCP changes through a
+  // 100-ms debounce. The add receipt confirms connection, not that propagation.
+  // Allow that metadata turn, then require a fresh server read before inference.
+  // This neither probes with a paid prompt nor retries an admitted model call.
+  await Bun.sleep(150);
   const servers = await client.mcp.list({ location }, { signal: AbortSignal.timeout(5_000) });
   if (
     !servers.data.some(

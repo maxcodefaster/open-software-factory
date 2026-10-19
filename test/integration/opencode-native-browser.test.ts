@@ -3,7 +3,10 @@ import { readdir, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
-import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
+import {
+  confirmSettledOpenCodeInput,
+  ensureOpenCodeMessageBoundary,
+} from "../../apps/factory/src/agent/opencode-client";
 import {
   buildBrowserCallInput,
   buildBrowserToolCatalogue,
@@ -62,16 +65,12 @@ test("pinned native MCP registration delivers browser images without a shell/rea
       return facade(request, session.id);
     },
   });
-  const target = await pinnedOpenCode();
+  const target = await pinnedOpenCode().catch(async (cause) => {
+    await endpoint.stop(true);
+    throw cause;
+  });
   try {
     const filesBefore = await readdir(resolve(target.scratch, "project"));
-    await connectOpenCodeBrowser(
-      target.client,
-      `http://host.orb.internal:${endpoint.port}/fixed`,
-      "owned-native-mcp-capability",
-    );
-    expect(calls).toContain("initialize");
-    expect(calls).toContain("tools/list");
     const sessionID = `ses_owned_mcp_${crypto.randomUUID().replaceAll("-", "")}`;
     await target.client.session.create({
       id: sessionID,
@@ -81,8 +80,37 @@ test("pinned native MCP registration delivers browser images without a shell/rea
       permissions: [{ action: "*", resource: "*", effect: "allow" }],
     });
     await ensureOpenCodeMessageBoundary(target.client, sessionID);
-    await target.control("/browser-mcp", "POST");
     await target.control("/release", "POST");
+    // Match retained Build sessions: the native tool registry has already been
+    // used before Factory registers the browser immediately before a new turn.
+    const warmPromptID = `msg_warm_${crypto.randomUUID().replaceAll("-", "")}`;
+    await target.client.session.prompt({
+      sessionID,
+      id: warmPromptID,
+      text: "Reply briefly without using tools.",
+      delivery: "queue",
+      resume: true,
+    });
+    await observe(
+      () => target.client.message.list({ sessionID, limit: 20 }),
+      (page) =>
+        page.data.some(
+          (message) => message.type === "assistant" && Boolean(message.time.completed),
+        ),
+    );
+    await observe(
+      () => confirmSettledOpenCodeInput(target.client, sessionID, warmPromptID),
+      Boolean,
+    );
+    const previousRequests = (await target.control()).providerRequests;
+    await connectOpenCodeBrowser(
+      target.client,
+      `http://host.orb.internal:${endpoint.port}/fixed`,
+      "owned-native-mcp-capability",
+    );
+    expect(calls).toContain("initialize");
+    expect(calls).toContain("tools/list");
+    await target.control("/browser-mcp", "POST");
     await target.client.session.prompt({
       sessionID,
       id: `msg_owned_mcp_${crypto.randomUUID().replaceAll("-", "")}`,
@@ -93,9 +121,9 @@ test("pinned native MCP registration delivers browser images without a shell/rea
     const state = await observe(
       () => target.control(),
       (state) => {
-        if (state.providerRequests && !state.browserTools.length)
+        if (state.providerRequests > previousRequests && !state.browserTools.length)
           throw new Error(`Native browser tools absent: ${JSON.stringify(state)}`);
-        if (state.providerRequests >= 2 && !state.imageRequests)
+        if (state.providerRequests >= previousRequests + 2 && !state.imageRequests)
           throw new Error("The native tool result reached the model without an image");
         return state.imageRequests > 0;
       },
@@ -150,7 +178,10 @@ test("pinned native MCP registration delivers browser images without a shell/rea
     );
     throw cause;
   } finally {
-    await target.dispose();
-    await endpoint.stop(true);
+    try {
+      await target.dispose();
+    } finally {
+      await endpoint.stop(true);
+    }
   }
 }, 120_000);

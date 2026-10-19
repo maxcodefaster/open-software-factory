@@ -68,6 +68,7 @@ let failure;
 let spawnChild = false;
 let runTool = false;
 let nativeBrowser = false;
+let nativeBrowserPending = false;
 const held = new Map();
 function complete(response, coding = true) {
   if (response.destroyed) return;
@@ -75,7 +76,7 @@ function complete(response, coding = true) {
   const browserTurn = process.env.FACTORY_PROCESS_BROWSER_TURN;
   const step = providerRequests;
   const call =
-    nativeBrowser && coding && step === 1
+    nativeBrowser && coding && nativeBrowserPending
       ? {
           name: browserTools.find((name) => name.endsWith("browser_screenshot")),
           arguments: "{}",
@@ -108,6 +109,7 @@ function complete(response, coding = true) {
                 ),
               }
             : undefined;
+  if (nativeBrowser && coding && nativeBrowserPending) nativeBrowserPending = false;
   if (spawnChild) spawnChild = false;
   if (coding) runTool = false;
   const deltas = call
@@ -172,7 +174,10 @@ function start() {
 
 const control = createServer(async (request, response) => {
   try {
-    if (request.url === "/control/browser-mcp" && request.method === "POST") nativeBrowser = true;
+    if (request.url === "/control/browser-mcp" && request.method === "POST") {
+      nativeBrowser = true;
+      nativeBrowserPending = true;
+    }
     if (request.url === "/control/usage" && request.method === "POST") reportUsage = true;
     if (request.url === "/control/deny" && request.method === "POST")
       failure =
