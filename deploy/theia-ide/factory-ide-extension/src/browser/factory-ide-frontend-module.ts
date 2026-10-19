@@ -22,6 +22,8 @@ import { FactorySourceClient } from "./factory-source-client";
 import { FactoryWorkspaceFileContribution, FactoryWorkspaceFiles } from "./factory-workspace-files";
 import { FactoryWorkspaceSearch } from "./factory-workspace-search";
 import { FactoryDiagnosticsContribution } from "./factory-diagnostics";
+import { LanguageGrammarDefinitionContribution } from "@theia/monaco/lib/browser/textmate/textmate-contribution";
+import { FactoryLanguageGrammars } from "./factory-language-grammars";
 import { FactoryChromeContribution } from "./factory-chrome";
 import { FactoryWriterContribution } from "./factory-writer";
 import {
@@ -37,6 +39,8 @@ import {
 import "./factory-ide.css";
 
 export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
+  bind(FactoryLanguageGrammars).toSelf().inSingletonScope();
+  bind(LanguageGrammarDefinitionContribution).toService(FactoryLanguageGrammars);
   rebind(ApplicationShellOptions).toConstantValue({ leftPanel: { initialSizeRatio: 0.28 } });
   bind(FactoryStatusBar).toSelf().inSingletonScope();
   rebind(StatusBarImpl).toService(FactoryStatusBar);

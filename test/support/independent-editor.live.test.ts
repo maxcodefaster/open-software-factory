@@ -82,7 +82,7 @@ async function cleanOwnedFixtures(
         '{{index .Config.Labels "factory.dev.independent-editor-proof"}}',
       );
       if (owner !== proofID) throw new Error("Refusing unowned fixture container cleanup");
-      await docker("rm", "--force", container);
+      await docker("rm", "--force", "--volumes", container);
       removedContainers.push(container);
     }
     for (const volume of volumes) {
@@ -177,17 +177,32 @@ test.skipIf(!enabled)(
         const serviceID = `source-${index}`;
         const volume = `factory-source-proof-${proofID}-${index}`;
         const container = `factory-source-proof-${proofID}-${index}`;
+        const initializer = `factory-source-init-${proofID}-${index}`;
         await writeFile(
           resolve(artifacts, `source-${index}-intent.json`),
-          JSON.stringify({ workspaceID, serviceID, volume, container, sourceImage }),
+          JSON.stringify({ workspaceID, serviceID, volume, container, initializer, sourceImage }),
         );
         volumes.push(volume);
         await docker("volume", "create", "--label", label, volume);
         const authored = `export const workspace = '${fixtureName}';\n`;
-        const initialize = `const fs=require('fs');fs.mkdirSync('/data/source',{mode:0o755});fs.mkdirSync('/data/control',{mode:0o755});fs.chownSync('/data/source',101000,101000);for(const [name,content] of [['app.ts',${JSON.stringify(authored)}],['unopened.txt','canonical search fixture ${fixtureName}']]){fs.writeFileSync('/data/source/'+name,content);fs.chownSync('/data/source/'+name,101000,101000)}fs.writeFileSync('/data/control/access.json',JSON.stringify(${JSON.stringify({ workspaceId: workspaceID, serviceId: serviceID, epoch: 1, token })}),{mode:0o444});`;
+        const files = [
+          ["app.ts", authored],
+          ["unopened.txt", `canonical search fixture ${fixtureName}`],
+          ["view.tsx", 'export const View = () => <button title="Save">Save</button>;\n'],
+          ["web.css", ".button { color: red; }\n"],
+          ["index.html", '<!doctype html><button title="Save">Save</button>\n'],
+          ["package.json", '{"private":true}\n'],
+          ["tsconfig.json", '// project compiler options\n{"compilerOptions":{"strict":true}}\n'],
+        ];
+        const initialize = `const fs=require('fs');fs.mkdirSync('/data/source',{mode:0o755});fs.mkdirSync('/data/control',{mode:0o755});fs.chownSync('/data/source',101000,101000);for(const [name,content] of ${JSON.stringify(files)}){fs.writeFileSync('/data/source/'+name,content);fs.chownSync('/data/source/'+name,101000,101000)}fs.writeFileSync('/data/control/access.json',JSON.stringify(${JSON.stringify({ workspaceId: workspaceID, serviceId: serviceID, epoch: 1, token })}),{mode:0o444});`;
+        containers.push(initializer);
         await docker(
           "run",
           "--rm",
+          "--name",
+          initializer,
+          "--label",
+          label,
           "--mount",
           `type=volume,source=${volume},target=/data`,
           nodeImage,
@@ -258,10 +273,13 @@ test.skipIf(!enabled)(
           .toBe(200);
         const listing = await listSource();
         expect(listing.status).toBe(200);
-        expect(await listing.json()).toEqual([
-          expect.objectContaining({ name: "app.ts", kind: "file" }),
-          expect.objectContaining({ name: "unopened.txt", kind: "file" }),
-        ]);
+        const listed = await listing.json();
+        expect(listed).toHaveLength(files.length);
+        expect(listed).toEqual(
+          expect.arrayContaining(
+            files.map(([name]) => expect.objectContaining({ name, kind: "file" })),
+          ),
+        );
         expect(await docker("inspect", container, "--format", "{{.Config.User}}")).toBe(
           "101000:101000",
         );
@@ -444,9 +462,49 @@ test.skipIf(!enabled)(
       await frame.getByText("Editor settings", { exact: true }).click();
       await browserExpect(frame.locator(".theia-settings-container")).toBeVisible();
       await page.screenshot({ path: resolve(artifacts, "editor-preferences.png") });
+      for (const [filename, language] of [
+        ["view.tsx", "TypeScript JSX"],
+        ["web.css", "CSS"],
+        ["index.html", "HTML"],
+        ["package.json", "JSON"],
+        ["tsconfig.json", "JSON with Comments"],
+      ] as const) {
+        await frame.locator("#files").getByText(filename, { exact: true }).dblclick();
+        await browserExpect(frame.locator("#status-bar-editor-status-language")).toHaveText(
+          language,
+        );
+        await browserExpect
+          .poll(() =>
+            frame
+              .locator(".monaco-editor:visible .view-line span")
+              .evaluateAll(
+                (elements) =>
+                  new Set(
+                    elements
+                      .filter((element) => element.textContent?.trim())
+                      .map((element) => getComputedStyle(element).color),
+                  ).size,
+              ),
+          )
+          .toBeGreaterThan(1);
+        await page.screenshot({ path: resolve(artifacts, `language-${filename}.png`) });
+      }
       await frame.locator("#files").getByText("app.ts", { exact: true }).dblclick();
       await browserExpect(frame.locator(".monaco-editor").first()).toBeVisible();
       await browserExpect(frame.locator(".view-lines").first()).toContainText("workspace-a");
+      await browserExpect(frame.locator("#status-bar-editor-status-language")).toHaveText(
+        "TypeScript",
+      );
+      await browserExpect
+        .poll(() =>
+          frame.locator(".monaco-editor:visible .view-line span").evaluateAll((elements) => {
+            const colors = elements
+              .filter((element) => element.textContent?.trim())
+              .map((element) => getComputedStyle(element).color);
+            return new Set(colors).size;
+          }),
+        )
+        .toBeGreaterThan(1);
       await browserExpect(frame.locator("#status-bar-factory-buffer-workspace")).toHaveText(
         "File · Personal · Fixture A",
       );
@@ -549,18 +607,7 @@ test.skipIf(!enabled)(
       const alternate = sources.get(workspaceB);
       if (!original || !alternate) throw new Error("Expected exact source fixtures");
       const canonical = async (source: SourceFixture) =>
-        docker(
-          "run",
-          "--rm",
-          "--user",
-          "101000:101000",
-          "--mount",
-          `type=volume,source=${source.volume},target=/source,volume-subpath=source,readonly`,
-          nodeImage,
-          "node",
-          "-e",
-          'process.stdout.write(require("fs").readFileSync("/source/app.ts","utf8"))',
-        );
+        docker("exec", "--user", "101000:101000", source.container, "cat", "/source/app.ts");
       expect(await canonical(original)).toBe(
         "export const workspace = 'workspace-a';\n// unsaved workspace-a edit",
       );
@@ -596,16 +643,15 @@ test.skipIf(!enabled)(
       await page.screenshot({ path: resolve(artifacts, "canonical-search.png") });
       const external = async (content: string) =>
         docker(
-          "run",
-          "--rm",
+          "exec",
           "--user",
           "101000:101000",
-          "--mount",
-          `type=volume,source=${original.volume},target=/source,volume-subpath=source`,
-          nodeImage,
-          "node",
-          "-e",
-          `require('fs').writeFileSync('/source/app.ts',${JSON.stringify(content)})`,
+          original.container,
+          "sh",
+          "-c",
+          'printf "%s" "$1" > /source/app.ts',
+          "fixture-write",
+          content,
         );
       const externalContent = "export const workspace = 'workspace-a';\n// external source edit\n";
       await external(externalContent);
@@ -652,6 +698,7 @@ test.skipIf(!enabled)(
           richStatusHoverPreserved: true,
           explorerUserResizePreserved: true,
           activeBufferWorkspaceVisible: true,
+          starterSyntaxWithoutExecution: true,
         }),
       );
     } catch (error) {
@@ -704,5 +751,5 @@ test.skipIf(!enabled)(
       for (const source of sources.values()) fixtureSecrets.delete(source.token);
     }
   },
-  120_000,
+  240_000,
 );

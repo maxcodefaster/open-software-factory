@@ -139,6 +139,9 @@ than repeating every live journey after a documentation edit.
 The independent editor proof builds and uses separate local artifacts. It opens canonical source
 without Project compute or model inference, switches retained buffers, verifies original-Workspace
 saves and rejects stale saves. Its containers and volumes have exact cleanup ownership.
+Pinned TextMate grammars provide syntax highlighting for Starter source and configuration files
+without compute. This is not project-aware completion, type checking, refactoring or formatting;
+those need the actual execution toolchain and dependencies.
 
 ```sh
 mise exec -- docker buildx build --load --file deploy/workspace-files/Dockerfile --tag factory-source:editor-proof .
