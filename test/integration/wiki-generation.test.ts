@@ -40,6 +40,7 @@ test.each([false, true])(
       interruptAfterPackage = false;
     let failureCause: Error = new Error("Provider failure including controlled-private-key");
     let inventoryReceived: string[] = [];
+    let expectedCompleted: string[] | undefined;
     const reader = {
       getDefaultBranch: async () => ({ name: "main", headSha: commit }),
       listFiles: async () => [
@@ -59,6 +60,7 @@ test.each([false, true])(
     };
     const wiki = createKnowledgeController(db, reader, async (input) => {
       calls++;
+      if (expectedCompleted) expect(input.completedPageIDs).toEqual(expectedCompleted);
       if (failure) throw failureCause;
       const paths = input.inventory.map((entry) => entry.path);
       inventoryReceived = paths;
@@ -150,11 +152,13 @@ test.each([false, true])(
         await db.client`UPDATE factory.knowledge_generation SET state='running',attempt_id=${crypto.randomUUID()},completed_at=NULL WHERE id=${String(interrupted?.["id"])}`;
         interruptAfterPackage = false;
         noop = true;
+        expectedCompleted = [page];
         await wiki.recover();
         const recovered = await completed();
         expect(recovered?.["id"]).toBe(interrupted?.["id"]);
         expect(recovered?.["state"]).toBe("succeeded");
         expect(await wiki.history(page, user)).toHaveLength(3);
+        expectedCompleted = undefined;
       }
       const priorCalls = calls;
       await wiki.reconcile(project);

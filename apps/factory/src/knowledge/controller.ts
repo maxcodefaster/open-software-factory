@@ -242,6 +242,54 @@ export function createKnowledgeController(
     void execution.finally(() => executions.delete(execution)).catch(() => {});
     return execution;
   }
+
+  async function completedPublications(
+    generationID: string,
+    attemptID: string,
+    projectID: string,
+    commitSha: string,
+  ) {
+    const [progress] = await database.client<
+      Array<{
+        pageCount: number;
+        previousState: string | null;
+        previousCount: number | null;
+        previousCommit: string | null;
+      }>
+    >`
+      SELECT COALESCE(current.page_count,0)::int AS "pageCount",
+        previous.state::text AS "previousState",previous.page_count::int AS "previousCount",
+        previous.source_commit_sha AS "previousCommit"
+      FROM factory.knowledge_generation current
+      LEFT JOIN LATERAL (
+        SELECT state,page_count,source_commit_sha FROM factory.knowledge_generation candidate
+        WHERE candidate.project_id=current.project_id AND candidate.id<>current.id
+          AND candidate.created_at<=current.created_at
+        ORDER BY candidate.created_at DESC,candidate.id DESC LIMIT 1
+      ) previous ON true
+      WHERE current.id=${generationID} AND current.attempt_id=${attemptID} AND current.state='running'
+        AND current.project_id=${projectID} AND current.source_commit_sha=${commitSha}`;
+    if (!progress) throw new Error("Wiki execution no longer owns analysis");
+    if (
+      !progress.pageCount &&
+      !(
+        progress.previousState === "failed" &&
+        progress.previousCommit === commitSha &&
+        Number(progress.previousCount) > 0
+      )
+    )
+      return [];
+    const checked = await database.client<Array<{ id: string }>>`
+      SELECT page.id FROM factory.knowledge_page page
+      WHERE page.project_id=${projectID} AND page.state='active' AND page.source_commit_sha=${commitSha}
+        AND EXISTS (
+          SELECT 1 FROM factory.knowledge_revision revision
+          WHERE revision.page_id=page.id AND revision.kind='generated'
+            AND revision.generation_id IS NOT NULL AND revision.source_commit_sha=${commitSha}
+        ) ORDER BY page.id`;
+    return checked.map((page) => page.id);
+  }
+
   async function executeGeneration(generationID: string) {
     if (running.has(generationID) || running.size >= 2) return;
     running.add(generationID);
@@ -294,6 +342,12 @@ export function createKnowledgeController(
         failureMessage =
           "Wiki source could not be read at this revision. Saved pages are retained; retry the update.";
         const pages = await snapshots(generation.projectID);
+        const completedPageIDs = await completedPublications(
+          generationID,
+          attemptId,
+          generation.projectID,
+          generation.commitSha,
+        );
         const bundle = await sourceBundle(generation.projectID, generation.commitSha, pages);
         failureMessage =
           "The Wiki model could not finish a supported update. Saved pages are retained; retry the update.";
@@ -304,6 +358,7 @@ export function createKnowledgeController(
             modelId,
             connection,
             pages,
+            completedPageIDs,
             inventory: bundle.candidates,
             changedPaths: bundle.changedPaths,
             sources: bundle.sources,

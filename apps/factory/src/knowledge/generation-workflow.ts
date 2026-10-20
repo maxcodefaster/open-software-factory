@@ -82,6 +82,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   };
   let activeSignal = input.signal;
   let pages = input.pages.map((page) => ({ ...page }));
+  const completedPageIDs = new Set(input.completedPageIDs ?? []);
   const known = new Set(input.inventory.map((file) => file.path));
   function sourceScope(seed: Array<{ path: string; content: string }> = []) {
     const read = new Map(seed.map((file) => [file.path, file]));
@@ -254,13 +255,22 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       for (const id of topic.pageIDs) ids.add(id);
     }
   }
+  function remainingPlan(plan: z.infer<typeof planSchema>): z.infer<typeof planSchema> {
+    return {
+      topics: plan.topics.flatMap((topic) => {
+        if (!topic.pageIDs.length) return [topic];
+        const pageIDs = topic.pageIDs.filter((id) => !completedPageIDs.has(id));
+        return pageIDs.length ? [{ ...topic, pageIDs }] : [];
+      }),
+    };
+  }
   const planning = createStep({
     id: "plan-wiki-topics",
     inputSchema: z.object({}),
     outputSchema: planSchema,
     execute: () =>
-      recordFailure(() =>
-        ask(
+      recordFailure(async () => {
+        const plan = await ask(
           "topic-planner",
           planSchema,
           {
@@ -268,14 +278,16 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             files: input.inventory,
             changedPaths: input.changedPaths,
             currentPages: pages,
+            completedPageIDs: [...completedPageIDs],
             initialSources: input.sources,
           },
           planSources,
-          "Research manifests and core flows, then plan only useful affected topics. New Wiki starts with a concise overview followed by coherent child guides. Small app needs 1-3 topics. Each purpose is at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning. Do not rewrite unrelated pages. No topics for genuine no-op. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
+          "Research manifests and core flows, then plan only useful affected topics. New Wiki starts with a concise overview followed by coherent child guides. Small app needs 1-3 topics. Each purpose is at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
           6,
-          validatePlan,
-        ),
-      ),
+          (plan) => validatePlan(remainingPlan(plan)),
+        );
+        return remainingPlan(plan);
+      }),
   });
   const packages = createStep({
     id: "investigate-write-check-publish",

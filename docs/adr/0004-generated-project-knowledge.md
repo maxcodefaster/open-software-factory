@@ -20,6 +20,12 @@ An authenticated Wiki retry hands a failed setup observation to the exact genera
 that command, including already-admitted work. The original failure remains in generation history.
 Ordinary status reads never adopt unrelated newer generations, and a completed setup step is not
 reopened by later Wiki work.
+An explicit retry after checked partial publication, or recovery of that same generation,
+reuses pages already published from the exact target commit. They remain full read-only context
+and link/parent targets; Factory removes their IDs from planned update work before validating the
+remaining plan. An empty remainder is a valid no-op. A failed attempt that published nothing, a
+normal new update, or a different source commit does not activate this reuse. The existing request
+bound is unchanged, and reaching it never starts an automatic successor generation.
 
 Factory binds new page identities and hierarchy to the validated topic plan. Writers supply content
 and inspected sources, not new slugs or parents. Existing-page writers can update only the topic's

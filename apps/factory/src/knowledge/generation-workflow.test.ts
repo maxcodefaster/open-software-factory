@@ -338,7 +338,7 @@ test.each([
   20_000,
 );
 
-test.each(["update", "no-op", "foreign-id", "identity-field"])(
+test.each(["update", "no-op", "foreign-id", "identity-field", "checked-retry"])(
   "existing Wiki writer keeps Factory-owned identity: %s",
   async (scenario) => {
     const id = crypto.randomUUID();
@@ -354,6 +354,7 @@ test.each(["update", "no-op", "foreign-id", "identity-field"])(
       citations: [],
     };
     let publications = 0;
+    let plans = 0;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -365,6 +366,7 @@ test.each(["update", "no-op", "foreign-id", "identity-field"])(
           .filter((message) => message.role === "system")
           .map((message) => message.content)
           .join("\n");
+        if (system.includes("Research manifests")) plans++;
         const output = system.includes("Research manifests")
           ? {
               topics: [
@@ -426,6 +428,7 @@ test.each(["update", "no-op", "foreign-id", "identity-field"])(
           apiKey: "owned-test-not-a-secret",
         },
         pages: [page],
+        ...(scenario === "checked-retry" ? { completedPageIDs: [id] } : {}),
         inventory: [{ path: "src/main.ts", sha: "a".repeat(40), size: 30 }],
         changedPaths: ["src/main.ts"],
         sources: [],
@@ -453,7 +456,8 @@ test.each(["update", "no-op", "foreign-id", "identity-field"])(
         expect(publications).toBe(0);
       } else {
         expect(await run).toEqual({ pages: [] });
-        expect(publications).toBe(1);
+        expect(publications).toBe(scenario === "checked-retry" ? 0 : 1);
+        if (scenario === "checked-retry") expect(plans).toBe(1);
       }
     } finally {
       await server.stop(true);

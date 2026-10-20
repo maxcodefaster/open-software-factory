@@ -11,6 +11,7 @@ export type WikiGenerationInput = {
   modelId: string;
   connection?: ResolvedModelConnection;
   pages: WikiPageSnapshot[];
+  completedPageIDs?: readonly string[];
   inventory: Array<{ path: string; sha: string; size: number }>;
   changedPaths: string[];
   sources: Array<{ path: string; content: string }>;
