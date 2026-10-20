@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { chromium, expect as visible } from "@playwright/test";
+import { chromium, expect as browserExpect } from "@playwright/test";
 import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createDatabase } from "../../packages/db/src/client";
@@ -12,6 +12,9 @@ import { runtimeAccessCookie } from "../fixtures/runtime-access";
 import { verifyCodingSource } from "../fixtures/coding-source";
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
 
+// Bun does not load playwright.config.ts. Match the repository's normal browser
+// assertion window rather than accidentally using Playwright's 5-second default.
+const visible = browserExpect.configure({ timeout: 30_000 });
 const installationName = process.env["FACTORY_CODING_COMPLETION_INSTALLATION"];
 const selectedPath = process.env["FACTORY_CODING_COMPLETION_PATH"];
 if (selectedPath && !["manual", "interview"].includes(selectedPath))
@@ -199,14 +202,15 @@ for (const requirementsPath of ["manual", "interview"] as const)
             const rows = await api(`/api/projects/${projectID}/setup`);
             const failure = rows.find(
               (row: { task: string; state: string }) =>
-                row.task !== "wiki" && row.state === "failed",
+                ["configuration", "protection", "development-secrets"].includes(row.task) &&
+                row.state === "failed",
             );
             if (failure)
               throw new Error(`Owned Starter ${failure.task} failed: ${failure.failure}`);
             return rows;
           },
           (rows) =>
-            ["main-preview", "protection", "development-secrets"].every((task) =>
+            ["configuration", "protection", "development-secrets"].every((task) =>
               rows.some(
                 (row: { task: string; state: string }) =>
                   row.task === task && row.state === "ready",
@@ -484,6 +488,19 @@ for (const requirementsPath of ["manual", "interview"] as const)
         SELECT runtime_attempt_id AS id FROM factory.change WHERE id=${changeID}`;
         if (!development) throw new Error("Owned Ticket Workspace is missing");
         await inspectApp(development.id, "development");
+        await eventually(
+          async () => {
+            const rows = await api(`/api/projects/${projectID}/setup`);
+            const preview = rows.find((row: { task: string }) => row.task === "main-preview");
+            if (preview?.state === "failed")
+              throw new Error(`Initial Template Preview failed: ${preview.failure}`);
+            return preview;
+          },
+          (preview) => preview?.state === "ready",
+          "Initial Template Preview did not become ready before Delivery",
+          900_000,
+        );
+        result["initialTemplatePreviewReady"] = true;
         await openTicket();
         await visible(page.getByRole("button", { name: "Deliver", exact: true })).toBeEnabled();
         await captureFactory("05-review-passed");
@@ -555,6 +572,10 @@ for (const requirementsPath of ["manual", "interview"] as const)
       } catch (cause) {
         result["status"] = "failed";
         result["error"] = cause instanceof Error ? cause.message : "Unknown coding proof failure";
+        result["implementationBlocker"] = await page
+          .getByRole("button", { name: "Implement", exact: true })
+          .evaluateAll((buttons) => buttons[0]?.getAttribute("title") ?? null)
+          .catch(() => null);
         await page.screenshot({ path: resolve(evidence, "failure.png") }).catch(() => {});
         result["pageErrors"] = pageErrors;
         failure = cause;

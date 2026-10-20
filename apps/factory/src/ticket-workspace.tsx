@@ -961,14 +961,17 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
         !props.change &&
         !proposal(),
     );
-  const implementationDisabled = () =>
-    props.pending ||
-    hasChanges() ||
-    Boolean(
-      currentDocument() && currentDocument()?.requirementRevisionId !== props.latestRevision?.id,
-    ) ||
-    !props.implementationAvailable ||
-    props.dependencies.prerequisites.some((prerequisite) => !prerequisite.delivered);
+  const implementationDisabledReason = () => {
+    if (props.pending) return "Finishing the current Ticket action.";
+    if (hasChanges()) return "Waiting for your requirements to save.";
+    if (currentDocument() && currentDocument()?.requirementRevisionId !== props.latestRevision?.id)
+      return "Complete the current requirements before starting implementation.";
+    if (!props.implementationAvailable) return "Connect a Coding model in Settings first.";
+    if (props.dependencies.prerequisites.some((prerequisite) => !prerequisite.delivered))
+      return "Deliver the prerequisite Tickets first.";
+    return undefined;
+  };
+  const implementationDisabled = () => Boolean(implementationDisabledReason());
 
   return (
     <div class={`ticket-layout${historyOpen() ? " has-inspector" : ""}`}>
@@ -1196,6 +1199,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       type="button"
                       class="primary-button"
                       disabled={implementationDisabled()}
+                      title={implementationDisabledReason()}
                       onClick={() =>
                         props.latestRevision && props.onImplement(props.latestRevision.id)
                       }
