@@ -1,0 +1,7 @@
+{
+  "name": "factory-language-project-proof",
+  "private": true,
+  "dependencies": {
+    "typescript": "6.0.3"
+  }
+}

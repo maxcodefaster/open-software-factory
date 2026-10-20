@@ -1,0 +1,9 @@
+{
+  "name": "factory-language-tools",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "pyright": "1.1.414",
+    "typescript-language-server": "6.0.2"
+  }
+}

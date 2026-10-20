@@ -1107,6 +1107,7 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 func injectApprovedTools(ctx context.Context, assignment Assignment, containerID string) error {
 	needsAgent := false
 	needsVerification := false
+	needsLanguages := false
 	for _, channel := range assignment.Channels {
 		if channel.Kind == "agent" {
 			needsAgent = true
@@ -1114,9 +1115,29 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		if channel.Kind == "verification" {
 			needsVerification = true
 		}
+		if channel.Kind == "ide" {
+			needsLanguages = true
+		}
 	}
-	if !needsAgent && !needsVerification {
+	if !needsAgent && !needsVerification && !needsLanguages {
 		return nil
+	}
+	if needsLanguages {
+		tool := "/opt/factory/language-tools/musl"
+		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "sh", "-c", "ldd --version 2>&1").CombinedOutput(); !strings.Contains(strings.ToLower(string(output)), "musl") {
+			if err != nil {
+				return errors.New("Language tools require a supported glibc or musl development container")
+			}
+			tool = "/opt/factory/language-tools/glibc"
+		}
+		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput(); err != nil {
+			return fmt.Errorf("create language tools destination: %w: %s", err, output)
+		}
+		for _, copy := range [][2]string{{"/opt/factory/language-tools/node_modules", "/opt/factory/language-tools/node_modules"}, {tool + "/.", "/opt/factory/language-tools/runtime"}} {
+			if output, err := exec.CommandContext(ctx, "docker", "cp", copy[0], containerID+":"+copy[1]).CombinedOutput(); err != nil {
+				return fmt.Errorf("inject language tools: %w: %s", err, output)
+			}
+		}
 	}
 	if needsAgent {
 		// Match the primary container's native libc. Upstream binaries stay

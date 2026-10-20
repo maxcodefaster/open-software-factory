@@ -4,10 +4,22 @@ WORKDIR /src/services/runtime-connector
 COPY services/runtime-connector/go.mod services/runtime-connector/go.sum ./
 RUN go mod download
 COPY services/runtime-connector ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-runtime-connector ./cmd/factory-runtime-connector
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-project-prebuild ./cmd/factory-project-prebuild
+RUN --mount=type=cache,id=factory-connector-go-build,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-runtime-connector ./cmd/factory-runtime-connector
+RUN --mount=type=cache,id=factory-connector-go-build,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-project-prebuild ./cmd/factory-project-prebuild
 
 FROM docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2 AS node
+
+FROM node AS language-node-musl
+RUN mkdir -p /opt/node-runtime/lib \
+  && cp -L /usr/local/bin/node /opt/node-runtime/node \
+  && cp -L /usr/lib/libstdc++.so.6 /opt/node-runtime/lib/libstdc++.so.6 \
+  && cp -L /usr/lib/libgcc_s.so.1 /opt/node-runtime/lib/libgcc_s.so.1
+
+FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS language-node-glibc
+RUN mkdir -p /opt/node-runtime/lib \
+  && cp -L /usr/local/bin/node /opt/node-runtime/node \
+  && cp -L "$(find /usr/lib -name libstdc++.so.6 -print -quit)" /opt/node-runtime/lib/libstdc++.so.6 \
+  && cp -L "$(find /usr/lib -name libgcc_s.so.1 -print -quit)" /opt/node-runtime/lib/libgcc_s.so.1
 
 FROM node AS build-tool
 ARG TARGETARCH
@@ -43,6 +55,11 @@ WORKDIR /opt/factory/opencode/server
 COPY upstream.json /tmp/upstream.json
 RUN node -e 'const fs=require("fs");const child=require("child_process");const crypto=require("crypto");const pins=JSON.parse(fs.readFileSync("/tmp/upstream.json")).openCodeServer.bun[process.argv[1]];for(const [libc,pin] of Object.entries(pins)){const tar=child.execFileSync("npm",["pack","--ignore-scripts",pin.name+"@1.4.3"]).toString().trim();if("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(tar)).digest("base64")!==pin.integrity)throw new Error("Bun integrity mismatch");fs.mkdirSync("../"+libc,{recursive:true});child.execFileSync("tar",["-xzf",tar,"-C","../"+libc,"--strip-components=2","package/bin/bun"]);fs.chmodSync("../"+libc+"/bun",0o555);fs.unlinkSync(tar)}' "$TARGETARCH"
 
+FROM node AS language-tools
+WORKDIR /opt/factory/language-tools
+COPY deploy/language-tools/package.json deploy/language-tools/package-lock.json ./
+RUN npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+
 FROM node AS verification-tool
 ARG TARGETARCH
 COPY upstream.json /tmp/upstream.json
@@ -74,9 +91,10 @@ COPY --from=theia /src/deploy/theia-ide/browser-app/lib /opt/factory/theia/lib
 COPY --from=theia /src/deploy/theia-ide/browser-app/package.json /opt/factory/theia/package.json
 USER 1000:1000
 ENV XDG_CONFIG_HOME=/home/node/.factory-theia
+ENV THEIA_CONFIG_DIR=/home/node/.factory-theia
 ENTRYPOINT ["node", "/opt/factory/theia/lib/backend/main.js", "--hostname", "0.0.0.0", "--port", "4400", "--session-preference", "security.workspace.trust.enabled=false"]
 
-FROM docker.io/library/docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470 AS runtime-host
+FROM docker.io/library/docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470 AS runtime-host-base
 
 COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
@@ -98,6 +116,11 @@ LABEL org.opencontainers.image.version="0.1.0"
 
 ENTRYPOINT ["dockerd-entrypoint.sh"]
 
+FROM runtime-host-base AS runtime-host
+COPY --from=language-tools /opt/factory/language-tools/node_modules /opt/factory/language-tools/node_modules
+COPY --from=language-node-glibc /opt/node-runtime /opt/factory/language-tools/glibc
+COPY --from=language-node-musl /opt/node-runtime /opt/factory/language-tools/musl
+
 FROM runtime-host AS build-runtime-host
 COPY --from=build-tool /opt/factory/opencode/opencode /opt/factory/opencode/opencode
 COPY --from=build-tool /opt/factory/opencode/glibc/opencode /opt/factory/opencode/glibc/opencode
@@ -105,7 +128,7 @@ COPY --from=opencode-server /opt/factory/opencode/server /opt/factory/opencode/s
 COPY --from=bun-tool /opt/factory/opencode/glibc/bun /opt/factory/opencode/glibc/bun
 COPY --from=bun-tool /opt/factory/opencode/musl/bun /opt/factory/opencode/musl/bun
 
-FROM runtime-host AS verification-runtime-host
+FROM runtime-host-base AS verification-runtime-host
 COPY --from=verification-tool /usr/local/bin/forgejo-runner /usr/local/bin/forgejo-runner
 
 FROM runtime-host AS runtime

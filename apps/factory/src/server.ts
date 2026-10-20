@@ -75,7 +75,7 @@ import { createProjectAgentController } from "./project-agent/controller";
 import { projectResponseStream } from "./project-agent/stream-response";
 import { agentActivityResponse } from "./agent/activity-response";
 import { createProjectRoute } from "./routes/projects";
-import { createTerminalWriterBoundary } from "./runtime/browser-writer";
+import { createRuntimeWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
 import { scopeRuntimeEmbedding } from "./runtime/embedding";
 import {
@@ -1545,13 +1545,13 @@ async function route(request: Request) {
 
 const { FACTORY_PORT } = process.env;
 type FactorySocketData = RuntimeSocketData | DeveloperEditorSocketData;
-const terminalWriter = createTerminalWriterBoundary(runtimeHub, async (data, send) => {
+const runtimeWriter = createRuntimeWriterBoundary(runtimeHub, async (data, send) => {
   if (data.kind !== "browser" || !data.accessToken)
-    throw new Error("Terminal identity is required");
+    throw new Error("Interactive identity is required");
   const userID = await runtimeAccess.user(data.accessToken);
   await database.client.begin(async (sql) => {
     await runtimeWriteAuthorityIn(sql, data.attemptID, userID);
-    if (!runtimeAccess.has(data.accessToken!)) throw new Error("Terminal access revoked");
+    if (!runtimeAccess.has(data.accessToken!)) throw new Error("Interactive access revoked");
     send();
   });
 });
@@ -1570,7 +1570,7 @@ const servers = serveFactory<FactorySocketData>(factoryHost, {
     ) {
       try {
         const data = url.pathname.includes("/__factory/")
-          ? await developerIDEEdge.terminalSocketData(request)
+          ? await developerIDEEdge.executionSocketData(request)
           : await developerIDEEdge.socketData(request);
         if (data instanceof Response) return data;
         if (!server.upgrade(request, { data }))
@@ -1710,17 +1710,17 @@ const servers = serveFactory<FactorySocketData>(factoryHost, {
         socket.close(1008, "Runtime access revoked");
         return;
       }
-      terminalWriter.open(socket as ServerWebSocket<RuntimeSocketData>);
+      runtimeWriter.open(socket as ServerWebSocket<RuntimeSocketData>);
     },
     message(socket, message) {
       if (socket.data.kind === "developer-editor")
         developerIDEEdge.message(socket as ServerWebSocket<DeveloperEditorSocketData>, message);
-      else terminalWriter.message(socket as ServerWebSocket<RuntimeSocketData>, message);
+      else runtimeWriter.message(socket as ServerWebSocket<RuntimeSocketData>, message);
     },
     close(socket) {
       if (socket.data.kind === "developer-editor")
         developerIDEEdge.close(socket as ServerWebSocket<DeveloperEditorSocketData>);
-      else terminalWriter.close(socket as ServerWebSocket<RuntimeSocketData>);
+      else runtimeWriter.close(socket as ServerWebSocket<RuntimeSocketData>);
     },
   },
 });

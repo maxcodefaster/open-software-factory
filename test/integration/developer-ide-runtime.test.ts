@@ -68,6 +68,8 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     });
     expect(starts).toBe(0);
     const terminal = `${prefix}/${owned.attemptID}/terminal/terminal-a`;
+    const language = `${prefix}/${owned.attemptID}/language/typescript`;
+    await expect(runtime.socketData(language, auth)).rejects.toThrow("observation-only");
     await expect(runtime.socketData(terminal, auth)).rejects.toThrow("observation-only");
     await expect(
       runtime.route(`${prefix}/${owned.attemptID}/processes/app/restart`, request("POST"), auth),
@@ -82,6 +84,15 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     expect(data.path).toBe("/terminal-a");
     expect(access.has(data.accessToken)).toBe(true);
     expect(await runtime.socketData(terminal, auth)).toEqual(data);
+    const tools = await runtime.socketData(language, auth);
+    expect(tools).toEqual({ ...data, channel: "language", path: `/typescript/${source.id}` });
+    expect(
+      await runtime.socketData(`${prefix}/${owned.attemptID}/language/shell`, auth),
+    ).toBeUndefined();
+    await expect(
+      runtime.socketData(language.replace(owned.attemptID, crypto.randomUUID()), auth),
+    ).rejects.toThrow("not connected");
+    expect(starts).toBe(0);
     const stream = await runtime.route(
       `${prefix}/${owned.attemptID}/processes/events`,
       request(),
@@ -125,6 +136,7 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     expect(starts).toBe(1);
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
     await expect(runtime.socketData(terminal, auth)).rejects.toThrow("not connected");
+    await expect(runtime.socketData(language, auth)).rejects.toThrow("not connected");
     await expect(
       runtime.route(`${prefix}/${owned.attemptID}/terminals/terminal-a`, request("DELETE"), auth),
     ).rejects.toThrow("not connected");

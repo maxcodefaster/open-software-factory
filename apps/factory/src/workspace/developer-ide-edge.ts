@@ -130,7 +130,7 @@ export function createDeveloperIDEEdge(
         ...(connectionToken ? { connectionToken } : {}),
       };
     },
-    async terminalSocketData(request: Request) {
+    async executionSocketData(request: Request) {
       const url = new URL(request.url);
       const match = url.pathname.match(editorRoute);
       if (!match?.[1] || !match[3] || request.headers.get("origin") !== url.origin)
@@ -139,7 +139,7 @@ export function createDeveloperIDEEdge(
       if (!authorized) return json({ error: "Editor access required" }, 401);
       return (
         (await runtime.socketData(match[3], authorized)) ??
-        json({ error: "Terminal path is invalid" }, 404)
+        json({ error: "Interactive path is invalid" }, 404)
       );
     },
     async route(request: Request) {

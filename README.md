@@ -206,15 +206,33 @@ than repeating every live journey after a documentation edit.
 The independent editor proof builds and uses separate local artifacts. It opens canonical source
 without Project compute or model inference, switches retained buffers, verifies original-Workspace
 saves and rejects stale saves. Its containers and volumes have exact cleanup ownership.
-Pinned TextMate grammars provide syntax highlighting for Starter source and configuration files
-without compute. This is not project-aware completion, type checking, refactoring or formatting;
-those need the actual execution toolchain and dependencies.
+Pinned TextMate grammars provide syntax highlighting for source and configuration files without
+compute. TypeScript/JavaScript and Python have a pinned project-language preset. In the editor
+status bar, Start tools explicitly prepares compute if needed, then starts the language servers
+in that exact Workspace's Dev Container. They use installed Project TypeScript and the actual
+Python environment, including `VIRTUAL_ENV`, `.venv` and repository Pyright configuration.
+Opening files never starts these processes. Other languages show Syntax highlighting rather
+than claiming language support. The preset supplies completion, semantic diagnostics, hover and
+Go to Definition; it does not supply general refactoring, formatting or arbitrary plugins.
+Dependency definitions outside canonical source open as read-only documents bound to their
+original Runtime Attempt. They are not copied into source or read from the editor host.
 
 ```sh
 mise exec -- docker buildx build --load --file deploy/workspace-files/Dockerfile --tag factory-source:editor-proof .
 mise exec -- docker buildx build --load --file deploy/runtime-host/Dockerfile --target developer-ide --tag factory-editor:editor-proof .
 FACTORY_RUN_INDEPENDENT_EDITOR_PROOF=1 FACTORY_SOURCE_PROOF_IMAGE=factory-source:editor-proof FACTORY_EDITOR_PROOF_IMAGE=factory-editor:editor-proof mise exec -- bun --no-env-file test test/support/independent-editor.live.test.ts
 ```
+
+The same owned editor proof can exercise actual TypeScript dependencies, a Python virtual
+environment, semantic diagnostics, completion, dependency navigation and reconnect. Build
+`runtime-host` as `factory-runtime:language-proof`, then build
+`test/fixtures/language-tools/Dockerfile` as `factory-language-child:proof`, explicitly passing
+`--build-arg FACTORY_LANGUAGE_TOOLS_IMAGE=factory-runtime:language-proof`. Add
+`FACTORY_LANGUAGE_PROOF_IMAGE=factory-language-child:proof` to the proof command above. This
+uses native Connector children and unchanged language servers in isolated containers, not models.
+For the complete Envbox/Dev Container path, set `FACTORY_RUNTIME_LANGUAGE_CONFORMANCE=1`
+and an exact `FACTORY_RUNTIME_CONFORMANCE_IMAGE` registry digest when running
+`bun run runtime:conformance`. These overrides affect only the owned proof, never retained pins.
 
 The unassisted coding acceptance uses its own disposable installation and real model calls.
 It needs the provider bootstrap variables described in `.env.example`. Settings-only connections

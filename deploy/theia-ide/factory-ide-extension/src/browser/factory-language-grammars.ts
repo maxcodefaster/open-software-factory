@@ -15,6 +15,7 @@ import yaml from "@shikijs/langs/yaml";
 import sql from "@shikijs/langs/sql";
 import shell from "@shikijs/langs/shellscript";
 import dockerfile from "@shikijs/langs/dockerfile";
+import python from "@shikijs/langs/python";
 
 const codeConfiguration: monaco.languages.LanguageConfiguration = {
   comments: { lineComment: "//", blockComment: ["/*", "*/"] },
@@ -46,6 +47,16 @@ const jsonConfiguration: monaco.languages.LanguageConfiguration = {
 };
 
 export const factoryLanguages = [
+  {
+    id: "python",
+    label: "Python",
+    extensions: [".py", ".pyi"],
+    grammars: python,
+    configuration: {
+      ...codeConfiguration,
+      comments: { lineComment: "#" },
+    },
+  },
   {
     id: "typescript",
     label: "TypeScript",

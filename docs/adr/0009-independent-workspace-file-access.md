@@ -78,6 +78,24 @@ reconciliation rather than silently losing changes. Events are ephemeral, not Ev
 Workspace changes preserve original buffer URIs and per-Workspace editor state; no writable
 `/current` symlink or forced save is used. PTY and Run routing remain tied to their exact runtime.
 
+## Project language tools
+
+Keep the independent editor small with a fixed TypeScript/JavaScript and Python language preset,
+rather than a general VS Code plugin host. Start tools is an explicit execution action, separate
+from opening source. It may prepare the actual Dev Container and requires the current Change
+Writer. The Connector starts unchanged pinned language servers on demand in that container.
+TypeScript uses Project dependencies, and Pyright reads the actual Python environment and Project
+configuration. Neither editor-local tools nor a second synchronized checkout stand in for them.
+
+Use the existing authenticated runtime WebSocket transport, bound to the exact Workspace and
+Runtime Attempt. Language requests cannot select executables, roots, plugins or commands and
+cannot apply edits. Stop, lost authority and disconnect close the processes. Reconnect creates
+a new language connection, reopens retained buffers and does not replay old requests.
+Dependencies in runtime-only mounts or outside source use read-only, session-reported document
+identities containing the original Runtime Attempt. Their bounded reads use that same connection,
+not unrestricted file access on the Theia backend. Project source retains its normal canonical URI.
+This preset is deliberately smaller than full IDE plugin compatibility.
+
 ## Why this integration
 
 Stock Theia file access and search are backend-local. An NFS/RWX mount does not automatically fix

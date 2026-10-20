@@ -46,12 +46,34 @@ exit 0
 }
 
 func TestInteractiveRuntimeInjectsNoEditor(t *testing.T) {
-	assignment := validAssignment()
-	assignment.Channels = []Channel{{Name: "ide", Kind: "ide"}}
-	// No editor artifact or Docker command is needed for Connector-owned PTYs.
-	t.Setenv("PATH", t.TempDir())
-	if err := injectApprovedTools(context.Background(), assignment, "owned-container"); err != nil {
-		t.Fatalf("interactive compute still injects an editor: %v", err)
+	for _, libc := range []string{"musl", "glibc"} {
+		t.Run(libc, func(t *testing.T) {
+			directory := t.TempDir()
+			log := filepath.Join(directory, "commands")
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FACTORY_DOCKER_LOG\"\ncase \"$*\" in *'ldd --version'*) printf '%s\\n' \"$FACTORY_LIBC\";; esac\n"
+			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FACTORY_DOCKER_LOG", log)
+			t.Setenv("FACTORY_LIBC", libc)
+			assignment := validAssignment()
+			assignment.Channels = []Channel{{Name: "ide", Kind: "ide"}}
+			if err := injectApprovedTools(context.Background(), assignment, "owned-container"); err != nil {
+				t.Fatal(err)
+			}
+			commands, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual := string(commands)
+			if strings.Contains(actual, "theia") || strings.Contains(actual, "opencode") || strings.Contains(actual, "forgejo") ||
+				!strings.Contains(actual, "cp /opt/factory/language-tools/node_modules owned-container:/opt/factory/language-tools/node_modules") ||
+				!strings.Contains(actual, "cp /opt/factory/language-tools/"+libc+"/. owned-container:/opt/factory/language-tools/runtime") ||
+				strings.Count(strings.TrimSpace(actual), "\n") != 3 {
+				t.Fatalf("unexpected interactive injection: %s", actual)
+			}
+		})
 	}
 }
 

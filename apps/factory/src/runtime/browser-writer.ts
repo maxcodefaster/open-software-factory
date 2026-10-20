@@ -1,9 +1,9 @@
 import type { ServerWebSocket } from "bun";
 import type { RuntimeHub, RuntimeSocketData } from "./hub";
 
-// Bun invokes socket callbacks synchronously. Keep terminal input ordered while
+// Bun invokes socket callbacks synchronously. Keep interactive input ordered while
 // each open/input acquires durable authority at the actual Connector send boundary.
-export function createTerminalWriterBoundary(
+export function createRuntimeWriterBoundary(
   hub: RuntimeHub,
   authorize: (data: RuntimeSocketData, send: () => void) => Promise<void>,
 ) {
@@ -17,7 +17,7 @@ export function createTerminalWriterBoundary(
     queue.bytes += bytes;
     if (queue.bytes > 1 << 20) {
       queue.closed = true;
-      socket.close(1009, "Terminal input limit exceeded");
+      socket.close(1009, "Interactive input limit exceeded");
       hub.close(socket);
       return;
     }
@@ -39,13 +39,13 @@ export function createTerminalWriterBoundary(
   }
   return {
     open(socket: ServerWebSocket<RuntimeSocketData>) {
-      if (socket.data.kind !== "browser" || socket.data.channel !== "terminal")
+      if (socket.data.kind !== "browser" || !["terminal", "language"].includes(socket.data.channel))
         return hub.open(socket);
       queues.set(socket, { tail: Promise.resolve(), bytes: 0, closed: false });
       enqueue(socket, 0, () => hub.open(socket));
     },
     message(socket: ServerWebSocket<RuntimeSocketData>, message: string | Buffer) {
-      if (socket.data.kind !== "browser" || socket.data.channel !== "terminal")
+      if (socket.data.kind !== "browser" || !["terminal", "language"].includes(socket.data.channel))
         return hub.message(socket, message);
       enqueue(socket, Buffer.byteLength(message), () => hub.message(socket, message));
     },

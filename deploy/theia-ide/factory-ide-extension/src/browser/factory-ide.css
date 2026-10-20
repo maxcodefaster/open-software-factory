@@ -21,6 +21,34 @@
   }
 }
 
+/* Keep the active file's Workspace and the language-tools action visible.
+   Passive editor details remain available through editor settings. */
+@media (max-width: 1000px) {
+  #theia-statusBar #status-bar-session-preference-status,
+  #theia-statusBar #status-bar-editor-status-encoding,
+  #theia-statusBar #status-bar-editor-status-eol,
+  #theia-statusBar #status-bar-editor-status-tabbing-config {
+    display: none;
+  }
+
+  #status-bar-factory-buffer-workspace {
+    max-width: 22vw;
+  }
+}
+
+@media (max-width: 800px) {
+  #theia-statusBar #status-bar-editor-status-cursor-position {
+    display: none;
+  }
+}
+
+@media (max-width: 600px) {
+  #theia-statusBar #status-bar-factory-editor-settings,
+  #theia-statusBar #status-bar-editor-status-language {
+    display: none;
+  }
+}
+
 .lm-TabBar.theia-app-centers .lm-TabBar-tab,
 .lm-TabBar.theia-app-bottom .lm-TabBar-tab {
   border-radius: 0;

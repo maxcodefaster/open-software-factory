@@ -2,7 +2,11 @@
 
 `runtime-host` is the inner host used by Envbox for Development and Staging. It contains Docker
 Engine 29.9.0, the integrity-checked Dev Containers CLI 0.89.0 and the static Factory Runtime Connector.
-It contains no editor, Change Agent or Verification runner.
+It contains no editor, Change Agent or Verification runner. Its development language preset
+contains pinned TypeScript Language Server and Pyright packages with the exact Node 24.21.0
+runtime for glibc and musl. Only interactive Development assignments inject those tools; source
+opening starts none of them. They use the Dev Container's Project toolchain and dependencies.
+The Verification image derives from the smaller common host and contains no language preset.
 
 `build-runtime-host` adds the pinned OpenCode server and Factory's admitted Skill package installer.
 `verification-runtime-host` adds only the

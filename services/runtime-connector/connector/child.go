@@ -30,6 +30,7 @@ type childRuntime struct {
 	controlLock    sync.RWMutex
 	processes      *processManager
 	terminals      *terminalManager
+	languages      *languageManager
 }
 
 type terminalControl struct {
@@ -104,7 +105,10 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 	}()
 	runtime.terminals = newTerminalManager(ctx, assignment, runtime.send)
 	defer runtime.terminals.closeAll()
+	runtime.languages = newLanguageManager(ctx, assignment, runtime.send)
+	defer runtime.languages.closeAll()
 	for {
+		runtime.languages.reconnect()
 		runtime.setControl(control)
 		terminals := runtime.terminals.observation()
 		if err := control.write(Message{
@@ -214,7 +218,11 @@ func (runtime *childRuntime) readLoop(ctx context.Context, control *controlConne
 		case "http-request":
 			runtime.startHTTPRequest(ctx, message)
 		case "websocket-open":
-			go runtime.openWebSocket(ctx, message)
+			if message.Channel == "language" {
+				runtime.languages.attach(message)
+			} else {
+				go runtime.openWebSocket(ctx, message)
+			}
 		case "websocket-message":
 			runtime.writeWebSocket(message)
 		case "stream-close":
@@ -556,6 +564,15 @@ func (runtime *childRuntime) openWebSocket(ctx context.Context, message Message)
 }
 
 func (runtime *childRuntime) writeWebSocket(message Message) {
+	if runtime.languages != nil {
+		if language, err := runtime.languages.write(message); language {
+			if err != nil {
+				runtime.sendError(message.StreamID, err.Error())
+				runtime.languages.close(message.StreamID)
+			}
+			return
+		}
+	}
 	if terminal, err := runtime.terminals.write(message); terminal {
 		if err != nil {
 			runtime.sendError(message.StreamID, err.Error())
@@ -580,6 +597,9 @@ func (runtime *childRuntime) writeWebSocket(message Message) {
 }
 
 func (runtime *childRuntime) closeStream(streamID string) {
+	if runtime.languages != nil && runtime.languages.close(streamID) {
+		return
+	}
 	if runtime.terminals != nil && runtime.terminals.detach(streamID) {
 		return
 	}
@@ -619,6 +639,9 @@ func (runtime *childRuntime) disconnectStreams() {
 		connection.Close()
 	}
 	runtime.terminals.detachAll()
+	if runtime.languages != nil {
+		runtime.languages.closeAll()
+	}
 }
 
 func (runtime *childRuntime) sendError(streamID string, message string) {

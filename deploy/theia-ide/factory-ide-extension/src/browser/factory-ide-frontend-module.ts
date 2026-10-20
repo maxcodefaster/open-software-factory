@@ -5,6 +5,7 @@ import { ApplicationShellOptions } from "@theia/core/lib/browser/shell/applicati
 import { LabelProviderContribution } from "@theia/core/lib/browser/label-provider";
 import { StatusBar, StatusBarImpl } from "@theia/core/lib/browser/status-bar/status-bar";
 import { ContainerModule } from "@theia/core/shared/inversify";
+import { ResourceResolver } from "@theia/core/lib/common/resource";
 import { FileServiceContribution } from "@theia/filesystem/lib/browser/file-service";
 import { SearchInWorkspaceServer } from "@theia/search-in-workspace/lib/common/search-in-workspace-interface";
 import { SearchInWorkspaceClientImpl } from "@theia/search-in-workspace/lib/browser/search-in-workspace-service";
@@ -22,6 +23,7 @@ import { FactorySourceClient } from "./factory-source-client";
 import { FactoryWorkspaceFileContribution, FactoryWorkspaceFiles } from "./factory-workspace-files";
 import { FactoryWorkspaceSearch } from "./factory-workspace-search";
 import { FactoryDiagnosticsContribution } from "./factory-diagnostics";
+import { FactoryLanguageTools } from "./factory-language-tools";
 import { LanguageGrammarDefinitionContribution } from "@theia/monaco/lib/browser/textmate/textmate-contribution";
 import { FactoryLanguageGrammars } from "./factory-language-grammars";
 import { FactoryChromeContribution } from "./factory-chrome";
@@ -85,6 +87,16 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
 
   bind(FactoryDiagnosticsContribution).toSelf().inSingletonScope();
   bind(FrontendApplicationContribution).toService(FactoryDiagnosticsContribution);
+  bind(FactoryLanguageTools).toSelf().inSingletonScope();
+  bind(FrontendApplicationContribution).toService(FactoryLanguageTools);
+  // Resolving ResourceProvider builds EditorManager itself. Defer the language
+  // contribution lookup until an actual dependency document is opened.
+  bind<ResourceResolver>(ResourceResolver).toDynamicValue(({ container }) => ({
+    resolve(uri) {
+      if (uri.scheme !== "factory-language") throw new Error("Not a project dependency document");
+      return container.get(FactoryLanguageTools).resolve(uri);
+    },
+  }));
 
   bind(FactoryRuntimeWidget).toSelf();
   bind(WidgetFactory)

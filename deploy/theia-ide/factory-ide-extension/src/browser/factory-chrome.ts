@@ -22,6 +22,7 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
   #editorSubscription: Disposable | undefined;
   #labelSubscription: Disposable | undefined;
   #stopped = false;
+  #wideExplorerWidth: number | undefined;
 
   constructor(
     @inject(ApplicationShell) private readonly shell: ApplicationShell,
@@ -59,7 +60,22 @@ export class FactoryChromeContribution implements FrontendApplicationContributio
     this.themes.setCurrentTheme(factoryTheme.id, false);
     this.shell.rightPanelHandler.container.hide();
     // Embedded frames can resize before Theia installs its window listener, or while hidden.
-    this.#resizeObserver = new ResizeObserver(() => this.shell.update());
+    this.#resizeObserver = new ResizeObserver(() => {
+      const width = this.shell.node.clientWidth;
+      const panel = this.shell.leftPanelHandler;
+      if (width > 0 && width < 1000 && panel.dockPanel.isVisible) {
+        const maximum = Math.max(140, Math.floor(width * 0.32));
+        const current = panel.container.node.clientWidth;
+        if (current > maximum) {
+          this.#wideExplorerWidth ??= current;
+          this.shell.resize(maximum, "left");
+        }
+      } else if (width >= 1000 && this.#wideExplorerWidth !== undefined) {
+        this.shell.resize(this.#wideExplorerWidth, "left");
+        this.#wideExplorerWidth = undefined;
+      }
+      this.shell.update();
+    });
     this.#resizeObserver.observe(this.shell.node);
     void this.preferences.ready.then(() => {
       if (this.#stopped) return;

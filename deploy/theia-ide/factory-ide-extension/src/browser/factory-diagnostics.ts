@@ -5,6 +5,7 @@ import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
 import { ProblemManager } from "@theia/markers/lib/browser";
 import { inject, injectable } from "@theia/core/shared/inversify";
 import ts from "typescript";
+import { factoryLanguageState } from "./factory-language-state";
 
 const diagnosticsOwner = "factory-typescript";
 const supportedSource = /\.(?:[cm]?[jt]sx?)$/i;
@@ -66,9 +67,10 @@ export class FactoryDiagnosticsContribution implements FrontendApplicationContri
     const update = () => {
       const uri = widget.editor.uri;
       const fileName = uri.path.toString();
-      const diagnostics = supportedSource.test(fileName)
-        ? sourceDiagnostics(fileName, widget.editor.document.getText())
-        : [];
+      const diagnostics =
+        supportedSource.test(fileName) && !factoryLanguageState.has(uri.authority, "typescript")
+          ? sourceDiagnostics(fileName, widget.editor.document.getText())
+          : [];
       this.problems.setMarkers(uri, diagnosticsOwner, diagnostics);
     };
     const schedule = () => {
@@ -77,10 +79,12 @@ export class FactoryDiagnosticsContribution implements FrontendApplicationContri
     };
     const contentChanged = widget.editor.onDocumentContentChanged(schedule);
     const languageChanged = widget.editor.onLanguageChanged(schedule);
+    const supportChanged = factoryLanguageState.subscribe(schedule);
     widget.onDidDispose(() => {
       if (timer !== undefined) window.clearTimeout(timer);
       contentChanged.dispose();
       languageChanged.dispose();
+      supportChanged.dispose();
       this.problems.setMarkers(widget.editor.uri, diagnosticsOwner, []);
     });
     schedule();

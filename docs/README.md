@@ -113,7 +113,16 @@ The independent file service and assigned compute mount the same canonical sourc
 storage node. Factory's Theia extension adapts files, search and watch operations through scoped
 access. Initialization runs no Project hooks or code and permanently drops ownership privileges
 before serving source. No synchronized checkout, mutable current-directory alias or NFS watch
-assumption is involved. Language tooling still needs its real execution toolchain and dependencies.
+assumption is involved.
+The independent editor has a pinned TypeScript/JavaScript and Python language preset. Start tools
+explicitly prepares execution if needed; opening source alone never starts a language server.
+The servers run in the actual Dev Container with Project dependencies, not on the editor backend.
+Completion, semantic diagnostics, hover and definition navigation use Workspace/Runtime Attempt-bound
+WebSockets. Lost authority, Stop and disconnect close their processes. Reconnect restores buffers
+without replaying prior requests. Definitions from runtime-only dependencies open read-only through
+session-reported, exact-Attempt identities, never backend-local `file://` access. Other languages
+remain syntax-only. Arbitrary language plugins, shell commands, server edits, general formatting
+and refactoring are not part of the preset.
 
 Every Sandbox uses the same topology:
 

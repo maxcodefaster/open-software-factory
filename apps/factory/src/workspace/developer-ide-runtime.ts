@@ -186,10 +186,10 @@ export function createDeveloperIDERuntime(
       authorized: EditorAuthorization,
     ): Promise<RuntimeSocketData | undefined> {
       const match = suffix.match(
-        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime\/([0-9a-f-]{36})\/terminal\/([a-zA-Z0-9_-]{1,64})$/,
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime\/([0-9a-f-]{36})\/(?:terminal\/([a-zA-Z0-9_-]{1,64})|language\/(typescript|python))$/,
       );
-      if (!match?.[1] || !match[2] || !match[3]) return undefined;
-      const [, workspaceID, attemptID, terminalID] = match;
+      if (!match?.[1] || !match[2] || (!match[3] && !match[4])) return undefined;
+      const [, workspaceID, attemptID, terminalID, language] = match;
       await exactAttempt(workspaceID, attemptID, authorized.grant.userID);
       await database.client.begin((sql) =>
         workspaceWriteAuthorityIn(sql, workspaceID, authorized.grant.userID),
@@ -198,8 +198,8 @@ export function createDeveloperIDERuntime(
       return {
         kind: "browser",
         attemptID,
-        channel: "terminal",
-        path: `/${terminalID}`,
+        channel: language ? "language" : "terminal",
+        path: language ? `/${language}/${workspaceID}` : `/${terminalID}`,
         accessToken: token,
       };
     },

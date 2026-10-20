@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, expect as browserExpect, type Page } from "@playwright/test";
+import { languageToolsFixture } from "../fixtures/language-tools";
 
 const enabled = process.env["FACTORY_RUN_INDEPENDENT_EDITOR_PROOF"] === "1";
 const root = resolve(import.meta.dir, "../..");
@@ -36,6 +37,19 @@ async function waitReady(url: string): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error("Independent editor did not become ready");
+}
+
+async function editorLogs(name: string) {
+  const child = Bun.spawn(["docker", "logs", "--tail", "120", name], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [output, diagnostic] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return redacted(`${output}\n${diagnostic}`);
 }
 
 interface SourceFixture {
@@ -162,6 +176,7 @@ test.skipIf(!enabled)(
       JSON.stringify({ proofID, sourceImage, editorImage, editorName, workspaceA, workspaceB }),
     );
     const sources = new Map<string, SourceFixture>();
+    let tools: Awaited<ReturnType<typeof languageToolsFixture>> | undefined;
     let proxy: ReturnType<typeof Bun.serve<ProxySocket>> | undefined;
     let capturedPage: Page | undefined;
     const browserErrors: string[] = [];
@@ -193,6 +208,14 @@ test.skipIf(!enabled)(
           ["index.html", '<!doctype html><button title="Save">Save</button>\n'],
           ["package.json", '{"private":true}\n'],
           ["tsconfig.json", '// project compiler options\n{"compilerOptions":{"strict":true}}\n'],
+          [
+            "language.ts",
+            'import { payment } from "fixture-dep";\nconst total: string = payment.amount;\npayment.\n',
+          ],
+          [
+            "language.py",
+            "from fixture_amount import amount\nwrong: str = amount()\nvalue = amount()\nvalue.\n",
+          ],
         ];
         const initialize = `const fs=require('fs');fs.mkdirSync('/data/source',{mode:0o755});fs.mkdirSync('/data/control',{mode:0o755});fs.chownSync('/data/source',101000,101000);for(const [name,content] of ${JSON.stringify(files)}){fs.writeFileSync('/data/source/'+name,content);fs.chownSync('/data/source/'+name,101000,101000)}fs.writeFileSync('/data/control/access.json',JSON.stringify(${JSON.stringify({ workspaceId: workspaceID, serviceId: serviceID, epoch: 1, token })}),{mode:0o444});`;
         containers.push(initializer);
@@ -284,6 +307,21 @@ test.skipIf(!enabled)(
           "101000:101000",
         );
       }
+      if (process.env["FACTORY_LANGUAGE_PROOF_IMAGE"])
+        tools = await languageToolsFixture({
+          image: await docker(
+            "image",
+            "inspect",
+            process.env["FACTORY_LANGUAGE_PROOF_IMAGE"]!,
+            "--format",
+            "{{.Id}}",
+          ),
+          proofID,
+          artifacts,
+          sources: [...sources.values()],
+          containers,
+          docker,
+        });
       containers.push(editorName);
       await docker(
         "run",
@@ -333,16 +371,25 @@ test.skipIf(!enabled)(
             });
           }
           const context = url.pathname.match(
-            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/(writer|runtime)$/,
+            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/(writer|runtime)(\/ensure)?$/,
           );
           if (context?.[1]) {
             if (!sources.has(context[1])) return new Response(null, { status: 403 });
-            if (request.method !== "GET")
+            if (context[2] === "runtime" && context[3] && request.method === "POST" && tools) {
+              await tools.start(context[1]);
+              return Response.json(tools.context(context[1]), { status: 202 });
+            }
+            if (request.method !== "GET" || context[3])
               throw new Error("Source-only proof must not start compute or take editing authority");
             return Response.json(
               context[2] === "writer"
                 ? { state: "human", canWrite: true, yours: true, epoch: 1 }
-                : { workspaceID: context[1], attemptID: null, state: "stopped", failure: null },
+                : (tools?.context(context[1]) ?? {
+                    workspaceID: context[1],
+                    attemptID: null,
+                    state: "stopped",
+                    failure: null,
+                  }),
             );
           }
           const sourcePath = url.pathname.match(
@@ -372,12 +419,30 @@ test.skipIf(!enabled)(
             return response;
           }
           if (request.headers.get("upgrade") === "websocket") {
+            const language = url.pathname.match(
+              /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime\/([0-9a-f-]{36})\/language\/(typescript|python)$/,
+            );
+            if (
+              url.pathname.startsWith("/__factory/") &&
+              (!language || !tools || tools.context(language[1]!).attemptID !== language[2])
+            )
+              return new Response(null, { status: 403 });
             const target = new WebSocket(
-              `${editorOrigin.replace("http:", "ws:")}${url.pathname}${url.search}`,
+              language && tools
+                ? tools.target(language[1]!, language[3]!)
+                : `${editorOrigin.replace("http:", "ws:")}${url.pathname}${url.search}`,
             );
             if (server.upgrade(request, { data: { target, pending: [], bytes: 0 } })) return;
             target.close();
             return new Response(null, { status: 400 });
+          }
+          const processes = url.pathname.match(
+            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime\/([0-9a-f-]{36})\/processes(\/events)?$/,
+          );
+          if (processes && tools && tools.context(processes[1]!).attemptID === processes[2]) {
+            return processes[3]
+              ? tools.processEvents(processes[1]!, request.signal)
+              : Response.json(tools.processes(processes[1]!));
           }
           const headers = new Headers(request.headers);
           headers.set("Accept-Encoding", "identity");
@@ -677,6 +742,169 @@ test.skipIf(!enabled)(
         "export const workspace = 'workspace-a';\n// newer external source",
       );
       await page.screenshot({ path: resolve(artifacts, "stale-save-keeps-buffer.png") });
+      let languageMetrics: { languageProcesses: number; memoryBytes: number } | undefined;
+      if (tools) {
+        expect(tools.starts).toBe(0);
+        expect(tools.languageConnections).toBe(0);
+        await frame.locator("body").press(mac ? "Meta+Shift+E" : "Control+Shift+E");
+        await frame.locator("#files").getByText("language.ts", { exact: true }).dblclick();
+        const status = frame.locator("#status-bar-factory-language-tools");
+        await browserExpect(status).toContainText("Start tools");
+        await page.screenshot({ path: resolve(artifacts, "project-tools-explicit-start.png") });
+        await status.click();
+        // Explicit compute preparation has the product's existing five-minute
+        // bound. Connected language requests are checked separately below.
+        await browserExpect(status).toHaveText("TypeScript tools", { timeout: 300_000 });
+        expect(tools.starts).toBe(1);
+        const code = frame.locator(".monaco-editor:visible");
+        await browserExpect(code.locator(".squiggly-error").first()).toBeVisible({
+          timeout: 20_000,
+        });
+        await frame.locator("#shell-tab-problems").click();
+        await browserExpect(frame.locator("#problems")).toContainText(
+          "Type 'number' is not assignable to type 'string'",
+          { timeout: 20_000 },
+        );
+        await page.screenshot({ path: resolve(artifacts, "typescript-semantic-diagnostic.png") });
+        const codeInput = code.locator("[role='textbox']:not([aria-hidden='true'])");
+        await codeInput.focus();
+        await codeInput.press(mac ? "Meta+ArrowDown" : "Control+End");
+        await codeInput.press("ArrowUp");
+        await codeInput.press(mac ? "Meta+ArrowRight" : "End");
+        await codeInput.press("Control+Space");
+        await browserExpect(
+          frame.locator(".suggest-widget.visible").getByText("amount", { exact: true }),
+        ).toBeVisible();
+        await page.screenshot({ path: resolve(artifacts, "typescript-project-completion.png") });
+        await codeInput.press("Escape");
+        // Definition goes to the actual installed dependency in the same Workspace.
+        await codeInput.press(mac ? "Meta+ArrowUp" : "Control+Home");
+        await codeInput.press("ArrowDown");
+        await codeInput.press(mac ? "Meta+ArrowLeft" : "Home");
+        for (let column = 0; column < 31; column++) await codeInput.press("ArrowRight");
+        await codeInput.press("F12");
+        await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+          "data-uri",
+          new RegExp(
+            `factory-language://${workspaceA}/.+/opt/project-seed/node_modules/fixture-dep/index.d.ts$`,
+          ),
+        );
+        await page.screenshot({ path: resolve(artifacts, "typescript-project-definition.png") });
+        await browserExpect(
+          frame.locator(".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])"),
+        ).toHaveAttribute("aria-autocomplete", "none");
+        await frame.locator("#files").getByText("language.py", { exact: true }).dblclick();
+        await browserExpect(status).toHaveText("Python tools", { timeout: 20_000 });
+        await browserExpect(
+          frame.locator(".monaco-editor:visible .squiggly-error").first(),
+        ).toBeVisible({ timeout: 20_000 });
+        await browserExpect(frame.locator("#problems")).toContainText(
+          /Type "int" is not assignable/,
+          { timeout: 20_000 },
+        );
+        await page.screenshot({ path: resolve(artifacts, "python-semantic-diagnostic.png") });
+        const pythonInput = frame.locator(
+          ".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])",
+        );
+        await pythonInput.focus();
+        await pythonInput.press(mac ? "Meta+ArrowDown" : "Control+End");
+        await pythonInput.press("ArrowUp");
+        await pythonInput.press(mac ? "Meta+ArrowRight" : "End");
+        await pythonInput.press("Control+Space");
+        await browserExpect(
+          frame.locator(".suggest-widget.visible").getByText("bit_length", { exact: true }),
+        ).toBeVisible();
+        await page.screenshot({ path: resolve(artifacts, "python-project-completion.png") });
+        await pythonInput.press("Escape");
+        await pythonInput.press(mac ? "Meta+ArrowUp" : "Control+Home");
+        await pythonInput.press(mac ? "Meta+ArrowRight" : "End");
+        await pythonInput.press("ArrowLeft");
+        await pythonInput.press("F12");
+        await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+          "data-uri",
+          new RegExp(
+            `factory-language://${workspaceA}/.+/opt/project-venv/lib/python3.14/site-packages/fixture_amount.py$`,
+          ),
+        );
+        await page.screenshot({ path: resolve(artifacts, "python-environment-definition.png") });
+        await browserExpect(
+          frame.locator(".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])"),
+        ).toHaveAttribute("aria-autocomplete", "none");
+        languageMetrics = await tools.processMetrics(workspaceA);
+        expect(languageMetrics.languageProcesses).toBeGreaterThanOrEqual(2);
+        await frame.locator("#files").getByText("language.ts", { exact: true }).dblclick();
+        const reconnectInput = frame.locator(
+          ".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])",
+        );
+        await reconnectInput.focus();
+        await reconnectInput.press(mac ? "Meta+ArrowDown" : "Control+End");
+        await reconnectInput.pressSequentially("// retained through language reconnect");
+        for (let reconnect = 0; reconnect < 3; reconnect++) {
+          tools.disconnect(workspaceA);
+          await browserExpect(status).toContainText("Retry tools");
+          await status.click();
+          await browserExpect(status).toHaveText("TypeScript tools", { timeout: 20_000 });
+          await browserExpect(frame.locator("#problems")).toContainText(
+            "Type 'number' is not assignable to type 'string'",
+            { timeout: 20_000 },
+          );
+          await browserExpect(frame.locator(".monaco-editor:visible .view-lines")).toContainText(
+            "retained through language reconnect",
+          );
+          expect(tools.starts).toBe(1);
+        }
+        await page.screenshot({ path: resolve(artifacts, "project-language-reconnect.png") });
+        await page.locator("#b").click();
+        await browserExpect(frame.getByText("Ticket · Fixture B", { exact: true })).toBeVisible();
+        await frame.locator("#files").getByText("language.ts", { exact: true }).dblclick();
+        await browserExpect(status).toContainText("Start tools");
+        expect(tools.starts).toBe(1);
+        await page.locator("#a").click();
+        await browserExpect(frame.getByText("Personal · Fixture A", { exact: true })).toBeVisible();
+        await frame.locator("#files").getByText("language.ts", { exact: true }).dblclick();
+        await browserExpect(status).toHaveText("TypeScript tools", { timeout: 20_000 });
+        await browserExpect(frame.locator("#problems")).toContainText(
+          "Type 'number' is not assignable to type 'string'",
+          { timeout: 20_000 },
+        );
+        await browserExpect(frame.locator(".monaco-editor:visible .view-lines")).toContainText(
+          "retained through language reconnect",
+        );
+        await page.screenshot({
+          path: resolve(artifacts, "project-tools-workspace-retention.png"),
+        });
+        await page.setViewportSize({ width: 800, height: 900 });
+        await browserExpect
+          .poll(() => explorer.evaluate((element) => element.getBoundingClientRect().width))
+          .toBeLessThanOrEqual(300);
+        await browserExpect
+          .poll(() => status.evaluate((element) => element.getBoundingClientRect().right))
+          .toBeLessThanOrEqual(800);
+        await browserExpect(status).toBeInViewport();
+        await page.screenshot({ path: resolve(artifacts, "project-language-narrow.png") });
+        await status.click();
+        await browserExpect(status).toContainText("Start tools");
+        await browserExpect
+          .poll(async () => (await tools!.processMetrics(workspaceA)).languageProcesses)
+          .toBe(0);
+        await page.setViewportSize({ width: 1440, height: 950 });
+        await browserExpect
+          .poll(async () =>
+            Math.abs(
+              (await explorer.evaluate((element) => element.getBoundingClientRect().width)) -
+                resizedExplorerWidth,
+            ),
+          )
+          .toBeLessThan(3);
+      }
+      const editorLog = await editorLogs(editorName);
+      expect(editorLog).not.toContain("EROFS");
+      expect(editorLog).not.toContain("Uncaught Exception");
+      if (tools)
+        await writeFile(
+          resolve(artifacts, "language-observations.json"),
+          JSON.stringify(tools.observations, null, 2),
+        );
       await writeFile(
         resolve(artifacts, "result.json"),
         JSON.stringify({
@@ -699,20 +927,31 @@ test.skipIf(!enabled)(
           explorerUserResizePreserved: true,
           activeBufferWorkspaceVisible: true,
           starterSyntaxWithoutExecution: true,
+          projectLanguageTools: tools
+            ? {
+                starts: tools.starts,
+                image: tools.image,
+                languageConnections: tools.languageConnections,
+                typeScriptDependencies: true,
+                pythonVirtualEnvironment: true,
+                completion: true,
+                semanticDiagnostics: true,
+                definitions: true,
+                reconnectRetainsBuffers: true,
+                languageMetrics,
+                languageStopConfirmed: true,
+              }
+            : null,
         }),
       );
     } catch (error) {
       failed = true;
-      const logs = Bun.spawn(["docker", "logs", "--tail", "120", editorName], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [output, diagnostic] = await Promise.all([
-        new Response(logs.stdout).text(),
-        new Response(logs.stderr).text(),
-        logs.exited,
-      ]);
-      await writeFile(resolve(artifacts, "editor.log"), redacted(`${output}\n${diagnostic}`));
+      if (tools)
+        await writeFile(
+          resolve(artifacts, "language-observations.json"),
+          JSON.stringify(tools.observations, null, 2),
+        );
+      await writeFile(resolve(artifacts, "editor.log"), await editorLogs(editorName));
       if (capturedPage) {
         await capturedPage
           .screenshot({ path: resolve(artifacts, "failed-source.png") })
@@ -746,10 +985,11 @@ test.skipIf(!enabled)(
     } finally {
       await browser.close();
       shutdown.abort();
+      await tools?.dispose();
       await proxy?.stop(true);
       await cleanOwnedFixtures(proofID, containers, volumes, artifacts, failed);
       for (const source of sources.values()) fixtureSecrets.delete(source.token);
     }
   },
-  240_000,
+  600_000,
 );
