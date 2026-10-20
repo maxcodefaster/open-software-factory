@@ -48,6 +48,28 @@ test("a bounded Pod-read subprocess timeout is still an unavailable observation"
 });
 
 test.each([
+  "Unable to connect to the server: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
+  "Error from server (ServiceUnavailable): the server is currently unable to handle the request",
+])(
+  "namespace read classifies transient observations without claiming resource absence: %s",
+  async (stderr) => {
+    const client = createKubernetesClient(async () => ({ stdout: "", stderr, exitCode: 1 }));
+    await expect(client.getNamespace("owned-namespace")).rejects.toBeInstanceOf(
+      KubernetesObservationUnavailableError,
+    );
+  },
+);
+
+test("a bounded namespace-read subprocess timeout remains an unavailable observation", async () => {
+  const client = createKubernetesClient(async () => {
+    throw new Error("Infrastructure command timed out; outcome is unconfirmed");
+  });
+  await expect(client.getNamespace("owned-namespace")).rejects.toBeInstanceOf(
+    KubernetesObservationUnavailableError,
+  );
+});
+
+test.each([
   "Error from server (Forbidden): pods is forbidden",
   "You must be logged in to the server",
   "Infrastructure command output exceeded its bound",

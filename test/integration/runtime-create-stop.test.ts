@@ -10,6 +10,7 @@ import {
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import {
   createKubernetesClient,
+  KubernetesObservationUnavailableError,
   type KubernetesClient,
 } from "../../packages/runtime-kubernetes/src/client";
 import upstream from "../../upstream.json";
@@ -397,6 +398,72 @@ test("Stop retires a failed older attempt without reactivating it or stopping it
   } finally {
     await database.client.end({ timeout: 2 });
     await processFixture.dispose();
+  }
+}, 30_000);
+
+test("a transient namespace read during failed-attempt Stop settles without another human retry", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const release = Promise.withResolvers<void>();
+  let attemptID: string | undefined;
+  let controller: ReturnType<typeof createRuntimeController> | undefined;
+  let reads = 0;
+  let deletions = 0;
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    attemptID = owned.attemptID;
+    await database.client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${attemptID}`;
+    const replacement = crypto.randomUUID();
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      SELECT ${replacement},project_id,change_id,workspace_id,2,revision,'ready',kubernetes_namespace,'runtime-2',parent_connector_token_hash,child_connector_token_hash,now(),created_by
+      FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    controller = createRuntimeController(
+      database,
+      new RuntimeHub(async () => {}),
+      "owned-transient-stop-secret",
+      {
+        prepareExecution: async () => {
+          throw new Error("Stop must not prepare source or repeat work");
+        },
+      },
+      {
+        ...createKubernetesClient(),
+        getNamespace: async () => {
+          if (++reads === 1)
+            throw new KubernetesObservationUnavailableError("Owned namespace read timed out");
+          await release.promise;
+          return { uid: "owned-source-namespace", labels: {} };
+        },
+        getPod: async (_namespace, podName) => {
+          expect(podName).toBe("never-created");
+          return null;
+        },
+        deleteNamespace: async () => {
+          deletions++;
+        },
+        deletePod: async () => {
+          deletions++;
+        },
+      },
+      async () => "",
+    );
+    await controller.stop(attemptID);
+    const [pending] = await database.client`
+      SELECT state,stop_intended_at IS NOT NULL AS intended FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    expect(pending).toEqual({ state: "failed", intended: true });
+    release.resolve();
+    await eventually(
+      async () => (await controller?.get(owned.attemptID))?.state,
+      (state) => state === "stopped",
+      "Persisted Stop was not reconciled after the transient read",
+    );
+    expect((await controller.get(replacement))?.state).toBe("ready");
+    expect(deletions).toBe(0);
+    expect(reads).toBe(2);
+  } finally {
+    release.resolve();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
   }
 }, 30_000);
 

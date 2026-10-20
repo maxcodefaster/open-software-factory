@@ -455,107 +455,111 @@ test("source admission persists intent, recovers lost create acknowledgement and
   }
 }, 30_000);
 
-test("admitted Contributor execution survives slow first-volume placement without granting editing authority", async () => {
-  const fixture = await ownedSourceFixture();
-  let sources: ReturnType<typeof createWorkspaceSourceController> | undefined;
-  try {
-    const { database, projectID, contributorID, developerID } = fixture;
-    const ticketID = crypto.randomUUID();
-    const revisionID = crypto.randomUUID();
-    const approvalID = crypto.randomUUID();
-    const changeID = crypto.randomUUID();
-    const identity = ticketWorkspaceIdentity(changeID);
-    const runtime = runtimeIdentity(identity.workspaceID, 1);
-    const content = JSON.stringify({
-      summary: "Owned source preparation",
-      acceptanceCriteria: ["Shared checkout"],
-      nonGoals: [],
-    });
-    await database.client`INSERT INTO factory.ticket(id,project_id,title,created_by) VALUES(${ticketID},${projectID},'Source admission',${contributorID})`;
-    await database.client`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${content},${createHash("sha256").update(content).digest("hex")},${contributorID})`;
-    await database.client`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${contributorID})`;
-    const branchName = `factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`;
-    await database.client`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${branchName},${"a".repeat(40)},'starting',${contributorID})`;
-    await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by) VALUES(${identity.workspaceID},${projectID},'ticket',${ticketID},${changeID},${branchName},${"a".repeat(40)},${identity.kubernetesNamespace},${identity.volumeName},${contributorID})`;
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${runtime.attemptID},${projectID},${changeID},${identity.workspaceID},1,${"a".repeat(40)},'create-intended',${identity.kubernetesNamespace},${runtime.podName},${"b".repeat(64)},${"c".repeat(64)},now(),${contributorID})`;
-    await database.client`UPDATE factory.change SET runtime_attempt_id=${runtime.attemptID} WHERE id=${changeID}`;
-    let creates = 0;
-    let elapsed = 0;
-    sources = createWorkspaceSourceController(
-      database,
-      "owned-source-secret",
-      {
-        async executionNode() {
-          throw new Error("Compute is absent");
+test.each([151_000, 721_000])(
+  "admitted Contributor execution survives %ims first-volume placement without granting editing authority",
+  async (placementMS) => {
+    const fixture = await ownedSourceFixture();
+    let sources: ReturnType<typeof createWorkspaceSourceController> | undefined;
+    try {
+      const { database, projectID, contributorID, developerID } = fixture;
+      const ticketID = crypto.randomUUID();
+      const revisionID = crypto.randomUUID();
+      const approvalID = crypto.randomUUID();
+      const changeID = crypto.randomUUID();
+      const identity = ticketWorkspaceIdentity(changeID);
+      const runtime = runtimeIdentity(identity.workspaceID, 1);
+      const content = JSON.stringify({
+        summary: "Owned source preparation",
+        acceptanceCriteria: ["Shared checkout"],
+        nonGoals: [],
+      });
+      await database.client`INSERT INTO factory.ticket(id,project_id,title,created_by) VALUES(${ticketID},${projectID},'Source admission',${contributorID})`;
+      await database.client`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${content},${createHash("sha256").update(content).digest("hex")},${contributorID})`;
+      await database.client`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${contributorID})`;
+      const branchName = `factory/change-${changeID.replaceAll("-", "").slice(0, 12)}`;
+      await database.client`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${changeID},${projectID},${ticketID},${approvalID},${branchName},${"a".repeat(40)},'starting',${contributorID})`;
+      await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by) VALUES(${identity.workspaceID},${projectID},'ticket',${ticketID},${changeID},${branchName},${"a".repeat(40)},${identity.kubernetesNamespace},${identity.volumeName},${contributorID})`;
+      await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by) VALUES(${runtime.attemptID},${projectID},${changeID},${identity.workspaceID},1,${"a".repeat(40)},'create-intended',${identity.kubernetesNamespace},${runtime.podName},${"b".repeat(64)},${"c".repeat(64)},now(),${contributorID})`;
+      await database.client`UPDATE factory.change SET runtime_attempt_id=${runtime.attemptID} WHERE id=${changeID}`;
+      let creates = 0;
+      let elapsed = 0;
+      sources = createWorkspaceSourceController(
+        database,
+        "owned-source-secret",
+        {
+          async executionNode() {
+            throw new Error("Compute is absent");
+          },
+          async prepare(input) {
+            creates++;
+            const [intent] = await database.client<
+              Array<{ state: string; kubernetes_uid: string | null }>
+            >`SELECT state,kubernetes_uid FROM factory.runtime_attempt WHERE id=${runtime.attemptID}`;
+            expect(intent?.state).toBe("create-intended");
+            expect(intent?.kubernetes_uid).toBeNull();
+            expect(input.identity.workspaceID).toBe(identity.workspaceID);
+            expect(
+              (
+                await database.client<
+                  Array<{ state: string }>
+                >`SELECT state FROM factory.workspace_source WHERE workspace_id=${identity.workspaceID}`
+              )[0]?.state,
+            ).toBe("create-intended");
+            // Infrastructure placement is not source initialization failure.
+            // Observe the same Pod even when placement outlasts an observation window.
+            elapsed += placementMS;
+            return {
+              namespaceUID: "source-namespace",
+              claimUID: "source-claim",
+              podUID: "source-pod",
+              storageNode: "canonical-node",
+              ready: false,
+              failed: false,
+            };
+          },
+          async observe() {
+            return {
+              namespaceUID: "source-namespace",
+              claimUID: "source-claim",
+              podUID: "source-pod",
+              storageNode: "canonical-node",
+              ready: true,
+              failed: false,
+            };
+          },
+          async request() {
+            return Response.json({});
+          },
+          async connect() {},
+          async stop() {},
+          close() {},
         },
-        async prepare(input) {
-          creates++;
-          const [intent] = await database.client<
-            Array<{ state: string; kubernetes_uid: string | null }>
-          >`SELECT state,kubernetes_uid FROM factory.runtime_attempt WHERE id=${runtime.attemptID}`;
-          expect(intent?.state).toBe("create-intended");
-          expect(intent?.kubernetes_uid).toBeNull();
-          expect(input.identity.workspaceID).toBe(identity.workspaceID);
-          expect(
-            (
-              await database.client<
-                Array<{ state: string }>
-              >`SELECT state FROM factory.workspace_source WHERE workspace_id=${identity.workspaceID}`
-            )[0]?.state,
-          ).toBe("create-intended");
-          // Cold CSI placement can take longer than the former 150-second bound.
-          // Keep the exact intent pending, then observe the same successfully ready Pod.
-          elapsed += 151_000;
-          return {
-            namespaceUID: "source-namespace",
-            claimUID: "source-claim",
-            podUID: "source-pod",
-            storageNode: "canonical-node",
-            ready: false,
-            failed: false,
-          };
-        },
-        async observe() {
-          return {
-            namespaceUID: "source-namespace",
-            claimUID: "source-claim",
-            podUID: "source-pod",
-            storageNode: "canonical-node",
-            ready: true,
-            failed: false,
-          };
-        },
-        async request() {
-          return Response.json({});
-        },
-        async connect() {},
-        async stop() {},
-        close() {},
-      },
-      () => performance.now() + elapsed,
-    );
-    expect(await sources.prepareExecution(runtime.attemptID)).toEqual({
-      workspaceID: identity.workspaceID,
-      namespaceUID: "source-namespace",
-      claimUID: "source-claim",
-      storageNode: "canonical-node",
-    });
-    expect(creates).toBe(1);
-    await expect(sources.get(identity.workspaceID, contributorID)).rejects.toThrow(
-      "Developer access required",
-    );
-    expect((await sources.get(identity.workspaceID, developerID)).state).toBe("ready");
-    expect((await sources.get(identity.workspaceID, developerID)).label).toBe(
-      "Ticket · Source admission",
-    );
-    await database.client`UPDATE factory.runtime_attempt SET state='stop-intended',stop_intended_at=now() WHERE id=${runtime.attemptID}`;
-    await expect(sources.prepareExecution(runtime.attemptID)).rejects.toThrow("no longer active");
-    expect(creates).toBe(1);
-  } finally {
-    await sources?.close();
-    await fixture.dispose();
-  }
-}, 30_000);
+        () => performance.now() + elapsed,
+      );
+      expect(await sources.prepareExecution(runtime.attemptID)).toEqual({
+        workspaceID: identity.workspaceID,
+        namespaceUID: "source-namespace",
+        claimUID: "source-claim",
+        storageNode: "canonical-node",
+      });
+      expect(creates).toBe(1);
+      await expect(sources.get(identity.workspaceID, contributorID)).rejects.toThrow(
+        "Developer access required",
+      );
+      expect((await sources.get(identity.workspaceID, developerID)).state).toBe("ready");
+      expect((await sources.get(identity.workspaceID, developerID)).label).toBe(
+        "Ticket · Source admission",
+      );
+      await database.client`UPDATE factory.runtime_attempt SET state='stop-intended',stop_intended_at=now() WHERE id=${runtime.attemptID}`;
+      await expect(sources.prepareExecution(runtime.attemptID)).rejects.toThrow("no longer active");
+      expect(creates).toBe(1);
+    } finally {
+      await sources?.close();
+      await fixture.dispose();
+    }
+  },
+  30_000,
+);
 
 test("source operations use current Developer authority, order revocation after writes and close watches", async () => {
   const fixture = await ownedSourceFixture();

@@ -25,9 +25,9 @@ import { resolveRepositoryRevision, serveRuntimeRepository } from "../runtime/gi
 
 type Database = ReturnType<typeof createDatabase>;
 type SourceSQL = Database["client"] | AgentTurnTransaction;
-// Cold volume placement and checkout are separate from prepared IDE switching.
-// Keep reconciliation and execution admission on the same bounded startup budget.
-const sourcePreparationTimeoutMS = 300_000;
+// Bound continuously unavailable observations, not valid Pending resources.
+// The source process separately bounds actual checkout initialization to 120s.
+const sourceObservationTimeoutMS = 300_000;
 interface SourceRow {
   workspaceID: string;
   projectID: string;
@@ -250,7 +250,7 @@ export function createWorkspaceSourceController(
     } catch {
       await sql`UPDATE factory.workspace_source SET state=CASE WHEN state='ready' THEN 'failed' ELSE state END,failure='Source resources are unavailable. Factory is checking the recorded resource intent.',updated_at=now() WHERE workspace_id=${workspaceID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
       // A failed teardown remains visible and recoverable, but must not launch endless workers.
-      return (await row(workspaceID, sql))?.state !== "stop-intended";
+      return (await row(workspaceID, sql))?.state === "stop-intended" ? false : "unavailable";
     } finally {
       try {
         await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
@@ -270,21 +270,24 @@ export function createWorkspaceSourceController(
     pending.set(workspaceID, worker);
     void (async () => {
       try {
-        const deadline = now() + sourcePreparationTimeoutMS;
+        let deadline = now() + sourceObservationTimeoutMS;
         do {
           worker.wakeup = false;
           const retry = await reconcile(workspaceID);
           if (!retry && !worker.wakeup) return;
+          // A verified, still-pending Pod is making a valid lifecycle observation.
+          // Timing it out here would revoke its clone capability before it starts.
+          if (retry === true) deadline = now() + sourceObservationTimeoutMS;
           const current = await row(workspaceID);
           if (
             !current ||
             !["create-intended", "preparing", "stop-intended"].includes(current.state)
           )
             return;
-          await Bun.sleep(200);
+          await Bun.sleep(1_000);
         } while (!closed && now() < deadline);
         if (closed) return;
-        await database.client`UPDATE factory.workspace_source SET state='failed',failure='Source preparation exceeded its deadline. Stop and retry source access.',updated_at=now() WHERE workspace_id=${workspaceID} AND state IN ('create-intended','preparing')`;
+        await database.client`UPDATE factory.workspace_source SET state='failed',failure='Source resources could not be confirmed. Retry source access to observe the retained resources.',updated_at=now() WHERE workspace_id=${workspaceID} AND state IN ('create-intended','preparing')`;
       } finally {
         pending.delete(workspaceID);
         // Only an actual command/recovery wakeup can start another worker after its bound.
@@ -369,8 +372,9 @@ export function createWorkspaceSourceController(
         return workspaceID;
       });
       if ((await row(workspaceID))?.state !== "ready") schedule(workspaceID);
-      const deadline = now() + sourcePreparationTimeoutMS;
-      while (!closed && now() < deadline) {
+      // Follow the recorded source lifecycle just like runtime startup. Slow
+      // scheduling is not a second failure deadline or permission to replace it.
+      while (!closed) {
         await admitted(database.client);
         const current = await row(workspaceID);
         if (current?.state === "ready") {
@@ -398,9 +402,9 @@ export function createWorkspaceSourceController(
         }
         if (current && ["failed", "stop-intended", "stopped"].includes(current.state))
           throw new CommandError("unavailable", "Canonical source is unavailable for execution");
-        await Bun.sleep(100);
+        await Bun.sleep(1_000);
       }
-      throw new CommandError("unavailable", "Canonical source preparation exceeded its deadline");
+      throw new CommandError("unavailable", "Canonical source preparation was interrupted");
     },
     async repository(
       request: Request,

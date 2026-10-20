@@ -391,13 +391,19 @@ export function createRuntimeController(
       try {
         for (;;) {
           const rows = await database.client<
-            Array<{ state: string; failure: string | null; cleanupAttempts: number }>
+            Array<{
+              state: string;
+              failure: string | null;
+              cleanupAttempts: number;
+              failedStop: boolean;
+            }>
           >`
-            SELECT state, failure, cleanup_attempts AS "cleanupAttempts"
+            SELECT state, failure, cleanup_attempts AS "cleanupAttempts",
+              state='failed' AND stop_intended_at IS NOT NULL AND stopped_at IS NULL AS "failedStop"
             FROM factory.runtime_attempt WHERE id = ${attemptID}
           `;
           const attempt = rows[0];
-          if (attempt?.state !== "stopping") return;
+          if (!attempt || (attempt.state !== "stopping" && !attempt.failedStop)) return;
           if (attempt.cleanupAttempts >= 12) break;
           try {
             await cleanupAttempt(attemptID);
@@ -410,7 +416,8 @@ export function createRuntimeController(
                   stopped_at = CASE WHEN stop_intended_at IS NOT NULL THEN now() ELSE stopped_at END,
                   failure = CASE WHEN stop_intended_at IS NOT NULL THEN NULL ELSE failure END,
                   updated_at = now()
-                WHERE id = ${attemptID} AND state = 'stopping'
+                WHERE id = ${attemptID} AND (state='stopping' OR
+                  (state='failed' AND stop_intended_at IS NOT NULL AND stopped_at IS NULL))
                 RETURNING state
               `;
               const state = settled[0]?.state;
@@ -438,7 +445,8 @@ export function createRuntimeController(
                 failure = ${`${attempt.failure?.split("; cleanup retry failed:")[0] ?? "runtime cleanup pending"}; cleanup retry failed: ${message}`},
                 cleanup_attempts = cleanup_attempts + 1,
                 updated_at = now()
-              WHERE id = ${attemptID} AND state = 'stopping'
+              WHERE id = ${attemptID} AND (state='stopping' OR
+                (state='failed' AND stop_intended_at IS NOT NULL AND stopped_at IS NULL))
             `;
             if (attempt.cleanupAttempts < 11) await Bun.sleep(5_000);
           }
@@ -2287,13 +2295,21 @@ export function createRuntimeController(
       try {
         await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
         const [failed] = await lock<{ id: string }[]>`
-          UPDATE factory.runtime_attempt SET stop_intended_at=COALESCE(stop_intended_at,now()),updated_at=now()
+          UPDATE factory.runtime_attempt SET stop_intended_at=COALESCE(stop_intended_at,now()),cleanup_attempts=0,updated_at=now()
           WHERE id=${attemptID} AND state='failed' RETURNING id`;
         if (failed) {
           // Do not move a terminal old generation back into the unique active
           // allocation. Persist Stop first, then confirm generation/UID-bound cleanup.
           hub.suspend(attemptID);
-          await withResourceLock(attemptID, (sql) => cleanupResources(sql, attemptID), lock);
+          try {
+            await withResourceLock(attemptID, (sql) => cleanupResources(sql, attemptID), lock);
+          } catch (cause) {
+            if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
+            // This failed generation must not re-enter active allocation. Retain
+            // Stop and reconcile its exact resources without another user action.
+            retryCleanup(attemptID);
+            return this.get(attemptID);
+          }
           await lock`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now(),failure=NULL,updated_at=now()
             WHERE id=${attemptID} AND state='failed' AND stop_intended_at IS NOT NULL`;
           return this.get(attemptID);

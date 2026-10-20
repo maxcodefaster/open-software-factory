@@ -17,7 +17,7 @@ export class KubernetesObservationUnavailableError extends Error {
   }
 }
 
-function podReadFailure(message: string) {
+function observationReadFailure(message: string) {
   const unavailable =
     /context deadline exceeded|timed out|i\/o timeout|TLS handshake timeout|Client\.Timeout|connection[^\n]*(?:refused|reset)|ECONNREFUSED|ECONNRESET|network is unreachable|no route to host|ServiceUnavailable|TooManyRequests/i;
   return unavailable.test(message)
@@ -111,12 +111,12 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
     async getPod(namespace, podName) {
       const result = await run(["get", "pod", podName, "-n", namespace, "-o", "json"]).catch(
         (cause: unknown) => {
-          throw podReadFailure(cause instanceof Error ? cause.message : "Pod read failed");
+          throw observationReadFailure(cause instanceof Error ? cause.message : "Pod read failed");
         },
       );
       if (result.exitCode !== 0) {
         if (result.stderr.includes("NotFound") || result.stderr.includes("not found")) return null;
-        throw podReadFailure(result.stderr);
+        throw observationReadFailure(result.stderr);
       }
       const pod = JSON.parse(result.stdout) as {
         metadata?: { uid?: string; labels?: Record<string, string> };
@@ -145,10 +145,16 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
       };
     },
     async getNamespace(namespace) {
-      const result = await run(["get", "namespace", namespace, "-o", "json"]);
+      const result = await run(["get", "namespace", namespace, "-o", "json"]).catch(
+        (cause: unknown) => {
+          throw observationReadFailure(
+            cause instanceof Error ? cause.message : "Namespace read failed",
+          );
+        },
+      );
       if (result.exitCode !== 0) {
         if (result.stderr.includes("NotFound") || result.stderr.includes("not found")) return null;
-        throw new Error(`Kubernetes namespace observation failed: ${result.stderr}`);
+        throw observationReadFailure(result.stderr);
       }
       const observed = JSON.parse(result.stdout) as {
         metadata?: { uid?: string; labels?: Record<string, string> };
