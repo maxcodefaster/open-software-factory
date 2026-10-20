@@ -25,7 +25,6 @@ function changeController(
   try {
     Object.assign(process.env, configuration);
     return createChangeController(database, {
-      startPersisted: async () => null,
       stop: async () => null,
     });
   } finally {
@@ -200,9 +199,15 @@ test("Change and Build commands require exact delivered prerequisites, not cance
     const approvedSecond = await owned.approved(second);
     await owned.edge("add", second, first);
     await expect(controller.start(second, ctx.userId)).rejects.toThrow("First delivery");
-    await expect(controller.start(second, crypto.randomUUID())).rejects.toMatchObject({
+    const outsider = crypto.randomUUID();
+    await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${outsider},'Owned non-member',${`${outsider}@dependencies.test`},true)`;
+    await expect(controller.start(second, outsider)).rejects.toMatchObject({
       code: "not-found",
     });
+    await expect(controller.start(second, crypto.randomUUID())).rejects.toThrow(
+      "Account access is disabled",
+    );
     await expect(owned.change(approvedSecond)).rejects.toThrow("Prerequisites must be delivered");
     await database.client`UPDATE factory.ticket SET state = 'cancelled' WHERE id = ${first}`;
     await expect(controller.start(second, ctx.userId)).rejects.toThrow(

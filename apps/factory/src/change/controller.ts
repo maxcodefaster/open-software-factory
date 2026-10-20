@@ -21,7 +21,6 @@ import {
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
-  startPersisted(changeID: string, userID: string): Promise<RuntimeAttemptView | null>;
   stop(attemptID: string): Promise<RuntimeAttemptView | null>;
 };
 type ImplementationAdmission = {
@@ -252,22 +251,21 @@ export function createChangeController(
         WHERE state IN ('executing', 'ambiguous')
       `;
       const changes = await database.client<
-        Array<{ id: string; state: string; userID: string; runtimeAttemptID: string | null }>
+        Array<{ id: string; state: string; runtimeAttemptID: string | null }>
       >`
-        SELECT id, state, created_by AS "userID", runtime_attempt_id AS "runtimeAttemptID"
+        SELECT id, state, runtime_attempt_id AS "runtimeAttemptID"
         FROM factory.change
         WHERE state IN ('branch-pending', 'starting', 'cancelling')
       `;
       for (const change of changes) {
         if (change.state === "branch-pending") void reconcile(change.id);
-        if (change.state === "starting") {
-          if (change.runtimeAttemptID) void runtime.startPersisted(change.id, change.userID);
-          else {
-            await database.client`
-              UPDATE factory.change SET state = 'active', version = version + 1
-              WHERE id = ${change.id} AND state = 'starting' AND runtime_attempt_id IS NULL
-            `;
-          }
+        // Runtime recovery observes the recorded attempt itself. Reopening a
+        // Change cannot commission a replacement generation after Stop/failure.
+        if (change.state === "starting" && !change.runtimeAttemptID) {
+          await database.client`
+            UPDATE factory.change SET state = 'active', version = version + 1
+            WHERE id = ${change.id} AND state = 'starting' AND runtime_attempt_id IS NULL
+          `;
         }
         if (change.state === "cancelling") {
           if (change.runtimeAttemptID) {

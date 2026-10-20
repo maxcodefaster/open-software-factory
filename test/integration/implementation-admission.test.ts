@@ -18,7 +18,6 @@ test("Implement atomically freezes requirements and Build before branch create; 
   const reachedCreate = Promise.withResolvers<void>();
   const releaseCreate = Promise.withResolvers<void>();
   let branchCreates = 0;
-  let runtimeCreates = 0;
   let protectionAttempts = 0;
   let protectionConfirmed = false;
   const ready: string[] = [];
@@ -88,10 +87,6 @@ test("Implement atomically freezes requirements and Build before branch create; 
     const changes = createChangeController(
       database,
       {
-        startPersisted: async () => {
-          runtimeCreates += 1;
-          return null;
-        },
         stop: async () => null,
       },
       async (id) => {
@@ -197,7 +192,9 @@ test("Implement atomically freezes requirements and Build before branch create; 
     );
     expect(branchCreates).toBe(1);
     expect(protectionAttempts).toBe(2);
-    expect(runtimeCreates).toBe(0);
+    expect(
+      await database.client`SELECT id FROM factory.runtime_attempt WHERE change_id=${first.id}`,
+    ).toHaveLength(0);
     expect(ready).toContain(first.id);
     const [intent] = await database.client<
       Array<{ scope: string; commandID: string; state: string; prompt: string }>

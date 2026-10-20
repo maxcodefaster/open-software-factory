@@ -127,9 +127,6 @@ test.each([false, true])(
       const changes = createChangeController(
         database,
         {
-          startPersisted: async () => {
-            throw new Error("This admission proof must not start compute");
-          },
           stop: async () => null,
         },
         async (id) => {
