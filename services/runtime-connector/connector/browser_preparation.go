@@ -13,7 +13,9 @@ type browserImagePreparation struct {
 	err     error
 	ctx     context.Context
 	cancel  context.CancelFunc
-	once    sync.Once
+	mu      sync.Mutex
+	started bool
+	turnID  string
 	prepare func(context.Context) error
 }
 
@@ -22,22 +24,43 @@ func prepareBrowserImage(ctx context.Context, prepare func(context.Context) erro
 	return &browserImagePreparation{done: make(chan struct{}), ctx: ctx, cancel: cancel, prepare: prepare}
 }
 
-func (preparation *browserImagePreparation) ready() error {
+func (preparation *browserImagePreparation) ready(turnID string) error {
+	preparation.mu.Lock()
+	defer preparation.mu.Unlock()
 	if preparation.ctx.Err() != nil {
 		return errors.New("Browser tools preparation was stopped")
 	}
-	preparation.once.Do(func() {
+	settled := false
+	select {
+	case <-preparation.done:
+		settled = true
+	default:
+	}
+	if !preparation.started || (settled && preparation.err != nil && preparation.turnID != turnID) {
+		// Success is shared for this exact Runtime image. A failed download is
+		// retained for its Turn, not a permanent failure of every later,
+		// separately authorized implementation or review in the Workspace.
+		if preparation.started {
+			preparation.done = make(chan struct{})
+		}
+		preparation.started = true
+		preparation.turnID = turnID
+		preparation.err = nil
+		done := preparation.done
 		go func() {
 			finish := startupPhase("browser-image")
-			preparation.err = preparation.prepare(preparation.ctx)
+			err := preparation.prepare(preparation.ctx)
 			finish()
-			close(preparation.done)
+			preparation.mu.Lock()
+			preparation.err = err
+			close(done)
+			preparation.mu.Unlock()
 		}()
-	})
+	}
 	select {
 	case <-preparation.done:
 		if preparation.err != nil {
-			return errors.New("Browser tools could not prepare the approved image; check registry connectivity and CA trust, then restart the Workspace")
+			return errors.New("Browser tools could not prepare the approved image; check Registry availability and approved access before retrying this work")
 		}
 		return nil
 	default:
@@ -48,6 +71,12 @@ func (preparation *browserImagePreparation) ready() error {
 func (preparation *browserImagePreparation) stop() {
 	preparation.cancel()
 	// Unused tools have no worker to join. Closing them must not start a pull.
-	preparation.once.Do(func() { close(preparation.done) })
-	<-preparation.done
+	preparation.mu.Lock()
+	if !preparation.started {
+		preparation.started = true
+		close(preparation.done)
+	}
+	done := preparation.done
+	preparation.mu.Unlock()
+	<-done
 }

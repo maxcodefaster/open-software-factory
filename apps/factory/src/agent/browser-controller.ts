@@ -87,6 +87,7 @@ const safeBrowserFailures = new Set([
   "browser screenshot publication was not confirmed",
   "Browser tools preparation was stopped",
   "Browser tools could not prepare the approved image; check registry connectivity and CA trust, then restart the Workspace",
+  "Browser tools could not prepare the approved image; check Registry availability and approved access before retrying this work",
   "Browser observation does not match this execution scope",
 ]);
 

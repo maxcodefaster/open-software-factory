@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createDeveloperIDEEdge } from "./developer-ide-edge";
+import { CommandError } from "../command-error";
 
 test("the authenticated Editor edge admits native Theia Socket.IO and keeps origin/path fences", async () => {
   const userID = "abdabd34-6496-40f1-afbf-86187708037c";
@@ -91,4 +92,61 @@ test("Workspace presentation uses authenticated source authority without opening
       ),
     ),
   ).rejects.toThrow("Workspace not found");
+});
+
+test("temporary editor preparation keeps its grant and recovers the initial document without a new epoch", async () => {
+  const userID = "abdabd34-6496-40f1-afbf-86187708037c";
+  let state: "ready" | "preparing" | "stop-intended" = "ready";
+  let backendRequests = 0;
+  const backend = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      backendRequests++;
+      return new Response("native editor ready", { headers: { "content-type": "text/html" } });
+    },
+  });
+  const edge = createDeveloperIDEEdge(
+    { client: async () => [{ id: "fixture-session" }] } as unknown as Parameters<
+      typeof createDeveloperIDEEdge
+    >[0],
+    {
+      get: async () => ({ epoch: 1, state }),
+      async connection() {
+        if (state !== "ready") throw new CommandError("unavailable", "Editor is preparing");
+        return backend.url.origin;
+      },
+    } as unknown as Parameters<typeof createDeveloperIDEEdge>[1],
+    {} as Parameters<typeof createDeveloperIDEEdge>[2],
+    "http://127.0.0.1:3000",
+    { revokeEditor() {}, route: async () => undefined } as unknown as Parameters<
+      typeof createDeveloperIDEEdge
+    >[4],
+  );
+  try {
+    const issued = await edge.issue(userID, "fixture-session", false);
+    const redeemed = await edge.route(new Request(issued));
+    const location = redeemed.headers.get("location");
+    const cookie = redeemed.headers.get("set-cookie")?.split(";")[0];
+    if (!location || !cookie) throw new Error("Expected the authenticated editor redirect");
+    const request = () => new Request(location, { headers: { cookie, accept: "text/html" } });
+    state = "preparing";
+    const waiting = await edge.route(request());
+    expect(waiting.status).toBe(503);
+    expect(await waiting.text()).toContain('http-equiv="refresh"');
+    expect(backendRequests).toBe(0);
+    state = "ready";
+    const ready = await edge.route(request());
+    expect(ready.status).toBe(200);
+    expect(await ready.text()).toBe("native editor ready");
+    expect(backendRequests).toBe(1);
+    state = "stop-intended";
+    expect((await edge.route(request())).status).toBe(401);
+    state = "ready";
+    // Stop revokes the grant permanently. Readiness recovery cannot revive it.
+    expect((await edge.route(request())).status).toBe(401);
+    expect(backendRequests).toBe(1);
+  } finally {
+    await backend.stop(true);
+  }
 });

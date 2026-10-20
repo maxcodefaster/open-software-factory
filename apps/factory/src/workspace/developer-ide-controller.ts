@@ -99,17 +99,24 @@ export function createDeveloperIDEController(
         await sql`UPDATE factory.developer_ide SET state='stopped',stopped_at=now(),updated_at=now() WHERE user_id=${userID} AND service_epoch=${current.epoch} AND state='stop-intended'`;
         return false;
       }
-      const observed = await (async () => {
-        if (current.podUID) {
-          const retained = await client.observe(input);
-          if (retained) return retained;
-        }
-        return client.prepare(input);
-      })().catch(async () => {
-        const recovered = await client.observe(input);
-        if (!recovered) throw new Error("Editor create outcome remains unconfirmed");
-        return recovered;
-      });
+      const observed = await (input.podUID ? client.observe(input) : client.prepare(input)).catch(
+        async (cause: unknown) => {
+          if (cause instanceof DeveloperIDEIntentConflict) throw cause;
+          const recovered = await client.observe(input);
+          if (!recovered && !input.podUID)
+            throw new Error("Editor create outcome remains unconfirmed");
+          return recovered;
+        },
+      );
+      if (!observed) {
+        // A confirmed missing Pod is not permission to create another Pod
+        // under its immutable recorded identity.
+        await sql`UPDATE factory.developer_ide SET state='failed',
+          failure='The recorded editor service is no longer available. Restart the editor to prepare a new service.',
+          updated_at=now() WHERE user_id=${userID} AND service_epoch=${current.epoch}
+          AND state IN ('create-intended','preparing','ready')`;
+        return false;
+      }
       await record(current, observed, sql);
       return !observed.ready && !observed.failed;
     } catch (cause) {
@@ -119,7 +126,7 @@ export function createDeveloperIDEController(
           updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
         return false;
       }
-      await sql`UPDATE factory.developer_ide SET state=CASE WHEN state='ready' THEN 'failed' ELSE state END,failure='Editor resources are unavailable. Factory is checking the recorded intent.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
+      await sql`UPDATE factory.developer_ide SET state=CASE WHEN state='ready' THEN 'preparing' ELSE state END,failure='Editor resources are unavailable. Factory is checking the recorded intent.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
       return (await row(userID, sql))?.state === "stop-intended" ? false : "unavailable";
     } finally {
       try {
@@ -211,7 +218,10 @@ export function createDeveloperIDEController(
           );
         return resources(current);
       });
-      return client.endpoint(input);
+      return client.endpoint(input).catch((cause: unknown) => {
+        if (cause instanceof DeveloperIDEIntentConflict) throw cause;
+        throw new CommandError("unavailable", "Editor connection is temporarily unavailable");
+      });
     },
     async stop(userID: string) {
       // An authenticated owner may also stop their own editor after losing their last Developer role.

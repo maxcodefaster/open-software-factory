@@ -132,6 +132,108 @@ esac
 	}
 }
 
+func TestBrowserImageRecoversFromARegistryConnectionFailureWithinItsStartupWindow(t *testing.T) {
+	directory := t.TempDir()
+	logPath := filepath.Join(directory, "commands")
+	reference := "registry.factory/browser-tools@sha256:" + strings.Repeat("a", 64)
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FACTORY_DOCKER_LOG"
+case "$1 $2" in
+  "image inspect")
+    if [ -f "$FACTORY_DOCKER_LOG.pulled" ]; then printf '["%s"]' "$FACTORY_IMAGE_REFERENCE"; exit 0; fi
+    exit 1 ;;
+  "pull "*)
+    if [ ! -f "$FACTORY_DOCKER_LOG.failed" ]; then
+      touch "$FACTORY_DOCKER_LOG.failed"
+      echo 'dial tcp: connect: connection refused; private-registry-secret' >&2
+      exit 1
+    fi
+    touch "$FACTORY_DOCKER_LOG.pulled" ;;
+  *) exit 1 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FACTORY_DOCKER_LOG", logPath)
+	t.Setenv("FACTORY_IMAGE_REFERENCE", reference)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := ensureBrowserImage(ctx, reference); err != nil {
+		t.Fatalf("a recovered Registry still requires a Workspace restart: %v", err)
+	}
+	commands, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(commands), "pull "+reference) != 2 ||
+		!strings.HasSuffix(strings.TrimSpace(string(commands)), "image inspect --format {{json .RepoDigests}} "+reference) {
+		t.Fatalf("recovery did not confirm the same exact image: %s", commands)
+	}
+}
+
+func TestBrowserImageTransportRetriesShareOneCancellableDeadline(t *testing.T) {
+	directory := t.TempDir()
+	logPath := filepath.Join(directory, "commands")
+	reference := "registry.factory/browser-tools@sha256:" + strings.Repeat("a", 64)
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FACTORY_DOCKER_LOG"
+if [ "$1" = pull ]; then echo 'dial tcp: connect: connection refused' >&2; fi
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FACTORY_DOCKER_LOG", logPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 450*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := ensureBrowserImage(ctx, reference)
+	if err == nil || !strings.Contains(err.Error(), "cancelled or exceeded") {
+		t.Fatal("retry lost its original startup deadline", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("image download ignored cancellation while backing off")
+	}
+	commands, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(commands), "pull "+reference); count < 1 || count > 3 {
+		t.Fatalf("retry was not bounded by one shared deadline: %s", commands)
+	}
+}
+
+func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures(t *testing.T) {
+	for _, diagnostic := range []string{
+		"x509: certificate signed by unknown authority",
+		"x509: certificate signed by unknown authority after a connection refused",
+		"unauthorized: no such host",
+		"forbidden: connection reset",
+		"manifest unknown",
+		"invalid reference format",
+		"no space left on device",
+		"unclassified private-registry-secret",
+	} {
+		if retryableBrowserImageDownload(diagnostic) {
+			t.Fatal("permanent or unknown image failure was silently retried", diagnostic)
+		}
+	}
+	for _, diagnostic := range []string{
+		"dial tcp: connect: connection refused",
+		"TLS handshake timeout",
+		"lookup registry.factory: no such host",
+		"unexpected status: 503 Service Unavailable",
+		"unexpected EOF",
+	} {
+		if !retryableBrowserImageDownload(diagnostic) {
+			t.Fatal("transient Registry transport failure was made permanent", diagnostic)
+		}
+	}
+}
+
 func TestRunArgumentBoundaryVariants(t *testing.T) {
 	for _, arguments := range [][]string{{"--pid", "host"}, {"--pid=host"}, {"--net", "host"}, {"--network=host"}, {"--ipc", "host"}, {"--privileged=true"}, {"--cap-add=SYS_ADMIN"}, {"--device", "/dev/sda"}} {
 		if err := validateRunArguments(arguments); err == nil {

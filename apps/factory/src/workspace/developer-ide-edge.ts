@@ -9,6 +9,7 @@ import { developerIDEOrigin } from "../developer-ide-origin";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import type { createDeveloperIDERuntime } from "./developer-ide-runtime";
 import type { createWorkspaceSourceController } from "./source-controller";
+import { CommandError } from "../command-error";
 
 export interface DeveloperEditorSocketData {
   readonly kind: "developer-editor";
@@ -31,6 +32,24 @@ interface Connection {
 }
 const editorRoute =
   /^\/editor\/([a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12})\/([1-9][0-9]*)(\/.*)$/;
+
+function reconnectingEditorDocument() {
+  // Only the initial, unsuccessful document retries its read. A working Theia
+  // document never receives this timer, so dirty buffers are not reloaded.
+  return new Response(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="1"><title>Opening your editor</title><style>body{margin:0;min-height:100dvh;display:grid;place-items:center;background:Canvas;color:CanvasText;font:16px/1.5 system-ui,sans-serif}p{max-width:36ch;padding:24px;text-align:center}</style></head><body><p role="status">Reconnecting to your editor…</p></body></html>`,
+    {
+      status: 503,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+        "retry-after": "1",
+        "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'",
+      },
+    },
+  );
+}
 
 export function createDeveloperIDEEdge(
   database: ReturnType<typeof createDatabase>,
@@ -179,6 +198,10 @@ export function createDeveloperIDEEdge(
         requests.delete(controller);
         request.signal.removeEventListener("abort", onAbort);
       };
+      const initialDocument =
+        request.method === "GET" &&
+        suffix === "/" &&
+        request.headers.get("accept")?.includes("text/html") === true;
       try {
         let response: Response;
         const execution = await runtime.route(
@@ -221,7 +244,14 @@ export function createDeveloperIDEEdge(
               : {}),
             signal: controller.signal,
             redirect: "manual",
+          }).catch(() => {
+            throw new CommandError("unavailable", "Editor connection is temporarily unavailable");
           });
+          if (initialDocument && upstream.status === 503) {
+            await upstream.body?.cancel();
+            finish();
+            return scopeRuntimeEmbedding(reconnectingEditorDocument(), factoryOrigin);
+          }
           const outgoing = new Headers(upstream.headers);
           outgoing.delete("set-cookie");
           outgoing.delete("content-length");
@@ -251,8 +281,16 @@ export function createDeveloperIDEEdge(
         }
         return track(scopeRuntimeEmbedding(response, factoryOrigin), controller, finish);
       } catch (cause) {
+        const aborted = controller.signal.aborted;
         finish();
         controller.abort();
+        if (
+          initialDocument &&
+          !aborted &&
+          cause instanceof CommandError &&
+          cause.code === "unavailable"
+        )
+          return scopeRuntimeEmbedding(reconnectingEditorDocument(), factoryOrigin);
         throw cause;
       }
     },

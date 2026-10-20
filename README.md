@@ -89,6 +89,10 @@ receives them. Retrying work requires a new explicit request; reconnecting never
 Failed file access and editor services have separate Restart actions. Each confirms Stop before
 starting another access epoch, without restarting Apps or Builds. Restarting the editor can lose
 unsaved editor changes; restarting file access retains editor buffers.
+Temporary editor observation or connection loss rechecks the same recorded service automatically.
+An initial unavailable editor document reconnects without a manual reload. An already open editor
+is never reloaded by that recovery, so its dirty buffers stay in place. Readiness changes do not
+revoke its grant; Stop, failed resources, changed identity and lost authority still do.
 Editor resources use a persisted random identity, separate from the account ID, so installations
 sharing the emergency administrator ID cannot adopt each other's editor. Existing editor identities
 remain unchanged until explicit Stop and restart.
@@ -261,6 +265,18 @@ is evidence for that task, not a guarantee that every model request will finish 
 Successful runs remove their owned source storage as well as execution resources. Failed runs
 retain source for inspection; the reset guard refuses deletion until that exact retained Workspace
 storage is explicitly cleaned up.
+
+Browser image acquisition retries recognized transient Registry failures within the existing
+three-minute startup window, before any browser or App action exists. Stop cancels that wait.
+Authentication, certificate, digest and unknown failures still fail explicitly. A later authorized
+Build or review may prepare the same frozen image again without restarting the Workspace;
+neither path repeats inference or an App interaction.
+The explicit native recovery proof uses a private TLS Registry and one uniquely labeled image,
+fails its first real Docker pull, restores the Registry and confirms the same exact image:
+
+```sh
+FACTORY_RUN_BROWSER_IMAGE_RECOVERY_PROOF=1 mise exec -- bun --no-env-file test test/support/browser-image-recovery.live.test.ts
+```
 
 The smaller `opencode-sol.live` proof runs the exact published OpenCode process in an owned
 fixture, implements and tests a small goal through Azure `gpt-6.1-sol` at medium reasoning,

@@ -13,14 +13,64 @@ import {
   editorFixtureNamespaces as namespaces,
   removeStoppedEditorSourceNamespace,
   recordedEditorIdentity,
+  editorFixtureKubectl,
 } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 const enabled = process.env["FACTORY_RUN_DEVELOPER_IDE_BROWSER_PROOF"] === "1";
+const proofTimeoutMS = 420_000;
+const podObservation = z.object({
+  metadata: z.object({ uid: z.string(), labels: z.record(z.string(), z.string()) }),
+  status: z.object({
+    phase: z.string(),
+    conditions: z
+      .array(
+        z.object({
+          type: z.string(),
+          status: z.string(),
+          reason: z.string().optional(),
+          message: z.string().optional(),
+        }),
+      )
+      .optional(),
+    containerStatuses: z
+      .array(
+        z.object({
+          name: z.string(),
+          ready: z.boolean(),
+          restartCount: z.number(),
+          state: z.object({
+            waiting: z.object({ reason: z.string().optional() }).optional(),
+            terminated: z
+              .object({ reason: z.string().optional(), exitCode: z.number() })
+              .optional(),
+          }),
+        }),
+      )
+      .optional(),
+  }),
+});
+
+async function observeOwnedPod(namespace: string, name: string, uid: string, ownerID: string) {
+  try {
+    const pod = podObservation.parse(
+      JSON.parse(await editorFixtureKubectl(["get", "pod", name, "-n", namespace, "-o", "json"])),
+    );
+    return pod.metadata.uid === uid && pod.metadata.labels["factory.dev/runtime-owner"] === ownerID
+      ? pod.status
+      : "identity-mismatch";
+  } catch {
+    return "unavailable";
+  }
+}
 
 test.skipIf(!enabled)(
   "authenticated independent Theia reads canonical source, retains dirty Workspace buffers and revokes access without execution",
   async () => {
+    // Share the existing proof window instead of abandoning a healthy Pending
+    // editor at 120s. Leave time for assertions and exact owned teardown.
+    const preparationDeadline = Date.now() + proofTimeoutMS - 90_000;
+    const remainingPreparationMS = () => Math.max(1, preparationDeadline - Date.now());
     const proofID = crypto.randomUUID();
     const artifacts = resolve(".factory/test-results/developer-ide-browser", proofID);
     await mkdir(artifacts, { recursive: true });
@@ -101,14 +151,9 @@ test.skipIf(!enabled)(
       const editorIdentity = await recordedEditorIdentity(database, userID);
       if (!editorIdentity) throw new Error("Missing recorded editor intent");
       ownedNamespaces.set(editorIdentity.namespace, { ownerID: userID });
-      await eventually(
-        async () =>
-          developerIDEViewSchema.parse(
-            await (await api("/api/developer-ide", developerCookie)).json(),
-          ),
-        (view) => view.state === "ready",
-        "Editor not ready",
-        120_000,
+      await writeFile(
+        resolve(artifacts, "intent.json"),
+        JSON.stringify({ proofID, userID, projects, sources, namespaces: [...ownedNamespaces] }),
       );
       for (const projectID of projects) {
         const source = sourceWorkspaceViewSchema.parse(
@@ -126,18 +171,38 @@ test.skipIf(!enabled)(
           resolve(artifacts, "intent.json"),
           JSON.stringify({ proofID, userID, projects, sources, namespaces: [...ownedNamespaces] }),
         );
-        await eventually(
-          async () =>
-            sourceWorkspaceViewSchema.parse(
-              await (
-                await api(`/api/workspaces/${source.workspaceID}/source`, developerCookie)
-              ).json(),
-            ),
-          (view) => view.state === "ready",
-          "Canonical source not ready",
-          150_000,
-        );
       }
+      await Promise.all([
+        eventually(
+          async () => {
+            const view = developerIDEViewSchema.parse(
+              await (await api("/api/developer-ide", developerCookie)).json(),
+            );
+            if (view.state === "failed") throw new Error(`Editor failed: ${view.failure}`);
+            return view;
+          },
+          (view) => view.state === "ready",
+          "Editor not ready",
+          remainingPreparationMS(),
+        ),
+        ...sources.map((source) =>
+          eventually(
+            async () => {
+              const view = sourceWorkspaceViewSchema.parse(
+                await (
+                  await api(`/api/workspaces/${source.workspaceID}/source`, developerCookie)
+                ).json(),
+              );
+              if (view.state === "failed")
+                throw new Error(`Canonical source failed: ${view.failure}`);
+              return view;
+            },
+            (view) => view.state === "ready",
+            "Canonical source not ready",
+            remainingPreparationMS(),
+          ),
+        ),
+      ]);
       for (const [name, ownership] of ownedNamespaces) {
         const current = await kubernetes.getNamespace(name);
         if (!current) throw new Error("Owned resource missing");
@@ -193,10 +258,16 @@ test.skipIf(!enabled)(
       await page.goto(`${fixture.base}/api/session`);
       const visibleStarted = performance.now();
       const ownedEditorOrigin = developerIDEOrigin(fixture.base, userID, 1);
+      // Explicit fault injection belongs only to this owned proof. The Pod and
+      // epoch stay unchanged while its initial document waits for readiness.
+      await database.client`UPDATE factory.developer_ide SET state='preparing' WHERE user_id=${userID} AND service_epoch=1 AND state='ready'`;
       await page.setContent(
         `<!doctype html><button id="a" onclick="pick('${a.workspaceID}')">A</button><button id="b" onclick="pick('${b.workspaceID}')">B</button><iframe title="Factory IDE" style="position:absolute;inset:40px 0 0;width:100%;height:calc(100% - 40px);border:0" src="/api/developer-ide/access?embed=1"></iframe><script>const editorOrigin=${JSON.stringify(ownedEditorOrigin)};function pick(workspaceID){document.querySelector('iframe').contentWindow.postMessage({type:'factory:select-workspace',workspaceID},editorOrigin)}window.addEventListener('message',event=>{if(event.source===document.querySelector('iframe').contentWindow&&event.origin===editorOrigin&&event.data?.type==='factory:ide-ready')pick('${a.workspaceID}')})</script>`,
       );
       const frame = page.frameLocator('iframe[title="Factory IDE"]');
+      await browserExpect(frame.getByRole("status")).toHaveText("Reconnecting to your editor…");
+      await page.screenshot({ path: resolve(artifacts, "initial-editor-reconnecting.png") });
+      await database.client`UPDATE factory.developer_ide SET state='ready' WHERE user_id=${userID} AND service_epoch=1 AND state='preparing'`;
       await browserExpect(frame.locator("#files").getByText("src", { exact: true })).toBeVisible({
         timeout: 30_000,
       });
@@ -214,6 +285,20 @@ test.skipIf(!enabled)(
       await input.press(mac ? "Meta+ArrowDown" : "Control+End");
       await input.pressSequentially(`human-${proofID}`);
       const documentID = await frame.locator("body").evaluate(() => performance.timeOrigin);
+      await database.client`UPDATE factory.developer_ide SET state='preparing' WHERE user_id=${userID} AND service_epoch=1 AND state='ready'`;
+      expect(
+        await frame.locator("body").evaluate(
+          async () =>
+            (
+              await fetch(new URL("__factory/context", new URL("./", window.location.href)), {
+                credentials: "same-origin",
+              })
+            ).status,
+        ),
+      ).toBe(200);
+      await browserExpect(editor.locator(".view-lines")).toContainText(`human-${proofID}`);
+      expect(await frame.locator("body").evaluate(() => performance.timeOrigin)).toBe(documentID);
+      await database.client`UPDATE factory.developer_ide SET state='ready' WHERE user_id=${userID} AND service_epoch=1 AND state='preparing'`;
       await page.screenshot({ path: resolve(artifacts, "source-a-dirty.png") });
       const switched = performance.now();
       await page.locator("#b").click();
@@ -301,11 +386,58 @@ test.skipIf(!enabled)(
           documentID,
           noExecution: true,
           dirtyBuffersRetained: true,
+          initialReadinessRecovery: true,
+          dirtyBufferRetainedThroughReadinessLoss: true,
           savedOnlyOriginalWorkspace: true,
           revoked: true,
         }),
       );
     } catch (cause) {
+      const sourceState = await database.client<
+        Array<{
+          workspaceID: string;
+          namespace: string;
+          state: string;
+          failure: string | null;
+          podUID: string | null;
+        }>
+      >`SELECT source.workspace_id AS "workspaceID",workspace.kubernetes_namespace AS namespace,
+        source.state,source.failure,source.pod_uid AS "podUID"
+        FROM factory.workspace_source source JOIN factory.development_workspace workspace
+        ON workspace.id=source.workspace_id WHERE workspace.project_id=ANY(${projects}::uuid[])`;
+      const sourcePods = await Promise.all(
+        sourceState.map(async (source) => {
+          if (!source.podUID) return { ...source, observed: null };
+          return {
+            ...source,
+            observed: await observeOwnedPod(
+              source.namespace,
+              "source-1",
+              source.podUID,
+              source.workspaceID,
+            ),
+          };
+        }),
+      );
+      await writeFile(resolve(artifacts, "source-failure-state.json"), JSON.stringify(sourcePods));
+      const [editor] = await database.client<
+        Array<{
+          state: string;
+          failure: string | null;
+          podUID: string | null;
+        }>
+      >`SELECT state,failure,pod_uid AS "podUID" FROM factory.developer_ide WHERE user_id=${userID}`;
+      const identity = userID ? await recordedEditorIdentity(database, userID) : undefined;
+      await writeFile(
+        resolve(artifacts, "editor-failure-state.json"),
+        JSON.stringify({
+          editor,
+          observed:
+            editor?.podUID && identity
+              ? await observeOwnedPod(identity.namespace, identity.podName, editor.podUID, userID)
+              : null,
+        }),
+      );
       const frames = await Promise.all(
         (page?.frames() ?? []).map(async (frame) => ({
           path: requestPath(frame.url()),
@@ -392,5 +524,5 @@ test.skipIf(!enabled)(
       }
     }
   },
-  420_000,
+  proofTimeoutMS,
 );

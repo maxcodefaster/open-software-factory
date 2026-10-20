@@ -32,7 +32,12 @@ export function createDeveloperIDEAccess(
     if (!sessions.length) return false;
     try {
       const current = await editors.get(grant.userID);
-      return current.epoch === grant.epoch && current.state === "ready";
+      // Readiness is transport state, not a new identity or loss of Developer
+      // authority. Preserve the grant while this same editor reconnects.
+      return (
+        current.epoch === grant.epoch &&
+        (current.state === "ready" || current.state === "preparing")
+      );
     } catch (cause) {
       if (cause instanceof CommandError) return false;
       throw cause;

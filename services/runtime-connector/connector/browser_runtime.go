@@ -481,11 +481,6 @@ func (runtime *browserRuntime) selectDeclaredPage(raw json.RawMessage, app strin
 }
 
 func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRuntimeRequest) (string, error) {
-	if manager.preparation != nil {
-		if err := manager.preparation.ready(); err != nil {
-			return "", err
-		}
-	}
 	manager.mu.Lock()
 	if ctx.Err() != nil || manager.ctx.Err() != nil {
 		manager.mu.Unlock()
@@ -508,6 +503,12 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 		if _, err := resolveBrowserTool(manager.assignment.Channels, 0, scope.Call); err != nil {
 			manager.mu.Unlock()
 			return "", err
+		}
+		if manager.preparation != nil {
+			if err := manager.preparation.ready(scope.TurnID); err != nil {
+				manager.mu.Unlock()
+				return "", err
+			}
 		}
 		live, cancel := context.WithCancel(ctx)
 		runtime = &browserRuntime{scope: scope, directory: manager.directory(scope.SessionID), ctx: live, cancel: cancel}

@@ -424,6 +424,113 @@ test("recorded editor readiness uses observation without repeating resource prep
   }
 }, 30_000);
 
+test("temporary editor observation failures recover the same resource without manual retry", async () => {
+  const owned = await fixture();
+  let preparations = 0;
+  let observations = 0;
+  const editor = createDeveloperIDEController(owned.database, {
+    async prepare() {
+      preparations++;
+      return {
+        namespaceUID: "retained-namespace",
+        podUID: "retained-pod",
+        ready: true,
+        failed: false,
+      };
+    },
+    async observe(input) {
+      expect(input.podUID).toBe("retained-pod");
+      expect(input.identity.epoch).toBe(1);
+      observations++;
+      if (observations <= 2) throw new Error("Temporary Kubernetes connection failure");
+      return {
+        namespaceUID: "retained-namespace",
+        podUID: "retained-pod",
+        ready: true,
+        failed: false,
+      };
+    },
+    async endpoint() {
+      return "http://127.0.0.1:4400";
+    },
+    async stop() {
+      throw new Error("A temporary read failure must not stop the editor");
+    },
+    close() {},
+  });
+  try {
+    await editor.ensure(owned.projectID, owned.developerID);
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "ready",
+      "Initial editor did not prepare",
+    );
+    await editor.recover();
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "failed" || (observations >= 3 && view.state === "ready"),
+      "The recorded editor did not finish observation",
+      5_000,
+    );
+    expect(await editor.get(owned.developerID)).toMatchObject({
+      state: "ready",
+      epoch: 1,
+      failure: null,
+    });
+    expect(preparations).toBe(1);
+    expect(observations).toBe(3);
+  } finally {
+    await editor.close();
+    await owned.dispose();
+  }
+}, 20_000);
+
+test("a confirmed missing editor requires explicit restart instead of recreating its immutable Pod", async () => {
+  const owned = await fixture();
+  let preparations = 0;
+  const editor = createDeveloperIDEController(owned.database, {
+    async prepare() {
+      preparations++;
+      return {
+        namespaceUID: "retained-namespace",
+        podUID: `pod-${preparations}`,
+        ready: true,
+        failed: false,
+      };
+    },
+    async observe() {
+      return null;
+    },
+    async endpoint() {
+      throw new Error("A missing editor must not connect");
+    },
+    async stop() {},
+    close() {},
+  });
+  try {
+    await editor.ensure(owned.projectID, owned.developerID);
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "ready",
+      "Initial editor did not prepare",
+    );
+    await editor.recover();
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "failed",
+      "Missing editor was not reported",
+    );
+    expect(preparations).toBe(1);
+    const [row] = await owned.database
+      .client`SELECT pod_uid,service_epoch FROM factory.developer_ide WHERE user_id=${owned.developerID}`;
+    expect(row?.["pod_uid"]).toBe("pod-1");
+    expect(Number(row?.["service_epoch"])).toBe(1);
+  } finally {
+    await editor.close();
+    await owned.dispose();
+  }
+}, 20_000);
+
 test("a healthy pending editor outlasts observation windows without a retry or new identity", async () => {
   const owned = await fixture();
   let elapsed = 0;

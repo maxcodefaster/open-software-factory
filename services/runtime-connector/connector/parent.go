@@ -902,19 +902,60 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 	if ctx.Err() != nil {
 		return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
 	}
-	command := exec.CommandContext(ctx, "docker", "pull", reference)
-	// Discard registry diagnostics and unbounded progress. Neither can contain
-	// product findings; callers receive only a fixed actionable startup failure.
-	if command.Run() != nil {
+	retryDelay := 250 * time.Millisecond
+	for {
+		command := exec.CommandContext(ctx, "docker", "pull", reference)
+		var diagnostic browserDockerOutput
+		// Keep only bounded, ephemeral diagnostics for failure classification.
+		// No Registry text, progress or credentials reach the model or Evidence.
+		command.Stderr = &diagnostic
+		if command.Run() == nil {
+			if !confirmed() {
+				return errors.New("browser tools image exact digest was not confirmed after download")
+			}
+			return nil
+		}
 		if ctx.Err() != nil {
 			return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
 		}
-		return errors.New("browser tools image download failed; check registry connectivity and approved CA trust")
+		if !retryableBrowserImageDownload(string(diagnostic.Bytes())) {
+			return errors.New("browser tools image download failed; check registry connectivity and approved CA trust")
+		}
+		// An immutable image acquisition can safely recover before any browser
+		// exists. Keep the original startup deadline and one worker; never
+		// repeat an App call or model request.
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
+		case <-timer.C:
+		}
+		if confirmed() {
+			return nil
+		}
+		retryDelay = min(retryDelay*2, 2*time.Second)
 	}
-	if !confirmed() {
-		return errors.New("browser tools image exact digest was not confirmed after download")
+}
+
+func retryableBrowserImageDownload(diagnostic string) bool {
+	value := strings.ToLower(diagnostic)
+	for _, permanent := range []string{"x509:", "unauthorized", "forbidden", "denied:", "manifest unknown", "invalid reference"} {
+		if strings.Contains(value, permanent) {
+			return false
+		}
 	}
-	return nil
+	for _, transient := range []string{
+		"connection refused", "connection reset", "no route to host", "no such host",
+		"i/o timeout", "tls handshake timeout", "context deadline exceeded", "unexpected eof",
+		"temporary failure in name resolution", "server misbehaving",
+		"500 internal server error", "502 bad gateway", "503 service unavailable", "504 gateway timeout",
+	} {
+		if strings.Contains(value, transient) {
+			return true
+		}
+	}
+	return false
 }
 
 // Compose lookup in the pinned CLI uses project/service, not --id-label. A prior
