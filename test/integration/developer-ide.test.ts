@@ -424,6 +424,107 @@ test("recorded editor readiness uses observation without repeating resource prep
   }
 }, 30_000);
 
+test("a healthy pending editor outlasts observation windows without a retry or new identity", async () => {
+  const owned = await fixture();
+  let elapsed = 0;
+  let preparations = 0;
+  let observations = 0;
+  const editor = createDeveloperIDEController(
+    owned.database,
+    {
+      async prepare() {
+        preparations++;
+        elapsed += 160_000;
+        return { namespaceUID: "namespace", podUID: "pod", ready: false, failed: false };
+      },
+      async observe(input) {
+        expect(input.namespaceUID).toBe("namespace");
+        expect(input.podUID).toBe("pod");
+        expect(input.identity.epoch).toBe(1);
+        elapsed += 160_000;
+        observations++;
+        return {
+          namespaceUID: "namespace",
+          podUID: "pod",
+          ready: observations === 3,
+          failed: false,
+        };
+      },
+      async endpoint() {
+        return "http://127.0.0.1:4400";
+      },
+      async stop() {
+        throw new Error("A healthy pending editor must not be stopped");
+      },
+      close() {},
+    },
+    () => performance.now() + elapsed,
+  );
+  try {
+    await editor.ensure(owned.projectID, owned.developerID);
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "ready" || view.state === "failed",
+      "Editor observation did not settle",
+      5_000,
+    );
+    expect(await editor.get(owned.developerID)).toMatchObject({
+      epoch: 1,
+      state: "ready",
+      failure: null,
+    });
+    expect(preparations).toBe(1);
+    expect(observations).toBe(3);
+  } finally {
+    await editor.close();
+    await owned.dispose();
+  }
+}, 20_000);
+
+test("unavailable editor observations remain bounded without recreating an uncertain resource", async () => {
+  const owned = await fixture();
+  let elapsed = 0;
+  let preparations = 0;
+  const editor = createDeveloperIDEController(
+    owned.database,
+    {
+      async prepare() {
+        preparations++;
+        throw new Error("Create acknowledgement lost");
+      },
+      async observe() {
+        elapsed += 160_000;
+        throw new Error("Kubernetes is unavailable");
+      },
+      async endpoint() {
+        throw new Error("Not ready");
+      },
+      async stop() {
+        throw new Error("Unknown create must not be replaced");
+      },
+      close() {},
+    },
+    () => performance.now() + elapsed,
+  );
+  try {
+    await editor.ensure(owned.projectID, owned.developerID);
+    await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "failed",
+      "Unknown observations ran forever",
+      5_000,
+    );
+    const current = await editor.get(owned.developerID);
+    expect(current.epoch).toBe(1);
+    expect(current.failure).toBeTruthy();
+    await Bun.sleep(600);
+    expect(preparations).toBe(1);
+  } finally {
+    await editor.close();
+    await owned.dispose();
+  }
+}, 20_000);
+
 test("Stop during editor create fences its outcome; failed teardown needs an explicit retry", async () => {
   const owned = await fixture();
   const { database, developerID, projectID } = owned;

@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { kubernetesCommand } from "./config";
-import { resolve } from "node:path";
 import { createKubernetesClient, type KubernetesClient } from "./client";
 import { renderWorkspaceSourceResources, type WorkspaceSourceManifest } from "./source-manifest";
+import { startServiceForward } from "./service-forward";
 
 const metadata = z.object({
   uid: z.string().min(1),
@@ -279,42 +279,10 @@ export function createWorkspaceSourceClient(
       recent && recent.expires > performance.now() ? recent.resources : await inventory(input);
     const current = completeSourceObservation(input, resources);
     if (!current?.ready) throw new Error("Source Pod is no longer ready");
-    const ready = Promise.withResolvers<string>();
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        resolve(import.meta.dir, "source-forward.ts"),
-        input.namespace,
-        input.identity.podName,
-      ],
-      {
-        env: {
-          PATH: process.env["PATH"],
-          HOME: process.env["HOME"],
-          KUBECONFIG: process.env["KUBECONFIG"],
-        },
-        stdin: "ignore",
-        stdout: "ignore",
-        stderr: "ignore",
-        ipc(message: unknown) {
-          const result = z.object({ port: z.number().int().min(1).max(65535) }).safeParse(message);
-          if (result.success) {
-            clearTimeout(timer);
-            ready.resolve(`http://127.0.0.1:${result.data.port}`);
-          }
-        },
-      },
-    );
-    const timer = setTimeout(() => {
-      child.kill();
-      ready.reject(new Error("Source connection exceeded its deadline"));
-    }, 10_000);
-    const connection = { origin: ready.promise, child, cancel: new AbortController() };
+    const forward = startServiceForward("source", input.namespace, input.identity.podName);
+    const connection = { origin: forward.endpoint, child: forward.child, cancel: forward.cancel };
     connections.set(key, connection);
-    void child.exited.then(() => {
-      clearTimeout(timer);
-      connection.cancel.abort();
-      ready.reject(new Error("Source connection closed"));
+    void forward.child.exited.then(() => {
       if (connections.get(key) === connection) connections.delete(key);
     });
     return connection;

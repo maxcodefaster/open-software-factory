@@ -48,6 +48,7 @@ async function developerAuthority(sql: IDEQuery, userID: string) {
 export function createDeveloperIDEController(
   database: Database,
   client: DeveloperIDEClient = createDeveloperIDEClient(),
+  now: () => number = () => performance.now(),
 ) {
   const pending = new Map<string, { wakeup: boolean }>();
   let closed = false;
@@ -119,7 +120,7 @@ export function createDeveloperIDEController(
         return false;
       }
       await sql`UPDATE factory.developer_ide SET state=CASE WHEN state='ready' THEN 'failed' ELSE state END,failure='Editor resources are unavailable. Factory is checking the recorded intent.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing','ready','stop-intended')`;
-      return (await row(userID, sql))?.state !== "stop-intended";
+      return (await row(userID, sql))?.state === "stop-intended" ? false : "unavailable";
     } finally {
       try {
         await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;
@@ -139,11 +140,14 @@ export function createDeveloperIDEController(
     pending.set(userID, worker);
     void (async () => {
       try {
-        const deadline = performance.now() + 150_000;
+        let deadline = now() + 150_000;
         do {
           worker.wakeup = false;
           const retry = await reconcile(userID);
           if (!retry && !worker.wakeup) return;
+          // A confirmed Pending Pod is still the same valid start, not an
+          // unavailable observation or permission to require a human restart.
+          if (retry === true) deadline = now() + 150_000;
           const current = await row(userID);
           if (
             !current ||
@@ -151,9 +155,9 @@ export function createDeveloperIDEController(
           )
             return;
           await Bun.sleep(500);
-        } while (!closed && performance.now() < deadline);
+        } while (!closed && now() < deadline);
         if (!closed)
-          await database.client`UPDATE factory.developer_ide SET state='failed',failure='Editor preparation exceeded its deadline. Stop and retry the editor.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing')`;
+          await database.client`UPDATE factory.developer_ide SET state='failed',failure='Editor resources could not be confirmed. Retry the connection to observe the retained editor.',updated_at=now() WHERE user_id=${userID} AND state IN ('create-intended','preparing')`;
       } finally {
         pending.delete(userID);
         if (worker.wakeup) schedule(userID);

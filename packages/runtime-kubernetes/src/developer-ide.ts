@@ -1,8 +1,8 @@
-import { resolve } from "node:path";
 import { z } from "zod";
 import { kubernetesCommand } from "./config";
 import { createKubernetesClient, type KubernetesClient } from "./client";
 import { renderDeveloperIDEResources, type DeveloperIDEResources } from "./developer-ide-manifest";
+import { startServiceForward } from "./service-forward";
 
 const metadata = z.object({
   uid: z.string().min(1),
@@ -156,46 +156,16 @@ export function createDeveloperIDEClient(
       const retained = forwards.get(key);
       if (retained) return retained.endpoint;
       if (!(await observe(input))?.ready) throw new Error("Developer IDE is not ready");
-      const ready = Promise.withResolvers<string>();
-      const child = Bun.spawn(
-        [
-          process.execPath,
-          resolve(import.meta.dir, "developer-ide-forward.ts"),
-          input.identity.namespace,
-          input.identity.podName,
-        ],
-        {
-          env: {
-            PATH: process.env["PATH"],
-            HOME: process.env["HOME"],
-            KUBECONFIG: process.env["KUBECONFIG"],
-          },
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-          ipc(message: unknown) {
-            const result = z
-              .object({ port: z.number().int().min(1).max(65535) })
-              .safeParse(message);
-            if (result.success) {
-              clearTimeout(timer);
-              ready.resolve(`http://127.0.0.1:${result.data.port}`);
-            }
-          },
-        },
+      const pending = startServiceForward(
+        "editor",
+        input.identity.namespace,
+        input.identity.podName,
       );
-      const timer = setTimeout(() => {
-        child.kill();
-        ready.reject(new Error("Developer IDE connection exceeded its deadline"));
-      }, 10_000);
-      const pending = { child, endpoint: ready.promise };
       forwards.set(key, pending);
-      void child.exited.then(() => {
-        clearTimeout(timer);
-        ready.reject(new Error("Developer IDE connection closed"));
+      void pending.child.exited.then(() => {
         if (forwards.get(key) === pending) forwards.delete(key);
       });
-      return ready.promise;
+      return pending.endpoint;
     },
     async stop(input) {
       disconnect(input);

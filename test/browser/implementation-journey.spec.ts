@@ -6,6 +6,7 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { fulfillAgentView, streamedAgentView } from "../support/agent-activity-route";
 import type { AgentView } from "../../apps/factory/src/api-contracts";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -1351,6 +1352,118 @@ test("a failed editor has an explicit restart that waits for confirmed Stop with
     "data-editor-epoch",
     "2",
   );
+  expect(runtimeCommands).toEqual([]);
+});
+
+test("slow valid editor and file preparation connects without a manual retry or restarting compute", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  const workspaceID = crypto.randomUUID();
+  const { session } = await (await page.request.get("/api/session")).json();
+  const origin = developerIDEOrigin(new URL(page.url()).origin, session.user.id, 1);
+  let prepared = false;
+  let editorReads = 0;
+  let sourceReads = 0;
+  let editorEnsures = 0;
+  const state = () => (prepared ? "ready" : "preparing");
+  const editor = () => ({ serviceID: "owned-editor", epoch: 1, state: state(), failure: null });
+  const source = () => ({
+    workspaceID,
+    serviceID: "owned-files",
+    epoch: 1,
+    state: state(),
+    failure: null,
+  });
+  const runtimeCommands: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(?:runtime-attempts|agent|personal-workspace|ticket-workspace|developer-ide\/stop)\b/.test(
+        new URL(request.url()).pathname,
+      )
+    )
+      runtimeCommands.push(new URL(request.url()).pathname);
+  });
+  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
+    route.fulfill({ json: source() }),
+  );
+  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) => {
+    sourceReads++;
+    return route.fulfill({ json: source() });
+  });
+  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
+    editorEnsures++;
+    return route.fulfill({ json: editor() });
+  });
+  await page.route("**/api/developer-ide", (route) => {
+    editorReads++;
+    return route.fulfill({ json: editor() });
+  });
+  await page.route("**/api/developer-ide/access?*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<script>location.replace(${JSON.stringify(`${origin}/owned-editor`)})</script>`,
+    }),
+  );
+  await page.route(`${origin}/owned-editor`, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><body>Owned editor loading<script>
+addEventListener("message", event => {
+  if (event.data?.type === "factory:select-workspace")
+    parent.postMessage({type:"factory:workspace-selected",workspaceID:event.data.workspaceID}, "*");
+});
+</script></body></html>`,
+    }),
+  );
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await expect.poll(() => editorReads).toBeGreaterThan(0);
+  await expect.poll(() => sourceReads).toBeGreaterThan(0);
+  const initialEnsures = editorEnsures;
+  // Advance the observation clock only. Advancing every browser timer would
+  // also expire Zero's unrelated connection and clear the selected Project.
+  await page.evaluate(() => {
+    const now = performance.now.bind(performance);
+    Object.defineProperty(performance, "now", { value: () => now() + 160_001 });
+  });
+  await expect(page.getByText("Preparing your editor…", { exact: true })).toBeVisible({
+    timeout: 2_000,
+  });
+  await expect(page.getByRole("button", { name: "Retry file access", exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Retry editor connection", exact: true }),
+  ).toHaveCount(0);
+  await mkdir(".factory/test-results/editor-preparation", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/editor-preparation/slow-valid-preparation.png",
+  });
+  prepared = true;
+  const iframe = page.locator('iframe[title="Factory IDE"]');
+  await expect(iframe).toHaveAttribute("data-editor-epoch", "1");
+  const editorFrame = page.frameLocator('iframe[title="Factory IDE"]');
+  await expect(editorFrame.locator("body")).toHaveText("Owned editor loading");
+  await expect(
+    page.getByText("Your editor is still opening. You can wait or retry the connection."),
+  ).toBeVisible({ timeout: 45_000 });
+  await expect(page.getByText("The editor did not connect. Retry opening it.")).toHaveCount(0);
+  await page.screenshot({
+    path: ".factory/test-results/editor-preparation/slow-editor-connection.png",
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({
+    path: ".factory/test-results/editor-preparation/slow-editor-connection-narrow.png",
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await editorFrame.locator("body").evaluate(() => {
+    window.parent.postMessage({ type: "factory:ide-ready" }, "*");
+  });
+  await expect(iframe).toHaveAttribute("data-workspace-id", workspaceID);
+  await expect(
+    page.getByRole("button", { name: "Retry editor connection", exact: true }),
+  ).toHaveCount(0);
+  expect(editorEnsures).toBe(initialEnsures);
   expect(runtimeCommands).toEqual([]);
 });
 

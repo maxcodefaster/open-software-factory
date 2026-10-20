@@ -23,6 +23,7 @@ export function DeveloperIDEWorkspace(props: {
   const [selected, setSelected] = createSignal<string>();
   const [availableSource, setAvailableSource] = createSignal<string>();
   const [editorError, setEditorError] = createSignal("");
+  const [editorSlow, setEditorSlow] = createSignal(false);
   const [sourceError, setSourceError] = createSignal("");
   const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
@@ -160,11 +161,9 @@ export function DeveloperIDEWorkspace(props: {
   createEffect(
     () => [attachment()?.epoch, ready(), editorRetry()] as const,
     ([epoch, editorReady]) => {
+      setEditorSlow(false);
       if (!epoch || editorReady) return;
-      const timer = setTimeout(
-        () => setEditorError("The editor did not connect. Retry opening it."),
-        30_000,
-      );
+      const timer = setTimeout(() => setEditorSlow(true), 30_000);
       return () => clearTimeout(timer);
     },
   );
@@ -183,7 +182,6 @@ export function DeveloperIDEWorkspace(props: {
             signal: cancel.signal,
           },
         );
-        const deadline = performance.now() + 150_000;
         while (!cancel.signal.aborted) {
           setEditorState(current.state);
           if (current.state === "ready") {
@@ -199,8 +197,6 @@ export function DeveloperIDEWorkspace(props: {
           }
           if (["failed", "stopped", "stop-intended"].includes(current.state))
             throw new Error(current.failure ?? "Editor is stopped. Retry to prepare it.");
-          if (performance.now() >= deadline)
-            throw new Error("Editor preparation is taking longer than expected. Retry opening it.");
           await pause(cancel.signal);
           current = await apiRequest(developerIDEViewSchema, "/api/developer-ide", {
             signal: cancel.signal,
@@ -222,7 +218,6 @@ export function DeveloperIDEWorkspace(props: {
       const cancel = new AbortController();
       setSourceError("");
       void (async () => {
-        const deadline = performance.now() + 150_000;
         while (!cancel.signal.aborted) {
           const source = await apiRequest(
             sourceWorkspaceViewSchema,
@@ -239,8 +234,6 @@ export function DeveloperIDEWorkspace(props: {
               source.failure ??
                 "Workspace files are stopped. Reopen this Workspace to prepare them.",
             );
-          if (performance.now() >= deadline)
-            throw new Error("Workspace files are still preparing. Reopen this Workspace to retry.");
           await pause(cancel.signal);
         }
       })().catch((cause: unknown) => {
@@ -337,7 +330,10 @@ export function DeveloperIDEWorkspace(props: {
                   <p>
                     {editorRecovering()
                       ? "Restarting your editor…"
-                      : editorError() || "Opening your editor…"}
+                      : editorError() ||
+                        (editorSlow()
+                          ? "Your editor is still opening. You can wait or retry the connection."
+                          : "Opening your editor…")}
                   </p>
                 </div>
               </Show>
@@ -353,7 +349,7 @@ export function DeveloperIDEWorkspace(props: {
             Preparing Workspace files…
           </div>
         </Show>
-        <Show when={editorError() || sourceError() || editorRecovering()}>
+        <Show when={editorError() || editorSlow() || sourceError() || editorRecovering()}>
           <div class="editor-recovery">
             <Show when={sourceError()}>
               <p role="status">{sourceError()}</p>
@@ -381,7 +377,7 @@ export function DeveloperIDEWorkspace(props: {
                   </button>
                 </Show>
               </Show>
-              <Show when={editorError() || editorRecovering()}>
+              <Show when={editorError() || editorSlow() || editorRecovering()}>
                 <button
                   class="quiet-button"
                   type="button"
