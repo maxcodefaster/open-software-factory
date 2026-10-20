@@ -6,7 +6,10 @@ export async function waitForRegistry(input: {
   caFile: string;
   timeoutMS?: number;
 }) {
-  const deadline = Date.now() + (input.timeoutMS ?? 15_000);
+  // kubectl permits a minute for its target Pod to become available. Its
+  // forwarding setup must fit inside this check too, not just the HTTPS probe.
+  const timeoutMS = input.timeoutMS ?? 60_000;
+  const deadline = Date.now() + timeoutMS;
   const exited = input.forward.exited.then(() => {
     throw new Error(
       "Registry port-forward exited before readiness; check its local port and cluster connection",
@@ -46,5 +49,7 @@ export async function waitForRegistry(input: {
     if (Date.now() < deadline)
       await Promise.race([Bun.sleep(Math.min(250, deadline - Date.now())), exited]);
   }
-  throw new Error("Registry did not become ready");
+  throw new Error(
+    `Registry forwarding or HTTPS readiness was not confirmed within ${timeoutMS / 1000}s`,
+  );
 }

@@ -1,9 +1,31 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { rootCertificates } from "node:tls";
 import { waitForRegistry } from "./registry-readiness";
+
+test("normal Kubernetes forwarding preparation does not exhaust the Registry check before HTTPS is ready", async () => {
+  const started = Date.now();
+  let reads = 0;
+  const clock = spyOn(Date, "now").mockImplementation(() => started + (reads++ === 0 ? 0 : 20_000));
+  const spawn = spyOn(Bun, "spawn").mockReturnValue({
+    exitCode: 0,
+    exited: Promise.resolve(0),
+  } as ReturnType<typeof Bun.spawn>);
+  try {
+    await waitForRegistry({
+      forward: { exitCode: null, exited: new Promise<number>(() => {}) },
+      host: "registry.localhost:12345",
+      caFile: "/owned-registry-ca.pem",
+    });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(spawn.mock.calls[0]?.[0]).toContain("--cacert");
+  } finally {
+    spawn.mockRestore();
+    clock.mockRestore();
+  }
+});
 
 test("a Registry that accepts TCP but never responds cannot hold startup past its deadline", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-registry-"));
