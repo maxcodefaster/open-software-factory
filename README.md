@@ -252,7 +252,7 @@ Projects, write manual Requirements or explicitly request an AI Interview, and c
 ```sh
 mise exec -- bun run factory:up --disposable coding-proof-example
 FACTORY_CODING_COMPLETION_INSTALLATION=coding-proof-example mise exec -- bun run test:live coding-completion.live
-mise exec -- bun run factory:reset --disposable coding-proof-example --confirm coding-proof-example
+mise exec -- bun run factory:reset --data --disposable coding-proof-example --confirm coding-proof-example
 ```
 
 Each journey requires the coding Agent's browser inspection, independent exact-commit review and
