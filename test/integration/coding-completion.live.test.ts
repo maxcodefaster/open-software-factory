@@ -247,9 +247,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
               ? summary
               : [
                   summary,
-                  ...acceptanceCriteria,
+                  ...acceptanceCriteria.filter((_text, index) => index !== 2),
                   `Out of scope: ${nonGoal}.`,
-                  "All product decisions are settled. Propose this complete Ticket without introducing new scope.",
+                  "One product decision is unresolved: should checklist progress survive a page reload? Ask me this question before proposing requirements. All other decisions are settled.",
                 ].join("\n\n"),
           );
         await page.getByRole("button", { name: "Write requirements", exact: true }).click();
@@ -289,6 +289,24 @@ for (const requirementsPath of ["manual", "interview"] as const)
           ).toHaveLength(0);
         } else {
           await page.getByRole("button", { name: "Ask AI to clarify", exact: true }).click();
+          const question = page.locator(".conversation-question");
+          await visible(question).toBeVisible({ timeout: 90_000 });
+          await captureFactory("02-interview-question");
+          const answer = question.getByLabel("Custom answer", { exact: true });
+          if (!(await answer.isVisible())) {
+            const custom = question.getByRole("radio", { name: "Something else", exact: true });
+            if (await custom.isVisible()) await custom.check();
+            else
+              await question
+                .getByRole("radio", { name: /page.local|reset.*reload|reload.*reset|not persist/i })
+                .check();
+          }
+          if (await answer.isVisible())
+            await answer.fill(
+              "Keep progress page-local. Reload resets the checklist to 0 of 3 ready without signing the member out. No persistence or backend changes. The remaining requirements are settled; propose the complete Ticket now.",
+            );
+          await captureFactory("02-interview-answer");
+          await question.getByRole("button", { name: "Continue", exact: true }).click();
           await visible(
             page.getByRole("button", { name: "Confirm answers", exact: true }),
           ).toBeVisible({ timeout: 90_000 });
