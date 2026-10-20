@@ -17,6 +17,7 @@ export function SettingsWorkspace(props: {
   systemManager: boolean;
   projectManager: boolean;
   developer: boolean;
+  onModelsChanged?: (() => Promise<void>) | undefined;
   initialSelection?: { scope: Scope; category: "people" | "security" } | undefined;
 }) {
   const [selection, setSelection] = createSignal<{ scope: Scope; category: Category }>(
@@ -146,6 +147,7 @@ export function SettingsWorkspace(props: {
             projectManager={canManage()}
             category={category() === "skills" ? "skills" : "models"}
             scope={selection().scope}
+            onModelsChanged={props.onModelsChanged}
           />
         </div>
         <Show when={category() === "security"}>

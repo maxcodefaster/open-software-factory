@@ -10,7 +10,10 @@ import {
 import { apiRequest } from "../api-client";
 import { ModelConnectionSettings } from "./connection-settings";
 
-export function SystemModelSettings(props: { active?: boolean }) {
+export function SystemModelSettings(props: {
+  active?: boolean;
+  onModelsChanged?: (() => Promise<void>) | undefined;
+}) {
   const [settings, setSettings] = createSignal<ModelSettingsView>();
   const [planning, setPlanning] = createSignal("");
   const [build, setBuild] = createSignal("");
@@ -99,7 +102,10 @@ export function SystemModelSettings(props: { active?: boolean }) {
               settings={current()}
               disabled={busy() || dirty()}
               onBusy={setConnectionBusy}
-              onChange={load}
+              onChange={async () => {
+                await load();
+                if (!disposed) await props.onModelsChanged?.();
+              }}
             />
             <Show when={current().connection.configured}>
               <details class="model-policy">

@@ -81,6 +81,7 @@ import {
   agentViewSchema,
   appPreviewsSchema,
   attemptsResponseSchema,
+  bootstrapSchema,
   type Bootstrap,
   type Change,
   type ConversationView,
@@ -212,6 +213,7 @@ function FactoryWorkspace(props: {
   uiPreference: UIPreference;
   modelRelayConfigured: boolean;
 }) {
+  const [modelRelayConfigured, setModelRelayConfigured] = createSignal(props.modelRelayConfigured);
   const zero = useZero<FactoryZeroSchema, undefined, FactoryZeroContext>();
   const projects = useZeroQuery(() => zeroQueries.projects.list());
   const memberships = useZeroQuery(() => zeroQueries.memberships.list());
@@ -402,6 +404,16 @@ function FactoryWorkspace(props: {
   let conversationReadGeneration = 0;
   let ticketReadGeneration = 0;
   let workspaceDisposed = false;
+  let modelAvailabilityReadGeneration = 0;
+  async function refreshModelAvailability() {
+    const generation = ++modelAvailabilityReadGeneration;
+    const value = await apiRequest(
+      bootstrapSchema.pick({ modelRelayConfigured: true }),
+      "/api/session",
+    );
+    if (!workspaceDisposed && generation === modelAvailabilityReadGeneration)
+      setModelRelayConfigured(value.modelRelayConfigured);
+  }
   const projectStreams = new Set<AbortController>();
   onCleanup(() => {
     workspaceDisposed = true;
@@ -3482,11 +3494,11 @@ function FactoryWorkspace(props: {
                                     agentNeedsResolution() ||
                                     Boolean(agent().commitOperation) ||
                                     agent().stopPending)) ||
-                                (!canPromptBuild() && !props.modelRelayConfigured) ||
+                                (!canPromptBuild() && !modelRelayConfigured()) ||
                                 blockersFor(selectedTicketID() ?? "").length > 0
                               }
                               title={
-                                !props.modelRelayConfigured
+                                !modelRelayConfigured()
                                   ? "Connect a Factory model before starting implementation"
                                   : preparingImplementation()
                                     ? "Start this specification with the selected reasoning"
@@ -3527,7 +3539,7 @@ function FactoryWorkspace(props: {
                       </div>
                     </div>
                   </form>
-                  <Show when={!props.modelRelayConfigured}>
+                  <Show when={!modelRelayConfigured()}>
                     <p class="agent-configuration-note">
                       Model connection required before implementation can start.
                     </p>
@@ -3687,7 +3699,7 @@ function FactoryWorkspace(props: {
                       }
                       onCodingOptions={openCodingOptions}
                       codingOptionsOpen={Boolean(preparingImplementation() && agentOpen())}
-                      implementationAvailable={props.modelRelayConfigured}
+                      implementationAvailable={modelRelayConfigured()}
                       codingPause={agent().codingPause}
                       computeWait={agent().computeWait}
                       onResumeCoding={() => void resumeCoding()}
@@ -3813,6 +3825,7 @@ function FactoryWorkspace(props: {
                   project={tab.settingsProject}
                   systemManager={props.session.systemManager}
                   projectManager={canManageSettingsProject(tab.settingsProject?.id)}
+                  onModelsChanged={refreshModelAvailability}
                   developer={
                     props.session.systemManager ||
                     memberships

@@ -9,6 +9,7 @@ export function ModelSettings(props: {
   project: { id: string; name: string } | undefined;
   category: "models" | "skills";
   scope: "personal" | "project" | "system";
+  onModelsChanged?: (() => Promise<void>) | undefined;
 }) {
   return (
     <section class="settings-configuration" aria-label="Agent settings">
@@ -35,7 +36,10 @@ export function ModelSettings(props: {
               </Show>
             }
           >
-            <SystemModelSettings active={props.active ?? true} />
+            <SystemModelSettings
+              active={props.active ?? true}
+              onModelsChanged={props.onModelsChanged}
+            />
           </Show>
         </>
       </Show>

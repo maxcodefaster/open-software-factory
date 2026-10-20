@@ -614,7 +614,8 @@ async function route(request: Request) {
             : { desktopBackgroundKey: "river-landscape" },
           zeroCacheURL: FACTORY_ZERO_CACHE_URL ?? "http://127.0.0.1:4948",
           modelRelayConfigured: Boolean(
-            process.env["FACTORY_MODEL_BASE_URL"] && process.env["FACTORY_MODEL_API_KEY"],
+            (process.env["FACTORY_MODEL_BASE_URL"] && process.env["FACTORY_MODEL_API_KEY"]) ||
+              (await database.client.begin((sql) => modelConnections.reference("build", sql))),
           ),
         },
         200,

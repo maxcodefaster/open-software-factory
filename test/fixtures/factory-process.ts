@@ -37,6 +37,7 @@ export async function factoryProcess(
     FACTORY_PROJECT_AGENT_MODEL?: string;
     FACTORY_AGENT_MODEL_ID?: string;
     FACTORY_MODEL_BASE_URL?: string;
+    FACTORY_MODEL_API_KEY?: string;
     FACTORY_PLANNING_MODEL_BASE_URL?: string;
     FACTORY_PLANNING_MODEL_API_KEY?: string;
     FACTORY_BROWSER_TOOLS_IMAGE?: string;

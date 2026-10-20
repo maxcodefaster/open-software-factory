@@ -113,6 +113,8 @@ mise exec -- bun run factory:restart
 ```
 
 Restart adopts published pins for new runtime attempts and preserves existing intent and data.
+It reuses the existing frontend bundle. After changing UI source, run `factory:up` again to rebuild
+that bundle and restart the same installation without resetting its data.
 Use [runtime artifact instructions](deploy/runtime-host/README.md) when changing runtime images.
 
 ### Run Factory through Compose
