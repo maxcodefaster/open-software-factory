@@ -78,6 +78,22 @@ describe("Ticket board stages", () => {
     ).toBe("implementation");
   });
 
+  test.each(["pending", "dispatching", "running", "failed", "stopped", "completed"])(
+    "independent review %s stays in Review instead of looking like another implementation",
+    (state) => {
+      const input = {
+        ticketState: "in-progress" as const,
+        changeState: "active",
+        verificationState: "succeeded",
+        buildTurnPurpose: "review",
+        buildTurnState: state,
+        implementationState: state === "completed" ? "committed" : "working",
+      };
+      expect(ticketBoardStage(input)).toBe("review");
+      expect(ticketBoardStatus(input)).not.toBe("Implementation");
+    },
+  );
+
   test.each(["pending", "dispatching", "running", "uncertain"])(
     "an admitted correction %s returns to Implementation before a new commit exists",
     (buildTurnState) => {

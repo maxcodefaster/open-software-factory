@@ -14,6 +14,7 @@ export type ChangeView = {
   runtimeState: string | null;
   verificationState: string | null;
   buildTurnState: string | null;
+  buildTurnPurpose?: string | null;
   implementationState: string | null;
   deliveryApprovedAt: string | null;
   mergeState: string | null;

@@ -1,5 +1,9 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import {
+  candidateReviewPermissions,
+  candidateReviewResultInput,
+} from "../../../../packages/conversation-domain/src/candidate-review";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
 import type { createChangeWriterController } from "../access/writer-controller";
@@ -15,6 +19,7 @@ import { codingAllowanceDenial } from "../usage/opencode";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createBuildBrowserController } from "./browser-controller";
 import { createChangeAdmission } from "./change-admission";
+import { createReviewAdmission } from "./review-admission";
 import { createChangeAgentTransport } from "./change-transport";
 import { createAgentCommitTransport } from "./commit-transport";
 import {
@@ -60,6 +65,8 @@ type AgentRow = {
   state: "starting" | "working" | "waiting" | "stopped" | "failed" | "committed";
   sessionID: string | null;
   sessionConfirmed: boolean;
+  implementationSessionID: string | null;
+  implementationSessionConfirmed: boolean;
   activeInboxID: string | null;
   lastError: string | null;
   activeTurnID: string | null;
@@ -460,6 +467,7 @@ export function createAgentController(
     (sql) => modelConnections.reference("build", sql),
   );
   const stop = createChangeAgentStop(database, hub);
+  const admitReview = createReviewAdmission(database);
   const commitTransport = createAgentCommitTransport(database, hub);
   const background = new Set<Promise<void>>();
   let closed = false;
@@ -482,6 +490,8 @@ export function createAgentController(
         session.runtime_attempt_id AS "runtimeAttemptID", attempt.state AS "runtimeState",
         session.state, session.opencode_session_id AS "sessionID",
         session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed",
+        COALESCE(session.implementation_session_id,session.opencode_session_id) AS "implementationSessionID",
+        COALESCE(session.implementation_session_confirmed_at,session.native_session_confirmed_at) IS NOT NULL AS "implementationSessionConfirmed",
         session.active_inbox_id AS "activeInboxID", session.last_error AS "lastError",
         session.active_turn_id AS "activeTurnID", session.stop_pending AS "stopPending",
         session.stop_id AS "stopID"
@@ -502,7 +512,9 @@ export function createAgentController(
   ) {
     const confirmed = await database.client`
       UPDATE factory.change_agent_session
-      SET native_session_confirmed_at = COALESCE(native_session_confirmed_at, now())
+      SET native_session_confirmed_at = COALESCE(native_session_confirmed_at, now()),
+        implementation_session_confirmed_at = CASE WHEN implementation_session_id = ${sessionID}
+          THEN COALESCE(implementation_session_confirmed_at, now()) ELSE implementation_session_confirmed_at END
       WHERE change_id = ${changeID} AND active_turn_id = ${turnID}
         AND runtime_attempt_id = ${attemptID} AND opencode_session_id = ${sessionID}
     `;
@@ -613,9 +625,15 @@ export function createAgentController(
         await sql`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id = ${attemptID}
           WHERE turn_id = ${turnID} AND runtime_attempt_id IS NULL`;
         await sql`INSERT INTO factory.change_agent_session(
-          change_id, runtime_attempt_id, opencode_session_id, state, created_by, active_turn_id
-        ) VALUES (${changeID}, ${attemptID}, ${intent.sessionID}, 'starting', ${userID}, ${turnID})
+          change_id, runtime_attempt_id, opencode_session_id, state, created_by, active_turn_id,
+          implementation_session_id
+        ) VALUES (${changeID}, ${attemptID}, ${intent.sessionID}, 'starting', ${userID}, ${turnID},
+          ${owned?.authority.mode === "build" && owned.authority.review ? null : intent.sessionID})
         ON CONFLICT (change_id) DO UPDATE SET runtime_attempt_id = EXCLUDED.runtime_attempt_id,
+          implementation_session_id = COALESCE(EXCLUDED.implementation_session_id,
+            factory.change_agent_session.implementation_session_id,factory.change_agent_session.opencode_session_id),
+          implementation_session_confirmed_at = COALESCE(factory.change_agent_session.implementation_session_confirmed_at,
+            CASE WHEN factory.change_agent_session.implementation_session_id IS NULL THEN factory.change_agent_session.native_session_confirmed_at END),
           native_session_confirmed_at = CASE
             WHEN factory.change_agent_session.opencode_session_id IS NOT DISTINCT FROM EXCLUDED.opencode_session_id
               THEN factory.change_agent_session.native_session_confirmed_at END,
@@ -694,19 +712,21 @@ export function createAgentController(
             title: intent.title,
             location: { directory: workspaceDirectory },
             model: { providerID: "factory", id: owned.authority.modelId },
-            permissions: [
-              { action: "*", resource: "*", effect: "allow" },
-              ...(intent.skillLoading === "native"
-                ? [
-                    { action: "skill", resource: "*", effect: "deny" as const },
-                    ...skillRevisionIDs.map((id) => ({
-                      action: "skill",
-                      resource: `factory-${id}`,
-                      effect: "allow" as const,
-                    })),
-                  ]
-                : []),
-            ],
+            permissions: owned.authority.review
+              ? candidateReviewPermissions
+              : [
+                  { action: "*", resource: "*", effect: "allow" },
+                  ...(intent.skillLoading === "native"
+                    ? [
+                        { action: "skill", resource: "*", effect: "deny" as const },
+                        ...skillRevisionIDs.map((id) => ({
+                          action: "skill",
+                          resource: `factory-${id}`,
+                          effect: "allow" as const,
+                        })),
+                      ]
+                    : []),
+                ],
           })
         : await client.session.get({ sessionID: intent.sessionID });
       if (
@@ -723,6 +743,12 @@ export function createAgentController(
       await ensureOpenCodeMessageBoundary(client, intent.sessionID);
       await usageJournal.prepare(turnID, client, intent.sessionID);
       if (intent.skillLoading === "native") await syncOpenCodeInputGuidance(client, intent);
+      if (owned.authority.review)
+        await client.session.instructions.entry.put({
+          sessionID: intent.sessionID,
+          key: "factory-review-policy",
+          value: intent.text,
+        });
       const browserGrant = await browser?.prepare(turnID, ownerToken);
       if (intent.browserTransport === "mcp" && browserGrant)
         await connectOpenCodeBrowser(
@@ -744,6 +770,9 @@ export function createAgentController(
           RETURNING change_id AS id`;
         if (!rows[0])
           throw new CommandError("conflict", "Build ownership changed before recording dispatch");
+        if (owned?.authority.mode === "build" && owned.authority.review)
+          await sql`UPDATE factory.candidate_review SET state='running'
+            WHERE id=${owned.authority.review.reviewId} AND turn_id=${turnID} AND state='pending'`;
       });
       if (!running) {
         // The accepted prompt may still be running, or Stop may already have
@@ -848,6 +877,12 @@ export function createAgentController(
           )
             throw new Error("Recovered OpenCode session does not match its recorded configuration");
           if (intent.skillLoading === "native") await syncOpenCodeInputGuidance(client, intent);
+          if (owned.authority.review)
+            await client.session.instructions.entry.put({
+              sessionID: intent.sessionID,
+              key: "factory-review-policy",
+              value: intent.text,
+            });
           await usageJournal.drain(turnID, client, intent.sessionID);
           [work, messages] = await Promise.all([
             observeOpenCodeWork(client, intent.sessionID),
@@ -1336,6 +1371,34 @@ export function createAgentController(
           }
           if (outcome.state === "succeeded") {
             await usageJournal.settle(turnID, "completed");
+            const reviewTurn = await turns.get(turnID);
+            if (reviewTurn?.authority.mode === "build" && reviewTurn.authority.review) {
+              const reviewID = reviewTurn.authority.review.reviewId;
+              const [review] = await database.client<{ result: unknown }[]>`
+                SELECT result FROM factory.candidate_review WHERE id=${reviewID} AND turn_id=${turnID}`;
+              const parsed = candidateReviewResultInput.safeParse(review?.result);
+              const result = parsed.success ? parsed.data : null;
+              const summary =
+                result?.summary ??
+                "Independent review ended without an accepted report. This candidate remains unverified.";
+              const settled = await turns.settle(
+                turnID,
+                ownerToken,
+                "completed",
+                bounded(summary, 2_000),
+                async (sql) => {
+                  await sql`UPDATE factory.candidate_review SET state=${result?.verdict ?? "incomplete"},completed_at=now()
+                  WHERE id=${reviewID} AND turn_id=${turnID} AND state IN ('pending','running')`;
+                  await sql`UPDATE factory.change_agent_session SET state='committed',active_inbox_id=NULL,
+                  last_error=NULL,updated_at=now() WHERE change_id=${changeID} AND active_turn_id=${turnID}
+                    AND state='working' AND active_inbox_id=${session.activeInboxID}`;
+                },
+              );
+              if (!settled)
+                throw new CommandError("conflict", "Review no longer owns this exact candidate");
+              notifyActivity(changeID);
+              return;
+            }
             const settled = await turns.settle(
               turnID,
               ownerToken,
@@ -1551,9 +1614,15 @@ export function createAgentController(
     },
     async resume(changeID: string, userID: string, commandID: string, pausedTurnID: string) {
       const [pendingResume] = await database.client<
-        Array<{ state: string; attemptID: string; sessionID: string; promptID: string }>
+        Array<{
+          state: string;
+          review: boolean;
+          attemptID: string;
+          sessionID: string;
+          promptID: string;
+        }>
       >`
-        SELECT turn.state,intent.runtime_attempt_id AS "attemptID",intent.session_id AS "sessionID",intent.prompt_id AS "promptID"
+        SELECT turn.state,(turn.authority ? 'review') AS review,intent.runtime_attempt_id AS "attemptID",intent.session_id AS "sessionID",intent.prompt_id AS "promptID"
         FROM factory.agent_turn turn JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
         JOIN factory.coding_pause pause ON pause.turn_id=turn.id
         WHERE turn.id=${pausedTurnID} AND turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL`;
@@ -1562,6 +1631,11 @@ export function createAgentController(
       >`SELECT project_id AS id FROM factory.change WHERE id=${changeID}`;
       if (!project) throw new CommandError("not-found", "Change not found");
       await database.client.begin((sql) => projectAuthorityIn(sql, userID, project.id));
+      if (pendingResume?.state === "failed" && pendingResume.review)
+        throw new CommandError(
+          "conflict",
+          "Retry the independent review after resolving its Coding allowance. A review cannot resume as implementation.",
+        );
       if (
         pendingResume?.state === "failed" &&
         !(await confirmSettledOpenCodeInput(
@@ -1666,6 +1740,13 @@ export function createAgentController(
         commandId,
         text,
       });
+      if (!accepted.replayed) run(execute(accepted.turn.id));
+      return this.get(changeID, accepted.turn.id);
+    },
+
+    async review(changeID: string, reviewID: string, userID: string) {
+      if (closed) throw new Error("Agent controller is closed");
+      const accepted = await admitReview(changeID, reviewID, userID);
       if (!accepted.replayed) run(execute(accepted.turn.id));
       return this.get(changeID, accepted.turn.id);
     },
@@ -1804,7 +1885,8 @@ export function createAgentController(
         activityRuntimeState === "ready"
       ) {
         try {
-          const page = await opencode(hub, activityAttemptID).message.list(
+          const client = opencode(hub, activityAttemptID);
+          const page = await client.message.list(
             { sessionID: session.sessionID, limit: 100 },
             { signal: AbortSignal.timeout(2_000) },
           );
@@ -1818,6 +1900,30 @@ export function createAgentController(
               ]),
             ),
           );
+          if (
+            session.implementationSessionConfirmed &&
+            session.implementationSessionID &&
+            session.implementationSessionID !== session.sessionID
+          ) {
+            const implementationPage = await client.message
+              .list(
+                { sessionID: session.implementationSessionID, limit: 100 },
+                { signal: AbortSignal.timeout(2_000) },
+              )
+              .catch(() => null);
+            if (implementationPage)
+              messages = [
+                ...projectMessages(
+                  implementationPage,
+                  new Map(
+                    intents
+                      .filter((intent) => intent.sessionID === session.implementationSessionID)
+                      .map((intent) => [intent.promptID, intent.bootstrap ? null : intent.text]),
+                  ),
+                ),
+                ...messages,
+              ].sort((a, b) => a.at - b.at);
+          }
           if (turn) {
             const intent = sessionIntents.find((intent) => intent.turnID === turn.id);
             if (intent) turn.usage = observeOpenCodeUsage(page.data, intent.promptID);
@@ -1868,7 +1974,9 @@ export function createAgentController(
         messages,
         ...(admittedMessages.length ? { admittedMessages } : {}),
         messagesAvailable,
-        sessionAvailable: Boolean(session.sessionID && session.sessionConfirmed),
+        sessionAvailable: Boolean(
+          session.implementationSessionID && session.implementationSessionConfirmed,
+        ),
         runtimeConnected: hub.connected(activityAttemptID),
         stopPending: session.stopPending,
         stopId: session.stopPending ? session.stopID : null,

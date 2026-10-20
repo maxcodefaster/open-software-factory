@@ -28,7 +28,7 @@ every create has deterministic identity, idempotency and ambiguous-outcome recov
 | --- | --- | --- |
 | Investigate | Mastra in the Factory server | Authorized Project research; no execution Sandbox |
 | Plan | Mastra in the Factory server | Typed questions and proposals; human confirmation grants scope |
-| Build | OpenCode 2 in the primary Dev Container | One approved Change in its canonical Ticket Workspace |
+| Build | OpenCode 2 in the primary Dev Container | One approved Change, with separate implementation and read-only review Sessions |
 
 Engine assignment is fixed. Models, role instructions and eligible Skills are configurable.
 Settings → Skills provides private authoring, a curated starter collection, package import previews
@@ -160,7 +160,7 @@ edited Epic/member proposals. New member Tickets enter Requirements without auto
 ```text
 Approved requirements -> commissioned Change -> OpenCode edits and local checks
   -> Factory commit and controlled push -> Forgejo pull request
-  -> fresh Verification -> exact human Delivery Approval
+  -> fresh Verification -> independent Candidate Review -> exact human Delivery Approval
   -> fast-forward merge -> healthy Staging replacement
 ```
 
@@ -168,6 +168,23 @@ Verification runs the protected default-branch workflow against the exact Change
 Sandbox, with a repository-scoped one-job Forgejo runner. The Change and recorded default-branch
 heads must still match the approved values; movement invalidates Delivery. A correction needs a
 new commit and Verification. Staging retains its previous healthy Preview until replacement is ready.
+After successful Verification, the same admitted Coding model reviews the exact candidate in a fresh
+OpenCode Session without implementation history. Fixed session permissions deny native execution,
+editing, Skill execution and descendants. The existing Factory MCP facade supplies bounded,
+immutable base/candidate file reads and diffs, App inspection and a review-report tool. No generic
+agent registry, extra model-default role or second orchestration engine is introduced.
+Factory retains the implementation Session separately for corrections. The current execution Session
+continues to bind Stop, model relay, usage and browser authority. Both histories remain readable.
+Only a settled review with accepted coverage and no blocking findings can pass. Frontend file changes
+require actual App inspection and an exact-candidate screenshot; dirty or different-commit browser
+observations cannot be accepted. The prompt also requires relevant UI behavior beyond that file
+classification. A fresh reviewer is an evaluator, not a guarantee that every defect will be detected.
+Factory persists compact findings, source-read evidence and screenshot digests/provenance, not image
+blobs or another transcript. Screenshot images retain the browser's existing ephemeral lifetime.
+Blocking findings request a bounded targeted correction in the retained implementation Session.
+Missing proof stays incomplete. An explicit retry creates another fresh review attempt for the same
+candidate without changing the old result. Changed Requirements or new source invalidate review eligibility. Human
+Delivery Approval records the exact settled review as well as the commit and Verification.
 Delivery ends at Staging, rather than a production application deployment.
 Cleanup confirms no writers on the delivered Change branch while retaining its protected source
 ref and history. It does not temporarily remove protection to force branch deletion.
@@ -231,6 +248,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Board Stage | Ideas, Requirements, Implementation or Review; Ready is a gate, not a stage |
 | Change | Isolated implementation of one approved Requirement Revision |
 | Verification | Evaluation of one exact Change commit in a fresh runtime |
+| Candidate Review | Independent, read-only AI evaluation of one exact verified Change commit |
 | Delivery Approval | Immutable human approval of one verified commit for merge and promotion |
 | Promotion | Adopt the merged default-branch commit; switch Staging only when ready |
 | App | Named Project service declared by its System Contract |
@@ -293,6 +311,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | [0009](adr/0009-independent-workspace-file-access.md) | Canonical file access independent of execution |
 | [0010](adr/0010-factory-identity-and-change-writers.md) | Factory identity and exclusive Change editing |
 | [0011](adr/0011-delivered-branch-retention.md) | Delivered branches retain source behind a closed write fence |
+| [0012](adr/0012-independent-candidate-review.md) | Independent review uses a fresh, read-only OpenCode Session |
 
 ## Verification and operating limits
 

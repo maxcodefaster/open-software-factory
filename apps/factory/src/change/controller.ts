@@ -566,7 +566,7 @@ export function createChangeController(
           change.version, change.runtime_attempt_id AS "runtimeAttemptId", change.failure,
           operation.state AS "branchState", operation.observed_head_sha AS "branchHeadSha",
           attempt.state AS "runtimeState", verification.state AS "verificationState",
-          build.state AS "buildTurnState", session.state AS "implementationState",
+          build.state AS "buildTurnState",build.purpose AS "buildTurnPurpose", session.state AS "implementationState",
           approval.approved_at AS "deliveryApprovedAt", merge.state AS "mergeState",
           promotion.state AS "promotionState"
         FROM factory.change change
@@ -574,7 +574,8 @@ export function createChangeController(
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id = change.runtime_attempt_id
         LEFT JOIN factory.change_agent_session session ON session.change_id = change.id
         LEFT JOIN LATERAL (
-          SELECT state FROM factory.agent_turn WHERE change_id = change.id
+          SELECT state,CASE WHEN input->>'kind'='change-review' THEN 'review' ELSE 'implementation' END AS purpose
+          FROM factory.agent_turn WHERE change_id = change.id
           ORDER BY created_at DESC, id DESC LIMIT 1
         ) build ON true
         LEFT JOIN LATERAL (
@@ -598,7 +599,7 @@ export function createChangeController(
           change.version, change.runtime_attempt_id AS "runtimeAttemptId", change.failure,
           operation.state AS "branchState", operation.observed_head_sha AS "branchHeadSha",
           attempt.state AS "runtimeState", verification.state AS "verificationState",
-          build.state AS "buildTurnState", session.state AS "implementationState",
+          build.state AS "buildTurnState",build.purpose AS "buildTurnPurpose", session.state AS "implementationState",
           approval.approved_at AS "deliveryApprovedAt", merge.state AS "mergeState",
           promotion.state AS "promotionState"
         FROM factory.change change
@@ -606,7 +607,8 @@ export function createChangeController(
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id = change.runtime_attempt_id
         LEFT JOIN factory.change_agent_session session ON session.change_id = change.id
         LEFT JOIN LATERAL (
-          SELECT state FROM factory.agent_turn WHERE change_id = change.id
+          SELECT state,CASE WHEN input->>'kind'='change-review' THEN 'review' ELSE 'implementation' END AS purpose
+          FROM factory.agent_turn WHERE change_id = change.id
           ORDER BY created_at DESC, id DESC LIMIT 1
         ) build ON true
         LEFT JOIN LATERAL (

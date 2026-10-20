@@ -113,6 +113,7 @@ export async function deleteFactoryProject(
         WHERE turn_id IN (SELECT id FROM factory.agent_turn WHERE project_id = ${projectID})
       `;
       await transaction`DELETE FROM factory.agent_turn_skill WHERE turn_id IN (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
+      await transaction`DELETE FROM factory.candidate_review WHERE change_id IN (SELECT id FROM factory.change WHERE project_id=${projectID})`;
       await transaction`DELETE FROM factory.coding_pause WHERE turn_id IN (SELECT id FROM factory.agent_turn WHERE project_id=${projectID}) OR resumed_by_turn_id IN (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
       await transaction`DELETE FROM factory.agent_turn WHERE project_id = ${projectID}`;
       await transaction`DELETE FROM factory.epic_confirmation WHERE project_id=${projectID}`;

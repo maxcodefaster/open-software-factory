@@ -7,6 +7,8 @@ import {
 import { CommandError } from "../command-error";
 import { json } from "../http";
 import type { createBuildBrowserController } from "./browser-controller";
+import type { createCandidateReviewController } from "./candidate-review";
+import { candidateReviewCallInput } from "../../../../packages/conversation-domain/src/candidate-review";
 
 const rpcInput = z.strictObject({
   jsonrpc: z.literal("2.0"),
@@ -99,6 +101,7 @@ export function createBuildBrowserEndpoint(
     ReturnType<typeof createBuildBrowserController>,
     "authorize" | "authorizeRuntime" | "call"
   >,
+  review?: ReturnType<typeof createCandidateReviewController>,
 ) {
   return async (request: Request, target: string | { attemptID: string; turnID: string }) => {
     if (request.headers.has("origin"))
@@ -144,23 +147,50 @@ export function createBuildBrowserEndpoint(
       case "tools/list": {
         if (rpc.params && Object.keys(rpc.params).length > 0)
           return fail(-32602, "Browser tool pagination is not available");
-        return reply({ tools: buildBrowserToolCatalogue });
+        return reply({
+          tools: [
+            ...buildBrowserToolCatalogue,
+            ...((await review?.tools(authorized.session.turnID)) ?? []),
+          ],
+        });
       }
       case "tools/call": {
         const call = decodeBuildBrowserCall(rpc.params);
-        if (!call) return fail(-32602, "Unsupported browser tool or arguments");
+        const envelope = toolCallInput.safeParse(rpc.params);
+        const reviewCall = envelope.success
+          ? candidateReviewCallInput.safeParse({
+              name: envelope.data.name,
+              arguments: envelope.data.arguments,
+            })
+          : undefined;
+        if (!call && (!review || !reviewCall?.success))
+          return fail(-32602, "Unsupported browser tool or arguments");
         try {
-          return reply(
-            browserMcpResult(
-              await controller.call(
-                authorized.session,
+          if (!call && review && reviewCall?.success)
+            return reply(
+              await review.call(
+                authorized.session.turnID,
                 authorized.ownerToken,
-                call,
+                reviewCall.data,
                 rpc.id,
-                request.signal,
               ),
-            ),
+            );
+          if (!call) return fail(-32602, "Unsupported browser tool or arguments");
+          const result = await controller.call(
+            authorized.session,
+            authorized.ownerToken,
+            call,
+            rpc.id,
+            request.signal,
           );
+          await review?.observeBrowser(
+            authorized.session.turnID,
+            authorized.ownerToken,
+            call,
+            rpc.id,
+            result,
+          );
+          return reply(browserMcpResult(result));
         } catch (cause) {
           return reply({
             isError: true,

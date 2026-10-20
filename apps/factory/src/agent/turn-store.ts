@@ -108,6 +108,20 @@ async function currentAuthorityIn(sql: AgentTurnTransaction, record: AgentTurnRe
         AND approval.requirement_revision_id = (SELECT id FROM factory.requirement_revision
           WHERE ticket_id = ${command.ticketId} ORDER BY ordinal DESC LIMIT 1)`;
   if (!approved[0]) return false;
+  if (authority.review) {
+    const [candidate] = await sql`
+      SELECT review.id FROM factory.candidate_review review
+      JOIN factory.verification verification ON verification.id=review.verification_id
+      JOIN factory.change change ON change.id=review.change_id
+      WHERE review.id=${authority.review.reviewId} AND review.turn_id=${record.id}
+        AND review.change_id=${command.changeId} AND review.verification_id=${authority.review.verificationId}
+        AND review.commit_sha=${authority.review.commitSha} AND review.base_sha=${authority.review.baseSha}
+        AND change.base_sha=review.base_sha AND verification.state='succeeded'
+        AND review.state IN ('pending','running')
+        AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
+          WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)`;
+    if (!candidate) return false;
+  }
   const stopping = await sql<Array<{ id: string }>>`
     SELECT change_id AS id FROM factory.change_agent_session
       WHERE change_id = ${command.changeId} AND stop_pending`;

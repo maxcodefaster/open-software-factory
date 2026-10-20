@@ -19,6 +19,11 @@ export const changeAgentPromptInput = changeAgentCommandInput
     text: z.string().trim().min(1).max(8_000),
   })
   .strict();
+// Internal check/reviewer feedback may contain several bounded findings.
+// Human chat retains its smaller input bound.
+export const changeAgentRepairInput = changeAgentCommandInput
+  .extend({ text: z.string().trim().min(1).max(20_000) })
+  .strict();
 
 const commandFields = {
   commandId: z.uuid(),
@@ -72,7 +77,14 @@ export const agentTurnCommandInput = z.discriminatedUnion("kind", [
     .object({
       ...changeFields,
       kind: z.literal("change-repair"),
-      text: z.string().trim().min(1).max(8_000),
+      text: z.string().trim().min(1).max(20_000),
+    })
+    .strict(),
+  z
+    .object({
+      ...changeFields,
+      kind: z.literal("change-review"),
+      reviewId: z.uuid(),
     })
     .strict(),
 ]);
@@ -102,6 +114,14 @@ export const agentTurnAuthorityInput = z.discriminatedUnion("mode", [
       browserTransport: z.literal("mcp").optional(),
       skillRevisionIds: skillRevisionIDsInput.default([]),
       requiredSkillRevisionIds: skillRevisionIDsInput.default([]),
+      review: z
+        .strictObject({
+          reviewId: z.uuid(),
+          verificationId: z.uuid(),
+          commitSha: z.string().regex(/^[a-f0-9]{40}$/),
+          baseSha: z.string().regex(/^[a-f0-9]{40}$/),
+        })
+        .optional(),
     })
     .strict(),
 ]);
@@ -129,6 +149,12 @@ export function assertAgentTurnAuthority(
   if (command.kind === "project-answer" && authority.mode !== "plan") {
     throw new Error("Interview answers need Plan authority");
   }
+  if (
+    authority.mode === "build" &&
+    ((command.kind === "change-review") !== Boolean(authority.review) ||
+      (command.kind === "change-review" && command.reviewId !== authority.review?.reviewId))
+  )
+    throw new Error("Review command and exact candidate authority do not match");
 }
 
 export function agentTurnBoundary(command: AgentTurnCommand) {

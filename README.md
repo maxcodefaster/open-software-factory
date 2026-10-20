@@ -53,6 +53,16 @@ Failed first preparation retains source and offers an explicit Retry.
 Build works toward the approved requirements and ends with an ordinary summary, without a required
 JSON checklist. A normal native finish submits changed source for independent Verification,
 not as proof of completion. Exact-commit checks and human Delivery approval remain separate.
+After successful checks, a fresh independent OpenCode Session reviews that exact candidate.
+It keeps the Change's Coding model and reasoning, with no additional model selector. The reviewer
+has only immutable Git reads, the existing restricted App browser and a bounded review-report tool.
+It cannot edit, run shell commands or delegate to a writing agent. A native finish without an
+accepted report remains incomplete. Passing checks alone no longer enables Delivery.
+Reproducible blocking findings return to the retained implementation Session for targeted correction;
+each changed commit needs new checks and a fresh review. Cosmetic suggestions do not expand scope.
+An incomplete or failed review has an explicit Retry review action after active work
+and Stop have settled. That creates a fresh attempt, never replays the old inference. A successful
+review still requires deliberate human approval of the exact commit before Staging promotion.
 Coding activity streams through authenticated Factory access, with history reconciliation after
 reconnect and no repeated model request. New Build turns use native OpenCode MCP tools for the
 restricted development browser, including inline screenshots. Already admitted CLI instructions
@@ -224,6 +234,14 @@ and explicitly configure `FACTORY_MODEL_BASE_URL`, `FACTORY_MODEL_API_KEY` and
 Set `FACTORY_OPENCODE_SOL_REASONING=high` to prove a higher selected effort instead of the
 default medium.
 It keeps the real provider credential outside the fixture and removes its owned containers.
+
+The independent reviewer calibration uses the same explicit Azure Sol connection at medium
+reasoning. Set `FACTORY_REVIEW_SOL_LIVE=1` and run
+`mise exec -- bun run test:live candidate-review-sol.live`. It executes a healthy control and two
+seeded defects independently, then checks the fresh native reviewer's judgments. This is a bounded
+calibration, not the final application journey. `bun run test:controllers candidate-review` checks
+exact-candidate Delivery, targeted correction, explicit retry, Stop and allowance behavior without
+live models. `bun run test:native opencode-review-permissions` proves the pinned native tool boundary.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
 Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live

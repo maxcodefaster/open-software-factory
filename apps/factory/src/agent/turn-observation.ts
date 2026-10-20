@@ -56,6 +56,7 @@ export async function readTurnObservation(database: Database, target: Target) {
     summary: row.summary,
     engine: authority.mode === "build" ? "opencode" : "mastra",
     mode: authority.mode,
+    ...(authority.mode === "build" && authority.review ? { purpose: "review" as const } : {}),
     modelId: authority.modelId,
     ...(authority.mode === "build" &&
     authority.codingReasoning &&

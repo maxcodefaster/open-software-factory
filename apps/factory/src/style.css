@@ -2757,13 +2757,19 @@ dt,
   font-size: var(--text-sm);
 }
 
-.ticket-checks summary {
+.ticket-checks > summary {
   display: flex;
   width: fit-content;
   align-items: center;
   gap: var(--space-2);
   cursor: pointer;
   list-style: none;
+}
+
+.ticket-checks summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
 }
 
 .check-indicator {
@@ -2802,6 +2808,10 @@ dt,
 .ticket-diagnostics p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+.ticket-check-details details p {
+  margin-block-start: var(--space-2);
 }
 
 @keyframes check-spin {

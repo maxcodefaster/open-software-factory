@@ -9,12 +9,11 @@ import {
   createAgentTurnStore,
 } from "../../apps/factory/src/agent/turn-store";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { createDatabase } from "../../packages/db/src/client";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 async function forwarding(databaseConnections?: number) {
   const owned = await fixture();
-  const database = databaseConnections ? createDatabase(databaseConnections) : owned.database;
+  const database = databaseConnections ? owned.connect(databaseConnections) : owned.database;
   const { turn } = await createChangeAdmission(database, buildModelID).admit(
     owned.changeID,
     owned.userID,

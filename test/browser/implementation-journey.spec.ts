@@ -1393,6 +1393,120 @@ test("a failed editor Stop leaves restart unconfirmed without ensuring another e
   await expect(restart).toBeEnabled();
 });
 
+test("an incomplete independent review retries its exact candidate without offering Delivery", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  const reviewID = crypto.randomUUID();
+  const initialCommandID = crypto.randomUUID();
+  let request: { commandId: string; reviewId: string } | undefined;
+  let running = false;
+  const turnID = crypto.randomUUID();
+  const change = () => ({
+    id: changeID,
+    projectId: projectID,
+    ticketId: ticketID,
+    branchName: "factory/owned-review",
+    baseSha: "a".repeat(40),
+    state: "active",
+    branchState: "succeeded",
+    verificationState: "succeeded",
+    implementationState: running ? "working" : "committed",
+    buildTurnState: running ? "running" : "completed",
+    buildTurnPurpose: "review",
+  });
+  const delivery = () => ({
+    verificationState: "succeeded",
+    reviewId: request?.commandId ?? reviewID,
+    reviewState: running ? "running" : "incomplete",
+    reviewCurrent: true,
+    reviewSummary: running
+      ? "Checking the same submitted version."
+      : "The declared App was unavailable. This review did not pass.",
+  });
+  const agent = () => ({
+    state: running ? "working" : "committed",
+    sessionAvailable: true,
+    runtimeConnected: true,
+    messagesAvailable: true,
+    messages: [],
+    stopPending: false,
+    stopId: null,
+    turn: {
+      id: turnID,
+      commandId: request?.commandId ?? initialCommandID,
+      purpose: "review",
+      mode: "build",
+      engine: "opencode",
+      modelId: "owned-coding-model",
+      codingReasoning: "medium",
+      skills: [],
+      state: running ? "running" : "completed",
+    },
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({ json: { changes: [change()] } }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
+    route.fulfill({ json: delivery() }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, { json: agent() }),
+  );
+  await page.route(`**/api/projects/${projectID}/conversation{,?*}`, (route) =>
+    route.fulfill({
+      json: {
+        id: crypto.randomUUID(),
+        projectId: projectID,
+        ticketId: ticketID,
+        mode: "build",
+        version: 1,
+        entries: [],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery/retry-review`, async (route) => {
+    request = route.request().postDataJSON();
+    running = true;
+    await route.fulfill({ json: delivery() });
+  });
+  await selectProject(page);
+  await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
+  const retry = page.getByRole("button", { name: "Retry review", exact: true });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
+  await page.locator(".ticket-checks > summary").click();
+  await expect(
+    page.getByText("The declared App was unavailable. This review did not pass."),
+  ).toBeVisible();
+  await mkdir(".factory/test-results/reviewer-interface", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/reviewer-interface/factory-incomplete.png",
+  });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.screenshot({
+    path: ".factory/test-results/reviewer-interface/factory-incomplete-narrow.png",
+  });
+  const bounds = await retry.boundingBox();
+  expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 430).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await retry.click();
+  await expect.poll(() => request?.reviewId).toBe(reviewID);
+  expect(request?.commandId).toMatch(/^[a-f0-9-]{36}$/);
+  await expect(retry).toHaveCount(0);
+  await expect(page.locator(".ticket-checks > summary")).toHaveText(
+    "Independent review in progress",
+  );
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: ".factory/test-results/reviewer-interface/factory-reviewing.png" });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.screenshot({
+    path: ".factory/test-results/reviewer-interface/factory-reviewing-narrow.png",
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
+});
+
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
   page,
 }) => {
@@ -1454,6 +1568,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
         pullRequestNumber: 1,
         pullRequestUrl: "http://127.0.0.1:33030/owned/starter/pulls/1",
         verificationState: "succeeded",
+        reviewState: "passed",
         actionRunUrl: "http://127.0.0.1:33030/owned/starter/actions/runs/1",
       },
     }),

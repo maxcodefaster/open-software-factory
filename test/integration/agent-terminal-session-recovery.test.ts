@@ -48,6 +48,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       let promptID: string | undefined;
       let promptText = "";
       let installedSkills: string[] = [];
+      const instructions = new Map<string, unknown>();
       let promptCalls = 0;
       let externalMutations = 0;
       async function connect(role: "parent" | "child") {
@@ -121,7 +122,24 @@ test.each(["failed", "pre-dispatch failed"] as const)(
           let status = 200;
           let data: unknown = [];
           if (request.method !== "GET" && request.method !== "HEAD") externalMutations += 1;
-          if (request.path === "/api/skill" && outcome === "pre-dispatch failed") {
+          if (request.path.includes("/instructions/entries")) {
+            if (request.method === "GET")
+              data = [...instructions].map(([key, value]) => ({ key, value }));
+            else {
+              status = 204;
+              const key = decodeURIComponent(request.path.split("/").at(-1)!);
+              if (request.method === "PUT")
+                instructions.set(key, (JSON.parse(request.body) as { value: unknown }).value);
+              else instructions.delete(key);
+            }
+          } else if (
+            request.path === "/api/experimental/mcp/factory_browser" &&
+            request.method === "PUT"
+          ) {
+            status = 204;
+          } else if (request.path === "/api/mcp") {
+            data = [{ name: "factory_browser", status: { status: "connected" } }];
+          } else if (request.path === "/api/skill" && outcome === "pre-dispatch failed") {
             status = 503;
             data = { message: "Owned skill discovery failed before dispatch" };
           } else if (request.path === "/api/info") {
@@ -319,12 +337,17 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       expect(externalMutations).toBe(beforeMutations);
       expect(promptCalls).toBe(outcome === "pre-dispatch failed" ? 0 : 1);
       expect((await owned.turn(commandID))?.state).toBe(settled?.state);
-      const admission = createChangeAdmission(database, buildModelID).admit(
+      const admitted = await createChangeAdmission(database, buildModelID).admit(
         owned.changeID,
         owned.userID,
         { kind: "change-prompt", commandId: crypto.randomUUID(), text: "Explicit later turn" },
       );
-      await expect(admission).rejects.toMatchObject({ code: "conflict" });
+      expect(admitted.turn.id).not.toBe(settled?.id);
+      expect(admitted.turn.state).toBe("pending");
+      const [writer] = await database.client<{ fence: boolean }[]>`
+        SELECT fence_required AS fence FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+      expect(writer?.fence).toBe(true);
+      expect(promptCalls).toBe(outcome === "pre-dispatch failed" ? 0 : 1);
     } finally {
       for (const socket of sockets) socket.close();
       await process.shutdown();

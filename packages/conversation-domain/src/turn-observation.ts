@@ -18,6 +18,7 @@ export const turnObservationInput = z.object({
   summary: z.string().nullable().optional(),
   engine: z.enum(["mastra", "opencode"]),
   mode: conversationModeInput,
+  purpose: z.literal("review").optional(),
   modelId: z.string(),
   codingReasoning: codingReasoningInput.optional(),
   usage: turnUsageInput.default(unavailableTurnUsage),

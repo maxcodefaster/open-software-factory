@@ -41,6 +41,27 @@ const unavailable: AgentView = {
   messages: [],
 };
 
+test("the panel identifies independent review without claiming source changes or Delivery approval", () => {
+  const turn = turnObservationInput.parse({
+    id: crypto.randomUUID(),
+    commandId: crypto.randomUUID(),
+    state: "running",
+    engine: "opencode",
+    mode: "build",
+    purpose: "review",
+    modelId: "owned",
+    skills: [],
+  });
+  const reviewing = { ...loaded, turn };
+  expect(buildAgentStatus(reviewing)).toBe("Reviewing");
+  expect(buildAgentHint(reviewing)).toContain("Product code is read-only");
+  expect(buildAgentEmptyMessage(reviewing)).toContain("Independent review");
+  expect(buildAgentStatus({ ...reviewing, state: "committed" })).toBe("Review finished");
+  expect(
+    buildAgentHint({ ...reviewing, state: "failed", turn: { ...turn, state: "failed" } }),
+  ).toContain("Retry independent review");
+});
+
 test("a status-only refresh keeps admitted input while a stopped Workspace is not described as a live outage", () => {
   const admittedMessages = [
     {

@@ -1,5 +1,6 @@
 import type { PullRow } from "@rocicorp/zero";
 import { z } from "zod";
+import { candidateReviewResultInput } from "../../../packages/conversation-domain/src/candidate-review";
 import {
   conversationModeInput,
   sourceCitationInput,
@@ -193,6 +194,7 @@ export const changeSchema = z.object({
   runtimeState: optionalString,
   verificationState: optionalString,
   buildTurnState: optionalString,
+  buildTurnPurpose: optionalString,
   implementationState: optionalString,
   deliveryApprovedAt: optionalString,
   mergeState: optionalString,
@@ -284,6 +286,13 @@ export const conversationStreamEventSchema = z.discriminatedUnion("type", [
 export type ConversationStreamEvent = z.infer<typeof conversationStreamEventSchema>;
 
 export const deliveryViewSchema = z.object({
+  reviewId: optionalString,
+  reviewState: optionalString,
+  reviewCurrent: z.boolean().optional(),
+  reviewSummary: optionalString,
+  reviewFindings: z
+    .preprocess((value) => value ?? [], candidateReviewResultInput.shape.findings)
+    .optional(),
   cleanupError: optionalString,
   pullRequestNumber: z.preprocess(
     (value) =>

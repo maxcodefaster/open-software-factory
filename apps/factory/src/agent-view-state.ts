@@ -31,11 +31,26 @@ export function buildAgentStatus(view: AgentView) {
   if (view.commitOperation)
     return view.commitOperation.lastError ? "Commit unconfirmed" : "Saving commit";
   if (view.state === "working" && !view.runtimeConnected) return "Reconnecting";
+  if (view.turn?.purpose === "review") {
+    if (view.state === "working") return "Reviewing";
+    if (view.state === "starting") return "Preparing review";
+    if (view.state === "committed") return "Review finished";
+  }
   return agentStatusLabels[view.state];
 }
 
 export function buildAgentHint(view: AgentView) {
   if (view.stopPending) return "Stop saved. Build waits for confirmation.";
+  if (view.turn?.purpose === "review") {
+    if (view.state === "working")
+      return view.runtimeConnected
+        ? "Independently checking the submitted version. Product code is read-only."
+        : "Reconnecting to the same independent review. Work is not restarted.";
+    if (view.state === "committed")
+      return "Independent review finished. Check its findings before Delivery.";
+    if (view.state === "failed" && view.turn.state !== "uncertain")
+      return "Review did not finish. Retry independent review, or send a correction to implementation.";
+  }
   if (view.commitOperation)
     return view.commitOperation.lastError
       ? "Commit outcome unconfirmed. New Build waits for recovery."
@@ -72,6 +87,7 @@ export function buildAgentEmptyMessage(view: AgentView) {
   if (view.stopPending)
     return "Waiting for Stop confirmation. The admitted work will not be replayed.";
   if (view.commitOperation) return "Waiting for source submission to settle.";
+  if (view.turn?.purpose === "review") return "Independent review activity will appear here.";
   return {
     idle: "Ask about the Project, or start implementation of this approved Ticket.",
     starting: "Preparing implementation. Activity will appear here.",

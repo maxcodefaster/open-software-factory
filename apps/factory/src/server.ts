@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { implementationInput } from "../../../packages/change-domain/src/implementation";
+import { candidateReviewRetryInput } from "../../../packages/conversation-domain/src/candidate-review";
 import {
   changeAgentPromptInput,
   changeAgentResumeInput,
@@ -45,6 +46,7 @@ import { createRuntimeAccess } from "./access/runtime";
 import { createChangeWriterController } from "./access/writer-controller";
 import { createBuildBrowserController } from "./agent/browser-controller";
 import { createBuildBrowserEndpoint } from "./agent/browser-endpoint";
+import { createCandidateReviewController } from "./agent/candidate-review";
 import { createAgentController } from "./agent/controller";
 import { createOpenCodeClient } from "./agent/opencode-client";
 import { createChangeController } from "./change/controller";
@@ -212,7 +214,10 @@ const relayModel = createModelRelay(
     ),
 );
 buildBrowserController = createBuildBrowserController(database, runtimeHub, runtimeSecret);
-const buildBrowserEndpoint = createBuildBrowserEndpoint(buildBrowserController);
+const buildBrowserEndpoint = createBuildBrowserEndpoint(
+  buildBrowserController,
+  createCandidateReviewController(database),
+);
 const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
 const workspaceSources = createWorkspaceSourceController(database, runtimeSecret);
 const reserveImages = {
@@ -1249,7 +1254,7 @@ async function route(request: Request) {
       });
     }
     const deliveryRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/delivery(?:\/(approve))?$/,
+      /^\/api\/changes\/([0-9a-f-]+)\/delivery(?:\/(approve|retry-review))?$/,
     );
     if (deliveryRoute) {
       const session = await requireSession(request);
@@ -1260,6 +1265,18 @@ async function route(request: Request) {
       if (!action && request.method === "GET") return json(await deliveryController.get(changeID));
       if (action === "approve" && request.method === "POST") {
         return json(await deliveryController.approve(changeID, session.user.id), 202);
+      }
+      if (action === "retry-review" && request.method === "POST") {
+        const input = candidateReviewRetryInput.parse(await request.json());
+        return json(
+          await deliveryController.retryReview(
+            changeID,
+            session.user.id,
+            input.commandId,
+            input.reviewId,
+          ),
+          202,
+        );
       }
       return new Response(null, { status: 405 });
     }

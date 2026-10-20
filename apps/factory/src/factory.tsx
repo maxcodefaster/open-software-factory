@@ -361,6 +361,7 @@ function FactoryWorkspace(props: {
       if (view.turn) {
         acknowledgeCommand(agentCommandScope("change-start", changeID), view.turn.commandId);
         acknowledgeCommand(agentCommandScope("change-prompt", changeID), view.turn.commandId);
+        acknowledgeCommand(agentCommandScope("retry-review", changeID), view.turn.commandId);
         const prepared = implementationPreparation();
         if (
           prepared &&
@@ -1096,6 +1097,7 @@ function FactoryWorkspace(props: {
       changeState: change?.state,
       verificationState: change?.verificationState,
       buildTurnState: change?.buildTurnState,
+      buildTurnPurpose: change?.buildTurnPurpose,
       implementationState: change?.implementationState,
     });
   }
@@ -1107,6 +1109,7 @@ function FactoryWorkspace(props: {
       changeState: change?.state,
       verificationState: change?.verificationState,
       buildTurnState: change?.buildTurnState,
+      buildTurnPurpose: change?.buildTurnPurpose,
       implementationState: change?.implementationState,
     });
   }
@@ -1579,6 +1582,26 @@ function FactoryWorkspace(props: {
     });
   }
 
+  async function retryReview(changeID: string) {
+    const reviewId = selectedChange()?.id === changeID ? delivery()?.reviewId : undefined;
+    if (!reviewId) return;
+    const scope = agentCommandScope("retry-review", changeID);
+    await mutate(async () => {
+      const commandId = agentCommandIds.forInput(scope, JSON.stringify({ changeID, reviewId }));
+      const value = await apiRequest(
+        deliveryViewSchema,
+        `/api/changes/${changeID}/delivery/retry-review`,
+        {
+          method: "POST",
+          body: JSON.stringify({ commandId, reviewId }),
+        },
+      );
+      acknowledgeCommand(scope, commandId);
+      if (selectedChange()?.id === changeID) setDelivery(value);
+      await refreshLifecycleState();
+    });
+  }
+
   async function startAgent() {
     const change = selectedChange();
     if (!change) return;
@@ -1605,6 +1628,13 @@ function FactoryWorkspace(props: {
     const change = selectedChange(),
       pause = agent().codingPause;
     if (!change || !pause) return;
+    if (
+      agent().turn?.id === pause.turnID &&
+      agent().turn?.purpose === "review" &&
+      agent().turn?.state === "failed" &&
+      delivery()?.reviewId
+    )
+      return retryReview(change.id);
     const scope = `coding-resume:${change.id}:${pause.turnID}`;
     await mutate(async () => {
       const commandId = agentCommandIds.forInput(scope, pause.turnID);
@@ -3662,6 +3692,7 @@ function FactoryWorkspace(props: {
                         if (target) void openIDETarget(target);
                       }}
                       onApproveDelivery={(changeID) => void approveDelivery(changeID)}
+                      onRetryReview={(changeID) => void retryReview(changeID)}
                       canDevelop={canDevelopProject()}
                       onRequestChanges={requestCorrections}
                     />

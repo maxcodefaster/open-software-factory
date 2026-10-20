@@ -67,11 +67,12 @@ type ChangeView = {
   runtimeState?: string | undefined;
   verificationState?: string | undefined;
   buildTurnState?: string | undefined;
+  buildTurnPurpose?: string | undefined;
   implementationState?: string | undefined;
   failure?: string | undefined;
 };
 
-type DeliveryView = {
+type DeliveryView = import("./ticket-checks").TicketCheckDetails & {
   pullRequestNumber?: number | undefined;
   pullRequestUrl?: string | undefined;
   pullRequestState?: string | undefined;
@@ -134,6 +135,7 @@ export type TicketWorkspaceProps = {
   onStopImplementation(): void;
   onOpenIDE(): void;
   onApproveDelivery(changeID: string): void;
+  onRetryReview?(changeID: string): void;
   canDevelop: boolean;
   onRequestChanges(): void;
 };
@@ -403,6 +405,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       changeState: props.change?.state,
       verificationState: props.change?.verificationState,
       buildTurnState: props.buildInProgress ? "running" : props.change?.buildTurnState,
+      buildTurnPurpose: props.change?.buildTurnPurpose,
       implementationState: props.change?.implementationState,
     });
   const implementationBusy = () =>
@@ -416,6 +419,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     props.change.implementationState === "committed" &&
     !implementationBusy() &&
     props.delivery?.verificationState === "succeeded" &&
+    props.delivery?.reviewState === "passed" &&
     !props.delivery.approvedAt;
   const nextRevisionOrdinal = () =>
     (currentDocument()?.ordinal ?? props.latestRevision?.ordinal ?? 0) + 1;
@@ -1125,6 +1129,27 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       onClick={() => props.change && props.onApproveDelivery(props.change.id)}
                     >
                       Deliver
+                    </button>
+                  </Show>
+                  <Show
+                    when={
+                      !props.current.ticket.trashedAt &&
+                      props.change?.state === "active" &&
+                      !implementationBusy() &&
+                      !props.codingPause &&
+                      ["incomplete", "failed", "stopped"].includes(
+                        props.delivery?.reviewState ?? "",
+                      ) &&
+                      props.onRetryReview
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      disabled={props.pending}
+                      onClick={() => props.change && props.onRetryReview?.(props.change.id)}
+                    >
+                      Retry review
                     </button>
                   </Show>
                   <Show

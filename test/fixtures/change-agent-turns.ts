@@ -163,10 +163,13 @@ export async function fixture(
     if (path === "/api/shell") return Response.json({ data: [] });
     if (path.endsWith("/log"))
       return new Response(
-        `data: ${JSON.stringify({ type: "log.synced", aggregateID: `ses_owned_${suffix}`, seq: 1 })}\n\n`,
+        `data: ${JSON.stringify({ type: "log.synced", aggregateID: path.split("/").at(-2), seq: 1 })}\n\n`,
         { headers: { "content-type": "text/event-stream" } },
       );
-    if (path === "/api/session") return Response.json({ data: [], cursor: {} });
+    if (path === "/api/session") {
+      if (request.method === "POST") return Response.json({ data: await request.json() });
+      return Response.json({ data: [], cursor: {} });
+    }
     if (path.endsWith("/interrupt")) {
       interruptRequests += 1;
       return Response.json({ interrupted: true });
@@ -187,7 +190,7 @@ export async function fixture(
       return Response.json({
         data: {
           id: body.id,
-          sessionID: `ses_owned_${suffix}`,
+          sessionID: path.split("/").at(-2),
           type: "user",
           time: { created: 1 },
           delivery: "queue",
@@ -213,7 +216,7 @@ export async function fixture(
             ? [
                 {
                   id: body.id,
-                  sessionID: `ses_owned_${suffix}`,
+                  sessionID: path.split("/").at(-2),
                   type: "user",
                   time: { created: 1 },
                   delivery: "queue",
@@ -232,10 +235,13 @@ export async function fixture(
           },
         ],
       });
-    if (path.endsWith(`/ses_owned_${suffix}`))
+    if (
+      path.endsWith(`/ses_owned_${suffix}`) ||
+      /^\/api\/session\/ses_factory_review_[a-f0-9]+$/.test(path)
+    )
       return Response.json({
         data: {
-          id: `ses_owned_${suffix}`,
+          id: path.split("/").at(-1),
           location: { directory: "/workspace/project" },
           model: {
             providerID: "factory",
@@ -324,6 +330,10 @@ export async function fixture(
   };
   return {
     database,
+    connect(max: number) {
+      if (!host) throw new Error("This fixture does not own a database connection factory");
+      return host.connect(max);
+    },
     userID,
     projectID,
     ticketID,
@@ -391,7 +401,15 @@ export async function fixture(
                 AND (kubernetes_uid IS NOT NULL OR kubernetes_namespace_uid IS NOT NULL)) FOR UPDATE`;
           if (!safe[0]) throw new Error("Owned non-created Build fixture cleanup refused");
           await sql`DELETE FROM factory.usage_operation WHERE project_id=${projectID} AND user_id=${userID}`;
+          await sql`SET LOCAL session_replication_role = replica`;
+          await sql`DELETE FROM factory.promotion_operation WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.merge_operation WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.delivery_approval WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.pull_request_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_agent_session WHERE change_id = ${changeID}`;
+          await sql`DELETE FROM factory.candidate_review WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.verification WHERE change_id=${changeID}`;
+          await sql`SET LOCAL session_replication_role = origin`;
           await sql`DELETE FROM factory.agent_turn WHERE project_id = ${projectID}`;
           await sql`SET LOCAL session_replication_role = replica`;
           await sql`DELETE FROM factory.change_writer WHERE change_id=${changeID}`;

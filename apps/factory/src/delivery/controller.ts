@@ -4,8 +4,15 @@ import {
   ForgeAmbiguousWriteError,
   type ForgeRepository,
 } from "../../../../packages/forge/src/forge";
-import { createAccessController, projectDevelopmentAuthorityIn } from "../access/controller";
+import {
+  createAccessController,
+  projectAuthorityIn,
+  projectDevelopmentAuthorityIn,
+} from "../access/controller";
 import type { RuntimeAttemptView } from "../runtime/types";
+import { CommandError } from "../command-error";
+import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
+import { lockChangeWriterIn } from "../access/change-writer";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -14,6 +21,7 @@ type RuntimeController = {
   stop(attemptID: string): Promise<RuntimeAttemptView | null>;
 };
 type AgentController = {
+  review?(changeID: string, reviewID: string, userID: string): Promise<unknown>;
   prompt(
     changeID: string,
     text: string,
@@ -63,6 +71,14 @@ export function createDeliveryController(
   }
   const { client: forge, owner: allowedOwner } = forgeOverride ?? configuredForge();
   const running = new Set<string>();
+  async function failedCorrections(changeID: string) {
+    const [row] = await database.client<{ count: number }[]>`
+      SELECT ((SELECT COUNT(*) FROM factory.verification WHERE change_id=${changeID}
+        AND state='failed' AND repair_prompted_at IS NOT NULL)
+        + (SELECT COUNT(*) FROM factory.candidate_review WHERE change_id=${changeID}
+          AND state='changes-requested' AND repair_prompted_at IS NOT NULL))::integer AS count`;
+    return Number(row?.count ?? 0);
+  }
 
   async function changeRow(changeID: string) {
     const rows = await database.client<
@@ -326,11 +342,7 @@ export function createDeliveryController(
           SELECT state FROM factory.change_agent_session WHERE change_id = ${change.id}
         `;
         if (sessions[0]?.state !== "committed") return;
-        const failures = await database.client<Array<{ count: number }>>`
-          SELECT COUNT(*)::integer AS count FROM factory.verification
-          WHERE change_id = ${change.id} AND state = 'failed' AND repair_prompted_at IS NOT NULL
-        `;
-        if (Number(failures[0]?.count ?? 0) >= 3)
+        if ((await failedCorrections(change.id)) >= 3)
           throw new Error(
             "Automatic repair paused after three failed Verifications. Review the failures and resume Build manually.",
           );
@@ -457,6 +469,67 @@ export function createDeliveryController(
       RETURNING id, runtime_attempt_id AS "runtimeAttemptID", runner_id AS "runnerID"
     `;
     for (const verification of verifications) await stopVerification(repository, verification);
+  }
+
+  async function ensureReview(change: NonNullable<Awaited<ReturnType<typeof changeRow>>>) {
+    const [verification] = await database.client<{ id: string }[]>`
+      SELECT id FROM factory.verification
+      WHERE change_id=${change.id} AND commit_sha=${change.commitSHA} AND state='succeeded'`;
+    if (!verification) return;
+    await database.client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by)
+      VALUES(${crypto.randomUUID()},${verification.id},${change.id},${change.commitSHA},${change.baseSHA},${change.userID})
+      ON CONFLICT(verification_id,ordinal) DO NOTHING`;
+    const [review] = await database.client<
+      {
+        id: string;
+        userID: string;
+        turnID: string | null;
+        state: string;
+        result: unknown;
+        repairCommandID: string;
+        repaired: boolean;
+      }[]
+    >`SELECT id,turn_id AS "turnID",state,result,repair_command_id AS "repairCommandID",
+      repair_prompted_at IS NOT NULL AS repaired,created_by AS "userID" FROM factory.candidate_review
+      WHERE verification_id=${verification.id} AND commit_sha=${change.commitSHA}
+      ORDER BY ordinal DESC LIMIT 1`;
+    if (!review) return;
+    const [session] = await database.client<{ state: string; stopping: boolean }[]>`
+      SELECT state,stop_pending AS stopping FROM factory.change_agent_session WHERE change_id=${change.id}`;
+    if (session?.stopping || (session && session.state !== "committed")) return;
+    const [work] =
+      await database.client`SELECT id FROM factory.agent_turn WHERE change_id=${change.id}
+      AND state IN ('pending','dispatching','running','uncertain')`;
+    if (work) return;
+    if (!review.turnID) {
+      if (!agent.review) throw new Error("Independent candidate review is not configured");
+      await agent.review(change.id, review.id, review.userID);
+      return;
+    }
+    if (review.state !== "changes-requested" || review.repaired) return;
+    if ((await failedCorrections(change.id)) >= 3)
+      throw new Error(
+        "Automatic correction paused after three failed candidates. Review the findings and resume Build manually.",
+      );
+    const result = candidateReviewResultInput.parse(review.result);
+    const findings = result.findings.filter((finding) => finding.severity === "blocking");
+    await agent.prompt(
+      change.id,
+      [
+        `Independent review of commit ${change.commitSHA} found these reproducible defects within the approved scope:`,
+        ...findings.map(
+          (finding, index) =>
+            `${index + 1}. ${finding.title}${finding.path ? ` (${finding.path}${finding.line ? `:${finding.line}` : ""})` : ""}\n${finding.explanation}\nReproduction: ${finding.reproduction}`,
+        ),
+        "Add or extend regression coverage for each fixed defect where the existing test toolchain supports it. Do not replace failing checks with skipped or weaker tests.",
+        "Fix these defects in the retained checkout, preserve unrelated human edits and run the relevant checks. Do not weaken tests, expand scope for cosmetic preferences, commit or push. Factory will submit the corrected candidate for new exact Verification and independent review.",
+      ].join("\n\n"),
+      change.userID,
+      review.repairCommandID,
+      true,
+    );
+    await database.client`UPDATE factory.candidate_review SET repair_prompted_at=now()
+      WHERE id=${review.id} AND repair_prompted_at IS NULL`;
   }
 
   async function reconcileMerge(
@@ -673,6 +746,8 @@ export function createDeliveryController(
         return;
       }
       await ensureVerification(change, pull.repository, pull.pullRequest);
+      if (pull.pullRequest.headSha === change.commitSHA && !pull.pullRequest.merged)
+        await ensureReview(change);
     } catch (cause) {
       const message = bounded(cause instanceof Error ? cause.message : "Delivery failed");
       await database.client`
@@ -729,11 +804,18 @@ export function createDeliveryController(
       );
       const base = await forge.getDefaultBranch(repository);
       const verifications = await database.client<
-        Array<{ id: string; actionRunID: string; commitSHA: string }>
+        Array<{ id: string; actionRunID: string; commitSHA: string; reviewID: string }>
       >`
-        SELECT id, action_run_id AS "actionRunID", commit_sha AS "commitSHA"
-        FROM factory.verification
-        WHERE change_id = ${changeID} AND commit_sha = ${change.commitSHA} AND state = 'succeeded'
+        SELECT verification.id,verification.action_run_id AS "actionRunID",verification.commit_sha AS "commitSHA",
+          review.id AS "reviewID"
+        FROM factory.verification verification
+        JOIN factory.candidate_review review ON review.verification_id=verification.id
+        JOIN factory.agent_turn turn ON turn.id=review.turn_id
+        WHERE verification.change_id = ${changeID} AND verification.commit_sha = ${change.commitSHA}
+          AND verification.state = 'succeeded' AND review.state='passed' AND turn.state='completed'
+          AND review.change_id=verification.change_id AND review.commit_sha=verification.commit_sha
+          AND review.base_sha=${change.baseSHA}
+          AND review.ordinal=(SELECT MAX(ordinal) FROM factory.candidate_review WHERE verification_id=verification.id)
       `;
       const verification = verifications[0];
       if (
@@ -748,10 +830,23 @@ export function createDeliveryController(
       const mergeID = crypto.randomUUID();
       await database.client.begin(async (transaction) => {
         await projectDevelopmentAuthorityIn(transaction, userID, change.projectID);
+        // Read scope only after the lock wait. A joined statement's earlier
+        // snapshot cannot authorize Requirements committed while it waited.
+        await transaction`SELECT change.id FROM factory.change change
+          JOIN factory.ticket ticket ON ticket.id=change.ticket_id
+          WHERE change.id=${changeID} FOR UPDATE OF change,ticket`;
         const [current] = await transaction<
-          Array<{ state: string }>
-        >`SELECT change.state FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
-          WHERE change.id = ${changeID} AND ticket.trashed_at IS NULL FOR UPDATE OF change, ticket`;
+          Array<{ state: string; requirementsCurrent: boolean }>
+        >`SELECT change.state,approval.requirement_revision_id=(SELECT id FROM factory.requirement_revision
+            WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1) AS "requirementsCurrent"
+          FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
+          JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
+          WHERE change.id = ${changeID} AND ticket.trashed_at IS NULL`;
+        if (current && !current.requirementsCurrent)
+          throw new CommandError(
+            "conflict",
+            "Requirements changed. Verify and review the current approved scope before Delivery.",
+          );
         const [work] =
           await transaction`SELECT id FROM factory.agent_turn WHERE change_id = ${changeID}
           AND state IN ('pending', 'dispatching', 'running', 'uncertain')`;
@@ -762,18 +857,28 @@ export function createDeliveryController(
           Array<{ sha: string }>
         >`SELECT commit_sha AS sha FROM factory.change_commit_operation
           WHERE change_id = ${changeID} AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1`;
+        const [review] = await transaction`
+          SELECT review.id FROM factory.candidate_review review
+          JOIN factory.verification verification ON verification.id=review.verification_id
+          JOIN factory.agent_turn turn ON turn.id=review.turn_id
+          WHERE review.id=${verification.reviewID} AND review.change_id=${changeID}
+            AND review.commit_sha=${verification.commitSHA} AND review.base_sha=${change.baseSHA}
+            AND review.state='passed' AND turn.state='completed' AND verification.state='succeeded'
+            AND review.ordinal=(SELECT MAX(ordinal) FROM factory.candidate_review WHERE verification_id=verification.id)
+          FOR SHARE OF review,verification,turn`;
         if (
           current?.state !== "active" ||
           work ||
           (session && session.state !== "committed") ||
-          commit?.sha !== verification.commitSHA
+          commit?.sha !== verification.commitSHA ||
+          !review
         )
           throw new Error("Wait for the current implementation to finish before delivery.");
         await transaction`
           INSERT INTO factory.delivery_approval(
-            id, change_id, verification_id, commit_sha, approved_by
+            id, change_id, verification_id, commit_sha, approved_by,candidate_review_id
           ) VALUES (
-            ${approvalID}, ${changeID}, ${verification.id}, ${verification.commitSHA}, ${userID}
+            ${approvalID}, ${changeID}, ${verification.id}, ${verification.commitSHA}, ${userID},${verification.reviewID}
           )
           ON CONFLICT(verification_id) DO NOTHING
         `;
@@ -802,6 +907,78 @@ export function createDeliveryController(
       const repository = repositoryFromURL(change.repositoryURL);
       await cancelVerifications(changeID, repository);
     },
+    async retryReview(
+      changeID: string,
+      userID: string,
+      commandID: string,
+      previousReviewID: string,
+    ) {
+      if (!agent.review)
+        throw new CommandError("unavailable", "Independent candidate review is not configured");
+      await database.client.begin(async (sql) => {
+        await lockChangeWriterIn(sql, changeID);
+        const [change] = await sql<
+          { projectID: string; sha: string; base: string; state: string }[]
+        >`
+          SELECT change.project_id AS "projectID",change.base_sha AS base,change.state,
+            (SELECT commit_sha FROM factory.change_commit_operation WHERE change_id=change.id
+              AND state='succeeded' ORDER BY sequence DESC LIMIT 1) AS sha
+          FROM factory.change change WHERE change.id=${changeID}`;
+        if (!change) throw new CommandError("not-found", "Change not found");
+        await projectAuthorityIn(sql, userID, change.projectID);
+        const [old] = await sql<
+          { changeID: string; userID: string; previousID: string | null }[]
+        >`SELECT change_id AS "changeID",created_by AS "userID",supersedes_id AS "previousID"
+          FROM factory.candidate_review WHERE id=${commandID}`;
+        if (old) {
+          if (
+            old.changeID !== changeID ||
+            old.userID !== userID ||
+            old.previousID !== previousReviewID
+          )
+            throw new CommandError("conflict", "Review retry changed target");
+          return;
+        }
+        const [previous] = await sql<
+          {
+            id: string;
+            verificationID: string;
+            ordinal: number;
+            state: string;
+            turnState: string | null;
+          }[]
+        >`
+          SELECT review.id,review.verification_id AS "verificationID",review.ordinal,review.state,turn.state AS "turnState"
+          FROM factory.candidate_review review
+          LEFT JOIN factory.agent_turn turn ON turn.id=review.turn_id
+          JOIN factory.verification verification ON verification.id=review.verification_id
+          WHERE review.change_id=${changeID} AND review.commit_sha=${change.sha}
+            AND verification.state='succeeded' ORDER BY review.ordinal DESC LIMIT 1`;
+        const [session] = await sql<{ stopping: boolean }[]>`SELECT stop_pending AS stopping
+          FROM factory.change_agent_session WHERE change_id=${changeID}`;
+        const [active] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
+          AND state IN ('pending','dispatching','running','uncertain')`;
+        if (
+          change.state !== "active" ||
+          !previous ||
+          previous.id !== previousReviewID ||
+          active ||
+          session?.stopping ||
+          !(
+            previous.state === "incomplete" ||
+            ["failed", "stopped"].includes(previous.turnState ?? "")
+          )
+        )
+          throw new CommandError(
+            "conflict",
+            "Resolve active, stale or uncertain work before retrying an incomplete review",
+          );
+        await sql`INSERT INTO factory.candidate_review(id,verification_id,ordinal,change_id,commit_sha,base_sha,created_by,supersedes_id)
+          VALUES(${commandID},${previous.verificationID},${previous.ordinal + 1},${changeID},${change.sha},${change.base},${userID},${previousReviewID})`;
+      });
+      await agent.review(changeID, commandID, userID);
+      return this.get(changeID);
+    },
     async stopForTrash(changeID: string) {
       const change = await changeRow(changeID);
       if (!change) return;
@@ -825,11 +1002,18 @@ export function createDeliveryController(
     async get(changeID: string) {
       const rows = await database.client<Array<Record<string, unknown>>>`
         SELECT pr.pull_request_number AS "pullRequestNumber",
+          review.id AS "reviewId",
           pr.pull_request_url AS "pullRequestUrl", pr.state AS "pullRequestState",
           verification.commit_sha AS "verificationCommitSha",
           verification.state AS "verificationState",
           verification.summary AS "verificationSummary",
           verification.action_run_url AS "actionRunUrl",
+          CASE WHEN review.state IN ('pending','running') AND review_turn.state IN ('failed','stopped','uncertain')
+            THEN review_turn.state::text ELSE review.state END AS "reviewState",
+          (review.turn_id IS NOT NULL AND review.turn_id=(SELECT id FROM factory.agent_turn
+            WHERE change_id=change.id ORDER BY created_at DESC,id DESC LIMIT 1)) AS "reviewCurrent",
+          COALESCE(review.result->>'summary',review_turn.outcome_summary) AS "reviewSummary",
+          review.result->'findings' AS "reviewFindings",
           approval.approved_at AS "approvedAt",
           merge.state AS "mergeState", merge.observed_default_sha AS "mergedCommitSha",
           promotion.state AS "promotionState",
@@ -844,6 +1028,10 @@ export function createDeliveryController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
+        LEFT JOIN LATERAL (
+          SELECT * FROM factory.candidate_review WHERE verification_id=verification.id ORDER BY ordinal DESC LIMIT 1
+        ) review ON true
+        LEFT JOIN factory.agent_turn review_turn ON review_turn.id=review.turn_id
         LEFT JOIN factory.delivery_approval approval
           ON approval.verification_id = verification.id
         LEFT JOIN factory.merge_operation merge ON merge.change_id = change.id
