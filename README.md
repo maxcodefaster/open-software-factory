@@ -236,7 +236,8 @@ and an exact `FACTORY_RUNTIME_CONFORMANCE_IMAGE` registry digest when running
 
 The unassisted coding acceptance uses its own disposable installation and real model calls.
 It needs the provider bootstrap variables described in `.env.example`. Settings-only connections
-from another installation are not copied.
+from another installation are not copied. Its two independent UI journeys create fresh Starter
+Projects, write manual Requirements or explicitly request an AI Interview, and commission Build.
 
 ```sh
 mise exec -- bun run factory:up --disposable coding-proof-example
@@ -244,8 +245,11 @@ FACTORY_CODING_COMPLETION_INSTALLATION=coding-proof-example mise exec -- bun run
 mise exec -- bun run factory:reset --disposable coding-proof-example --confirm coding-proof-example
 ```
 
-It creates a fresh Starter feature, requires the coding Agent's own browser inspection, and
-independently checks behavior, exact Verification and Delivery without editing generated source.
+Each journey requires the coding Agent's browser inspection, independent exact-commit review and
+passing Verification. It independently checks the real App, clicks Deliver deliberately and checks
+the promoted Staging revision. A saved human Wiki note must survive the generated delivery update.
+The harness does not edit generated source or repair infrastructure. Set
+`FACTORY_CODING_COMPLETION_PATH=manual` or `interview` to run only one path.
 Screenshots and results go under `.factory/test-results/coding-completion/`. A passing sample
 is evidence for that task, not a guarantee that every model request will finish unaided.
 Successful runs remove their owned source storage as well as execution resources. Failed runs
