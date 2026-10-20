@@ -14,7 +14,9 @@ describe("IDE messages", () => {
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: {
-        location: { href: `http://user.1.editor.runtime.localhost:3000/editor/${attemptID}/1/` },
+        location: {
+          href: `http://user.1.h3000.editor.runtime.localhost:3000/editor/${attemptID}/1/`,
+        },
         parent: { postMessage: (_message: unknown, target: string) => targets.push(target) },
       },
     });

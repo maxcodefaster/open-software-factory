@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
+import { resolve, sep } from "node:path";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -23,7 +25,26 @@ test("failed file access can be explicitly restarted without discarding the edit
     editorEnsures = 0,
     computeStarts = 0;
   let page: import("@playwright/test").Page | undefined;
+  const frontend = resolve(
+    ".factory/test-results/source-recovery-browser",
+    `frontend-${crypto.randomUUID()}`,
+  );
   try {
+    const build = Bun.spawn(
+      [
+        "node",
+        resolve("node_modules/vite/bin/vite.js"),
+        "build",
+        "--config",
+        resolve("apps/factory/vite.config.ts"),
+        "--outDir",
+        frontend,
+      ],
+      { stdout: "ignore", stderr: "pipe" },
+    );
+    const buildError = await new Response(build.stderr).text();
+    if (await build.exited)
+      throw new Error(`Owned frontend build failed: ${buildError.slice(-500)}`);
     await fixture.startPlanningCache();
     await fixture.start();
     const cookie = await fixture.signIn();
@@ -34,6 +55,9 @@ test("failed file access can be explicitly restarted without discarding the edit
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${slug},'Source recovery fixture','https://example.invalid/owned','main','.devcontainer/devcontainer.json',${userID})`;
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    // Chromium treats the intercepted entry document as public-network content.
+    // Permit only this owned fixture origin to reach its loopback planning cache.
+    await context.grantPermissions(["local-network-access"], { origin: fixture.base });
     await context.addCookies(
       cookie.split("; ").map((part) => ({
         name: part.slice(0, part.indexOf("=")),
@@ -42,6 +66,16 @@ test("failed file access can be explicitly restarted without discarding the edit
       })),
     );
     page = await context.newPage();
+    // Test the current frontend without replacing assets served by a retained
+    // developer installation or depending on an older host build.
+    await page.route(`${fixture.base}/`, (route) =>
+      route.fulfill({ path: resolve(frontend, "index.html") }),
+    );
+    await page.route(`${fixture.base}/assets/**`, (route) => {
+      const file = resolve(frontend, new URL(route.request().url()).pathname.slice(1));
+      if (!file.startsWith(frontend + sep)) throw new Error("Fixture asset path escaped its build");
+      return route.fulfill({ path: file });
+    });
     const failures: string[] = [];
     page.on("pageerror", (error) => failures.push(error.message));
     page.on("request", (request) => {
@@ -73,9 +107,8 @@ test("failed file access can be explicitly restarted without discarding the edit
         json: { serviceID: "owned-editor", epoch: 1, state: "ready", failure: null },
       }),
     );
-    const editorOrigin = new URL(fixture.base);
-    editorOrigin.hostname = `${userID.replaceAll("-", "")}.1.editor.runtime.localhost`;
-    const editorURL = `${editorOrigin.origin}/owned-source-editor`;
+    const editorOrigin = developerIDEOrigin(fixture.base, userID, 1);
+    const editorURL = `${editorOrigin}/owned-source-editor`;
     await page.route("**/api/developer-ide/access?*", (route) =>
       route.fulfill({ contentType: "text/html", body: "<!doctype html><html></html>" }),
     );
@@ -226,8 +259,12 @@ test("failed file access can be explicitly restarted without discarding the edit
     }
     throw cause;
   } finally {
-    await browser.close();
-    await database.client.end({ timeout: 2 });
-    await fixture.dispose();
+    try {
+      await browser.close();
+      await database.client.end({ timeout: 2 });
+      await fixture.dispose();
+    } finally {
+      await rm(frontend, { recursive: true, force: true });
+    }
   }
 }, 90_000);

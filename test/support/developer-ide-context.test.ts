@@ -3,10 +3,10 @@ import { authorizedFactoryOrigin } from "../../deploy/theia-ide/factory-ide-exte
 
 test("independent IDE selection trusts authenticated context even when grant redemption suppresses referrer", async () => {
   const href =
-    "http://user.1.editor.runtime.localhost:3000/editor/11111111-1111-4111-8111-111111111111/1/?workspace=source";
+    "http://user.1.h3000.editor.runtime.localhost:3000/editor/11111111-1111-4111-8111-111111111111/1/?workspace=source";
   const fetcher: Parameters<typeof authorizedFactoryOrigin>[2] = async (input, init) => {
     expect(String(input)).toBe(
-      "http://user.1.editor.runtime.localhost:3000/editor/11111111-1111-4111-8111-111111111111/1/__factory/context",
+      "http://user.1.h3000.editor.runtime.localhost:3000/editor/11111111-1111-4111-8111-111111111111/1/__factory/context",
     );
     expect(init?.credentials).toBe("same-origin");
     return Response.json({ factoryOrigin: "http://127.0.0.1:3000" });

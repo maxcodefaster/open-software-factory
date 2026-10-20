@@ -8,6 +8,7 @@ import {
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import {
   editorFixtureNamespaces as namespaces,
   removeStoppedEditorSourceNamespace,
@@ -191,8 +192,9 @@ test.skipIf(!enabled)(
       // Establish the real Factory origin before inserting this minimal editing fixture.
       await page.goto(`${fixture.base}/api/session`);
       const visibleStarted = performance.now();
+      const ownedEditorOrigin = developerIDEOrigin(fixture.base, userID, 1);
       await page.setContent(
-        `<!doctype html><button id="a" onclick="pick('${a.workspaceID}')">A</button><button id="b" onclick="pick('${b.workspaceID}')">B</button><iframe title="Factory IDE" style="position:absolute;inset:40px 0 0;width:100%;height:calc(100% - 40px);border:0" src="/api/developer-ide/access?embed=1"></iframe><script>const editorOrigin='http://${userID.replaceAll("-", "")}.1.editor.runtime.localhost:${new URL(fixture.base).port}';function pick(workspaceID){document.querySelector('iframe').contentWindow.postMessage({type:'factory:select-workspace',workspaceID},editorOrigin)}window.addEventListener('message',event=>{if(event.source===document.querySelector('iframe').contentWindow&&event.origin===editorOrigin&&event.data?.type==='factory:ide-ready')pick('${a.workspaceID}')})</script>`,
+        `<!doctype html><button id="a" onclick="pick('${a.workspaceID}')">A</button><button id="b" onclick="pick('${b.workspaceID}')">B</button><iframe title="Factory IDE" style="position:absolute;inset:40px 0 0;width:100%;height:calc(100% - 40px);border:0" src="/api/developer-ide/access?embed=1"></iframe><script>const editorOrigin=${JSON.stringify(ownedEditorOrigin)};function pick(workspaceID){document.querySelector('iframe').contentWindow.postMessage({type:'factory:select-workspace',workspaceID},editorOrigin)}window.addEventListener('message',event=>{if(event.source===document.querySelector('iframe').contentWindow&&event.origin===editorOrigin&&event.data?.type==='factory:ide-ready')pick('${a.workspaceID}')})</script>`,
       );
       const frame = page.frameLocator('iframe[title="Factory IDE"]');
       await browserExpect(frame.locator("#files").getByText("src", { exact: true })).toBeVisible({

@@ -1,6 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import { CommandError } from "../command-error";
+import { developerIDEOrigin } from "../developer-ide-origin";
 
 export interface DeveloperIDEGrant {
   readonly userID: string;
@@ -11,11 +12,6 @@ export interface DeveloperIDEGrant {
 }
 export function developerIDEPath(userID: string, epoch: number) {
   return `/editor/${userID}/${epoch}/`;
-}
-export function developerIDEOrigin(factoryOrigin: string, userID: string, epoch: number) {
-  const origin = new URL(factoryOrigin);
-  origin.hostname = `${userID.replaceAll("-", "")}.${epoch}.editor.runtime.localhost`;
-  return origin.origin;
 }
 export function createDeveloperIDEAccess(
   database: ReturnType<typeof createDatabase>,

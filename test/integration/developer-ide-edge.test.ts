@@ -180,7 +180,9 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
       "Source did not prepare",
     );
     const issued = new URL(await edge.issue(userID, sessionID, true, source.workspaceID));
-    expect(issued.hostname).toBe(`${userID.replaceAll("-", "")}.1.editor.runtime.localhost`);
+    expect(issued.hostname).toBe(
+      `${userID.replaceAll("-", "")}.1.h${frontend.url.port}.editor.runtime.localhost`,
+    );
     const redeemed = await edge.route(new Request(issued));
     expect(redeemed.status).toBe(302);
     const setCookie = redeemed.headers.get("set-cookie") ?? "";
@@ -192,6 +194,14 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
     const wrongHost = new URL(editorURL);
     wrongHost.hostname = "127.0.0.1";
     expect((await edge.route(new Request(wrongHost, { headers: { cookie } }))).status).toBe(401);
+    const oldHost = new URL(editorURL);
+    oldHost.hostname = `${userID.replaceAll("-", "")}.1.editor.runtime.localhost`;
+    expect((await edge.route(new Request(oldHost, { headers: { cookie } }))).status).toBe(401);
+    const otherListener = new URL(editorURL);
+    otherListener.hostname = `${userID.replaceAll("-", "")}.1.h1.editor.runtime.localhost`;
+    expect((await edge.route(new Request(otherListener, { headers: { cookie } }))).status).toBe(
+      401,
+    );
     const wrongUser = new URL(editorURL);
     wrongUser.pathname = wrongUser.pathname.replace(userID, otherUserID);
     expect((await edge.route(new Request(wrongUser, { headers: { cookie } }))).status).toBe(401);

@@ -5,6 +5,7 @@ import { developmentPreviewMessage, type DevelopmentPreviewMessage } from "./ide
 import { selectedSourcePreparation } from "./selected-source-preparation";
 import { recoverWorkspaceSource } from "./source-recovery";
 import { confirmAccessStopped } from "./access-stop";
+import { developerIDEOrigin } from "./developer-ide-origin";
 import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
 import { z } from "zod";
 
@@ -154,9 +155,7 @@ export function DeveloperIDEWorkspace(props: {
   const editorOrigin = () => {
     const current = attachment();
     if (!current) return undefined;
-    const url = new URL(window.location.origin);
-    url.hostname = `${props.userID.replaceAll("-", "")}.${current.epoch}.editor.runtime.localhost`;
-    return url.origin;
+    return developerIDEOrigin(window.location.origin, props.userID, current.epoch);
   };
   createEffect(
     () => [attachment()?.epoch, ready(), editorRetry()] as const,

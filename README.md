@@ -58,6 +58,8 @@ unsaved editor changes; restarting file access retains editor buffers.
 Editor resources use a persisted random identity, separate from the account ID, so installations
 sharing the emergency administrator ID cannot adopt each other's editor. Existing editor identities
 remain unchanged until explicit Stop and restart.
+Editor hostnames also include the local HTTP/HTTPS listener so browser cookies stay separate across
+installations on different ports, even when the account and editor epoch match.
 
 The local listener defaults to `0.0.0.0` so OrbStack-hosted runtimes can call Factory.
 Set `FACTORY_HOST` explicitly to narrow that listener, noting that loopback-only access may prevent
