@@ -35,6 +35,7 @@ import {
 import { completeFactoryStartup, waitForFactory } from "./readiness";
 import { localServerSettings } from "./server-settings";
 import { waitForRegistry } from "./registry-readiness";
+import { publishRuntimeImage } from "./runtime-publication";
 import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
 import { localStarterCompose, starterImageManifest, starterImagesSchema } from "./starter-images";
 
@@ -342,22 +343,7 @@ async function publishRuntimeHost() {
         target: "developer-ide",
       },
     ]) {
-      await command([
-        "docker",
-        "buildx",
-        "build",
-        "--provenance=false",
-        "--file",
-        artifact.dockerfile,
-        ...(artifact.target ? ["--target", artifact.target] : []),
-        "--output",
-        "type=registry,registry.insecure=true",
-        "--tag",
-        `${artifact.repository}:local`,
-        "--metadata-file",
-        artifact.metadata,
-        ".",
-      ]);
+      await publishRuntimeImage(artifact, command);
       const metadata = JSON.parse(await readFile(artifact.metadata, "utf8")) as {
         "containerimage.digest"?: string;
       };
