@@ -23,7 +23,7 @@ type childRuntime struct {
 	httpClient     *http.Client
 	streams        map[string]*websocket.Conn
 	httpCancels    map[string]context.CancelFunc
-	agentHTTP      map[string]bool
+	agentMutations map[string]bool
 	agentRequests  chan func()
 	agentUncertain bool
 	streamLock     sync.Mutex
@@ -312,11 +312,11 @@ func (runtime *childRuntime) startHTTPRequest(ctx context.Context, message Messa
 		return
 	}
 	runtime.httpCancels[message.StreamID] = cancel
-	if ordered {
-		if runtime.agentHTTP == nil {
-			runtime.agentHTTP = make(map[string]bool)
+	if mutation {
+		if runtime.agentMutations == nil {
+			runtime.agentMutations = make(map[string]bool)
 		}
-		runtime.agentHTTP[message.StreamID] = true
+		runtime.agentMutations[message.StreamID] = true
 	}
 	runtime.streamLock.Unlock()
 	execute := func() {
@@ -324,7 +324,7 @@ func (runtime *childRuntime) startHTTPRequest(ctx context.Context, message Messa
 			cancel()
 			runtime.streamLock.Lock()
 			delete(runtime.httpCancels, message.StreamID)
-			delete(runtime.agentHTTP, message.StreamID)
+			delete(runtime.agentMutations, message.StreamID)
 			runtime.streamLock.Unlock()
 		}()
 		if ordered && runtime.agentUncertain {
@@ -348,7 +348,7 @@ func (runtime *childRuntime) startHTTPRequest(ctx context.Context, message Messa
 		cancel()
 		runtime.streamLock.Lock()
 		delete(runtime.httpCancels, message.StreamID)
-		delete(runtime.agentHTTP, message.StreamID)
+		delete(runtime.agentMutations, message.StreamID)
 		runtime.streamLock.Unlock()
 		runtime.sendError(message.StreamID, "Agent request queue is full")
 	}
@@ -606,9 +606,11 @@ func (runtime *childRuntime) closeStream(streamID string) {
 	runtime.streamLock.Lock()
 	connection := runtime.streams[streamID]
 	cancel := runtime.httpCancels[streamID]
-	if runtime.agentHTTP[streamID] {
+	if runtime.agentMutations[streamID] {
 		// OpenCode admission is uninterruptible. Keep observing its response
 		// even after the Factory HTTP consumer detaches, or Stop could pass it.
+		// Ordered reads have no external effect and must release this queue
+		// when their consumer times out or disconnects.
 		cancel = nil
 	}
 	delete(runtime.streams, streamID)
@@ -626,7 +628,7 @@ func (runtime *childRuntime) disconnectStreams() {
 	streams := runtime.streams
 	cancels := make([]context.CancelFunc, 0, len(runtime.httpCancels))
 	for streamID, cancel := range runtime.httpCancels {
-		if !runtime.agentHTTP[streamID] {
+		if !runtime.agentMutations[streamID] {
 			cancels = append(cancels, cancel)
 		}
 	}

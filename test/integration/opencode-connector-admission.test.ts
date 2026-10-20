@@ -74,3 +74,47 @@ test("Connector interruption follows native prompt admission despite response/co
     await process.dispose();
   }
 }, 60_000);
+
+test("detached native history cannot keep the Connector queue ahead of Stop", async () => {
+  const process = await pinnedOpenCode();
+  try {
+    const boundary = await connectorBoundary(process);
+    try {
+      for (const loss of ["stream-close", "reconnect"] as const) {
+        const sessionID = `ses_owned_${crypto.randomUUID().replaceAll("-", "")}`;
+        await boundary.client.session.create({
+          id: sessionID,
+          location: { directory: "/workspace/project" },
+          model: { providerID: "factory", id: buildModelID },
+        });
+        const read = await boundary.delayRead(loss);
+        const history = read.client.message.list({ sessionID, limit: 100 }).then(
+          () => true,
+          () => false,
+        );
+        try {
+          await read.detach();
+          await boundary.client.session.interrupt(
+            { sessionID },
+            { signal: AbortSignal.timeout(2_000) },
+          );
+          expect(await history).toBe(false);
+          expect((await process.control()).providerRequests).toBe(0);
+        } finally {
+          read.finish();
+          await history;
+        }
+        expect(
+          await boundary.client.message.list(
+            { sessionID, limit: 100 },
+            { signal: AbortSignal.timeout(2_000) },
+          ),
+        ).toMatchObject({ data: [] });
+      }
+    } finally {
+      await boundary.dispose();
+    }
+  } finally {
+    await process.dispose();
+  }
+}, 60_000);

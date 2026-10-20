@@ -63,12 +63,25 @@ export async function connectorBoundary(
         mutation: "prompt" | "session-create";
       }
     | undefined;
+  let heldRead:
+    | {
+        entered: ReturnType<typeof Promise.withResolvers<void>>;
+        release: ReturnType<typeof Promise.withResolvers<void>>;
+      }
+    | undefined;
   const proxy = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
       const path = `${url.pathname}${url.search}`;
+      const reading = heldRead;
+      if (request.method === "GET" && url.pathname.endsWith("/message") && reading) {
+        reading.entered.resolve();
+        await reading.release.promise;
+        if (request.signal.aborted) return new Response(null, { status: 499 });
+        return forwardedResponse(await process.transport(request, path));
+      }
       const current = held;
       if (
         request.method === "POST" &&
@@ -98,6 +111,7 @@ export async function connectorBoundary(
   let connector: ReturnType<typeof Bun.spawn> | undefined;
   async function dispose() {
     held?.release.resolve();
+    heldRead?.release.resolve();
     try {
       connector?.kill("SIGTERM");
       if (connector) await cleanupDeadline(connector.exited, "child");
@@ -185,6 +199,36 @@ export async function connectorBoundary(
       client: createOpenCodeClient((request, path) =>
         hub.request(attemptID, "agent", request, path),
       ),
+      async delayRead(loss: Exclude<Loss, "none">) {
+        const current = {
+          entered: Promise.withResolvers<void>(),
+          release: Promise.withResolvers<void>(),
+        };
+        heldRead = current;
+        const generation = connections;
+        const abort = new AbortController();
+        return {
+          ...current,
+          client: createOpenCodeClient((request, path) =>
+            hub.request(attemptID, "agent", new Request(request, { signal: abort.signal }), path),
+          ),
+          async detach() {
+            await current.entered.promise;
+            if (loss === "stream-close") abort.abort();
+            else {
+              child?.send("{");
+              await observe(
+                async () => connections,
+                (count) => count > generation,
+              );
+            }
+          },
+          finish() {
+            if (heldRead === current) heldRead = undefined;
+            current.release.resolve();
+          },
+        };
+      },
       async delay(loss: Loss, mutation: "prompt" | "session-create" = "prompt") {
         const current = {
           entered: Promise.withResolvers<void>(),

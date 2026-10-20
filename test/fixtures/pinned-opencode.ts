@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, realpath } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
@@ -80,7 +80,28 @@ export async function pinnedOpenCode(
   const scratch = await realpath(await mkdtemp(resolve(tmpdir(), "factory-opencode-process-")));
   const project = retainedProject ?? resolve(scratch, "project");
   await mkdir(project, { recursive: true });
+  const evidence = resolve(".factory/test-results/opencode-process", id);
+  await mkdir(evidence, { recursive: true });
   const created: string[] = [];
+  const acknowledged = new Set<string>();
+  async function create(name: string, ...args: string[]) {
+    created.push(name);
+    await writeFile(
+      resolve(evidence, "intent.json"),
+      JSON.stringify({
+        id,
+        source,
+        container,
+        artifactImage,
+        scratch,
+        ownerProcessID: process.pid,
+        attempted: created,
+      }),
+      { mode: 0o600 },
+    );
+    await docker(...args);
+    acknowledged.add(name);
+  }
   async function dispose() {
     for (const name of [...created].reverse()) {
       const owner = await docker(
@@ -88,16 +109,35 @@ export async function pinnedOpenCode(
         "--format",
         '{{index .Config.Labels "factory.owned-process-test"}}',
         name,
-      );
+      ).catch((cause: unknown) => {
+        if (cause instanceof Error && /no such (?:object|container)/i.test(cause.message)) {
+          if (acknowledged.has(name)) return null;
+          throw new Error(`Owned create outcome is unconfirmed; retain ${evidence}/intent.json`);
+        }
+        throw cause;
+      });
+      if (owner === null) {
+        created.splice(created.indexOf(name), 1);
+        continue;
+      }
       if (owner !== id) throw new Error("Owned process cleanup refused");
       await docker("rm", "--force", "--volumes", name);
       created.splice(created.indexOf(name), 1);
     }
+    await writeFile(resolve(evidence, "cleanup.json"), JSON.stringify({ removed: true }));
   }
   try {
     const label = `factory.owned-process-test=${id}`;
-    await docker("create", "--pull=never", "--name", source, "--label", label, artifactImage);
-    created.push(source);
+    await create(
+      source,
+      "create",
+      "--pull=never",
+      "--name",
+      source,
+      "--label",
+      label,
+      artifactImage,
+    );
     if (skillManifest)
       await Bun.write(resolve(scratch, "admitted-skills.json"), JSON.stringify(skillManifest));
     if (packaged) {
@@ -111,7 +151,8 @@ export async function pinnedOpenCode(
         `${source}:/opt/factory/opencode/glibc/opencode`,
         resolve(scratch, "opencode"),
       );
-    await docker(
+    await create(
+      container,
       "run",
       "--detach",
       "--name",
@@ -173,7 +214,6 @@ export async function pinnedOpenCode(
       ...(!packaged ? ["node"] : []),
       "/owned-fixture/opencode-process.mjs",
     );
-    created.push(container);
     const port = (await docker("port", container, "4096/tcp")).split(":").at(-1);
     const controlPort = (await docker("port", container, "4097/tcp")).split(":").at(-1);
     const transport = (request: Request, path: string) => {
@@ -276,9 +316,13 @@ export async function pinnedOpenCode(
       }),
     };
   } catch (cause) {
-    if (nativeServer && created.includes(container))
+    if (nativeServer && acknowledged.has(container))
       console.log("Owned native server startup", (await docker("logs", container)).slice(-3000));
-    await dispose();
+    try {
+      await dispose();
+    } catch (cleanup) {
+      throw new AggregateError([cause, cleanup], "Owned process failed and cleanup is unconfirmed");
+    }
     throw cause;
   }
 }

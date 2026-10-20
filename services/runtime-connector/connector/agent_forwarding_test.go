@@ -66,6 +66,74 @@ func TestFailedRecoveryReadDoesNotPoisonAgentAdmission(t *testing.T) {
 	}
 }
 
+func TestDetachedRecoveryReadReleasesAgentQueue(t *testing.T) {
+	for _, loss := range []string{"stream-close", "disconnect"} {
+		t.Run(loss, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			entered := make(chan struct{})
+			cancelled := make(chan struct{})
+			interrupted := make(chan struct{})
+			assignment := validAssignment()
+			assignment.Channels = []Channel{{Name: "agent", Kind: "agent", Target: "http://127.0.0.1:1", HealthPath: "/health"}}
+			runtime := &childRuntime{
+				assignment:    assignment,
+				agentRequests: make(chan func(), 16),
+				httpClient: &http.Client{Transport: recoveryRoundTripper(func(request *http.Request) (*http.Response, error) {
+					if request.Method == http.MethodGet {
+						close(entered)
+						<-request.Context().Done()
+						close(cancelled)
+						return nil, request.Context().Err()
+					}
+					close(interrupted)
+					return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody}, nil
+				})},
+			}
+			runtime.terminals = newTerminalManager(ctx, assignment, func(Message) error { return nil })
+			defer runtime.terminals.closeAll()
+			done := make(chan struct{})
+			go func() {
+				runtime.forwardAgentRequests(ctx)
+				close(done)
+			}()
+			defer func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(time.Second):
+					t.Error("read observer did not stop")
+				}
+			}()
+			runtime.startHTTPRequest(ctx, Message{StreamID: "history", Channel: "agent", Method: http.MethodGet, Path: "/api/session/owned/message?limit=100"})
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("history did not reach upstream")
+			}
+			if loss == "stream-close" {
+				runtime.closeStream("history")
+			} else {
+				runtime.disconnectStreams()
+			}
+			runtime.startHTTPRequest(ctx, Message{StreamID: "stop", Channel: "agent", Method: http.MethodPost, Path: "/api/session/owned/interrupt"})
+			select {
+			case <-cancelled:
+			case <-time.After(time.Second):
+				t.Fatal("detached read kept the ordered Agent queue occupied")
+			}
+			select {
+			case <-interrupted:
+			case <-time.After(time.Second):
+				t.Fatal("detached read blocked the later Stop")
+			}
+			if runtime.agentUncertain {
+				t.Fatal("read cancellation poisoned Agent admission")
+			}
+		})
+	}
+}
+
 func TestAgentInterruptCannotOvertakePromptAdmission(t *testing.T) {
 	testAgentRecoveryOrdering(t, false)
 }
