@@ -24,6 +24,8 @@ import {
   isOpenCodeObservationTransportError,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
+  readOpenCodeInputMessages,
+  syncOpenCodeInputGuidance,
 } from "./opencode-client";
 import { observeOpenCodeUsage } from "./opencode-usage";
 import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
@@ -720,6 +722,7 @@ export function createAgentController(
         throw new CommandError("conflict", "Build authority changed before prompt submission");
       await ensureOpenCodeMessageBoundary(client, intent.sessionID);
       await usageJournal.prepare(turnID, client, intent.sessionID);
+      if (intent.skillLoading === "native") await syncOpenCodeInputGuidance(client, intent);
       const browserGrant = await browser?.prepare(turnID, ownerToken);
       if (intent.browserTransport === "mcp" && browserGrant)
         await connectOpenCodeBrowser(
@@ -801,7 +804,7 @@ export function createAgentController(
         );
       const skillRevisionIDs = owned.authority.skillRevisionIds;
       let queueWakeRequested = false;
-      for (let observation = 0; observation < 30 && !closed; observation += 1) {
+      while (!closed) {
         if (!(await turns.renew(turnID, ownerToken))) {
           throw new CommandError("conflict", "Build authority changed before external recovery");
         }
@@ -830,16 +833,39 @@ export function createAgentController(
         const client = createOpenCodeClient(
           createChangeAgentTransport(database, hub, intent.attemptID, turnID, ownerToken),
         );
-        const retained = await client.session.get({ sessionID: intent.sessionID });
-        if (
-          retained.id !== intent.sessionID ||
-          retained.location.directory !== workspaceDirectory ||
-          retained.model?.providerID !== "factory" ||
-          retained.model.id !== owned.authority.modelId
-        )
-          throw new Error("Recovered OpenCode session does not match its recorded configuration");
+        let work: Awaited<ReturnType<typeof observeOpenCodeWork>>;
+        let messages: Awaited<ReturnType<typeof readOpenCodeInputMessages>>;
+        try {
+          const retained = await client.session.get(
+            { sessionID: intent.sessionID },
+            { signal: AbortSignal.any([observationController.signal, AbortSignal.timeout(5_000)]) },
+          );
+          if (
+            retained.id !== intent.sessionID ||
+            retained.location.directory !== workspaceDirectory ||
+            retained.model?.providerID !== "factory" ||
+            retained.model.id !== owned.authority.modelId
+          )
+            throw new Error("Recovered OpenCode session does not match its recorded configuration");
+          if (intent.skillLoading === "native") await syncOpenCodeInputGuidance(client, intent);
+          await usageJournal.drain(turnID, client, intent.sessionID);
+          [work, messages] = await Promise.all([
+            observeOpenCodeWork(client, intent.sessionID),
+            readOpenCodeInputMessages(
+              client,
+              intent.sessionID,
+              intent.promptID,
+              AbortSignal.any([observationController.signal, AbortSignal.timeout(5_000)]),
+            ),
+          ]);
+        } catch (cause) {
+          if (!isOpenCodeObservationTransportError(cause)) throw cause;
+          // These reads and exact idempotent guidance bindings may repeat,
+          // never inference. Recheck Stop, ownership and runtime next time.
+          await Bun.sleep(1_000);
+          continue;
+        }
         await confirmNativeSession(changeID, turnID, intent.attemptID, intent.sessionID);
-        await usageJournal.drain(turnID, client, intent.sessionID);
         const browserGrant = await browser?.prepare(turnID, ownerToken);
         if (intent.browserTransport === "mcp" && browserGrant)
           await connectOpenCodeBrowser(
@@ -847,10 +873,6 @@ export function createAgentController(
             browserGrant.runtimeEndpoint,
             browserGrant.runtimeBearer,
           );
-        const [work, messages] = await Promise.all([
-          observeOpenCodeWork(client, intent.sessionID),
-          client.message.list({ sessionID: intent.sessionID, limit: 100 }),
-        ]);
         await recordNativeSkillLoads(turnID, ownerToken, intent.promptID, messages.data);
         const input = messages.data.find(
           (message) => message.type === "user" && message.id === intent.promptID,
@@ -936,9 +958,6 @@ export function createAgentController(
         await monitor(changeID, owned.command.createdBy, turnID, ownerToken);
         return;
       }
-      throw new Error(
-        "Recorded OpenCode runtime or input did not become observable within the recovery window",
-      );
     } catch (cause) {
       if (closed) return;
       if (owned?.ownerToken && "changeId" in owned.command) {
@@ -1262,9 +1281,11 @@ export function createAgentController(
           const work = await observeOpenCodeWork(client, session.sessionID);
           const [, messages] = await Promise.all([
             usageJournal.drain(turnID, client, session.sessionID, work.sessionIDs),
-            client.message.list(
-              { sessionID: session.sessionID, limit: 100 },
-              { signal: AbortSignal.timeout(5_000) },
+            readOpenCodeInputMessages(
+              client,
+              session.sessionID,
+              intent.promptID,
+              AbortSignal.any([observationController.signal, AbortSignal.timeout(5_000)]),
             ),
           ]);
           await recordNativeSkillLoads(turnID, ownerToken, session.activeInboxID, messages.data);

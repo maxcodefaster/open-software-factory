@@ -1,0 +1,6 @@
+{
+  "plugins": ["-opencode.config.compatibility"],
+  "compaction": {
+    "auto": true
+  }
+}

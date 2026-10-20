@@ -4,7 +4,10 @@ import { z } from "zod";
 type AgentTransport = (request: Request, path: string) => Promise<Response>;
 
 export function isOpenCodeObservationTransportError(error: unknown) {
-  return error instanceof ClientError && error.reason === "Transport";
+  return (
+    (error instanceof ClientError && error.reason === "Transport") ||
+    (error instanceof DOMException && ["AbortError", "TimeoutError"].includes(error.name))
+  );
 }
 
 type RecordedInput = {
@@ -67,6 +70,90 @@ export function decodeOpenCodeAdmission(
   };
 }
 
+// Lifecycle needs the interval after the exact input, not an arbitrary recent
+// page. Follow native cursors read-only, preserving newest-first causal order.
+export async function readOpenCodeInputMessages(
+  client: ReturnType<typeof createOpenCodeClient>,
+  sessionID: string,
+  promptID: string,
+  signal = AbortSignal.timeout(5_000),
+) {
+  const data: Awaited<ReturnType<typeof client.message.list>>["data"][number][] = [];
+  const messages = new Set<string>();
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  for (;;) {
+    signal.throwIfAborted();
+    const page = await client.message.list(
+      { sessionID, limit: 100, ...(cursor ? { cursor } : { order: "desc" as const }) },
+      { signal },
+    );
+    for (const message of page.data) {
+      if (messages.has(message.id)) continue;
+      messages.add(message.id);
+      data.push(message);
+      if (message.id === promptID) return { data };
+    }
+    cursor = page.cursor?.next ?? undefined;
+    if (!cursor) return { data };
+    if (cursors.has(cursor)) throw new Error("OpenCode repeated a message cursor");
+    cursors.add(cursor);
+  }
+}
+
+// API-managed instruction entries are rebased by native compaction. Input
+// attachments alone are conversation history and can disappear from context.
+// Replace only this Factory-owned namespace when a new turn selects guidance.
+export async function syncOpenCodeInputGuidance(
+  client: ReturnType<typeof createOpenCodeClient>,
+  input: {
+    sessionID: string;
+    skills: readonly { id: string }[];
+    skillManifest: { files: readonly { path: string; body: string }[] } | null;
+  },
+) {
+  const prefix = "factory-skill-";
+  const expected = new Map<string, string>(
+    input.skills.map((skill) => {
+      const file = input.skillManifest?.files.find((file) => file.path === `${skill.id}/SKILL.md`);
+      if (!file) throw new Error("Admitted native guidance has no exact Skill package");
+      return [`${prefix}${skill.id}`, Buffer.from(file.body, "base64").toString("utf8")] as const;
+    }),
+  );
+  const entries = await client.session.instructions.entry.list(
+    { sessionID: input.sessionID },
+    { signal: AbortSignal.timeout(5_000) },
+  );
+  let changed = false;
+  for (const entry of entries) {
+    if (!entry.key.startsWith(prefix) || expected.has(entry.key)) continue;
+    await client.session.instructions.entry.remove(
+      { sessionID: input.sessionID, key: entry.key },
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    changed = true;
+  }
+  for (const [key, value] of expected) {
+    if (entries.some((entry) => entry.key === key && entry.value === value)) continue;
+    await client.session.instructions.entry.put(
+      { sessionID: input.sessionID, key, value },
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    changed = true;
+  }
+  if (!changed) return;
+  const confirmed = await client.session.instructions.entry.list(
+    { sessionID: input.sessionID },
+    { signal: AbortSignal.timeout(5_000) },
+  );
+  const owned = confirmed.filter((entry) => entry.key.startsWith(prefix));
+  if (
+    owned.length !== expected.size ||
+    owned.some((entry) => entry.value !== expected.get(entry.key))
+  )
+    throw new Error("Native instruction entries do not match the admitted Skill guidance");
+}
+
 export async function promptRecordedOpenCodeInput(
   client: ReturnType<typeof createOpenCodeClient>,
   input: RecordedInput,
@@ -84,7 +171,7 @@ export async function promptRecordedOpenCodeInput(
   const receipt = decodeOpenCodeAdmission(admitted, input);
   const inbox = await client.session.inbox.list({ sessionID: input.sessionID });
   if (inbox.some((item) => item.id === input.promptID)) return receipt;
-  const messages = await client.message.list({ sessionID: input.sessionID, limit: 100 });
+  const messages = await readOpenCodeInputMessages(client, input.sessionID, input.promptID);
   const message = messages.data.find((item) => item.id === input.promptID);
   if (message?.type !== "user" || message.text !== input.text)
     throw new Error("OpenCode input is neither queued nor identifiable in retained messages");

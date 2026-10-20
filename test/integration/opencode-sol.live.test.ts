@@ -4,8 +4,13 @@ import { resolve } from "node:path";
 import {
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
+  syncOpenCodeInputGuidance,
 } from "../../apps/factory/src/agent/opencode-client";
-import { openCodeModelConfiguration } from "../../packages/runtime-kubernetes/src/opencode-model";
+import { nativeInputSkills, nativeSkillManifest } from "../../apps/factory/src/skills/native";
+import {
+  openCodeModelConfiguration,
+  openCodeModelMetadata,
+} from "../../packages/runtime-kubernetes/src/opencode-model";
 import { pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { codingReasoningInput } from "../../packages/conversation-domain/src/model-settings";
 
@@ -24,6 +29,22 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
     if (endpoint.protocol !== "https:" || !endpoint.hostname.endsWith(".openai.azure.com"))
       throw new Error("This proof requires the explicitly selected Azure endpoint");
     const id = crypto.randomUUID();
+    const required = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      content: {
+        key: "owned-number-operands",
+        name: "Number operands",
+        description: "Validate numeric operands while implementing sum.",
+        roles: ["build" as const],
+        instructions:
+          "sum(a,b) must throw TypeError when either operand is not a number. Add a regression test that sum('2',3) throws TypeError. Keep normal numeric addition unchanged.",
+        references: [],
+      },
+      digest: "a".repeat(64),
+      published: true,
+    };
+    const manifest = nativeSkillManifest([required]);
     const directory = resolve(".factory/test-results/opencode-sol", id);
     await mkdir(directory, { recursive: true });
     const requests: Array<{ path: string; model: string; reasoning: string }> = [];
@@ -62,6 +83,9 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
     let owned: Awaited<ReturnType<typeof pinnedOpenCode>> | undefined;
     let cleaned = false;
     let succeeded = false;
+    let repositoryInstructionsObserved = false;
+    let verifiedModelLimits: unknown;
+    let requiredGuidanceApplied = false;
     try {
       owned = await pinnedOpenCode(
         undefined,
@@ -70,9 +94,31 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
         `http://host.orb.internal:${proxy.port}/v1`,
         undefined,
         undefined,
-        undefined,
-        { modelID, ...configuration, settings: { ...configuration.settings, apiKey: capability } },
+        manifest,
+        {
+          modelID,
+          ...configuration,
+          model: openCodeModelMetadata("openai", modelID),
+          settings: { ...configuration.settings, apiKey: capability },
+        },
       );
+      await Bun.write(
+        resolve(owned.scratch, "project", "AGENTS.md"),
+        [
+          "# Owned repository instructions",
+          "When creating sum.mjs in this checkout, start it with this exact comment:",
+          "// Owned repository instructions were read.",
+        ].join("\n"),
+      );
+      const nativeModel = (
+        await owned.client.model.list({ location: { directory: "/workspace/project" } })
+      ).data.find((model) => model.providerID === "factory" && model.id === modelID);
+      expect(nativeModel?.limit).toEqual({
+        context: 1_050_000,
+        input: 922_000,
+        output: 128_000,
+      });
+      verifiedModelLimits = nativeModel?.limit;
       const sessionID = `ses_factory_${id.replaceAll("-", "")}`;
       await owned.client.session.create({
         id: sessionID,
@@ -82,12 +128,19 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
         agent: "build",
         permissions: [{ action: "*", resource: "*", effect: "allow" }],
       });
+      const skills = nativeInputSkills("", [required], [required.id]);
+      await syncOpenCodeInputGuidance(owned.client, {
+        sessionID,
+        skills,
+        skillManifest: manifest,
+      });
       await promptRecordedOpenCodeInput(
         owned.client,
         {
           sessionID,
           promptID: `msg_factory_${id.replaceAll("-", "")}`,
           bootstrap: false,
+          skills,
           text: [
             "Goal: implement and test a small sum module in this owned empty checkout.",
             "Create sum.mjs exporting sum(a,b), and sum.test.mjs using node:test and node:assert/strict.",
@@ -134,6 +187,8 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
       const project = resolve(owned.scratch, "project");
       const source = await readFile(resolve(project, "sum.mjs"), "utf8");
       expect(source).toContain("sum");
+      expect(source).toStartWith("// Owned repository instructions were read.");
+      repositoryInstructionsObserved = true;
       const independent = Bun.spawn(["node", "--test", "sum.test.mjs"], {
         cwd: project,
         stdout: "pipe",
@@ -151,11 +206,13 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
             'import { sum } from "./sum.mjs";',
             'import assert from "node:assert/strict";',
             "assert.equal(sum(2,3),5); assert.equal(sum(-2,1),-1); assert.equal(sum(0,0),0);",
+            "assert.throws(()=>sum('2',3),TypeError); assert.throws(()=>sum(2,'3'),TypeError);",
           ].join("\n"),
         ],
         { cwd: project, stdout: "pipe", stderr: "pipe" },
       );
       expect(await behavior.exited).toBe(0);
+      requiredGuidanceApplied = true;
       expect(requests.length).toBeGreaterThan(1);
       expect(requests.every((request) => request.reasoning === reasoningEffort)).toBe(true);
       succeeded = true;
@@ -171,6 +228,9 @@ test.skipIf(process.env["FACTORY_OPENCODE_SOL_LIVE"] !== "1")(
             requests,
             cleaned,
             succeeded,
+            verifiedModelLimits,
+            repositoryInstructionsObserved,
+            requiredGuidanceApplied,
             instruction: "Native coding goal with ordinary summary; no mandatory completion JSON.",
           },
           null,

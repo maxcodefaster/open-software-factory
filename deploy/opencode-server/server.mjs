@@ -1,6 +1,7 @@
 import { start } from "@opencode/server/process";
 import { Effect } from "effect";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { migrateRetainedEvents } from "./retained-events.mjs";
 
 // The published server has no compile-time libc marker. Select its native watcher explicitly.
@@ -30,7 +31,7 @@ await Effect.runPromise(
         events: { persist: true },
         models: { fetch: false },
         config: {
-          global: false,
+          directory: fileURLToPath(new URL("./config/", import.meta.url)),
           project: false,
           content: process.env.FACTORY_OPENCODE_CONFIG,
         },

@@ -215,7 +215,7 @@ describe("runtime Kubernetes resources", () => {
           modelBaseURL: "http://host.orb.internal:3000/internal/model/attempt/v1",
           modelToken: "generation-token",
           modelID: "gpt-5.6-terra",
-          modelIDs: ["gpt-5.6-terra", "approved-alternative"],
+          modelIDs: ["gpt-5.6-terra", "approved-alternative", "gpt-6.1-sol"],
           ...(reasoningEffort ? { reasoningEffort } : {}),
           browserToolsImage: `registry.factory/browser-tools@sha256:${"a".repeat(64)}`,
           browserURL: "http://host.orb.internal:3000/internal/build-browser/attempt",
@@ -247,6 +247,11 @@ describe("runtime Kubernetes resources", () => {
         JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory.settings
           .reasoningEffort,
       ).toBe(reasoningEffort ?? "none");
+      const provider = JSON.parse(agentProcess.env.FACTORY_OPENCODE_CONFIG).providers.factory;
+      expect(provider.websocket).toBeUndefined();
+      expect(provider.settings.transport).toBe("http");
+      expect(provider.settings.compaction).toEqual({ type: "summary" });
+      expect(agentCommand).not.toContain(".config/opencode");
       expect(assignment.browserToolsImage).toBe(
         `registry.factory/browser-tools@sha256:${"a".repeat(64)}`,
       );
@@ -267,6 +272,11 @@ describe("runtime Kubernetes resources", () => {
         {
           "gpt-5.6-terra": { name: "gpt-5.6-terra" },
           "approved-alternative": { name: "approved-alternative" },
+          "gpt-6.1-sol": {
+            name: "gpt-6.1-sol",
+            capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+            limit: { context: 1_050_000, input: 922_000, output: 128_000 },
+          },
         },
       );
       expect(JSON.stringify(assignment)).not.toContain("FACTORY_FORGEJO_TOKEN");
@@ -277,7 +287,6 @@ describe("runtime Kubernetes resources", () => {
       );
       expect(agentProcess.env.OPENCODE_PASSWORD).toBe("generation-token");
       expect(agentCommand).not.toContain("opencode web");
-      expect(agentCommand).toContain("FACTORY_OPENCODE_CONFIG");
       expect(agentCommand).toContain("OPENCODE_DB=/workspace/project/.git/factory-opencode.db");
     },
   );

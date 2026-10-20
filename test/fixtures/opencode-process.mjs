@@ -28,9 +28,10 @@ await writeFile(
         package: nativeProvider?.package ?? "@opencode/ai/providers/openai/chat",
         canonical: "openai",
         env: ["FACTORY_OPENCODE_TOKEN"],
-        websocket: false,
         name: "Factory process fixture",
         settings: {
+          transport: "http",
+          compaction: { type: "summary" },
           baseURL: process.env.FACTORY_PROCESS_PROVIDER_URL ?? "http://127.0.0.1:4097/v1",
           apiKey: "owned-not-a-secret",
           ...(process.env.FACTORY_PROCESS_PROVIDER_URL && modelID === "gpt-5.6-terra"
@@ -47,6 +48,7 @@ await writeFile(
               output: ["text"],
             },
             limit: { context: 200000, output: 32000 },
+            ...nativeProvider?.model,
           },
         },
       },
@@ -62,6 +64,9 @@ let providerRequests = 0;
 let browserTools = [];
 let imageRequests = 0;
 let browserContextRequests = 0;
+let factoryPolicyRequests = 0;
+let requiredSkillRequests = 0;
+let summaryRequests = 0;
 let hold = true;
 let reportUsage = false;
 let failure;
@@ -70,7 +75,7 @@ let runTool = false;
 let nativeBrowser = false;
 let nativeBrowserPending = false;
 const held = new Map();
-function complete(response, coding = true) {
+function complete(response, coding = true, summary = false) {
   if (response.destroyed) return;
   response.writeHead(200, { "content-type": "text/event-stream" });
   const browserTurn = process.env.FACTORY_PROCESS_BROWSER_TURN;
@@ -120,7 +125,34 @@ function complete(response, coding = true) {
           ],
         },
       ]
-    : [{ content: "Owned process response" }, {}];
+    : [
+        {
+          content: summary
+            ? [
+                "## Objective",
+                "- Finish the owned native compaction proof.",
+                "## Requirements",
+                "- Preserve the admitted model and Factory runtime coding policy.",
+                "## Decisions",
+                "- Use native summary compaction.",
+                "## Work State",
+                "### Completed",
+                "- Earlier history is retained.",
+                "### Active",
+                "- Answer the current input.",
+                "### Blocked",
+                "- (none)",
+                "## Next Move",
+                "1. Answer the current input without tools.",
+                "## Relevant Files",
+                "- (none)",
+                "## Important Context",
+                "- Owned fixture only.",
+              ].join("\n")
+            : "Owned process response",
+        },
+        {},
+      ];
   for (const delta of deltas) {
     response.write(
       `data: ${JSON.stringify({
@@ -205,16 +237,31 @@ const control = createServer(async (request, response) => {
         .map((tool) => tool.function?.name)
         .filter((name) => typeof name === "string" && name.includes("browser"));
       providerRequests += 1;
-      const coding = Boolean(input.tools?.length);
+      const summary =
+        messages.includes("Do not continue the task or call tools.") &&
+        messages.includes("<template>");
+      const coding = !summary && Boolean(input.tools?.length);
+      if (summary) summaryRequests += 1;
+      if (
+        coding &&
+        input.messages?.some(
+          (message) =>
+            ["system", "developer"].includes(message.role) &&
+            JSON.stringify(message.content).includes("Factory runtime coding policy"),
+        )
+      )
+        factoryPolicyRequests += 1;
+      if (coding && messages.includes("Owned required Skill must be present before inference."))
+        requiredSkillRequests += 1;
       if (failure) {
         response.writeHead(403, { "content-type": "application/json" });
         response.end(JSON.stringify({ error: { message: failure, type: "access_denied" } }));
         return;
       }
       if (hold) {
-        held.set(response, coding);
+        held.set(response, { coding, summary });
         response.on("close", () => held.delete(response));
-      } else complete(response, coding);
+      } else complete(response, coding, summary);
       return;
     }
     if (request.url === "/control/kill" && request.method === "POST") {
@@ -228,12 +275,12 @@ const control = createServer(async (request, response) => {
     } else if (request.url === "/control/restart" && request.method === "POST") start();
     else if (request.url === "/control/release" && request.method === "POST") {
       hold = false;
-      for (const [item, coding] of held) complete(item, coding);
+      for (const [item, { coding, summary }] of held) complete(item, coding, summary);
       held.clear();
     } else if (request.url === "/control/release-aux" && request.method === "POST") {
-      for (const [item, coding] of held) {
+      for (const [item, { coding, summary }] of held) {
         if (coding) continue;
-        complete(item, false);
+        complete(item, false, summary);
         held.delete(item);
       }
     } else if (request.url === "/control/hold" && request.method === "POST") hold = true;
@@ -261,10 +308,13 @@ const control = createServer(async (request, response) => {
         running: processHandle?.exitCode === null && processHandle?.signalCode === null,
         providerRequests,
         heldRequests: held.size,
-        heldCodingRequests: [...held.values()].filter(Boolean).length,
+        heldCodingRequests: [...held.values()].filter((item) => item.coding).length,
         browserTools,
         imageRequests,
         browserContextRequests,
+        factoryPolicyRequests,
+        requiredSkillRequests,
+        summaryRequests,
       }),
     );
   } catch (error) {

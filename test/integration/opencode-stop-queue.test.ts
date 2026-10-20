@@ -28,6 +28,7 @@ test("Stop before native Session creation confirms without inference and fences 
       const store = createAgentTurnStore(owned.database);
       const claimed = await store.claimPending(turn.id);
       if (!claimed?.ownerToken) throw new Error("Owned pre-Session Turn claim required");
+      expect(await owned.writers.prepareAgent(owned.changeID, turn.id)).toBe(true);
       await store.beginDispatch(turn.id, claimed.ownerToken);
       await owned.database.client`UPDATE factory.change_agent_turn_intent
         SET runtime_attempt_id = ${owned.attemptID} WHERE turn_id = ${turn.id}`;
@@ -94,7 +95,7 @@ test("Stop before native Session creation confirms without inference and fences 
   }
 }, 60_000);
 
-test("Stop cannot infer absence from a GET while a prior Session create is held", async () => {
+test("Stop and retained Session reads wait for an earlier held native create", async () => {
   const process = await pinnedOpenCode();
   try {
     const owned = await fixture();
@@ -112,6 +113,7 @@ test("Stop cannot infer absence from a GET while a prior Session create is held"
       const store = createAgentTurnStore(owned.database);
       const claimed = await store.claimPending(turn.id);
       if (!claimed?.ownerToken) throw new Error("Owned held Create Turn claim required");
+      expect(await owned.writers.prepareAgent(owned.changeID, turn.id)).toBe(true);
       await store.beginDispatch(turn.id, claimed.ownerToken);
       await owned.database.client`UPDATE factory.change_agent_turn_intent
         SET runtime_attempt_id = ${owned.attemptID} WHERE turn_id = ${turn.id}`;
@@ -139,12 +141,19 @@ test("Stop cannot infer absence from a GET while a prior Session create is held"
         })
         .catch(() => undefined);
       await delay.detach();
-      await expect(
-        boundary.client.session.get({ sessionID: owned.sessionID }),
-      ).rejects.toMatchObject({
-        _tag: "SessionNotFoundError",
-        sessionID: owned.sessionID,
-      });
+      // Session recovery reads share the Connector's ordered admission fence.
+      // Health remains responsive, but a GET cannot jump the held create.
+      await boundary.client.server.info();
+      let readSettled = false;
+      const retained = boundary.client.session
+        .get({ sessionID: owned.sessionID })
+        .then(
+          (session) => ({ session, error: undefined }),
+          (error: unknown) => ({ session: undefined, error }),
+        )
+        .finally(() => {
+          readSettled = true;
+        });
       const stopping = owned.controller().stop(owned.changeID);
       try {
         await observe(
@@ -159,8 +168,12 @@ test("Stop cannot infer absence from a GET while a prior Session create is held"
             Bun.sleep(100).then(() => false),
           ]),
         ).toBe(false);
+        expect(readSettled).toBe(false);
         delay.release.resolve();
         await stopping;
+        const observed = await retained;
+        expect(observed.error).toBeUndefined();
+        expect(observed.session?.id).toBe(owned.sessionID);
         expect(await delay.interrupted.promise).toBe(false);
       } finally {
         delay.release.resolve();
@@ -223,6 +236,7 @@ test.each(["none", "stream-close", "reconnect"] as const)(
         const store = createAgentTurnStore(owned.database);
         const claimed = await store.claimPending(turn.id);
         if (!claimed?.ownerToken) throw new Error("Owned queued Turn claim required");
+        expect(await owned.writers.prepareAgent(owned.changeID, turn.id)).toBe(true);
         await store.beginDispatch(turn.id, claimed.ownerToken);
         await owned.database
           .client`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id = ${owned.attemptID} WHERE turn_id = ${turn.id}`;

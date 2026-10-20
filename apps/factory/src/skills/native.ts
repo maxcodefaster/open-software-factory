@@ -14,6 +14,19 @@ export function invokedSkills(prompt: string, revisions: SkillRevision[]) {
     return matches;
   });
 }
+export function nativeInputSkills(
+  prompt: string,
+  revisions: SkillRevision[],
+  requiredRevisionIDs: readonly string[],
+) {
+  const required = revisions.filter(
+    (revision) => requiredRevisionIDs.includes(revision.id) && revision.content.manualOnly !== true,
+  );
+  const selected = new Map(
+    [...required, ...invokedSkills(prompt, revisions)].map((revision) => [revision.id, revision]),
+  );
+  return [...selected.values()].map((revision) => ({ id: nativeSkillId(revision) }));
+}
 export const nativeSkillManifestInput = z.object({
   digest: z.string().regex(/^[a-f0-9]{64}$/),
   files: z.array(
@@ -64,6 +77,13 @@ export function observedNativeSkillIds(
   );
   if (boundary < 0) return [];
   const loaded = new Set<string>();
+  const input = z.object({ skills: z.array(z.unknown()).nullish() }).parse(parsed[boundary]);
+  // Native input attachments contain the resolved package text once admitted.
+  // The mere presence of an eligible ID is not evidence that it was loaded.
+  for (const value of input.skills ?? []) {
+    const resolved = z.object({ id: z.string(), text: z.string().trim().min(1) }).safeParse(value);
+    if (resolved.success) loaded.add(resolved.data.id);
+  }
   for (const message of parsed.slice(0, boundary)) {
     const skill = z.object({ type: z.literal("skill"), skill: z.string() }).safeParse(message);
     if (skill.success) loaded.add(skill.data.skill);

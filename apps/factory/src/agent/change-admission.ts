@@ -16,8 +16,7 @@ import { requireDeliveredPrerequisites } from "../change/dependencies";
 import { CommandError } from "../command-error";
 import { createSkillController } from "../skills/controller";
 import {
-  invokedSkills,
-  nativeSkillId,
+  nativeInputSkills,
   nativeSkillManifest,
   nativeSkillManifestInput,
   skillAdvertisement,
@@ -183,12 +182,11 @@ export function createChangeAdmission(
     const [firstTurn] = await sql<
       Array<{
         modelId: string;
-        skillRevisionIds: unknown;
         authority: unknown;
         skillLoading: string | null;
       }>
     >`
-          SELECT turn.authority->>'modelId' AS "modelId", turn.authority->'skillRevisionIds' AS "skillRevisionIds", turn.authority, intent.skill_loading AS "skillLoading" FROM factory.agent_turn turn
+          SELECT turn.authority->>'modelId' AS "modelId", turn.authority, intent.skill_loading AS "skillLoading" FROM factory.agent_turn turn
           LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id = turn.id
           WHERE turn.change_id = ${changeID} ORDER BY turn.created_at, turn.id LIMIT 1
         `;
@@ -243,15 +241,13 @@ export function createChangeAdmission(
           "Coding needs known input and output prices before starting with an enabled allowance. Set contract prices in Usage & limits.",
         );
     }
-    const skillRevisionIDs = firstTurn
-      ? agentTurnAuthorityInput.parse({
-          mode: "build",
-          modelId: firstTurn.modelId,
-          skillRevisionIds: firstTurn.skillRevisionIds ?? [],
-          conversationVersion: current.conversationVersion,
-          requirementRevisionId: current.revisionID,
-        }).skillRevisionIds
-      : await skills.resolve("build", sql, { projectID: current.projectID, userID });
+    const assignedSkills = firstAuthority
+      ? {
+          revisionIds: firstAuthority.skillRevisionIds,
+          requiredRevisionIds: firstAuthority.requiredSkillRevisionIds,
+        }
+      : await skills.resolveAssignment("build", sql, { projectID: current.projectID, userID });
+    const skillRevisionIDs = assignedSkills.revisionIds;
     const admittedSkills = await skills.load(skillRevisionIDs, sql);
     const skillLoading = firstTurn ? (firstTurn.skillLoading ?? "eager") : "native";
     if (current.stopPending)
@@ -295,6 +291,7 @@ export function createChangeAdmission(
         ...(modelConnection ? { modelConnection } : {}),
         ...(codingReasoning ? { codingReasoning } : {}),
         skillRevisionIds: skillRevisionIDs,
+        requiredSkillRevisionIds: assignedSkills.requiredRevisionIds,
         requirementRevisionId: current.revisionID,
         conversationVersion: current.conversationVersion,
       },
@@ -346,9 +343,7 @@ export function createChangeAdmission(
         const manifest = skillLoading === "native" ? nativeSkillManifest(admittedSkills) : null;
         const attachments =
           skillLoading === "native"
-            ? invokedSkills(userPrompt, admittedSkills).map((revision) => ({
-                id: nativeSkillId(revision),
-              }))
+            ? nativeInputSkills(userPrompt, admittedSkills, assignedSkills.requiredRevisionIds)
             : [];
         await transaction`INSERT INTO factory.change_agent_turn_intent(
             turn_id, change_id, session_id, prompt_id, prompt_text, bootstrap, session_title, skill_loading, skill_manifest, skill_attachments

@@ -36,6 +36,18 @@ Implement action still commissions work in one click with the configured default
 research chats, and contributor correction chats, have no model switcher. Existing Changes show developers their
 fixed admitted value; changing defaults never reconfigures them. OpenAI Coding uses the native
 Responses adapter.
+Factory supplies OpenCode's configuration through its packaged read-only configuration directory
+and admitted model settings. Home-directory and Project OpenCode configuration and compatibility
+skills do not override that setup. Do not maintain a second `opencode.json` for Factory.
+Coding uses native HTTP transport and automatic summary compaction with the selected model;
+provider-native compaction is not enabled through the relay.
+The packaged runtime policy augments OpenCode's native instructions rather than replacing its
+tool guidance. Build reads the checkout's applicable `AGENTS.md` files explicitly. Required
+non-manual Build Skills and human-invoked Skills load before inference; optional Skills remain
+available on demand. Each Change retains its original eligible and required revisions through
+corrections, even if defaults change later. Selected guidance also uses OpenCode's durable
+instruction entries so context compaction cannot silently discard it. Each new turn replaces only
+Factory's own instruction entries with its exact selection.
 An intended Session ID is not a resumable Coding session until OpenCode confirms its creation.
 Failed first preparation retains source and offers an explicit Retry.
 Build works toward the approved requirements and ends with an ordinary summary, without a required

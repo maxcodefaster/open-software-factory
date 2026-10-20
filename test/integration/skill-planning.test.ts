@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
@@ -705,7 +706,11 @@ test("Build installs exact native packages, records actual loading and keeps the
     const turns = createAgentTurnStore(owned.database);
     const turn = await turns.getByCommand(commandID);
     expect(turn?.authority.skillRevisionIds).toEqual([revisionID]);
-    const payload = z.object({ text: z.string() }).parse(owned.payloads[0]);
+    expect(turn?.authority.requiredSkillRevisionIds).toEqual([revisionID]);
+    const payload = z
+      .object({ text: z.string(), skills: z.array(z.object({ id: z.string() })).optional() })
+      .parse(owned.payloads[0]);
+    expect(payload.skills).toEqual([{ id: `factory-${revisionID}` }]);
     expect(payload.text).not.toContain(content.instructions);
     expect(payload.text).not.toContain(content.references[0]?.body ?? "missing reference");
     expect(payload.text).toContain(revisionID);
@@ -716,6 +721,16 @@ test("Build installs exact native packages, records actual loading and keeps the
     expect(
       Buffer.from(firstIntent.skillManifest?.files[0]?.body ?? "", "base64").toString(),
     ).toContain(content.instructions);
+    const { hub, attemptID } = owned;
+    const native = createOpenCodeClient((request, path) =>
+      hub.request(attemptID, "agent", request, path),
+    );
+    expect(await native.session.instructions.entry.list({ sessionID: owned.sessionID })).toEqual([
+      {
+        key: `factory-skill-factory-${revisionID}`,
+        value: Buffer.from(firstIntent.skillManifest?.files[0]?.body ?? "", "base64").toString(),
+      },
+    ]);
     await skills.publish(
       {
         revisionId: crypto.randomUUID(),
@@ -756,7 +771,9 @@ test("Build installs exact native packages, records actual loading and keeps the
       text: "Continue the shared Change",
     });
     expect(next.turn.authority.skillRevisionIds).toEqual([revisionID]);
+    expect(next.turn.authority.requiredSkillRevisionIds).toEqual([revisionID]);
     expect((await admission.intent(next.turn.id)).skillManifest).toEqual(firstIntent.skillManifest);
+    expect((await admission.intent(next.turn.id)).skills).toEqual(firstIntent.skills);
     expect((await admission.intent(next.turn.id)).text).not.toContain(
       "Replacement must not reach shared work",
     );

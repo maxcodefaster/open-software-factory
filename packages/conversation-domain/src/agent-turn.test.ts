@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   type AgentTurnCommand,
   agentTurnBoundary,
+  agentTurnAuthorityInput,
   agentTurnCommandInput,
   assertAgentTurnAuthority,
   changeAgentPromptInput,
@@ -29,6 +30,21 @@ test("personal draft boundaries are user-owned; Ticket boundaries are shared", (
   expect(agentTurnBoundary({ ...command, ticketId, projectId: crypto.randomUUID() })).not.toBe(
     agentTurnBoundary({ ...command, ticketId }),
   );
+});
+
+test("historical Build authority does not acquire newly required guidance", () => {
+  const revisionID = crypto.randomUUID();
+  const authority = {
+    mode: "build" as const,
+    requirementRevisionId: crypto.randomUUID(),
+    modelId: "retained-model",
+    skillRevisionIds: [revisionID],
+  };
+  expect(agentTurnAuthorityInput.parse(authority).requiredSkillRevisionIds).toEqual([]);
+  expect(
+    agentTurnAuthorityInput.parse({ ...authority, requiredSkillRevisionIds: [revisionID] })
+      .requiredSkillRevisionIds,
+  ).toEqual([revisionID]);
 });
 
 test("Build HTTP commands require stable identity and bounded strict input", () => {

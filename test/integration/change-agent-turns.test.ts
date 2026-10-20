@@ -1149,6 +1149,151 @@ test("recovery reattaches exact accepted work after response loss without anothe
   }
 });
 
+test.each(["monitor", "recovery"] as const)(
+  "%s settles the exact completed input beyond 100 native messages without replay",
+  async (phase) => {
+    const owned = await fixture();
+    const commandID = crypto.randomUUID();
+    const controller = owned.controller();
+    let earlierReads = 0;
+    try {
+      if (phase === "monitor") owned.acceptResponse();
+      await controller.prompt(
+        owned.changeID,
+        "Complete this long native turn",
+        owned.userID,
+        commandID,
+      );
+      await owned.requested;
+      owned.release();
+      await until(
+        async () =>
+          (await owned.turn(commandID))?.state === (phase === "monitor" ? "running" : "uncertain"),
+      );
+      const request = owned.hub.request.bind(owned.hub);
+      owned.hub.request = async (attempt, channel, input, path) => {
+        const response = await request(attempt, channel, input, path);
+        const url = new URL(input.url);
+        if (!url.pathname.endsWith("/message")) return response;
+        const page = (await response.json()) as { data: Array<{ type: string }> };
+        const prompt = page.data.find((message) => message.type === "user");
+        if (!prompt) return Response.json(page);
+        if (url.searchParams.get("cursor") === "owned-earlier-messages") {
+          earlierReads++;
+          return Response.json({ data: [prompt], cursor: {} });
+        }
+        return Response.json({
+          data: [
+            page.data[0],
+            ...Array.from({ length: 99 }, (_, index) => ({
+              id: `msg_owned_step_${index}`,
+              type: "assistant",
+              time: { created: 2, completed: 3 },
+              finish: "tool-calls",
+              content: [],
+            })),
+          ],
+          cursor: { next: "owned-earlier-messages" },
+        });
+      };
+      owned.finish();
+      if (phase === "recovery") await owned.controller().recover();
+      await until(
+        async () => (await controller.get(owned.changeID, undefined, false)).state === "committed",
+        300,
+      );
+      expect((await owned.turn(commandID))?.state).toBe("completed");
+      expect(earlierReads).toBeGreaterThan(0);
+      expect(owned.requests()).toBe(1);
+      expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
+    } finally {
+      await owned.dispose();
+    }
+  },
+);
+
+test.each(["session", "messages", "activity", "usage", "guidance"] as const)(
+  "recovery survives a transient %s read failure without another prompt",
+  async (boundary) => {
+    const owned = await fixture();
+    const commandID = crypto.randomUUID();
+    let failures = 0;
+    try {
+      await owned
+        .controller()
+        .prompt(owned.changeID, "Recover after a read disconnect", owned.userID, commandID);
+      await owned.requested;
+      owned.release();
+      await until(async () => (await owned.turn(commandID))?.state === "uncertain");
+      owned.finish();
+      const request = owned.hub.request.bind(owned.hub);
+      owned.hub.request = async (attempt, channel, input, path) => {
+        const pathname = new URL(input.url).pathname;
+        const target =
+          boundary === "session"
+            ? `/api/session/${owned.sessionID}`
+            : boundary === "messages"
+              ? `/api/session/${owned.sessionID}/message`
+              : boundary === "activity"
+                ? "/api/session/active"
+                : boundary === "usage"
+                  ? `/api/experimental/session/${owned.sessionID}/log`
+                  : `/api/experimental/session/${owned.sessionID}/instructions/entries`;
+        if (input.method === "GET" && pathname === target && failures === 0) {
+          failures++;
+          throw new Error("Owned transient read disconnect");
+        }
+        return request(attempt, channel, input, path);
+      };
+      const controller = owned.controller();
+      await controller.recover();
+      await until(
+        async () => (await controller.get(owned.changeID, undefined, false)).state === "committed",
+        300,
+      );
+      expect(failures).toBe(1);
+      expect((await owned.turn(commandID))?.state).toBe("completed");
+      expect(owned.requests()).toBe(1);
+      expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
+    } finally {
+      await owned.dispose();
+    }
+  },
+);
+
+test("Stop fences recovery while read-only reconnect is waiting", async () => {
+  const owned = await fixture();
+  const commandID = crypto.randomUUID();
+  const disconnected = Promise.withResolvers<void>();
+  try {
+    await owned
+      .controller()
+      .prompt(owned.changeID, "Stop this reconnecting input", owned.userID, commandID);
+    await owned.requested;
+    owned.release();
+    await until(async () => (await owned.turn(commandID))?.state === "uncertain");
+    owned.finish();
+    const request = owned.hub.request.bind(owned.hub);
+    owned.hub.request = async (attempt, channel, input, path) => {
+      if (new URL(input.url).pathname === `/api/session/${owned.sessionID}`) {
+        disconnected.resolve();
+        throw new Error("Owned status transport remains disconnected");
+      }
+      return request(attempt, channel, input, path);
+    };
+    const controller = owned.controller();
+    await controller.recover();
+    await disconnected.promise;
+    await controller.stop(owned.changeID);
+    await controller.shutdown();
+    expect((await owned.turn(commandID))?.state).toBe("stopped");
+    expect(owned.requests()).toBe(1);
+    expect(owned.commitCalls).toHaveLength(0);
+  } finally {
+    await owned.dispose();
+  }
+});
+
 test("recovery refuses a replaced runtime generation without prompting or committing", async () => {
   const owned = await fixture();
   const commandID = crypto.randomUUID();

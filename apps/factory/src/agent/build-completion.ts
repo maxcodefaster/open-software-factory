@@ -75,6 +75,7 @@ export function buildGoalInstructions(criteria: number) {
   return [
     `Factory Build goal v1: criteria=${criteria}`,
     "Your goal is to satisfy the approved specification and the current correction request in this checkout. Treat every approved acceptance criterion as part of that goal, without adding unrelated work.",
+    "Before editing, read the checkout's root and applicable nested AGENTS.md files with your normal tools. Project configuration discovery is disabled; absent automatic instructions are not proof that the repository has none.",
     "Use your native planning tools when useful to keep track of implementation and verification. Continue using native tools until the work and normal repository checks are finished or a genuine blocker prevents progress. Do not invent a turn time or token limit.",
     "Before finishing, inspect the current diff and actual component integration. An unused module or a test environment override that hides failures does not satisfy the goal. Fix findings within the approved scope and rerun the affected checks.",
     "For UI changes exercise the changed workflow in the declared App using Factory's browser. A landing or sign-in screen alone does not verify a feature behind it. Use exactly owned synthetic accounts and records, check required account transitions, empty/error states, keyboard behavior and narrow layout, inspect the console and read a screenshot of the changed screen.",

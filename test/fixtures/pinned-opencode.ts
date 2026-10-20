@@ -42,7 +42,12 @@ export async function pinnedOpenCode(
     digest: string;
     files: Array<{ path: string; body: string; digest: string; executable: boolean }>;
   },
-  nativeProvider?: { modelID: string; package: string; settings: Record<string, unknown> },
+  nativeProvider?: {
+    modelID: string;
+    package: string;
+    settings: Record<string, unknown>;
+    model?: Record<string, unknown>;
+  },
 ) {
   artifactImage ??=
     process.env["FACTORY_OPENCODE_TEST_IMAGE"] ??
@@ -205,6 +210,9 @@ export async function pinnedOpenCode(
         browserTools: string[];
         imageRequests: number;
         browserContextRequests: number;
+        factoryPolicyRequests: number;
+        requiredSkillRequests: number;
+        summaryRequests: number;
       }>;
     };
     await observe(
@@ -256,6 +264,7 @@ export async function pinnedOpenCode(
     };
     return {
       client,
+      container,
       control,
       transport,
       dispose,

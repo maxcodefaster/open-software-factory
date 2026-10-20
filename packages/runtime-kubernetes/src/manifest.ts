@@ -1,7 +1,7 @@
 import type { SystemContract } from "../../system-contract/src/system-contract";
 import { renderEnvboxPod } from "./envbox-pod";
 import { verificationSupervisor } from "./verification-process";
-import { openCodeModelConfiguration } from "./opencode-model";
+import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
 
 export interface RuntimeManifestInput {
@@ -137,7 +137,7 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
               command: [
                 "sh",
                 "-c",
-                'umask 077; mkdir -p "$HOME/.config/opencode"; printf %s "$FACTORY_OPENCODE_CONFIG" > "$HOME/.config/opencode/opencode.json"; export OPENCODE_DB=/workspace/project/.git/factory-opencode.db; exec /opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs',
+                "umask 077; export OPENCODE_DB=/workspace/project/.git/factory-opencode.db; exec /opt/factory/opencode/bun /opt/factory/opencode/server/server.mjs",
               ],
               env: {
                 FACTORY_BUILD_BROWSER_COMMAND: `/tmp/factory-runtime-connector-${input.generation}`,
@@ -154,15 +154,19 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
                       package: openCodeModelConfiguration(input.agent).package,
                       canonical: input.agent.provider ?? "openai",
                       env: ["FACTORY_OPENCODE_TOKEN"],
-                      websocket: false,
                       name: "Factory",
                       settings: {
+                        transport: "http",
+                        compaction: { type: "summary" },
                         baseURL: input.agent.modelBaseURL,
                         apiKey: input.agent.modelToken,
                         ...openCodeModelConfiguration(input.agent).settings,
                       },
                       models: Object.fromEntries(
-                        input.agent.modelIDs.map((id) => [id, { name: id }]),
+                        input.agent.modelIDs.map((id) => [
+                          id,
+                          openCodeModelMetadata(input.agent?.provider, id),
+                        ]),
                       ),
                     },
                   },

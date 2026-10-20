@@ -102,6 +102,7 @@ export async function fixture(
   const payloads: unknown[] = [];
   const cancelledInputs = new Set<string>();
   let installedSkills: string[] = [];
+  const nativeInstructions = new Map<string, unknown>();
   const hub = new RuntimeHub(async () => {});
   const activityStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const publishActivity = () => {
@@ -113,6 +114,18 @@ export async function fixture(
   hub.connected = () => true;
   hub.request = async (_attempt, _channel, request) => {
     const path = new URL(request.url).pathname;
+    if (path.includes("/instructions/entries")) {
+      if (request.method === "GET")
+        return Response.json({
+          data: [...nativeInstructions].map(([key, value]) => ({ key, value })),
+        });
+      const key = decodeURIComponent(path.slice(path.lastIndexOf("/") + 1));
+      if (request.method === "PUT") {
+        const body = (await request.json()) as { value: unknown };
+        nativeInstructions.set(key, body.value);
+      } else if (request.method === "DELETE") nativeInstructions.delete(key);
+      return new Response(null, { status: 204 });
+    }
     if (path === "/api/experimental/mcp/factory_browser" && request.method === "PUT")
       return new Response(null, { status: 204 });
     if (path === "/api/mcp")

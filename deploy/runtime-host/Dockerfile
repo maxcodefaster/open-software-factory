@@ -34,6 +34,8 @@ COPY deploy/opencode-server/package.json deploy/opencode-server/bun.lock ./
 # Keep upstream dynamic native assets intact for both glibc and musl containers.
 RUN cpu=x64; if [ "$TARGETARCH" = arm64 ]; then cpu=arm64; fi; bun install --frozen-lockfile --ignore-scripts --production --os='*' --cpu="$cpu"
 COPY deploy/opencode-server/server.mjs deploy/opencode-server/retained-events.mjs deploy/opencode-server/install-skills.mjs ./
+COPY deploy/opencode-server/config ./config
+RUN chmod 0555 config && chmod 0444 config/opencode.json config/AGENTS.md
 
 FROM node AS bun-tool
 ARG TARGETARCH

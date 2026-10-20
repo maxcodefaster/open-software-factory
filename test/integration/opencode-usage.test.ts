@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { pinnedOpenCode, observe } from "../fixtures/pinned-opencode";
 import { ensureOpenCodeMessageBoundary } from "../../apps/factory/src/agent/opencode-client";
 import { buildModelID, fixture as changeFixture } from "../fixtures/change-agent-turns";
@@ -10,6 +10,31 @@ import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import upstream from "../../upstream.json";
+
+// Kubernetes is injected in the cleanup case; these artifacts are never
+// launched, and no fixture may inherit the retained installation's forge token.
+const runtimeConfiguration = {
+  FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
+  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
+  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
+  FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
+  FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
+  FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
+  FACTORY_FORGEJO_OWNER: "owned-runtime-fixture",
+};
+const previousRuntimeConfiguration = new Map<string, string | undefined>();
+beforeAll(() => {
+  for (const [key, value] of Object.entries(runtimeConfiguration)) {
+    previousRuntimeConfiguration.set(key, process.env[key]);
+    process.env[key] = value;
+  }
+});
+afterAll(() => {
+  for (const [key, value] of previousRuntimeConfiguration) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 test("pinned native OpenCode durable log exposes fresh per-step consumption and replay", async () => {
   const fixture = await pinnedOpenCode(
@@ -409,6 +434,14 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
   let controller: ReturnType<Awaited<ReturnType<typeof changeFixture>>["controller"]> | undefined;
   try {
     const owned = await changeFixture(undefined, undefined, database);
+    // This owned usage fixture has no native package installer. Initialize its
+    // own empty guidance just like the default Change fixture; package loading
+    // is proved separately by the native Skill cases.
+    const empty = JSON.stringify({ required: [], optional: [], selected: [] });
+    await database.client`INSERT INTO factory.system_skill_settings(singleton,version,planning,build,updated_by)
+      VALUES(true,1,${empty}::jsonb,${empty}::jsonb,${owned.userID})
+      ON CONFLICT(singleton) DO UPDATE SET version=factory.system_skill_settings.version+1,
+        planning=EXCLUDED.planning,build=EXCLUDED.build,updated_by=EXCLUDED.updated_by`;
     owned.hub.request = (_attempt, _channel, request, path) =>
       native.transport(request, path ?? new URL(request.url).pathname);
     await native.control("/usage", "POST");
@@ -429,7 +462,15 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
       commandID,
     );
     await observe(
-      () => native.control("/release-aux", "POST"),
+      async () => {
+        if (!controller) throw new Error("Owned Coding controller unavailable");
+        const view = await controller.get(owned.changeID, undefined, false);
+        if (view.turn && ["failed", "uncertain", "stopped"].includes(view.turn.state))
+          throw new Error(
+            view.turn.summary ?? view.lastError ?? "Owned Coding failed before inference",
+          );
+        return native.control("/release-aux", "POST");
+      },
       (value) => value.heldCodingRequests === 1,
     );
     const turn = await owned.turn(commandID);

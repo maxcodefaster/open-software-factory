@@ -101,6 +101,7 @@ export const agentTurnAuthorityInput = z.discriminatedUnion("mode", [
       submissionPolicy: z.literal("native").optional(),
       browserTransport: z.literal("mcp").optional(),
       skillRevisionIds: skillRevisionIDsInput.default([]),
+      requiredSkillRevisionIds: skillRevisionIDsInput.default([]),
     })
     .strict(),
 ]);

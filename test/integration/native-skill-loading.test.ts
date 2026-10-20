@@ -1,5 +1,4 @@
 import { test, expect } from "bun:test";
-import { readFile } from "node:fs/promises";
 import { pinnedOpenCode, observe } from "../fixtures/pinned-opencode";
 import { nativeSkillManifest, nativeSkillId } from "../../apps/factory/src/skills/native";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
@@ -29,9 +28,8 @@ test("pinned native OpenCode discovers only admitted packages and retains explic
     digest: "a".repeat(64),
     published: true,
   };
-  const artifact = (await readFile(".factory/build-runtime-host-image", "utf8")).trim();
   const processFixture = await pinnedOpenCode(
-    artifact,
+    undefined,
     undefined,
     undefined,
     undefined,
