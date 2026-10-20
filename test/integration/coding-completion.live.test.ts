@@ -87,6 +87,11 @@ for (const requirementsPath of ["manual", "interview"] as const)
         installation: installationName,
         requirementsPath,
       };
+      // Share the test's existing one-hour bound across the native journey.
+      // Reserve its final five minutes for exact owned cleanup. A separate
+      // 15-minute cutoff must not abandon healthy source/runtime preparation.
+      const journeyDeadline = Date.now() + 3_300_000;
+      const remainingJourneyMS = () => Math.max(1, journeyDeadline - Date.now());
       async function api(path: string, method = "GET", body?: unknown) {
         const response = await fetch(base + path, {
           method,
@@ -217,7 +222,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
               ),
             ),
           "Owned Starter preparation did not finish",
-          900_000,
+          remainingJourneyMS(),
         );
         const initialWiki = await eventually(
           async () => {
@@ -228,7 +233,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
           },
           (generation) => !!generation && ["succeeded", "failed"].includes(generation.state),
           "Initial Wiki generation did not settle",
-          900_000,
+          remainingJourneyMS(),
         );
         result["initialWiki"] = initialWiki;
         await captureFactory("02-starter-ready");
@@ -372,7 +377,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
           },
           (view) => view.state === "committed",
           "Unassisted Build did not submit source",
-          900_000,
+          remainingJourneyMS(),
         );
         await captureFactory("04-source-submitted");
         const delivery = await eventually(
@@ -388,7 +393,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
             view.reviewState === "passed" &&
             view.reviewCurrent === true,
           "Unassisted source did not pass exact Verification and independent review",
-          900_000,
+          remainingJourneyMS(),
         );
         if (!delivery?.verificationCommitSha) throw new Error("Exact verified source is missing");
         result["verifiedSHA"] = delivery.verificationCommitSha;
@@ -498,7 +503,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
           },
           (preview) => preview?.state === "ready",
           "Initial Template Preview did not become ready before Delivery",
-          900_000,
+          remainingJourneyMS(),
         );
         result["initialTemplatePreviewReady"] = true;
         await openTicket();
@@ -524,7 +529,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
           },
           (row) => row?.state === "ready" && row.changeState === "delivered",
           "Verified feature did not reach healthy Staging",
-          900_000,
+          remainingJourneyMS(),
         );
         if (!staging) throw new Error("Owned Staging is missing");
         expect(staging.revision).toBe(delivery.verificationCommitSha);
@@ -554,7 +559,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
             >`SELECT state FROM factory.knowledge_generation WHERE project_id=${projectID} AND source_commit_sha=${staging.revision}`,
           (rows) => rows.some((row) => row.state === "succeeded"),
           "Delivered source did not finish its Wiki update",
-          900_000,
+          remainingJourneyMS(),
         );
         const [retainedNote] = await database.client<
           { body: string; title: string }[]
@@ -572,6 +577,36 @@ for (const requirementsPath of ["manual", "interview"] as const)
       } catch (cause) {
         result["status"] = "failed";
         result["error"] = cause instanceof Error ? cause.message : "Unknown coding proof failure";
+        // Stop changes runtime/turn state and destroys ephemeral execution logs.
+        // Preserve secret-free lifecycle evidence before cleanup obscures it.
+        if (projectID) {
+          result["failureRuntime"] = await database.client`
+            SELECT id,workspace_id,state,failure,create_intended_at,create_observed_at,updated_at
+            FROM factory.runtime_attempt WHERE project_id=${projectID}`.catch(() => ({
+            unavailable: true,
+          }));
+          result["failureSource"] = await database.client`
+            SELECT source.workspace_id,source.access_epoch,source.state,source.failure,
+              source.pod_uid,source.claim_uid,source.storage_node,source.updated_at
+            FROM factory.workspace_source source
+            JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
+            WHERE workspace.project_id=${projectID}`.catch(() => ({ unavailable: true }));
+        }
+        if (changeID)
+          result["failureAgent"] = await api(`/api/changes/${changeID}/agent?history=0`)
+            .then((value) => {
+              const view = agentViewSchema.parse(value);
+              return {
+                state: view.state,
+                runtimeState: view.runtimeState,
+                lastError: view.lastError,
+                sessionAvailable: view.sessionAvailable,
+                runtimeConnected: view.runtimeConnected,
+                stopPending: view.stopPending,
+                turn: view.turn,
+              };
+            })
+            .catch(() => ({ unavailable: true }));
         result["implementationBlocker"] = await page
           .getByRole("button", { name: "Implement", exact: true })
           .evaluateAll((buttons) => buttons[0]?.getAttribute("title") ?? null)
