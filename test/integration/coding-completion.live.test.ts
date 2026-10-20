@@ -321,7 +321,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
           const minimize = page.getByRole("button", { name: "Minimize Agent panel", exact: true });
           if (await minimize.isVisible()) await minimize.click();
         }
-        await captureFactory("02-requirements-approved");
+        await captureFactory("02-requirements-ready");
         const implementation = page.waitForResponse(
           (response) =>
             response.url().endsWith(`/api/tickets/${ticketID}/implement`) &&

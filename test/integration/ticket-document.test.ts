@@ -6,6 +6,69 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { fixture, buildModelID } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
+test("partial manual drafts acknowledge the next write base without making incomplete requirements implementable", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const ticketID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
+      VALUES(${ticketID},${owned.projectID},'Manual draft','A manual specification.','ready',${owned.userID})`;
+    const documents = createTicketDocumentController(database);
+    const firstInput = {
+      commandId: crypto.randomUUID(),
+      expectedVersion: 1,
+      expectedDocumentId: null,
+      requirementRevisionId: null,
+      title: "Manual draft",
+      description: "A manual specification.",
+      requirement: {
+        summary: "A manual specification.",
+        acceptanceCriteria: ["The checklist counts checked items."],
+        nonGoals: [],
+      },
+    };
+    const first = await documents.save(ticketID, owned.userID, firstInput);
+    const partialInput = {
+      ...firstInput,
+      commandId: crypto.randomUUID(),
+      expectedVersion: first.ticketVersion,
+      expectedDocumentId: first.id,
+      requirementRevisionId: first.requirementRevisionId,
+      requirement: { ...firstInput.requirement, acceptanceCriteria: [] },
+    };
+    const partial = await documents.save(ticketID, owned.userID, partialInput);
+    expect(partial).toEqual({
+      id: partialInput.commandId,
+      ticketVersion: 3,
+      requirementRevisionId: first.id,
+    });
+    const [document] = await database.client<{ revisionID: string | null }[]>`
+      SELECT requirement_revision_id AS "revisionID" FROM factory.ticket_document_revision WHERE id=${partial.id}`;
+    expect(document?.revisionID).toBeNull();
+    const final = await documents.save(ticketID, owned.userID, {
+      ...firstInput,
+      commandId: crypto.randomUUID(),
+      expectedVersion: partial.ticketVersion,
+      expectedDocumentId: partial.id,
+      requirementRevisionId: partial.requirementRevisionId,
+      requirement: {
+        ...firstInput.requirement,
+        acceptanceCriteria: ["The checklist counts checked items and Reset clears it."],
+      },
+    });
+    expect(final.ticketVersion).toBe(4);
+    expect(final.requirementRevisionId).toBe(final.id);
+    expect(await documents.save(ticketID, owned.userID, partialInput)).toEqual(partial);
+    expect(
+      await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${ticketID}`,
+    ).toHaveLength(0);
+  } finally {
+    await database.client.end();
+    await host.dispose();
+  }
+}, 60_000);
+
 test("post-start human edits are immutable documents, never new Build scope or inference", async () => {
   const process = await factoryProcess();
   const db = process.connect();
@@ -25,8 +88,13 @@ test("post-start human edits are immutable documents, never new Build scope or i
         nonGoals: ["Do not automatically build"],
       },
     };
-    await documents.save(owned.ticketID, owned.userID, input);
-    await documents.save(owned.ticketID, owned.userID, input);
+    const saved = await documents.save(owned.ticketID, owned.userID, input);
+    expect(saved).toEqual({
+      id: input.commandId,
+      ticketVersion: 2,
+      requirementRevisionId: owned.revisionID,
+    });
+    expect(await documents.save(owned.ticketID, owned.userID, input)).toEqual(saved);
     const [counts] = await db.client<
       Array<{
         documents: number;
@@ -77,6 +145,9 @@ test("post-start human edits are immutable documents, never new Build scope or i
       expectedDocumentId: input.commandId,
       title: "Delivered wording",
     });
+    // An uncertain acknowledgement must retain its own base even after another
+    // editor has saved. It must not authorize overwriting that later version.
+    expect(await documents.save(owned.ticketID, owned.userID, input)).toEqual(saved);
     const admission = createChangeAdmission(db, buildModelID);
     const turn = await admission.admit(owned.changeID, owned.userID, {
       kind: "change-prompt",

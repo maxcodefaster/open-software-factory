@@ -82,7 +82,7 @@ export function SetupReadiness(props: { projectID: string }) {
               </span>
               <span>
                 {labels[row.task]}
-                <Show when={row.failure}>
+                <Show when={row.state === "failed" && row.failure}>
                   <small>{row.failure}</small>
                 </Show>
               </span>

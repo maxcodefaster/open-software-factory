@@ -8,7 +8,7 @@ import {
   requirementContentInput,
 } from "../../../packages/requirement-domain/src/content";
 import { ticketDocumentInput } from "../../../packages/requirement-domain/src/document";
-import type { Epic, RequirementProposal } from "./api-contracts";
+import type { Epic, RequirementProposal, TicketDocumentSave } from "./api-contracts";
 import {
   type DocumentBlock,
   type DocumentEditor,
@@ -92,6 +92,7 @@ export type TicketDraft = TicketEdit & {
   requirement: RequirementContent;
   expectedVersion?: number;
   expectedDocumentId?: string | null;
+  requirementRevisionId?: string | null;
   proposalEntryId?: string | undefined;
 };
 
@@ -118,8 +119,8 @@ export type TicketWorkspaceProps = {
   drafts: Map<string, TicketDraft>;
   onInterview(): void;
   onWriteRequirements(): void;
-  onSaveDocument(input: TicketDraft): Promise<boolean>;
-  onConfirmRequirements(input: TicketDraft): Promise<boolean>;
+  onSaveDocument(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
+  onConfirmRequirements(input: TicketDraft): Promise<TicketDocumentSave | undefined>;
   clarificationAction: { label: string; status: boolean };
   onFollowUp(): void;
   onOpenTicket(id: string): void;
@@ -291,6 +292,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
   let baseVersion = props.current.ticket.version;
   let baseDocumentID: string | null = props.current.documentRevisions[0]?.id ?? null;
+  let baseRequirementRevisionID: string | null = props.latestRevision?.id ?? null;
   const [historyOpen, setHistoryOpen] = createSignal(false);
   const proposal = () =>
     props.current.proposal?.base.version === props.current.ticket.version
@@ -375,6 +377,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
         description: draftDescription(),
         expectedVersion: baseVersion,
         expectedDocumentId: baseDocumentID,
+        requirementRevisionId: baseRequirementRevisionID,
         ...(proposal() ? { proposalEntryId: proposal()?.id } : {}),
         requirement: {
           summary: draftSummary(),
@@ -489,6 +492,10 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
         draft?.expectedDocumentId === undefined
           ? (currentDocument()?.id ?? null)
           : draft.expectedDocumentId;
+      baseRequirementRevisionID =
+        draft?.requirementRevisionId === undefined
+          ? (props.latestRevision?.id ?? null)
+          : draft.requirementRevisionId;
       setEditing(!!draft);
       if (draft) {
         setDraftTitle(draft.title);
@@ -540,6 +547,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       if (saving() || (editing() && hasChanges())) return;
       baseVersion = props.current.ticket.version;
       baseDocumentID = currentDocument()?.id ?? null;
+      baseRequirementRevisionID = props.latestRevision?.id ?? null;
       resetDrafts();
     },
   );
@@ -854,12 +862,13 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     const requirement = currentRequirement();
     const snapshot = { title, description: draftDescription().trim(), requirement };
     setSaving(true);
-    let saved = false;
+    let saved: TicketDocumentSave | undefined;
     try {
       saved = await props.onSaveDocument({
         ...snapshot,
         expectedVersion: baseVersion,
         expectedDocumentId: baseDocumentID,
+        requirementRevisionId: baseRequirementRevisionID,
       });
     } finally {
       setSaving(false);
@@ -872,8 +881,9 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       return;
     }
     if (props.current.ticket.id !== ticketID) return;
-    baseVersion = props.current.ticket.version;
-    baseDocumentID = currentDocument()?.id ?? null;
+    baseVersion = saved.ticketVersion;
+    baseDocumentID = saved.id;
+    baseRequirementRevisionID = saved.requirementRevisionId;
     if (
       JSON.stringify(snapshot) !==
       JSON.stringify({
@@ -893,6 +903,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
 
   async function confirmProposal() {
     clearTimeout(autosaveTimer);
+    const ticketID = props.current.ticket.id;
     const parsed = ticketDocumentInput.safeParse({
       commandId: crypto.randomUUID(),
       expectedVersion: proposal()?.base.version,
@@ -913,15 +924,15 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       requirement: parsed.data.requirement,
     };
     try {
-      if (
-        await props.onConfirmRequirements({
-          title: parsed.data.title,
-          description: parsed.data.description,
-          requirement: currentRequirement(),
-        })
-      ) {
-        baseVersion = props.current.ticket.version;
-        baseDocumentID = currentDocument()?.id ?? null;
+      const saved = await props.onConfirmRequirements({
+        title: parsed.data.title,
+        description: parsed.data.description,
+        requirement: currentRequirement(),
+      });
+      if (saved && props.current.ticket.id === ticketID) {
+        baseVersion = saved.ticketVersion;
+        baseDocumentID = saved.id;
+        baseRequirementRevisionID = saved.requirementRevisionId;
         if (
           JSON.stringify(snapshot) !==
           JSON.stringify({

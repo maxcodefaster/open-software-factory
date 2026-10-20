@@ -179,6 +179,13 @@ export const ticketDocumentRevisionSchema = requirementRevisionSchema.extend({
   proposalEntryId: z.uuid().nullable().optional(),
 });
 export type TicketDocumentRevision = z.infer<typeof ticketDocumentRevisionSchema>;
+// Exact base for the next write, independent of delayed read projections.
+export const ticketDocumentSaveSchema = z.object({
+  id: z.uuid(),
+  ticketVersion: z.number().int().positive(),
+  requirementRevisionId: z.uuid().nullable(),
+});
+export type TicketDocumentSave = z.infer<typeof ticketDocumentSaveSchema>;
 
 export const changeSchema = z.object({
   id: z.string(),

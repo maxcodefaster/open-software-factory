@@ -88,9 +88,16 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
         if (!ticket) throw new CommandError("not-found", "Ticket not found");
         await projectAuthorityIn(sql, userID, ticket.projectID);
         const replay = await sql<
-          Array<{ id: string; inputDigest: string; ticketID: string; userID: string }>
+          Array<{
+            id: string;
+            inputDigest: string;
+            ticketID: string;
+            userID: string;
+            requirementRevisionId: string | null;
+          }>
         >`
-          SELECT id, input_digest AS "inputDigest", ticket_id AS "ticketID", created_by AS "userID"
+          SELECT id, input_digest AS "inputDigest", ticket_id AS "ticketID", created_by AS "userID",
+            requirement_revision_id AS "requirementRevisionId"
           FROM factory.ticket_document_revision WHERE id = ${input.commandId}`;
         if (replay[0]) {
           if (
@@ -99,7 +106,11 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
             replay[0].userID !== userID
           )
             throw new CommandError("conflict", "This save command belongs to another document");
-          return { id: replay[0].id };
+          return {
+            id: replay[0].id,
+            ticketVersion: input.expectedVersion + 1,
+            requirementRevisionId: replay[0].requirementRevisionId ?? input.requirementRevisionId,
+          };
         }
         const approvals = await sql<Array<{ revisionID: string }>>`
           SELECT requirement_revision_id AS "revisionID" FROM factory.requirement_approval WHERE ticket_id = ${ticketID}`;
@@ -168,7 +179,13 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
           id, ticket_id, ordinal, title, description, canonical_content, content_digest, requirement_revision_id, input_digest, created_by, author_kind, proposal_entry_id)
           VALUES (${input.commandId}, ${ticketID}, ${ordinal}, ${input.title}, ${input.description}, ${canonical}, ${digest(canonical)}, ${revisionID}, ${inputDigest}, ${userID}, ${input.proposalEntryId ? "ai" : "human"}, ${input.proposalEntryId ?? null})`;
         await sql`UPDATE factory.ticket SET title = ${input.title}, description = ${input.description}, version = version + 1, updated_at = now() WHERE id = ${ticketID}`;
-        return { id: input.commandId };
+        return {
+          id: input.commandId,
+          ticketVersion: ticket.version + 1,
+          // Partial documents do not produce a complete Requirement Revision,
+          // but the next save still fences the previous scope.
+          requirementRevisionId: revisionID ?? input.requirementRevisionId,
+        };
       });
     },
   };

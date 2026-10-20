@@ -31,6 +31,40 @@ async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
   };
 }
 
+test("successful preparation hides technical fallback notes but retains actionable failures", async ({
+  page,
+}) => {
+  const fixture = await openImportedSetup(page);
+  await page.route(`**/api/projects/${fixture.projectID}/setup`, (route) =>
+    route.fulfill({
+      json: [
+        {
+          task: "development",
+          state: "ready",
+          commandID: crypto.randomUUID(),
+          operationID: null,
+          failure: "This configuration uses normal startup instead of a prebuilt image.",
+        },
+        {
+          task: "main-preview",
+          state: "failed",
+          commandID: crypto.randomUUID(),
+          operationID: null,
+          failure: "The application did not become ready.",
+        },
+      ],
+    }),
+  );
+  await page.route(fixture.path, (route) => route.fulfill({ json: null }));
+  await fixture.open();
+  const preparation = page.getByRole("region", { name: "Project preparation", exact: true });
+  await expect(preparation.getByText("Development image", { exact: true })).toBeVisible();
+  await expect(preparation.getByText(/normal startup/)).toHaveCount(0);
+  await expect(preparation.getByText("The application did not become ready.")).toBeVisible();
+  await expect(preparation.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
+  await page.screenshot({ path: ".factory/test-results/setup-actionable-status.png" });
+});
+
 test("an initial inspection read failure offers a read-only retry without starting inference", async ({
   page,
 }) => {

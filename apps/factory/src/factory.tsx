@@ -108,6 +108,7 @@ import {
   sourceWorkspaceViewSchema,
   type Ticket,
   type TicketDocumentRevision,
+  ticketDocumentSaveSchema,
   ticketDetailSchema,
   type UIPreference,
   uiPreferenceSchema,
@@ -1328,7 +1329,7 @@ function FactoryWorkspace(props: {
   async function saveTicketDocument(input: TicketDraft) {
     const current = detail();
     const revision = latestRevision();
-    if (!current) return false;
+    if (!current) return undefined;
     const scope = `document:${current.ticket.id}`;
     const payload = {
       expectedVersion: input.expectedVersion ?? current.ticket.version,
@@ -1336,28 +1337,38 @@ function FactoryWorkspace(props: {
         input.expectedDocumentId === undefined
           ? (current.documentRevisions[0]?.id ?? null)
           : input.expectedDocumentId,
-      requirementRevisionId: revision?.id ?? null,
+      requirementRevisionId:
+        input.requirementRevisionId === undefined
+          ? (revision?.id ?? null)
+          : input.requirementRevisionId,
       title: input.title,
       description: input.description,
       requirement: input.requirement,
     };
     const result = await mutate(async () => {
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(payload));
-      await apiRequest(emptyResponseSchema, `/api/tickets/${current.ticket.id}/document`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, ...payload }),
-      });
+      const saved = await apiRequest(
+        ticketDocumentSaveSchema,
+        `/api/tickets/${current.ticket.id}/document`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId, ...payload }),
+        },
+      );
       acknowledgeCommand(scope, commandId);
-      await refreshTicketDetail(current.ticket.id);
+      // A competing read may supersede this refresh. The write's exact base
+      // comes from its acknowledgement, never whichever projection arrives first.
+      await refreshTicketDetail(current.ticket.id).catch(() => undefined);
+      return saved;
     });
-    return result.ok;
+    return result.ok ? result.value : undefined;
   }
 
   async function confirmRequirements(draft: TicketDraft) {
     const current = detail();
     const proposal = current?.proposal;
-    if (!current || !proposal) return false;
+    if (!current || !proposal) return undefined;
     const result = await mutate(async () => {
       const payload = {
         expectedVersion: proposal.base.version,
@@ -1370,15 +1381,20 @@ function FactoryWorkspace(props: {
       };
       const scope = `confirm:${current.ticket.id}`;
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(payload));
-      await apiRequest(emptyResponseSchema, `/api/tickets/${current.ticket.id}/document`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, ...payload }),
-      });
+      const saved = await apiRequest(
+        ticketDocumentSaveSchema,
+        `/api/tickets/${current.ticket.id}/document`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ commandId, ...payload }),
+        },
+      );
       acknowledgeCommand(scope, commandId);
-      await refreshTicketDetail(current.ticket.id);
+      await refreshTicketDetail(current.ticket.id).catch(() => undefined);
+      return saved;
     });
-    return result.ok;
+    return result.ok ? result.value : undefined;
   }
 
   async function confirmEpicWork(entryID: string, proposal: EpicProposal) {
