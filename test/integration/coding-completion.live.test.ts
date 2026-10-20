@@ -198,14 +198,15 @@ for (const requirementsPath of ["manual", "interview"] as const)
             await Bun.sleep(500);
             const rows = await api(`/api/projects/${projectID}/setup`);
             const failure = rows.find(
-              (row: { task: string; state: string }) => row.state === "failed",
+              (row: { task: string; state: string }) =>
+                row.task !== "wiki" && row.state === "failed",
             );
             if (failure)
               throw new Error(`Owned Starter ${failure.task} failed: ${failure.failure}`);
             return rows;
           },
           (rows) =>
-            ["main-preview", "protection", "development-secrets", "wiki"].every((task) =>
+            ["main-preview", "protection", "development-secrets"].every((task) =>
               rows.some(
                 (row: { task: string; state: string }) =>
                   row.task === task && row.state === "ready",
@@ -214,29 +215,42 @@ for (const requirementsPath of ["manual", "interview"] as const)
           "Owned Starter preparation did not finish",
           900_000,
         );
+        const initialWiki = await eventually(
+          async () => {
+            const [generation] = await database.client<{ state: string; failure: string | null }[]>`
+              SELECT state,failure FROM factory.knowledge_generation
+              WHERE project_id=${projectID} ORDER BY created_at LIMIT 1`;
+            return generation;
+          },
+          (generation) => !!generation && ["succeeded", "failed"].includes(generation.state),
+          "Initial Wiki generation did not settle",
+          900_000,
+        );
+        result["initialWiki"] = initialWiki;
         await captureFactory("02-starter-ready");
         await setup.getByRole("button", { name: "Open project", exact: true }).click();
         const [wiki] = await database.client<{ id: string; title: string }[]>`
         SELECT id,title FROM factory.knowledge_page WHERE project_id=${projectID} ORDER BY created_at LIMIT 1`;
-        if (!wiki) throw new Error("Starter Wiki did not contain a generated page");
         const note = `Human release note ${runID}: contact the release owner before production.`;
-        await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-        await page.getByRole("button", { name: wiki.title, exact: true }).click();
-        await page.getByLabel("Edit Knowledge body", { exact: true }).click();
-        const wikiEditor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
-        await wikiEditor.press("ControlOrMeta+End");
-        await wikiEditor.press("Enter");
-        await wikiEditor.pressSequentially(note);
-        await eventually(
-          async () =>
-            database.client<
-              { body: string }[]
-            >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${wiki.id}`,
-          (rows) => rows[0]?.body.includes(note) ?? false,
-          "Human Wiki note did not save",
-          30_000,
-        );
-        await captureFactory("02-wiki-human-note");
+        if (wiki) {
+          await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+          await page.getByRole("button", { name: wiki.title, exact: true }).click();
+          await page.getByLabel("Edit Knowledge body", { exact: true }).click();
+          const wikiEditor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+          await wikiEditor.press("ControlOrMeta+End");
+          await wikiEditor.press("Enter");
+          await wikiEditor.pressSequentially(note);
+          await eventually(
+            async () =>
+              database.client<
+                { body: string }[]
+              >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${wiki.id}`,
+            (rows) => rows[0]?.body.includes(note) ?? false,
+            "Human Wiki note did not save",
+            30_000,
+          );
+          await captureFactory("02-wiki-human-note");
+        }
         await page.getByRole("button", { name: "Desktop", exact: true }).click();
         await page.getByRole("button", { name: "New Ticket", exact: true }).click();
         await page.getByRole("textbox", { name: "Ticket title", exact: true }).fill(title);
@@ -502,6 +516,20 @@ for (const requirementsPath of ["manual", "interview"] as const)
           page.getByRole("button", { name: "Create follow-up", exact: true }),
         ).toBeVisible({ timeout: 30_000 });
         await captureFactory("06-delivered");
+        result["codingStatus"] = "passed";
+        result["turns"] = turns;
+        result["reviews"] = reviews;
+        result["browserSessions"] = sessions;
+        result["nativeImageReads"] = imageReads.map(({ id, text }) => ({ id, text }));
+        result["outsideSourceEdits"] = 0;
+        result["stagingSHA"] = staging.revision;
+        // Wiki is an independent background feature, not a Coding prerequisite.
+        // Keep its acceptance mandatory, but do not let a Wiki failure erase
+        // evidence about the implementation/review/Delivery path.
+        if (initialWiki?.state !== "succeeded" || !wiki)
+          throw new Error(
+            `Initial Wiki acceptance failed: ${initialWiki?.failure ?? "No checked page"}`,
+          );
         await eventually(
           async () =>
             database.client<
@@ -522,14 +550,8 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await captureFactory("07-wiki-note-preserved");
         expect(pageErrors).toEqual([]);
         result["status"] = "passed";
-        result["turns"] = turns;
-        result["reviews"] = reviews;
         result["wikiNotePreserved"] = true;
         result["pageErrors"] = pageErrors;
-        result["browserSessions"] = sessions;
-        result["nativeImageReads"] = imageReads.map(({ id, text }) => ({ id, text }));
-        result["outsideSourceEdits"] = 0;
-        result["stagingSHA"] = staging?.revision;
       } catch (cause) {
         result["status"] = "failed";
         result["error"] = cause instanceof Error ? cause.message : "Unknown coding proof failure";
