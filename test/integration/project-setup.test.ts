@@ -4,9 +4,9 @@ import type { ImportCredential } from "../../apps/factory/src/setup/secrets";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
 
-test("retained setup, protected private import and ambiguous create recover without duplicate repositories", async () => {
+test("retained setup and ambiguous import recover without duplicate repositories with one application connection", async () => {
   const process = await factoryProcess();
-  const database = process.connect();
+  const database = process.connect(1);
   const manager = crypto.randomUUID();
   const contributor = crypto.randomUUID();
   const credentials = new Map<string, ImportCredential>();

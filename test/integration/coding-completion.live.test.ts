@@ -196,7 +196,25 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await setup.getByRole("button", { name: "Create project", exact: true }).click();
         const response = await creation;
         expect(response.ok()).toBe(true);
-        const created = await response.json();
+        const submitted = await response.json();
+        result["setupID"] = submitted.id;
+        const created =
+          submitted.state === "created"
+            ? submitted
+            : await eventually(
+                async () => {
+                  await Bun.sleep(1_000);
+                  const value = await api("/api/project-setup");
+                  if (value?.id !== submitted.id)
+                    throw new Error("The admitted Project setup identity changed");
+                  if (value.state === "failed")
+                    throw new Error(`Owned Project creation failed: ${value.failure}`);
+                  return value;
+                },
+                (value) => value.state === "created",
+                "Owned Project creation did not settle without manual intervention",
+                remainingJourneyMS(),
+              );
         expect(created.state).toBe("created");
         projectID = created.projectID;
         result["projectID"] = projectID;
@@ -617,6 +635,22 @@ for (const requirementsPath of ["manual", "interview"] as const)
       } finally {
         try {
           await browser.close();
+          if (!projectID && typeof result["setupID"] === "string") {
+            const [intent] = await database.client<{ projectID: string; state: string }[]>`
+              SELECT project_id AS "projectID",state FROM factory.project_repository_intent
+              WHERE setup_id=${result["setupID"]} AND slug=${slug}`;
+            if (!intent || intent.state !== "committed") {
+              const cause = new Error(
+                "Owned repository setup is still unconfirmed. Its exact intent is retained; execution cleanup cannot yet be confirmed.",
+              );
+              result["status"] = "failed";
+              result["cleanupError"] = cause.message;
+              failure ??= cause;
+            } else {
+              projectID = intent.projectID;
+              result["projectID"] = projectID;
+            }
+          }
           if (projectID) {
             if (changeID) await api(`/api/changes/${changeID}/agent/stop`, "POST", {});
             const attempts = await database.client<Array<{ id: string }>>`
@@ -658,7 +692,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
               }
             }
           }
-          result["ownedExecutionStopped"] = true;
+          result["ownedExecutionStopped"] = !result["cleanupError"];
         } catch (cause) {
           result["status"] = "failed";
           result["cleanupError"] = cause instanceof Error ? cause.message : "Cleanup unconfirmed";

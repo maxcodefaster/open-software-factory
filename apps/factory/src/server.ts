@@ -1745,6 +1745,19 @@ setInterval(() => {
 setInterval(() => {
   void developerIDEEdge.sweep().catch(() => console.error("Editor access refresh failed"));
 }, 30_000).unref();
+let projectSetupReconciling = false;
+setInterval(() => {
+  if (projectSetupReconciling) return;
+  projectSetupReconciling = true;
+  // Observe only already-admitted creates. Recovery cannot repeat an unconfirmed
+  // repository/import write, and each setup retains its cross-process lock.
+  void projectSetup
+    .recover()
+    .catch(() => console.error("Project setup observation is unavailable"))
+    .finally(() => {
+      projectSetupReconciling = false;
+    });
+}, 15_000).unref();
 let knowledgeReconciling = false;
 setInterval(() => {
   void runtimeController

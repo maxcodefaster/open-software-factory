@@ -62,6 +62,40 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
         });
     },
   );
+  createEffect(
+    () => [visible(), draft()?.id, draft()?.state] as const,
+    ([shown, setupID, state]) => {
+      if (!shown || !setupID || !["creating", "checking"].includes(state ?? "")) return;
+      const admittedNavigation = navigation;
+      const abort = new AbortController();
+      let disposed = false;
+      let timer: ReturnType<typeof setTimeout>;
+      const observe = async () => {
+        try {
+          const value = await apiRequest(projectSetupView.nullable(), "/api/project-setup", {
+            signal: abort.signal,
+          });
+          if (
+            !disposed &&
+            navigation === admittedNavigation &&
+            draft()?.id === setupID &&
+            value?.id === setupID
+          )
+            setDraft(value);
+        } catch {
+          // Status reads neither repeat creation nor discard the retained draft.
+        } finally {
+          if (!disposed) timer = setTimeout(() => void observe(), 2_000);
+        }
+      };
+      timer = setTimeout(() => void observe(), 2_000);
+      return () => {
+        disposed = true;
+        clearTimeout(timer);
+        abort.abort();
+      };
+    },
+  );
   async function open() {
     show(true);
     if (pending()) return;

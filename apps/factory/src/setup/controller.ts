@@ -46,7 +46,7 @@ export function createProjectSetupController(options: {
   const unavailable = () =>
     new CommandError(
       "unavailable",
-      "Repository setup needs another status check. Your setup is retained.",
+      "Repository setup is still being checked. Your setup is retained.",
     );
 
   async function view(userID: string): Promise<ProjectSetupView | null> {
@@ -130,7 +130,7 @@ export function createProjectSetupController(options: {
 
   async function execute(row: Intent, authorizeCreate: boolean) {
     // Cross-process serialization covers the external call, not just SQL intent.
-    const connection = await sql.reserve();
+    const connection = options.database.coordination();
     try {
       const [lock] = await connection<
         { held: boolean }[]
@@ -149,7 +149,7 @@ export function createProjectSetupController(options: {
         if (!observed) {
           if (!authorizeCreate) {
             await sql`UPDATE factory.project_repository_intent SET state='uncertain' WHERE command_id=${row.commandID}`;
-            await sql`UPDATE factory.project_setup_draft SET state='checking',failure='Repository creation is still unconfirmed. Check again; Factory will not duplicate the import.' WHERE id=${row.setupID}`;
+            await sql`UPDATE factory.project_setup_draft SET state='checking',failure='Repository creation is still unconfirmed. Factory keeps checking without repeating creation or import.' WHERE id=${row.setupID}`;
             return;
           }
           let token: string | undefined;
@@ -205,12 +205,12 @@ export function createProjectSetupController(options: {
       const ambiguous =
         error instanceof ForgeAmbiguousWriteError ||
         (error instanceof CommandError && error.code === "unavailable");
-      await sql`UPDATE factory.project_repository_intent SET state=${ambiguous ? "uncertain" : "failed"},failure=${ambiguous ? "Repository setup needs a status check." : "Repository setup could not finish. Check the repository access and try again."}
+      await sql`UPDATE factory.project_repository_intent SET state=${ambiguous ? "uncertain" : "failed"},failure=${ambiguous ? "Repository setup is unconfirmed. Factory is checking without repeating creation or import." : "Repository setup could not finish. Check the repository access and try again."}
         WHERE command_id=${row.commandID} AND state<>'committed'`;
-      await sql`UPDATE factory.project_setup_draft SET state=${ambiguous ? "checking" : "failed"},failure=${ambiguous ? "Repository setup needs a status check." : "Repository setup could not finish. Check repository access."}
+      await sql`UPDATE factory.project_setup_draft SET state=${ambiguous ? "checking" : "failed"},failure=${ambiguous ? "Repository setup is unconfirmed. Factory is checking without repeating creation or import." : "Repository setup could not finish. Check repository access."}
         WHERE id=${row.setupID} AND state<>'created'`;
     } finally {
-      connection.release();
+      await connection.end({ timeout: 1 });
     }
   }
 

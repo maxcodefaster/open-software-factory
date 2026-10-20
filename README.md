@@ -26,6 +26,10 @@ password `factory-local-password`; these are development defaults. Configure pro
 in Settings. Optional environment bootstrap is described in [.env.example](.env.example); put real
 credentials in the ignored `.env` file.
 
+If a repository-creation response is lost, Factory observes that same setup automatically and
+updates the open setup panel. Status recovery never repeats repository creation or import.
+Known setup failures still require an explicit retry.
+
 Requirements can be written directly. New Ticket → Write requirements creates shared, editable
 intent without calling a model or opening an Interview. Enter the specification and acceptance
 criteria; Implement approves that exact saved revision and commissions Coding in one action.
