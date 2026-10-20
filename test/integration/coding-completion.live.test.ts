@@ -512,11 +512,12 @@ for (const requirementsPath of ["manual", "interview"] as const)
           900_000,
         );
         const [retainedNote] = await database.client<
-          { body: string }[]
-        >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${wiki.id}`;
+          { body: string; title: string }[]
+        >`SELECT current_body AS body,title FROM factory.knowledge_page WHERE id=${wiki.id}`;
         expect(retainedNote?.body).toContain(note);
+        if (!retainedNote) throw new Error("The original Wiki page is missing after delivery");
         await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-        await page.getByRole("button", { name: wiki.title, exact: true }).click();
+        await page.getByRole("button", { name: retainedNote.title, exact: true }).click();
         await visible(page.getByLabel("Edit Knowledge body", { exact: true })).toContainText(note);
         await captureFactory("07-wiki-note-preserved");
         expect(pageErrors).toEqual([]);

@@ -171,6 +171,10 @@ test.each([
           sourceToolCall = scenario === "source-hungry-checker" && incoming.tool_choice !== "none";
           expect(system).toContain("normalized publication package, not a raw writer response");
           expect(system).toContain("Do not flag these fields or request schema changes");
+          expect(system).toContain("Judge the current draft, not an earlier rejected version");
+          expect(system).toContain("Never request source-code changes");
+          expect(system).toContain("Clearly labelled advice");
+          expect(system).toContain("Do not invent an overclaim that the draft does not make");
           output = {
             issues:
               scenario === "unsupported-claim" && prompt.topic.slug !== "overview"

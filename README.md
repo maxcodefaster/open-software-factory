@@ -273,6 +273,11 @@ calibration, not the final application journey. `bun run test:controllers candid
 exact-candidate Delivery, targeted correction, explicit retry, Stop and allowance behavior without
 live models. `bun run test:native opencode-review-permissions` proves the pinned native tool boundary.
 
+Wiki review has a separate Planning-model calibration. With the explicit Luna connection, set
+`FACTORY_WIKI_QUALITY_LIVE=1` and run `bun run test:live wiki-quality.live`. It accepts an accurate
+description of a source limitation and clearly marked improvement advice, while rejecting invented
+cleanup and global-connection guarantees. It does not replace the full application journey.
+
 Exact-commit code research has its own paid proof. With the explicit Luna Planning connection,
 set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.
 It checks native code discovery, inspected-file citations and visibility after a permission
