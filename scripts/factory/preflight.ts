@@ -4,15 +4,21 @@ export async function inspectCurrentContainers<T>(
   list: () => Promise<string[]>,
   inspect: (ids: string[]) => Promise<T[]>,
 ) {
-  const initial = await list();
-  if (!initial.length) return [];
-  try {
-    return await inspect(initial);
-  } catch (cause) {
-    const current = await list();
-    if (!initial.some((id) => !current.includes(id))) throw cause;
-    return current.length ? inspect(current) : [];
+  let pending = await list();
+  // IDs are immutable. Reconcile the original snapshot by removing only IDs
+  // confirmed gone. Every retry strictly shrinks it, so unrelated container
+  // churn cannot make this loop unbounded or bypass a real inspection error.
+  while (pending.length) {
+    try {
+      return await inspect(pending);
+    } catch (cause) {
+      const current = new Set(await list());
+      const remaining = pending.filter((id) => current.has(id));
+      if (remaining.length === pending.length) throw cause;
+      pending = remaining;
+    }
   }
+  return [];
 }
 
 export function requirePinnedImage(value: unknown) {

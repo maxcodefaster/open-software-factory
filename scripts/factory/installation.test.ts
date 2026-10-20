@@ -17,7 +17,7 @@ import {
   inspectCurrentContainers,
 } from "./preflight";
 
-test("ownership inspection retries a vanished container once, but never ignores inspection failure", async () => {
+test("ownership inspection reconciles vanished containers, but never ignores inspection failure", async () => {
   let calls = 0;
   const inspected: string[][] = [];
   expect(
@@ -48,6 +48,28 @@ test("ownership inspection retries a vanished container once, but never ignores 
       },
     ),
   ).rejects.toThrow("Still unavailable");
+});
+
+test("ownership inspection handles successive removals without chasing unrelated new containers", async () => {
+  const lists = [
+    ["owned", "gone-a", "gone-b"],
+    ["owned", "gone-b", "new-a"],
+    ["owned", "new-b"],
+  ];
+  let read = 0;
+  const inspected: string[][] = [];
+  expect(
+    await inspectCurrentContainers(
+      async () => lists[read++] ?? ["owned", "new-c"],
+      async (ids) => {
+        inspected.push(ids);
+        if (ids.some((id) => id.startsWith("gone-"))) throw new Error("Container vanished");
+        return ids;
+      },
+    ),
+  ).toEqual(["owned"]);
+  expect(inspected).toEqual([["owned", "gone-a", "gone-b"], ["owned", "gone-b"], ["owned"]]);
+  expect(read).toBe(3);
 });
 
 const pins = {
