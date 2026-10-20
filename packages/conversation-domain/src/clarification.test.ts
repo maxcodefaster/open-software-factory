@@ -19,6 +19,15 @@ test("ordinary research preserves a paused question; changed intent supersedes i
   ).toBeUndefined();
 });
 test("Ticket owns one restore action, while the active interview owns answering", () => {
+  expect(
+    clarificationAction({
+      question: false,
+      working: false,
+      open: false,
+      paused: false,
+      started: false,
+    }),
+  ).toEqual({ label: "Ask AI to clarify", status: false });
   const input = { question: true, working: false, open: false, paused: false, started: true };
   expect(clarificationAction(input)).toEqual({ label: "Continue clarification", status: false });
   expect(clarificationAction({ ...input, open: true }).status).toBe(true);

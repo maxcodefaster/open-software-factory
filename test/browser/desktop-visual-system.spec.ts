@@ -296,7 +296,7 @@ test("persists curated backgrounds and centers the active app around the Agent p
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const primaryControlStyle = await page
     .locator(".ticket-draft-workspace")
-    .getByRole("button", { name: "Elaborate requirements", exact: true })
+    .getByRole("button", { name: "Write requirements", exact: true })
     .evaluate((element) => {
       const style = getComputedStyle(element);
       return {

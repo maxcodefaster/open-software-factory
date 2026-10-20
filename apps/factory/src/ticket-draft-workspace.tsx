@@ -190,7 +190,7 @@ export function TicketDraftWorkspace(props: {
               disabled={props.pending || !draft().title.trim()}
               onClick={() => void create("ready")}
             >
-              Elaborate requirements
+              Write requirements
             </button>
           </div>
           <Show when={error()}>

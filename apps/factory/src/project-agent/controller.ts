@@ -120,49 +120,6 @@ export function createProjectAgentController(
   const usage = createUsageObservations();
   const progress = new Map<string, ProjectAgentProgress>();
   const recovering = new Set<string>();
-  const entering = new Set<string>();
-
-  async function dispatchRequirementsEntries() {
-    const pending = await database.client<
-      Array<{ ticketID: string; commandID: string; userID: string; projectID: string }>
-    >`
-      SELECT intent.ticket_id AS "ticketID",intent.command_id AS "commandID",intent.created_by AS "userID",ticket.project_id AS "projectID"
-      FROM factory.requirements_entry_intent intent JOIN factory.ticket ticket ON ticket.id=intent.ticket_id
-      WHERE intent.admitted_at IS NULL AND intent.failure IS NULL AND ticket.state='ready' AND ticket.trashed_at IS NULL AND ticket.converted_to_epic_id IS NULL`;
-    for (const item of pending) {
-      if (entering.has(item.ticketID)) continue;
-      entering.add(item.ticketID);
-      void (async () => {
-        const previous = await turns.getByCommand(item.commandID);
-        if (!previous) {
-          const current = await ensureConversation(item.projectID, item.ticketID, item.userID);
-          const [existing] = await database.client`SELECT id FROM factory.conversation_entry
-            WHERE conversation_id=${current.id} AND (kind IN ('question','requirement') OR payload->>'intent'='requirements-interview') LIMIT 1`;
-          if (existing) {
-            await database.client`UPDATE factory.requirements_entry_intent SET admitted_at=now() WHERE ticket_id=${item.ticketID}`;
-            return;
-          }
-          await database.client`UPDATE factory.ticket_conversation SET mode='plan',version=version+1 WHERE id=${current.id} AND mode!='plan'`;
-        }
-        const { turn } = await admitProject({
-          kind: "project-message",
-          commandId: item.commandID,
-          projectId: item.projectID,
-          ticketId: item.ticketID,
-          createdBy: item.userID,
-          text: "Elaborate this Ticket's requirements. Ask only unresolved decisions or propose a complete Ticket.",
-          intent: "requirements-interview",
-        });
-        await database.client`UPDATE factory.requirements_entry_intent SET admitted_at=now() WHERE ticket_id=${item.ticketID}`;
-        await respond(turn);
-      })()
-        .catch(async () => {
-          await database.client`UPDATE factory.requirements_entry_intent SET failure='Requirements could not start. Your Ticket is retained; continue elaborating to retry.'
-          WHERE ticket_id=${item.ticketID} AND admitted_at IS NULL`;
-        })
-        .finally(() => entering.delete(item.ticketID));
-    }
-  }
 
   async function conversation(projectID: string, ticketID: string | undefined, userID: string) {
     const rows = await database.client<ConversationRow[]>`
@@ -829,7 +786,6 @@ export function createProjectAgentController(
   return {
     confirmEpic: createEpicConfirmation(database),
     async recover() {
-      await dispatchRequirementsEntries();
       const pending = await database.client<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
         WHERE change_id IS NULL AND state IN ('pending', 'dispatching', 'running') ORDER BY created_at`;
       for (const record of pending) {
@@ -838,7 +794,6 @@ export function createProjectAgentController(
         void recoverTurn(record.id).catch(() => {});
       }
     },
-    dispatchRequirementsEntries,
     async get(projectID: string, ticketID: string | undefined, userID: string) {
       await createAccessController(database).requireProject(userID, projectID);
       return view(await conversation(projectID, ticketID, userID), userID);
@@ -861,9 +816,6 @@ export function createProjectAgentController(
         text,
         ...(intent ? { intent } : {}),
       });
-      if (intent === "requirements-interview" && ticketID)
-        await database.client`UPDATE factory.requirements_entry_intent
-        SET admitted_at=now(),failure=NULL WHERE ticket_id=${ticketID}`;
       observer?.admitted(turn.id);
       await respond(turn, observer);
       if (!turn.command.conversationId) throw new Error("Project conversation required");

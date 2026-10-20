@@ -41,5 +41,5 @@ export function clarificationAction(input: {
       label: input.open && input.paused ? "Clarification paused" : "Continue clarification",
       status: input.open,
     };
-  return { label: input.started ? "Clarify further" : "Clarify requirements", status: false };
+  return { label: input.started ? "Clarify further with AI" : "Ask AI to clarify", status: false };
 }

@@ -594,12 +594,7 @@ async function route(request: Request) {
     if (url.pathname === "/api/zero/mutate" && request.method === "POST") {
       if (!sameFactoryOrigin(request))
         return json({ error: "Factory command origin is invalid" }, 403);
-      return handleZeroMutate(
-        request,
-        database,
-        await requireSession(request),
-        projectAgentController.dispatchRequirementsEntries,
-      );
+      return handleZeroMutate(request, database, await requireSession(request));
     }
     if (
       url.pathname.startsWith("/api/") &&
@@ -1105,9 +1100,6 @@ async function route(request: Request) {
           AND NOT EXISTS(SELECT 1 FROM factory.conversation_entry newer WHERE newer.conversation_id=entry.conversation_id
             AND newer.kind='requirement' AND newer.ordinal>entry.ordinal)
         ORDER BY entry.ordinal DESC LIMIT 1`;
-      const [requirementsEntry] = await database.client`SELECT
-        CASE WHEN admitted_at IS NOT NULL THEN 'admitted' WHEN failure IS NOT NULL THEN 'failed' ELSE 'pending' END AS state,failure
-        FROM factory.requirements_entry_intent WHERE ticket_id=${ticketID}`;
       const projectID = tickets[0]?.["projectId"];
       const visibleProposal =
         proposal?.payload["visibility"] !== "developer" ||
@@ -1121,7 +1113,6 @@ async function route(request: Request) {
           visibleProposal && proposal?.payload["base"] && proposal.payload["requirement"]
             ? { ...proposal.payload, id: proposal.id }
             : null,
-        requirementsEntry: requirementsEntry ?? null,
         origin: origin ?? null,
         followUps,
       });
@@ -1742,11 +1733,6 @@ console.log(`Factory listening on ${servers[0]!.url}`);
 setInterval(() => {
   void runtimeAccess.sweep().catch(() => console.error("Runtime access refresh failed"));
 }, 60_000).unref();
-setInterval(() => {
-  void projectAgentController
-    .dispatchRequirementsEntries()
-    .catch(() => console.error("Requirements admission unavailable"));
-}, 5_000).unref();
 setInterval(() => {
   void environmentSecrets
     .renew?.()

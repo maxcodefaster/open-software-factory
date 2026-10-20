@@ -257,11 +257,6 @@ export const zeroServerMutators = defineMutators({
           );
         return;
       }
-      if (args.state === "ready") {
-        await db.execute(sql`INSERT INTO factory.requirements_entry_intent(ticket_id,command_id,created_by)
-          VALUES (${args.id}::uuid,${crypto.randomUUID()}::uuid,${ctx.userId}::uuid)
-          ON CONFLICT(ticket_id) DO NOTHING`);
-      }
     }),
     update: defineMutator(updateTicketValidator, async ({ tx, ctx, args }) => {
       const db = drizzleTransaction(tx);
@@ -327,11 +322,6 @@ export const zeroServerMutators = defineMutators({
         )
         .returning({ id: ticket.id });
       if (changed.length !== 1) throw new Error("Ticket version conflict");
-      if (args.state === "ready") {
-        await db.execute(sql`INSERT INTO factory.requirements_entry_intent(ticket_id,command_id,created_by)
-          VALUES (${args.ticketId}::uuid,${crypto.randomUUID()}::uuid,${ctx.userId}::uuid)
-          ON CONFLICT(ticket_id) DO NOTHING`);
-      }
     }),
   },
 });

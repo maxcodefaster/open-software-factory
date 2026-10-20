@@ -33,7 +33,6 @@ export async function handleZeroMutate(
   request: Request,
   database: Database,
   session: Session | null,
-  afterCommit?: () => Promise<void>,
 ) {
   if (!session) return Response.json({ error: "Authentication required" }, { status: 401 });
   const zeroDatabase = zeroDrizzle(zeroSchema, database.db);
@@ -41,7 +40,5 @@ export async function handleZeroMutate(
     zeroServerMutators,
     request,
   );
-  // The committed planning mutation remains successful if dispatch is temporarily unavailable.
-  void afterCommit?.().catch(() => {});
   return Response.json(result);
 }

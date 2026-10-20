@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readdir } from "node:fs/promises";
 import type postgres from "postgres";
 import { createDatabase } from "../../packages/db/src/client";
 
@@ -33,7 +34,13 @@ try {
   const migrations = await client<Array<{ version: number }>>`
     SELECT version FROM factory.schema_migration ORDER BY version
   `;
-  if (migrations.map(({ version }) => version).join(",") !== "0,1") {
+  const expectedVersions = (
+    await readdir(new URL("../../packages/db/migrations/", import.meta.url))
+  )
+    .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+    .map((file) => Number(file.slice(0, 4)))
+    .sort((a, b) => a - b);
+  if (migrations.map(({ version }) => version).join(",") !== expectedVersions.join(",")) {
     throw new Error("PostgreSQL clean baseline is not applied exactly once");
   }
   await client.begin(async (transaction) => {

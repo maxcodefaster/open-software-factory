@@ -26,6 +26,14 @@ password `factory-local-password`; these are development defaults. Configure pro
 in Settings. Optional environment bootstrap is described in [.env.example](.env.example); put real
 credentials in the ignored `.env` file.
 
+Requirements can be written directly. New Ticket → Write requirements creates shared, editable
+intent without calling a model or opening an Interview. Enter the specification and acceptance
+criteria; Implement approves that exact saved revision and commissions Coding in one action.
+An existing Idea has the same Write requirements action without starting AI.
+Ask AI to clarify starts an optional Interview explicitly. Creating or moving Tickets, opening
+their documents and reconnecting do not start clarification. An Interview proposal still needs
+human confirmation, and neither path bypasses independent checks, review or Delivery approval.
+
 Factory's Models settings show separate Planning & knowledge and Coding choices. Each has a
 connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
 minimum. Save & check adopts the Coding model and reasoning together only after a successful
@@ -242,6 +250,11 @@ seeded defects independently, then checks the fresh native reviewer's judgments.
 calibration, not the final application journey. `bun run test:controllers candidate-review` checks
 exact-candidate Delivery, targeted correction, explicit retry, Stop and allowance behavior without
 live models. `bun run test:native opencode-review-permissions` proves the pinned native tool boundary.
+
+Exact-commit code research has its own paid proof. With the explicit Luna Planning connection,
+set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.
+It checks native code discovery, inspected-file citations and visibility after a permission
+downgrade. It is not part of the ordinary controller lane.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
 Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live

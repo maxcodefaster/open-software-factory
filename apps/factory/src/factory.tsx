@@ -257,8 +257,7 @@ function FactoryWorkspace(props: {
     `assistant:${selectedProjectID() ?? "none"}:${assistantTicketID() ?? "none"}`;
   const assistantPending = () =>
     (pendingContexts()[assistantKey()] ?? 0) > 0 ||
-    ["pending", "dispatching", "running"].includes(conversation()?.turn?.state ?? "") ||
-    Boolean(assistantTicketID() && detail()?.requirementsEntry?.state === "pending");
+    ["pending", "dispatching", "running"].includes(conversation()?.turn?.state ?? "");
   const [pendingInterviewAnswer, setPendingInterviewAnswer] = createSignal<{
     key: string;
     questionID: string;
@@ -269,10 +268,6 @@ function FactoryWorkspace(props: {
     revisions: RequirementRevision[];
     documentRevisions: TicketDocumentRevision[];
     proposal?: import("./api-contracts").RequirementProposal | null;
-    requirementsEntry?:
-      | { state: "pending" | "admitted" | "failed"; failure: string | null }
-      | null
-      | undefined;
     origin: { id: string; title: string } | null;
     followUps: Array<{ id: string; title: string }>;
   }>();
@@ -1307,19 +1302,14 @@ function FactoryWorkspace(props: {
       );
       selectTicket(draft.id);
       await refreshTicketDetail(draft.id);
-      if (state === "ready") {
-        clarificationOrigins.add(assistantKey());
-        setAgentOpen(true);
-        await refreshConversation();
-      }
     });
     return result.ok;
   }
 
   async function moveTicket(ticket: Ticket, state: "inbox" | "ready") {
     const client = zero();
-    if (!client) return;
-    await mutate(async () => {
+    if (!client) return false;
+    const result = await mutate(async () => {
       await commitZeroMutation(
         client.mutate(
           zeroMutators.tickets.move({
@@ -1331,13 +1321,8 @@ function FactoryWorkspace(props: {
         ).server,
       );
       await refreshTicketDetail(ticket.id);
-      if (state === "ready") {
-        setAgentOpen(true);
-        selectTicket(ticket.id);
-        clarificationOrigins.add(assistantKey());
-        await refreshConversation();
-      }
     });
+    return result.ok;
   }
 
   async function saveTicketDocument(input: TicketDraft) {
@@ -1771,6 +1756,9 @@ function FactoryWorkspace(props: {
   }
 
   async function beginRequirementsInterview() {
+    const projectID = selectedProjectID();
+    const ticketID = assistantTicketID();
+    if (!projectID || !ticketID || detail()?.ticket.id !== ticketID) return;
     setAgentOpen(true);
     if (assistantPending()) return;
     pauseClarification(false);
@@ -1779,9 +1767,11 @@ function FactoryWorkspace(props: {
     clarificationOrigins.add(assistantKey());
     const ticket = detail()?.ticket;
     if (ticket && ticket.state !== "ready" && !selectedChange()) {
-      await moveTicket(ticket, "ready");
-      return;
+      if (!(await moveTicket(ticket, "ready"))) return;
     }
+    // Moving the Ticket is planning only. Start this explicit request only if
+    // the user is still in the same Project/Ticket after that acknowledgement.
+    if (selectedProjectID() !== projectID || assistantTicketID() !== ticketID) return;
     await sendProjectMessage(
       "Start a requirements interview for this Ticket.",
       undefined,
@@ -3666,6 +3656,7 @@ function FactoryWorkspace(props: {
                       }}
                       onAssignEpic={(epicId) => void assignTicketEpic(epicId)}
                       onInterview={() => void beginRequirementsInterview()}
+                      onWriteRequirements={() => void moveTicket(current().ticket, "ready")}
                       onSaveDocument={saveTicketDocument}
                       onFollowUp={() => void createFollowUp()}
                       onOpenTicket={selectTicket}

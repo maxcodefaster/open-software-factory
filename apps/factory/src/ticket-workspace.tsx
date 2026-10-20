@@ -117,6 +117,7 @@ export type TicketWorkspaceProps = {
   onAssignEpic(epicId: string | null): void;
   drafts: Map<string, TicketDraft>;
   onInterview(): void;
+  onWriteRequirements(): void;
   onSaveDocument(input: TicketDraft): Promise<boolean>;
   onConfirmRequirements(input: TicketDraft): Promise<boolean>;
   clarificationAction: { label: string; status: boolean };
@@ -1011,9 +1012,6 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       </span>
                     )}
                   </Show>
-                  <Show when={!props.latestRevision && props.current.ticket.state === "ready"}>
-                    <span>Clarifying requirements</span>
-                  </Show>
                 </div>
                 <div class="ticket-header-actions">
                   <Show when={props.canDevelop && sourceReviewURL(props.delivery?.pullRequestUrl)}>
@@ -1056,6 +1054,24 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       onClick={props.onRequestChanges}
                     >
                       Request changes
+                    </button>
+                  </Show>
+                  <Show
+                    when={
+                      !props.current.ticket.trashedAt &&
+                      !props.current.ticket.convertedToEpicId &&
+                      ["inbox", "backlog"].includes(props.current.ticket.state) &&
+                      !props.change &&
+                      !proposal()
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="primary-button"
+                      disabled={props.pending || saving() || hasChanges()}
+                      onClick={props.onWriteRequirements}
+                    >
+                      Write requirements
                     </button>
                   </Show>
                   <Show

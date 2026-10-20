@@ -90,9 +90,8 @@ for (const restore of [false, true])
           .fill(
             `Change src/version.txt to contain exactly ${slug} followed by a newline so our product contributors can identify this version. Keep the existing application intact. Acceptance: src/version.txt has the exact value and node --check src/server.mjs passes. Do not change dependencies, runtime configuration or other files. These decisions are settled. Propose the complete Ticket immediately without questions.`,
           );
-        await contributor
-          .getByRole("button", { name: "Elaborate requirements", exact: true })
-          .click();
+        await contributor.getByRole("button", { name: "Write requirements", exact: true }).click();
+        await contributor.getByRole("button", { name: "Ask AI to clarify", exact: true }).click();
         await expect(
           contributor.getByRole("article", { name: "Elaborated requirements" }),
         ).toBeVisible({ timeout: 60_000 });

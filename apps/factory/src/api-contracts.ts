@@ -377,10 +377,6 @@ export const ticketDetailSchema = z.object({
   revisions: z.array(requirementRevisionSchema),
   documentRevisions: z.array(ticketDocumentRevisionSchema).default([]),
   proposal: requirementProposalSchema.nullable().default(null),
-  requirementsEntry: z
-    .object({ state: z.enum(["pending", "admitted", "failed"]), failure: z.string().nullable() })
-    .nullable()
-    .optional(),
   origin: z.object({ id: z.uuid(), title: z.string() }).nullable().default(null),
   followUps: z.array(z.object({ id: z.uuid(), title: z.string() })).default([]),
 });

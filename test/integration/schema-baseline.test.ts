@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { is } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
@@ -46,22 +46,28 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
   const factory = await factoryProcess();
   const database = factory.connect(1);
   const candidateURL = new URL(factory.databaseURL);
-  candidateURL.pathname = "/baseline_probe";
+  const probeName = `baseline_probe_${factory.id.replaceAll("-", "")}`;
+  candidateURL.pathname = `/${probeName}`;
   const candidate = postgres(candidateURL.toString(), { max: 1 });
+  let created = false;
   try {
-    const container = `factory-owned-commit-process-${factory.id}`;
-    const original = await dump(container, "factory");
+    const shared = process.env["FACTORY_TEST_POSTGRES"];
+    const container = shared
+      ? `factory-test-postgres-${(JSON.parse(shared) as { owner: string }).owner}`
+      : `factory-owned-commit-process-${factory.id}`;
+    const original = await dump(container, new URL(factory.databaseURL).pathname.slice(1));
     const publications = await database.client<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables
       WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
     expect(publications).toHaveLength(6);
-    await database.client`CREATE DATABASE baseline_probe`;
+    await database.client.unsafe(`CREATE DATABASE ${probeName}`);
+    created = true;
     const sql = await readFile(
       process.env["FACTORY_BASELINE_CANDIDATE"] ?? "packages/db/migrations/0000_baseline.sql",
       "utf8",
     );
     await candidate.unsafe(sql);
-    expect(digest(await dump(container, "baseline_probe"))).toBe(
+    expect(digest(await dump(container, probeName))).toBe(
       "1ea24d98676787c858b7ae3c93123ce90b96bbf74ddb2fb8810f54f4decbac86",
     );
     const freshPublication = await candidate<{ schemaname: string; tablename: string }[]>`
@@ -90,16 +96,19 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
         migration.exited,
       ]);
       if (status !== 0) throw new Error(`Repeated owned migration failed: ${error}`);
-      const currentDigest = digest(await dump(container, "baseline_probe"));
+      const currentDigest = digest(await dump(container, probeName));
       if (run === 0) migratedDigest = currentDigest;
       else expect(currentDigest).toBe(migratedDigest);
     }
-    expect(digest(await dump(container, "baseline_probe"))).toBe(migratedDigest);
+    expect(digest(await dump(container, probeName))).toBe(migratedDigest);
     expect(migratedDigest).toBe(digest(original));
-    expect([...(await candidate`SELECT version FROM factory.schema_migration`)]).toEqual([
-      { version: 0 },
-      { version: 1 },
-    ]);
+    const versions = (await readdir("packages/db/migrations"))
+      .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+      .map((file) => ({ version: Number(file.slice(0, 4)) }))
+      .sort((a, b) => a.version - b.version);
+    expect([
+      ...(await candidate`SELECT version FROM factory.schema_migration ORDER BY version`),
+    ]).toEqual(versions);
     await candidate`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES ('01994a7d-0000-7000-8000-000000000001','Owned baseline invariant probe','baseline@test.invalid',true)`;
     const invariants = Bun.spawn([process.execPath, "scripts/integration/postgres.ts"], {
@@ -123,6 +132,7 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     );
   } finally {
     await candidate.end({ timeout: 2 });
+    if (created) await database.client.unsafe(`DROP DATABASE ${probeName} WITH (FORCE)`);
     await database.client.end({ timeout: 2 });
     await factory.dispose();
   }

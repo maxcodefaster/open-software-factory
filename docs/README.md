@@ -42,7 +42,14 @@ external work. Navigation and reconnect never retarget an admitted turn. Unknown
 remain uncertain and require an explicit new human retry. An expired lease alone does not authorize
 another paid request. Both provider retries and Mastra error-processor retries are disabled.
 
-Requirements uses the frozen selected Ticket without rereading it solely for attribution. Explicitly
+Requirements work is manual by default. Creating or moving a Ticket into Requirements, saving its
+document and reading it never commission model work. A complete manual specification may go
+directly to Implement, which approves its exact saved revision and durably admits Build. The optional
+Interview starts only with an explicit conversation command. Historical automatic-entry records
+remain retained but are not a dispatch queue; already admitted Agent Turns keep their normal
+recovery and outcomes.
+
+The Interview uses the frozen selected Ticket without rereading it solely for attribution. Explicitly
 invoked Skills, applicable required rules and the assigned Interview Skill load through Mastra's native `getSkill` API before
 inference, with at most 8 KiB of reference text. Other Skills and larger references remain on demand.
 Manual-only guidance still requires invocation. Task-specific structured context preserves earlier
@@ -236,7 +243,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Project Setup Proposal | Exact source-grounded configuration edits confirmed before preparation |
 | Ticket | Shared planning record for one intended Project change |
 | Ticket Draft | Human-owned, uncreated intent with no Interview or implementation authority |
-| Idea | A shared Ticket not yet selected for Requirements elaboration |
+| Idea | A shared Ticket not yet selected for Requirements work |
 | Ticket Document | Human-authored intent refined through Requirements work |
 | Requirement Proposal | Suggested edits against an identified document state, accepted by a human |
 | Requirements Interview | Resumable clarification producing a proposal without granting implementation |

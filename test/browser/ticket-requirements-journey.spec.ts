@@ -481,7 +481,8 @@ test("real Luna elaborates detailed intent; confirmation preserves scope and man
     title,
     "Product contributors need to capture an idea privately and resume later. A new ticket tab should preserve its title and rich description locally per signed-in user and project across closing the tab and reloading. It is not shared or sent to AI until explicitly created. On creation publish one shared ticket and remove the local draft. On failed creation retain it and show a readable retry message. Acceptance: closing and reopening restores the draft; reloading restores it; creating as an idea publishes once without an AI call; failures do not lose text. No server-side draft synchronization or cross-device support is requested. These decisions are settled, propose the complete ticket without further questions.",
   );
-  await page.getByRole("button", { name: "Elaborate requirements", exact: true }).click();
+  await page.getByRole("button", { name: "Write requirements", exact: true }).click();
+  await page.getByRole("button", { name: "Ask AI to clarify", exact: true }).click();
   await expect(page.getByRole("complementary", { name: "Agent panel" })).toBeVisible();
   await expect(page.getByRole("article", { name: "Elaborated requirements" })).toBeVisible({
     timeout: 90_000,

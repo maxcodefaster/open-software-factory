@@ -18,7 +18,7 @@ later navigation cannot retarget submitted work. Ambiguous intended targets requ
 Factory displays one question at a time and advances within a round without another inference.
 Question controls do not turn general planning into a single-Ticket Requirements Interview.
 Answers retain the scope of the request which produced their question, including after paused
-research. Only explicit Requirements entry imposes the single-Ticket output contract.
+research. Only an explicitly started Requirements Interview imposes the single-Ticket output contract.
 Choice questions expose one custom-answer control; a generic model-provided Other or Something
 else placeholder uses that control instead of appearing as a second, non-editable fallback.
 The last answer, a custom choice outside a prefetched option set, or an explicit correction requests
@@ -63,8 +63,10 @@ creates or resumes the existing Change path and sends later turns to OpenCode in
 Workspace. The interface shows one chronological Ticket Conversation and marks the authority
 change without exposing an agent picker.
 
-Mode is an internal authority boundary, not a user-selectable switch. Requirements entry records
-one recoverable interview intent before inference. Personal Drafts remain local until creation.
+Mode is an internal authority boundary, not a user-selectable switch. Creating or moving a Ticket
+into Requirements is planning, not model admission. An explicitly started Interview records one
+recoverable Agent Turn before inference. A complete human-authored specification can be approved
+and commissioned directly without an Interview. Personal Drafts remain local until creation.
 Planning Luna uses the OpenAI Responses API with low reasoning and provider storage disabled,
 through the pinned SDK and existing governed selection. Other models retain their chat path.
 Investigate and Plan need no Sandbox. Preview uses the Project's Staging runtime; IDE or

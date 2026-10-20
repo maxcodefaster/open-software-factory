@@ -6,7 +6,7 @@ import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
-test("automatic Requirements entry starts once; round advancement persists without another model call", async () => {
+test("Requirements entry is planning only; explicit Interview and round advancement do not replay inference", async () => {
   const process = await factoryProcess();
   const db = process.connect();
   const question = (prompt: string) => ({
@@ -68,7 +68,7 @@ test("automatic Requirements entry starts once; round advancement persists witho
       (
         await db.client`SELECT command_id FROM factory.requirements_entry_intent WHERE ticket_id=${ticketID}`
       ).length,
-    ).toBe(1);
+    ).toBe(0);
     await expect(
       zero.transaction((tx) =>
         zeroServerMutators.tickets.create.fn({
@@ -79,10 +79,22 @@ test("automatic Requirements entry starts once; round advancement persists witho
       ),
     ).rejects.toThrow("different content");
     const controller = createProjectAgentController(db, { start: async () => null });
-    await Promise.all([
-      controller.dispatchRequirementsEntries(),
-      controller.dispatchRequirementsEntries(),
-    ]);
+    await controller.recover();
+    expect(requests).toBe(0);
+    expect(await controller.get(owned.projectID, ticketID, owned.userID)).toBeNull();
+    await controller.setMode(owned.projectID, ticketID, "plan", owned.userID);
+    const interviewCommandID = crypto.randomUUID();
+    const interview = () =>
+      controller.message(
+        owned.projectID,
+        ticketID,
+        "Start an AI interview for this Ticket.",
+        owned.userID,
+        interviewCommandID,
+        "requirements-interview",
+      );
+    await interview();
+    await interview();
     const first = await eventually(
       () => controller.get(owned.projectID, ticketID, owned.userID),
       (value) =>
@@ -120,7 +132,7 @@ test("automatic Requirements entry starts once; round advancement persists witho
         (entry) => entry.kind === "answer",
       ),
     ).toHaveLength(1);
-    await controller.dispatchRequirementsEntries();
+    await controller.recover();
     expect(requests).toBe(1);
     for (const [state, expectedVersion] of [
       ["inbox", 1],
@@ -133,7 +145,7 @@ test("automatic Requirements entry starts once; round advancement persists witho
           args: { projectId: owned.projectID, ticketId: ticketID, state, expectedVersion },
         }),
       );
-    await controller.dispatchRequirementsEntries();
+    await controller.recover();
     expect(requests).toBe(1);
     const currentQuestion = second?.entries.filter((entry) => entry.kind === "question").at(-1);
     if (!currentQuestion) throw new Error("Missing next question");
@@ -170,7 +182,19 @@ test("automatic Requirements entry starts once; round advancement persists witho
     const connections = connectionKeys.map((key) => [key, Bun.env[key]] as const);
     try {
       for (const key of connectionKeys) Bun.env[key] = "";
-      await controller.dispatchRequirementsEntries();
+      await controller.recover();
+      expect(await controller.get(owned.projectID, retainedID, owned.userID)).toBeNull();
+      await controller.setMode(owned.projectID, retainedID, "plan", owned.userID);
+      await expect(
+        controller.message(
+          owned.projectID,
+          retainedID,
+          "Start an AI interview for this retained Ticket.",
+          owned.userID,
+          crypto.randomUUID(),
+          "requirements-interview",
+        ),
+      ).rejects.toThrow();
       const failed = await eventually(
         () => controller.get(owned.projectID, retainedID, owned.userID),
         (value) => value?.turn?.state === "failed",
