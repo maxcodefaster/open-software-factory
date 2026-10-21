@@ -45,13 +45,17 @@ Then install from the repository:
 
 ```sh
 helm install factory ./deploy/helm/factory --namespace factory --create-namespace \
-  --values /path/to/private-values.yaml --wait=legacy --timeout 10m
+  --values /path/to/private-values.yaml --wait=legacy --timeout 20m
 ```
 
 The repository pins Helm 4. These commands select its supported `legacy` readiness strategy.
 The newer watcher waited for the full timeout when observing an absent cleanup hook in the
 local native check; the same hook completed normally with `legacy`. This is Helm's installation
 readiness behavior, not a Factory polling implementation. Helm 3 uses `--wait` instead.
+Allow twenty minutes for cold volume provisioning and the owned storage write/read check with
+its confirmed cleanup. The Factory Deployment uses the same progress window. Concurrent local
+validation exceeded the former ten-minute default before bootstrap settled; a
+timeout does not authorize resetting retained state or deleting an in-flight claim.
 
 Factory bootstraps the retained database, encrypted OpenBao and its scoped credentials, Forgejo
 service identities and the native OIDC connection. It checks actual writable runtime storage.
@@ -133,7 +137,7 @@ Save human edits, finish or explicitly stop active work, then select the next bu
 
 ```sh
 helm upgrade factory ./deploy/helm/factory --namespace factory \
-  --values /path/to/private-values.yaml --wait=legacy --timeout 10m
+  --values /path/to/private-values.yaml --wait=legacy --timeout 20m
 ```
 
 The pre-upgrade Job refuses active or unresolved Coding work, pending Knowledge generation and

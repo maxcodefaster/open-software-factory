@@ -30,6 +30,7 @@ type Resource = {
   metadata: { name: string; annotations?: Record<string, string> };
   data?: Record<string, string>;
   spec?: {
+    progressDeadlineSeconds?: number;
     publishNotReadyAddresses?: boolean;
     template?: {
       metadata?: { annotations?: Record<string, string> };
@@ -141,6 +142,11 @@ test("every upgrade replaces Factory even when its image and configuration are u
   expect(await readFile(`${chart}/templates/factory.yaml`, "utf8")).toContain(
     "factory.dev/upgrade-revision: {{ .Release.Revision | quote }}",
   );
+});
+
+test("cold installation progress allows the documented twenty-minute readiness window", async () => {
+  const application = (await resources()).find((resource) => resource.kind === "Deployment");
+  expect(application?.spec?.progressDeadlineSeconds).toBe(1_200);
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {

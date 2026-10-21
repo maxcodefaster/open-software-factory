@@ -17,6 +17,7 @@ metadata:
     {{- include "factory.labels" . | nindent 4 }}
 spec:
   replicas: 1
+  progressDeadlineSeconds: 1200
   strategy: {type: Recreate}
   selector:
     matchLabels:
