@@ -115,6 +115,17 @@ Factory server; a valid digest file alone is not readiness. Cold artifact builds
 and Sandbox preparation can take several minutes. Installation data and exact artifact references
 live under the ignored `.factory/` directory.
 
+Before replacing the running server or announcing readiness, startup checks the default Kubernetes
+storage class with a fresh 8 GiB RWO claim. The pinned source image must write and read a marker as
+the source-service UID, then its Pod, claim, backing volume and Namespace must be removed.
+This checks usable storage, not just a reachable cluster or an existing volume. A failed check
+keeps its own recorded identity for the next startup; it never resets Project storage.
+`storage-readiness-diagnostic.json` in the installation state records compact claim, Pod and
+provisioning-helper states, including observed exit codes when available. The last failed check
+also remains in `storage-readiness-failure.json`, even after a successful retry. Neither file
+contains raw logs, environment values or credentials. The explicit native proof is
+`FACTORY_RUN_STORAGE_READINESS_PROOF=1 mise exec -- bun run test:live storage-readiness.live`.
+
 ```sh
 mise exec -- bun run factory:status
 mise exec -- bun run factory:restart

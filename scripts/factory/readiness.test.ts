@@ -1,6 +1,28 @@
 import { expect, test } from "bun:test";
 import { completeFactoryStartup, waitForFactory } from "./readiness";
 
+test("storage failure prevents server replacement, cache startup and the ready announcement", async () => {
+  const calls: string[] = [];
+  await expect(
+    completeFactoryStartup({
+      checkStorageReady: async () => {
+        calls.push("storage");
+        throw new Error("Storage is not writable");
+      },
+      startServer: async () => {
+        calls.push("server");
+      },
+      startPlanningCache: async () => {
+        calls.push("cache");
+      },
+      ready: () => {
+        calls.push("ready");
+      },
+    }),
+  ).rejects.toThrow("Storage is not writable");
+  expect(calls).toEqual(["storage"]);
+});
+
 test("installation readiness follows the planning cache and is never announced after its failure", async () => {
   const calls: string[] = [];
   const server = async () => {
@@ -8,6 +30,9 @@ test("installation readiness follows the planning cache and is never announced a
   };
   await expect(
     completeFactoryStartup({
+      checkStorageReady: async () => {
+        calls.push("storage");
+      },
       startServer: server,
       startPlanningCache: async () => {
         calls.push("cache");
@@ -18,9 +43,12 @@ test("installation readiness follows the planning cache and is never announced a
       },
     }),
   ).rejects.toThrow("Cache unavailable");
-  expect(calls).toEqual(["server", "cache"]);
+  expect(calls).toEqual(["storage", "server", "cache"]);
   calls.length = 0;
   await completeFactoryStartup({
+    checkStorageReady: async () => {
+      calls.push("storage");
+    },
     startServer: server,
     startPlanningCache: async () => {
       calls.push("cache");
@@ -29,7 +57,7 @@ test("installation readiness follows the planning cache and is never announced a
       calls.push("ready");
     },
   });
-  expect(calls).toEqual(["server", "cache", "ready"]);
+  expect(calls).toEqual(["storage", "server", "cache", "ready"]);
 });
 
 function child() {

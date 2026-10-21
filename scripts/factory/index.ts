@@ -2,16 +2,15 @@ import { chmod, lstat, mkdir, open, readFile, rename, rm, stat, writeFile } from
 import { dirname, resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
-import upstream from "../../upstream.json";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import upstream from "../../upstream.json";
+import { inspectRegistryArtifact, requireAvailableRuntimeArtifacts } from "./artifact-availability";
 import {
   installRuntimeArtifacts,
   publishedRuntimeArtifacts,
-  runtimeArtifactsSchema,
   type RuntimeArtifacts,
+  runtimeArtifactsSchema,
 } from "./artifacts";
-import { inspectRegistryArtifact, requireAvailableRuntimeArtifacts } from "./artifact-availability";
-import { requireSafeRegistryStorage } from "./registry-storage";
 import { requireContainerState } from "./container-state";
 import { ensureLocalForgeIdentity } from "./forge-identity";
 import { installForgeBrowserLogout } from "./forge-logout";
@@ -33,11 +32,13 @@ import {
   requirePinnedImage,
 } from "./preflight";
 import { completeFactoryStartup, waitForFactory } from "./readiness";
-import { localServerSettings } from "./server-settings";
 import { waitForRegistry } from "./registry-readiness";
-import { publishRuntimeImage } from "./runtime-publication";
+import { requireSafeRegistryStorage } from "./registry-storage";
 import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
+import { publishRuntimeImage } from "./runtime-publication";
+import { localServerSettings } from "./server-settings";
 import { localStarterCompose, starterImageManifest, starterImagesSchema } from "./starter-images";
+import { disposeRuntimeStorageCheck, requireWritableRuntimeStorage } from "./storage-readiness";
 
 const root = resolve(import.meta.dir, "../..");
 process.env["FACTORY_FORGEJO_IMPORT_DOMAINS"] =
@@ -995,20 +996,27 @@ async function up() {
     installation?.runtimeImage ?? published?.["runtime-host"] ?? (await publishRuntimeHost());
   const artifacts = await configuredRuntimeArtifacts(runtimeImage);
   await requireAvailableRuntimeArtifacts(artifacts);
-  await command([...composeArguments, "up", "-d", "--wait", "postgres", "forgejo"], {
-    quiet: Boolean(installation),
-  });
-  await command(["bun", "run", "db:migrate"], { quiet: true });
-  const forgejoToken = await ensureForgejo();
-  if (action !== "container") {
-    await command(["bun", "run", "factory:build"], {
-      quiet: Boolean(installation),
-      env: { NODE_ENV: "production" },
-    });
-    await stopServer();
-  }
   await completeFactoryStartup({
-    startServer: () => startServer(runtimeImage, forgejoToken, artifacts),
+    checkStorageReady: () =>
+      requireWritableRuntimeStorage({
+        stateDirectory,
+        image: artifacts["workspace-files"],
+      }),
+    startServer: async () => {
+      await command([...composeArguments, "up", "-d", "--wait", "postgres", "forgejo"], {
+        quiet: Boolean(installation),
+      });
+      await command(["bun", "run", "db:migrate"], { quiet: true });
+      const forgejoToken = await ensureForgejo();
+      if (action !== "container") {
+        await command(["bun", "run", "factory:build"], {
+          quiet: Boolean(installation),
+          env: { NODE_ENV: "production" },
+        });
+        await stopServer();
+      }
+      await startServer(runtimeImage, forgejoToken, artifacts);
+    },
     startPlanningCache,
     ready: announceReady,
   });
@@ -1028,10 +1036,17 @@ async function restart() {
     throw new Error("Published runtime host is not pinned");
   const artifacts = await configuredRuntimeArtifacts(runtimeImage);
   await requireAvailableRuntimeArtifacts(artifacts);
-  await command(["bun", "run", "db:migrate"], { quiet: true });
-  await stopServer();
   await completeFactoryStartup({
-    startServer: () => startServer(runtimeImage, undefined, artifacts),
+    checkStorageReady: () =>
+      requireWritableRuntimeStorage({
+        stateDirectory,
+        image: artifacts["workspace-files"],
+      }),
+    startServer: async () => {
+      await command(["bun", "run", "db:migrate"], { quiet: true });
+      await stopServer();
+      await startServer(runtimeImage, undefined, artifacts);
+    },
     startPlanningCache,
     ready: announceReady,
   });
@@ -1074,6 +1089,7 @@ async function reset() {
       await validateComposeOwnership();
       await validateResetRuntimes();
       await saveInstallationPhase("reset-intent");
+      await disposeRuntimeStorageCheck(stateDirectory);
       await command([...composeArguments, "down", "--volumes"], { quiet: true });
       if (await lstat(resolve(stateDirectory, "openbao/identity.json")).catch(() => undefined)) {
         await (await localOpenBao(stateDirectory)).dispose();
