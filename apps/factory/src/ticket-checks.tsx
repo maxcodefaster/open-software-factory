@@ -16,6 +16,7 @@ export type TicketCheckDetails = {
 export function TicketChecks(props: {
   details: TicketCheckDetails | undefined;
   building: boolean;
+  preparing?: boolean | undefined;
   unsubmitted?: boolean | undefined;
 }) {
   const unsubmitted = () =>
@@ -27,7 +28,8 @@ export function TicketChecks(props: {
   const label = () => {
     if (!unsubmitted() && ["pending", "running"].includes(props.details?.reviewState ?? ""))
       return "Independent review in progress";
-    if (props.building) return "Implementation in progress";
+    if (props.building)
+      return props.preparing ? "Preparing implementation" : "Implementation in progress";
     if (unsubmitted()) return "Corrections not submitted";
     switch (props.details?.verificationState) {
       case "succeeded":
@@ -83,7 +85,13 @@ export function TicketChecks(props: {
               </p>
             }
           >
-            <p>Earlier check results do not approve these corrections.</p>
+            <p>
+              {props.details?.verificationState
+                ? "Earlier check results do not approve these corrections."
+                : props.preparing
+                  ? "Work starts automatically when preparation finishes. Your requirements and existing code are retained."
+                  : "The coding agent is implementing the approved requirements. Checks and independent review follow source submission."}
+            </p>
           </Show>
           <Show when={props.details?.actionRunUrl}>
             <a href={props.details?.actionRunUrl} target="_blank" rel="noreferrer">

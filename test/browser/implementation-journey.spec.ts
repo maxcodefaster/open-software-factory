@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import { createDatabase } from "../../packages/db/src/client";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
-import { fulfillAgentView, streamedAgentView } from "../support/agent-activity-route";
 import type { AgentView } from "../../apps/factory/src/api-contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { createDatabase } from "../../packages/db/src/client";
+import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { fulfillAgentView, streamedAgentView } from "../support/agent-activity-route";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -175,6 +175,119 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
   await expect(resume).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: ".factory/screenshots/usage-limits/coding-pause-narrow.png" });
+});
+
+test("a queued first Build shows preparation after reconnect, not active implementation or correction results", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const changeID = crypto.randomUUID();
+  const turnID = crypto.randomUUID();
+  const commandID = crypto.randomUUID();
+  const errors: string[] = [];
+  let working = false;
+  let executionWrites = 0;
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(?:implement|start|message|retry|prompt)$/.test(new URL(request.url()).pathname)
+    )
+      executionWrites++;
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-preparing",
+            baseSha: "a".repeat(40),
+            state: working ? "active" : "starting",
+            branchState: "succeeded",
+            runtimeState: working ? "ready" : "create-intended",
+            implementationState: working ? "working" : "starting",
+            buildTurnState: working ? "running" : "pending",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
+      json: {
+        state: working ? "working" : "starting",
+        sessionAvailable: working,
+        runtimeConnected: working,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+        turn: {
+          id: turnID,
+          commandId: commandID,
+          mode: "build",
+          engine: "opencode",
+          modelId: "owned-coding-model",
+          codingReasoning: "medium",
+          skills: [],
+          state: working ? "running" : "pending",
+        },
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  const open = async () => {
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button")
+      .click();
+  };
+  await open();
+  const summary = page.locator(".ticket-checks > summary");
+  await expect(summary).toHaveText("Preparing implementation");
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(
+    page.getByText(
+      "Work starts automatically when preparation finishes. Your requirements and existing code are retained.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Earlier check results do not approve these corrections."),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await expect(
+    page.getByRole("menuitem", { name: "Stop implementation", exact: true }),
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  const captures = ".factory/test-results/implementation-preparation";
+  await mkdir(captures, { recursive: true });
+  await page.screenshot({ path: `${captures}/pending-wide.png` });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: `${captures}/pending-narrow.png` });
+  await page.reload();
+  await open();
+  await expect(summary).toHaveText("Preparing implementation");
+  working = true;
+  await expect(summary).toHaveText("Implementation in progress");
+  await summary.click();
+  await expect(
+    page.getByText(
+      "The coding agent is implementing the approved requirements. Checks and independent review follow source submission.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Earlier check results do not approve these corrections."),
+  ).toHaveCount(0);
+  await page.screenshot({ path: `${captures}/working-narrow.png` });
+  await expect(page.getByText("Updates paused. Showing the last known state.")).toHaveCount(0);
+  expect(executionWrites).toBe(0);
+  expect(errors).toEqual([]);
 });
 
 test("Implement is one explicit recoverable action and does not open IDE or Assistant", async ({

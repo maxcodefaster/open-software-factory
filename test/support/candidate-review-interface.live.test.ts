@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { chromium, expect as browserExpect } from "@playwright/test";
+import { expect as browserExpect, chromium } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer } from "vite";
 
@@ -29,7 +29,8 @@ const [state,setState] = createSignal({
 });
 window.setReview = setState;
 render(() => <><h1>Review candidate</h1><TicketChecks details={state().details}
- building={state().building} unsubmitted={state().unsubmitted}/></>,document.getElementById("root"));
+ building={state().building} preparing={state().preparing}
+ unsubmitted={state().unsubmitted}/></>,document.getElementById("root"));
 </script></body></html>`,
     );
     // Use the same Solid compiler and real component/CSS without rebuilding or
@@ -83,6 +84,46 @@ render(() => <><h1>Review candidate</h1><TicketChecks details={state().details}
       await page.keyboard.press("Enter");
       await browserExpect(page.locator(".ticket-checks")).toHaveAttribute("open", "");
       await page.screenshot({ path: resolve(directory, "running-desktop.png") });
+      for (const preparing of [true, false]) {
+        await page.evaluate((value) => {
+          (window as unknown as { setReview(value: unknown): void }).setReview({
+            building: true,
+            preparing: value,
+            unsubmitted: false,
+            details: {},
+          });
+        }, preparing);
+        await browserExpect(summary).toHaveText(
+          preparing ? "Preparing implementation" : "Implementation in progress",
+        );
+        await browserExpect(page.locator(".ticket-check-details")).toHaveText(
+          preparing
+            ? "Work starts automatically when preparation finishes. Your requirements and existing code are retained."
+            : "The coding agent is implementing the approved requirements. Checks and independent review follow source submission.",
+        );
+        for (const width of [1280, 390]) {
+          await page.setViewportSize({ width, height: 800 });
+          await page.screenshot({
+            path: resolve(directory, `${preparing ? "preparing" : "implementing"}-${width}.png`),
+          });
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth),
+          ).toBeLessThanOrEqual(width);
+        }
+      }
+      await page.evaluate(() => {
+        (window as unknown as { setReview(value: unknown): void }).setReview({
+          building: true,
+          preparing: true,
+          unsubmitted: true,
+          details: { verificationState: "succeeded", reviewState: "passed", reviewCurrent: false },
+        });
+      });
+      await browserExpect(summary).toHaveText("Preparing implementation");
+      await browserExpect(page.locator(".ticket-check-details")).toHaveText(
+        "Earlier check results do not approve these corrections.",
+      );
+      await browserExpect(page.locator(".check-indicator.passed")).toHaveCount(0);
       const findings = [
         {
           severity: "blocking",

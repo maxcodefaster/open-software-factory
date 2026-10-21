@@ -416,6 +416,13 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     props.buildInProgress ||
     ["pending", "dispatching", "running"].includes(props.change?.buildTurnState ?? "") ||
     ["starting", "working"].includes(props.change?.implementationState ?? "");
+  const implementationPreparing = () =>
+    props.change?.buildTurnPurpose !== "review" &&
+    props.change?.buildTurnState !== "running" &&
+    props.change?.implementationState !== "working" &&
+    (["branch-pending", "starting"].includes(props.change?.state ?? "") ||
+      props.change?.buildTurnState === "pending" ||
+      props.change?.implementationState === "starting");
   const canDeliver = () =>
     !props.current.ticket.trashedAt &&
     props.canDevelop &&
@@ -1253,6 +1260,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
               <TicketChecks
                 details={props.delivery}
                 building={implementationBusy() && !props.computeWait && !props.codingPause}
+                preparing={implementationPreparing()}
                 unsubmitted={
                   props.change?.state === "active" &&
                   ((props.change.implementationState !== undefined &&
