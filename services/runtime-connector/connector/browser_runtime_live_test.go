@@ -213,6 +213,45 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	}
 	call("browser_resize", `{"width":1280,"height":720}`)
 	call("browser_wait", `{"text":"Viewport 1280x720"}`)
+	// A real model can think longer than the short execution lease between
+	// tools. The ordinary ten-second controller heartbeat must keep this same
+	// browser and its UI state alive without another App action or reopening.
+	idleScope := scope
+	idleScope.ExpiresAt = time.Now().Add(25 * time.Second)
+	if err := manager.renew(idleScope); err != nil {
+		t.Fatal("renew before idle model interval", err)
+	}
+	idleContext, stopIdleRenewal := context.WithCancel(connection)
+	defer stopIdleRenewal()
+	idleRenewed := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-idleContext.Done():
+				idleRenewed <- nil
+				return
+			case <-ticker.C:
+				renewal := idleScope
+				renewal.ExpiresAt = time.Now().Add(25 * time.Second)
+				if err := manager.renew(renewal); err != nil {
+					idleRenewed <- err
+					return
+				}
+			}
+		}
+	}()
+	time.Sleep(70 * time.Second)
+	stopIdleRenewal()
+	if err := <-idleRenewed; err != nil {
+		t.Fatal("browser ended during a renewed idle model interval", err)
+	}
+	retained := call("browser_snapshot", `{}`)
+	if retained.StructuredContent == nil || retained.StructuredContent.SessionID != scope.SessionID ||
+		!strings.Contains(retained.Content[0].Text, "Keyboard activated") {
+		t.Fatal("idle renewal replaced the browser or lost its inspected UI state")
+	}
 	browserName, proxyName := browserRuntimeNames(scope.SessionID)
 	// A compromised browser or proxy cannot extend its own authority by writing
 	// the shared lease. Verify the actual mount, not merely create flags.
@@ -276,7 +315,7 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("disconnected execution created a browser")
 	}
 	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage,
-		"loopbackApp": true, "startupRenewal": true, "coldAppHeaders": true, "initialNavigationRecovery": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
+		"loopbackApp": true, "startupRenewal": true, "idleModelRenewal": true, "coldAppHeaders": true, "initialNavigationRecovery": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
 	if err := os.WriteFile(filepath.Join(root, "inspection.json"), evidence, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -288,7 +327,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 	if imageReference == "" || parentReference == "" {
 		t.Skip("requires explicit browser and parent proof images")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	docker := func(args ...string) string {
 		t.Helper()
@@ -389,7 +428,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 		"--env", "FACTORY_BROWSER_RUNTIME_MANAGER_FIXTURE=1", "--env", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath,
 		"--env", "FACTORY_BROWSER_FIXTURE_ID="+owned, "--env", "FACTORY_BROWSER_FIXTURE_IMAGE="+image,
 		"--env", "FACTORY_BROWSER_FIXTURE_PRIMARY="+primaryID, "--entrypoint", "/test", parentImage,
-		"-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=120s")
+		"-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=180s")
 	output, startedErr := exec.CommandContext(ctx, "docker", "start", "--attach", runnerName).CombinedOutput()
 	// Retain bounded fixture diagnostics and evidence even if an assertion failed.
 	os.WriteFile(filepath.Join(root, "fixture-output.txt"), output, 0600)

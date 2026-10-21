@@ -1,25 +1,25 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import type { ServerWebSocket } from "bun";
 import { createHash } from "node:crypto";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-import {
-  runtimeBuildBrowserToken,
-  runtimeModelToken,
-} from "../../packages/runtime-domain/src/identity";
+import type { ServerWebSocket } from "bun";
 import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
 import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { createAgentController } from "../../apps/factory/src/agent/controller";
-import { observe } from "../fixtures/pinned-opencode";
 import {
   RuntimeHub,
   RuntimeParentOperationError,
   type RuntimeSocketData,
 } from "../../apps/factory/src/runtime/hub";
+import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import {
+  runtimeBuildBrowserToken,
+  runtimeModelToken,
+} from "../../packages/runtime-domain/src/identity";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { observe } from "../fixtures/pinned-opencode";
 
 let installation: Awaited<ReturnType<typeof factoryProcess>>;
 beforeAll(async () => {
@@ -222,9 +222,14 @@ test("one browser_open waits for confirmed cold preparation without another mode
   }
 });
 
-test.each([false, true])(
-  "a still-authorized Build can explicitly reopen only after confirmed browser cleanup: lost cleanup %s",
-  async (lostCleanup) => {
+test.each([
+  { lostCleanup: false, disconnected: false },
+  { lostCleanup: true, disconnected: false },
+  { lostCleanup: false, disconnected: true },
+  { lostCleanup: true, disconnected: true },
+])(
+  "a still-authorized Build can explicitly reopen only after confirmed browser cleanup: %j",
+  async ({ lostCleanup, disconnected }) => {
     const scope = await setup();
     const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
     try {
@@ -235,6 +240,10 @@ test.each([false, true])(
         "first-open",
       );
       scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+        if (disconnected && payload.action === "browser-call") {
+          await forward(attempt, payload, beforeSend);
+          throw new Error("Runtime channel disconnected");
+        }
         if (payload.action === "browser-renew")
           throw new RuntimeParentOperationError(
             "browser-renew",
@@ -244,7 +253,16 @@ test.each([false, true])(
           throw new Error("Cleanup acknowledgement unavailable");
         return forward(attempt, payload, beforeSend);
       };
-      await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
+      if (disconnected)
+        await expect(
+          scope.browser.call(
+            scope.authorized.session,
+            scope.ownerToken,
+            { name: "browser_click", arguments: { uid: "1_2" } },
+            "lost-click",
+          ),
+        ).rejects.toMatchObject({ code: "conflict" });
+      else await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
       scope.owned.hub.parentOperation = forward;
       const response = await scope.endpoint(
         new Request("http://factory.test/internal/browser", {
@@ -264,13 +282,22 @@ test.each([false, true])(
       );
       if (lostCleanup) {
         expect(response.status).toBe(403);
-        expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(1);
+        expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(
+          disconnected ? 2 : 1,
+        );
         return;
       }
       expect(response.status).toBe(200);
       const result = await response.json();
       expect(result.result.isError).not.toBe(true);
       expect(result.result.structuredContent.sessionId).not.toBe(scope.grant.sessionID);
+      expect(
+        scope.frames.filter(
+          (frame) =>
+            frame.action === "browser-call" &&
+            JSON.parse(String(frame["data"])).call.name === "browser_click",
+        ),
+      ).toHaveLength(disconnected ? 1 : 0);
       const ordinals = await scope.owned.database.client<Array<{ ordinal: number; state: string }>>`
         SELECT ordinal,state FROM factory.build_browser_session
         WHERE turn_id=${scope.turn.id} ORDER BY ordinal`;
@@ -333,6 +360,34 @@ test.each([false, true])(
     }
   },
 );
+
+test("Connector error text cannot impersonate confirmed control-channel loss", async () => {
+  const scope = await setup();
+  const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+  try {
+    scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+      await forward(attempt, payload, beforeSend);
+      if (payload.action === "browser-call")
+        throw new RuntimeParentOperationError("browser-call", "Runtime channel disconnected");
+      return {};
+    };
+    await expect(
+      scope.browser.call(
+        scope.authorized.session,
+        scope.ownerToken,
+        { name: "browser_open", arguments: { app: "app" } },
+        "untrusted-disconnect-text",
+      ),
+    ).rejects.toMatchObject({ code: "conflict" });
+    const [session] = await scope.owned.database.client<
+      Array<{ state: string; allowed: boolean }>
+    >`SELECT state,reopen_allowed AS allowed FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
+    expect(session).toEqual({ state: "closed", allowed: false });
+  } finally {
+    scope.owned.hub.parentOperation = forward;
+    await scope.dispose();
+  }
+});
 
 test("the 128-call bound spans explicitly reopened browser sessions", async () => {
   const scope = await setup();

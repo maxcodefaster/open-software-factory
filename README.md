@@ -85,8 +85,8 @@ reconnect and no repeated model request. New Build turns use native OpenCode MCP
 restricted development browser, including inline screenshots. Already admitted CLI instructions
 remain executable without rewriting their frozen input. Neither transport grants arbitrary MCP
 registration, URLs, scripts or access to human browser sessions.
-If the Connector confirms browser expiry or connection loss, the same active Build can explicitly
-open a fresh browser after exact cleanup is confirmed. It cannot restore or reuse the old browser,
+If the Connector confirms browser expiry or Factory confirms control-connection loss, the same active
+Build can explicitly open a fresh browser after exact cleanup is confirmed. It cannot restore or reuse the old browser,
 replay a UI action, bypass Stop, or reset the turn's browser-call limit. A fresh snapshot is required
 before further actions.
 Admitted corrections remain in the conversation even if source preparation fails before OpenCode

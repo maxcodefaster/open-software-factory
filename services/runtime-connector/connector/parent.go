@@ -258,7 +258,8 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 			if strings.HasPrefix(message.Action, "browser-") {
 				captured := control
 				capturedContext := connectionContext
-				go func() { captured.write(browser.handle(capturedContext, message)) }()
+				capturedDisconnect := disconnect
+				go handleBrowserControlOperation(capturedContext, capturedDisconnect, captured, browser, message)
 				continue
 			}
 			response := handleParentOperation(ctx, assignment, message)
@@ -268,6 +269,16 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 				control.close()
 			}
 		}
+	}
+}
+
+func handleBrowserControlOperation(ctx context.Context, disconnect context.CancelFunc, control *controlConnection, browser *browserRuntimeManager, message Message) {
+	if err := control.write(browser.handle(ctx, message)); err != nil {
+		// A failed response cannot leave Parent reading another request on a
+		// half-open socket while Factory waits for acknowledgements. Close only
+		// this captured connection; recovery never replays the operation.
+		disconnect()
+		_ = control.close()
 	}
 }
 

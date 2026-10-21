@@ -1,18 +1,18 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   type BuildBrowserCall,
   type BuildBrowserResult,
   buildBrowserCallInput,
   buildBrowserResultInput,
 } from "../../../../packages/conversation-domain/src/browser-tools";
-import { CommandError } from "../command-error";
-import { RuntimeParentOperationError, type RuntimeHub } from "../runtime/hub";
-import { projectAuthorityIn } from "../access/controller";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
+import { projectAuthorityIn } from "../access/controller";
+import { CommandError } from "../command-error";
 import { runtimeFactoryURL } from "../runtime/endpoints";
-import { createAgentTurnStore, type AgentTurnTransaction } from "./turn-store";
+import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
+import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 
 type BrowserSession = {
   id: string;
@@ -110,6 +110,15 @@ const reopenableFailures = new Set([
   "browser session requires owned cleanup after parent restart; do not replay a UI mutation",
 ]);
 
+function reopenableBrowserFailure(cause: unknown) {
+  return (
+    (cause instanceof RuntimeParentOperationError && reopenableFailures.has(cause.message)) ||
+    (cause instanceof Error &&
+      !(cause instanceof RuntimeParentOperationError) &&
+      cause.message === "Runtime channel disconnected")
+  );
+}
+
 export function createBuildBrowserController(
   database: ReturnType<typeof createDatabase>,
   hub: RuntimeHub,
@@ -200,8 +209,7 @@ export function createBuildBrowserController(
       cause instanceof Error && safeBrowserFailures.has(cause.message)
         ? `Inspection ended: ${cause.message}`
         : null;
-    const reopenAllowed =
-      cause instanceof RuntimeParentOperationError && reopenableFailures.has(cause.message);
+    const reopenAllowed = reopenableBrowserFailure(cause);
     const work = (async () => {
       await database.client`UPDATE factory.build_browser_session SET state = 'closing',
         reopen_allowed = ${reopenAllowed},
@@ -527,7 +535,11 @@ export function createBuildBrowserController(
             : "";
         throw new CommandError(
           "conflict",
-          `Browser inspection was not confirmed${reason}. Do not replay a UI mutation without checking the App; start a new authorized turn if its browser has ended.`,
+          `Browser inspection was not confirmed${reason}. Do not replay a UI mutation without checking the App; ${
+            reopenableBrowserFailure(cause)
+              ? "after exact cleanup is confirmed, use browser_open for a fresh browser and inspect browser_snapshot before another action."
+              : "start a new authorized turn if its browser has ended."
+          }`,
         );
       }
     },
