@@ -1189,7 +1189,9 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                   <Show
                     when={
                       !props.current.ticket.trashedAt &&
-                      props.change?.state === "active" &&
+                      (props.change?.state === "active" ||
+                        (props.change?.state === "starting" &&
+                          ["stopped", "failed"].includes(props.change.runtimeState ?? ""))) &&
                       !implementationBusy() &&
                       !props.codingPause &&
                       ["incomplete", "failed", "stopped"].includes(

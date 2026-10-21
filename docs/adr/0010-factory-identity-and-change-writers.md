@@ -8,6 +8,11 @@ Contributor/Developer membership. SSO mode retains only a separately secured loc
 administrator. Session termination does not cancel admitted Agent work; actual account disablement
 and authority removal revoke further operations while retaining code.
 
+Moving the local control-plane server into Linux does not rename its registered Forge identity.
+Startup retains the recorded discovery endpoint separately from the runtime callback address.
+The issuer bridge still requires development mode and the exact configured issuer host, port and
+local listener. Existing clients, accounts and grants are not migrated or recreated.
+
 The Developer IDE and Change Agent share the Ticket checkout, so one durable writer owns it at a
 time. Observation stays available during Agent work. Completion or confirmed Stop transfers editing
 without another approval ceremony; explicit early takeover fences source, Terminal and Change-branch
@@ -21,6 +26,9 @@ Writer handoff uses a persisted epoch and confirmed native Agent Stop, then stop
 execution Sandbox before giving the next writer access. Killing one PTY shell does not stop
 detached jobs or nested Docker processes. Complete teardown provides the initial reliable boundary
 while preserving canonical files, approved development volumes and OpenCode's checkout-local database.
+After exact compute teardown, a fresh bootstrap Session without durable native confirmation has
+not reached prompt submission and can settle Stop. Late confirmation is fenced by Stop. Reused
+or confirmed Sessions still require native queued-input evidence; teardown alone never clears them.
 The source editor remains available independently; compute restarts when commands are needed.
 Development Stop and failed-start cleanup remove containers and networks, not named volumes in
 that Workspace's retained private Docker storage. Verification and Preview teardown keep their

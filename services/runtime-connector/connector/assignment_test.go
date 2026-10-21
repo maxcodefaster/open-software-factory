@@ -51,6 +51,34 @@ func TestAssignmentValidation(t *testing.T) {
 	}
 }
 
+func TestAssignmentRepositoryUsesPrivateLinuxHostWithoutAllowingPublicHTTP(t *testing.T) {
+	for _, value := range []string{
+		"http://192.168.139.2:3001/factory/project.git",
+		"http://[fd00::2]:3001/factory/project.git",
+	} {
+		assignment := validAssignment()
+		assignment.RepositoryURL = value
+		if err := assignment.Validate(); err != nil {
+			t.Fatalf("Linux-hosted Factory repository rejected: %v", err)
+		}
+	}
+	for _, value := range []string{
+		"http://8.8.8.8/project.git",
+		"http://169.254.169.254/project.git",
+		"http://example.com/project.git",
+		"http://secret@192.168.139.2/project.git",
+		"http://[invalid/project.git",
+	} {
+		t.Run(value, func(t *testing.T) {
+			assignment := validAssignment()
+			assignment.RepositoryURL = value
+			if err := assignment.Validate(); err == nil {
+				t.Fatal("unsafe repository assignment admitted")
+			}
+		})
+	}
+}
+
 func TestProtectProcess(t *testing.T) {
 	if err := ProtectProcess(); err != nil {
 		t.Fatalf("protect process: %v", err)

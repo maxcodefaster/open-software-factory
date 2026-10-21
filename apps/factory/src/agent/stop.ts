@@ -96,13 +96,18 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
             promptID: string | null;
             intentAttemptID: string | null;
             currentAttemptID: string | null;
+            bootstrap: boolean | null;
+            intendedSessionID: string | null;
+            sessionConfirmed: boolean;
           }
         >
       >`SELECT session.runtime_attempt_id AS "attemptID", session.opencode_session_id AS "sessionID",
         attempt.state AS "runtimeState", session.stop_dispatched AS dispatched,
         session.stop_id AS "stopID", session.stop_turn_id AS "turnID",
         intent.prompt_id AS "promptID", intent.runtime_attempt_id AS "intentAttemptID",
-        change.runtime_attempt_id AS "currentAttemptID"
+        change.runtime_attempt_id AS "currentAttemptID",intent.bootstrap,
+        intent.session_id AS "intendedSessionID",
+        session.native_session_confirmed_at IS NOT NULL AS "sessionConfirmed"
         FROM factory.change_agent_session session
         JOIN factory.runtime_attempt attempt ON attempt.id = session.runtime_attempt_id
         JOIN factory.change change ON change.id = session.change_id
@@ -115,9 +120,19 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
       // and settlement. Admission remains blocked throughout.
       await settleTarget(changeID, current);
       if (current.currentAttemptID !== current.attemptID) return false;
+      // A fresh Session cannot receive its prompt before native confirmation
+      // is durable. Stop fences late confirmation. With exact compute teardown,
+      // an unconfirmed bootstrap therefore has no queued input to cancel.
+      // Reused or confirmed Sessions still require native history.
+      const unsubmittedBootstrap =
+        current.runtimeState === "stopped" &&
+        current.bootstrap === true &&
+        !current.sessionConfirmed &&
+        current.sessionID === current.intendedSessionID;
       // OpenCode's queued state survives compute suspension. Destruction of a
       // runtime is not evidence that an assigned input has been removed.
-      if (current.runtimeState === "stopped" && current.intentAttemptID) return false;
+      if (current.runtimeState === "stopped" && current.intentAttemptID && !unsubmittedBootstrap)
+        return false;
       if (current.intentAttemptID && current.intentAttemptID !== current.attemptID) return false;
       if (current.runtimeState !== "stopped") {
         if (mode === "observe" && !current.dispatched) return false;
@@ -183,6 +198,7 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
         WHERE change_id = ${changeID} AND state = 'stopped' AND stop_pending
           AND stop_id IS NOT DISTINCT FROM ${current.stopID} AND runtime_attempt_id = ${current.attemptID}
           AND opencode_session_id IS NOT DISTINCT FROM ${current.sessionID}
+          AND (NOT ${unsubmittedBootstrap} OR native_session_confirmed_at IS NULL)
         RETURNING change_id AS id`;
         return confirmed.length === 1;
       });

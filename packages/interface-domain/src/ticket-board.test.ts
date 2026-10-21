@@ -94,6 +94,24 @@ describe("Ticket board stages", () => {
     },
   );
 
+  test.each(["pending", "stopped"])(
+    "review %s stays in Review while its compute is starting or stopped",
+    (state) => {
+      const input = {
+        ticketState: "in-progress" as const,
+        changeState: "starting",
+        verificationState: "succeeded",
+        buildTurnPurpose: "review",
+        buildTurnState: state,
+        implementationState: state === "stopped" ? "stopped" : "starting",
+      };
+      expect(ticketBoardStage(input)).toBe("review");
+      expect(ticketBoardStatus(input)).toBe(
+        state === "stopped" ? "Review needs attention" : "Preparing independent review",
+      );
+    },
+  );
+
   test.each(["pending", "dispatching", "running", "uncertain"])(
     "an admitted correction %s returns to Implementation before a new commit exists",
     (buildTurnState) => {

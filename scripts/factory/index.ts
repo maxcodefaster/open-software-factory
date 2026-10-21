@@ -7,6 +7,7 @@ import upstream from "../../upstream.json";
 import { inspectRegistryArtifact, requireAvailableRuntimeArtifacts } from "./artifact-availability";
 import {
   installRuntimeArtifacts,
+  localRuntimeDefaults,
   publishedRuntimeArtifacts,
   type RuntimeArtifacts,
   runtimeArtifactsSchema,
@@ -36,7 +37,14 @@ import { waitForRegistry } from "./registry-readiness";
 import { requireSafeRegistryStorage } from "./registry-storage";
 import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
 import { publishRuntimeImage } from "./runtime-publication";
-import { localServerSettings } from "./server-settings";
+import {
+  prepareFactoryServerContainer,
+  requireFactoryServerImage,
+  requireFactoryServerRuntimeHost,
+  retainedFactoryServerContainer,
+  stopFactoryServerContainer,
+} from "./server-container";
+import { localForgeIdentityEndpoints, localServerSettings } from "./server-settings";
 import { localStarterCompose, starterImageManifest, starterImagesSchema } from "./starter-images";
 import { disposeRuntimeStorageCheck, requireWritableRuntimeStorage } from "./storage-readiness";
 
@@ -115,6 +123,7 @@ for (const port of [factoryPort, forgejoPort, zeroPort])
   if (!Number.isInteger(port) || port < 1024 || port > 65535)
     throw new Error("Invalid local Factory port");
 let foregroundServer: ReturnType<typeof Bun.spawn> | undefined;
+let serverImage: string | undefined;
 const factoryBaseURL = `http://127.0.0.1:${factoryPort}`;
 const forgejoBaseURL = `http://127.0.0.1:${forgejoPort}`;
 const composeArguments = [
@@ -424,6 +433,10 @@ async function publishRuntimeHost() {
 }
 
 async function stopServer() {
+  if (await stopFactoryServerContainer(stateDirectory)) {
+    await rm(serverPIDFile, { force: true });
+    return;
+  }
   const pid = Number((await readFile(serverPIDFile, "utf8").catch(() => "")).trim());
   if (Number.isSafeInteger(pid) && pid > 0) {
     const command = Bun.spawn(["ps", "eww", "-p", String(pid), "-o", "command="], {
@@ -759,9 +772,8 @@ async function ensureForgeAdministrator() {
 async function publishedBrowserImage() {
   const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
   const browserImage =
-    installation?.browserImage ??
     process.env["FACTORY_BROWSER_TOOLS_IMAGE"] ??
-    artifacts?.["browser-tools"] ??
+    localRuntimeDefaults(artifacts, installation).browserImage ??
     (await readFile(browserImageFile, "utf8")).trim();
   if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(browserImage))
     throw new Error("Published browser tools image is not pinned");
@@ -809,6 +821,7 @@ async function startServer(
   runtimeImage: string,
   forgejoToken: string | undefined,
   artifacts: RuntimeArtifacts,
+  forgeIdentity: ReturnType<typeof localForgeIdentityEndpoints>,
 ) {
   const settings = localServerSettings(
     installation
@@ -828,58 +841,64 @@ async function startServer(
   const startupID = crypto.randomUUID();
   await writeFile(serverLogFile, "", { mode: 0o600 });
   await chmod(serverLogFile, 0o600);
-  const server = Bun.spawn(["bun", "apps/factory/src/server.ts"], {
+  const environment = {
+    ...process.env,
+    FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
+    ...(action === "container" &&
+    !runtimeImage.includes("registry.open-factory-envbox-smoke.svc.cluster.local")
+      ? {
+          FACTORY_REGISTRY_CA_FILE:
+            process.env["FACTORY_REGISTRY_CA_FILE"] || "/etc/ssl/certs/ca-certificates.crt",
+        }
+      : {}),
+    ...(process.env["FACTORY_OPENBAO_URL"]
+      ? {}
+      : await (
+          await localOpenBao(stateDirectory, action === "container" ? composeArguments : undefined)
+        ).start()),
+    FACTORY_BUILD_RUNTIME_HOST_IMAGE: artifacts["build-runtime-host"],
+    FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: artifacts["verification-runtime-host"],
+    FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
+    FACTORY_WORKSPACE_FILES_IMAGE: artifacts["workspace-files"],
+    FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],
+    FACTORY_HOST: settings.host,
+    FACTORY_EXECUTION_RESERVE_TARGET: settings.executionReserveTarget,
+    FACTORY_PORT: String(factoryPort),
+    FACTORY_BASE_URL: factoryBaseURL,
+    FACTORY_WIKI_WEBHOOK_URL:
+      process.env["FACTORY_WIKI_WEBHOOK_URL"] ??
+      `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}`,
+    FACTORY_WIKI_WEBHOOK_SECRET: await localSecret(resolve(stateDirectory, "wiki-webhook-secret")),
+    FACTORY_AUTH_SECRET: authSecret,
+    FACTORY_AUTH_COOKIE_PREFIX: installation
+      ? `factory-${installation.name}`
+      : action === "container"
+        ? `factory-${process.env["COMPOSE_PROJECT_NAME"]}`
+        : "factory",
+    FACTORY_ADMIN_EMAIL: settings.email,
+    FACTORY_ADMIN_PASSWORD: settings.password,
+    FACTORY_FORGEJO_API_URL: `${forgejoBaseURL}/api/v1/`,
+    FACTORY_FORGEJO_TOKEN: forgejoToken ?? (await readFile(forgejoTokenFile, "utf8")).trim(),
+    FACTORY_FORGEJO_OWNER: "factory-mutation",
+    FACTORY_FORGEJO_ADMIN_TOKEN: await ensureForgeAdministrator(),
+    FACTORY_FORGE_ISSUER_HOST: forgeIdentity.host,
+    FACTORY_FORGE_ISSUER_URL: forgeIdentity.issuer,
+    FACTORY_FORGE_DISCOVERY_URL: forgeIdentity.discovery,
+    FACTORY_ZERO_CACHE_URL: `http://127.0.0.1:${zeroPort}`,
+    FACTORY_STARTUP_ID: startupID,
+  };
+  const container = serverImage
+    ? await prepareFactoryServerContainer({
+        stateDirectory,
+        sharedStateDirectory,
+        image: serverImage,
+        startupID,
+        environment,
+      })
+    : undefined;
+  const server = Bun.spawn(container?.command ?? ["bun", "apps/factory/src/server.ts"], {
     cwd: root,
-    env: {
-      ...process.env,
-      FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
-      ...(action === "container" &&
-      !runtimeImage.includes("registry.open-factory-envbox-smoke.svc.cluster.local")
-        ? {
-            FACTORY_REGISTRY_CA_FILE:
-              process.env["FACTORY_REGISTRY_CA_FILE"] || "/etc/ssl/certs/ca-certificates.crt",
-          }
-        : {}),
-      ...(process.env["FACTORY_OPENBAO_URL"]
-        ? {}
-        : await (
-            await localOpenBao(
-              stateDirectory,
-              action === "container" ? composeArguments : undefined,
-            )
-          ).start()),
-      FACTORY_BUILD_RUNTIME_HOST_IMAGE: artifacts["build-runtime-host"],
-      FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: artifacts["verification-runtime-host"],
-      FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
-      FACTORY_WORKSPACE_FILES_IMAGE: artifacts["workspace-files"],
-      FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],
-      FACTORY_HOST: settings.host,
-      FACTORY_EXECUTION_RESERVE_TARGET: settings.executionReserveTarget,
-      FACTORY_PORT: String(factoryPort),
-      FACTORY_BASE_URL: factoryBaseURL,
-      FACTORY_WIKI_WEBHOOK_URL:
-        process.env["FACTORY_WIKI_WEBHOOK_URL"] ??
-        `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}`,
-      FACTORY_WIKI_WEBHOOK_SECRET: await localSecret(
-        resolve(stateDirectory, "wiki-webhook-secret"),
-      ),
-      FACTORY_AUTH_SECRET: authSecret,
-      FACTORY_AUTH_COOKIE_PREFIX: installation
-        ? `factory-${installation.name}`
-        : action === "container"
-          ? `factory-${process.env["COMPOSE_PROJECT_NAME"]}`
-          : "factory",
-      FACTORY_ADMIN_EMAIL: settings.email,
-      FACTORY_ADMIN_PASSWORD: settings.password,
-      FACTORY_FORGEJO_API_URL: `${forgejoBaseURL}/api/v1/`,
-      FACTORY_FORGEJO_TOKEN: forgejoToken ?? (await readFile(forgejoTokenFile, "utf8")).trim(),
-      FACTORY_FORGEJO_OWNER: "factory-mutation",
-      FACTORY_FORGEJO_ADMIN_TOKEN: await ensureForgeAdministrator(),
-      FACTORY_FORGE_ISSUER_URL: `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}/api/auth`,
-      FACTORY_FORGE_DISCOVERY_URL: `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}/api/auth/.well-known/openid-configuration`,
-      FACTORY_ZERO_CACHE_URL: `http://127.0.0.1:${zeroPort}`,
-      FACTORY_STARTUP_ID: startupID,
-    },
+    env: environment,
     stdin: "ignore",
     stdout: Bun.file(serverLogFile),
     stderr: Bun.file(serverLogFile),
@@ -899,10 +918,11 @@ async function startServer(
   });
   try {
     await waitForFactory({ server, baseURL: factoryBaseURL, startupID });
+    await container?.confirm();
     await ensureLocalForgeIdentity({
       factoryURL: factoryBaseURL,
       forgeURL: forgejoBaseURL,
-      discoveryURL: `http://${process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal"}:${factoryPort}/api/auth/.well-known/openid-configuration`,
+      discoveryURL: forgeIdentity.discovery,
       email: settings.email,
       password: settings.password,
       signingKey: authSecret,
@@ -933,6 +953,7 @@ async function startServer(
   } catch (cause) {
     if (server.exitCode === null) server.kill();
     await server.exited;
+    if (container) await stopFactoryServerContainer(stateDirectory);
     await rm(serverPIDFile, { force: true });
     throw new Error(
       `${cause instanceof Error ? cause.message : "Factory startup failed"}. Inspect the protected local log at ${serverLogFile}`,
@@ -964,7 +985,7 @@ async function up() {
       await installRuntimeArtifacts(sharedStateDirectory, bundle);
     }
   }
-  const published = installation ? null : await publishedRuntimeArtifacts(sharedStateDirectory);
+  const published = await publishedRuntimeArtifacts(sharedStateDirectory);
   if (action === "container" && !published)
     throw new Error(
       "Use a release Factory image with embedded runtime artifacts, or supply a complete published artifact set in FACTORY_STATE_DIRECTORY",
@@ -993,21 +1014,21 @@ async function up() {
     );
   }
   const runtimeImage =
-    installation?.runtimeImage ?? published?.["runtime-host"] ?? (await publishRuntimeHost());
+    localRuntimeDefaults(published, installation).runtimeImage ?? (await publishRuntimeHost());
   const artifacts = await configuredRuntimeArtifacts(runtimeImage);
   await requireAvailableRuntimeArtifacts(artifacts);
+  await selectServerImage();
   await completeFactoryStartup({
     checkStorageReady: () =>
       requireWritableRuntimeStorage({
         stateDirectory,
         image: artifacts["workspace-files"],
       }),
+    startDependencies: startDataServices,
     startServer: async () => {
-      await command([...composeArguments, "up", "-d", "--wait", "postgres", "forgejo"], {
-        quiet: Boolean(installation),
-      });
       await command(["bun", "run", "db:migrate"], { quiet: true });
       const forgejoToken = await ensureForgejo();
+      const forgeIdentity = await configuredForgeIdentity();
       if (action !== "container") {
         await command(["bun", "run", "factory:build"], {
           quiet: Boolean(installation),
@@ -1015,7 +1036,7 @@ async function up() {
         });
         await stopServer();
       }
-      await startServer(runtimeImage, forgejoToken, artifacts);
+      await startServer(runtimeImage, forgejoToken, artifacts, forgeIdentity);
     },
     startPlanningCache,
     ready: announceReady,
@@ -1026,26 +1047,61 @@ async function up() {
     );
 }
 
+async function startDataServices() {
+  await command([...composeArguments, "up", "-d", "--wait", "postgres", "forgejo"], {
+    quiet: Boolean(installation),
+  });
+}
+
+async function configuredForgeIdentity() {
+  const database = createDatabase(1);
+  try {
+    const [connection] = await database.client<{ discovery: string }[]>`
+      SELECT discovery_url AS discovery FROM factory.forge_connection`;
+    return localForgeIdentityEndpoints(
+      process.env["FACTORY_RUNTIME_HOST"],
+      factoryPort,
+      connection?.discovery,
+    );
+  } finally {
+    await database.client.end({ timeout: 2 });
+  }
+}
+
+async function selectServerImage() {
+  if (action === "container") return;
+  const retained = await retainedFactoryServerContainer(stateDirectory);
+  const reference = process.env["FACTORY_SERVER_IMAGE"] ?? retained?.image;
+  if (!reference || reference === "native") return;
+  const runtimeHost = requireFactoryServerRuntimeHost(
+    process.env["FACTORY_RUNTIME_HOST"] ?? retained?.runtimeHost,
+  );
+  serverImage = await requireFactoryServerImage(reference);
+  process.env["FACTORY_RUNTIME_HOST"] = runtimeHost;
+}
+
 async function restart() {
   await preflight();
   const runtimeImage =
-    installation?.runtimeImage ??
-    (await publishedRuntimeArtifacts(sharedStateDirectory))?.["runtime-host"] ??
-    (await readFile(runtimeImageFile, "utf8")).trim();
+    localRuntimeDefaults(await publishedRuntimeArtifacts(sharedStateDirectory), installation)
+      .runtimeImage ?? (await readFile(runtimeImageFile, "utf8")).trim();
   if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(runtimeImage))
     throw new Error("Published runtime host is not pinned");
   const artifacts = await configuredRuntimeArtifacts(runtimeImage);
   await requireAvailableRuntimeArtifacts(artifacts);
+  await selectServerImage();
   await completeFactoryStartup({
     checkStorageReady: () =>
       requireWritableRuntimeStorage({
         stateDirectory,
         image: artifacts["workspace-files"],
       }),
+    startDependencies: startDataServices,
     startServer: async () => {
       await command(["bun", "run", "db:migrate"], { quiet: true });
+      const forgeIdentity = await configuredForgeIdentity();
       await stopServer();
-      await startServer(runtimeImage, undefined, artifacts);
+      await startServer(runtimeImage, undefined, artifacts, forgeIdentity);
     },
     startPlanningCache,
     ready: announceReady,
@@ -1057,9 +1113,8 @@ async function status() {
     signal: AbortSignal.timeout(1_000),
   }).catch(() => null);
   const runtimeImage =
-    installation?.runtimeImage ??
-    (await publishedRuntimeArtifacts(sharedStateDirectory))?.["runtime-host"] ??
-    (await readFile(runtimeImageFile, "utf8").catch(() => "not published"));
+    localRuntimeDefaults(await publishedRuntimeArtifacts(sharedStateDirectory), installation)
+      .runtimeImage ?? (await readFile(runtimeImageFile, "utf8").catch(() => "not published"));
   console.log(`server: ${response?.ok ? "ready" : "stopped"}`);
   console.log(`runtime host: ${runtimeImage.trim()}`);
   await command([...composeArguments, "ps"]);

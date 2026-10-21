@@ -52,7 +52,11 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
         JOIN factory.candidate_review review ON review.change_id=change.id AND review.id=${reviewID}
         JOIN factory.verification verification ON verification.id=review.verification_id
         LEFT JOIN factory.ticket_conversation conversation ON conversation.ticket_id=ticket.id
-        WHERE change.id=${changeID} AND review.created_by=${userID} AND change.state='active' AND change.cancel_requested_at IS NULL
+        WHERE change.id=${changeID} AND review.created_by=${userID}
+          AND (change.state='active' OR (change.state='starting' AND review.supersedes_id IS NOT NULL
+            AND EXISTS(SELECT 1 FROM factory.runtime_attempt attempt
+              WHERE attempt.id=change.runtime_attempt_id AND attempt.state IN ('stopped','failed'))))
+          AND change.cancel_requested_at IS NULL
           AND ticket.trashed_at IS NULL AND verification.state='succeeded'
           AND review.base_sha=change.base_sha
           AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation

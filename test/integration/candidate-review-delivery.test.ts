@@ -354,6 +354,45 @@ test("explicit incomplete-review retry gets a fresh identity and does not rewrit
   }
 });
 
+test.each(["stopped", "failed", "cleanup-failed", "starting", "ready"] as const)(
+  "review retry after bootstrap interruption only replaces settled compute: %s",
+  async (runtimeState) => {
+    const f = await setup();
+    try {
+      await f.complete(null);
+      await f.database.client`UPDATE factory.change SET state='starting' WHERE id=${f.changeID}`;
+      await f.database.client`UPDATE factory.runtime_attempt SET state=${runtimeState}
+        WHERE id=${f.attemptID}`;
+      await f.database
+        .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=false
+        WHERE change_id=${f.changeID}`;
+      const commandID = crypto.randomUUID();
+      if (["stopped", "failed"].includes(runtimeState)) {
+        await f.controller.retryReview(f.changeID, f.userID, commandID, f.reviewID);
+        expect(f.reviews).toHaveLength(1);
+        const freshID = f.reviews[0];
+        if (!freshID) throw new Error("Expected the new owned review turn");
+        const fresh = await f.turns.get(freshID);
+        expect(fresh?.command.kind).toBe("change-review");
+        expect(fresh?.authority).toMatchObject({
+          mode: "build",
+          review: { commitSha: f.commit },
+        });
+      } else {
+        await expect(
+          f.controller.retryReview(f.changeID, f.userID, commandID, f.reviewID),
+        ).rejects.toMatchObject({ code: "conflict" });
+        expect(f.reviews).toHaveLength(0);
+      }
+      expect(f.requests()).toBe(0);
+      expect(f.corrections).toEqual([]);
+      await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow();
+    } finally {
+      await f.dispose();
+    }
+  },
+);
+
 test("automatic correction retains every compact finding rather than cutting feedback at the chat limit", async () => {
   const f = await setup();
   try {

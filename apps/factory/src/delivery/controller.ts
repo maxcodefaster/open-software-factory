@@ -988,12 +988,21 @@ export function createDeliveryController(
       await database.client.begin(async (sql) => {
         await lockChangeWriterIn(sql, changeID);
         const [change] = await sql<
-          { projectID: string; sha: string; base: string; state: string }[]
+          {
+            projectID: string;
+            sha: string;
+            base: string;
+            state: string;
+            runtimeState: string | null;
+          }[]
         >`
           SELECT change.project_id AS "projectID",change.base_sha AS base,change.state,
+            attempt.state AS "runtimeState",
             (SELECT commit_sha FROM factory.change_commit_operation WHERE change_id=change.id
               AND state='succeeded' ORDER BY sequence DESC LIMIT 1) AS sha
-          FROM factory.change change WHERE change.id=${changeID}`;
+          FROM factory.change change
+          LEFT JOIN factory.runtime_attempt attempt ON attempt.id=change.runtime_attempt_id
+          WHERE change.id=${changeID}`;
         if (!change) throw new CommandError("not-found", "Change not found");
         await projectAuthorityIn(sql, userID, change.projectID);
         const [old] = await sql<
@@ -1029,7 +1038,11 @@ export function createDeliveryController(
         const [active] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
           AND state IN ('pending','dispatching','running','uncertain')`;
         if (
-          change.state !== "active" ||
+          !(
+            change.state === "active" ||
+            (change.state === "starting" &&
+              ["stopped", "failed"].includes(change.runtimeState ?? ""))
+          ) ||
           !previous ||
           previous.id !== previousReviewID ||
           active ||

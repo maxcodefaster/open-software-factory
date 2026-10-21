@@ -16,5 +16,7 @@ does not pass. This is not a JSON completion form imposed on implementation.
 The resumable implementation Session remains separate. Only reproducible blocking defects within
 approved scope enter automatic correction. A changed commit requires new CI and review. An
 explicit retry can create another fresh attempt for an incomplete review without rewriting the
-old attempt. Delivery still needs an immutable human approval naming the exact commit,
+old attempt. After a settled bootstrap interruption, that retry may prepare fresh compute for the
+same verified candidate. Unresolved input and incomplete cleanup remain fenced; retry never
+restarts implementation. Delivery still needs an immutable human approval naming the exact commit,
 Verification and settled passing review. Previously recorded Delivery Approvals remain intact.

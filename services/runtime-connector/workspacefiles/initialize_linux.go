@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/repositoryurl"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,13 +35,7 @@ type initializationIdentity struct {
 }
 
 func sourceRepositoryURL(value string) bool {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.User != nil || strings.ContainsAny(value, "\r\n\x00") {
-		return false
-	}
-	return (parsed.Scheme == "https" && parsed.Host != "") ||
-		(parsed.Scheme == "http" && (parsed.Hostname() == "host.orb.internal" || parsed.Hostname() == "localhost")) ||
-		(parsed.Scheme == "file" && parsed.Host == "" && filepath.IsAbs(parsed.Path))
+	return repositoryurl.Valid(value)
 }
 
 func initGit(ctx context.Context, directory string, args ...string) (string, error) {

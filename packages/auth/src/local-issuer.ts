@@ -2,7 +2,7 @@ export function requireLocalForgeIssuer(
   baseURL: string,
   issuerOverride: string | undefined,
   development: boolean,
-  runtimeHost = "host.orb.internal",
+  issuerHost = "host.orb.internal",
 ) {
   const publicIssuer = `${baseURL.replace(/\/$/, "")}/api/auth`;
   const internalIssuer =
@@ -11,7 +11,7 @@ export function requireLocalForgeIssuer(
     internalIssuer &&
     (!development ||
       !["localhost", "127.0.0.1", "[::1]"].includes(new URL(baseURL).hostname) ||
-      internalIssuer.hostname !== runtimeHost ||
+      internalIssuer.hostname !== issuerHost ||
       internalIssuer.protocol !== "http:" ||
       internalIssuer.port !== new URL(baseURL).port ||
       internalIssuer.pathname !== "/api/auth" ||

@@ -17,7 +17,11 @@ export type TicketBoardInput = {
 };
 
 function hasCurrentImplementation(input: TicketBoardInput) {
-  if (input.buildTurnPurpose === "review" && input.changeState === "active") return false;
+  if (
+    input.buildTurnPurpose === "review" &&
+    ["active", "starting"].includes(input.changeState ?? "")
+  )
+    return false;
   return (
     ["branch-pending", "starting", "failed", "cancelling"].includes(input.changeState ?? "") ||
     ["pending", "dispatching", "running", "uncertain", "failed", "stopped"].includes(
@@ -56,6 +60,14 @@ export function ticketBoardStatus(input: TicketBoardInput): string {
   if (input.ticketState === "done") return "Completed";
   if (input.changeState === "delivering") return "Delivering";
   if (input.changeState === "cancelling") return "Cancelling";
+  if (
+    input.buildTurnPurpose === "review" &&
+    ["active", "starting"].includes(input.changeState ?? "")
+  ) {
+    if (["failed", "stopped", "uncertain"].includes(input.buildTurnState ?? ""))
+      return "Review needs attention";
+    return input.changeState === "starting" ? "Preparing independent review" : "Independent review";
+  }
   if (["branch-pending", "starting"].includes(input.changeState ?? "")) {
     return "Change starting";
   }

@@ -18,6 +18,16 @@ export const runtimeArtifactsSchema = z.record(
 );
 export type RuntimeArtifacts = z.infer<typeof runtimeArtifactsSchema>;
 
+export function localRuntimeDefaults(
+  published: RuntimeArtifacts | null,
+  bootstrap: { runtimeImage: string; browserImage: string } | null,
+) {
+  return {
+    runtimeImage: published?.["runtime-host"] ?? bootstrap?.runtimeImage,
+    browserImage: published?.["browser-tools"] ?? bootstrap?.browserImage,
+  };
+}
+
 // Publish one complete generation atomically. These are defaults for future
 // creates; persisted Runtime Attempts keep their own immutable image references.
 export async function installRuntimeArtifacts(directory: string, bundle: unknown) {

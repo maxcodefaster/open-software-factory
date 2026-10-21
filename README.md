@@ -140,9 +140,43 @@ mise exec -- bun run factory:restart
 ```
 
 Restart adopts published pins for new runtime attempts and preserves existing intent and data.
+Published defaults also supersede disposable-installation bootstrap pins, never an existing
+Runtime Attempt's recorded image.
+It starts stopped PostgreSQL and Forgejo services and waits for their health checks before running
+migrations or replacing the server. A dependency failure leaves the existing server untouched.
 It reuses the existing frontend bundle. After changing UI source, run `factory:up` again to rebuild
 that bundle and restart the same installation without resetting its data.
 Use [runtime artifact instructions](deploy/runtime-host/README.md) when changing runtime images.
+
+### Run the existing installation's server on Linux
+
+On macOS 27 with OrbStack 2.2.3, long-lived Pod connections through the Mac host alias can lose
+responses. Keep Factory's server on the Linux side and use the Linux node's reachable IPv4 address
+for runtime callbacks. This changes only the server process, not the installation, database,
+Workspace storage, model settings or registered Forge identity.
+Source initialization and runtime assignments share the same repository-transport check. Local
+HTTP endpoints may use private or loopback IP literals as well as the local host aliases. Public
+HTTP endpoints, credentials in URLs and executable clone protocols remain rejected.
+
+After the initial artifact publication, build the application image and inspect the node address:
+
+```sh
+FACTORY_IMAGE=open-software-factory:local mise exec -- bun run factory:image
+mise exec -- kubectl --context orbstack get node orbstack -o wide
+```
+
+Use the actual `INTERNAL-IP` from that output, rather than copying this example address:
+
+```sh
+FACTORY_SERVER_IMAGE=open-software-factory:local FACTORY_RUNTIME_HOST=192.168.139.2 mise exec -- bun run factory:restart
+```
+
+The native launcher still owns startup and Stop. It records the exact image/container identity
+before creation, keeps credentials out of command arguments and reuses the selected image and
+runtime host on later restarts. It mounts the configured OpenBao token and CA files read-only,
+including a local CA stored outside installation state. Neither a static neighbour entry nor a
+network repair loop is needed. Rebuild the image and explicitly select it to adopt source or UI changes. Setting
+`FACTORY_SERVER_IMAGE=native` explicitly returns to a host process.
 
 ### Run Factory through Compose
 
@@ -155,7 +189,7 @@ With a published Factory image and a self-contained kubeconfig:
 
 ```sh
 export FACTORY_IMAGE=ghcr.io/maxcodefaster/open-software-factory/factory:<published-version>
-export FACTORY_RUNTIME_HOST=host.orb.internal  # On Linux, use the host's reachable address.
+export FACTORY_RUNTIME_HOST=192.168.139.2  # Example Linux node address; use your actual reachable host.
 docker compose --project-name factory-compose -f deploy/local/compose.yaml up -d factory
 ```
 

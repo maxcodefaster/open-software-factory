@@ -1,5 +1,28 @@
 import { isIP } from "node:net";
 
+export function localForgeIdentityEndpoints(
+  runtimeHost: string | undefined,
+  port: number,
+  retainedDiscovery?: string,
+) {
+  const discovery =
+    retainedDiscovery ??
+    `http://${runtimeHost || "host.orb.internal"}:${port}/api/auth/.well-known/openid-configuration`;
+  const url = new URL(discovery);
+  if (
+    url.protocol !== "http:" ||
+    url.port !== String(port) ||
+    url.pathname !== "/api/auth/.well-known/openid-configuration" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw new Error("Saved Forge identity does not match the local Factory listener");
+  url.pathname = "/api/auth";
+  return { issuer: url.href, discovery, host: url.hostname };
+}
+
 export function localServerSettings(
   environment: Record<string, string | undefined>,
   defaults: { email: string; password: string },

@@ -5,10 +5,10 @@ import {
   type AgentTurnTransaction,
   createAgentTurnStore,
 } from "../../apps/factory/src/agent/turn-store";
-import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test("Build waits for OpenCode after IDE readiness without repeating a prompt", async () => {
   const owned = await fixture();
@@ -580,8 +580,9 @@ test("controller shutdown joins held work without settling its lost outcome", as
 });
 
 test("owned fixture joins held work and cleans up even when Stop persistence throws", async () => {
-  const owned = await fixture();
-  const checking = createDatabase();
+  const isolated = await factoryProcess();
+  const owned = await fixture(undefined, undefined, isolated.connect());
+  const checking = isolated.connect();
   await owned
     .controller()
     .prompt(
@@ -617,6 +618,7 @@ test("owned fixture joins held work and cleans up even when Stop persistence thr
     expect(projects).toHaveLength(0);
   } finally {
     await checking.client.end();
+    await isolated.dispose();
   }
 });
 

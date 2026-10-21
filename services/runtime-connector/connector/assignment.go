@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/open-software-factory/open-software-factory/services/runtime-connector/internal/repositoryurl"
 )
 
 const AssignmentVersion = 1
@@ -106,9 +108,7 @@ func (assignment Assignment) Validate() error {
 	if !filepath.IsAbs(assignment.RemoteWorkspaceFolder) || filepath.Clean(assignment.RemoteWorkspaceFolder) != assignment.RemoteWorkspaceFolder {
 		return errors.New("remote workspace folder must be a clean absolute path")
 	}
-	repository, err := url.Parse(assignment.RepositoryURL)
-	localHTTP := repository.Scheme == "http" && (repository.Hostname() == "host.orb.internal" || repository.Hostname() == "localhost")
-	if err != nil || (repository.Scheme != "https" && repository.Scheme != "file" && !localHTTP) || repository.User != nil {
+	if !repositoryurl.Valid(assignment.RepositoryURL) {
 		return errors.New("repository URL must use HTTPS, file, or the local Factory bridge without credentials")
 	}
 	if !identityPattern.MatchString(assignment.RepositoryIdentity) {

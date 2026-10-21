@@ -84,6 +84,55 @@ func TestSourceInitializationPublishesOnceAndRetainsHumanWork(t *testing.T) {
 	}
 }
 
+func TestSourceInitializationRecoversRetainedCheckoutThroughLinuxHost(t *testing.T) {
+	parent, intent := initializerFixture(t)
+	ctx := context.Background()
+	if err := Initialize(ctx, parent, intent); err != nil {
+		t.Fatal(err)
+	}
+	canonical := filepath.Join(parent, "project")
+	if err := os.WriteFile(filepath.Join(canonical, "source.txt"), []byte("retained candidate"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	intent.RepositoryURL = "http://192.168.139.2:3000/internal/workspace-source/owned-capability"
+	intent.OriginURL = "http://192.168.139.2:3001/factory/project.git"
+	if err := Initialize(ctx, parent, intent); err != nil {
+		t.Fatal("Linux callback address prevented retained source recovery:", err)
+	}
+	content, err := os.ReadFile(filepath.Join(canonical, "source.txt"))
+	if err != nil || string(content) != "retained candidate" {
+		t.Fatal("recovery changed retained candidate", err)
+	}
+}
+
+func TestSourceRepositoryURLAllowsPrivateLinuxEndpointsOnly(t *testing.T) {
+	for _, value := range []string{
+		"http://192.168.139.2:3000/source",
+		"http://10.0.0.2:3000/source",
+		"http://172.20.0.2:3000/source",
+		"http://127.0.0.1:3000/source",
+		"http://[fd00::2]:3000/source",
+	} {
+		if !sourceRepositoryURL(value) {
+			t.Fatalf("local Linux source endpoint rejected: %q", value)
+		}
+	}
+	for _, value := range []string{
+		"http://8.8.8.8/source",
+		"http://example.com/source",
+		"http://169.254.169.254/source",
+		"http://0.0.0.0/source",
+		"http://[::]/source",
+		"http://[ff02::1]/source",
+		"http://secret@192.168.139.2/source",
+		"http://192.168.139.2/\nsource",
+	} {
+		if sourceRepositoryURL(value) {
+			t.Fatalf("unsafe source endpoint admitted: %q", value)
+		}
+	}
+}
+
 func TestSourceInitializationRecoversOnlyItsPrivatePartialClone(t *testing.T) {
 	parent, intent := initializerFixture(t)
 	intent.Revision = strings.Repeat("a", 40)

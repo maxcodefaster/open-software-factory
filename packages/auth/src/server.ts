@@ -48,7 +48,9 @@ export function createFactoryAuth(
     baseURL,
     process.env["FACTORY_FORGE_ISSUER_URL"],
     development,
-    process.env["FACTORY_RUNTIME_HOST"] || "host.orb.internal",
+    process.env["FACTORY_FORGE_ISSUER_HOST"] ||
+      process.env["FACTORY_RUNTIME_HOST"] ||
+      "host.orb.internal",
   );
   if (!development && new URL(baseURL).protocol !== "https:")
     throw new Error("Non-development installations require an HTTPS Factory URL");

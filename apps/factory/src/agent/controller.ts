@@ -517,6 +517,7 @@ export function createAgentController(
           THEN COALESCE(implementation_session_confirmed_at, now()) ELSE implementation_session_confirmed_at END
       WHERE change_id = ${changeID} AND active_turn_id = ${turnID}
         AND runtime_attempt_id = ${attemptID} AND opencode_session_id = ${sessionID}
+        AND state <> 'stopped' AND NOT stop_pending
     `;
     if (confirmed.count !== 1)
       throw new CommandError(

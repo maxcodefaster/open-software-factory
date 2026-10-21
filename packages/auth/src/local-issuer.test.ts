@@ -1,6 +1,16 @@
 import { expect, test } from "bun:test";
 import { requireLocalForgeIssuer } from "./local-issuer";
 
+test("a retained Forge issuer stays exact when its host differs from runtime callbacks", () => {
+  const base = "http://127.0.0.1:3000";
+  const issuer = "http://host.orb.internal:3000/api/auth";
+  expect(() => requireLocalForgeIssuer(base, issuer, true, "host.orb.internal")).not.toThrow();
+  expect(() =>
+    requireLocalForgeIssuer(base, "http://192.168.139.2:3000/api/auth", true, "host.orb.internal"),
+  ).toThrow();
+  expect(() => requireLocalForgeIssuer(base, issuer, false, "host.orb.internal")).toThrow();
+});
+
 test("only the installation's exact internal host and local development listener can override Forge issuer", () => {
   const base = "http://127.0.0.1:3000";
   expect(() =>

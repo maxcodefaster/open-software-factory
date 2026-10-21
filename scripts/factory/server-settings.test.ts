@@ -1,7 +1,25 @@
 import { expect, test } from "bun:test";
-import { localServerSettings } from "./server-settings";
+import { localForgeIdentityEndpoints, localServerSettings } from "./server-settings";
 
 const defaults = { email: "admin@factory.local", password: "factory-local-password" };
+
+test("local Forge identity is retained when only the runtime callback address changes", () => {
+  const before = localForgeIdentityEndpoints("host.orb.internal", 3000);
+  expect(localForgeIdentityEndpoints("192.168.139.2", 3000, before.discovery)).toEqual(before);
+  expect(localForgeIdentityEndpoints("192.168.139.2", 3000).host).toBe("192.168.139.2");
+});
+
+test("retained Forge identity must still match the exact local listener", () => {
+  for (const value of [
+    "http://host.orb.internal:3001/api/auth/.well-known/openid-configuration",
+    "https://host.orb.internal:3000/api/auth/.well-known/openid-configuration",
+    "http://host.orb.internal:3000/other/.well-known/openid-configuration",
+    "http://user:secret@host.orb.internal:3000/api/auth/.well-known/openid-configuration",
+  ])
+    expect(() => localForgeIdentityEndpoints("192.168.139.2", 3000, value)).toThrow(
+      "local Factory listener",
+    );
+});
 
 test("a fresh local launch keeps spare compute off unless explicitly requested", () => {
   expect(localServerSettings({}, defaults).executionReserveTarget).toBe("0");

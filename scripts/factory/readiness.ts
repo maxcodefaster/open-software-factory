@@ -2,11 +2,13 @@ type ServerProcess = Pick<ReturnType<typeof Bun.spawn>, "exitCode" | "exited">;
 
 export async function completeFactoryStartup(input: {
   checkStorageReady(): Promise<unknown>;
+  startDependencies(): Promise<void>;
   startServer(): Promise<void>;
   startPlanningCache(): Promise<void>;
   ready(): void;
 }) {
   await input.checkStorageReady();
+  await input.startDependencies();
   await input.startServer();
   await input.startPlanningCache();
   input.ready();

@@ -1,6 +1,56 @@
 import { expect, test } from "bun:test";
 import { completeFactoryStartup, waitForFactory } from "./readiness";
 
+test("restart brings stopped data services back before starting the server", async () => {
+  const calls: string[] = [];
+  let dataServicesRunning = false;
+  await completeFactoryStartup({
+    checkStorageReady: async () => {
+      calls.push("storage");
+    },
+    startDependencies: async () => {
+      calls.push("dependencies");
+      dataServicesRunning = true;
+    },
+    startServer: async () => {
+      if (!dataServicesRunning) throw new Error("Database and Forgejo are still stopped");
+      calls.push("server");
+    },
+    startPlanningCache: async () => {
+      calls.push("cache");
+    },
+    ready: () => {
+      calls.push("ready");
+    },
+  });
+  expect(calls).toEqual(["storage", "dependencies", "server", "cache", "ready"]);
+});
+
+test("failed data-service readiness leaves the server and planning cache untouched", async () => {
+  const calls: string[] = [];
+  await expect(
+    completeFactoryStartup({
+      checkStorageReady: async () => {
+        calls.push("storage");
+      },
+      startDependencies: async () => {
+        calls.push("dependencies");
+        throw new Error("Database health check failed");
+      },
+      startServer: async () => {
+        calls.push("server");
+      },
+      startPlanningCache: async () => {
+        calls.push("cache");
+      },
+      ready: () => {
+        calls.push("ready");
+      },
+    }),
+  ).rejects.toThrow("Database health check failed");
+  expect(calls).toEqual(["storage", "dependencies"]);
+});
+
 test("storage failure prevents server replacement, cache startup and the ready announcement", async () => {
   const calls: string[] = [];
   await expect(
@@ -8,6 +58,9 @@ test("storage failure prevents server replacement, cache startup and the ready a
       checkStorageReady: async () => {
         calls.push("storage");
         throw new Error("Storage is not writable");
+      },
+      startDependencies: async () => {
+        calls.push("dependencies");
       },
       startServer: async () => {
         calls.push("server");
@@ -33,6 +86,9 @@ test("installation readiness follows the planning cache and is never announced a
       checkStorageReady: async () => {
         calls.push("storage");
       },
+      startDependencies: async () => {
+        calls.push("dependencies");
+      },
       startServer: server,
       startPlanningCache: async () => {
         calls.push("cache");
@@ -43,11 +99,14 @@ test("installation readiness follows the planning cache and is never announced a
       },
     }),
   ).rejects.toThrow("Cache unavailable");
-  expect(calls).toEqual(["storage", "server", "cache"]);
+  expect(calls).toEqual(["storage", "dependencies", "server", "cache"]);
   calls.length = 0;
   await completeFactoryStartup({
     checkStorageReady: async () => {
       calls.push("storage");
+    },
+    startDependencies: async () => {
+      calls.push("dependencies");
     },
     startServer: server,
     startPlanningCache: async () => {
@@ -57,7 +116,7 @@ test("installation readiness follows the planning cache and is never announced a
       calls.push("ready");
     },
   });
-  expect(calls).toEqual(["storage", "server", "cache", "ready"]);
+  expect(calls).toEqual(["storage", "dependencies", "server", "cache", "ready"]);
 });
 
 function child() {
