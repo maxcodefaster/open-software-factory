@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
-import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import type { createForgejoClient } from "../../packages/forge/src/forge";
+import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
+import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
@@ -62,6 +62,7 @@ test("independent review freezes the exact candidate and the original Coding con
       SELECT session_id AS session,prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id=${a.turn.id}`;
     expect(intent?.session).not.toBe(f.sessionID);
     expect(intent?.text).toContain("independent candidate reviewer");
+    expect(intent?.text).toContain(`Successful protected Forgejo Verification ${f.verificationID}`);
     await expect(
       (async () => {
         await f.database

@@ -190,6 +190,7 @@ test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
           const policy = candidateReviewInstructions({
             commitSHA: f.commit,
             baseSHA: "a".repeat(40),
+            verificationID: f.verificationID,
             specification,
           });
           await owned.client.session.instructions.entry.put({

@@ -68,6 +68,8 @@ not as proof of completion. Exact-commit checks and human Delivery approval rema
 After successful checks, a fresh independent OpenCode Session reviews that exact candidate.
 It keeps the Change's Coding model and reasoning, with no additional model selector. The reviewer
 has only immutable Git reads, the existing restricted App browser and a bounded review-report tool.
+Its frozen instructions identify the successful exact-commit Verification as Factory-observed CI
+evidence. The reviewer still checks source, test relevance and actual App behavior independently.
 It cannot edit, run shell commands or delegate to a writing agent. A native finish without an
 accepted report remains incomplete. Passing checks alone no longer enables Delivery.
 Reproducible blocking findings return to the retained implementation Session for targeted correction;

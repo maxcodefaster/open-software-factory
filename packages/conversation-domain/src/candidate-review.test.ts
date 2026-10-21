@@ -1,11 +1,28 @@
 import { expect, test } from "bun:test";
 import {
   candidateReviewCallInput,
+  candidateReviewInstructions,
   candidateReviewPermissions,
-  candidateReviewToolCatalogue,
   candidateReviewResultInput,
+  candidateReviewToolCatalogue,
   reviewNeedsBrowser,
 } from "./candidate-review";
+
+test("review receives exact successful CI evidence without claiming shell execution or replacing App inspection", () => {
+  const verificationID = crypto.randomUUID();
+  const policy = candidateReviewInstructions({
+    commitSHA: "d".repeat(40),
+    baseSHA: "a".repeat(40),
+    verificationID,
+    specification: "Run the normal repository checks and inspect the actual App.",
+  });
+  expect(policy).toContain(`Successful protected Forgejo Verification ${verificationID}`);
+  expect(policy).toContain("Inspect the immutable protected workflow");
+  expect(policy).toContain("do not claim you ran those commands");
+  expect(policy).toContain("CI alone");
+  expect(policy).toContain("exercise the declared App");
+  expect(policy).toContain("no shell");
+});
 
 const result = {
   verdict: "passed",
