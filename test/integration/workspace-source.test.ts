@@ -52,6 +52,118 @@ async function ownedSourceFixture(maxConnections = 10) {
   };
 }
 
+test("an interrupted observation worker retries the same source intent without a manual wakeup", async () => {
+  const fixture = await ownedSourceFixture();
+  const { database, projectID, developerID } = fixture;
+  let interrupted = false;
+  let creates = 0;
+  const observed: SourceResourceObservation = {
+    namespaceUID: "retry-namespace",
+    claimUID: "retry-claim",
+    podUID: "retry-pod",
+    storageNode: "retry-node",
+    ready: true,
+    failed: false,
+  };
+  const sources = createWorkspaceSourceController(
+    {
+      ...database,
+      coordination() {
+        if (!interrupted) {
+          interrupted = true;
+          throw new Error("Observation connection was interrupted before acquisition");
+        }
+        return database.coordination();
+      },
+    },
+    "owned-source-secret",
+    {
+      async executionNode() {
+        throw new Error("Browsing needs no execution");
+      },
+      async prepare() {
+        creates++;
+        return observed;
+      },
+      async observe() {
+        return observed;
+      },
+      async connect() {},
+      async request() {
+        throw new Error("No browser file request should be necessary");
+      },
+      async stop() {},
+      close() {},
+    },
+  );
+  try {
+    const first = await sources.ensurePersonal(projectID, developerID);
+    const ready = await eventually(
+      () => sources.get(first.workspaceID, developerID),
+      (view) => view.state === "ready",
+      "The original source intent was orphaned after its observer failed",
+      3_000,
+    );
+    expect(interrupted).toBe(true);
+    expect(ready.serviceID).toBe(first.serviceID);
+    expect(ready.epoch).toBe(first.epoch);
+    expect(creates).toBe(1);
+    expect(await database.client`SELECT workspace_id FROM factory.workspace_source`).toHaveLength(
+      1,
+    );
+  } finally {
+    await sources.close();
+    await fixture.dispose();
+  }
+}, 30_000);
+
+test("persistent observation faults keep the existing unavailable bound and never create a replacement", async () => {
+  const fixture = await ownedSourceFixture();
+  const { database, projectID, developerID } = fixture;
+  let elapsed = 0;
+  let observations = 0;
+  const unexpected = async () => {
+    throw new Error("Unavailable observations must not create resources");
+  };
+  const sources = createWorkspaceSourceController(
+    {
+      ...database,
+      coordination() {
+        observations++;
+        elapsed += 180_000;
+        throw new Error("Observation connection remains unavailable");
+      },
+    },
+    "owned-source-secret",
+    {
+      executionNode: unexpected,
+      prepare: unexpected,
+      observe: unexpected,
+      connect: unexpected,
+      request: unexpected,
+      stop: unexpected,
+      close() {},
+    },
+    () => performance.now() + elapsed,
+  );
+  try {
+    const first = await sources.ensurePersonal(projectID, developerID);
+    const failed = await eventually(
+      () => sources.get(first.workspaceID, developerID),
+      (view) => view.state === "failed",
+      "Unconfirmed observation failures kept the source worker alive indefinitely",
+      4_000,
+    );
+    expect(observations).toBe(2);
+    expect(failed.serviceID).toBe(first.serviceID);
+    expect(failed.epoch).toBe(first.epoch);
+    expect(failed.failure).toContain("could not be confirmed");
+  } finally {
+    await sources.close();
+    await fixture.dispose();
+  }
+}, 30_000);
+
 test("source connection warming leaves application reads and Stop available with one connection", async () => {
   const fixture = await ownedSourceFixture(1);
   const connecting = Promise.withResolvers<void>();

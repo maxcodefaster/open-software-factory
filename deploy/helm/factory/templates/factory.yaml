@@ -29,6 +29,7 @@ spec:
         app.kubernetes.io/component: factory
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        factory.dev/upgrade-revision: {{ .Release.Revision | quote }}
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       serviceAccountName: {{ include "factory.name" . }}

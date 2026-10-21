@@ -103,6 +103,10 @@ reconnect and no repeated model request. New Build turns use native OpenCode MCP
 restricted development browser, including inline screenshots. Already admitted CLI instructions
 remain executable without rewriting their frozen input. Neither transport grants arbitrary MCP
 registration, URLs, scripts or access to human browser sessions.
+An unavailable runtime-status write does not terminate Factory or disconnect healthy compute.
+Only the current authorized observation retries; newer observations supersede it, and revocation
+cancels it. A terminating producer's final outcome remains observable after its connection closes.
+These retries never create another Sandbox or resend an inference.
 If the Connector confirms browser expiry or Factory confirms control-connection loss, the same active
 Build can explicitly open a fresh browser after exact cleanup is confirmed. It cannot restore or reuse the old browser,
 replay a UI action, bypass Stop, or reset the turn's browser-call limit. A fresh snapshot is required
@@ -116,6 +120,8 @@ Missing confirmed source resources are never recreated under their old access ep
 access Stop can retire a replaced Pod only after validating its full assignment and manifest against
 the same recorded Namespace and volume. It never adopts that Pod's identity or removes source storage.
 Temporary editor observation or connection loss rechecks the same recorded service automatically.
+Interrupted source and editor observation workers also retry the same retained intent within
+their existing unavailable-observation bounds, without a human wakeup or another access epoch.
 An initial unavailable editor document reconnects without a manual reload. An already open editor
 is never reloaded by that recovery, so its dirty buffers stay in place. Readiness changes do not
 revoke its grant; Stop, failed resources, changed identity and lost authority still do.

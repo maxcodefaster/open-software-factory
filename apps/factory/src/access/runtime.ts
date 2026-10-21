@@ -78,7 +78,7 @@ export function createRuntimeAccess(
           "set-cookie":
             grant.mode === "embedded"
               ? `factory_runtime_access=${accessToken}; Path=${cookiePath}; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=28800`
-              : `factory_runtime_access=${accessToken}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=28800`,
+              : `factory_runtime_access=${accessToken}; Path=${cookiePath}; HttpOnly; SameSite=Lax; ${url.protocol === "https:" ? "Secure; " : ""}Max-Age=28800`,
         },
       });
     },

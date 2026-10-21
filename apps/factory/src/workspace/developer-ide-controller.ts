@@ -150,17 +150,24 @@ export function createDeveloperIDEController(
         let deadline = now() + 150_000;
         do {
           worker.wakeup = false;
-          const retry = await reconcile(userID);
-          if (!retry && !worker.wakeup) return;
+          let retry: boolean | "unavailable" = "unavailable";
+          try {
+            retry = await reconcile(userID);
+            if (!retry && !worker.wakeup) return;
+            const current = await row(userID);
+            if (
+              !current ||
+              !["create-intended", "preparing", "stop-intended"].includes(current.state)
+            )
+              return;
+          } catch {
+            // Acquiring/releasing the observer connection or reading its result
+            // can fail outside reconcile's own catch. Observe the same intent
+            // again instead of orphaning a healthy editor until a human Retry.
+          }
           // A confirmed Pending Pod is still the same valid start, not an
           // unavailable observation or permission to require a human restart.
           if (retry === true) deadline = now() + 150_000;
-          const current = await row(userID);
-          if (
-            !current ||
-            !["create-intended", "preparing", "stop-intended"].includes(current.state)
-          )
-            return;
           await Bun.sleep(500);
         } while (!closed && now() < deadline);
         if (!closed)

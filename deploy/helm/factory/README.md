@@ -62,6 +62,10 @@ The same Ingress routes `/zero` to the planning cache without a rewrite or anoth
 Zero's native optional base path carries its WebSocket protocol there. Keeping the browser on
 the Factory hostname also preserves the host-only session cookies forwarded to query and mutation
 authorization. The internal cache address is never supplied to the browser.
+Preserve the incoming Host header. Factory restores the configured public HTTPS identity for that
+host and its isolated runtime hosts across the Ingress's HTTP backend hop. It does not trust
+caller-provided forwarding headers to select an identity. Internal Service requests keep their
+actual HTTP transport.
 
 The initial account is `admin@factory.local`, unless `adminEmail` was set. Retrieve its generated
 password from the installation's Secret without putting it in Git:
@@ -104,7 +108,7 @@ forgejoPublicURL: http://127.0.0.1:58001
 developmentZeroURL: http://127.0.0.1:58002
 ```
 
-After installation, forward the two browser Services in separate terminals:
+After installation, forward the three browser Services in separate terminals:
 
 ```sh
 kubectl --namespace factory port-forward service/factory-factory 58000:3000
@@ -115,6 +119,9 @@ kubectl --namespace factory port-forward service/factory-zero 58002:4848
 Run all three forwards for local acceptance. `developmentZeroURL` uses a separate port on exactly
 the same loopback hostname as `publicURL`, so browser cookies still accompany planning traffic.
 Ordinary Ingress installations do not set this value or need a third browser hostname.
+Port-forwarding attaches to a particular Pod connection. Reopen the affected forward after a Pod
+replacement or a broken connection; a listening local port alone does not confirm live transport.
+An Ingress installation does not use these local forwarding processes.
 
 The local HTTP exception is restricted to loopback browser access. Internal callbacks still use
 Kubernetes Services, never the Mac's host alias or a manually selected VM address. Testing on
@@ -135,6 +142,8 @@ new inference admissions. A concurrent request therefore cannot slip into the id
 A busy installation refuses the upgrade without stopping the running application.
 
 The application uses a single-replica Recreate deployment. A short interruption is expected.
+Each Helm revision replaces the Factory Pod, even when its image and configuration are unchanged,
+so its bootstrap clears the maintenance fence after a successful same-image upgrade too.
 Its replacement uses the same retained data, signing credentials and public identities.
 Recovery does not commission another inference. Missing retained credentials or a changed
 installation identity refuses startup instead of silently generating replacements.

@@ -32,6 +32,7 @@ type Resource = {
   spec?: {
     publishNotReadyAddresses?: boolean;
     template?: {
+      metadata?: { annotations?: Record<string, string> };
       spec: {
         containers: Array<{
           name: string;
@@ -128,6 +129,18 @@ test("all standard service images retain the maintained exact upstream pins", as
     expect(workload?.spec?.template?.spec.containers[0]?.image).toBe(image);
     expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
   }
+});
+
+test("every upgrade replaces Factory even when its image and configuration are unchanged", async () => {
+  const application = (await resources()).find((resource) => resource.kind === "Deployment");
+  // The pre-upgrade hook fences admissions. A no-op Pod template would leave
+  // that fence enabled forever because only the replacement bootstrap clears it.
+  expect(application?.spec?.template?.metadata?.annotations?.["factory.dev/upgrade-revision"]).toBe(
+    "1",
+  );
+  expect(await readFile(`${chart}/templates/factory.yaml`, "utf8")).toContain(
+    "factory.dev/upgrade-revision: {{ .Release.Revision | quote }}",
+  );
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {

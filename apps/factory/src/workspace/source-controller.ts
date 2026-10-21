@@ -273,17 +273,24 @@ export function createWorkspaceSourceController(
         let deadline = now() + sourceObservationTimeoutMS;
         do {
           worker.wakeup = false;
-          const retry = await reconcile(workspaceID);
-          if (!retry && !worker.wakeup) return;
+          let retry: boolean | "unavailable" = "unavailable";
+          try {
+            retry = await reconcile(workspaceID);
+            if (!retry && !worker.wakeup) return;
+            const current = await row(workspaceID);
+            if (
+              !current ||
+              !["create-intended", "preparing", "stop-intended"].includes(current.state)
+            )
+              return;
+          } catch {
+            // Connection acquisition, cleanup and follow-up reads can fail
+            // outside reconcile's observation catch. Keep this same intent's
+            // worker alive, rather than stranding execution until a human Retry.
+          }
           // A verified, still-pending Pod is making a valid lifecycle observation.
           // Timing it out here would revoke its clone capability before it starts.
           if (retry === true) deadline = now() + sourceObservationTimeoutMS;
-          const current = await row(workspaceID);
-          if (
-            !current ||
-            !["create-intended", "preparing", "stop-intended"].includes(current.state)
-          )
-            return;
           await Bun.sleep(1_000);
         } while (!closed && now() < deadline);
         if (closed) return;

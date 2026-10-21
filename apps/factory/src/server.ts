@@ -66,6 +66,7 @@ import { json, sameFactoryOrigin } from "./http";
 import { installationInMaintenance } from "./installation/maintenance";
 import { appRuntimeOrigin } from "./runtime-origins";
 import { serveFactory } from "./http-listener";
+import { factoryRequestURL } from "./request-origin";
 import { createKnowledgeController } from "./knowledge/controller";
 import { factoryForgeSource } from "./knowledge/forge-source";
 import { createWikiSourceUpdates } from "./knowledge/source-updates";
@@ -204,10 +205,18 @@ const skillRoutes = createSkillRoutes(createSkillController(database));
 const usageRoutes = createUsageRoutes(database, factoryAuth);
 const runtimeHub = new RuntimeHub(async (attemptID, phase, error) => {
   await runtimeController.status(attemptID, phase, error);
-  agentController?.runtimeActivityChanged();
-  if (phase === "ready" && agentController) await agentController.recoverRuntimeCommits(attemptID);
-  if (phase === "ready" && agentController) await agentController.dispatchRuntimePending(attemptID);
-  if (phase === "ready" && buildBrowserController) await buildBrowserController.recover(attemptID);
+  try {
+    agentController?.runtimeActivityChanged();
+    if (phase === "ready") {
+      if (agentController) await agentController.recoverRuntimeCommits(attemptID);
+      if (agentController) await agentController.dispatchRuntimePending(attemptID);
+      if (buildBrowserController) await buildBrowserController.recover(attemptID);
+    }
+  } catch {
+    // Persistence succeeded. Dependent recovery must not reject that status
+    // and interrupt healthy compute. Pending admissions have their own drain.
+    console.error("Runtime work reconciliation needs another observation");
+  }
 });
 const relayModel = createModelRelay(
   database,
@@ -364,7 +373,9 @@ await accessRevocation.start();
 
 function sameRuntimeOrigin(request: Request) {
   const origin = request.headers.get("origin");
-  return origin !== null && new URL(origin).origin === new URL(request.url).origin;
+  return (
+    origin !== null && new URL(origin).origin === factoryRequestURL(request, factoryOrigin).origin
+  );
 }
 
 async function runtimeReady(attemptID: string) {
@@ -573,7 +584,7 @@ async function route(request: Request) {
       503,
       { "retry-after": "30" },
     );
-  const url = new URL(request.url);
+  const url = factoryRequestURL(request, factoryOrigin);
   try {
     const runtimeEnvironment = url.pathname.match(
       /^\/internal\/runtime-environment\/([0-9a-f-]{36})$/,
@@ -1604,7 +1615,7 @@ const servers = serveFactory<FactorySocketData>(factoryHost, {
   port: Number(FACTORY_PORT ?? 3000),
   idleTimeout: 180,
   async fetch(request, server) {
-    const url = new URL(request.url);
+    const url = factoryRequestURL(request, factoryOrigin);
     if (/^\/internal\/build-browser\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/.test(url.pathname))
       // Cold image preparation has its own 180-second bound, followed by the
       // bounded container and cold Chrome setup. Do not time out transport first.
@@ -1824,7 +1835,7 @@ const reconcileKnowledge = async () => {
 };
 void reconcileKnowledge();
 setInterval(() => void reconcileKnowledge(), 15 * 60_000).unref();
-void wikiSourceUpdates.repair();
+void wikiSourceUpdates.repair().catch(() => console.error("Wiki hook reconciliation failed"));
 setInterval(
   () =>
     void wikiSourceUpdates.repair().catch(() => console.error("Wiki hook reconciliation failed")),

@@ -39,6 +39,123 @@ async function fixture(maxConnections = 10, developerID = crypto.randomUUID()) {
   };
 }
 
+test.each(["acquire", "release"] as const)(
+  "an editor observer %s failure cannot strand the same pending editor intent",
+  async (failure) => {
+    const owned = await fixture();
+    let interrupted = false;
+    let preparations = 0;
+    const observed: DeveloperIDEObservation = {
+      namespaceUID: "retained-namespace",
+      podUID: "retained-pod",
+      ready: true,
+      failed: false,
+    };
+    const editor = createDeveloperIDEController(
+      {
+        ...owned.database,
+        coordination() {
+          if (failure === "acquire" && !interrupted) {
+            interrupted = true;
+            throw new Error("Observer connection acquisition failed");
+          }
+          const connection = owned.database.coordination();
+          const end = connection.end.bind(connection);
+          connection.end = async (options) => {
+            await end(options);
+            if (failure === "release" && !interrupted) {
+              interrupted = true;
+              throw new Error("Observer cleanup acknowledgement failed");
+            }
+          };
+          return connection;
+        },
+      },
+      {
+        async prepare() {
+          preparations++;
+          return { ...observed, ready: false };
+        },
+        async observe() {
+          return observed;
+        },
+        async endpoint() {
+          return "http://127.0.0.1:4400";
+        },
+        async stop() {
+          throw new Error("An observation failure must not replace the editor");
+        },
+        close() {},
+      },
+    );
+    try {
+      const first = await editor.ensure(owned.projectID, owned.developerID);
+      const ready = await eventually(
+        () => editor.get(owned.developerID),
+        (view) => view.state === "ready",
+        "An interrupted worker left the running editor preparing until a human wakeup",
+        3_000,
+      );
+      expect(interrupted).toBe(true);
+      expect(ready).toMatchObject({
+        serviceID: first.serviceID,
+        epoch: first.epoch,
+        failure: null,
+      });
+      expect(preparations).toBe(1);
+      expect(await owned.database.client`SELECT user_id FROM factory.developer_ide`).toHaveLength(
+        1,
+      );
+    } finally {
+      await editor.close();
+      await owned.dispose();
+    }
+  },
+  30_000,
+);
+
+test("persistent editor worker acquisition failures retain the unavailable bound and identity", async () => {
+  const owned = await fixture();
+  let elapsed = 0;
+  let acquisitions = 0;
+  const unexpected = async (): Promise<never> => {
+    throw new Error("Unavailable observation must not create or replace resources");
+  };
+  const editor = createDeveloperIDEController(
+    {
+      ...owned.database,
+      coordination() {
+        elapsed += 160_000;
+        acquisitions++;
+        throw new Error("Observer acquisition remains unavailable");
+      },
+    },
+    {
+      prepare: unexpected,
+      observe: unexpected,
+      endpoint: unexpected,
+      stop: unexpected,
+      close() {},
+    },
+    () => performance.now() + elapsed,
+  );
+  try {
+    const first = await editor.ensure(owned.projectID, owned.developerID);
+    const failed = await eventually(
+      () => editor.get(owned.developerID),
+      (view) => view.state === "failed",
+      "An unavailable editor worker exceeded its existing observation bound",
+      3_000,
+    );
+    expect(acquisitions).toBe(1);
+    expect(failed).toMatchObject({ serviceID: first.serviceID, epoch: first.epoch });
+    expect(failed.failure).toContain("could not be confirmed");
+  } finally {
+    await editor.close();
+    await owned.dispose();
+  }
+}, 30_000);
+
 test("separate installations never share an editor namespace even with the same administrator identity", async () => {
   const administratorID = crypto.randomUUID();
   const first = await fixture(10, administratorID);

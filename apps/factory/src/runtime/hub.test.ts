@@ -540,6 +540,36 @@ describe("Runtime edge headers", () => {
       appRuntimeHeaders(new Request(`http://${host}/runtime/${id}/wrong/api`), "/api"),
     ).toThrow("scoped");
   });
+  test("public HTTPS App context survives the Ingress HTTP hop without trusting forwarding headers", () => {
+    const previous = process.env["FACTORY_BASE_URL"];
+    process.env["FACTORY_BASE_URL"] = "https://factory.example.com";
+    try {
+      const id = "01994a7d-0000-7000-8000-000000000001";
+      const host = `${id.replaceAll("-", "")}-app.runtime.factory.example.com`;
+      const prefix = `/runtime/${id}/preview/app`;
+      const headers = appRuntimeHeaders(
+        new Request(`http://${host}${prefix}/api/auth/sign-in/email`, {
+          headers: {
+            origin: `https://${host}`,
+            "x-forwarded-host": "untrusted.example",
+            "x-forwarded-proto": "http",
+            cookie: "starter.session_token=owned-app-session; factory_runtime_access=private",
+          },
+        }),
+        "/api/auth/sign-in/email",
+      );
+      expect(headers).toEqual({
+        "x-forwarded-host": host,
+        "x-forwarded-prefix": prefix,
+        "x-forwarded-proto": "https",
+        origin: `https://${host}`,
+        cookie: "starter.session_token=owned-app-session",
+      });
+    } finally {
+      if (previous === undefined) delete process.env["FACTORY_BASE_URL"];
+      else process.env["FACTORY_BASE_URL"] = previous;
+    }
+  });
   test("strips Factory and upgrade credentials before Connector serialization", () => {
     const headers = safeRuntimeHeaders(
       new Headers({

@@ -17,7 +17,7 @@ import { factoryProcess, eventually } from "../fixtures/factory-process";
 const ClientSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
 };
-test("independent editor edge fences origin/user/session/epoch, strips credentials and revokes HTTP/WS/source streams", async () => {
+async function verifyEditorIngress(protocol: string) {
   const fixture = await factoryProcess();
   const database = fixture.connect();
   const userID = crypto.randomUUID();
@@ -141,11 +141,13 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
   const noCompute = async (): Promise<never> => {
     throw new Error("Browsing must not start compute");
   };
+  const publicFactory = new URL(frontend.url);
+  publicFactory.protocol = protocol;
   edge = createDeveloperIDEEdge(
     database,
     editors,
     sources,
-    frontend.url.origin,
+    publicFactory.origin,
     createDeveloperIDERuntime(
       database,
       {
@@ -181,15 +183,26 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
     );
     const issued = new URL(await edge.issue(userID, sessionID, true, source.workspaceID));
     expect(issued.hostname).toBe(
-      `${userID.replaceAll("-", "")}-1-h${frontend.url.port}-editor.runtime.localhost`,
+      `${userID.replaceAll("-", "")}-1-${protocol === "https:" ? "s" : "h"}${frontend.url.port}-editor.runtime.localhost`,
     );
-    const redeemed = await edge.route(new Request(issued));
+    const backendURL = new URL(issued);
+    backendURL.protocol = "http:";
+    const redeemed = await edge.route(new Request(backendURL));
     expect(redeemed.status).toBe(302);
     const setCookie = redeemed.headers.get("set-cookie") ?? "";
     expect(setCookie).toContain("HttpOnly; SameSite=None; Secure; Partitioned");
     const cookie = setCookie.split(";")[0] ?? "";
     const editorURL = new URL(redeemed.headers.get("location") ?? "");
+    expect(editorURL.protocol).toBe(protocol);
     expect(editorURL.searchParams.has("factory-grant")).toBe(false);
+    const topLevel = new URL(await edge.issue(userID, sessionID, false, source.workspaceID));
+    topLevel.protocol = "http:";
+    const topLevelAccess = await edge.route(new Request(topLevel));
+    expect(topLevelAccess.status).toBe(302);
+    expect(topLevelAccess.headers.get("set-cookie")).toContain("SameSite=Lax");
+    expect(topLevelAccess.headers.get("set-cookie")?.includes("; Secure")).toBe(
+      protocol === "https:",
+    );
     expect((await edge.route(new Request(issued))).status).toBe(401);
     const wrongHost = new URL(editorURL);
     wrongHost.hostname = "127.0.0.1";
@@ -259,8 +272,10 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
         )
       ).status,
     ).toBe(403);
+    const sourceBackendURL = new URL(sourceURL);
+    sourceBackendURL.protocol = "http:";
     const sourceResponse = await edge.route(
-      new Request(sourceURL, {
+      new Request(sourceBackendURL, {
         method: "POST",
         body: '{"path":"src/version.txt"}',
         headers: { cookie, origin: editorURL.origin },
@@ -365,4 +380,10 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
       await fixture.dispose();
     }
   }
-}, 30_000);
+}
+
+test.each(["http:", "https:"])(
+  "%s independent editor edge fences origin/user/session/epoch behind its HTTP ingress, strips credentials and revokes HTTP/WS/source streams",
+  verifyEditorIngress,
+  30_000,
+);

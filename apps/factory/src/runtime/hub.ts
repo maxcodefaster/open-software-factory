@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import { RuntimeProcessEvents } from "./process-events";
+import { factoryRequestURL } from "../request-origin";
 
 const protocol = "factory-runtime-connector-v1";
 
@@ -91,6 +92,18 @@ type BrowserStream = {
   pending: Array<{ messageType: 1 | 2; data: string }>;
 };
 
+type ConnectorAuthority = {
+  parentHash: string;
+  childHash: string;
+  generation: number;
+};
+
+type StatusObservation = {
+  authority: ConnectorAuthority | undefined;
+  terminal: boolean;
+  timer?: Timer;
+};
+
 export class RuntimeHub {
   readonly #terminalSockets = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
   readonly #parents = new Map<string, ServerWebSocket<RuntimeSocketData>>();
@@ -119,11 +132,9 @@ export class RuntimeHub {
       timer: Timer;
     }
   >();
-  readonly #tokens = new Map<
-    string,
-    { parentHash: string; childHash: string; generation: number }
-  >();
+  readonly #tokens = new Map<string, ConnectorAuthority>();
   readonly #disconnectTimers = new Map<string, Timer>();
+  readonly #statusObservations = new Map<string, StatusObservation>();
   readonly #processes = new Map<string, Map<string, RuntimeProcessSnapshot>>();
   readonly processEvents = new RuntimeProcessEvents((attemptID) => this.processes(attemptID));
   readonly #appChannels = new Map<string, Set<string>>();
@@ -139,6 +150,65 @@ export class RuntimeHub {
     private readonly now = Date.now,
   ) {
     this.#onStatus = onStatus;
+  }
+
+  #observeStatus(producer: ServerWebSocket<RuntimeSocketData>, phase: string, error?: string) {
+    if (producer.data.kind !== "connector") return;
+    const { attemptID, role } = producer.data;
+    const authority = this.#tokens.get(attemptID);
+    const key = `${attemptID}:${role}`;
+    const terminal = ["stopped", "failed", "cleanup-failed"].includes(phase);
+    const previous = this.#statusObservations.get(key);
+    if (previous && previous.authority === authority && previous.terminal && !terminal) return;
+    if (previous?.timer) clearTimeout(previous.timer);
+    const observation: StatusObservation = { authority, terminal };
+    this.#statusObservations.set(key, observation);
+    const forget = () => {
+      if (this.#statusObservations.get(key) !== observation) return;
+      if (observation.timer) clearTimeout(observation.timer);
+      this.#statusObservations.delete(key);
+    };
+    const relevant = () => {
+      if (
+        !authority ||
+        this.#tokens.get(attemptID) !== authority ||
+        this.#statusObservations.get(key) !== observation
+      )
+        return false;
+      if (terminal) return true;
+      const current = role === "parent" ? this.#parents : this.#children;
+      return phase === "reconnecting" || phase === "disconnected"
+        ? !current.has(attemptID)
+        : current.get(attemptID) === producer;
+    };
+    const unavailable = () => {
+      // Status is observation, not authority to replay a create or inference.
+      // Never let its rejected database work escape a WebSocket callback.
+      if (!relevant()) {
+        forget();
+        return;
+      }
+      console.error("Runtime status observation is unavailable; recorded intent was retained");
+      // Keep healthy compute connected. A fresh observation supersedes this
+      // retry, and revocation cancels it. Terminal facts survive producer close.
+      observation.timer = setTimeout(() => {
+        delete observation.timer;
+        if (!relevant()) {
+          forget();
+          return;
+        }
+        deliver();
+      }, 1_000);
+      observation.timer.unref();
+    };
+    const deliver = () => {
+      try {
+        void this.#onStatus(attemptID, phase, error).then(forget, unavailable);
+      } catch {
+        unavailable();
+      }
+    };
+    deliver();
   }
 
   allow(attemptID: string, generation: number, parentHash: string, childHash: string) {
@@ -252,7 +322,7 @@ export class RuntimeHub {
         ),
       );
       if (this.#parents.has(socket.data.attemptID)) {
-        void this.#onStatus(socket.data.attemptID, "ready");
+        this.#observeStatus(socket, "ready");
       }
       return;
     }
@@ -261,7 +331,7 @@ export class RuntimeHub {
       return;
     }
     if (socket.data.role === "child" && message.type === "status" && message.phase) {
-      void this.#onStatus(socket.data.attemptID, message.phase, message.error);
+      this.#observeStatus(socket, message.phase, message.error);
       return;
     }
     if (
@@ -307,7 +377,7 @@ export class RuntimeHub {
       const timer = this.#disconnectTimers.get(`${socket.data.attemptID}:parent`);
       if (timer) clearTimeout(timer);
       this.#disconnectTimers.delete(`${socket.data.attemptID}:parent`);
-      void this.#onStatus(socket.data.attemptID, message.phase, message.error);
+      this.#observeStatus(socket, message.phase, message.error);
       return;
     }
     if (socket.data.role === "parent" && message.type === "hello" && message.role === "parent") {
@@ -315,7 +385,7 @@ export class RuntimeHub {
       if (timer) clearTimeout(timer);
       this.#disconnectTimers.delete(`${socket.data.attemptID}:parent`);
       if (this.#children.has(socket.data.attemptID)) {
-        void this.#onStatus(socket.data.attemptID, "ready");
+        this.#observeStatus(socket, "ready");
       }
       return;
     }
@@ -446,7 +516,7 @@ export class RuntimeHub {
       connections.delete(socket.data.attemptID);
       this.#failAttemptStreams(attemptID, "Runtime channel disconnected");
       if (this.#terminalSockets.has(socket)) return;
-      void this.#onStatus(attemptID, "reconnecting", `${role} connector reconnecting`);
+      this.#observeStatus(socket, "reconnecting", `${role} connector reconnecting`);
       const timerKey = `${attemptID}:${role}`;
       const previous = this.#disconnectTimers.get(timerKey);
       if (previous) clearTimeout(previous);
@@ -455,7 +525,7 @@ export class RuntimeHub {
         const reconnected =
           role === "child" ? this.#children.has(attemptID) : this.#parents.has(attemptID);
         if (!reconnected) {
-          void this.#onStatus(attemptID, "disconnected", `${role} connector did not reconnect`);
+          this.#observeStatus(socket, "disconnected", `${role} connector did not reconnect`);
         }
       }, 15_000);
       this.#disconnectTimers.set(timerKey, timer);
@@ -701,6 +771,15 @@ export class RuntimeHub {
     this.#activity.delete(attemptID);
     this.#idleClaims.delete(attemptID);
     this.#tokens.delete(attemptID);
+    for (const role of ["parent", "child"]) {
+      const key = `${attemptID}:${role}`;
+      const observation = this.#statusObservations.get(key);
+      if (observation?.timer) clearTimeout(observation.timer);
+      this.#statusObservations.delete(key);
+      const disconnected = this.#disconnectTimers.get(key);
+      if (disconnected) clearTimeout(disconnected);
+      this.#disconnectTimers.delete(key);
+    }
     const parent = this.#parents.get(attemptID);
     const child = this.#children.get(attemptID);
     this.#parents.delete(attemptID);
@@ -888,7 +967,7 @@ export function safeRuntimeHeaders(headers: Headers) {
 
 export function appRuntimeHeaders(request: Request, path: string) {
   const headers = safeRuntimeHeaders(request.headers);
-  const url = new URL(request.url);
+  const url = factoryRequestURL(request, process.env["FACTORY_BASE_URL"]);
   const prefix = url.pathname.slice(0, url.pathname.length - new URL(path, url).pathname.length);
   // Internal health/browser-tool requests deliberately have no browser proxy
   // context. They never receive cookies or caller-supplied forwarding headers.

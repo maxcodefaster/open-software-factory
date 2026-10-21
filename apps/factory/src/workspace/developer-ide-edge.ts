@@ -10,6 +10,7 @@ import type { createDeveloperIDEController } from "./developer-ide-controller";
 import type { createDeveloperIDERuntime } from "./developer-ide-runtime";
 import type { createWorkspaceSourceController } from "./source-controller";
 import { CommandError } from "../command-error";
+import { factoryRequestURL } from "../request-origin";
 
 export interface DeveloperEditorSocketData {
   readonly kind: "developer-editor";
@@ -120,7 +121,7 @@ export function createDeveloperIDEEdge(
       return url.href;
     },
     async socketData(request: Request): Promise<DeveloperEditorSocketData | Response> {
-      const url = new URL(request.url);
+      const url = factoryRequestURL(request, factoryOrigin);
       const matched = url.pathname.match(editorRoute);
       const userID = matched?.[1];
       const epoch = Number(matched?.[2]);
@@ -150,7 +151,7 @@ export function createDeveloperIDEEdge(
       };
     },
     async executionSocketData(request: Request) {
-      const url = new URL(request.url);
+      const url = factoryRequestURL(request, factoryOrigin);
       const match = url.pathname.match(editorRoute);
       if (!match?.[1] || !match[3] || request.headers.get("origin") !== url.origin)
         return json({ error: "Editor origin is invalid" }, 403);
@@ -162,7 +163,7 @@ export function createDeveloperIDEEdge(
       );
     },
     async route(request: Request) {
-      const url = new URL(request.url);
+      const url = factoryRequestURL(request, factoryOrigin);
       const matched = url.pathname.match(editorRoute);
       const userID = matched?.[1];
       const epoch = Number(matched?.[2]);

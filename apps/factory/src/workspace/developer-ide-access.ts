@@ -2,6 +2,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createDeveloperIDEController } from "./developer-ide-controller";
 import { CommandError } from "../command-error";
 import { developerIDEOrigin } from "../developer-ide-origin";
+import { factoryRequestURL } from "../request-origin";
 
 export interface DeveloperIDEGrant {
   readonly userID: string;
@@ -81,7 +82,7 @@ export function createDeveloperIDEAccess(
           location: url.href,
           "referrer-policy": "no-referrer",
           "cache-control": "no-store",
-          "set-cookie": `factory_editor_access=${accessToken}; Path=${developerIDEPath(userID, epoch)}; HttpOnly; ${grant.embedded ? "SameSite=None; Secure; Partitioned" : "SameSite=Lax"}; Max-Age=28800`,
+          "set-cookie": `factory_editor_access=${accessToken}; Path=${developerIDEPath(userID, epoch)}; HttpOnly; ${grant.embedded ? "SameSite=None; Secure; Partitioned" : `SameSite=Lax${url.protocol === "https:" ? "; Secure" : ""}`}; Max-Age=28800`,
         },
       });
     },
@@ -97,7 +98,7 @@ export function createDeveloperIDEAccess(
         !grant ||
         grant.userID !== userID ||
         grant.epoch !== epoch ||
-        !originMatches(new URL(request.url), grant)
+        !originMatches(factoryRequestURL(request, factoryOrigin), grant)
       )
         return undefined;
       if (!(await valid(grant)) || grants.get(token) !== grant) {
