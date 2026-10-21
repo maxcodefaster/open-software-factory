@@ -3,8 +3,8 @@ import { workspaceSourceIdentity } from "../../workspace-domain/src/source";
 import { createKubernetesClient } from "./client";
 import { renderWorkspaceSourceResources } from "./source-manifest";
 import {
-  createWorkspaceSourceClient,
   confirmSourceRoot,
+  createWorkspaceSourceClient,
   type SourceResources,
 } from "./workspace-source";
 
@@ -189,10 +189,115 @@ test("partial source still rechecks the namespace UID immediately before apply",
     calls.push(args);
     return JSON.stringify({ items: [namespace] });
   });
-  await expect(client.prepare(input)).rejects.toThrow("Refusing to adopt existing namespace");
+  await expect(client.prepare({ ...input, claimUID: null, podUID: null })).rejects.toThrow(
+    "Refusing to adopt existing namespace",
+  );
   expect(calls).toHaveLength(1);
   client.close();
 });
+
+test("a missing confirmed source Pod cannot be recreated under its old access epoch", async () => {
+  const observed = resources().filter((resource) => resource.kind !== "Pod");
+  let applies = 0;
+  const kubernetes = createKubernetesClient(async (args) => {
+    if (args[0] === "get") return { stdout: JSON.stringify(observed[0]), stderr: "", exitCode: 0 };
+    applies++;
+    return { stdout: "", stderr: "", exitCode: 0 };
+  });
+  const client = createWorkspaceSourceClient(kubernetes, async () =>
+    JSON.stringify({ items: observed }),
+  );
+  try {
+    await expect(client.prepare(input)).rejects.toThrow("Recorded source Pod disappeared");
+    expect(applies).toBe(0);
+  } finally {
+    client.close();
+  }
+});
+
+function replacedSource(corruption?: string) {
+  let observed = resources().map((resource) =>
+    resource.kind === "Pod"
+      ? { ...resource, metadata: { ...resource.metadata, uid: "replacement-pod" } }
+      : resource,
+  );
+  const pod = observed.find((resource) => resource.kind === "Pod");
+  const secret = observed.find((resource) => resource.kind === "Secret");
+  const claim = observed.find((resource) => resource.kind === "PersistentVolumeClaim");
+  const namespace = observed.find((resource) => resource.kind === "Namespace");
+  if (!pod || !secret || !claim || !namespace) throw new Error("Missing owned source fixture");
+  const container = pod.spec.containers[0];
+  const data = secret.data;
+  if (!container || !data) throw new Error("Missing source container or assignment");
+  if (corruption === "claim") claim.metadata.uid = "different-claim";
+  if (corruption === "namespace") namespace.metadata.uid = "different-namespace";
+  if (corruption === "assignment")
+    data["access.json"] = Buffer.from('{"token":"different"}').toString("base64");
+  if (corruption === "image") container.image = "unowned:latest";
+  if (corruption === "environment")
+    Reflect.set(container, "env", [{ name: "UNOWNED", value: "changed" }]);
+  const deleted: Array<{ path: string; uid: string }> = [];
+  const client = createWorkspaceSourceClient(createKubernetesClient(), async (args, body) => {
+    if (args[0] === "delete") {
+      const path = args[2];
+      if (!path) throw new Error("Missing exact resource path");
+      const uid = (body as { preconditions: { uid: string } }).preconditions.uid;
+      deleted.push({ path, uid });
+      observed = observed.filter((resource) => resource.metadata.uid !== uid);
+      return "";
+    }
+    if (args[1]?.startsWith("pod/"))
+      return JSON.stringify({
+        items:
+          corruption === "pod-race"
+            ? observed.map((resource) =>
+                resource.kind === "Pod"
+                  ? { ...resource, metadata: { ...resource.metadata, uid: "second-replacement" } }
+                  : resource,
+              )
+            : observed,
+      });
+    if (args[1] === "pods" || args[1] === "pod") {
+      const resource = observed.find((resource) => resource.kind === "Pod");
+      return resource ? JSON.stringify(resource) : null;
+    }
+    if (args[1] === "secrets") return JSON.stringify(secret);
+    throw new Error(`Unexpected source cleanup operation: ${args[0]}`);
+  });
+  return { client, deleted, remaining: () => observed };
+}
+
+test("explicit source Stop can remove only a fully validated replacement, without adopting it or removing storage", async () => {
+  const f = replacedSource();
+  try {
+    await expect(f.client.observe(input)).rejects.toThrow("identity differs");
+    await f.client.stop(input);
+    expect(f.deleted.map((entry) => entry.uid)).toEqual(["replacement-pod", "secret-uid"]);
+    expect(
+      f.deleted.every((entry) => entry.path.startsWith(`/api/v1/namespaces/${input.namespace}/`)),
+    ).toBe(true);
+    expect(f.remaining().map((resource) => resource.kind)).toEqual([
+      "Namespace",
+      "PersistentVolumeClaim",
+    ]);
+    expect(input.podUID).toBe("pod-uid");
+  } finally {
+    f.client.close();
+  }
+});
+
+test.each(["claim", "namespace", "assignment", "image", "environment", "pod-race"])(
+  "explicit source Stop still refuses a replacement with changed %s before deleting anything",
+  async (corruption) => {
+    const f = replacedSource(corruption);
+    try {
+      await expect(f.client.stop(input)).rejects.toThrow();
+      expect(f.deleted).toEqual([]);
+    } finally {
+      f.client.close();
+    }
+  },
+);
 
 test("complete source observation still rejects a conflicting assignment", async () => {
   const observed = resources().map((resource) =>

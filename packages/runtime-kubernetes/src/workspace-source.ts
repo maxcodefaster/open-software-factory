@@ -1,8 +1,9 @@
 import { z } from "zod";
-import { kubernetesCommand } from "./config";
 import { createKubernetesClient, type KubernetesClient } from "./client";
-import { renderWorkspaceSourceResources, type WorkspaceSourceManifest } from "./source-manifest";
+import { runCommand } from "./command";
+import { kubernetesCommand } from "./config";
 import { startServiceForward } from "./service-forward";
+import { renderWorkspaceSourceResources, type WorkspaceSourceManifest } from "./source-manifest";
 
 const metadata = z.object({
   uid: z.string().min(1),
@@ -356,6 +357,19 @@ export function createWorkspaceSourceClient(
         )
           throw new Error("Source capability differs from persisted intent");
       }
+      for (const [kind, uid, label] of [
+        ["Namespace", input.namespaceUID, "namespace"],
+        ["PersistentVolumeClaim", input.claimUID, "claim"],
+        ["Pod", input.podUID, "Pod"],
+      ] as const) {
+        const recorded = items.find((resource) => resource.kind === kind);
+        if (uid && !recorded)
+          throw new Error(
+            `Recorded source ${label} disappeared. Restart file access instead of recreating its confirmed identity`,
+          );
+        if (uid && recorded && metadata.parse(recorded.metadata).uid !== uid)
+          throw new Error(`Recorded source ${label} identity differs from persisted intent`);
+      }
       await kubernetes.apply(
         renderWorkspaceSourceResources(input),
         namespace ? { ownerID: input.identity.workspaceID, uid: namespace.uid } : undefined,
@@ -407,8 +421,20 @@ export function createWorkspaceSourceClient(
         if (!raw) continue;
         const resource = z.object({ metadata }).parse(JSON.parse(raw));
         requireSourceOwner(resource.metadata.labels, input);
-        if (expectedUID && resource.metadata.uid !== expectedUID)
-          throw new Error("Refusing to stop a replaced source Pod");
+        if (expectedUID && resource.metadata.uid !== expectedUID) {
+          if (!input.namespaceUID || !input.claimUID || !input.storageNode)
+            throw new Error("Refusing to stop a replaced source Pod without recorded storage");
+          // Stop may retire an exact replica on the same recorded storage, but
+          // observation and serving must never adopt its new UID. Validate the
+          // full private assignment and manifest before deleting only that
+          // observed UID. The old outcome stays immutable until a new epoch.
+          const replacement = completeSourceObservation(
+            { ...input, podUID: null },
+            await inventory(input),
+          );
+          if (!replacement || replacement.podUID !== resource.metadata.uid)
+            throw new Error("Source Pod identity changed during Stop");
+        }
         await command(
           ["delete", "--raw", `/api/v1/namespaces/${input.namespace}/${plural}/${name}`, "-f", "-"],
           {
@@ -505,4 +531,3 @@ function completeSourceObservation(
   const owner = metadata.parse(namespace.metadata);
   return validateSourceObservation(input, { pod, claim, secret, namespace: owner });
 }
-import { runCommand } from "./command";

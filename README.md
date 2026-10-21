@@ -92,6 +92,9 @@ receives them. Retrying work requires a new explicit request; reconnecting never
 Failed file access and editor services have separate Restart actions. Each confirms Stop before
 starting another access epoch, without restarting Apps or Builds. Restarting the editor can lose
 unsaved editor changes; restarting file access retains editor buffers.
+Missing confirmed source resources are never recreated under their old access epoch. Explicit file
+access Stop can retire a replaced Pod only after validating its full assignment and manifest against
+the same recorded Namespace and volume. It never adopts that Pod's identity or removes source storage.
 Temporary editor observation or connection loss rechecks the same recorded service automatically.
 An initial unavailable editor document reconnects without a manual reload. An already open editor
 is never reloaded by that recovery, so its dirty buffers stay in place. Readiness changes do not
