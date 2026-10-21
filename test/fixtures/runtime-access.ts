@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { eventually } from "./factory-process";
 
 const ClientSocket = WebSocket as typeof WebSocket & {
@@ -17,7 +18,8 @@ export async function runtimeAccessCookie(
   );
   expect(grant.status).toBe(302);
   const location = new URL(grant.headers.get("location") ?? "");
-  expect(location.hostname).toBe(`${attemptID.replaceAll("-", "")}.${channel}.runtime.localhost`);
+  if (channel !== "app" && channel !== "ide") throw new Error("Invalid runtime access channel");
+  expect(location.origin).toBe(appRuntimeOrigin(base, attemptID, channel));
   expect(location.port).toBe(new URL(base).port);
   const redeemed = await fetch(`${base}${location.pathname}${location.search}`, {
     redirect: "manual",

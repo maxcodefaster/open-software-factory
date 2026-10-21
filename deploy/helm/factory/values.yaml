@@ -1,0 +1,38 @@
+# Kept in this repository during development. Build/load an application image
+# containing the exact runtime-artifacts.json before local acceptance.
+image: ""
+imagePullPolicy: IfNotPresent
+publicURL: ""
+forgejoPublicURL: ""
+development: false
+# Only for development port-forwarding. Use the same loopback hostname as publicURL.
+# Ingress installations use publicURL/zero automatically.
+developmentZeroURL: ""
+adminEmail: admin@factory.local
+
+# Empty uses the cluster's default dynamically provisioned RWO StorageClass.
+storageClass: ""
+stateSize: 1Gi
+databaseSize: 8Gi
+forgejoSize: 8Gi
+openbaoSize: 1Gi
+zeroSize: 2Gi
+
+# Optional extra CA for private runtime image registries. The Secret must have
+# a ca.crt key. Without it, Factory uses the image's normal system trust bundle.
+registryCASecret: ""
+modelAllowedOrigins: []
+
+ingress:
+  enabled: false
+  className: ""
+  tlsSecret: ""
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi

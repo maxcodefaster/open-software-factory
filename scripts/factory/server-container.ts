@@ -162,9 +162,7 @@ export async function prepareFactoryServerContainer(
       ...input.environment,
       NODE_ENV: input.environment["NODE_ENV"] ?? "development",
       KUBECONFIG: "/run/factory/kubeconfig",
-      FACTORY_KUBERNETES_CONTEXT:
-        input.environment["FACTORY_KUBERNETES_CONTEXT"] ??
-        (process.platform === "darwin" ? "orbstack" : ""),
+      FACTORY_KUBERNETES_CONTEXT: input.environment["FACTORY_KUBERNETES_CONTEXT"] ?? "",
     };
     const serialized = Object.entries(environment)
       .flatMap(([key, value]) => {
@@ -197,7 +195,6 @@ export async function prepareFactoryServerContainer(
     const mounts = [
       `type=bind,src=${directory},dst=${directory}`,
       `type=bind,src=${kubeconfig},dst=/run/factory/kubeconfig,readonly`,
-      "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
       ...credentialMounts,
     ];
     const shared = resolve(input.sharedStateDirectory);

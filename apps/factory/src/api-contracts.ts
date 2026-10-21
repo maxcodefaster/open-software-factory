@@ -93,6 +93,7 @@ export const bootstrapSchema = z.object({
   session: sessionSchema.nullable(),
   uiPreference: uiPreferenceSchema,
   zeroCacheURL: z.string(),
+  forgeOrigins: z.object({ browser: z.string().url(), transport: z.string().url() }).optional(),
   modelRelayConfigured: z.boolean(),
   identity: z
     .object({ companySignIn: z.boolean(), sessionDays: z.number() })

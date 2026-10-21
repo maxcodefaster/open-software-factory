@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { kubernetesCommand } from "./config";
+import { kubernetesCommand, kubernetesConnectionEnvironment } from "./config";
 
 const payload = z.object({
   metadata: z.object({ name: z.string(), namespace: z.string() }),
@@ -83,6 +83,7 @@ async function boundedText(stream: ReadableStream<Uint8Array>, limit: number) {
 }
 async function readRaw(path: string) {
   const process = Bun.spawn(kubernetesCommand(["get", "--request-timeout=2s", "--raw", path]), {
+    env: kubernetesConnectionEnvironment(),
     stdout: "pipe",
     stderr: "pipe",
   });

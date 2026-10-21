@@ -182,7 +182,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
       if (!preview) throw new Error("Starter preview missing");
       const runtimeCookie = await runtimeAccessCookie(factory.base, cookie, preview.id, "app");
       const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-      const appOrigin = `http://${preview.id.replaceAll("-", "")}.app.runtime.localhost:${new URL(factory.base).port}`;
+      const appOrigin = `http://${preview.id.replaceAll("-", "")}-app.runtime.localhost:${new URL(factory.base).port}`;
       const prefix = `/runtime/${preview.id}/app`;
       const clientResponse = await fetch(`${appOrigin}${prefix}/@vite/client`, {
         headers: { cookie: runtimeCookie },

@@ -5,6 +5,7 @@ import { kubernetesCommand } from "./config";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
 import { createKubernetesClient, readRuntimeRegistryCA } from "./client";
 import { renderEnvboxPod } from "./envbox-pod";
+import { runtimeVolumeClaimSpec } from "./storage";
 
 export interface SlotObservation {
   readonly namespaceUID: string;
@@ -72,7 +73,7 @@ export function renderReserveResources(slot: ExecutionSlot, registryCA: string) 
       apiVersion: "v1",
       kind: "PersistentVolumeClaim" as const,
       metadata: { name: "runtime-data", namespace: slot.namespace, labels },
-      spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "8Gi" } } },
+      spec: runtimeVolumeClaimSpec(),
     },
     renderEnvboxPod({
       namespace: slot.namespace,

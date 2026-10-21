@@ -1,0 +1,56 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "factory.name" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tlsSecret }}
+  tls:
+    - secretName: {{ . | quote }}
+      hosts:
+        - {{ regexReplaceAll ":[0-9]+$" (urlParse $.Values.publicURL).host "" | quote }}
+        - {{ regexReplaceAll ":[0-9]+$" (urlParse $.Values.forgejoPublicURL).host "" | quote }}
+        - {{ printf "*.runtime.%s" (regexReplaceAll ":[0-9]+$" (urlParse $.Values.publicURL).host "") | quote }}
+  {{- end }}
+  rules:
+    {{- range $endpoint := list (dict "url" .Values.publicURL "service" "factory") (dict "url" .Values.forgejoPublicURL "service" "forgejo") }}
+    - host: {{ regexReplaceAll ":[0-9]+$" (urlParse $endpoint.url).host "" | quote }}
+      http:
+        paths:
+          {{- if eq $endpoint.service "factory" }}
+          - path: /zero
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "factory.name" $ }}-zero
+                port:
+                  number: 4848
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "factory.name" $ }}-{{ $endpoint.service }}
+                port:
+                  number: 3000
+    {{- end }}
+    - host: {{ printf "*.runtime.%s" (regexReplaceAll ":[0-9]+$" (urlParse .Values.publicURL).host "") | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "factory.name" . }}-factory
+                port:
+                  number: 3000
+{{- end }}

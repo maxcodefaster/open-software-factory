@@ -63,6 +63,8 @@ import { createOpenBaoEnvironmentSecrets } from "./environments/openbao";
 import { createEnvironmentRoutes } from "./environments/routes";
 import { createRuntimeEnvironmentEndpoint } from "./environments/runtime";
 import { json, sameFactoryOrigin } from "./http";
+import { installationInMaintenance } from "./installation/maintenance";
+import { appRuntimeOrigin } from "./runtime-origins";
 import { serveFactory } from "./http-listener";
 import { createKnowledgeController } from "./knowledge/controller";
 import { factoryForgeSource } from "./knowledge/forge-source";
@@ -122,6 +124,10 @@ const { FACTORY_ADMIN_PASSWORD, FACTORY_AUTH_SECRET, FACTORY_HOST, FACTORY_ZERO_
   process.env;
 const factoryHost = FACTORY_HOST ?? "127.0.0.1";
 const factoryOrigin = new URL(process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000").origin;
+const forgeAPIURL = process.env["FACTORY_FORGEJO_API_URL"];
+if (!forgeAPIURL) throw new Error("Configure the Factory Forgejo API before starting the server");
+const forgeTransportOrigin = new URL(forgeAPIURL).origin;
+const forgePublicOrigin = new URL(process.env["FACTORY_FORGEJO_PUBLIC_URL"] ?? forgeAPIURL).origin;
 const { FACTORY_STARTUP_ID } = process.env;
 const startupID = FACTORY_STARTUP_ID ?? crypto.randomUUID();
 if (
@@ -272,7 +278,7 @@ const accessRevocation = createAccessRevocation(database, revokeAccountAccess);
 const forgeIdentityRoutes = createForgeIdentityRoutes({
   database,
   identity: factoryAuth,
-  forgeOrigin: new URL(process.env["FACTORY_FORGEJO_API_URL"]!).origin,
+  forgeOrigin: forgePublicOrigin,
   discoveryURL:
     process.env["FACTORY_FORGE_DISCOVERY_URL"] ??
     `${factoryOrigin}/api/auth/.well-known/openid-configuration`,
@@ -288,7 +294,7 @@ const accessRoutes = createAccessRoutes(
     developerIDEEdge.revokeUser(userID);
   },
   revokeAccountAccess,
-  forgeAccess ? new URL(process.env["FACTORY_FORGEJO_API_URL"]!).origin : undefined,
+  forgeAccess ? forgePublicOrigin : undefined,
 );
 const observeRecoveredRuntimes = await runtimeController.recover();
 await workspaceSources.recover();
@@ -551,6 +557,22 @@ await setupReadiness
   .catch(() => console.error("Project preparation recovery is unavailable"));
 
 async function route(request: Request) {
+  if (
+    process.env["FACTORY_HELM_RELEASE"] &&
+    !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
+    new URL(request.url).pathname.startsWith("/api/") &&
+    !new URL(request.url).pathname.startsWith("/api/auth/") &&
+    new URL(request.url).pathname !== "/api/zero/query" &&
+    (await installationInMaintenance(database))
+  )
+    return json(
+      {
+        error:
+          "Factory is being updated. Your saved work is retained. Try again after maintenance.",
+      },
+      503,
+      { "retry-after": "30" },
+    );
   const url = new URL(request.url);
   try {
     const runtimeEnvironment = url.pathname.match(
@@ -615,7 +637,14 @@ async function route(request: Request) {
           uiPreference: session
             ? await uiPreferenceController.get(session.user.id)
             : { desktopBackgroundKey: "river-landscape" },
-          zeroCacheURL: FACTORY_ZERO_CACHE_URL ?? "http://127.0.0.1:4948",
+          zeroCacheURL:
+            process.env["FACTORY_ZERO_CACHE_PUBLIC_URL"] ??
+            FACTORY_ZERO_CACHE_URL ??
+            "http://127.0.0.1:4948",
+          forgeOrigins: {
+            browser: forgePublicOrigin,
+            transport: forgeTransportOrigin,
+          },
           modelRelayConfigured: Boolean(
             (process.env["FACTORY_MODEL_BASE_URL"] && process.env["FACTORY_MODEL_API_KEY"]) ||
               (await database.client.begin((sql) => modelConnections.reference("build", sql))),
@@ -1380,9 +1409,8 @@ async function route(request: Request) {
         expires: Date.now() + 8 * 60 * 60 * 1_000,
         mode: url.searchParams.get("embed") === "1" ? "embedded" : "top-level",
       });
-      const runtimeHost = `${attemptID.replaceAll("-", "")}.${channel}.runtime.localhost`;
       const destination = new URL(path, process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000");
-      destination.hostname = runtimeHost;
+      destination.host = new URL(appRuntimeOrigin(factoryOrigin, attemptID, channel)).host;
       destination.searchParams.set("factory-grant", token);
       return Response.redirect(destination, 302);
     }

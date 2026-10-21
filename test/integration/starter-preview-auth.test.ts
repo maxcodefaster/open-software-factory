@@ -19,7 +19,7 @@ test("Starter authentication works behind the real scoped App proxy path and ret
   const number = port.port;
   await port.stop(true);
   const id = crypto.randomUUID();
-  const host = `${id.replaceAll("-", "")}.app.runtime.localhost:3000`;
+  const host = `${id.replaceAll("-", "")}-app.runtime.localhost:3000`;
   const prefix = `/runtime/${id}/preview/app`;
   try {
     await database.client`CREATE DATABASE ${database.client(databaseName)}`;
@@ -151,7 +151,7 @@ test("Starter authentication works behind the real scoped App proxy path and ret
           url.pathname === "/factory-shell"
         ) {
           return new Response(
-            `<h1>Factory shell</h1><iframe title="Starter preview" width="100%" height="680" src="http://${id.replaceAll("-", "")}.app.runtime.localhost:${url.port}${prefix}/"></iframe>`,
+            `<h1>Factory shell</h1><iframe title="Starter preview" width="100%" height="680" src="http://${id.replaceAll("-", "")}-app.runtime.localhost:${url.port}${prefix}/"></iframe>`,
             { headers: { "content-type": "text/html" } },
           );
         }
@@ -192,7 +192,7 @@ test("Starter authentication works behind the real scoped App proxy path and ret
         errors.push(`HTTP ${response.status()}`);
     });
     await page.goto(
-      `http://${id.replaceAll("-", "")}.app.runtime.localhost:${proxy.port}${prefix}/`,
+      `http://${id.replaceAll("-", "")}-app.runtime.localhost:${proxy.port}${prefix}/`,
     );
     const module = await fetch(`http://127.0.0.1:${number}/src/web.tsx`, { headers });
     const source = await module.text();

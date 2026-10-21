@@ -74,6 +74,7 @@ import {
   retainAgentActivity,
 } from "./agent-view-state";
 import { apiRequest, emptyResponseSchema } from "./api-client";
+import { repositoryBrowserURL, repositoryLink } from "./knowledge/source-link";
 import type { Epic } from "./api-contracts";
 import {
   type AgentView,
@@ -203,6 +204,7 @@ export function AuthenticatedFactory(props: Bootstrap & { session: Session }) {
         session={props.session}
         uiPreference={props.uiPreference}
         modelRelayConfigured={props.modelRelayConfigured}
+        forgeOrigins={props.forgeOrigins}
       />
     </ZeroProvider>
   );
@@ -212,10 +214,13 @@ function FactoryWorkspace(props: {
   session: Session;
   uiPreference: UIPreference;
   modelRelayConfigured: boolean;
+  forgeOrigins?: Bootstrap["forgeOrigins"];
 }) {
   const [modelRelayConfigured, setModelRelayConfigured] = createSignal(props.modelRelayConfigured);
   const zero = useZero<FactoryZeroSchema, undefined, FactoryZeroContext>();
   const projects = useZeroQuery(() => zeroQueries.projects.list());
+  const browserRepository = () =>
+    repositoryBrowserURL(selectedProject()?.repositoryUrl ?? "", props.forgeOrigins);
   const memberships = useZeroQuery(() => zeroQueries.memberships.list());
   const [selectedProjectID, setSelectedProjectID] = createSignal<string>();
   const securityReturn = takeSettingsReturn(props.session.user.id);
@@ -3237,13 +3242,12 @@ function FactoryWorkspace(props: {
                             } else if (source === "epic") {
                               setSelectedEpicID(id);
                             } else if (source === "code") {
-                              const url = selectedProject()?.repositoryUrl?.replace(/\.git$/, "");
-                              if (url && commitSha && path)
-                                window.open(
-                                  `${url}/src/commit/${commitSha}/${path.split("/").map(encodeURIComponent).join("/")}`,
-                                  "_blank",
-                                  "noopener,noreferrer",
-                                );
+                              const repository = browserRepository();
+                              const link =
+                                repository && commitSha && path
+                                  ? repositoryLink(repository, commitSha, path)
+                                  : undefined;
+                              if (link) window.open(link, "_blank", "noopener,noreferrer");
                             } else {
                               setOpenRepositoryDocument(undefined);
                               setSelectedKnowledgePageID(id);
@@ -3743,7 +3747,7 @@ function FactoryWorkspace(props: {
                 <KnowledgeWorkspace
                   projectID={selectedProjectID() ?? ""}
                   userID={props.session.user.id}
-                  repositoryURL={selectedProject()?.repositoryUrl ?? ""}
+                  repositoryURL={browserRepository() ?? ""}
                   canDevelop={canDevelopProject()}
                   onOpenIDE={() => {
                     const target = ideTargets().find((entry) => !entry.changeId);

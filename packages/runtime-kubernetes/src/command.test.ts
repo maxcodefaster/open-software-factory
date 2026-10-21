@@ -1,6 +1,23 @@
 import { expect, test } from "bun:test";
 import { runCommand } from "./command";
 
+test("commands inherit the current configured environment, not Bun's original startup environment", async () => {
+  const key = "FACTORY_OWNED_COMMAND_ENVIRONMENT";
+  const previous = process.env[key];
+  process.env[key] = "current-owned-configuration";
+  try {
+    const result = await runCommand([
+      process.execPath,
+      "-e",
+      `process.stdout.write(process.env["${key}"] ?? "missing")`,
+    ]);
+    expect(result.stdout).toBe("current-owned-configuration");
+  } finally {
+    if (previous === undefined) delete process.env[key];
+    else process.env[key] = previous;
+  }
+});
+
 test("a hung infrastructure process releases its caller within the deadline", async () => {
   await expect(
     runCommand([process.execPath, "-e", "setInterval(() => {}, 1000)"], undefined, {

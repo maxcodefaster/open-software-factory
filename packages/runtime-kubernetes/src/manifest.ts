@@ -3,6 +3,7 @@ import { renderEnvboxPod } from "./envbox-pod";
 import { verificationSupervisor } from "./verification-process";
 import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
+import { runtimeVolumeClaimSpec } from "./storage";
 
 export interface RuntimeManifestInput {
   readonly attemptID: string;
@@ -242,7 +243,7 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
       apiVersion: "v1",
       kind: "PersistentVolumeClaim" as const,
       metadata: { name: "runtime-data", namespace: input.namespace, labels },
-      spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "8Gi" } } },
+      spec: runtimeVolumeClaimSpec(),
     },
     renderEnvboxPod({ ...input, hostname: input.attemptID, labels, mode }),
   ];

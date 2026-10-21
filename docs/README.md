@@ -328,6 +328,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | [0010](adr/0010-factory-identity-and-change-writers.md) | Factory identity and exclusive Change editing |
 | [0011](adr/0011-delivered-branch-retention.md) | Delivered branches retain source behind a closed write fence |
 | [0012](adr/0012-independent-candidate-review.md) | Independent review uses a fresh, read-only OpenCode Session |
+| [0013](adr/0013-kubernetes-native-installation.md) | One Helm installation on existing Kubernetes, independent of the workstation |
 
 ## Verification and operating limits
 

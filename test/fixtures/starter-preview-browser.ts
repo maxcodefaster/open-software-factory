@@ -11,7 +11,7 @@ export async function starterPreviewBrowser(input: {
   screenshot: string;
 }) {
   const { browser, base, cookie, previewID, heading, screenshot } = input;
-  const origin = `http://${previewID.replaceAll("-", "")}.app.runtime.localhost:${new URL(base).port}`;
+  const origin = `http://${previewID.replaceAll("-", "")}-app.runtime.localhost:${new URL(base).port}`;
   const grant = await runtimeAccessCookie(base, cookie, previewID, "app");
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   try {

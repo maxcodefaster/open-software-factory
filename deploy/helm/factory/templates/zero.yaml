@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "factory.name" . }}-zero
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "factory.name" . }}-zero
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: zero
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: zero
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 600
+      initContainers:
+        - name: wait-for-factory-schema
+          image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+          command:
+            - sh
+            - -c
+            - |
+              until psql --no-password -Atqc "SELECT EXISTS(SELECT 1 FROM pg_publication WHERE pubname='factory_zero_publication')" 2>/dev/null | grep -qx t; do sleep 2; done
+          env:
+            - {name: PGHOST, value: "{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc"}
+            - {name: PGPORT, value: "5432"}
+            - {name: PGUSER, value: factory}
+            - {name: PGDATABASE, value: factory}
+            - {name: PGCONNECT_TIMEOUT, value: "2"}
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 250m, memory: 128Mi}
+      containers:
+        - name: zero
+          image: docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437
+          env:
+            - name: FACTORY_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+            - name: ZERO_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: zero-password}
+            {{- range $key := list "ZERO_UPSTREAM_DB" "ZERO_CVR_DB" "ZERO_CHANGE_DB" }}
+            - name: {{ $key }}
+              value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" $ }}-postgres.{{ $.Release.Namespace }}.svc:5432/factory"
+            {{- end }}
+            - {name: ZERO_REPLICA_FILE, value: /data/replica.db}
+            - {name: ZERO_QUERY_URL, value: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000/api/zero/query"}
+            - {name: ZERO_MUTATE_URL, value: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000/api/zero/mutate"}
+            - {name: ZERO_ENABLE_CRUD_MUTATIONS, value: "false"}
+            - {name: ZERO_APP_PUBLICATIONS, value: factory_zero_publication}
+            - {name: ZERO_QUERY_FORWARD_COOKIES, value: "true"}
+            - {name: ZERO_MUTATE_FORWARD_COOKIES, value: "true"}
+            - {name: ZERO_AUTH_REVALIDATE_INTERVAL_SECONDS, value: "60"}
+            - {name: DO_NOT_TRACK, value: "1"}
+          readinessProbe:
+            httpGet: {path: /keepalive, port: 4848}
+            periodSeconds: 3
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        {{- include "factory.claim" (dict "root" . "size" .Values.zeroSize) | nindent 8 }}

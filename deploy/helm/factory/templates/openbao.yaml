@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "factory.name" . }}-openbao
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "factory.name" . }}-openbao
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: openbao
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: openbao
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      automountServiceAccountToken: false
+      containers:
+        - name: openbao
+          image: docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
+          command: [/usr/bin/bao, server, -config=/bao/config/config.json]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - 'bao status -address=https://{{ include "factory.name" . }}-openbao.{{ .Release.Namespace }}.svc:8200 -ca-cert=/bao/tls/ca.crt >/dev/null; result=$?; test "$result" -eq 0 -o "$result" -eq 2'
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /bao/data}
+            - {name: config, mountPath: /bao/config, readOnly: true}
+            - {name: tls, mountPath: /bao/tls, readOnly: true}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: "{{ include "factory.name" . }}-openbao"}
+        - name: tls
+          secret: {secretName: "{{ include "factory.name" . }}-openbao-tls", defaultMode: 256}
+        - name: temporary
+          emptyDir: {medium: Memory, sizeLimit: 16Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        {{- include "factory.claim" (dict "root" . "size" .Values.openbaoSize) | nindent 8 }}

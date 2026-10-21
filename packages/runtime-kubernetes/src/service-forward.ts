@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import { z } from "zod";
+import { kubernetesConnectionEnvironment } from "./config";
 
 // Match kubectl's normal Pod-running/forwarding startup window. This covers
 // process bootstrap as well as establishing the approved Kubernetes connection.
@@ -23,12 +24,7 @@ export function startServiceForward(role: "source" | "editor", namespace: string
       podName,
     ],
     {
-      env: {
-        PATH: process.env["PATH"],
-        HOME: process.env["HOME"],
-        KUBECONFIG: process.env["KUBECONFIG"],
-        FACTORY_KUBERNETES_CONTEXT: process.env["FACTORY_KUBERNETES_CONTEXT"],
-      },
+      env: kubernetesConnectionEnvironment(),
       stdin: "ignore",
       stdout: "ignore",
       stderr: "ignore",

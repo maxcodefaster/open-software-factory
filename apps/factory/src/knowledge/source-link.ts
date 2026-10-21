@@ -1,3 +1,37 @@
+export type RepositoryOrigins = { browser: string; transport: string };
+
+export function repositoryBrowserURL(
+  repositoryURL: string,
+  origins?: RepositoryOrigins,
+): string | undefined {
+  try {
+    const url = new URL(repositoryURL);
+    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) return;
+    if (origins) {
+      const browser = new URL(origins.browser);
+      const transport = new URL(origins.transport);
+      for (const origin of [browser, transport])
+        if (
+          !["http:", "https:"].includes(origin.protocol) ||
+          origin.username ||
+          origin.password ||
+          origin.pathname !== "/" ||
+          origin.search ||
+          origin.hash
+        )
+          return;
+      if (url.origin === transport.origin) {
+        url.protocol = browser.protocol;
+        url.host = browser.host;
+        url.port = browser.port;
+      }
+    }
+    return url.href;
+  } catch {
+    return;
+  }
+}
+
 export function repositoryLink(repositoryURL: string, commit: string, path?: string) {
   try {
     const url = new URL(repositoryURL);

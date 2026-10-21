@@ -1,4 +1,6 @@
 import type { WorkspaceSourceIdentity } from "../../workspace-domain/src/source";
+import { runtimeVolumeClaimSpec } from "./storage";
+import { runtimeNodeSelector } from "./config";
 
 export interface WorkspaceSourceManifest {
   readonly identity: WorkspaceSourceIdentity;
@@ -50,7 +52,7 @@ export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
       apiVersion: "v1",
       kind: "PersistentVolumeClaim" as const,
       metadata: { name: "runtime-data", namespace: input.namespace, labels: ownerLabels },
-      spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "8Gi" } } },
+      spec: runtimeVolumeClaimSpec(),
     },
     {
       apiVersion: "v1",
@@ -73,9 +75,7 @@ export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
         hostPID: false,
         hostIPC: false,
         shareProcessNamespace: false,
-        ...(input.storageNode
-          ? { nodeSelector: { "kubernetes.io/hostname": input.storageNode } }
-          : {}),
+        nodeSelector: runtimeNodeSelector(input.storageNode ?? undefined),
         securityContext: { seccompProfile: { type: "RuntimeDefault" } },
         initContainers: [],
         containers: [

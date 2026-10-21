@@ -1,0 +1,42 @@
+{{- range $service := list
+  (dict "name" "factory" "port" 3000)
+  (dict "name" "postgres" "port" 5432)
+  (dict "name" "forgejo" "port" 3000)
+  (dict "name" "zero" "port" 4848)
+  (dict "name" "openbao" "port" 8200) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "factory.name" $ }}-{{ $service.name }}
+  labels:
+    {{- include "factory.labels" $ | nindent 4 }}
+spec:
+  {{- if eq $service.name "openbao" }}
+  # Bootstrap must reach the encrypted store while it is still sealed.
+  publishNotReadyAddresses: true
+  {{- end }}
+  selector:
+    app.kubernetes.io/instance: {{ $.Release.Name | quote }}
+    app.kubernetes.io/component: {{ $service.name }}
+  ports:
+    - name: {{ if eq $service.name "postgres" }}postgres{{ else if eq $service.name "openbao" }}https{{ else }}http{{ end }}
+      port: {{ $service.port }}
+      targetPort: {{ $service.port }}
+{{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "factory.name" . }}-internal
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  # OIDC bootstrap and Zero may connect before public installation readiness.
+  # This Service is never exposed by the chart's public Ingress.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    app.kubernetes.io/component: factory
+  ports:
+    - {name: http, port: 3000, targetPort: 3000}

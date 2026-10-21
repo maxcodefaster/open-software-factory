@@ -3,12 +3,14 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
 import { requirePinnedImage } from "./preflight";
 
 const intentSchema = z.object({
   version: z.literal(1),
   id: z.uuid(),
   image: z.string(),
+  storageClass: z.string().optional(),
   namespaceUID: z.string().nullable(),
   claimUID: z.string().nullable(),
   podUID: z.string().nullable(),
@@ -135,6 +137,9 @@ async function storageCheck(
         version: 1,
         id: crypto.randomUUID(),
         image: input.image,
+        ...(process.env["FACTORY_STORAGE_CLASS"]
+          ? { storageClass: process.env["FACTORY_STORAGE_CLASS"] }
+          : {}),
         namespaceUID: null,
         claimUID: null,
         podUID: null,
@@ -416,7 +421,7 @@ async function storageCheck(
           JSON.parse(
             await run([
               "get",
-              "all,pvc,secret,cm,serviceaccounts,networkpolicies",
+              "pods,pvc,secrets,configmaps,serviceaccounts,networkpolicies,services,deployments,statefulsets,daemonsets,replicasets,jobs,cronjobs,replicationcontrollers",
               "-n",
               namespace,
               "-o",
@@ -470,11 +475,13 @@ async function storageCheck(
     while (Date.now() < deadline) {
       try {
         await ensure("Namespace", namespace);
-        const claim = await ensure("PersistentVolumeClaim", claimName, {
-          accessModes: ["ReadWriteOnce"],
-          resources: { requests: { storage: "8Gi" } },
-        });
+        const claim = await ensure(
+          "PersistentVolumeClaim",
+          claimName,
+          runtimeVolumeClaimSpec("8Gi", { FACTORY_STORAGE_CLASS: intent.storageClass ?? "" }),
+        );
         const pod = await ensure("Pod", probeName, {
+          nodeSelector: { "kubernetes.io/os": "linux" },
           automountServiceAccountToken: false,
           enableServiceLinks: false,
           restartPolicy: "Never",

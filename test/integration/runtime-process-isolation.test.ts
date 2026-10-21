@@ -19,7 +19,7 @@ test("isolated Factory runtime grants stay on its configured listener", async ()
         const destination = new URL(response.headers.get("location") ?? "");
         expect(destination.port).toBe(new URL(process.base).port);
         expect(destination.hostname).toBe(
-          `${owned.attemptID.replaceAll("-", "")}.${channel}.runtime.localhost`,
+          `${owned.attemptID.replaceAll("-", "")}-${channel}.runtime.localhost`,
         );
         expect(destination.pathname).toBe(path);
         expect(destination.searchParams.has("factory-grant")).toBe(true);

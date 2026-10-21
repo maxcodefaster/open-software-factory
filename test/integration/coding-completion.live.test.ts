@@ -116,7 +116,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
       }
       async function inspectApp(attemptID: string, label: string) {
         const access = await runtimeAccessCookie(base, cookie, attemptID, "app");
-        const origin = `http://${attemptID.replaceAll("-", "")}.app.runtime.localhost:${installation.ports.factory}`;
+        const origin = `http://${attemptID.replaceAll("-", "")}-app.runtime.localhost:${installation.ports.factory}`;
         const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
         try {
           await context.addCookies(

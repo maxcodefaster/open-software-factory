@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "factory.name" . }}-maintenance
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: maintenance
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: maintenance
+          image: {{ required "Set image to the available Factory development image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [bun, scripts/kubernetes/maintenance.ts]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          env:
+            - name: FACTORY_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+            - name: DATABASE_URL
+              value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc:5432/factory"
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}

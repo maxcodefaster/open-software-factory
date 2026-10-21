@@ -1,4 +1,5 @@
 import type { DeveloperIDEIdentity } from "../../workspace-domain/src/developer-ide";
+import { runtimeNodeSelector } from "./config";
 
 export interface DeveloperIDEResources {
   readonly identity: DeveloperIDEIdentity;
@@ -30,6 +31,7 @@ export function renderDeveloperIDEResources(input: DeveloperIDEResources) {
       kind: "Pod" as const,
       metadata: { name: input.identity.podName, namespace: input.identity.namespace, labels },
       spec: {
+        nodeSelector: runtimeNodeSelector(),
         restartPolicy: "Never",
         automountServiceAccountToken: false,
         enableServiceLinks: false,

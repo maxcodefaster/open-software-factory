@@ -10,7 +10,25 @@ projections. Mastra handles Project research and Requirements Interviews; OpenCo
 approved Changes. Forgejo owns Git and Verification runs. Every execution Sandbox uses Envbox,
 Sysbox, a private Docker daemon, the Dev Containers CLI and the Factory Runtime Connector.
 
-## Start locally
+## Install into existing Kubernetes
+
+The development Helm chart lives in [deploy/helm/factory](deploy/helm/factory/README.md).
+Install it directly from this repository; a public chart repository and release publication are
+not required during development. Kubernetes is provided by the operator. Factory does not
+install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
+
+The chart runs Factory, PostgreSQL, Forgejo, Zero and encrypted OpenBao in Kubernetes. Internal
+callbacks use Services and the application uses its ServiceAccount, without a personal kubeconfig
+or a mounted host Docker socket. Envbox execution still requires compatible Linux workers,
+permission for privileged outer Pods and usable persistent storage.
+
+Choose an available development application image containing the exact runtime artifact bundle,
+then supply the browser-facing Factory and Forgejo origins. See the chart's
+[installation and maintenance instructions](deploy/helm/factory/README.md) for local port forwarding,
+Ingress, credentials and retained data. Development images may be built locally; the installed
+application does not build its own tools or require a source checkout on the operator's machine.
+
+## Source development
 
 The source-development environment uses macOS with OrbStack's Linux Docker daemon and Kubernetes
 context `orbstack`. Install [mise](https://mise.jdx.dev/), enable that environment, then run:
@@ -178,24 +196,10 @@ including a local CA stored outside installation state. Neither a static neighbo
 network repair loop is needed. Rebuild the image and explicitly select it to adopt source or UI changes. Setting
 `FACTORY_SERVER_IMAGE=native` explicitly returns to a host process.
 
-### Run Factory through Compose
-
-The same application can run in a container, with Compose managing PostgreSQL, Forgejo,
-Zero and encrypted OpenBao. It still needs Kubernetes for Envbox execution. Compose does not
-replace the runtime with host containers. See [local deployment](deploy/local/README.md) for
-the Mac/Linux prerequisites, image publication and isolated local ports.
-
-With a published Factory image and a self-contained kubeconfig:
-
-```sh
-export FACTORY_IMAGE=ghcr.io/maxcodefaster/open-software-factory/factory:<published-version>
-export FACTORY_RUNTIME_HOST=192.168.139.2  # Example Linux node address; use your actual reachable host.
-docker compose --project-name factory-compose -f deploy/local/compose.yaml up -d factory
-```
-
-The initial password is generated privately in `.factory/compose/admin-password`. Provider
-connections are configured in Factory Settings. No Bun, Node or compiler is needed on the host
-when using published images. The publication workflow is manual; it does not publish on every push.
+Compose supplies only the source-development data services. It is not another Factory installation
+method. The application image starts the Kubernetes bootstrap and contains neither a Docker CLI
+nor a workstation certificate generator. Install that image with the
+[repository Helm chart](deploy/helm/factory/README.md).
 
 ## Repository layout
 

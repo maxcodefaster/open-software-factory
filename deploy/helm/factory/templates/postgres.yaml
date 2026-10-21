@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "factory.name" . }}-postgres
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "factory.name" . }}-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: postgres
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      automountServiceAccountToken: false
+      containers:
+        - name: postgres
+          image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
+          args: [postgres, -c, wal_level=logical]
+          env:
+            - {name: POSTGRES_DB, value: factory}
+            - {name: POSTGRES_USER, value: factory}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, factory, -d, factory]
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        {{- include "factory.claim" (dict "root" . "size" .Values.databaseSize) | nindent 8 }}

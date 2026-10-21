@@ -1,0 +1,50 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "factory.name" . }}-config
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+data:
+  HOME: "/tmp/factory-home"
+  KUBECONFIG: "/tmp/factory-kubernetes/config.json"
+  FACTORY_KUBERNETES_CONTEXT: "factory"
+  NODE_ENV: {{ ternary "development" "production" .Values.development | quote }}
+  FACTORY_HOST: "0.0.0.0"
+  FACTORY_PORT: "3000"
+  FACTORY_BASE_URL: {{ include "factory.publicURL" . | quote }}
+  FACTORY_AUTH_COOKIE_PREFIX: "factory-{{ printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 16 }}"
+  FACTORY_FORGEJO_PUBLIC_URL: {{ include "factory.forgeURL" . | quote }}
+  FACTORY_INTERNAL_URL: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000"
+  FACTORY_WIKI_WEBHOOK_URL: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000"
+  FACTORY_AUTH_BACKCHANNEL_URL: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000"
+  FACTORY_FORGE_DISCOVERY_URL: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000/api/auth/.well-known/openid-configuration"
+  FACTORY_FORGEJO_API_URL: "http://{{ include "factory.name" . }}-forgejo.{{ .Release.Namespace }}.svc:3000/api/v1/"
+  FACTORY_ZERO_CACHE_URL: "http://{{ include "factory.name" . }}-zero.{{ .Release.Namespace }}.svc:4848"
+  FACTORY_ZERO_CACHE_PUBLIC_URL: {{ include "factory.zeroBrowserURL" . | quote }}
+  FACTORY_OPENBAO_URL: "https://{{ include "factory.name" . }}-openbao.{{ .Release.Namespace }}.svc:8200"
+  FACTORY_OPENBAO_CA_FILE: "/run/factory/openbao/ca.crt"
+  FACTORY_REGISTRY_CA_FILE: {{ ternary "/run/factory/registry/ca.crt" "/etc/ssl/certs/ca-certificates.crt" (not (empty .Values.registryCASecret)) | quote }}
+  FACTORY_STATE_DIRECTORY: "/var/lib/factory"
+  FACTORY_STORAGE_CLASS: {{ .Values.storageClass | quote }}
+  FACTORY_ADMIN_EMAIL: {{ .Values.adminEmail | quote }}
+  FACTORY_MODEL_ALLOWED_ORIGINS: {{ join "," .Values.modelAllowedOrigins | quote }}
+  FACTORY_FORGEJO_OWNER: "factory-mutation"
+  FACTORY_FORGEJO_POD: "{{ include "factory.name" . }}-forgejo-0"
+  FACTORY_HELM_RELEASE: {{ .Release.Name | quote }}
+  FACTORY_EXECUTION_RESERVE_TARGET: "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "factory.name" . }}-openbao
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "storage": {"raft": {"path": "/bao/data", "node_id": "factory"}},
+      "api_addr": "https://{{ include "factory.name" . }}-openbao.{{ .Release.Namespace }}.svc:8200",
+      "cluster_addr": "https://127.0.0.1:8201",
+      "listener": {"tcp": {"address": "0.0.0.0:8200", "tls_cert_file": "/bao/tls/tls.crt", "tls_key_file": "/bao/tls/tls.key"}},
+      "ui": false
+    }

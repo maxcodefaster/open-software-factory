@@ -3,15 +3,13 @@ import { readFile } from "node:fs/promises";
 import { parse } from "yaml";
 import upstream from "../../upstream.json";
 
-test("Compose OpenBao preserves tmpfs mount options as one mount", async () => {
+test("source-development Compose does not offer a second product installation", async () => {
   const compose = parse(
     await readFile(new URL("../../deploy/local/compose.yaml", import.meta.url), "utf8"),
   );
-  expect(compose.services.openbao.tmpfs).toEqual(["/tmp:rw,noexec,nosuid,size=16m"]);
-  expect(compose.services.openbao.image).toBe(upstream.openbao.image);
-  expect(compose.services.factory.network_mode).toBe("host");
-  expect(compose.services.factory.profiles).toEqual(["factory"]);
-  expect(compose.services.openbao.profiles).toEqual(["secrets"]);
+  expect(Object.keys(compose.services)).toEqual(["postgres", "forgejo", "zero-cache"]);
+  expect(JSON.stringify(compose)).not.toContain("docker.sock");
+  expect(JSON.stringify(compose)).not.toContain("KUBECONFIG");
 });
 
 test("application build tools match the upstream artifact pins", async () => {
@@ -22,12 +20,14 @@ test("application build tools match the upstream artifact pins", async () => {
   for (const image of [
     upstream.kubectl.image,
     upstream.openCodeServer.bunImage,
-    upstream.docker.image,
     upstream.nodeDevelopment.image,
   ])
     expect(dockerfile).toContain(image);
-  for (const checksum of Object.values(upstream.mkcert.sha256))
-    expect(dockerfile).toContain(checksum);
+  expect(dockerfile).not.toContain("mkcert");
+  expect(dockerfile).not.toContain("COPY --from=docker");
+  expect(dockerfile).not.toContain("COPY deploy/local");
+  expect(dockerfile).toContain('"/var/lib/factory/bootstrap.lock"');
+  expect(dockerfile).toContain('"scripts/kubernetes/start.ts"');
 });
 
 test("publication is explicit and builds both architectures natively", async () => {

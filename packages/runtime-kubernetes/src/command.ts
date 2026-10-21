@@ -6,6 +6,9 @@ export async function runCommand(
   limits = { timeoutMS: 15_000, outputBytes: 4 * 1024 * 1024 },
 ) {
   const child = Bun.spawn([...argv], {
+    // Bun otherwise inherits the process's original environment, ignoring
+    // configuration selected during startup, including the ServiceAccount config.
+    env: process.env,
     stdin: input === undefined ? "ignore" : "pipe",
     stdout: "pipe",
     stderr: "pipe",

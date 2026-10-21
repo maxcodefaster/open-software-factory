@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "factory.name" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+---
+# Factory creates independent Workspace/IDE Namespaces. Namespace-only RBAC
+# cannot express this topology. No RBAC management or node administration is granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-{{ include "factory.name" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces, namespaces/finalize, pods, persistentvolumeclaims, secrets]
+    verbs: [get, list, watch, create, patch, update, delete]
+  - apiGroups: [""]
+    resources: [pods/portforward, pods/exec]
+    verbs: [get, create]
+  - apiGroups: [""]
+    resources: [pods/log, nodes, events, services, serviceaccounts, configmaps, replicationcontrollers]
+    verbs: [get, list, watch]
+  - apiGroups: [""]
+    resources: [persistentvolumes]
+    verbs: [get, list, patch]
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses]
+    verbs: [get, list]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: [pods]
+    verbs: [get]
+  - apiGroups: ["apps"]
+    resources: [deployments, replicasets, daemonsets, statefulsets]
+    verbs: [get, list]
+  - apiGroups: ["batch"]
+    resources: [jobs, cronjobs]
+    verbs: [get, list]
+  - apiGroups: ["networking.k8s.io"]
+    resources: [networkpolicies]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-{{ include "factory.name" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "factory.name" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-{{ include "factory.name" . }}

@@ -21,7 +21,10 @@ test("source access mounts only canonical source, remains independent and requir
   };
   const resources = renderWorkspaceSourceResources(input);
   const pod = resources.find((resource) => resource.kind === "Pod");
-  expect(pod?.spec?.nodeSelector).toEqual({ "kubernetes.io/hostname": "source-node" });
+  expect(pod?.spec?.nodeSelector).toEqual({
+    "kubernetes.io/os": "linux",
+    "kubernetes.io/hostname": "source-node",
+  });
   expect(pod?.spec?.containers?.[0]?.volumeMounts).toEqual([
     { name: "data", mountPath: "/data/home", subPath: "home" },
     { name: "assignment", mountPath: "/assignment", readOnly: true },
@@ -196,8 +199,7 @@ test("ambiguous source create recovery validates storage, the complete Pod and i
       ),
     }),
   ).toThrow();
-  const firstPodSpec = { ...observed.pod.spec };
-  delete firstPodSpec.nodeSelector;
+  const { nodeSelector: _placement, ...firstPodSpec } = observed.pod.spec;
   expect(
     validateSourceObservation(input, { ...observed, pod: { ...observed.pod, spec: firstPodSpec } })
       .ready,

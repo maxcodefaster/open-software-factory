@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "factory.name" . }}-state
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  {{- include "factory.claim" (dict "root" . "size" .Values.stateSize) | nindent 2 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "factory.name" . }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: factory
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: factory
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      serviceAccountName: {{ include "factory.name" . }}
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: factory
+          image: {{ required "Set image to the available Factory development image" .Values.image | quote }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [flock, --nonblock, --no-fork, /var/lib/factory/bootstrap.lock, bun, scripts/kubernetes/start.ts]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          envFrom:
+            - configMapRef: {name: "{{ include "factory.name" . }}-config"}
+          env:
+            - name: FACTORY_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+            - name: FACTORY_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+            - name: DATABASE_URL
+              value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc:5432/factory"
+            - name: FACTORY_AUTH_SECRET
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: auth-secret}
+            - name: FACTORY_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: admin-password}
+            - name: FACTORY_WIKI_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: webhook-secret}
+          readinessProbe:
+            exec:
+              command: [bun, scripts/kubernetes/healthcheck.ts]
+            periodSeconds: 5
+            timeoutSeconds: 5
+          startupProbe:
+            exec:
+              command: [bun, scripts/kubernetes/healthcheck.ts]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/factory}
+            - {name: temporary, mountPath: /tmp}
+            - {name: openbao-tls, mountPath: /run/factory/openbao, readOnly: true}
+            {{- if .Values.registryCASecret }}
+            - {name: registry-ca, mountPath: /run/factory/registry, readOnly: true}
+            {{- end }}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: "{{ include "factory.name" . }}-state"}
+        - name: temporary
+          emptyDir: {sizeLimit: 1Gi}
+        - name: openbao-tls
+          secret:
+            secretName: {{ include "factory.name" . }}-openbao-tls
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- if .Values.registryCASecret }}
+        - name: registry-ca
+          secret:
+            secretName: {{ .Values.registryCASecret }}
+            items: [{key: ca.crt, path: ca.crt}]
+        {{- end }}

@@ -50,7 +50,10 @@ describe("runtime Kubernetes resources", () => {
     });
     const pod = resources.find((resource) => resource.kind === "Pod");
     expect(pod?.spec?.automountServiceAccountToken).toBe(false);
-    expect(pod?.spec?.nodeSelector).toEqual({ "kubernetes.io/hostname": "canonical-source-node" });
+    expect(pod?.spec?.nodeSelector).toEqual({
+      "kubernetes.io/os": "linux",
+      "kubernetes.io/hostname": "canonical-source-node",
+    });
     expect(JSON.stringify(pod?.spec?.volumes)).not.toContain("docker.sock");
     expect(JSON.stringify(pod?.spec?.containers?.[0]?.volumeMounts)).not.toContain("docker.sock");
     expect(JSON.stringify(pod)).not.toContain('hostPath":{"path":"/Users');
@@ -74,8 +77,7 @@ describe("runtime Kubernetes resources", () => {
       "/factory/registry-ca:/factory/registry-ca:ro",
     );
     const bootstrap = envbox?.env?.find((entry) => entry.name === "CODER_BOOTSTRAP_SCRIPT")?.value;
-    const install =
-      "cp /factory/registry-ca/ca.crt /etc/docker/certs.d/registry.open-factory-envbox-smoke.svc.cluster.local:5000/ca.crt";
+    const install = "cp /factory/registry-ca/ca.crt /etc/docker/certs.d/registry.example/ca.crt";
     expect(bootstrap).toContain(install);
     expect(bootstrap?.indexOf(install)).toBeLessThan(
       bootstrap?.indexOf("dockerd-entrypoint.sh") ?? -1,

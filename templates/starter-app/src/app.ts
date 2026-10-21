@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 import { createDatabase } from "./db/client.ts";
 import { createAuth } from "./auth.ts";
+import { appProxyContext } from "./proxy.ts";
 
 export function createApplication(
   options: { databaseURL?: string; baseURL?: string; secret?: string } = {},
@@ -28,17 +29,9 @@ export function createApplication(
   }
   const auths = new Map<string, ReturnType<typeof createAuth>>();
   function requestAuth(request: import("node:http").IncomingMessage) {
-    const forwardedHost = request.headers["x-forwarded-host"];
-    const forwardedProtocol = request.headers["x-forwarded-proto"];
-    const prefix = request.headers["x-forwarded-prefix"];
-    const valid =
-      typeof forwardedHost === "string" &&
-      /^[a-f0-9]{32}\.app\.runtime\.localhost(?::\d+)?$/.test(forwardedHost) &&
-      ["http", "https"].includes(String(forwardedProtocol)) &&
-      typeof prefix === "string" &&
-      /^\/runtime\/[a-f0-9-]{36}\/(app|preview\/app(?:-[a-z][a-z0-9-]{0,26})?)$/.test(prefix);
-    const origin = valid ? `${forwardedProtocol}://${forwardedHost}` : baseURL;
-    const basePath = valid ? prefix : "";
+    const proxy = appProxyContext(request.headers);
+    const origin = proxy?.origin ?? baseURL;
+    const basePath = proxy?.basePath ?? "";
     const key = origin + basePath;
     let auth = auths.get(key);
     if (!auth) {

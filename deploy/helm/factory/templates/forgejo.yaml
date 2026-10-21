@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "factory.name" . }}-forgejo
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "factory.name" . }}-forgejo
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: forgejo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: forgejo
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      automountServiceAccountToken: false
+      securityContext: {fsGroup: 1000}
+      containers:
+        - name: forgejo
+          image: codeberg.org/forgejo/forgejo:15.0.10-rootless@sha256:6ffebd9ab9ee9f6677e3523fa60debd9de630ff2a226fa681d6cc0c7ba541d77
+          env:
+            - {name: FORGEJO__database__DB_TYPE, value: sqlite3}
+            - {name: FORGEJO__database__PATH, value: /var/lib/gitea/data/forgejo.db}
+            - {name: FORGEJO__security__INSTALL_LOCK, value: "true"}
+            - {name: FORGEJO__service__DISABLE_REGISTRATION, value: "true"}
+            - {name: FORGEJO__oauth2_client__ACCOUNT_LINKING, value: disabled}
+            - {name: FORGEJO__oauth2_client__ENABLE_AUTO_REGISTRATION, value: "false"}
+            - {name: FORGEJO__oauth2__DEFAULT_APPLICATIONS, value: "git-credential-oauth,git-credential-manager"}
+            - {name: FORGEJO__server__DISABLE_SSH, value: "true"}
+            - {name: FORGEJO__server__HTTP_PORT, value: "3000"}
+            - {name: FORGEJO__server__ROOT_URL, value: "{{ include "factory.forgeURL" . }}/"}
+            - {name: FORGEJO__webhook__ALLOWED_HOST_LIST, value: "{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc"}
+            - {name: FORGEJO__migrations__ALLOWED_DOMAINS, value: "github.com,gitlab.com,codeberg.org"}
+            - {name: FORGEJO__migrations__ALLOW_LOCALNETWORKS, value: "false"}
+          readinessProbe:
+            httpGet: {path: /api/healthz, port: 3000}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/gitea}
+            - {name: config, mountPath: /etc/gitea}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        {{- include "factory.claim" (dict "root" . "size" .Values.forgejoSize) | nindent 8 }}
+    - metadata:
+        name: config
+      spec:
+        {{- include "factory.claim" (dict "root" . "size" "64Mi") | nindent 8 }}

@@ -1,0 +1,7 @@
+apiVersion: v2
+name: factory
+description: Open Software Factory on an existing Kubernetes cluster
+type: application
+version: 0.1.0-dev
+appVersion: development
+kubeVersion: ">=1.33.0-0"

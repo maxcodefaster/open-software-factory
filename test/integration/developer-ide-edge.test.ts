@@ -181,7 +181,7 @@ test("independent editor edge fences origin/user/session/epoch, strips credentia
     );
     const issued = new URL(await edge.issue(userID, sessionID, true, source.workspaceID));
     expect(issued.hostname).toBe(
-      `${userID.replaceAll("-", "")}.1.h${frontend.url.port}.editor.runtime.localhost`,
+      `${userID.replaceAll("-", "")}-1-h${frontend.url.port}-editor.runtime.localhost`,
     );
     const redeemed = await edge.route(new Request(issued));
     expect(redeemed.status).toBe(302);

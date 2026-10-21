@@ -11,6 +11,7 @@ import {
   identitySetup,
 } from "../../db/src/schema";
 import { factoryForgeIssuer, forgeClientID, forgeClientSecret } from "./forge-issuer";
+import { forgeBackchannelMetadata, forgeBackchannelOrigin } from "./backchannel";
 import { requireLocalForgeIssuer } from "./local-issuer";
 import {
   directoryProvisioning,
@@ -52,6 +53,9 @@ export function createFactoryAuth(
       process.env["FACTORY_RUNTIME_HOST"] ||
       "host.orb.internal",
   );
+  const backchannel = forgeBackchannelOrigin(process.env["FACTORY_AUTH_BACKCHANNEL_URL"]);
+  if (backchannel && internalIssuer)
+    throw new Error("A Kubernetes Forge backchannel cannot rename the retained issuer");
   if (!development && new URL(baseURL).protocol !== "https:")
     throw new Error("Non-development installations require an HTTPS Factory URL");
   if (
@@ -195,7 +199,7 @@ export function createFactoryAuth(
     },
     async discovery() {
       const native = await auth.api.getOpenIdConfig();
-      if (!internalIssuer) return native;
+      if (!internalIssuer) return forgeBackchannelMetadata(native, backchannel);
       const internal = (url: string) => `${internalIssuer.origin}${new URL(url).pathname}`;
       // Browser authorization remains public. Native claims and server-to-server discovery
       // use the same issuer reached from local Docker, without disabling certificate checks.

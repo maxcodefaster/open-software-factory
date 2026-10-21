@@ -508,7 +508,7 @@ describe("Runtime edge headers", () => {
   });
   test("App requests retain their cookies and exact proxy path without Factory credentials or spoofed proxy headers", () => {
     const id = crypto.randomUUID();
-    const host = `${id.replaceAll("-", "")}.app.runtime.localhost:3000`;
+    const host = `${id.replaceAll("-", "")}-app.runtime.localhost:3000`;
     const prefix = `/runtime/${id}/preview/app`;
     const request = new Request(`http://${host}${prefix}/api/auth/sign-in/email`, {
       headers: {
@@ -722,7 +722,7 @@ describe("Runtime terminal attachment readiness", () => {
     const id = crypto.randomUUID();
     const prefix = `/runtime/${id}/app`;
     const request = new Request(
-      `http://${id.replaceAll("-", "")}.app.runtime.localhost:3000${prefix}/?token=hmr`,
+      `http://${id.replaceAll("-", "")}-app.runtime.localhost:3000${prefix}/?token=hmr`,
       {
         headers: {
           cookie: "factory_runtime_access=secret; starter.session_token=app",

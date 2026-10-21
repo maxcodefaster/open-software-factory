@@ -171,8 +171,9 @@ export function validateSourceObservation(
   const expectedPod = intended.find((resource) => resource.kind === "Pod")?.spec;
   // A first Pod can acquire its storage node while preparing. That observed node is immutable,
   // but cannot retroactively add a selector to the admitted Pod's spec.
-  const expectedPodSpec = expectedPod ? { ...expectedPod } : undefined;
-  if (expectedPodSpec) delete expectedPodSpec.nodeSelector;
+  const { nodeSelector: _placement, ...expectedPodSpec } = expectedPod ?? {
+    nodeSelector: undefined,
+  };
   if (
     !assignment ||
     !expectedPod ||

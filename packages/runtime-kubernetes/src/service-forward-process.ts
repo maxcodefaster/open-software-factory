@@ -1,4 +1,4 @@
-import { kubernetesCommand } from "./config";
+import { kubernetesCommand, kubernetesConnectionEnvironment } from "./config";
 import { serviceForwardTimeoutMS } from "./service-forward";
 // Fixed trusted service connections only. IPC disconnection owns cleanup after Factory death.
 export async function runServiceForward(role: "source" | "editor", args: readonly string[]) {
@@ -24,7 +24,12 @@ export async function runServiceForward(role: "source" | "editor", args: readonl
       `pod/${podName}`,
       role === "source" ? "0:4600" : "0:4400",
     ]),
-    { stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+    {
+      env: kubernetesConnectionEnvironment(),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "ignore",
+    },
   );
   let stopping = false;
   const stop = () => {

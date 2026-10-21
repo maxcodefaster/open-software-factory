@@ -123,6 +123,7 @@ test("server preparation rejects unsupported callback addresses before commands 
 test("server launch persists identity and keeps secrets out of arguments and public metadata", async () => {
   const { directory, prepared, intended } = await fixture();
   try {
+    expect(prepared.command.join(" ")).not.toContain("docker.sock");
     expect(prepared.command).toContain("host");
     expect(prepared.command).toContain(image);
     expect(prepared.command.join(" ")).not.toContain("private-provider-key");

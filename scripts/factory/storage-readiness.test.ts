@@ -116,7 +116,7 @@ class Cluster {
         ],
       });
     }
-    if (args[0] === "get" && args[1]?.startsWith("all,")) {
+    if (args[0] === "get" && args[1]?.startsWith("pods,pvc,secrets,")) {
       return ok({
         items: this.foreignSecret
           ? [

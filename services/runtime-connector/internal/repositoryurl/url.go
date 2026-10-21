@@ -4,8 +4,13 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
+
+// A qualified Service name uses the Pod resolver's cluster search suffix, so
+// Factory need not hardcode the installation's cluster DNS domain.
+var serviceName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.svc$`)
 
 // Valid checks transport for a repository endpoint supplied by a trusted Factory
 // assignment. Resource ownership and checkout identity are checked separately.
@@ -21,7 +26,7 @@ func Valid(value string) bool {
 		return parsed.Host == "" && filepath.IsAbs(parsed.Path)
 	case "http":
 		host := parsed.Hostname()
-		if host == "host.orb.internal" || host == "localhost" {
+		if host == "host.orb.internal" || host == "localhost" || serviceName.MatchString(host) {
 			return true
 		}
 		address, err := netip.ParseAddr(host)
