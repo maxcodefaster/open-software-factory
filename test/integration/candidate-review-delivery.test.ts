@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
-import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
+import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
+import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import {
-  candidateReviewResultInput,
   type CandidateReviewResult,
+  candidateReviewResultInput,
 } from "../../packages/conversation-domain/src/candidate-review";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
@@ -102,6 +102,92 @@ const passed = candidateReviewResultInput.parse({
   findings: [],
   ui: "not-applicable",
 });
+
+test("a settled Stop can resume submitted checks without repeating implementation or clearing a later Stop", async () => {
+  const f = await setup();
+  try {
+    const stopID = crypto.randomUUID();
+    await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+      stop_id=${stopID},stop_pending=false WHERE change_id=${f.changeID}`;
+    await f.controller.reconcile(f.changeID);
+    expect(f.reviews).toHaveLength(0);
+    expect((await f.controller.get(f.changeID))?.["checksStopId"]).toBe(stopID);
+    const commandID = crypto.randomUUID();
+    await Promise.all([
+      f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID),
+      f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID),
+    ]);
+    await f.controller.reconcile(f.changeID);
+    expect(f.reviews).toHaveLength(1);
+    expect(f.requests()).toBe(0);
+    expect(f.corrections).toHaveLength(0);
+    const [implementation] = await f.database.client<{ state: string }[]>`
+      SELECT state FROM factory.agent_turn WHERE id=${f.initial.id}`;
+    expect(implementation?.state).toBe("completed");
+    const laterStopID = crypto.randomUUID();
+    await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+      stop_id=${laterStopID},stop_pending=false WHERE change_id=${f.changeID}`;
+    await f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID);
+    const [session] = await f.database.client<{ state: string; stopID: string }[]>`
+      SELECT state,stop_id AS "stopID" FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+    expect(session).toMatchObject({ state: "stopped", stopID: laterStopID });
+    await expect(
+      f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, laterStopID),
+    ).rejects.toMatchObject({ code: "conflict" });
+  } finally {
+    await f.dispose();
+  }
+});
+
+test.each([
+  "unconfirmed-stop",
+  "newer-stop",
+  "human-writer",
+  "unfinished-source",
+  "contributor",
+  "wrong-verification",
+  "cancelling",
+])(
+  "resuming checks refuses %s instead of bypassing its authority or source fence",
+  async (condition) => {
+    const f = await setup();
+    try {
+      const stopID = crypto.randomUUID();
+      await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+        stop_id=${stopID},stop_pending=${condition === "unconfirmed-stop"} WHERE change_id=${f.changeID}`;
+      if (condition === "human-writer")
+        await f.database.client`UPDATE factory.change_writer SET state='human',turn_id=NULL,
+          user_id=${f.userID},fence_required=false,fence_attempt_id=NULL WHERE change_id=${f.changeID}`;
+      if (condition === "unfinished-source")
+        await f.database
+          .client`UPDATE factory.change_agent_session SET active_turn_id=NULL WHERE change_id=${f.changeID}`;
+      if (condition === "contributor")
+        await f.database.client`UPDATE factory.project_membership SET role='product-contributor'
+          WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
+      if (condition === "cancelling")
+        await f.database.client`UPDATE factory.change SET cancel_requested_at=now()
+          WHERE id=${f.changeID}`;
+      if (!["contributor", "newer-stop", "wrong-verification"].includes(condition))
+        expect((await f.controller.get(f.changeID))?.["checksStopId"]).toBeNull();
+      await expect(
+        f.controller.resumeChecks(
+          f.changeID,
+          f.userID,
+          crypto.randomUUID(),
+          condition === "wrong-verification" ? crypto.randomUUID() : f.verificationID,
+          condition === "newer-stop" ? crypto.randomUUID() : stopID,
+        ),
+      ).rejects.toMatchObject({ code: condition === "contributor" ? "forbidden" : "conflict" });
+      const [session] = await f.database.client<{ state: string }[]>`
+        SELECT state FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+      expect(session?.state).toBe("stopped");
+      expect(f.reviews).toHaveLength(0);
+      expect(f.requests()).toBe(0);
+    } finally {
+      await f.dispose();
+    }
+  },
+);
 
 test("successful CI alone cannot deliver and admits just one independent review", async () => {
   const f = await setup();

@@ -1,13 +1,16 @@
 import { resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
 import { implementationInput } from "../../../packages/change-domain/src/implementation";
-import { candidateReviewRetryInput } from "../../../packages/conversation-domain/src/candidate-review";
 import {
   changeAgentPromptInput,
   changeAgentResumeInput,
   changeAgentStartInput,
   changeAgentStopConfirmationInput,
 } from "../../../packages/conversation-domain/src/agent-turn";
+import {
+  candidateReviewRetryInput,
+  verificationResumeInput,
+} from "../../../packages/conversation-domain/src/candidate-review";
 import {
   conversationMessageInput,
   conversationModeCommandInput,
@@ -44,6 +47,7 @@ import { createAccessRevocation } from "./access/revocation";
 import { createAccessRoutes } from "./access/routes";
 import { createRuntimeAccess } from "./access/runtime";
 import { createChangeWriterController } from "./access/writer-controller";
+import { agentActivityResponse } from "./agent/activity-response";
 import { createBuildBrowserController } from "./agent/browser-controller";
 import { createBuildBrowserEndpoint } from "./agent/browser-endpoint";
 import { createCandidateReviewController } from "./agent/candidate-review";
@@ -73,8 +77,8 @@ import { createUIPreferenceController } from "./preferences/controller";
 import { projectModelConnection } from "./project-agent/adapter";
 import { createProjectAgentController } from "./project-agent/controller";
 import { projectResponseStream } from "./project-agent/stream-response";
-import { agentActivityResponse } from "./agent/activity-response";
 import { createProjectRoute } from "./routes/projects";
+import { appTimeoutResponse } from "./runtime/app-timeout";
 import { createRuntimeWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
 import { scopeRuntimeEmbedding } from "./runtime/embedding";
@@ -112,7 +116,6 @@ import { createDeveloperIDERoutes } from "./workspace/developer-ide-routes";
 import { createDeveloperIDERuntime } from "./workspace/developer-ide-runtime";
 import { createWorkspaceSourceController } from "./workspace/source-controller";
 import { createWorkspaceSourceRoutes } from "./workspace/source-routes";
-import { appTimeoutResponse } from "./runtime/app-timeout";
 import { handleZeroMutate, handleZeroQuery } from "./zero/http";
 
 const { FACTORY_ADMIN_PASSWORD, FACTORY_AUTH_SECRET, FACTORY_HOST, FACTORY_ZERO_CACHE_URL } =
@@ -1246,7 +1249,7 @@ async function route(request: Request) {
       });
     }
     const deliveryRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/delivery(?:\/(approve|retry-review))?$/,
+      /^\/api\/changes\/([0-9a-f-]+)\/delivery(?:\/(approve|retry-review|resume-checks))?$/,
     );
     if (deliveryRoute) {
       const session = await requireSession(request);
@@ -1266,6 +1269,19 @@ async function route(request: Request) {
             session.user.id,
             input.commandId,
             input.reviewId,
+          ),
+          202,
+        );
+      }
+      if (action === "resume-checks" && request.method === "POST") {
+        const input = verificationResumeInput.parse(await request.json());
+        return json(
+          await deliveryController.resumeChecks(
+            changeID,
+            session.user.id,
+            input.commandId,
+            input.verificationId,
+            input.stopId,
           ),
           202,
         );

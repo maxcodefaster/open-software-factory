@@ -15,6 +15,7 @@ export async function candidateReviewFixture(canonical?: string) {
   );
   const owner = await turns.claimPending(initial.turn.id);
   if (!owner?.ownerToken) throw new Error("Missing owned initial lease");
+  await owned.writers.prepareAgent(owned.changeID, initial.turn.id);
   await turns.beginDispatch(initial.turn.id, owner.ownerToken);
   await turns.settle(
     initial.turn.id,
@@ -26,12 +27,13 @@ export async function candidateReviewFixture(canonical?: string) {
   const verificationID = crypto.randomUUID();
   const reviewID = crypto.randomUUID();
   await owned.database.client`UPDATE factory.change_agent_session SET
-    implementation_session_id=opencode_session_id,implementation_session_confirmed_at=native_session_confirmed_at
+    implementation_session_id=opencode_session_id,implementation_session_confirmed_at=native_session_confirmed_at,
+    active_turn_id=${initial.turn.id}
     WHERE change_id=${owned.changeID}`;
   await owned.database.client`INSERT INTO factory.change_commit_operation(
     id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
     observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
-    SELECT ${crypto.randomUUID()},id,runtime_attempt_id,1,branch_name,base_sha,${commit},
+    SELECT ${initial.turn.id},id,runtime_attempt_id,1,branch_name,base_sha,${commit},
       ${commit},'Owned review candidate',${crypto.randomUUID()},'succeeded',created_by,now()
     FROM factory.change WHERE id=${owned.changeID}`;
   await owned.database

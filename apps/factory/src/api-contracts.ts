@@ -293,6 +293,8 @@ export const conversationStreamEventSchema = z.discriminatedUnion("type", [
 export type ConversationStreamEvent = z.infer<typeof conversationStreamEventSchema>;
 
 export const deliveryViewSchema = z.object({
+  verificationId: optionalString,
+  checksStopId: optionalString,
   reviewId: optionalString,
   reviewState: optionalString,
   reviewCurrent: z.boolean().optional(),

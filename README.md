@@ -75,6 +75,9 @@ each changed commit needs new checks and a fresh review. Cosmetic suggestions do
 An incomplete or failed review has an explicit Retry review action after active work
 and Stop have settled. That creates a fresh attempt, never replays the old inference. A successful
 review still requires deliberate human approval of the exact commit before Staging promotion.
+After a confirmed Stop of an already submitted implementation, Resume checks continues its
+Verification and independent review without calling the implementer again. It applies only to the
+current submitted version and that exact Stop; unfinished source and editing takeover remain fenced.
 Coding activity streams through authenticated Factory access, with history reconciliation after
 reconnect and no repeated model request. New Build turns use native OpenCode MCP tools for the
 restricted development browser, including inline screenshots. Already admitted CLI instructions

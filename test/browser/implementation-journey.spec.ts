@@ -290,6 +290,100 @@ test("a queued first Build shows preparation after reconnect, not active impleme
   expect(errors).toEqual([]);
 });
 
+test("a submitted stopped candidate resumes checks explicitly, with stable retries and no implementation request", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  const verificationID = crypto.randomUUID();
+  const stopID = crypto.randomUUID();
+  const requests: unknown[] = [];
+  const implementationRequests: string[] = [];
+  let resumed = false;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && /\/agent\/(?:start|prompt)$/.test(request.url()))
+      implementationRequests.push(request.url());
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-stopped",
+            baseSha: "a".repeat(40),
+            state: "active",
+            branchState: "succeeded",
+            implementationState: resumed ? "committed" : "stopped",
+            buildTurnState: "completed",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
+      json: {
+        state: resumed ? "committed" : "stopped",
+        sessionAvailable: true,
+        runtimeConnected: false,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+      },
+    }),
+  );
+  const delivery = () => ({
+    verificationId: verificationID,
+    verificationCommitSha: "b".repeat(40),
+    verificationState: "runner-starting",
+    ...(!resumed ? { checksStopId: stopID } : {}),
+  });
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
+    route.fulfill({ json: delivery() }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery/resume-checks`, (route) => {
+    requests.push(route.request().postDataJSON());
+    if (requests.length === 1) return route.abort("failed");
+    resumed = true;
+    return route.fulfill({ status: 202, json: delivery() });
+  });
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  const resume = page.getByRole("button", { name: "Resume checks", exact: true });
+  await expect(resume).toBeEnabled();
+  const summary = page.locator(".ticket-checks > summary");
+  await expect(summary).toContainText("Checks paused");
+  await expect(summary.locator(".busy")).toHaveCount(0);
+  await summary.click();
+  await expect(
+    page.getByText("The submitted version is retained.", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByText("Corrections not submitted", { exact: true })).toHaveCount(0);
+  const captures = ".factory/test-results/checks-resume";
+  await mkdir(captures, { recursive: true });
+  await page.screenshot({ path: `${captures}/paused-wide.png` });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(resume).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: `${captures}/paused-narrow.png` });
+  expect(requests).toEqual([]);
+  await resume.click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await resume.click();
+  await expect(summary).toHaveText("Preparing checks");
+  await expect(resume).toHaveCount(0);
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(requests[0]).toMatchObject({ verificationId: verificationID, stopId: stopID });
+  expect(implementationRequests).toEqual([]);
+});
+
 test("Implement is one explicit recoverable action and does not open IDE or Assistant", async ({
   page,
 }) => {

@@ -1,18 +1,18 @@
+import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createForgejoClient,
   ForgeAmbiguousWriteError,
   type ForgeRepository,
 } from "../../../../packages/forge/src/forge";
+import { lockChangeWriterIn } from "../access/change-writer";
 import {
   createAccessController,
   projectAuthorityIn,
   projectDevelopmentAuthorityIn,
 } from "../access/controller";
-import type { RuntimeAttemptView } from "../runtime/types";
 import { CommandError } from "../command-error";
-import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
-import { lockChangeWriterIn } from "../access/change-writer";
+import type { RuntimeAttemptView } from "../runtime/types";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -907,6 +907,76 @@ export function createDeliveryController(
       const repository = repositoryFromURL(change.repositoryURL);
       await cancelVerifications(changeID, repository);
     },
+    async resumeChecks(
+      changeID: string,
+      userID: string,
+      commandID: string,
+      verificationID: string,
+      stopID: string,
+    ) {
+      await database.client.begin(async (sql) => {
+        const writer = await lockChangeWriterIn(sql, changeID);
+        await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+        const input = { changeID, verificationID, stopID };
+        const scope = `checks-resume:${changeID}`;
+        const [previous] = await sql<
+          { scope: string; userID: string; input: typeof input }[]
+        >`SELECT scope,actor_id AS "userID",input FROM factory.execution_policy_command
+          WHERE command_id=${commandID}`;
+        if (previous) {
+          if (
+            previous.scope !== scope ||
+            previous.userID !== userID ||
+            previous.input.changeID !== changeID ||
+            previous.input.verificationID !== verificationID ||
+            previous.input.stopID !== stopID
+          )
+            throw new CommandError("conflict", "Checks resume changed target");
+          return;
+        }
+        const [candidate] = await sql<
+          { state: string; stopping: boolean; stopID: string | null; submitted: boolean }[]
+        >`
+          SELECT session.state,session.stop_pending AS stopping,session.stop_id AS "stopID",
+            (commit.id=session.active_turn_id AND turn.state='completed') AS submitted
+          FROM factory.verification verification
+          JOIN factory.change change ON change.id=verification.change_id
+          JOIN factory.change_agent_session session ON session.change_id=change.id
+          JOIN LATERAL (
+            SELECT id,commit_sha FROM factory.change_commit_operation
+            WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1
+          ) commit ON commit.commit_sha=verification.commit_sha
+          LEFT JOIN factory.agent_turn turn ON turn.id=session.active_turn_id
+          WHERE verification.id=${verificationID} AND change.id=${changeID}
+            AND verification.state<>'cancelled' AND change.state='active'`;
+        const [active] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
+          AND state IN ('pending','dispatching','running','uncertain')`;
+        const [committing] = await sql`SELECT id FROM factory.change_commit_operation
+          WHERE change_id=${changeID} AND state NOT IN ('succeeded','failed')`;
+        if (
+          !writer.available ||
+          !["agent", "unassigned"].includes(writer.state) ||
+          !candidate?.submitted ||
+          candidate.state !== "stopped" ||
+          candidate.stopping ||
+          candidate.stopID !== stopID ||
+          active ||
+          committing
+        )
+          throw new CommandError(
+            "conflict",
+            "Resume checks only after Stop is confirmed and the current implementation is submitted",
+          );
+        // Restore only the completed candidate's delivery eligibility. No turn,
+        // prompt, source edit or Stop confirmation is created or replayed here.
+        await sql`UPDATE factory.change_agent_session SET state='committed',last_error=NULL,
+          updated_at=now() WHERE change_id=${changeID}`;
+        await sql`INSERT INTO factory.execution_policy_command(command_id,scope,actor_id,input,result)
+          VALUES(${commandID},${scope},${userID},${JSON.stringify(input)}::jsonb,'{}'::jsonb)`;
+      });
+      await reconcile(changeID);
+      return this.get(changeID);
+    },
     async retryReview(
       changeID: string,
       userID: string,
@@ -1002,6 +1072,19 @@ export function createDeliveryController(
     async get(changeID: string) {
       const rows = await database.client<Array<Record<string, unknown>>>`
         SELECT pr.pull_request_number AS "pullRequestNumber",
+          verification.id AS "verificationId",
+          CASE WHEN session.state='stopped' AND NOT session.stop_pending
+            AND writer.state IN ('agent','unassigned') AND change.cancel_requested_at IS NULL
+            AND session.active_turn_id=(SELECT id FROM factory.change_commit_operation
+              WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
+            AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=session.active_turn_id AND state='completed')
+            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
+              AND state IN ('pending','dispatching','running','uncertain'))
+            AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
+              AND state NOT IN ('succeeded','failed'))
+            AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id AND trashed_at IS NULL)
+            AND verification.state<>'cancelled' AND change.state='active'
+            THEN session.stop_id END AS "checksStopId",
           review.id AS "reviewId",
           pr.pull_request_url AS "pullRequestUrl", pr.state AS "pullRequestState",
           verification.commit_sha AS "verificationCommitSha",
@@ -1021,6 +1104,8 @@ export function createDeliveryController(
           promotion.replacement_runtime_attempt_id AS "replacementRuntimeAttemptId",
           replacement.state AS "replacementRuntimeState"
         FROM factory.change change
+        LEFT JOIN factory.change_agent_session session ON session.change_id=change.id
+        LEFT JOIN factory.change_writer writer ON writer.change_id=change.id
         LEFT JOIN factory.pull_request_operation pr ON pr.change_id = change.id
         LEFT JOIN LATERAL (
           SELECT * FROM factory.verification WHERE change_id = change.id

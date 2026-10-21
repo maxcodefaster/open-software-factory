@@ -400,6 +400,8 @@ export async function fixture(
               AND NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE project_id = project.id
                 AND (kubernetes_uid IS NOT NULL OR kubernetes_namespace_uid IS NOT NULL)) FOR UPDATE`;
           if (!safe[0]) throw new Error("Owned non-created Build fixture cleanup refused");
+          await sql`DELETE FROM factory.execution_policy_command
+            WHERE scope=${`checks-resume:${changeID}`} AND actor_id=${userID}`;
           await sql`DELETE FROM factory.usage_operation WHERE project_id=${projectID} AND user_id=${userID}`;
           await sql`SET LOCAL session_replication_role = replica`;
           await sql`DELETE FROM factory.promotion_operation WHERE change_id=${changeID}`;

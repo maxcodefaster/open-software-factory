@@ -138,6 +138,7 @@ export type TicketWorkspaceProps = {
   onOpenIDE(): void;
   onApproveDelivery(changeID: string): void;
   onRetryReview?(changeID: string): void;
+  onResumeChecks?(changeID: string): void;
   canDevelop: boolean;
   onRequestChanges(): void;
 };
@@ -1166,6 +1167,23 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       onClick={() => props.change && props.onApproveDelivery(props.change.id)}
                     >
                       Deliver
+                    </button>
+                  </Show>
+                  <Show
+                    when={
+                      !props.current.ticket.trashedAt &&
+                      props.canDevelop &&
+                      props.delivery?.checksStopId &&
+                      props.onResumeChecks
+                    }
+                  >
+                    <button
+                      type="button"
+                      class="secondary-button"
+                      disabled={props.pending}
+                      onClick={() => props.change && props.onResumeChecks?.(props.change.id)}
+                    >
+                      Resume checks
                     </button>
                   </Show>
                   <Show

@@ -28,6 +28,10 @@ import {
   type EpicProposal,
   epicProposalInput,
 } from "../../../packages/conversation-domain/src/epic-proposal";
+import {
+  type CodingReasoning,
+  codingReasoningInput,
+} from "../../../packages/conversation-domain/src/model-settings";
 import { assistantContext } from "../../../packages/interface-domain/src/assistant-context";
 import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import {
@@ -55,25 +59,21 @@ import {
 } from "../../../packages/zero-schema/src";
 import { useZero, useZeroQuery, ZeroProvider } from "../../../packages/zero-solid/src";
 import { takeSettingsReturn } from "./access/settings-return";
-import { AgentBlockers } from "./agent/configuration";
 import { BuildModelControls } from "./agent/build-model-controls";
-import {
-  codingReasoningInput,
-  type CodingReasoning,
-} from "../../../packages/conversation-domain/src/model-settings";
+import { AgentBlockers } from "./agent/configuration";
+import { observeAgentActivity } from "./agent-activity-stream";
 import { createAgentCommandIds } from "./agent-command-ids";
 import {
   type AgentSnapshot,
-  buildAgentHint,
-  buildAgentEmptyMessage,
   buildAgentActivityNotice,
+  buildAgentEmptyMessage,
+  buildAgentHint,
   buildAgentNeedsStart,
   buildAgentStatus,
   createAgentReadFence,
   retainAgentActivity,
 } from "./agent-view-state";
 import { apiRequest, emptyResponseSchema } from "./api-client";
-import { observeAgentActivity } from "./agent-activity-stream";
 import type { Epic } from "./api-contracts";
 import {
   type AgentView,
@@ -81,8 +81,8 @@ import {
   agentViewSchema,
   appPreviewsSchema,
   attemptsResponseSchema,
-  bootstrapSchema,
   type Bootstrap,
+  bootstrapSchema,
   type Change,
   type ConversationView,
   changesResponseSchema,
@@ -109,8 +109,8 @@ import {
   sourceWorkspaceViewSchema,
   type Ticket,
   type TicketDocumentRevision,
-  ticketDocumentSaveSchema,
   ticketDetailSchema,
+  ticketDocumentSaveSchema,
   type UIPreference,
   uiPreferenceSchema,
 } from "./api-contracts";
@@ -1608,6 +1608,26 @@ function FactoryWorkspace(props: {
           method: "POST",
           body: JSON.stringify({ commandId, reviewId }),
         },
+      );
+      acknowledgeCommand(scope, commandId);
+      if (selectedChange()?.id === changeID) setDelivery(value);
+      await refreshLifecycleState();
+    });
+  }
+
+  async function resumeChecks(changeID: string) {
+    const target = selectedChange()?.id === changeID ? delivery() : undefined;
+    const verificationId = target?.verificationId;
+    const stopId = target?.checksStopId;
+    if (!verificationId || !stopId) return;
+    const scope = `checks-resume:${changeID}`;
+    await mutate(async () => {
+      const input = { verificationId, stopId };
+      const commandId = agentCommandIds.forInput(scope, JSON.stringify(input));
+      const value = await apiRequest(
+        deliveryViewSchema,
+        `/api/changes/${changeID}/delivery/resume-checks`,
+        { method: "POST", body: JSON.stringify({ commandId, ...input }) },
       );
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === changeID) setDelivery(value);
@@ -3712,6 +3732,7 @@ function FactoryWorkspace(props: {
                       }}
                       onApproveDelivery={(changeID) => void approveDelivery(changeID)}
                       onRetryReview={(changeID) => void retryReview(changeID)}
+                      onResumeChecks={(changeID) => void resumeChecks(changeID)}
                       canDevelop={canDevelopProject()}
                       onRequestChanges={requestCorrections}
                     />

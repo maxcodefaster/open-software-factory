@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import type { CandidateReviewResult } from "../../../packages/conversation-domain/src/candidate-review";
 
 export type TicketCheckDetails = {
+  checksStopId?: string | undefined;
   verificationState?: string | undefined;
   verificationSummary?: string | undefined;
   actionRunUrl?: string | undefined;
@@ -20,12 +21,16 @@ export function TicketChecks(props: {
   unsubmitted?: boolean | undefined;
 }) {
   const unsubmitted = () =>
-    props.unsubmitted && !props.details?.reviewCurrent && Boolean(props.details?.verificationState);
+    !props.details?.checksStopId &&
+    props.unsubmitted &&
+    !props.details?.reviewCurrent &&
+    Boolean(props.details?.verificationState);
   const passed = () =>
     !unsubmitted() &&
     props.details?.verificationState === "succeeded" &&
     props.details?.reviewState === "passed";
   const label = () => {
+    if (props.details?.checksStopId) return "Checks paused";
     if (!unsubmitted() && ["pending", "running"].includes(props.details?.reviewState ?? ""))
       return "Independent review in progress";
     if (props.building)
@@ -56,12 +61,15 @@ export function TicketChecks(props: {
     }
   };
   const busy = () =>
-    props.building ||
-    (!unsubmitted() &&
-      (["pending", "runner-starting", "running"].includes(props.details?.verificationState ?? "") ||
-        (props.details?.verificationState === "succeeded" &&
-          (!props.details.reviewState ||
-            ["pending", "running"].includes(props.details.reviewState)))));
+    !props.details?.checksStopId &&
+    (props.building ||
+      (!unsubmitted() &&
+        (["pending", "runner-starting", "running"].includes(
+          props.details?.verificationState ?? "",
+        ) ||
+          (props.details?.verificationState === "succeeded" &&
+            (!props.details.reviewState ||
+              ["pending", "running"].includes(props.details.reviewState))))));
   return (
     <Show when={label()}>
       <details class="ticket-checks">
@@ -81,7 +89,9 @@ export function TicketChecks(props: {
               <p>
                 {unsubmitted()
                   ? "Earlier checks do not verify the retained corrections. Finish and submit them before review."
-                  : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
+                  : props.details?.checksStopId
+                    ? "The submitted version is retained. Resume checks to continue verification and independent review without repeating implementation."
+                    : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
               </p>
             }
           >
