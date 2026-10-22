@@ -1,6 +1,17 @@
 import { expect, test } from "bun:test";
 import { completeFactoryStartup, waitForFactory } from "./readiness";
 
+test("public Factory start commands keep managed bootstrap instead of launching a bare server", async () => {
+  const { scripts } = await Bun.file(new URL("../../package.json", import.meta.url)).json();
+  expect(scripts["factory:up"]).toBe("bun scripts/factory/index.ts up");
+  expect(scripts["factory:restart"]).toBe("bun scripts/factory/index.ts restart");
+  expect(scripts["factory:connect"]).toBe("bun scripts/kubernetes/connect.ts");
+  for (const [name, command] of Object.entries(scripts)) {
+    if (name.startsWith("factory:"))
+      expect(String(command)).not.toContain("apps/factory/src/server.ts");
+  }
+});
+
 test("restart brings stopped data services back before starting the server", async () => {
   const calls: string[] = [];
   let dataServicesRunning = false;

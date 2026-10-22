@@ -253,6 +253,15 @@ Run commands through `mise exec --` to use the pinned tools. Keep dependencies e
 from committed lockfiles. `upstream.json` owns the upstream artifact pins; package manifests and
 lockfiles own application dependencies.
 
+For everyday work, use `factory:up` to prepare the source-development backend, `factory:dev`
+for frontend development and `check` for the standard checks. `factory:connect` is only the
+local browser connection to a Helm installation; it is not another server launcher.
+Installed Factory lifecycle stays with Helm, including upgrades. Do not start the server directly
+to bypass bootstrap, readiness or owned process cleanup.
+The focused commands below remain available for diagnosing one area. Select a particular browser
+test by passing its path to the appropriate lane, for example
+`bun run test:browser:manual test/browser/runtime-recovery.spec.ts`; no per-file alias is needed.
+
 The test and type-check launchers prepare separately locked test dependencies when the selected checks need
 them. Editor adapter tests install the Theia composition without dependency lifecycle scripts and
 compile the Factory extension. The scoped Starter authentication proof prepares the template's
