@@ -275,3 +275,23 @@ test("local planning transport keeps the same cookie hostname on a separate list
     expect(result.stderr).toContain("developmentZeroURL");
   }
 });
+
+test("the local preset is installable with one image setting and keeps all browser access on loopback", async () => {
+  const result = await helm([
+    "template",
+    "factory",
+    chart,
+    "--values",
+    `${chart}/values.local.yaml`,
+    "--set-string",
+    "image=owned-factory-proof:unit",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const all = parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource);
+  const config = all.find((resource) => resource.metadata.name === "factory-config")?.data;
+  expect(config?.["NODE_ENV"]).toBe("development");
+  expect(config?.["FACTORY_BASE_URL"]).toBe("http://127.0.0.1:58000");
+  expect(config?.["FACTORY_FORGEJO_PUBLIC_URL"]).toBe("http://127.0.0.1:58001");
+  expect(config?.["FACTORY_ZERO_CACHE_PUBLIC_URL"]).toBe("http://127.0.0.1:58002/zero");
+  expect(all.some((resource) => resource.kind === "Ingress")).toBe(false);
+});

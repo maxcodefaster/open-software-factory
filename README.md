@@ -24,9 +24,24 @@ permission for privileged outer Pods and usable persistent storage.
 
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's
-[installation and maintenance instructions](deploy/helm/factory/README.md) for local port forwarding,
+[installation and maintenance instructions](deploy/helm/factory/README.md) for local access,
 Ingress, credentials and retained data. Development images may be built locally; the installed
 application does not build its own tools or require a source checkout on the operator's machine.
+
+For local browser access, install with `deploy/helm/factory/values.local.yaml` and your
+cluster-reachable application image. Then run:
+
+```sh
+mise exec -- bun run factory:connect
+```
+
+This one foreground command reads the installed addresses and manages all three native Kubernetes
+connections. It reconnects after a forwarding process exits, including Pod replacement, without
+restarting Factory or replaying work. Use `--namespace`, `--release` and `--context` for a different
+installation. Ctrl+C closes only its own local connections. No hosts-file edits, external wildcard
+DNS or browser resolver flags are needed in Chromium-based browsers for the isolated
+`*.runtime.localhost` IDE and App addresses. This is local development access, not a public Ingress
+or an installer for Kubernetes.
 
 ## Source development
 
@@ -254,6 +269,7 @@ for an isolated installation. It does not start or reset that installation.
 | `bun run factory:dev` | Vite frontend development against the local Factory server |
 | `bun run factory:build` | Build the frontend |
 | `bun run factory:image` | Build the local application image with the currently published runtime pins |
+| `bun run factory:connect` | Connect the browser to a local Helm installation and restore interrupted forwards |
 | `bun run check:docs` | Validate documentation names, local links and anchors |
 | `bun run typecheck` | Check all TypeScript projects and tests |
 | `bun run test:unit` | Fast domain, adapter and operation tests, including pure `test/support` tests; no live models |

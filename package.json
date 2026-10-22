@@ -30,6 +30,7 @@
     "factory:dev": "vite --config apps/factory/vite.config.ts",
     "factory:build": "vite build --config apps/factory/vite.config.ts",
     "factory:image": "bun scripts/factory/image.ts",
+    "factory:connect": "bun scripts/kubernetes/connect.ts",
     "factory:serve": "bun apps/factory/src/server.ts",
     "factory:serve:detached": "nohup bun apps/factory/src/server.ts </dev/null >/tmp/open-factory-server.log 2>&1 &!",
     "factory:up": "bun scripts/factory/index.ts up",

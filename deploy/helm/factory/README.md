@@ -102,30 +102,50 @@ existing source-development artifact publication; the installed Factory never in
 publication or builds runtime tools. An image loaded into one host Docker daemon is not
 automatically available to every Kubernetes distribution.
 
-For a local test, set distinct loopback ports and explicit development mode:
-
-```yaml
-image: your-cluster-reachable-development-image
-development: true
-publicURL: http://127.0.0.1:58000
-forgejoPublicURL: http://127.0.0.1:58001
-developmentZeroURL: http://127.0.0.1:58002
-```
-
-After installation, forward the three browser Services in separate terminals:
+For local browser access, use the repository's small local preset:
 
 ```sh
-kubectl --namespace factory port-forward service/factory-factory 58000:3000
-kubectl --namespace factory port-forward service/factory-forgejo 58001:3000
-kubectl --namespace factory port-forward service/factory-zero 58002:4848
+helm install factory ./deploy/helm/factory --namespace factory --create-namespace \
+  --values ./deploy/helm/factory/values.local.yaml \
+  --set-string image=your-cluster-reachable-development-image \
+  --wait=legacy --timeout 20m
+mise exec -- bun run factory:connect
 ```
 
-Run all three forwards for local acceptance. `developmentZeroURL` uses a separate port on exactly
-the same loopback hostname as `publicURL`, so browser cookies still accompany planning traffic.
+Open the Factory address printed by `factory:connect`, normally `http://127.0.0.1:58000`.
+Keep that one command running. It discovers the three browser addresses from the selected
+installation and manages the native Kubernetes port forwards. A forwarding process exiting,
+including after Pod replacement, reconnects to the same installation automatically. It does not
+restart services, modify Kubernetes resources, change public identities or repeat model work.
+Small unauthenticated HTTP transport probes also detect idle forwards left attached to a dead Pod,
+without waiting for a real browser request to fail. They inspect neither model work nor Project
+history. An HTTP error from a bootstrapping application is still live transport, not a reason to
+restart a connection.
+Ctrl+C closes only connections owned by this invocation; the installation keeps running.
+An occupied port fails with an explanation instead of stopping another process or choosing a
+different origin. If you need different ports, choose them in a private values file before the
+initial installation. Preserve that file and the origins for later upgrades.
+
+For an existing local installation, no upgrade or address change is needed. Select it explicitly
+when its namespace, release or Kubernetes context differs from the defaults:
+
+```sh
+mise exec -- bun run factory:connect --namespace my-factory --release my-release --context my-cluster
+```
+
+The command pins the selected context and ConfigMap identity while it runs. Reconnection refuses
+another installation or changed browser addresses under the same name. It reads no installation
+Secrets and never exposes PostgreSQL, OpenBao or a non-loopback listener.
+Use a Chromium-based browser for this local preset. Its ordinary loopback hostname resolution
+supports the isolated `*.runtime.localhost` editor and App addresses without resolver flags,
+an external DNS service or changes to the Mac's hosts file. Other browser engines need their own
+acceptance before being claimed as supported for local wildcard access.
+
+`developmentZeroURL` uses a separate port on exactly the same loopback hostname as `publicURL`,
+so browser cookies still accompany planning traffic.
 Ordinary Ingress installations do not set this value or need a third browser hostname.
-Port-forwarding attaches to a particular Pod connection. Reopen the affected forward after a Pod
-replacement or a broken connection; a listening local port alone does not confirm live transport.
-An Ingress installation does not use these local forwarding processes.
+The command confirms HTTP transport rather than just an open socket. That is not proof that an
+application or its bootstrap is healthy. An Ingress installation does not need the local command.
 
 The local HTTP exception is restricted to loopback browser access. Internal callbacks still use
 Kubernetes Services, never the Mac's host alias or a manually selected VM address. Testing on

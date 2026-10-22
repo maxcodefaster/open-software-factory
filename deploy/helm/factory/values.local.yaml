@@ -1,0 +1,6 @@
+# Local browser access. Supply a cluster-reachable application image separately.
+# Keep these origins stable after installation, including their ports.
+development: true
+publicURL: http://127.0.0.1:58000
+forgejoPublicURL: http://127.0.0.1:58001
+developmentZeroURL: http://127.0.0.1:58002
