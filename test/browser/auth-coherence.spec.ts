@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { luminance, rgb } from "../support/visual-contrast";
+import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 
 for (const width of [1440, 900, 390]) {
   test(`signed-out supporting text has a contrast floor at ${width}px`, async ({ page }) => {
@@ -24,7 +25,7 @@ for (const width of [1440, 900, 390]) {
       ),
     ).toEqual([]);
 
-    for (const background of ["river-landscape", "mountainous-landscape", "the-harvesters"]) {
+    for (const background of desktopBackgroundKeys) {
       // Presentation-only variants in a signed-out fixture; no persisted user preference changes.
       await page.locator(".signin").evaluate((element, key) => {
         element.setAttribute("data-background", key);

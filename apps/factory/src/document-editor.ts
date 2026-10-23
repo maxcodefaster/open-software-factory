@@ -9,6 +9,8 @@ import { CodeBlockLowlight } from "@tiptap/extension-code-block-lowlight";
 import { codeHighlighter } from "./code-highlighting";
 import { TextSelection } from "@tiptap/pm/state";
 import { preserveDocumentSelection } from "./document-selection";
+import { Image } from "@tiptap/extension-image";
+import type { SelectionBookmark } from "@tiptap/pm/state";
 
 export const documentBlocks = [
   { id: "paragraph", label: "Text" },
@@ -20,6 +22,8 @@ export const documentBlocks = [
   { id: "code-block", label: "Code block" },
   { id: "table", label: "Table" },
   { id: "divider", label: "Divider" },
+  { id: "image", label: "Image" },
+  { id: "file", label: "File" },
 ] as const;
 export type DocumentBlock = (typeof documentBlocks)[number]["id"];
 export type DocumentFormat = DocumentBlock | "bold" | "italic" | "code";
@@ -29,6 +33,50 @@ export function documentExtensions() {
     StarterKit.configure({ link: { openOnClick: false }, codeBlock: false }),
     CodeBlockLowlight.configure({ lowlight: codeHighlighter, defaultLanguage: "plaintext" }),
     Markdown,
+    Image.extend({
+      addNodeView() {
+        return ({ node }) => {
+          const dom = document.createElement("figure");
+          dom.className = "document-attachment";
+          const image = document.createElement("img");
+          image.className = "document-attachment-image";
+          image.loading = "lazy";
+          const open = document.createElement("a");
+          open.className = "attachment-image-action";
+          open.target = "_blank";
+          open.rel = "noopener noreferrer";
+          open.textContent = "Open image";
+          const update = (attributes: Record<string, unknown>) => {
+            const src = String(attributes["src"] ?? "");
+            if (!/^\/api\/attachments\/[a-f0-9-]{36}$/i.test(src)) return false;
+            image.src = `${src}/previews/0`;
+            image.alt = String(attributes["alt"] ?? "");
+            open.href = src;
+            open.setAttribute("aria-label", `Open image ${image.alt} in new tab`);
+            return true;
+          };
+          update(node.attrs);
+          dom.append(image, open);
+          return {
+            dom,
+            update: (next) => next.type === node.type && update(next.attrs),
+            stopEvent: (event) => event.target instanceof Node && open.contains(event.target),
+          };
+        };
+      },
+      parseHTML: () => [
+        {
+          tag: "img[src]",
+          getAttrs: (node) =>
+            /^\/api\/attachments\/[a-f0-9-]{36}$/.test(node.getAttribute("src") ?? "")
+              ? null
+              : false,
+        },
+      ],
+    }).configure({
+      allowBase64: false,
+      HTMLAttributes: { class: "document-attachment-image", loading: "lazy" },
+    }),
     TableKit.configure({ table: { resizable: false } }),
     TaskList,
     TaskItem.configure({ nested: true }),
@@ -38,7 +86,9 @@ export function documentExtensions() {
 // Unsupported authored constructs remain available in source rather than being dropped on save.
 export function supportsDocumentMarkdown(value: string) {
   return !/(!\[|^\s*\[[^\]]+\]:|<\/?[a-z][^>]*>|^---\s*\n[\s\S]+?\n---\s*$)/im.test(
-    value.replace(/<br\s*\/?>/gi, ""),
+    value
+      .replace(/<br\s*\/?>/gi, "")
+      .replace(/!\[[^\]]*\]\(\/api\/attachments\/[a-f0-9-]{36}\)/gi, ""),
   );
 }
 
@@ -50,6 +100,7 @@ export type DocumentEditor = {
   format(command: DocumentFormat, selection?: Range): void;
   link(url: string, selection?: Range): void;
   removeSlash(): void;
+  prepareAttachment(): (markdown: string) => void;
   table(command: TableCommand): void;
   language(value: string): void;
   destroy(): void;
@@ -84,6 +135,7 @@ export function createDocumentEditor(input: {
   let disposed = false;
   let publishedValue = input.value;
   let selectingWithPointer = false;
+  const pendingAttachments = new Set<{ bookmark: SelectionBookmark }>();
   const finishPointerSelection = () => {
     selectingWithPointer = false;
     queueMicrotask(() => !disposed && input.onSelection(editor.view.dom));
@@ -147,6 +199,10 @@ export function createDocumentEditor(input: {
     onSelectionUpdate: () => {
       if (!selectingWithPointer) input.onSelection(editor.view.dom);
       notifyBlock();
+    },
+    onTransaction: ({ transaction }) => {
+      for (const pending of pendingAttachments)
+        pending.bookmark = pending.bookmark.map(transaction.mapping);
     },
   });
   // Let the upstream trailing-paragraph plugin establish a writable position after a
@@ -231,6 +287,12 @@ export function createDocumentEditor(input: {
       case "divider":
         chain.setHorizontalRule().run();
         break;
+      case "image":
+      case "file":
+        editor.view.dom.dispatchEvent(
+          new CustomEvent("factory-choose-attachment", { bubbles: true, detail: command }),
+        );
+        break;
     }
   }
   return {
@@ -285,6 +347,26 @@ export function createDocumentEditor(input: {
       editor.view.dom.classList.toggle("inline-editor-surface", value);
     },
     format,
+    prepareAttachment: () => {
+      const pending = { bookmark: editor.state.selection.getBookmark() };
+      pendingAttachments.add(pending);
+      return (markdown) => {
+        if (!markdown) {
+          pendingAttachments.delete(pending);
+          return;
+        }
+        if (disposed) return;
+        const selected = pending.bookmark.resolve(editor.state.doc);
+        const content = editor.storage.markdown.manager.parse(markdown);
+        editor
+          .chain()
+          .focus()
+          .setTextSelection({ from: selected.to, to: selected.to })
+          .insertContent(content.content ?? [])
+          .run();
+        pending.bookmark = editor.state.selection.getBookmark();
+      };
+    },
     table: (command) => {
       editor.chain()[command]().run();
       editor.view.focus();

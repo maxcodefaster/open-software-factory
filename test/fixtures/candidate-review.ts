@@ -2,9 +2,27 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "./change-agent-turns";
+import type { createDatabase } from "../../packages/db/src/client";
+import { seedMonitoringDelegation } from "./monitoring";
 
-export async function candidateReviewFixture(canonical?: string) {
-  const owned = await fixture(canonical);
+export async function candidateReviewFixture(
+  canonical?: string,
+  database?: ReturnType<typeof createDatabase>,
+  autofix = false,
+) {
+  let monitoring: Awaited<ReturnType<typeof seedMonitoringDelegation>> | undefined;
+  const owned = await fixture(
+    canonical,
+    undefined,
+    database,
+    undefined,
+    autofix
+      ? async (sql, context) => {
+          monitoring = await seedMonitoringDelegation(sql, context);
+          return monitoring;
+        }
+      : undefined,
+  );
   await owned.database
     .client`UPDATE factory.project SET repository_url='https://forge.invalid/owned/review.git' WHERE id=${owned.projectID}`;
   const turns = createAgentTurnStore(owned.database);
@@ -68,6 +86,7 @@ export async function candidateReviewFixture(canonical?: string) {
   }
   return {
     ...owned,
+    monitoring,
     turns,
     initial: initial.turn,
     commit,

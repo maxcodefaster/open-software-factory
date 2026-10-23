@@ -5,7 +5,7 @@ import {
   candidateReviewResultInput,
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { projectAuthorityIn } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createChangeWriterController } from "../access/writer-controller";
 import { CommandError } from "../command-error";
 import { createModelConnections } from "../models/connections";
@@ -19,6 +19,8 @@ import { codingAllowanceDenial } from "../usage/opencode";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createBuildBrowserController } from "./browser-controller";
 import { createChangeAdmission } from "./change-admission";
+import { createCodingContexts } from "./conversation-contexts";
+import { activityNavigation, type ActivityNavigation } from "./activity-navigation";
 import { createReviewAdmission } from "./review-admission";
 import { createChangeAgentTransport } from "./change-transport";
 import { createAgentCommitTransport } from "./commit-transport";
@@ -34,7 +36,7 @@ import {
 } from "./opencode-client";
 import { observeOpenCodeUsage } from "./opencode-usage";
 import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
-import { connectOpenCodeBrowser } from "./opencode-browser";
+import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
 import { createChangeAgentStop } from "./stop";
 import { waitForBuildSandbox } from "./runtime-readiness";
 import { readTurnObservation } from "./turn-observation";
@@ -242,12 +244,32 @@ export type AgentProjectedMessage = {
   role: "user" | "assistant" | "tool";
   text: string;
   at: number;
+  truncated?: boolean;
   activity?: {
     name: string;
     status: ActivityStatus;
     detail?: string;
+    truncated?: boolean;
+    navigation?: ActivityNavigation;
   };
 };
+
+export function navigationMessages(messages: AgentProjectedMessage[], allowed: boolean) {
+  if (allowed) return messages;
+  return messages.map((message) => {
+    const activity = message.activity;
+    if (!activity?.navigation) return message;
+    return {
+      ...message,
+      activity: {
+        name: activity.name,
+        status: activity.status,
+        ...(activity.detail !== undefined ? { detail: activity.detail } : {}),
+        ...(activity.truncated !== undefined ? { truncated: activity.truncated } : {}),
+      },
+    };
+  });
+}
 
 function objectString(value: unknown, key: string) {
   if (!value || typeof value !== "object") return null;
@@ -275,8 +297,11 @@ function toolDetail(state: {
     ?.filter((item) => item.type === "text" && item.text?.trim())
     .map((item) => item.text?.trim())
     .join("\n");
-  if (output) return bounded(output, 4_000);
-  if (state.status === "error" && state.error) return bounded(readableError(state.error), 1_000);
+  if (output) return { text: bounded(output, 4_000), truncated: output.length > 4_000 };
+  if (state.status === "error" && state.error) {
+    const error = readableError(state.error);
+    return { text: bounded(error, 1_000), truncated: error.length > 1_000 };
+  }
   return null;
 }
 
@@ -331,12 +356,14 @@ export function projectMessages(
           const ordinal =
             content.type === "text" ? textOrdinal++ : content.type === "tool" ? toolOrdinal++ : 0;
           if (content.type === "text" && content.text?.trim()) {
+            const text = buildCompletionText(content.text);
             return [
               {
                 id: `${message.id}:text:${ordinal}`,
                 role: "assistant",
-                text: bounded(buildCompletionText(content.text), 8_000),
+                text: bounded(text, 8_000),
                 at: message.time.created,
+                ...(text.length > 8_000 ? { truncated: true } : {}),
               },
             ];
           }
@@ -349,16 +376,23 @@ export function projectMessages(
               : undefined;
             const input = status === "streaming" ? null : content.state.input;
             const detail = toolDetail(content.state);
+            const summary = toolSummary(browserAction ?? content.name, input);
+            const navigation =
+              status === "completed"
+                ? activityNavigation(content.name, input, content.state.metadata)
+                : undefined;
             return [
               {
                 id: `${message.id}:tool:${content.id ?? ordinal}`,
                 role: "tool",
-                text: bounded(toolSummary(browserAction ?? content.name, input), 500),
+                text: bounded(summary, 500),
                 at: content.time.created,
                 activity: {
                   name: browserAction ? "browser" : content.name,
                   status,
-                  ...(detail ? { detail } : {}),
+                  ...(detail ? { detail: detail.text } : {}),
+                  ...(summary.length > 500 || detail?.truncated ? { truncated: true } : {}),
+                  ...(navigation ? { navigation } : {}),
                 },
               },
             ];
@@ -385,6 +419,9 @@ export function projectMessages(
               name: "shell",
               status,
               ...(detail ? { detail: bounded(detail, 4_000) } : {}),
+              ...(message.command.length > 500 || (detail?.length ?? 0) > 4_000
+                ? { truncated: true }
+                : {}),
             },
           },
         ];
@@ -757,6 +794,12 @@ export function createAgentController(
           browserGrant.runtimeEndpoint,
           browserGrant.runtimeBearer,
         );
+      if (!owned.authority.review && browserGrant)
+        await connectOpenCodeSources(
+          client,
+          browserGrant.runtimeEndpoint,
+          browserGrant.runtimeBearer,
+        );
       const inbox = await promptRecordedOpenCodeInput(client, intent, true);
       if (inbox.id !== intent.promptID)
         throw new Error("OpenCode returned another prompt identity");
@@ -905,6 +948,12 @@ export function createAgentController(
         const browserGrant = await browser?.prepare(turnID, ownerToken);
         if (intent.browserTransport === "mcp" && browserGrant)
           await connectOpenCodeBrowser(
+            client,
+            browserGrant.runtimeEndpoint,
+            browserGrant.runtimeBearer,
+          );
+        if (!owned.authority.review && browserGrant)
+          await connectOpenCodeSources(
             client,
             browserGrant.runtimeEndpoint,
             browserGrant.runtimeBearer,
@@ -1374,6 +1423,7 @@ export function createAgentController(
             await usageJournal.settle(turnID, "completed");
             const reviewTurn = await turns.get(turnID);
             if (reviewTurn?.authority.mode === "build" && reviewTurn.authority.review) {
+              await browser?.finishTurnRecording(turnID, ownerToken);
               const reviewID = reviewTurn.authority.review.reviewId;
               const [review] = await database.client<{ result: unknown }[]>`
                 SELECT result FROM factory.candidate_review WHERE id=${reviewID} AND turn_id=${turnID}`;
@@ -1603,12 +1653,14 @@ export function createAgentController(
       userID: string,
       commandId: string,
       codingReasoning?: CodingReasoning,
+      contextID?: string,
     ) {
       if (closed) throw new Error("Agent controller is closed");
       const accepted = await admission.admit(changeID, userID, {
         kind: "change-start",
         commandId,
         ...(codingReasoning ? { codingReasoning } : {}),
+        ...(contextID ? { contextId: contextID } : {}),
       });
       if (!accepted.replayed) run(execute(accepted.turn.id));
       return this.get(changeID, accepted.turn.id);
@@ -1734,15 +1786,33 @@ export function createAgentController(
       userID: string,
       commandId: string,
       repair = false,
+      contextID?: string,
     ) {
       if (closed) throw new Error("Agent controller is closed");
       const accepted = await admission.admit(changeID, userID, {
         kind: repair ? "change-repair" : "change-prompt",
         commandId,
         text,
+        ...(contextID ? { contextId: contextID } : {}),
       });
       if (!accepted.replayed) run(execute(accepted.turn.id));
       return this.get(changeID, accepted.turn.id);
+    },
+
+    async admitPromptIn(
+      sql: AgentTurnTransaction,
+      changeID: string,
+      userID: string,
+      text: string,
+      commandId: string,
+    ) {
+      if (closed) throw new Error("Agent controller is closed");
+      const accepted = await admission.admitIn(sql, changeID, userID, {
+        kind: "change-prompt",
+        commandId,
+        text,
+      });
+      return accepted.turn.id;
     },
 
     async review(changeID: string, reviewID: string, userID: string) {
@@ -1788,7 +1858,90 @@ export function createAgentController(
       return this.get(changeID);
     },
 
-    async get(changeID: string, turnID?: string, history = true) {
+    async retainedMessages(conversationID: string, contextID?: string) {
+      const [context] = await database.client<
+        {
+          changeID: string;
+          original: boolean;
+          id: string;
+          nativeID: string | null;
+          currentID: string | null;
+          confirmed: boolean;
+          attemptID: string | null;
+        }[]
+      >`SELECT context.change_id AS "changeID",context.id,context.original,
+          context.native_session_id AS "nativeID",context.archived_session->>'opencode_session_id' AS "currentID",
+          (context.archived_session->>'native_session_confirmed_at' IS NOT NULL OR
+           context.archived_session->>'implementation_session_confirmed_at' IS NOT NULL) AS confirmed,
+          current.id AS "attemptID"
+        FROM factory.conversation_context context
+        JOIN factory.change change ON change.id=context.change_id
+        LEFT JOIN factory.runtime_attempt original ON original.id=(context.archived_session->>'runtime_attempt_id')::uuid
+        LEFT JOIN factory.runtime_attempt current ON current.id=change.runtime_attempt_id AND current.state='ready'
+          AND current.workspace_id=original.workspace_id AND current.workspace_id IS NOT NULL
+        WHERE context.conversation_id=${conversationID} AND context.archived_session IS NOT NULL
+          AND (context.id=${contextID ?? null} OR (${contextID ?? null}::uuid IS NULL AND context.original)) LIMIT 1`;
+      if (!context) return;
+      if (!context.confirmed) return { messages: [], messagesAvailable: true };
+      if (!context.attemptID || !hub.connected(context.attemptID)) return;
+      const intents = await database.client<{ promptID: string; text: string | null }[]>`
+        SELECT intent.prompt_id AS "promptID",
+          CASE WHEN turn.input->>'kind'='change-start' THEN NULL ELSE turn.input->>'text' END AS text
+        FROM factory.change_agent_turn_intent intent JOIN factory.agent_turn turn ON turn.id=intent.turn_id
+        WHERE intent.change_id=${context.changeID} AND turn.input->>'contextId'
+          IS NOT DISTINCT FROM ${context.original ? null : context.id}`;
+      try {
+        const client = opencode(hub, context.attemptID);
+        const messages = (
+          await Promise.all(
+            [
+              ...new Set(
+                [context.nativeID, context.currentID].filter((id): id is string => Boolean(id)),
+              ),
+            ].map((sessionID) =>
+              client.message
+                .list({ sessionID, limit: 100 }, { signal: AbortSignal.timeout(2_000) })
+                .then((page) =>
+                  projectMessages(
+                    page,
+                    new Map(intents.map((intent) => [intent.promptID, intent.text])),
+                  ),
+                ),
+            ),
+          )
+        ).flat();
+        return {
+          messages: [...new Map(messages.map((message) => [message.id, message])).values()].sort(
+            (a, b) => a.at - b.at,
+          ),
+          messagesAvailable: true,
+        };
+      } catch {
+        return;
+      }
+    },
+    async newConversation(
+      changeID: string,
+      userID: string,
+      commandID: string,
+      expectedContextID: string | null,
+    ) {
+      await database.client.begin(async (sql) => {
+        const [change] = await sql<
+          { projectID: string }[]
+        >`SELECT project_id AS "projectID" FROM factory.change WHERE id=${changeID}`;
+        if (!change) throw new CommandError("not-found", "Change not found");
+        await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
+      });
+      const snapshot = await this.get(changeID, undefined, true, true);
+      return createCodingContexts(database)(changeID, userID, commandID, expectedContextID, {
+        messages: snapshot.messages,
+        admittedMessages: snapshot.admittedMessages ?? [],
+        messagesAvailable: snapshot.messagesAvailable,
+        turn: snapshot.turn ?? null,
+      });
+    },
+    async get(changeID: string, turnID?: string, history = true, includeNavigation = true) {
       const [waiting] = await database.client<
         Array<{ reason: string }>
       >`SELECT waiting.reason FROM factory.runtime_compute_wait waiting
@@ -1806,11 +1959,14 @@ export function createAgentController(
               at: number;
             }>
           >`SELECT intent.turn_id AS "turnID", turn.command_id AS "commandID", intent.session_id AS "sessionID",
-              intent.prompt_id AS "promptID", intent.bootstrap, turn.input->>'text' AS text,
+              intent.prompt_id AS "promptID", (turn.input->>'kind'='change-start') AS bootstrap, turn.input->>'text' AS text,
               EXTRACT(EPOCH FROM turn.created_at)::float8 * 1000 AS at
             FROM factory.change_agent_turn_intent intent
             JOIN factory.agent_turn turn ON turn.id = intent.turn_id
             WHERE intent.change_id = ${changeID}
+              AND turn.input->>'contextId' IS NOT DISTINCT FROM
+                (SELECT conversation.active_coding_context_id::text FROM factory.ticket_conversation conversation
+                  JOIN factory.change change ON change.ticket_id=conversation.ticket_id WHERE change.id=${changeID})
             ORDER BY intent.created_at DESC, intent.turn_id DESC LIMIT 100`
         : [];
       const admittedMessages = intents.toReversed().flatMap((intent) =>
@@ -1972,7 +2128,7 @@ export function createAgentController(
                 : session.lastError,
         commitSHA: operations[0]?.commitSHA ?? null,
         ...(pendingCommits[0] ? { commitOperation: pendingCommits[0] } : {}),
-        messages,
+        messages: navigationMessages(messages, includeNavigation),
         ...(admittedMessages.length ? { admittedMessages } : {}),
         messagesAvailable,
         sessionAvailable: Boolean(

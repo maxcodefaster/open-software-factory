@@ -6,6 +6,7 @@ import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import type { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { factoryProcess } from "./factory-process";
+import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 
 const { FACTORY_AGENT_MODEL_ID } = process.env;
 export const buildModelID = FACTORY_AGENT_MODEL_ID ?? "factory-coding-model";
@@ -20,6 +21,10 @@ export async function fixture(
   baseSHA = "a".repeat(40),
   externalDatabase?: ReturnType<typeof createDatabase>,
   connectorToken?: string,
+  approvalSetup?: (
+    sql: AgentTurnTransaction,
+    context: { userID: string; projectID: string; ticketID: string },
+  ) => Promise<{ incidentID: string; policyID: string }>,
 ) {
   const host = externalDatabase ? undefined : await factoryProcess();
   const database = externalDatabase ?? host!.connect();
@@ -54,8 +59,10 @@ export async function fixture(
       VALUES (${ticketID}, ${projectID}, 'Owned Build regression', ${userID})`;
       await sql`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
       VALUES (${revisionID}, ${ticketID}, 1, ${canonical}, ${createHash("sha256").update(canonical).digest("hex")}, ${userID})`;
-      await sql`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
-      VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${userID})`;
+      const basis = await approvalSetup?.(sql, { userID, projectID, ticketID });
+      await sql`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by,
+        monitoring_incident_id,monitoring_policy_id)
+      VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${userID},${basis?.incidentID ?? null},${basis?.policyID ?? null})`;
       await sql`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
         VALUES (${changeID}, ${projectID}, ${ticketID}, ${approvalID}, ${`factory/change-${suffix}`}, ${baseSHA}, 'active', ${userID})`;
       await sql`INSERT INTO factory.development_workspace(id, project_id, kind, ticket_id, change_id,
@@ -404,6 +411,25 @@ export async function fixture(
             WHERE scope=${`checks-resume:${changeID}`} AND actor_id=${userID}`;
           await sql`DELETE FROM factory.usage_operation WHERE project_id=${projectID} AND user_id=${userID}`;
           await sql`SET LOCAL session_replication_role = replica`;
+          await sql`DELETE FROM factory.change_editing_request WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.change_editing_decision WHERE change_id=${changeID}`;
+          await sql`UPDATE factory.ticket_conversation SET active_coding_context_id=NULL WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.conversation_context WHERE conversation_id IN
+            (SELECT id FROM factory.ticket_conversation WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.monitoring_evidence WHERE incident_id IN
+            (SELECT id FROM factory.monitoring_incident WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.monitoring_incident WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.monitoring_command WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.monitoring_policy WHERE hook_id IN
+            (SELECT id FROM factory.monitoring_hook WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.monitoring_hook WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.review_feedback_message WHERE feedback_id IN
+            (SELECT id FROM factory.review_feedback WHERE change_id=${changeID})`;
+          await sql`DELETE FROM factory.review_feedback_command WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.review_feedback WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.review_media WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.review_scenario WHERE review_id IN
+            (SELECT id FROM factory.candidate_review WHERE change_id=${changeID})`;
           await sql`DELETE FROM factory.promotion_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.merge_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.delivery_approval WHERE change_id=${changeID}`;
@@ -411,6 +437,23 @@ export async function fixture(
           await sql`DELETE FROM factory.change_agent_session WHERE change_id = ${changeID}`;
           await sql`DELETE FROM factory.candidate_review WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.verification WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.mcp_observation WHERE turn_id IN
+            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.agent_turn_mcp WHERE turn_id IN
+            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.attachment_turn_context WHERE turn_id IN
+            (SELECT id FROM factory.agent_turn WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.attachment_reference WHERE attachment_id IN
+            (SELECT id FROM factory.attachment WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.attachment WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.attachment_draft WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.mcp_connection WHERE id IN
+            (SELECT id FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID})`;
+          await sql`DELETE FROM factory.mcp_revision WHERE library_id IN
+            (SELECT id FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID})`;
+          await sql`DELETE FROM factory.mcp_library WHERE scope='project' AND project_id=${projectID}`;
+          await sql`DELETE FROM factory.mcp_access_decision WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.mcp_project_grant WHERE project_id=${projectID}`;
           await sql`SET LOCAL session_replication_role = origin`;
           await sql`DELETE FROM factory.agent_turn WHERE project_id = ${projectID}`;
           await sql`SET LOCAL session_replication_role = replica`;
@@ -425,6 +468,8 @@ export async function fixture(
           await sql`DELETE FROM factory.change WHERE id = ${changeID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.requirement_approval WHERE id = ${approvalID} AND approved_by = ${userID}`;
           await sql`DELETE FROM factory.requirement_revision WHERE ticket_id = ${ticketID} AND created_by = ${userID}`;
+          await sql`DELETE FROM factory.conversation_entry WHERE conversation_id IN
+            (SELECT id FROM factory.ticket_conversation WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.ticket_conversation WHERE project_id = ${projectID}`;
           await sql`SET LOCAL session_replication_role = origin`;
           await sql`DELETE FROM factory.ticket WHERE id = ${ticketID} AND project_id = ${projectID}`;

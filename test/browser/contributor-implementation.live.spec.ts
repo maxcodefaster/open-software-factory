@@ -1,10 +1,11 @@
-import { expect, test, type Page } from "@playwright/test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
-import { signIn, deleteFactoryProject, stopProjectRuntimes } from "../support/factory-fixture";
-import { fixtureNamespace, removeFixtureNamespace } from "../support/owned-namespace";
 import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
+import { fixtureNamespace, removeFixtureNamespace } from "../support/owned-namespace";
 import { luminance, rgb } from "../support/visual-contrast";
 
 const origin = "http://127.0.0.1:3000";
@@ -34,7 +35,7 @@ for (const restore of [false, true])
         await current.getByLabel("Email", { exact: true }).fill(email);
         await current.getByLabel("Password", { exact: true }).fill(password);
         await current.getByRole("button", { name: "Sign in", exact: true }).click();
-        await current.getByRole("button", { name: "Open project menu", exact: true }).click();
+        await openProjectMenu(current);
         await current.getByRole("button").filter({ hasText: slug }).click();
       }
       async function openTicket(current: Page) {
@@ -136,7 +137,8 @@ for (const restore of [false, true])
         await login(developer, users[1]!.email);
         await openTicket(developer);
         const cold = performance.now();
-        await developer.getByRole("button", { name: "Open IDE", exact: true }).click();
+        await developer.getByRole("button", { name: "Ticket actions", exact: true }).click();
+        await developer.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
         const frame = developer.locator('iframe[title="Factory IDE"]');
         const ide = frame.contentFrame();
         await expect(ide.locator("#theia-app-shell")).toBeVisible({ timeout: 600_000 });
@@ -245,7 +247,8 @@ for (const restore of [false, true])
             contributor.getByRole("button", { name: "Restore", exact: true }),
           ).toHaveCount(0);
           await developer.getByRole("tab", { name: title, exact: true }).click();
-          await developer.getByRole("button", { name: "Open IDE", exact: true }).click();
+          await developer.getByRole("button", { name: "Ticket actions", exact: true }).click();
+          await developer.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
           await expect(ide.locator("#theia-app-shell")).toBeVisible({ timeout: 600_000 });
           await expect(ide.locator(".theia-preload")).toHaveCount(0);
           await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();

@@ -72,11 +72,12 @@ export async function ownedPlanningCache(databaseURL: string, base: string) {
       () => fetch(`${url}/keepalive`, { signal: AbortSignal.timeout(1000) }).catch(() => null),
       (response) => response?.ok === true,
       "Owned planning cache not ready",
-      60_000,
+      120_000,
     );
     return { url, dispose };
   } catch (cause) {
+    const logs = await docker("logs", "--tail", "60", name).catch(() => "");
     await dispose();
-    throw cause;
+    throw new Error(`Owned planning cache failed${logs ? `:\n${logs}` : ""}`, { cause });
   }
 }

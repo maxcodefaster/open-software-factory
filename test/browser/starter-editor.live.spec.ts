@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test.skip(
@@ -9,7 +10,7 @@ test.skip(
 test("the clean Starter IDE reads canonical files without starting compute", async ({ page }) => {
   test.setTimeout(90_000);
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page
     .getByRole("region", { name: "Projects", exact: true })
     .getByRole("button")

@@ -39,6 +39,58 @@ const passed = {
   findings: [],
   ui: "not-applicable" as const,
 };
+async function observedCases(
+  controller: ReturnType<typeof createCandidateReviewController>,
+  turn: { id: string; ownerToken: string },
+  path: string,
+  context?: Parameters<typeof controller.observeBrowser>[4]["structuredContent"],
+) {
+  for (const [index, category] of (["normal", "boundary"] as const).entries()) {
+    const id = `case-${index}`;
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario",
+        arguments: {
+          id,
+          title: category === "normal" ? "Ordinary sum" : "Zero boundary",
+          category,
+          criterion: 1,
+          expected: "Adds operands correctly",
+        },
+      },
+      `start-${id}`,
+    );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      { name: "review_read", arguments: { path } },
+      `source-${id}`,
+    );
+    if (context)
+      await controller.observeBrowser(
+        turn.id,
+        turn.ownerToken,
+        { name: "browser_snapshot", arguments: {} },
+        `browser-${id}`,
+        { structuredContent: context, content: [{ type: "text", text: "Observed the App." }] },
+      );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario_result",
+        arguments: {
+          id,
+          status: "passed",
+          observed: "Expected sum follows from the observed candidate",
+        },
+      },
+      `end-${id}`,
+    );
+  }
+}
 
 test("independent review freezes the exact candidate and the original Coding configuration", async () => {
   const f = await candidateReviewFixture();
@@ -87,12 +139,14 @@ test("review source comes only from immutable Git refs and a report needs observ
   const controller = createCandidateReviewController(f.database, source.forge);
   try {
     const turn = await f.activeReview();
-    const call = (name: string, args: unknown, id: number) =>
+    const call = (name: string, args: unknown, id: string | number) =>
       controller.call(turn.id, turn.ownerToken, { name, arguments: args }, id);
     await expect(call("review_report", passed, 1)).rejects.toThrow("source evidence");
     const diff = await call("review_diff", { path: source.path }, 2);
     expect(JSON.stringify(diff)).toContain("+export const sum = (a, b) => a + b");
     expect(source.refs.every((ref) => [f.commit, "a".repeat(40)].includes(ref))).toBe(true);
+    await expect(call("review_report", passed, "no-cases")).rejects.toThrow("normal coverage");
+    await observedCases(controller, turn, source.path);
     await expect(
       call("review_report", { ...passed, criteria: [{ ...passed.criteria[0], criterion: 2 }] }, 3),
     ).rejects.toThrow("every approved");
@@ -165,6 +219,7 @@ test("frontend review rejects missing, dirty and different-commit screenshots", 
         content: [{ type: "image", mimeType: "image/jpeg", data: "aGVsbG8=" }],
       },
     );
+    await observedCases(controller, turn, source.path, context);
     await controller.call(turn.id, turn.ownerToken, checked, 6);
     expect((await f.review())?.result).toMatchObject({ verdict: "passed", ui: "checked" });
     expect(JSON.stringify((await f.review())?.evidence)).toContain("screenshotSHA256");
@@ -256,6 +311,7 @@ test.each([false, true])(
           { name: "review_read", arguments: { path: source.path } },
           1,
         );
+        await observedCases(review, { id: turn.id, ownerToken: turn.token }, source.path);
         await review.call(turn.id, turn.token, { name: "review_report", arguments: passed }, 2);
       }
       f.finish("Independent review finished.");

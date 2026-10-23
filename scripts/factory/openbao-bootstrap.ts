@@ -8,7 +8,7 @@ const bootstrapSchema = z.object({
 });
 const loginSchema = z.object({ role_id: z.string().min(1), secret_id: z.string().min(1) });
 export const openBaoPolicy =
-  'path "factory/data/projects/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/models/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/identity/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/imports/*" { capabilities = ["create", "read", "update"] }\npath "factory/metadata/imports/*" { capabilities = ["delete"] }\npath "auth/token/renew-self" { capabilities = ["update"] }';
+  'path "factory/data/projects/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/models/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/mcp/*" { capabilities = ["create", "read"] }\npath "factory/data/identity/*" { capabilities = ["create", "read", "update"] }\npath "factory/data/imports/*" { capabilities = ["create", "read", "update"] }\npath "factory/metadata/imports/*" { capabilities = ["delete"] }\npath "auth/token/renew-self" { capabilities = ["update"] }';
 export const openBaoPolicyVersion = new Bun.CryptoHasher("sha256")
   .update(openBaoPolicy)
   .digest("hex");

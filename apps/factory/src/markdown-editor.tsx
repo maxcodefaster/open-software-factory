@@ -13,6 +13,7 @@ export function MarkdownEditor(props: {
   value: string;
   onChange(value: string): void;
   label?: string;
+  attachmentScopeKey?: string | undefined;
 }) {
   let editor: DocumentEditor | undefined;
   let root: HTMLDivElement | undefined;
@@ -154,6 +155,7 @@ export function MarkdownEditor(props: {
         }
       >
         <RichDocumentSurface
+          attachmentScopeKey={props.attachmentScopeKey}
           value={props.value}
           editable={true}
           field="knowledge"

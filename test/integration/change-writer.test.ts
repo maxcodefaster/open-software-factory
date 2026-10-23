@@ -411,7 +411,9 @@ test("Ticket writer fences saves, requires settled Stop and compute teardown, an
       workspaceWriteAuthorityIn(sql, workspace.id, owned.userID),
     );
     const turnID = crypto.randomUUID();
-    await owned.database.client.begin((sql) => claimAgentWriterIn(sql, owned.changeID, turnID));
+    await owned.database.client.begin((sql) =>
+      claimAgentWriterIn(sql, owned.changeID, turnID, owned.userID),
+    );
     await expect(
       owned.database.client.begin((sql) =>
         workspaceWriteAuthorityIn(sql, workspace.id, owned.userID),
@@ -481,7 +483,9 @@ test("duplicate takeover commands cannot stop newly acquired compute, and Agent 
     expect((await duplicate).canWrite).toBe(true);
     expect(stopping).toBe(1);
     const turnID = crypto.randomUUID();
-    await owned.database.client.begin((sql) => claimAgentWriterIn(sql, owned.changeID, turnID));
+    await owned.database.client.begin((sql) =>
+      claimAgentWriterIn(sql, owned.changeID, turnID, owned.userID),
+    );
     let observations = 0;
     const waiting = createChangeWriterController({
       ...options,

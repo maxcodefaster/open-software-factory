@@ -1,6 +1,9 @@
 import { resolve } from "node:path";
 
 const nativeNames = new Set([
+  "attachment-s3",
+  "attachment-browser",
+  "attachment-factory-browser",
   "agent-native-commit-recovery",
   "build-browser",
   "build-browser-client",

@@ -2,6 +2,7 @@ import { For, Show } from "solid-js";
 import type { CandidateReviewResult } from "../../../packages/conversation-domain/src/candidate-review";
 
 export type TicketCheckDetails = {
+  openReviewThreads?: number | undefined;
   checksStopId?: string | undefined;
   verificationState?: string | undefined;
   verificationSummary?: string | undefined;
@@ -19,6 +20,7 @@ export function TicketChecks(props: {
   building: boolean;
   preparing?: boolean | undefined;
   unsubmitted?: boolean | undefined;
+  fallback?: string | undefined;
 }) {
   const unsubmitted = () =>
     !props.details?.checksStopId &&
@@ -71,15 +73,14 @@ export function TicketChecks(props: {
             (!props.details.reviewState ||
               ["pending", "running"].includes(props.details.reviewState))))));
   return (
-    <Show when={label()}>
+    <Show when={label()} fallback={props.fallback ? <span>{props.fallback}</span> : undefined}>
       <details class="ticket-checks">
         <summary>
-          <span
-            class={`check-indicator ${busy() ? "busy" : passed() ? "passed" : "attention"}`}
-            aria-hidden="true"
-          >
-            {busy() ? "" : passed() ? "✓" : "!"}
-          </span>
+          <Show when={!busy()}>
+            <span class={`check-indicator ${passed() ? "passed" : "attention"}`} aria-hidden="true">
+              {passed() ? "✓" : "!"}
+            </span>
+          </Show>
           <span>{label()}</span>
         </summary>
         <div class="ticket-check-details">

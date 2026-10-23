@@ -95,7 +95,8 @@ export class FactoryRuntimeWidget extends BaseWidget {
     this.#processList.setAttribute("aria-label", "Declared App processes");
     this.#main.className = "factory-runtime-main";
     this.#output.className = "factory-runtime-output wrap";
-    this.#output.setAttribute("aria-live", "polite");
+    this.#output.setAttribute("aria-label", "Process output");
+    this.#output.setAttribute("aria-live", "off");
     this.#output.textContent = "Connecting to declared processes...";
     this.#main.append(this.#output);
     this.node.append(this.#processList, this.#main);
@@ -244,12 +245,19 @@ export class FactoryRuntimeWidget extends BaseWidget {
       const canWrite = !!this.#runtime && factoryWriteContext.allows(this.#runtime.workspaceID);
       lifecycle.disabled =
         !canWrite || this.#busyProcess === selected.name || selected.state === "stopping";
+      lifecycle.title = canWrite
+        ? `${canStart ? "Start" : "Stop"} ${processLabel(selected)}`
+        : "Observation mode. Request editing to control processes.";
+      lifecycle.setAttribute("aria-busy", String(this.#busyProcess === selected.name));
       const restart = controlButton("Restart", () => void this.#runAction(selected, "restart"));
       restart.disabled =
         !canWrite ||
         this.#busyProcess === selected.name ||
         selected.state === "starting" ||
         selected.state === "stopping";
+      restart.title = canWrite
+        ? `Restart ${processLabel(selected)}`
+        : "Observation mode. Request editing to control processes.";
       const runtime = this.#runtime;
       const preview = controlButton("Preview", () => {
         if (runtime) void openFactoryPreview(runtime, selected.name, processLabel(selected));

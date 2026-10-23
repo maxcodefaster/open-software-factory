@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
@@ -256,7 +257,7 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
   const initialStagingAttemptID = initialPreview[0]?.attemptID;
   if (!initialStagingAttemptID) throw new Error("Initial Staging was not recorded");
 
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
   await page
     .getByRole("region", { name: "Ticket board" })

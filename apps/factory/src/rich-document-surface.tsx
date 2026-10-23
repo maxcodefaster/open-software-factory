@@ -1,10 +1,11 @@
-import { createEffect, createSignal, onCleanup } from "solid-js";
+import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import {
   createDocumentEditor,
   type DocumentEditor,
   type DocumentBlockState,
 } from "./document-editor";
 import { DocumentBlockControls } from "./document-block-controls";
+import { AttachmentPicker, type AttachmentPickerHandle } from "./attachments/ui";
 
 export type RichDocumentSurfaceProps = {
   value: string;
@@ -19,11 +20,14 @@ export type RichDocumentSurfaceProps = {
   onInput(value: string, element: HTMLElement): void;
   onKeyDown(event: KeyboardEvent, element: HTMLElement): void;
   onSelection(element: HTMLElement): void;
+  attachmentDraftId?: string | undefined;
+  attachmentScopeKey?: string | undefined;
 };
 
 export function RichDocumentSurface(props: RichDocumentSurfaceProps) {
   let editor: DocumentEditor | undefined;
   let root: HTMLDivElement | undefined;
+  let attachments: AttachmentPickerHandle | undefined;
   const [block, setBlock] = createSignal<DocumentBlockState>();
   createEffect(
     () => props.value,
@@ -37,7 +41,16 @@ export function RichDocumentSurface(props: RichDocumentSurfaceProps) {
   );
   onCleanup(() => editor?.destroy());
   return (
-    <div class="rich-editor-host" ref={root}>
+    <div
+      class="rich-editor-host"
+      ref={(element) => {
+        root = element;
+        const choose = (event: Event) =>
+          attachments?.choose((event as CustomEvent).detail === "image");
+        element.addEventListener("factory-choose-attachment", choose);
+        onCleanup(() => element.removeEventListener("factory-choose-attachment", choose));
+      }}
+    >
       <div
         ref={(host) => {
           editor = createDocumentEditor({
@@ -64,6 +77,25 @@ export function RichDocumentSurface(props: RichDocumentSurfaceProps) {
         host={root}
         editable={props.editable}
       />
+      <Show when={props.editable}>
+        <AttachmentPicker
+          compact
+          showButton={["knowledge", "description", "summary"].includes(props.field)}
+          disabled={!props.editable}
+          draftId={props.attachmentDraftId}
+          scopeKey={props.attachmentScopeKey}
+          fieldKey={props.label}
+          content={props.value}
+          privacy={
+            props.attachmentDraftId ? "create" : props.field === "knowledge" ? "autosave" : "save"
+          }
+          target={() => editor?.element}
+          prepare={() => editor?.prepareAttachment() ?? (() => {})}
+          ref={(handle) => {
+            attachments = handle;
+          }}
+        />
+      </Show>
     </div>
   );
 }

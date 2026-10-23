@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { sourceWorkspaceViewSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 const projectID = process.env["FACTORY_STABILIZATION_PROJECT_ID"];
@@ -55,7 +56,7 @@ test("current Starter IDE reopens with usable source without starting compute", 
     const sourceResponse = page.waitForResponse((response) =>
       response.url().endsWith(`/api/projects/${projectID}/source-workspace/ensure`),
     );
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: project.slug }).click();
     await mkdir(".factory/screenshots/stabilization", { recursive: true });
     for (const phase of ["open", "reopen"] as const) {
@@ -151,7 +152,7 @@ test("silent IDE document has a bounded retry instead of an endless opening stat
       });
     });
     await signIn(page);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: project.slug }).click();
     await openPersonalIDE(page);
     await expect.poll(() => documents).toBe(1);
@@ -190,7 +191,7 @@ test("current Starter Main-Preview retains the promoted instance across Ticket a
     `;
     if (!project) throw new Error("Selected Starter does not have a ready promoted Main-Preview");
     await signIn(page);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: project.slug }).click();
     await page.getByRole("button", { name: "Preview", exact: true }).click();
     const frame = page.locator('iframe[title="Factory Preview"]');

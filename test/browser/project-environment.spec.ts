@@ -7,6 +7,7 @@ import {
   environmentWrite,
   replaceEnvironment,
 } from "../../packages/project-domain/src/environment";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test("Environment settings retain typing focus, mask saves, preview literal imports and isolate scopes", async ({
@@ -44,7 +45,7 @@ test("Environment settings retain typing focus, mask saves, preview literal impo
   });
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page
     .getByRole("region", { name: "Projects", exact: true })
     .getByRole("button")

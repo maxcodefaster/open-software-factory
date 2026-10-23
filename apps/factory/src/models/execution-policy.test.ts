@@ -10,6 +10,32 @@ import {
 } from "./execution-policy";
 import { nativeModel } from "./native";
 
+test("multimodal input has a separate bounded image allowance without relaxing authored text", async () => {
+  const guard = nativeStepGuard({
+    signal: AbortSignal.timeout(2000),
+    maxInputBytes: 1024,
+    maxMediaBytes: 2048,
+  });
+  const image = {
+    type: "image-data",
+    mediaType: "image/jpeg",
+    data: Buffer.alloc(1200, 1).toString("base64"),
+  };
+  await guard({ messages: [{ role: "tool", content: [image] }], systemMessages: [] });
+  expect(image.data.length).toBeGreaterThan(1024);
+  await expect(
+    guard({ messages: [{ role: "user", content: "x".repeat(1025) }], systemMessages: [] }),
+  ).rejects.toBeInstanceOf(ModelExecutionBoundError);
+  await expect(
+    guard({
+      messages: [
+        { role: "tool", content: [{ ...image, data: Buffer.alloc(3000, 1).toString("base64") }] },
+      ],
+      systemMessages: [],
+    }),
+  ).rejects.toBeInstanceOf(ModelExecutionBoundError);
+});
+
 test("shared native policy removes processor retries and counts every tool-loop provider step", async () => {
   let requests = 0;
   const provider = Bun.serve({

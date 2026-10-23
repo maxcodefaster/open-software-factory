@@ -59,3 +59,26 @@ test("table header removal retains authored cells and stabilizes canonical GFM o
     editor.destroy();
   }
 });
+
+test("Factory image references round-trip in the rich editor without admitting remote images", () => {
+  const id = crypto.randomUUID();
+  const body = `## Design\n\n![Visual reference](/api/attachments/${id})\n\n[Brief.pdf](/api/attachments/${crypto.randomUUID()})`;
+  expect(supportsDocumentMarkdown(body)).toBe(true);
+  const editor = new Editor({
+    element: null,
+    injectCSS: false,
+    extensions: documentExtensions(),
+    contentType: "markdown",
+    content: body,
+  });
+  try {
+    expect(editor.getJSON().content?.some((node) => node.type === "image")).toBe(true);
+    const saved = editor.getMarkdown();
+    expect(saved).toContain(`/api/attachments/${id}`);
+    editor.commands.setContent(saved, { contentType: "markdown" });
+    expect(editor.getMarkdown()).toBe(saved);
+    expect(supportsDocumentMarkdown("![Remote](https://example.invalid/pixel.png)")).toBe(false);
+  } finally {
+    editor.destroy();
+  }
+});

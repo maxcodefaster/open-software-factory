@@ -28,7 +28,7 @@ export async function createPlanningEpic(input: {
   return id;
 }
 
-const factoryOrigin = "http://127.0.0.1:3000";
+const factoryOrigin = process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000";
 const terminalRuntimeStates = new Set(["failed", "stopped"]);
 
 export async function signIn(page: Page) {
@@ -104,6 +104,11 @@ export async function deleteFactoryProject(
       await transaction`DELETE FROM factory.forge_grant_intent WHERE project_id=${projectID}`;
       await transaction`DELETE FROM factory.forge_branch_intent WHERE project_id=${projectID}`;
       await transaction`DELETE FROM factory.change_writer WHERE change_id IN (SELECT id FROM factory.change WHERE project_id=${projectID})`;
+      await transaction`DELETE FROM factory.change_editing_request WHERE change_id IN (SELECT id FROM factory.change WHERE project_id=${projectID})`;
+      await transaction`DELETE FROM factory.change_editing_decision WHERE change_id IN (SELECT id FROM factory.change WHERE project_id=${projectID})`;
+      await transaction`UPDATE factory.ticket_conversation SET active_coding_context_id=NULL WHERE project_id=${projectID}`;
+      await transaction`DELETE FROM factory.conversation_context WHERE conversation_id IN
+        (SELECT id FROM factory.ticket_conversation WHERE project_id=${projectID})`;
       await transaction`
         DELETE FROM factory.build_browser_session
         WHERE change_id IN (SELECT id FROM factory.change WHERE project_id = ${projectID})

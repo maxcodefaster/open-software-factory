@@ -6,6 +6,7 @@ import { expect, test } from "@playwright/test";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const execute = promisify(execFile);
@@ -160,7 +161,7 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await expect(page.getByText(slug, { exact: true })).toBeVisible();
   await page.getByRole("button").filter({ hasText: slug }).click();
   await page
@@ -208,7 +209,7 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
   await restartFactory();
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
   await page
     .getByRole("region", { name: "Ticket board" })

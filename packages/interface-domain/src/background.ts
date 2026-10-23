@@ -2,6 +2,9 @@ export const desktopBackgroundKeys = [
   "river-landscape",
   "the-harvesters",
   "mountainous-landscape",
+  "gulf-of-marseille",
+  "scene-on-the-ice",
+  "moonlit-landscape",
 ] as const;
 
 export type DesktopBackgroundKey = (typeof desktopBackgroundKeys)[number];

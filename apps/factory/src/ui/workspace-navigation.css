@@ -1,0 +1,53 @@
+.workspace-navigation-container {
+  position: relative;
+  container: workspace / inline-size;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+.workspace-navigation-trigger {
+  display: none;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height);
+  padding: var(--space-1) 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  box-shadow: none;
+  color: var(--color-ink);
+  font: var(--weight-medium) var(--text-lg) / var(--leading-label) var(--font-interface);
+  text-align: left;
+}
+.workspace-navigation-trigger > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-navigation-trigger > svg {
+  width: var(--space-4);
+  height: var(--space-4);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  flex: none;
+}
+.workspace-navigation-trigger:hover {
+  color: var(--color-river-deep);
+}
+.workspace-navigation-trigger:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+}
+.workspace-action-leading {
+  display: none;
+  min-width: 0;
+  margin-inline-end: auto;
+}
+@media (pointer: coarse) {
+  .workspace-navigation-trigger {
+    min-height: 44px;
+  }
+}

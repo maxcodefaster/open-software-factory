@@ -1,27 +1,24 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject } from "../support/factory-fixture";
 import { luminance } from "../support/visual-contrast";
 
 const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
 const password = process.env["FACTORY_ADMIN_PASSWORD"] ?? "factory-local-password";
 const userID = "01994a7d-0000-7000-8000-000000000001";
-const evidenceDirectory = ".factory/screenshots/ui-polish/desktop-system";
+const evidenceDirectory = ".factory/test-results/desktop-system";
 const coreFlowEvidenceDirectory = evidenceDirectory;
 
 let database: ReturnType<typeof createDatabase> | undefined;
 let projectID = "";
 let projectSlug = "";
-type Preference = { key: string; updatedAt: string };
-let originalPreference: Preference | undefined;
-let fixturePreference: Preference | undefined;
-
-async function readPreference() {
+async function readProjectBackground() {
   if (!database) throw new Error("Database was not initialized");
-  const [value] = await database.client<Preference[]>`
-    SELECT desktop_background_key AS key, updated_at::text AS "updatedAt"
-    FROM factory.user_ui_preference WHERE user_id = ${userID}
+  const [value] = await database.client<{ key: string }[]>`
+    SELECT desktop_background_key AS key
+    FROM factory.project WHERE id = ${projectID}
   `;
   return value;
 }
@@ -30,18 +27,13 @@ async function selectBackground(page: Page, key: string, label: string) {
   if (!(await page.locator(".settings-menu").isVisible())) {
     await page.getByRole("button", { name: "Settings", exact: true }).click();
   }
-  await Promise.all([
-    page.waitForResponse(
-      (response) =>
-        response.url().endsWith("/api/ui-preference") &&
-        response.request().method() === "PUT" &&
-        response.ok(),
-    ),
-    page.getByRole("button").filter({ hasText: label }).click(),
-  ]);
+  if (!(await page.locator("button.background-option").filter({ hasText: label }).isVisible())) {
+    await page.getByRole("button", { name: "Show all 6 backgrounds" }).click();
+  }
+  await page.getByRole("button").filter({ hasText: label }).click();
   await expect(page.locator("main.factory-desktop")).toHaveAttribute("data-background", key);
-  await expect.poll(async () => (await readPreference())?.key).toBe(key);
-  fixturePreference = await readPreference();
+  await expect.poll(async () => (await readProjectBackground())?.key).toBe(key);
+  await expect(page.locator(".background-picker")).toHaveAttribute("aria-busy", "false");
   const colors = await page.locator("main.factory-desktop").evaluate((element) => {
     const style = getComputedStyle(element);
     return {
@@ -71,33 +63,6 @@ async function selectBackground(page: Page, key: string, label: string) {
   ).toBeGreaterThanOrEqual(4.5);
 }
 
-async function restorePreference() {
-  if (!database || !fixturePreference) return;
-  await database.client.begin(async (transaction) => {
-    const [current] = await transaction<Preference[]>`
-      SELECT desktop_background_key AS key, updated_at::text AS "updatedAt"
-      FROM factory.user_ui_preference WHERE user_id = ${userID} FOR UPDATE
-    `;
-    if (
-      current?.key !== fixturePreference?.key ||
-      current?.updatedAt !== fixturePreference?.updatedAt
-    ) {
-      throw new Error("UI preference changed outside the fixture; refusing to overwrite it");
-    }
-    if (originalPreference) {
-      await transaction`
-        UPDATE factory.user_ui_preference
-        SET desktop_background_key = ${originalPreference.key},
-          updated_at = ${originalPreference.updatedAt}::timestamptz
-        WHERE user_id = ${userID}
-      `;
-    } else {
-      await transaction`DELETE FROM factory.user_ui_preference WHERE user_id = ${userID}`;
-    }
-  });
-  expect(await readPreference()).toEqual(originalPreference);
-}
-
 async function signIn(page: Page) {
   await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill(password);
@@ -116,14 +81,12 @@ test.beforeEach(async ({ page }) => {
       route.fulfill({ status: 503, json: { error: "Planning-only visual fixture" } }),
     );
   }
-  originalPreference = await readPreference();
-  fixturePreference = undefined;
   await database.client`
     INSERT INTO factory.project(
-      id, slug, name, repository_url, default_branch, devcontainer_path, created_by
+      id, slug, name, repository_url, default_branch, devcontainer_path, created_by, desktop_background_key
     ) VALUES (
       ${projectID}, ${projectSlug}, 'Renaissance workspace',
-      'https://example.invalid/visual.git', 'main', '.devcontainer/devcontainer.json', ${userID}
+      'https://example.invalid/visual.git', 'main', '.devcontainer/devcontainer.json', ${userID}, 'river-landscape'
     )
   `;
   await database.client`
@@ -137,15 +100,12 @@ test.beforeEach(async ({ page }) => {
 
 test.afterEach(async () => {
   try {
-    await restorePreference();
-  } finally {
     if (projectID) await deleteFactoryProject(projectID);
+  } finally {
     await database?.client.end();
     database = undefined;
     projectID = "";
     projectSlug = "";
-    originalPreference = undefined;
-    fixturePreference = undefined;
   }
 });
 
@@ -165,7 +125,7 @@ test("persists curated backgrounds and centers the active app around the Agent p
   await expect(
     dock.getByRole("button", { name: "Inbox", exact: true }).locator(".notification-dot"),
   ).toHaveCount(0);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await expect(page.locator(".popover-backdrop")).toBeVisible();
   const projectMenuPadding = await page
     .locator(".project-menu")
@@ -259,14 +219,14 @@ test("persists curated backgrounds and centers the active app around the Agent p
   if (!database) throw new Error("Database was not initialized");
   const stored = await database.client<Array<{ desktopBackgroundKey: string }>>`
     SELECT desktop_background_key AS "desktopBackgroundKey"
-    FROM factory.user_ui_preference WHERE user_id = ${userID}
+    FROM factory.project WHERE id = ${projectID}
   `;
   expect(stored[0]?.desktopBackgroundKey).toBe("mountainous-landscape");
-  const arbitraryURL = await page.context().request.put("/api/ui-preference", {
-    headers: { origin: "http://127.0.0.1:3000" },
+  const retiredPreferenceWrite = await page.context().request.put("/api/ui-preference", {
+    headers: { origin: new URL(page.url()).origin },
     data: { desktopBackgroundKey: "https://example.invalid/painting.jpg" },
   });
-  expect(arbitraryURL.status()).toBe(400);
+  expect(retiredPreferenceWrite.status()).toBe(405);
 
   await page.getByRole("button", { name: "Inbox" }).click();
   await expect(page.locator(".inbox-workspace")).toBeVisible();
@@ -286,10 +246,10 @@ test("persists curated backgrounds and centers the active app around the Agent p
   await page.screenshot({ path: `${evidenceDirectory}/inbox.png`, fullPage: true });
   await page.getByRole("button", { name: "Minimize workspace" }).click();
 
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.locator(".popover-backdrop").click({ position: { x: 20, y: 200 } });
   await expect(page.getByRole("region", { name: "Projects" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
   await page.getByRole("button", { name: "New Ticket" }).click();
   await expect(page.locator(".ticket-draft-workspace")).toBeVisible();
@@ -517,7 +477,7 @@ test("keeps the desktop and active app usable at a narrow viewport", async ({ pa
   });
   expect(topbarOverlaps).toBe(false);
 
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   const projectMenuLayout = await page.locator(".project-menu").evaluate((element) => {
     const menu = element.getBoundingClientRect();
     const dock = document.querySelector(".workspace-dock")?.getBoundingClientRect();

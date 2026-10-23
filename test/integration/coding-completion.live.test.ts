@@ -1,16 +1,17 @@
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { chromium, expect as browserExpect } from "@playwright/test";
+import { expect as browserExpect, chromium } from "@playwright/test";
 import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
-import { loadInstallation, installationDirectory } from "../../scripts/factory/installation";
-import { eventually } from "../fixtures/factory-process";
-import { runtimeAccessCookie } from "../fixtures/runtime-access";
+import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
 import { verifyCodingSource } from "../fixtures/coding-source";
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { eventually } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { runtimeAccessCookie } from "../fixtures/runtime-access";
 
 // Bun does not load playwright.config.ts. Match the repository's normal browser
 // assertion window rather than accidentally using Playwright's 5-second default.
@@ -180,7 +181,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
           .map(({ name, value }) => `${name}=${value}`)
           .join("; ");
         await captureFactory("00-clean-installation");
-        await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+        await openProjectMenu(page);
         await page.getByRole("button", { name: "Create project", exact: true }).click();
         const setup = page.getByRole("region", { name: "Project setup", exact: true });
         await setup

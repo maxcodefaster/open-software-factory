@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
@@ -26,7 +27,7 @@ async function signIn(page: Page) {
 }
 
 async function selectProject(page: Page) {
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
   await expect(page.getByRole("region", { name: "Ticket board" })).toContainText(
     "Conversation fixture",

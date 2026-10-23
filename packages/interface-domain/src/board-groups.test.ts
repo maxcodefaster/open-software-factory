@@ -31,3 +31,19 @@ test("stage-local grouping does not combine different Epics or manufacture empty
     ).map((group) => group.kind),
   ).toEqual(["epic", "epic"]);
 });
+
+test("nested Epic members share a root folder without changing stage-local Ticket order", () => {
+  const epics = [
+    { id: "release", title: "Release", parentId: null },
+    { id: "onboarding", title: "Onboarding", parentId: "release" },
+  ] as const;
+  const tickets = [
+    { id: "child", epicId: "onboarding" },
+    { id: "direct", epicId: "release" },
+    { id: "solo", epicId: null },
+  ] as const;
+  expect(boardGroups(tickets, epics)).toEqual([
+    { kind: "epic", epic: epics[0], tickets: tickets.slice(0, 2) },
+    { kind: "ticket", ticket: tickets[2] },
+  ]);
+});

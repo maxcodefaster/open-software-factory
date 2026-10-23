@@ -22,19 +22,5 @@ export function createUIPreferenceController(database: ReturnType<typeof createD
         desktopBackgroundKey: isDesktopBackgroundKey(key) ? key : defaultDesktopBackgroundKey,
       };
     },
-
-    async set(userID: string, desktopBackgroundKey: DesktopBackgroundKey): Promise<UIPreference> {
-      const rows = await database.client<Array<{ desktopBackgroundKey: DesktopBackgroundKey }>>`
-        INSERT INTO factory.user_ui_preference(user_id, desktop_background_key)
-        VALUES (${userID}, ${desktopBackgroundKey})
-        ON CONFLICT (user_id) DO UPDATE SET
-          desktop_background_key = EXCLUDED.desktop_background_key,
-          updated_at = now()
-        RETURNING desktop_background_key AS "desktopBackgroundKey"
-      `;
-      const preference = rows[0];
-      if (!preference) throw new Error("UI Preference update returned no row");
-      return preference;
-    },
   };
 }

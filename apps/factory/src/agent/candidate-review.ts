@@ -22,6 +22,7 @@ type ReviewScope = {
   baseSHA: string;
   repositoryURL: string;
   criteria: number;
+  coverageVersion: number;
   result: unknown;
   evidence: Array<Record<string, unknown>>;
 };
@@ -45,6 +46,7 @@ export function createCandidateReviewController(
     const [scope] = await sql<ReviewScope[]>`
       SELECT review.id,review.change_id AS "changeID",review.commit_sha AS "commitSHA",
         review.base_sha AS "baseSHA",project.repository_url AS "repositoryURL",review.result,review.evidence,
+        review.coverage_version AS "coverageVersion",
         jsonb_array_length(revision.canonical_content::jsonb->'acceptanceCriteria') AS criteria
       FROM factory.candidate_review review
       JOIN factory.change change ON change.id=review.change_id
@@ -123,7 +125,10 @@ export function createCandidateReviewController(
       if (scope.evidence.some((item) => item["id"] === observation["id"])) return;
       if (scope.evidence.length >= 256)
         throw new CommandError("conflict", "Review evidence limit reached");
-      await sql`UPDATE factory.candidate_review SET evidence=evidence || ${JSON.stringify([observation])}::jsonb
+      const [scenario] = await sql<{ id: string }[]>`SELECT id FROM factory.review_scenario
+        WHERE review_id=${scope.id} AND ended_at IS NULL`;
+      const attributed = { ...observation, ...(scenario ? { scenarioId: scenario.id } : {}) };
+      await sql`UPDATE factory.candidate_review SET evidence=evidence || ${JSON.stringify([attributed])}::jsonb
         WHERE id=${scope.id}`;
     });
   }
@@ -193,6 +198,66 @@ export function createCandidateReviewController(
       const scope = await authorized(turnID, ownerToken, async (_sql, scope) => scope);
       if (scope.result && call.name !== "review_report")
         throw new CommandError("conflict", "Review report is already recorded");
+      if (call.name === "review_scenario" || call.name === "review_scenario_result") {
+        return authorized(turnID, ownerToken, async (sql, current) => {
+          if (current.result)
+            throw new CommandError("conflict", "Review report is already recorded");
+          if (call.name === "review_scenario") {
+            const args = call.arguments;
+            const [active] = await sql`SELECT id FROM factory.review_scenario
+              WHERE review_id=${scope.id} AND ended_at IS NULL`;
+            const [count] = await sql<{ count: number }[]>`SELECT count(*)::int AS count
+              FROM factory.review_scenario WHERE review_id=${scope.id}`;
+            if (active || (count?.count ?? 0) >= 64 || args.criterion > current.criteria)
+              throw new CommandError(
+                "conflict",
+                "Finish the current case; use an approved criterion and at most 64 cases",
+              );
+            await sql`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected)
+              VALUES(${scope.id},${args.id},${args.title},${args.category},${args.criterion},${args.expected})`;
+          } else {
+            const args = call.arguments;
+            const positions = current.evidence.flatMap((item) => {
+              const context = item["context"];
+              if (
+                item["scenarioId"] !== args.id ||
+                item["kind"] !== "browser" ||
+                !context ||
+                typeof context !== "object"
+              )
+                return [];
+              const value = context as Record<string, unknown>;
+              return typeof value["recordingTimeMs"] === "number" &&
+                Number.isSafeInteger(value["recordingTimeMs"]) &&
+                value["recordingTimeMs"] >= 0 &&
+                typeof value["sessionId"] === "string"
+                ? [{ time: value["recordingTimeMs"], session: value["sessionId"] }]
+                : [];
+            });
+            const mediaSession = positions.at(-1)?.session;
+            const times = positions
+              .filter((item) => item.session === mediaSession)
+              .map((item) => item.time);
+            if (
+              args.status !== "unverified" &&
+              !current.evidence.some(
+                (item) =>
+                  item["scenarioId"] === args.id &&
+                  ["source", "browser"].includes(String(item["kind"])),
+              )
+            )
+              throw new CommandError("conflict", "Case needs observations made after it began");
+            const updated = await sql`UPDATE factory.review_scenario SET ended_at=clock_timestamp(),
+              status=${args.status},observed=${args.observed},
+              media_started_ms=${times.length ? Math.min(...times) : null},media_session_id=${mediaSession ?? null}
+              WHERE review_id=${scope.id} AND id=${args.id} AND ended_at IS NULL RETURNING id`;
+            if (!updated.length) throw new CommandError("conflict", "Case is not currently active");
+          }
+          return textResult(
+            "Case recorded. Continue with the actual observations; do not replay App actions.",
+          );
+        });
+      }
       const inventory = await inventories(scope);
       if (call.name === "review_report") {
         const result = call.arguments;
@@ -233,6 +298,38 @@ export function createCandidateReviewController(
               !current.evidence.some((item) => item["screenshotSHA256"])
             )
               throw new CommandError("conflict", "App review needs an exact-candidate screenshot");
+            if (current.coverageVersion >= 1 && result.verdict === "passed") {
+              const cases = await sql<
+                { id: string; criterion: number; category: string; status: string | null }[]
+              >`
+                SELECT id,criterion,category,status FROM factory.review_scenario WHERE review_id=${scope.id}`;
+              if (
+                cases.some((item) => item.status !== "passed") ||
+                result.criteria.some(
+                  (criterion) => !cases.some((item) => item.criterion === criterion.criterion),
+                ) ||
+                !cases.some((item) => item.category === "normal") ||
+                !cases.some((item) => item.category === "error" || item.category === "boundary")
+              )
+                throw new CommandError(
+                  "conflict",
+                  "Passing review needs observed normal coverage, every approved criterion and a relevant adverse case",
+                );
+              if (
+                result.ui === "checked" &&
+                cases.some(
+                  (item) =>
+                    !current.evidence.some(
+                      (observation) =>
+                        observation["scenarioId"] === item.id && observation["kind"] === "browser",
+                    ),
+                )
+              )
+                throw new CommandError(
+                  "conflict",
+                  "User-facing cases need their own actual App observations",
+                );
+            }
           }
           await sql`UPDATE factory.candidate_review SET result=${JSON.stringify(result)}::jsonb,
             ui_required=${uiRequired} WHERE id=${current.id} AND result IS NULL`;

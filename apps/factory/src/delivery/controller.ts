@@ -13,6 +13,8 @@ import {
 } from "../access/controller";
 import { CommandError } from "../command-error";
 import type { RuntimeAttemptView } from "../runtime/types";
+import { monitoringChangeAuthorityIn } from "../monitoring/authority";
+import { monitoringCandidate } from "../monitoring/candidate";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -543,11 +545,14 @@ export function createDeliveryController(
         commitSHA: string;
         baseSHA: string;
         pullRequestNumber: string;
+        monitoringIncidentID: string | null;
       }>
     >`
       SELECT merge.id, merge.state, merge.commit_sha AS "commitSHA",
-        merge.base_sha AS "baseSHA", merge.pull_request_number AS "pullRequestNumber"
-      FROM factory.merge_operation merge WHERE merge.change_id = ${change.id}
+        merge.base_sha AS "baseSHA", merge.pull_request_number AS "pullRequestNumber",
+        approval.monitoring_incident_id AS "monitoringIncidentID"
+      FROM factory.merge_operation merge JOIN factory.delivery_approval approval ON approval.id=merge.delivery_approval_id
+      WHERE merge.change_id = ${change.id}
     `;
     const operation = rows[0];
     if (!operation || operation.state === "failed") return;
@@ -576,15 +581,36 @@ export function createDeliveryController(
         WHERE id = ${operation.id} AND state IN ('pending', 'ambiguous')
       `;
       try {
+        const pullRequestNumber = operation.pullRequestNumber;
+        const commitSHA = operation.commitSHA;
+        async function performMerge() {
+          return forge.mergeFastForward(
+            repository,
+            Number(pullRequestNumber),
+            commitSHA,
+            change.defaultBranch,
+          );
+        }
+        async function delegatedMerge(incidentId: string) {
+          const coordination = database.coordination();
+          try {
+            return await coordination.begin(async (sql) => {
+              // Revocation and this irreversible command serialize on the
+              // same authority rows, without holding the application pool.
+              await sql`SELECT id FROM factory.change WHERE id=${change.id} FOR UPDATE`;
+              await monitoringChangeAuthorityIn(database, sql, change.id, incidentId);
+              return performMerge();
+            });
+          } finally {
+            await coordination.end();
+          }
+        }
         const merged =
           base.headSha === operation.commitSHA
             ? { headSha: base.headSha }
-            : await forge.mergeFastForward(
-                repository,
-                Number(operation.pullRequestNumber),
-                operation.commitSHA,
-                change.defaultBranch,
-              );
+            : operation.monitoringIncidentID
+              ? await delegatedMerge(operation.monitoringIncidentID)
+              : await performMerge();
         await database.client.begin(async (transaction) => {
           await transaction`
             UPDATE factory.merge_operation SET state = 'succeeded',
@@ -606,6 +632,11 @@ export function createDeliveryController(
         });
       } catch (cause) {
         const message = bounded(cause instanceof Error ? cause.message : "Merge failed");
+        if (cause instanceof CommandError && operation.monitoringIncidentID) {
+          await database.client`UPDATE factory.merge_operation SET state='failed',last_error=${message},
+            completed_at=now(),updated_at=now() WHERE id=${operation.id} AND state='executing'`;
+          return;
+        }
         await database.client`
           UPDATE factory.merge_operation
           SET state = 'ambiguous',
@@ -791,11 +822,18 @@ export function createDeliveryController(
       await reconcileAll();
       setInterval(() => void reconcileAll(), 1_000).unref();
     },
-    async approve(changeID: string, userID: string) {
+    async approve(changeID: string, userID: string, monitoringIncidentID?: string) {
       const change = await changeRow(changeID);
       if (change)
         await createAccessController(database).requireDevelopment(userID, change.projectID);
       if (!change?.commitSHA) throw new Error("Change has no delivered commit candidate");
+      if (monitoringIncidentID) {
+        const delegated = await database.client.begin((sql) =>
+          monitoringChangeAuthorityIn(database, sql, changeID, monitoringIncidentID),
+        );
+        if (delegated.userId !== userID)
+          throw new CommandError("forbidden", "Autofix must use its recorded Project delegation");
+      }
       const repository = repositoryFromURL(change.repositoryURL);
       const pullRequest = await forge.getPullRequest(
         repository,
@@ -828,6 +866,9 @@ export function createDeliveryController(
       }
       const approvalID = crypto.randomUUID();
       const mergeID = crypto.randomUUID();
+      const candidateDigest = monitoringIncidentID
+        ? await monitoringCandidate(forge, repository, change.baseSHA, verification.commitSHA)
+        : null;
       await database.client.begin(async (transaction) => {
         await projectDevelopmentAuthorityIn(transaction, userID, change.projectID);
         // Read scope only after the lock wait. A joined statement's earlier
@@ -835,6 +876,24 @@ export function createDeliveryController(
         await transaction`SELECT change.id FROM factory.change change
           JOIN factory.ticket ticket ON ticket.id=change.ticket_id
           WHERE change.id=${changeID} FOR UPDATE OF change,ticket`;
+        const delegated = monitoringIncidentID
+          ? await monitoringChangeAuthorityIn(database, transaction, changeID, monitoringIncidentID)
+          : null;
+        if (delegated && delegated.userId !== userID)
+          throw new CommandError("forbidden", "Autofix must use its recorded Project delegation");
+        if (delegated) {
+          const [human] =
+            await transaction`SELECT turn.id FROM factory.agent_turn turn WHERE change_id=${changeID}
+            AND input->>'kind'='change-prompt' LIMIT 1`;
+          const [writer] =
+            await transaction`SELECT change_id FROM factory.change_writer WHERE change_id=${changeID}
+            AND (state IN ('human','handoff') OR user_id IS NOT NULL)`;
+          if (human || writer)
+            throw new CommandError(
+              "conflict",
+              "A human took over this Change. Automatic Delivery is disabled.",
+            );
+        }
         const [current] = await transaction<
           Array<{ state: string; requirementsCurrent: boolean }>
         >`SELECT change.state,approval.requirement_revision_id=(SELECT id FROM factory.requirement_revision
@@ -847,6 +906,10 @@ export function createDeliveryController(
             "conflict",
             "Requirements changed. Verify and review the current approved scope before Delivery.",
           );
+        const [thread] = await transaction`SELECT id FROM factory.review_feedback
+          WHERE change_id=${changeID} AND kind='thread' AND state<>'resolved' LIMIT 1`;
+        if (thread)
+          throw new CommandError("conflict", "Resolve the open review Threads before Delivery.");
         const [work] =
           await transaction`SELECT id FROM factory.agent_turn WHERE change_id = ${changeID}
           AND state IN ('pending', 'dispatching', 'running', 'uncertain')`;
@@ -876,12 +939,17 @@ export function createDeliveryController(
           throw new Error("Wait for the current implementation to finish before delivery.");
         await transaction`
           INSERT INTO factory.delivery_approval(
-            id, change_id, verification_id, commit_sha, approved_by,candidate_review_id
+            id, change_id, verification_id, commit_sha, approved_by,candidate_review_id,
+            monitoring_incident_id,monitoring_policy_id
           ) VALUES (
-            ${approvalID}, ${changeID}, ${verification.id}, ${verification.commitSHA}, ${userID},${verification.reviewID}
+            ${approvalID}, ${changeID}, ${verification.id}, ${verification.commitSHA}, ${userID},${verification.reviewID},
+            ${monitoringIncidentID ?? null},${delegated?.policyId ?? null}
           )
           ON CONFLICT(verification_id) DO NOTHING
         `;
+        if (delegated && candidateDigest)
+          await transaction`INSERT INTO factory.monitoring_evidence(id,incident_id,kind,digest,commit_sha)
+            VALUES(${crypto.randomUUID()},${delegated.id},'delivery-candidate',${candidateDigest},${verification.commitSHA})`;
         await transaction`
           INSERT INTO factory.merge_operation(
             id, change_id, delivery_approval_id, pull_request_number,
@@ -1110,13 +1178,19 @@ export function createDeliveryController(
             WHERE change_id=change.id ORDER BY created_at DESC,id DESC LIMIT 1)) AS "reviewCurrent",
           COALESCE(review.result->>'summary',review_turn.outcome_summary) AS "reviewSummary",
           review.result->'findings' AS "reviewFindings",
+          (SELECT count(*)::int FROM factory.review_feedback
+            WHERE change_id=change.id AND kind='thread' AND state<>'resolved') AS "openReviewThreads",
           approval.approved_at AS "approvedAt",
+          approval.monitoring_policy_id AS "monitoringPolicyId",
+          autofix.id AS "monitoringIncidentId",autofix.state AS "monitoringState",
+          autofix.reason AS "monitoringReason",
           merge.state AS "mergeState", merge.observed_default_sha AS "mergedCommitSha",
           promotion.state AS "promotionState",
           promotion.last_error AS "cleanupError",
           promotion.replacement_runtime_attempt_id AS "replacementRuntimeAttemptId",
           replacement.state AS "replacementRuntimeState"
         FROM factory.change change
+        LEFT JOIN factory.monitoring_incident autofix ON autofix.ticket_id=change.ticket_id
         LEFT JOIN factory.change_agent_session session ON session.change_id=change.id
         LEFT JOIN factory.change_writer writer ON writer.change_id=change.id
         LEFT JOIN factory.pull_request_operation pr ON pr.change_id = change.id

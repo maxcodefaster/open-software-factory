@@ -13,6 +13,8 @@ import { CommandError } from "../command-error";
 import { runtimeFactoryURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
+import { createReviewMedia, maximumRecordingBytes } from "../review/media";
+import { z } from "zod";
 
 type BrowserSession = {
   id: string;
@@ -123,6 +125,7 @@ export function createBuildBrowserController(
   database: ReturnType<typeof createDatabase>,
   hub: RuntimeHub,
   secret: string,
+  media = createReviewMedia(database),
 ) {
   const turns = createAgentTurnStore(database);
   const closing = new Map<string, Promise<void>>();
@@ -184,7 +187,7 @@ export function createBuildBrowserController(
     session: BrowserSession,
     action: string,
     expiresAt: string,
-    call?: BuildBrowserCall,
+    call?: BuildBrowserCall | { name: "recording_chunk"; arguments: { offset: number } },
   ) {
     return {
       operationId: crypto.randomUUID(),
@@ -218,6 +221,9 @@ export function createBuildBrowserController(
         WHERE id = ${id} AND state IN ('intended', 'active')`;
       const session = await row(id);
       if (!session || session.state === "closed") return;
+      await database.client`UPDATE factory.review_media SET state='unavailable',
+        reason='Recording interrupted. App observations and QA results are retained separately.'
+        WHERE browser_session_id=${id} AND state IN ('intended','recording')`.catch(() => {});
       needsObservation.delete(id);
       try {
         await hub.parentOperation(
@@ -250,8 +256,13 @@ export function createBuildBrowserController(
   async function dispatch(
     session: BrowserSession,
     ownerToken: string,
-    action: "browser-call" | "browser-renew",
-    call?: BuildBrowserCall,
+    action:
+      | "browser-call"
+      | "browser-renew"
+      | "browser-recording-start"
+      | "browser-recording-finish"
+      | "browser-recording-chunk",
+    call?: BuildBrowserCall | { name: "recording_chunk"; arguments: { offset: number } },
     signal?: AbortSignal,
   ) {
     signal?.throwIfAborted();
@@ -361,6 +372,42 @@ export function createBuildBrowserController(
     return next;
   }
 
+  async function recordingFailure(id: string) {
+    await database.client`UPDATE factory.review_media SET state='unavailable',
+      reason='QA recording unavailable. App observations and review results are separate.'
+      WHERE id=${id} AND state IN ('intended','recording')`.catch(() => {});
+  }
+  async function beginRecording(session: BrowserSession, ownerToken: string) {
+    // Persist the fixed recording identity before asking upstream to create it.
+    // Only independent review sessions record; implementation never does.
+    let id: string | undefined;
+    try {
+      const allowed = await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
+        await currentIn(sql, session, ownerToken);
+        const [intent] = await sql<{ id: string; state: string }[]>`
+          INSERT INTO factory.review_media(id,change_id,review_id,browser_session_id,kind,commit_sha,runtime_attempt_id,state,reason)
+          SELECT ${session.id},review.change_id,review.id,${session.id},'recording',review.commit_sha,
+            ${session.attemptID},CASE WHEN project.qa_recording_enabled THEN 'intended' ELSE 'unavailable' END,
+            CASE WHEN NOT project.qa_recording_enabled THEN 'Recording is disabled for this Project' END
+          FROM factory.candidate_review review JOIN factory.change change ON change.id=review.change_id
+          JOIN factory.project project ON project.id=change.project_id WHERE review.turn_id=${session.turnID}
+          ON CONFLICT DO NOTHING RETURNING id,state`;
+        if (intent?.state === "intended") id = intent.id;
+      });
+      if (!allowed || !id) return;
+      const output = await dispatch(session, ownerToken, "browser-recording-start");
+      const started = z
+        .object({ startedAt: z.iso.datetime() })
+        .parse(JSON.parse(output.data ?? ""));
+      await database.client`UPDATE factory.review_media SET state='recording',created_at=${started.startedAt}
+        WHERE id=${id} AND state='intended'`;
+    } catch {
+      if (id) await recordingFailure(id);
+      // Never turn a successful browser action into a retriable failure just
+      // because recording was unavailable.
+    }
+  }
+
   return {
     async prepare(turnID: string, ownerToken: string) {
       const id = browserIdentity(turnID, ownerIdentity(ownerToken));
@@ -427,6 +474,13 @@ export function createBuildBrowserController(
       signal?: AbortSignal,
     ): Promise<BuildBrowserResult> {
       const call = buildBrowserCallInput.parse(input);
+      const [reported] = await database.client`SELECT id FROM factory.candidate_review
+        WHERE turn_id=${session.turnID} AND result IS NOT NULL`;
+      if (reported)
+        throw new CommandError(
+          "conflict",
+          "Review report is already recorded. Finish this review without further App actions.",
+        );
       const callKey = `${session.turnID}:${session.ownerID}`;
       const calls = dispatchedCalls.get(callKey) ?? new Set<string>();
       dispatchedCalls.set(callKey, calls);
@@ -499,6 +553,8 @@ export function createBuildBrowserController(
         await database.client`UPDATE factory.build_browser_session SET state = 'active',
           create_confirmed_at = COALESCE(create_confirmed_at, now()), inspection_context = ${JSON.stringify(inspection)}::jsonb
           WHERE id = ${session.id} AND state IN ('intended','active')`;
+        if (call.name === "browser_open" || session.state === "intended")
+          await beginRecording(session, ownerToken);
         return {
           ...result,
           structuredContent: inspection,
@@ -544,6 +600,71 @@ export function createBuildBrowserController(
       }
     },
 
+    async finishRecording(session: BrowserSession, ownerToken: string) {
+      const [recording] = await database.client<
+        { id: string }[]
+      >`SELECT id FROM factory.review_media
+        WHERE browser_session_id=${session.id} AND kind='recording' AND state='recording'`;
+      if (!recording) return;
+      try {
+        const output = await dispatch(session, ownerToken, "browser-recording-finish");
+        const manifest = z
+          .object({
+            bytes: z.number().int().positive().max(maximumRecordingBytes),
+            durationMs: z.number().int().nonnegative(),
+          })
+          .parse(JSON.parse(output.data ?? ""));
+        const chunks: Buffer[] = [];
+        for (let offset = 0; offset < manifest.bytes; offset += 49_152) {
+          const output = await dispatch(session, ownerToken, "browser-recording-chunk", {
+            name: "recording_chunk",
+            arguments: { offset },
+          });
+          const chunk = z
+            .object({ offset: z.number().int(), data: z.string().max(65_536) })
+            .parse(JSON.parse(output.data ?? ""));
+          const bytes = Buffer.from(chunk.data, "base64");
+          if (
+            chunk.offset !== offset ||
+            bytes.byteLength !== Math.min(49_152, manifest.bytes - offset)
+          )
+            throw new Error("Recording chunk did not match its manifest");
+          chunks.push(bytes);
+        }
+        const bytes = Buffer.concat(chunks);
+        if (bytes.readUInt32BE(0) !== 0x1a45dfa3) throw new Error("Recording is not WebM");
+        // Slow state-volume I/O must not hold the turn lock and starve its
+        // ownership heartbeat. Publication is a separate, short fenced commit.
+        const proof = await media.stage(recording.id, bytes);
+        await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
+          await currentIn(sql, session, ownerToken);
+          const [enabled] = await sql`SELECT project.id FROM factory.project project
+            JOIN factory.change change ON change.project_id=project.id
+            WHERE change.id=${session.changeID} AND project.qa_recording_enabled FOR SHARE OF project`;
+          if (!enabled) throw new Error("Recording disabled");
+          await media.complete(proof, manifest.durationMs, sql);
+          await currentIn(sql, session, ownerToken);
+        });
+        await media.sweep();
+      } catch {
+        await recordingFailure(recording.id);
+      }
+    },
+
+    async finishTurnRecording(turnID: string, ownerToken: string) {
+      try {
+        const [latest] = await database.client<
+          { id: string }[]
+        >`SELECT id FROM factory.build_browser_session
+        WHERE turn_id=${turnID} AND owner_id=${ownerIdentity(ownerToken)}
+          AND state='active' ORDER BY ordinal DESC LIMIT 1`;
+        const session = latest ? await row(latest.id) : undefined;
+        if (session) await this.finishRecording(session, ownerToken);
+      } catch {
+        // Media failure must not change the QA verdict or block exact cleanup.
+      }
+    },
+
     async renewTurn(turnID: string, ownerToken: string) {
       if (renewing.has(turnID)) return;
       renewing.add(turnID);
@@ -556,6 +677,23 @@ export function createBuildBrowserController(
         if (!current) return;
         try {
           await dispatch(current, ownerToken, "browser-renew");
+          try {
+            const [disabled] = await database.client`SELECT media.id FROM factory.review_media media
+            JOIN factory.change change ON change.id=media.change_id
+            JOIN factory.project project ON project.id=change.project_id
+            WHERE media.browser_session_id=${current.id} AND media.state='recording'
+              AND NOT project.qa_recording_enabled`;
+            if (disabled) {
+              try {
+                await dispatch(current, ownerToken, "browser-recording-finish");
+              } catch {
+                /* Never replay browser work. */
+              }
+              await recordingFailure(current.id);
+            }
+          } catch {
+            /* Recording diagnostics cannot revoke an otherwise valid QA browser. */
+          }
         } catch (cause) {
           if (
             cause instanceof Error &&
@@ -571,6 +709,10 @@ export function createBuildBrowserController(
     },
 
     async closeTurn(turnID: string) {
+      await database.client`UPDATE factory.review_media SET state='unavailable',
+        reason='Recording interrupted. No App actions were repeated.'
+        WHERE browser_session_id IN (SELECT id FROM factory.build_browser_session WHERE turn_id=${turnID})
+          AND state IN ('intended','recording')`.catch(() => {});
       const sessions = await database.client<Array<{ id: string; ownerID: string }>>`
         SELECT id,owner_id AS "ownerID" FROM factory.build_browser_session WHERE turn_id = ${turnID}`;
       await Promise.all(sessions.map(({ id }) => close(id)));

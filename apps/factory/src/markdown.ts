@@ -18,20 +18,25 @@ function createReader(codeControls = false) {
         const language = lang?.split(/\s+/)[0] ?? "plaintext";
         const content = highlightedCode(text, language) ?? escapeHTML(text);
         const controls = codeControls
-          ? `<span class="reader-code-controls"><span>${escapeHTML(language === "plaintext" ? "Plain text" : language)}</span><button type="button" aria-label="Copy code">Copy</button></span>`
+          ? `<span class="reader-code-controls"><span>${escapeHTML(language === "plaintext" ? "Plain text" : language)}</span><button type="button" class="copy-feedback" data-feedback="idle" aria-label="Copy code"><span class="feedback-mark" aria-hidden="true"></span><span class="copy-feedback-label" aria-hidden="true"><span class="copy-feedback-reserve">Copy</span><span data-copy-label>Copy</span></span></button></span>`
           : "";
         return `<pre>${controls}<code class="language-${escapeHTML(language)}">${content}</code></pre>\n`;
       },
       html({ text }) {
         return /^<br\s*\/?>$/i.test(text) ? "<br>" : escapeHTML(text);
       },
-      image({ text }) {
-        return escapeHTML(text);
+      image({ text, href }) {
+        if (!/^\/api\/attachments\/[a-f0-9-]{36}$/i.test(href)) return escapeHTML(text);
+        return `<a class="factory-attachment-preview" href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" aria-label="Open image ${escapeHTML(text)} in new tab"><img class="factory-attachment-image" src="${escapeHTML(href)}/previews/0" alt="${escapeHTML(text)}" loading="lazy"><span class="attachment-image-action">Open image</span></a>`;
       },
       link({ href, title, tokens }) {
         const label = this.parser.parseInline(tokens);
         if (!/^(https?:\/\/|mailto:|#|\/(?!\/))/i.test(href)) return label;
-        const attribute = title ? ' title="' + escapeHTML(title) + '"' : "";
+        const attachment = /^\/api\/attachments\/[a-f0-9-]{36}$/i.test(href);
+        const attribute =
+          (title || attachment
+            ? ' title="' + escapeHTML(title ?? tokens.map((token) => token.raw).join("")) + '"'
+            : "") + (attachment ? ' class="factory-attachment-file" download' : "");
         return (
           '<a href="' +
           escapeHTML(href) +

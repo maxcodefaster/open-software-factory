@@ -51,6 +51,10 @@ prevents continuation. Uncertain or already dispatched inference is not replayed
 through this path. Stale failure text from a prior turn is not the new admission's
 current error.
 
+[ADR 0019](0019-conversation-contexts-and-shared-editing.md) adds named writer attribution,
+ephemeral editing activity, explicit release and requested transfers. Idle indication never
+automatically releases writing authority or expires an Agent's work.
+
 Factory browser logout first destroys its own session, then navigates to an installation-owned
 static page served by Forgejo's native custom-assets handler. That page uses native same-origin
 logout and verifies the session ended before returning. No proxy cookie impersonation, disabled

@@ -109,6 +109,10 @@
     "version": "2.0.27",
     "integrity": "sha512-RqJodg+QsUgqqJVo+b2PGk2w96l7424nM4BijUSb49Iep9IyUfjDH3zfii4OGfCsmZkNCYK83Mgk9e9EeRA1iQ=="
   },
+  "ffmpeg": {
+    "version": "5.1.9",
+    "debianPackage": "7:5.1.9-0+deb12u1"
+  },
   "chromeDevToolsMcp": {
     "version": "1.10.1",
     "integrity": "sha512-Klw6HWDqHC/XS1JwZldd2r49aUhbUJN9m9Mvcx4SEueIPXtzuQX+QelxAViobv8YUkDZ7HWDrmViR6LeYK0wAw==",

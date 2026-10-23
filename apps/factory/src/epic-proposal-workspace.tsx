@@ -4,6 +4,7 @@ import {
   type EpicProposal,
 } from "../../../packages/conversation-domain/src/epic-proposal";
 import { MarkdownEditor } from "./markdown-editor";
+import { WorkspaceActionBar } from "./ui/workspace-actions";
 
 export function EpicProposalWorkspace(props: {
   id: string;
@@ -56,15 +57,18 @@ export function EpicProposalWorkspace(props: {
     <section class="ticket-workspace epic-proposal-workspace" aria-label="Proposed Epic">
       <div class="ticket-document">
         <header class="ticket-status-row">
-          <span>Proposed work</span>
-          <button
-            type="button"
-            class="primary-button"
-            disabled={props.pending}
-            onClick={() => void confirm()}
-          >
-            Confirm work
-          </button>
+          <WorkspaceActionBar label="Epic actions" class="ticket-header-actions">
+            <button
+              type="button"
+              class="workspace-action"
+              data-primary="true"
+              disabled={props.pending}
+              onClick={() => void confirm()}
+            >
+              Confirm work
+            </button>
+          </WorkspaceActionBar>
+          <span class="ticket-status-context">Proposed work</span>
         </header>
         <textarea
           class="ticket-draft-title"

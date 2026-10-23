@@ -1,10 +1,11 @@
 import { mkdir } from "node:fs/promises";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
+import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 960 }, contextOptions: { reducedMotion: "reduce" } });
@@ -49,12 +50,15 @@ test("admitted configuration is readable, private to Project members, and distin
     await expect(current.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   }
   async function openAgent(current: Page) {
-    await current.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(current);
     await current
       .getByRole("button")
       .filter({ hasText: `config-qa-${short}` })
       .click();
-    await current.getByRole("region", { name: "ideas", exact: true }).getByRole("button").click();
+    await current
+      .getByRole("region", { name: "ideas", exact: true })
+      .locator(".ticket-card-body")
+      .click();
     await current.getByRole("button", { name: "Toggle Agent panel" }).click();
     const panel = current.getByRole("complementary", { name: "Agent panel" });
     await expect(panel.locator(".agent-turn-details")).toHaveCount(0);
@@ -182,11 +186,10 @@ test("admitted configuration is readable, private to Project members, and distin
     await expect(
       developer.getByRole("dialog", { name: "Agent settings", exact: true }),
     ).toHaveCount(0);
-    const personal = settings
+    await settings
       .getByRole("navigation", { name: "Settings navigation" })
-      .locator("section")
-      .filter({ has: developer.getByRole("heading", { name: "Personal", exact: true }) });
-    await personal.getByRole("button", { name: "Skills", exact: true }).click();
+      .getByRole("button", { name: "Skills", exact: true })
+      .click();
     await developer.screenshot({
       path: ".factory/screenshots/agent-configuration-developer-settings.png",
     });

@@ -7,8 +7,9 @@ import {
   interviewAnswerCommandInput,
 } from "../../packages/conversation-domain/src/conversation";
 import { createDatabase } from "../../packages/db/src/client";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { fulfillAgentView } from "../support/agent-activity-route";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
 const evidenceDirectory = ".factory/test-results/interview-coherence";
@@ -53,7 +54,7 @@ test.afterEach(async ({ page }) => {
 async function openProject(page: Page) {
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
 }
 
@@ -132,6 +133,11 @@ for (const outcome of ["complete", "error"] as const) {
       ticketId: ticketID,
       mode: "plan",
       version: 1,
+      contextId: null,
+      activeCodingContextId: null,
+      isActiveCoding: false,
+      contexts: [],
+      codingHistory: null,
       entries: [],
     };
     let holdRead = false;
@@ -139,7 +145,7 @@ for (const outcome of ["complete", "error"] as const) {
     const releaseRead = Promise.withResolvers<void>();
     const readDelivered = Promise.withResolvers<void>();
     await page.route(
-      `**/api/projects/${projectID}/conversation?ticketId=${ticketID}`,
+      `**/api/projects/${projectID}/conversation?ticketId=${ticketID}*`,
       async (route) => {
         const captured = view;
         if (holdRead) {
@@ -484,7 +490,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
   });
   let showProgress = false;
   await page.route(
-    `**/api/projects/${projectID}/conversation?ticketId=${ticketID}`,
+    `**/api/projects/${projectID}/conversation?ticketId=${ticketID}*`,
     async (route) => {
       const response = await route.fetch();
       const body = await response.json();
@@ -533,7 +539,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
     await expect(pending).toBeVisible();
     await page.screenshot({ path: `${evidenceDirectory}/interview-pending-narrow.png` });
     release();
-    await page.unroute(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}`);
+    await page.unroute(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}*`);
     await expect(
       page.getByRole("alert").filter({ hasText: "Owned delayed answer interrupted" }),
     ).toBeVisible();
@@ -554,7 +560,7 @@ test("makes empty Agent guidance and the composer match the selected Ticket cont
   const panel = page.getByRole("complementary", { name: "Agent panel" });
   await expect(panel.locator(".agent-empty")).toContainText("Ask about the Project");
   await expect(panel.locator("header strong")).toHaveCount(0);
-  await page.getByRole("region", { name: "requirements" }).getByRole("button").click();
+  await page.getByRole("region", { name: "requirements" }).locator(".ticket-card-body").click();
   await expect(panel.locator(".agent-empty")).toContainText("Ask about this Ticket");
   await expect(panel.locator(".assistant-context-chip")).toHaveCount(0);
   await expect(panel.getByLabel("Message conversation")).toHaveAttribute(
@@ -720,9 +726,9 @@ test("minimize and pause preserve the exact answer; Wiki chat never retargets th
   ).toHaveCount(1);
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await page.getByRole("region", { name: "requirements" }).getByRole("button").click();
+  await page.getByRole("region", { name: "requirements" }).locator(".ticket-card-body").click();
   if (!(await panel.isVisible()))
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(panel.getByLabel("Message conversation")).toBeVisible();

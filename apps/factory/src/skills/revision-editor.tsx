@@ -1,14 +1,14 @@
+import { createPatch } from "diff";
 import { createSignal, For, Show } from "solid-js";
 import { z } from "zod";
-import { createPatch } from "diff";
-import {
-  type SkillContent,
-  skillContentInput,
-} from "../../../../packages/conversation-domain/src/skills";
 import type {
   SkillLibraryEntry,
   SkillScope,
 } from "../../../../packages/conversation-domain/src/skill-library";
+import {
+  type SkillContent,
+  skillContentInput,
+} from "../../../../packages/conversation-domain/src/skills";
 import { apiRequest } from "../api-client";
 
 export function SkillRevisionEditor(props: {
@@ -19,8 +19,9 @@ export function SkillRevisionEditor(props: {
   canManageProject: boolean;
   canManageSystem: boolean;
   warnings?: string[] | undefined;
-  onSaved: () => void;
+  onSaved: (saved: { libraryId: string; revisionId: string; scope: SkillScope }) => void;
   onCancel: () => void;
+  onDiscard?: (() => void) | undefined;
 }) {
   const [draft, setDraft] = createSignal(structuredClone(props.content));
   const [scope, setScope] = createSignal<SkillScope>(props.entry?.scope ?? props.scope);
@@ -98,12 +99,16 @@ export function SkillRevisionEditor(props: {
     setBusy(true);
     setError("");
     try {
-      await apiRequest(z.object({ libraryId: z.uuid(), revisionId: z.uuid() }), "/api/skills", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(pending),
-      });
-      props.onSaved();
+      const saved = await apiRequest(
+        z.object({ libraryId: z.uuid(), revisionId: z.uuid() }),
+        "/api/skills",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(pending),
+        },
+      );
+      props.onSaved({ ...saved, scope: scope() });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save skill");
     } finally {
@@ -112,10 +117,11 @@ export function SkillRevisionEditor(props: {
   }
   return (
     <form class="skill-editor" aria-label="Skill editor" onSubmit={(event) => void save(event)}>
-      <h3>{props.entry ? "Edit skill" : "New skill"}</h3>
+      <h3 tabindex="-1">{props.entry ? "Edit skill" : "New skill"}</h3>
       <label>
         Name
         <input
+          name="skill-name"
           required
           maxlength={100}
           value={draft().name}
@@ -338,6 +344,11 @@ export function SkillRevisionEditor(props: {
         <button type="button" class="quiet-button" disabled={busy()} onClick={props.onCancel}>
           Back to library
         </button>
+        <Show when={props.onDiscard}>
+          <button type="button" class="quiet-button" disabled={busy()} onClick={props.onDiscard}>
+            Discard draft
+          </button>
+        </Show>
         <button type="submit" class="primary-button" disabled={busy() || !reviewed()}>
           {busy() ? "Saving…" : "Save skill"}
         </button>

@@ -2,7 +2,7 @@ import { defineMutatorsWithType, defineMutatorWithType, type Transaction } from 
 import type { DrizzleTransaction } from "@rocicorp/zero/server/adapters/drizzle";
 import { and, eq, sql } from "drizzle-orm";
 import type { createDatabase } from "../../db/src/client";
-import { epic, ticket, ticketDependency } from "../../db/src/schema";
+import { epic, project, ticket, ticketDependency } from "../../db/src/schema";
 import { dependencyWouldCycle } from "../../ticket-domain/src/dependency";
 import { canPlanTicket } from "../../ticket-domain/src/ticket";
 import { ticketDependencyValidator } from "./dependencies";
@@ -11,6 +11,8 @@ import { knowledgePageIconValidator, moveKnowledgePageValidator } from "./knowle
 import { moveKnowledgePage, setKnowledgePageIcon } from "./knowledge-server";
 import type { FactoryZeroContext, FactoryZeroSchema } from "./schema";
 import { createTicketValidator, moveTicketValidator, updateTicketValidator } from "./tickets";
+import { createPlanningTicketIn } from "../../db/src/planning-ticket";
+import { projectBackgroundValidator } from "./projects";
 
 type Database = ReturnType<typeof createDatabase>["db"];
 type WrappedTransaction = DrizzleTransaction<Database>;
@@ -44,6 +46,27 @@ async function requireProjectAccess(
 }
 
 export const zeroServerMutators = defineMutators({
+  projects: {
+    setBackground: defineMutator(projectBackgroundValidator, async ({ tx, ctx, args }) => {
+      const db = drizzleTransaction(tx);
+      await requireProjectAccess(db, ctx.userId, args.projectId);
+      const managers = await db.execute<{ allowed: boolean }>(sql`
+        WITH administrator AS (SELECT user_id FROM factory.administrator
+          WHERE user_id=${ctx.userId}::uuid FOR SHARE)
+        SELECT EXISTS(SELECT 1 FROM administrator) OR EXISTS(
+          SELECT 1 FROM factory.project_membership
+          WHERE project_id=${args.projectId}::uuid AND user_id=${ctx.userId}::uuid
+            AND manage_project
+        ) AS allowed`);
+      if (!managers[0]?.allowed) throw new Error("Project Manager access required");
+      const changed = await db
+        .update(project)
+        .set({ desktopBackgroundKey: args.desktopBackgroundKey, updatedAt: new Date() })
+        .where(eq(project.id, args.projectId))
+        .returning({ id: project.id });
+      if (!changed.length) throw new Error("Project not found");
+    }),
+  },
   knowledge: {
     move: defineMutator(moveKnowledgePageValidator, async ({ tx, ctx, args }) => {
       await moveKnowledgePage(drizzleTransaction(tx), ctx.userId, args);
@@ -223,44 +246,14 @@ export const zeroServerMutators = defineMutators({
     }),
     create: defineMutator(createTicketValidator, async ({ tx, ctx, args }) => {
       const db = drizzleTransaction(tx);
-      await requireProjectAccess(db, ctx.userId, args.projectId);
-      const project = await db.query.project.findFirst({
-        where: (row, { eq }) => eq(row.id, args.projectId),
-      });
-      if (!project) throw new Error("Project not found");
-      const created = await db
-        .insert(ticket)
-        .values({
-          id: args.id,
-          projectId: args.projectId,
-          title: args.title,
-          description: args.description,
-          state: args.state ?? "inbox",
-          createdBy: ctx.userId,
-        })
-        .onConflictDoNothing({ target: ticket.id })
-        .returning({ id: ticket.id });
-      if (!created.length) {
-        const previous = await db.query.ticket.findFirst({
-          where: (row, { eq }) => eq(row.id, args.id),
-        });
-        if (
-          !previous ||
-          previous.projectId !== args.projectId ||
-          previous.createdBy !== ctx.userId ||
-          previous.title !== args.title ||
-          previous.description !== args.description ||
-          previous.state !== (args.state ?? "inbox")
-        )
-          throw new Error(
-            "This draft was already created with different content. Open the saved Ticket.",
-          );
-        return;
-      }
+      await createPlanningTicketIn((statement) => db.execute(statement), ctx.userId, args);
     }),
     update: defineMutator(updateTicketValidator, async ({ tx, ctx, args }) => {
       const db = drizzleTransaction(tx);
       await requireProjectAccess(db, ctx.userId, args.projectId);
+      if (args.description !== undefined)
+        await db.execute(sql`SELECT factory.bind_attachment_references(
+          ${args.projectId}::uuid,${ctx.userId}::uuid,'ticket',${args.ticketId}::uuid,${args.description},true)`);
       const current = await db.query.ticket.findFirst({
         where: (row, { eq }) => eq(row.id, args.ticketId),
       });

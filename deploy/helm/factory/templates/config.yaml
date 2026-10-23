@@ -25,6 +25,11 @@ data:
   FACTORY_OPENBAO_CA_FILE: "/run/factory/openbao/ca.crt"
   FACTORY_REGISTRY_CA_FILE: {{ ternary "/run/factory/registry/ca.crt" "/etc/ssl/certs/ca-certificates.crt" (not (empty .Values.registryCASecret)) | quote }}
   FACTORY_STATE_DIRECTORY: "/var/lib/factory"
+  FACTORY_ATTACHMENT_S3_ENDPOINT: {{ .Values.attachments.endpoint | quote }}
+  FACTORY_ATTACHMENT_S3_BUCKET: {{ .Values.attachments.bucket | quote }}
+  FACTORY_ATTACHMENT_S3_REGION: {{ .Values.attachments.region | quote }}
+  FACTORY_ATTACHMENT_FILE_BYTES: {{ .Values.attachments.fileBytes | quote }}
+  FACTORY_ATTACHMENT_MESSAGE_BYTES: {{ .Values.attachments.messageBytes | quote }}
   FACTORY_STORAGE_CLASS: {{ .Values.storageClass | quote }}
   FACTORY_ADMIN_EMAIL: {{ .Values.adminEmail | quote }}
   FACTORY_MODEL_ALLOWED_ORIGINS: {{ join "," .Values.modelAllowedOrigins | quote }}

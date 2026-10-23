@@ -3,6 +3,8 @@ import { workspacePresence } from "../../../packages/interface-domain/src/worksp
 import type { AppPreview, RuntimeAttempt } from "./api-contracts";
 import { runtimeReconnecting, runtimeWorkspaceURL } from "./runtime-workspace-state";
 import type { WorkspaceTab } from "./workspace-tabs";
+import { PreviewReview } from "./review/preview";
+import { appRuntimeOrigin } from "./runtime-origins";
 
 export function RuntimeWorkspaceTabs(props: {
   projectID: string;
@@ -11,6 +13,9 @@ export function RuntimeWorkspaceTabs(props: {
   attempts: readonly RuntimeAttempt[];
   previews: readonly AppPreview[];
   pending: boolean;
+  userID: string;
+  canDevelop: boolean;
+  onOpenTicket?(changeID: string): void;
 }) {
   const runtimeTabs = () => props.tabs.filter((tab) => tab.view === "preview");
   return (
@@ -29,6 +34,16 @@ export function RuntimeWorkspaceTabs(props: {
           runtimeWorkspaceURL(tab(), props.projectID, props.attempts, attachedURL, props.previews),
         );
         const reconnecting = () => runtimeReconnecting(attempt());
+        const review = createMemo(() => {
+          const changeID = attempt()?.changeId;
+          if (!changeID) return undefined;
+          return {
+            changeID,
+            userID: props.userID,
+            canDevelop: props.canDevelop,
+            onOpenTicket: props.onOpenTicket ? () => props.onOpenTicket?.(changeID) : undefined,
+          };
+        });
         const status = () => {
           if (reconnecting()) return "Connection interrupted. Reconnecting to the same Workspace…";
           const current = attempt();
@@ -48,6 +63,8 @@ export function RuntimeWorkspaceTabs(props: {
               url={url()}
               reconnecting={reconnecting()}
               loadingLabel={status()}
+              active={active()}
+              review={review()}
             />
           </div>
         );
@@ -62,6 +79,15 @@ export function RuntimeWorkspace(props: {
   url?: string | undefined;
   loadingLabel: string;
   reconnecting?: boolean;
+  active?: boolean | undefined;
+  review?:
+    | {
+        changeID: string;
+        userID: string;
+        canDevelop: boolean;
+        onOpenTicket?: (() => void) | undefined;
+      }
+    | undefined;
 }) {
   return (
     <div class="runtime-workspace">
@@ -79,6 +105,8 @@ export function RuntimeWorkspace(props: {
             attemptID={props.attemptID}
             url={url()}
             reconnecting={Boolean(props.reconnecting)}
+            review={props.review}
+            active={props.active}
           />
         )}
       </Show>
@@ -91,6 +119,15 @@ function AttachedRuntimeFrame(props: {
   attemptID: string | undefined;
   url: string;
   reconnecting?: boolean;
+  active?: boolean | undefined;
+  review?:
+    | {
+        changeID: string;
+        userID: string;
+        canDevelop: boolean;
+        onOpenTicket?: (() => void) | undefined;
+      }
+    | undefined;
 }) {
   const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
   let frame: HTMLIFrameElement | undefined;
@@ -141,6 +178,20 @@ function AttachedRuntimeFrame(props: {
         }}
         onError={() => setPhase("failed")}
       />
+      <Show
+        when={props.title === "Preview" && props.review && props.attemptID && phase() === "loaded"}
+      >
+        <PreviewReview
+          changeID={props.review!.changeID}
+          attemptID={props.attemptID!}
+          userID={props.review!.userID}
+          canDevelop={props.review!.canDevelop}
+          active={props.active !== false}
+          onOpenTicket={props.review!.onOpenTicket}
+          frame={() => frame}
+          runtimeOrigin={appRuntimeOrigin(location.origin, props.attemptID!, "app")}
+        />
+      </Show>
       <Show when={phase() !== "loaded" || props.reconnecting}>
         <div
           class="runtime-frame-state empty-workspace"

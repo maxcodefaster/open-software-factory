@@ -181,6 +181,7 @@ export async function factoryProcess(
       FACTORY_HOST: liveRuntime ? "0.0.0.0" : "127.0.0.1",
       FACTORY_PORT: String(port),
       FACTORY_BASE_URL: base,
+      FACTORY_STATE_DIRECTORY: `.factory/test-results/factory-process/${id}`,
       FACTORY_ADMIN_EMAIL: `owned-${id}@factory.local`,
       FACTORY_ADMIN_PASSWORD: "owned-process-password-not-a-secret",
       FACTORY_AUTH_SECRET: "owned-process-auth-secret-not-a-production-credential",
@@ -241,8 +242,8 @@ export async function factoryProcess(
         planningCache ??= await ownedPlanningCache(databaseURL, base);
         environment.FACTORY_ZERO_CACHE_URL = planningCache.url;
       },
-      async start() {
-        const child = Bun.spawn([process.execPath, "apps/factory/src/server.ts"], {
+      async start(entrypoint = "apps/factory/src/server.ts", args: string[] = []) {
+        const child = Bun.spawn([process.execPath, entrypoint, ...args], {
           env: environment,
           stdout: "pipe",
           stderr: "pipe",

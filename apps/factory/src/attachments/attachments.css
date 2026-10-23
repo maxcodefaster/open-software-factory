@@ -1,0 +1,482 @@
+.attachment-insert {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  padding-block: var(--space-2);
+  color: var(--color-ink);
+  min-inline-size: 0;
+  font: var(--weight-regular) var(--text-sm) / var(--leading-label) var(--font-interface);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.attachment-add {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.attachment-add svg {
+  width: 1rem;
+  height: 1rem;
+}
+.attachment-insert svg {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.attachment-toolbar > small {
+  overflow-wrap: anywhere;
+  color: var(--color-ink-muted);
+}
+.attachment-restrictions,
+.attachment-privacy {
+  flex-basis: 100%;
+}
+.attachment-privacy {
+  order: 4;
+}
+form:has(.attachment-insert-drop),
+.rich-editor-host:has(.attachment-insert-drop) {
+  outline: 2px dashed var(--color-focus);
+  outline-offset: var(--space-1);
+}
+.attachment-insert .attachment-drop-hint {
+  flex-basis: 100%;
+  color: var(--color-river-deep);
+  font-weight: var(--weight-medium);
+}
+.attachment-insert-compact:has(> input:only-child) {
+  padding: 0;
+}
+.attachment-insert .inline-error {
+  flex-basis: 100%;
+  margin: 0;
+}
+.attachment-transfer-list {
+  flex-basis: 100%;
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.attachment-transfer-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  max-inline-size: 32rem;
+}
+.attachment-transfer-name {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+.attachment-transfer-list progress {
+  grid-column: 1 / -1;
+  inline-size: 100%;
+  block-size: var(--space-1);
+  accent-color: var(--color-river-deep);
+}
+.attachment-transfer-list .interaction-feedback {
+  max-inline-size: 12rem;
+}
+.attachment-insert .interaction-feedback {
+  text-transform: none;
+  letter-spacing: normal;
+}
+@media (max-width: 480px) {
+  .attachment-transfer-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.attachment-pending-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: var(--space-2);
+  flex-basis: 100%;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.attachment-pending-list .attachment-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-inline-size: 0;
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-control);
+  background: var(--material-input);
+  padding: var(--space-2);
+}
+.attachment-file-open {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-inline-size: 0;
+  color: var(--color-ink);
+  text-decoration: none;
+  border-radius: var(--radius-xs);
+}
+.attachment-file-preview {
+  display: grid;
+  place-items: center;
+  flex: 0 0 var(--space-12);
+  width: var(--space-12);
+  height: var(--space-12);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+  color: var(--color-river-deep);
+  background: var(--material-accent);
+}
+.attachment-file-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.attachment-file-preview svg {
+  width: var(--space-6);
+  height: var(--space-6);
+}
+.attachment-file-details {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-1);
+  min-inline-size: 0;
+}
+.attachment-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: var(--weight-medium);
+}
+.attachment-file-open:hover .attachment-file-name {
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+.attachment-file-details small {
+  display: flex;
+  min-inline-size: 0;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--color-ink-muted);
+}
+.attachment-file-meta {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-insert small,
+.factory-desktop .attachment-insert small {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-regular);
+  text-transform: none;
+  letter-spacing: normal;
+  line-height: var(--leading-label);
+}
+.attachment-file-ready {
+  display: inline-flex;
+  flex: none;
+  color: var(--color-success);
+}
+.attachment-file-ready svg {
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+}
+.attachment-insert .attachment-file-remove {
+  display: grid;
+  place-items: center;
+  min-width: var(--control-height);
+  min-height: var(--control-height);
+  padding: var(--space-1);
+}
+.attachment-file-remove svg {
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+}
+.attachment-file-attach {
+  grid-row: 2;
+}
+.attachment-file-open:focus-visible,
+.attachment-image-action:focus-visible,
+.factory-attachment-preview:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: var(--space-1);
+}
+.document-attachment {
+  margin: var(--space-4) 0;
+}
+.document-attachment-image,
+.markdown-body img.factory-attachment-image {
+  display: block;
+  max-width: 100%;
+  max-height: 32rem;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  margin-block: var(--space-3);
+}
+.document-attachment-image,
+.factory-attachment-preview {
+  border-radius: var(--radius-control);
+}
+.markdown-body a.factory-attachment-preview {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  color: var(--color-river-deep);
+  text-decoration: none;
+}
+.attachment-image-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-height);
+  color: var(--color-river-deep);
+  font: var(--weight-medium) var(--text-sm) / var(--leading-label) var(--font-interface);
+  text-decoration: underline;
+  text-underline-offset: 0.16em;
+}
+.markdown-body .factory-attachment-preview .factory-attachment-image,
+.document-attachment .document-attachment-image {
+  margin-block: 0;
+}
+@media (max-width: 480px), (pointer: coarse) {
+  .attachment-add,
+  .attachment-insert .attachment-file-remove,
+  .attachment-image-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+.markdown-body a.factory-attachment-file,
+.rich-editor-host a[href^="/api/attachments/"]:not(.attachment-image-action) {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+  padding: var(--space-3);
+  color: var(--color-river-deep);
+  background: var(--material-input);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-control);
+  text-decoration: none;
+  text-underline-offset: 0.16em;
+}
+.markdown-body a.factory-attachment-file::before,
+.rich-editor-host a[href^="/api/attachments/"]:not(.attachment-image-action)::before {
+  content: "";
+  display: inline-block;
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+  margin-inline-end: var(--space-2);
+  vertical-align: text-bottom;
+  background: currentColor;
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8l-5-5Zm0 0v5h5M8 13h8M8 17h5'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+}
+.markdown-body a.factory-attachment-file:hover,
+.rich-editor-host a[href^="/api/attachments/"]:not(.attachment-image-action):hover {
+  background: var(--material-accent-strong);
+  text-decoration: underline;
+}
+.markdown-body a.factory-attachment-file:focus-visible,
+.rich-editor-host a[href^="/api/attachments/"]:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+.review-message-body.markdown-body {
+  white-space: normal;
+}
+.review-message-body.markdown-body > :first-child {
+  margin-top: 0;
+}
+.review-message-body.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.attachment-toolbar {
+  position: relative;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  flex-basis: 100%;
+  min-inline-size: 0;
+}
+.attachment-composer,
+.attachment-text-entry,
+.attachment-files {
+  display: block;
+  min-inline-size: 0;
+  inline-size: 100%;
+  flex-basis: 100%;
+}
+.attachment-toolbar:empty,
+.attachment-text-entry:empty {
+  display: none;
+}
+.attachment-insert-strip {
+  padding: 0;
+}
+.attachment-insert-compact:has(> .attachment-toolbar:empty):not(
+  :has(.attachment-files, .inline-error, .attachment-transfer-list, .attachment-drop-hint)
+) {
+  padding: 0;
+}
+.attachment-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.attachment-strip .attachment-pending-list {
+  display: flex;
+  flex: 1;
+  flex-wrap: nowrap;
+  gap: var(--space-2);
+  min-inline-size: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding: var(--space-1);
+  scroll-padding-inline: var(--space-1);
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.attachment-strip .attachment-pending-list .attachment-file {
+  flex: 0 0 13rem;
+  padding: var(--space-1);
+}
+.attachment-strip .attachment-file-preview {
+  flex-basis: var(--space-8);
+  width: var(--space-8);
+  height: var(--space-8);
+}
+.attachment-strip .attachment-file-open {
+  gap: var(--space-2);
+}
+.attachment-strip .attachment-file-details {
+  gap: var(--space-0-5);
+}
+.attachment-strip .attachment-file-details small {
+  white-space: nowrap;
+}
+.attachment-strip .attachment-file-attach {
+  grid-row: 1;
+}
+.attachment-strip .attachment-file:has(.attachment-file-attach) {
+  flex-basis: 17rem;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+}
+.attachment-insert .attachment-scroll,
+.attachment-help > summary {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: var(--control-height);
+  height: var(--control-height);
+  padding: var(--space-1);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+.attachment-scroll svg,
+.attachment-help svg {
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+}
+.attachment-scroll-back svg {
+  transform: rotate(90deg);
+}
+.attachment-scroll-next svg {
+  transform: rotate(-90deg);
+}
+.attachment-count {
+  flex: 1 0 11em;
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+.attachment-insert-strip .attachment-privacy {
+  flex-basis: auto;
+  margin-inline-start: auto;
+  color: var(--color-ink-muted);
+}
+.attachment-insert-strip .attachment-add {
+  justify-content: center;
+  min-width: var(--control-height);
+  padding-inline: var(--space-2);
+}
+.attachment-insert-strip .attachment-transfer-list {
+  display: flex;
+  flex-wrap: nowrap;
+  min-inline-size: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.attachment-insert-strip .attachment-transfer-list li {
+  flex: 0 0 13rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+.attachment-insert-strip .attachment-transfer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-help {
+  flex: none;
+}
+.attachment-help > summary {
+  list-style: none;
+  color: var(--color-ink-muted);
+}
+.attachment-help > summary::-webkit-details-marker {
+  display: none;
+}
+.attachment-help > summary:hover,
+.attachment-help[open] > summary {
+  color: var(--color-ink);
+  background: var(--material-accent);
+}
+.attachment-help-content {
+  position: absolute;
+  z-index: 2;
+  inset-block-end: calc(100% + var(--space-2));
+  inset-inline-start: 0;
+  width: min(22rem, 100%);
+  padding: var(--space-4);
+  border-radius: var(--radius-control);
+  background: var(--material-popover);
+  box-shadow: var(--shadow-float);
+  color: var(--color-ink);
+}
+.attachment-help-content p {
+  margin-block: var(--space-2) 0;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+.attachment-strip .attachment-pending-list:focus-visible,
+.attachment-help > summary:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: var(--space-0-5);
+}
+@media (max-width: 480px) {
+  .attachment-insert.attachment-insert-strip .attachment-scroll {
+    display: none;
+  }
+  .attachment-help > summary {
+    width: 44px;
+    height: 44px;
+  }
+  .attachment-insert-strip .attachment-add {
+    min-width: 44px;
+  }
+}

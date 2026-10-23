@@ -74,6 +74,7 @@ let spawnChild = false;
 let runTool = false;
 let nativeBrowser = false;
 let nativeBrowserPending = false;
+let nativeAttachmentID;
 const held = new Map();
 function complete(response, coding = true, summary = false) {
   if (response.destroyed) return;
@@ -81,40 +82,46 @@ function complete(response, coding = true, summary = false) {
   const browserTurn = process.env.FACTORY_PROCESS_BROWSER_TURN;
   const step = providerRequests;
   const call =
-    nativeBrowser && coding && nativeBrowserPending
+    nativeAttachmentID && coding && nativeBrowserPending
       ? {
-          name: browserTools.find((name) => name.endsWith("browser_screenshot")),
-          arguments: "{}",
+          name: browserTools.find((name) => name.endsWith("attachment_read")),
+          arguments: JSON.stringify({ id: nativeAttachmentID, page: 0, offset: 0 }),
         }
-      : runTool && coding
+      : nativeBrowser && coding && nativeBrowserPending
         ? {
-            name: "shell",
-            arguments: JSON.stringify({ command: "true", description: "Owned budget boundary" }),
+            name: browserTools.find((name) => name.endsWith("browser_screenshot")),
+            arguments: "{}",
           }
-        : spawnChild
+        : runTool && coding
           ? {
-              name: "subagent",
-              arguments: JSON.stringify({
-                agent: "general",
-                description: "Owned child usage",
-                prompt: "Return one short answer. No tools.",
-              }),
+              name: "shell",
+              arguments: JSON.stringify({ command: "true", description: "Owned budget boundary" }),
             }
-          : browserTurn && step <= 2
+          : spawnChild
             ? {
-                name: step === 1 ? "shell" : "read",
-                arguments: JSON.stringify(
-                  step === 1
-                    ? {
-                        command: `printf '%s' '{"name":"browser_screenshot","arguments":{}}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${browserTurn}`,
-                        description: "Capture the fixed declared App screenshot",
-                        timeout: 270000,
-                      }
-                    : { path: `/tmp/factory-build-browser-${browserTurn}/screenshot.jpg` },
-                ),
+                name: "subagent",
+                arguments: JSON.stringify({
+                  agent: "general",
+                  description: "Owned child usage",
+                  prompt: "Return one short answer. No tools.",
+                }),
               }
-            : undefined;
-  if (nativeBrowser && coding && nativeBrowserPending) nativeBrowserPending = false;
+            : browserTurn && step <= 2
+              ? {
+                  name: step === 1 ? "shell" : "read",
+                  arguments: JSON.stringify(
+                    step === 1
+                      ? {
+                          command: `printf '%s' '{"name":"browser_screenshot","arguments":{}}' | "$FACTORY_BUILD_BROWSER_COMMAND" browser-client ${browserTurn}`,
+                          description: "Capture the fixed declared App screenshot",
+                          timeout: 270000,
+                        }
+                      : { path: `/tmp/factory-build-browser-${browserTurn}/screenshot.jpg` },
+                  ),
+                }
+              : undefined;
+  if ((nativeBrowser || nativeAttachmentID) && coding && nativeBrowserPending)
+    nativeBrowserPending = false;
   if (spawnChild) spawnChild = false;
   if (coding) runTool = false;
   const deltas = call
@@ -206,6 +213,11 @@ function start() {
 
 const control = createServer(async (request, response) => {
   try {
+    const attachment = /^\/control\/attachment-mcp\/([a-f0-9-]{36})$/.exec(request.url ?? "");
+    if (attachment && request.method === "POST") {
+      nativeAttachmentID = attachment[1];
+      nativeBrowserPending = true;
+    }
     if (request.url === "/control/browser-mcp" && request.method === "POST") {
       nativeBrowser = true;
       nativeBrowserPending = true;
@@ -286,6 +298,7 @@ const control = createServer(async (request, response) => {
     } else if (request.url === "/control/hold" && request.method === "POST") hold = true;
     else if (request.url === "/control/clear" && request.method === "POST") failure = undefined;
     else if (
+      !attachment &&
       ![
         "/control",
         "/control/usage",

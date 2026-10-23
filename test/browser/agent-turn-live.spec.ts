@@ -10,6 +10,7 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 
 const execute = promisify(execFile);
@@ -168,7 +169,7 @@ test("runs genuine Project and Build turns beside the embedded IDE and Preview",
   if (!database) throw new Error("Missing live fixture database");
   const fixtureDatabase = database;
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
   await page
     .getByRole("region", { name: "Ticket board" })

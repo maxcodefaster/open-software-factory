@@ -9,7 +9,7 @@ import {
 const fields = sourceCitationInput.shape;
 const projectCitation = z
   .object({
-    source: z.enum(["knowledge", "ticket", "epic"]),
+    source: z.enum(["knowledge", "ticket", "epic", "attachment"]),
     id: fields.id,
     label: fields.label,
     reference: fields.reference.unwrap().nullable().default(null),
@@ -38,21 +38,28 @@ const interview = z.discriminatedUnion("kind", [
   round.extend({ citations }),
   requirement.extend({ citations }),
 ]);
+const automaticInput = z.discriminatedUnion("kind", [
+  answer.extend({ citations }),
+  requirement.extend({ citations }),
+]);
 
 // Strict provider schemas require every property. Non-applicable Git fields must
 // be absent from non-code variants, and an unused footnote is explicitly null.
 export function projectAgentProviderOutputFor(
   mode: ConversationMode,
   requirementsInterview = false,
+  inputTask = false,
 ) {
   return z
     .object({
       output:
         mode === "investigate"
           ? projectAgentAnswerOutput.extend({ citations })
-          : requirementsInterview
-            ? interview
-            : planning,
+          : inputTask
+            ? automaticInput
+            : requirementsInterview
+              ? interview
+              : planning,
     })
     .strict();
 }

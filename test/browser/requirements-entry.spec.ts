@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const observer = process.env["FACTORY_REQUIREMENTS_MODEL_OBSERVER"];
@@ -28,7 +29,7 @@ test.beforeEach(async ({ page }) => {
       }),
     );
   await mkdir(captures, { recursive: true });
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
 });
 test.afterEach(async () => {
@@ -97,7 +98,7 @@ for (const idea of [false, true])
     await page.reload();
     await page
       .getByRole("region", { name: "requirements", exact: true })
-      .getByRole("button")
+      .locator(".ticket-card-body")
       .click();
     await expect(
       page.getByRole("textbox", { name: "Acceptance criterion 1", exact: true }),
@@ -164,7 +165,7 @@ for (const idea of [false, true])
     await page.reload();
     await page
       .getByRole("region", { name: "requirements", exact: true })
-      .getByRole("button")
+      .locator(".ticket-card-body")
       .click();
     await page.getByRole("button", { name: "Continue clarification", exact: true }).click();
     await expect(question).toBeVisible();

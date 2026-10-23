@@ -4,7 +4,9 @@ import { modelConnectionReference } from "./model-connection";
 import { skillRevisionIDsInput } from "./skills";
 import { codingReasoningInput } from "./model-settings";
 
-const changeAgentCommandInput = z.object({ commandId: z.uuid() }).strict();
+const changeAgentCommandInput = z
+  .object({ commandId: z.uuid(), contextId: z.uuid().optional() })
+  .strict();
 export const changeAgentStartInput = changeAgentCommandInput
   .extend({
     codingReasoning: codingReasoningInput.optional(),
@@ -17,6 +19,7 @@ export const changeAgentStopConfirmationInput = z.object({ stopId: z.uuid() }).s
 export const changeAgentPromptInput = changeAgentCommandInput
   .extend({
     text: z.string().trim().min(1).max(8_000),
+    contextId: z.uuid().optional(),
   })
   .strict();
 // Internal check/reviewer feedback may contain several bounded findings.
@@ -34,12 +37,14 @@ const projectFields = {
   ...commandFields,
   conversationId: z.uuid(),
   ticketId: z.uuid().nullable(),
+  contextId: z.uuid().optional(),
 };
 const changeFields = {
   ...commandFields,
   conversationId: z.uuid().nullable(),
   ticketId: z.uuid(),
   changeId: z.uuid(),
+  contextId: z.uuid().optional(),
 };
 
 export const agentTurnCommandInput = z.discriminatedUnion("kind", [
@@ -112,6 +117,7 @@ export const agentTurnAuthorityInput = z.discriminatedUnion("mode", [
       codingReasoning: codingReasoningInput.optional(),
       submissionPolicy: z.literal("native").optional(),
       browserTransport: z.literal("mcp").optional(),
+      monitoringIncidentId: z.uuid().optional(),
       skillRevisionIds: skillRevisionIDsInput.default([]),
       requiredSkillRevisionIds: skillRevisionIDsInput.default([]),
       review: z
@@ -158,6 +164,8 @@ export function assertAgentTurnAuthority(
 }
 
 export function agentTurnBoundary(command: AgentTurnCommand) {
+  if (!("changeId" in command) && command.contextId)
+    return `agent-turn:${command.projectId}:context:${command.contextId}`;
   return command.ticketId
     ? `agent-turn:${command.projectId}:ticket:${command.ticketId}`
     : `agent-turn:${command.projectId}:draft:${command.createdBy}`;

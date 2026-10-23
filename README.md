@@ -2,8 +2,9 @@
 
 Factory turns approved product intent into reviewed source changes. A Project brings together a
 source repository, Tickets, revisioned Knowledge, shared development and a promoted Preview.
-People approve the requirements and the exact verified commit. Factory controls the work between
-those decisions.
+People approve the requirements and the exact verified commit. A Project monitoring delegation can
+commission eligible application-code fixes and Delivery under those same independent gates.
+Factory records the delegation rather than pretending a human reviewed generated results.
 
 The application uses Solid 2, Bun and PostgreSQL. Zero supplies planning mutations and cached read
 projections. Mastra handles Project research and Requirements Interviews; OpenCode 2 implements
@@ -43,6 +44,81 @@ DNS or browser resolver flags are needed in Chromium-based browsers for the isol
 `*.runtime.localhost` IDE and App addresses. This is local development access, not a public Ingress
 or an installer for Kubernetes.
 
+## Conversations and shared editing
+
+The Assistant's conversation selector retains personal Project and shared Ticket conversations.
+New conversation keeps previous history and drafts. In Coding, starting fresh requires finished
+work or confirmed Stop and uses the same Ticket Workspace. Ask about this Project opens
+checkout-free research alongside implementation. Coding can also search and read authorized
+Project sources itself, without switching agents. History selection never changes the shared
+active Coding context.
+
+Personal Project Chat uses Factory MCP for Project search, source reads and explicit Ticket
+creation. Ask it to create a Ticket in Requirements or capture an Idea. The action saves a chat
+receipt linked to the Ticket; creating it starts no Interview, implementation or runtime.
+The existing permission and approval boundaries remain. See
+[Factory MCP](docs/adr/0020-factory-actions-through-mcp.md).
+
+Typing `/` opens eligible Skill suggestions. Selecting one inserts it into the draft without
+sending a message or enabling guidance. Human and Assistant messages have Copy actions.
+Tool activity groups consecutive calls, keeps active work and failures visible, and labels
+shortened previews. File and recorded-diff actions open the IDE only when selected.
+
+Editing status names the human writer or the Agent's commissioner. Another developer can request
+editing; the holder can release it or approve a transfer. After five minutes without observed
+edits, deliberate human takeover becomes available. Inactivity never releases authority by itself
+or expires Agent work. Handoff stops previous commands and fences old source and branch writes.
+Save before releasing: unsaved buffers remain with their developer and are not transferred.
+See [the collaboration decision](docs/adr/0019-conversation-contexts-and-shared-editing.md).
+
+## Human attachments
+
+Wiki and Ticket editors accept `/image`, `/file`, file selection, image paste and file drops.
+Chats and review comments, Threads and replies have Add file and support paste/drop.
+PNG, JPEG, WebP, PDF, DOCX, UTF-8 TXT and Markdown are supported. Pending uploads stay private.
+Saving a Wiki/Ticket document or sending a shared Ticket message or feedback publishes its exact
+file references. Personal Project chat and uncreated Ticket drafts remain private.
+Upload and document saves do not start agent work. Sending an ordinary chat still commissions its
+normal Agent Turn; saving feedback does not.
+
+Configure the operator-owned private bucket through the `FACTORY_ATTACHMENT_S3_*` variables in
+[the environment example](.env.example), or the Helm chart's `attachments` values and
+`attachments.existingSecret`. The Secret contains `access-key-id` and `secret-access-key`.
+Factory does not install an object store. Use HTTPS, a dedicated non-versioned bucket, credentials
+restricted to that bucket, and no automatic expiry for retained attachment objects. Without this
+configuration, other Factory work remains available and uploads explain the missing storage.
+
+The defaults are 10 MiB per file and 20 MiB per message, configurable in environment bytes or
+Helm values. Factory imposes no cumulative storage limit per Project or installation.
+Original files, generated page images and extracted text remain accounted for. Actual capacity
+and costs belong to the operator's bucket; storage failures retain history and permit explicit retry.
+Unassigned uploads expire after one
+day. Private drafts retain their current file references; removal or Ticket publication releases
+obsolete draft associations. Bucket-provider backups and object versioning are outside this accounting.
+
+Agents read actual images and rendered PDF pages through authenticated, task-bound tools.
+Text is paged rather than silently cut off. PDF processing is limited to 200 pages, extracted text
+to 1 MiB and derived image content to 100 MiB per file. Unsupported DOCX drawings or embedded
+objects require an explicit PDF export instead of silently dropping content. Image processing
+accepts up to 40 megapixels and provides a bounded visual copy while retaining the original.
+Busy or unconfirmed uploads offer an explicit Retry file upload action, which reconciles the same
+upload identity. File processing uses at most two conversion workers per Factory process.
+
+Focused proofs use separate databases and object-store resources:
+
+```sh
+mise exec -- bun run test:controllers attachments.test
+mise exec -- bun run test:native attachment-s3 attachment-browser attachment-factory-browser opencode-attachments
+FACTORY_ATTACHMENT_MODEL_LIVE=1 mise exec -- bun run test:live attachment-model.live
+```
+
+The last command uses the configured Planning connection and incurs model usage. The native
+storage proof uses digest-pinned Garage 2.3.0; it does not access or reset a retained installation.
+The full-Factory browser proof captures desktop and phone layouts, long file names, saved feedback
+and an oversized-file error against its own authenticated installation and private bucket.
+Admission freezes file identities, hashes and human context; replacing a reference never
+reconfigures already admitted work. Independent review retains the implementation's references.
+
 ## Source development
 
 The source-development environment uses macOS with OrbStack's Linux Docker daemon and Kubernetes
@@ -81,6 +157,35 @@ Implement action still commissions work in one click with the configured default
 research chats, and contributor correction chats, have no model switcher. Existing Changes show developers their
 fixed admitted value; changing defaults never reconfigures them. OpenAI Coding uses the native
 Responses adapter.
+
+Settings → Libraries → MCP connections manages remote read-only sources with illustrated landscape connection
+cards and the same ownership and work-type choices as Skills. Start from a Sentry or Datadog suggestion, or add a public HTTPS
+endpoint. Saving does not connect or enable it. Connect, review the exact read-only tools using
+a suitably restricted provider account, then choose where to enable the connection. Factory-owned
+connections also need an explicit Project grant. Sharing a personal definition proposes only
+that version for manager review, never its credentials. OAuth material and bearer tokens stay in
+OpenBao; Coding receives a turn-bound Factory facade. Reconnect creates a new authorization epoch,
+and Disconnect blocks further lookups. Renew Project grants after reconnecting a Factory-owned
+account. Provider-side token revocation or rotation remains separate.
+Local MCP commands, stdio processes and external write tools are not supported.
+
+Project Settings → Inputs accepts feedback, monitoring alerts and other JSON requests through a
+named private webhook. Save its task and select Connected sources from reviewed shared MCP
+connections, or inherit shared Project defaults. Connect a service opens the independent MCP setup
+and returns to the same draft. Creating an Input does not call a model; receiving a request does.
+The Project Agent automatically clarifies it and prepares requirements. Explicitly selected sources
+must be consulted. Missing context produces no Ticket and repeated deliveries coalesce.
+Prepared Tickets still need human implementation approval. Their sources remain available in
+authorized Build, but never independent review.
+
+Automatic implementation is a separate advanced delegation, requiring Project management and
+Developer access. Eligible application fixes use the existing Build, fresh Verification,
+independent review and exact-commit Delivery path. Operational, configuration and dependency changes
+require a human decision. Disable or key rotation fences pending automatic work; accepted merges
+still finish recorded promotion and cleanup. Previously issued monitoring URLs remain valid.
+See [Project Inputs](docs/adr/0018-project-inputs.md) and
+[bounded Autofix](docs/adr/0016-delegated-monitoring-autofix.md).
+
 Factory supplies OpenCode's configuration through its packaged read-only configuration directory
 and admitted model settings. Home-directory and Project OpenCode configuration and compatibility
 skills do not override that setup. Do not maintain a second `opencode.json` for Factory.
@@ -109,7 +214,43 @@ Reproducible blocking findings return to the retained implementation Session for
 each changed commit needs new checks and a fresh review. Cosmetic suggestions do not expand scope.
 An incomplete or failed review has an explicit Retry review action after active work
 and Stop have settled. That creates a fresh attempt, never replays the old inference. A successful
-review still requires deliberate human approval of the exact commit before Staging promotion.
+review still requires deliberate human approval of the exact commit before Staging promotion,
+unless an eligible monitoring fix has an active explicit Delivery delegation.
+New independent reviews name concrete normal and relevant adverse cases before observing them.
+The QA & review panel shows expected versus observed scenario outcomes even without a recording.
+When available, selectable chapters navigate each case in one real browser QA video, not duplicate
+clips. Recording failure or Project-level disable does not turn a successful App observation into
+a QA failure or replay any action.
+
+Human feedback can be an ordinary comment or a resolvable Thread. Open Threads block Delivery,
+including Threads marked "Implemented, please recheck" by the agent. The author or an existing
+authorized developer resolves them. Saving, replying and resolving start no inference.
+Request revision commissions all open Threads that still need work in the retained coding
+conversation. There are no per-comment checkboxes or separate Ticket correction composer.
+Ordinary comments stay in the discussion. Already dispatched Threads are not silently sent again;
+implemented Threads await human rechecking. Needs changes explicitly returns a reviewed Thread
+to the next revision batch. Failed or stopped revision work can be explicitly requested again.
+The Ticket leads with its QA video and scenario chapters, followed by shared feedback. Open Threads
+come first, including agent-implemented Threads awaiting human recheck; resolved Threads are folded.
+Add feedback also accepts a general comment without an image anchor.
+The custom QA player has continuous playback, a seek bar, scenario boundaries, feedback markers,
+chapter navigation and fullscreen. Seeking preserves play/pause, and the active chapter follows
+the playhead. Comment pauses the video so a point can be selected; saved frames retain their
+original timestamp. Discussions have one reply level; source details and resolved Threads fold.
+Open Live Preview reuses the matching Factory workspace tab. Only ticket-bound Previews offer a
+comment button. Hover or Tab selects an element, Enter confirms and Escape exits selection.
+There is no screen-sharing prompt, extension or coordinate editor. A restricted App-side bridge
+supplies the element anchor and an optional DOM-reconstructed context image from that human session.
+The image may differ from browser pixels; rendering or image-storage failure does not block feedback.
+The App keeps its script policy; when that blocks selection, general feedback remains available.
+Preview anchors retain their Runtime Attempt basis and view identity and are not blindly projected
+onto another page or edited state. Only the independent QA recording claims an exact clean candidate.
+
+Project Managers can disable recording under Settings → Environments. Media uses protected
+installation state, with authenticated, non-cached reads. A newer complete recording removes the
+previous video even when it has comments. Comments and their saved frames remain. The final video
+expires thirty days after the Change is delivered or cancelled. Unattached frame uploads are
+removed after one day.
 After a confirmed Stop of an already submitted implementation, Resume checks continues its
 Verification and independent review without calling the implementer again. It applies only to the
 current submitted version and that exact Stop; unfinished source and editing takeover remain fenced.
@@ -375,9 +516,9 @@ Set `FACTORY_OPENCODE_SOL_REASONING=high` to prove a higher selected effort inst
 default medium.
 It keeps the real provider credential outside the fixture and removes its owned containers.
 
-The independent reviewer calibration uses the same explicit Azure Sol connection at medium
-reasoning. Set `FACTORY_REVIEW_SOL_LIVE=1` and run
-`mise exec -- bun run test:live candidate-review-sol.live`. It executes a healthy control and two
+The independent reviewer calibration uses an explicitly configured Azure Coding connection at medium
+reasoning. Set `FACTORY_REVIEW_MODEL_LIVE=1` and run
+`mise exec -- bun run test:live candidate-review-model.live`. It executes a healthy control and two
 seeded defects independently, then checks the fresh native reviewer's judgments. This is a bounded
 calibration, not the final application journey. `bun run test:controllers candidate-review` checks
 exact-candidate Delivery, targeted correction, explicit retry, Stop and allowance behavior without
@@ -392,6 +533,42 @@ Exact-commit code research has its own paid proof. With the explicit Luna Planni
 set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.
 It checks native code discovery, inspected-file citations and visibility after a permission
 downgrade. It is not part of the ordinary controller lane.
+
+Monitoring diagnosis has a separate configured Planning-model proof. Set
+`FACTORY_MONITORING_MODEL_LIVE=1` and run `mise exec -- bun run test:live monitoring-model.live`.
+It reads owned synthetic incidents through the official MCP transport and exact local Git source,
+then distinguishes an application defect, missing code and an operational alert. It records native
+model usage. This bounded diagnosis proof does not claim end-to-end Build, review or Delivery.
+
+Generic Input preparation has its own configured-model proof:
+
+```sh
+FACTORY_PROJECT_INPUT_LIVE=1 mise exec -- bun run test:live project-input.live
+```
+
+It reads two selected sources through the official MCP client, prepares one unapproved Ticket
+with requirements, and checks that duplicate deliveries do not repeat inference. It starts no
+Build or Delivery. `bun run test:browser test/browser/project-inputs-ui.spec.ts` exercises the real
+settings components with controlled API responses on desktop and phone. The full-Factory
+`monitoring-settings.spec.ts` additionally exercises authenticated commands and durable policies.
+
+The full monitoring proof uses separate PostgreSQL, OpenBao and Forgejo resources, the published
+runtime pins and configured Planning/Coding models:
+
+```sh
+FACTORY_RUN_MONITORING_AUTOFIX_PROOF=1 mise exec -- bun run test:live monitoring-autofix.live
+```
+
+Only the external monitoring provider is synthetic. The proof connects it with an encrypted bearer
+token, reviews its exact tools and grants Project access. Duplicate alerts must create one Ticket
+and one Change, then pass native Build, fresh Verification and independent review before delegated
+Delivery advances `release`, the configured default branch. The unrelated `main` branch must stay
+unchanged. The harness checks the promoted App's missing and known invoice responses without
+editing source or approving Delivery after intake.
+Failures retain exact owned identities under `.factory/test-results/monitoring/native/`.
+`FACTORY_MONITORING_AUTOFIX_RESUME` accepts that run's `state.json` to observe its existing work.
+It never commissions a replacement for a blocked or uncertain incident. Successful runs remove
+their owned runtime storage, services and credentials.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
 Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live
@@ -410,9 +587,11 @@ or registry. Old unlabeled resources require separate ownership review.
 - [Artwork attribution](apps/factory/public/art/README.md) preserves bundled source and rights details.
 - [AGENTS.md](AGENTS.md) contains only rules specific to work in this repository.
 
-Maintained Markdown is limited to READMEs, AGENTS.md and ADRs. Task plans and progress belong in
-the task or issue. Lasting decisions belong in ADRs; current behavior belongs in code, tests and
-the relevant README. Historical local reports and captures are preserved under
+Maintained Markdown is limited to READMEs, AGENTS.md, ADRs and the
+[UI product brief](apps/factory/PRODUCT.md). The product brief records durable users, workflows
+and constraints for design work, not task plans or design specifications. Task plans and progress
+belong in the task or issue. Lasting decisions belong in ADRs; current behavior belongs in code,
+tests and the relevant README. Historical local reports and captures are preserved under
 `.factory/archives/repository-cleanup-20261013/`.
 
 Factory is licensed under [Apache-2.0](LICENSE). Bundled third-party assets retain their own notices.

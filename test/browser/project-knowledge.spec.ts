@@ -1,6 +1,7 @@
 import { mkdir, readFile } from "node:fs/promises";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const origin = "http://127.0.0.1:3000";
@@ -43,7 +44,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
   }
   async function selectProject(current: Page) {
     await expect(current.getByRole("region", { name: "Ticket board" })).toBeVisible();
-    await current.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(current);
     await current.getByRole("button").filter({ hasText: name }).click();
     await current.getByRole("button", { name: "Knowledge", exact: true }).click();
   }

@@ -1,0 +1,451 @@
+.input-settings {
+  max-width: 1120px;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  caret-color: var(--color-focus);
+  scrollbar-color: var(--line-strong) transparent;
+}
+.input-settings ::selection {
+  background: var(--material-accent-strong);
+  color: var(--color-ink);
+}
+.input-settings :is(button, input, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 3px;
+}
+.input-settings :is(h3, h4, p) {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.input-settings h3 {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+}
+.input-settings h4 {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+}
+.input-settings svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  flex-shrink: 0;
+}
+.input-settings p {
+  max-width: 70ch;
+}
+.input-row-main,
+.input-row-title,
+.input-actions,
+.input-form-actions {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+}
+.input-actions {
+  flex-wrap: wrap;
+}
+.input-overview-heading {
+  margin-bottom: var(--space-4);
+}
+.input-overview-heading .workspace-action-status {
+  flex: 1 1 28rem;
+  max-width: 70ch;
+}
+.input-settings .input-message {
+  margin-bottom: var(--space-4);
+}
+.input-message > button {
+  margin-top: var(--space-2);
+}
+.input-settings .input-help {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+.input-empty {
+  padding-block: var(--space-6);
+}
+.input-empty h3 {
+  margin-bottom: var(--space-2);
+}
+.input-list {
+  border-top: 1px solid var(--line-subtle);
+}
+.input-row {
+  padding-block: var(--space-5);
+  border-bottom: 1px solid var(--line-subtle);
+}
+.input-row-main {
+  align-items: start;
+}
+.input-row-main > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+.input-row-main h3 {
+  font-size: var(--text-md);
+}
+.input-row-title {
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-1);
+}
+.input-state {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.input-state:is([data-state="enabled"], [data-state="prepared"], [data-state="delivered"]) {
+  color: var(--color-success);
+}
+.input-state:is([data-state="attention"], [data-state="blocked"], [data-state="uncertain"]),
+.input-settings .input-error {
+  color: var(--color-danger);
+}
+.input-row-menu {
+  position: relative;
+  flex: 0 0 auto;
+  margin-top: calc(-1 * var(--space-1));
+}
+.input-row-menu summary {
+  list-style: none;
+}
+.input-row-menu summary::-webkit-details-marker {
+  display: none;
+}
+.input-row-menu > div {
+  position: absolute;
+  z-index: var(--layer-menu);
+  right: 0;
+  display: grid;
+  width: 200px;
+  max-width: calc(100vw - var(--space-8));
+  overflow: auto;
+  padding: var(--space-1);
+  border-radius: var(--radius-sm);
+  background: var(--material-popover);
+  box-shadow: var(--shadow-float);
+}
+.input-row-menu button {
+  justify-content: start;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  translate: none;
+  scale: none;
+}
+.input-row-menu button:hover:not(:disabled) {
+  background: var(--material-accent);
+}
+.input-row-details {
+  margin-top: var(--space-3);
+}
+.input-settings summary {
+  cursor: pointer;
+}
+.input-row-details > summary {
+  display: flex;
+  align-items: center;
+  width: fit-content;
+  min-height: var(--control-height);
+  gap: var(--space-1);
+  list-style: none;
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+.input-row-details > summary::-webkit-details-marker {
+  display: none;
+}
+.input-row-details > summary > svg,
+.input-event > summary > svg {
+  transform: rotate(-90deg);
+}
+.input-row-details[open] > summary > svg,
+.input-event[open] > summary > svg {
+  transform: rotate(0);
+}
+.input-detail-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-6);
+  padding-block: var(--space-4) var(--space-1);
+}
+.input-detail-content > section {
+  display: grid;
+  align-content: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.input-task {
+  white-space: pre-wrap;
+}
+.input-events {
+  margin-top: var(--space-8);
+}
+.input-section-heading {
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--line-subtle);
+}
+.input-event {
+  padding-block: var(--space-4);
+  border-bottom: 1px solid var(--line-subtle);
+}
+.input-event > summary {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  gap: var(--space-4);
+  align-items: baseline;
+  list-style: none;
+}
+.input-event > summary::-webkit-details-marker {
+  display: none;
+}
+.input-event > summary > :where(svg) {
+  align-self: start;
+  margin-top: calc(var(--space-1-5) / 2);
+}
+.input-event strong {
+  display: block;
+  font-weight: var(--weight-medium);
+}
+.input-event small,
+.input-event time {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+.input-event time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.input-event-content {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  margin: var(--space-3) 0 0 var(--space-8);
+}
+.input-editor,
+.input-setup-result {
+  max-width: 680px;
+}
+.input-settings .input-editor {
+  display: grid;
+  gap: var(--space-5);
+}
+.input-editor > header > .workspace-action-bar {
+  padding-bottom: 0;
+}
+.input-editor .workspace-action-status {
+  color: var(--color-ink);
+}
+.input-editor > :where(header) > p {
+  margin-top: var(--space-2);
+}
+.input-settings fieldset:not(.workspace-action-bar) {
+  display: grid;
+  gap: var(--space-5);
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  margin: 0;
+}
+.input-settings label {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+  font: var(--weight-medium) var(--text-sm) / var(--leading-body) var(--font-interface);
+  text-transform: none;
+  letter-spacing: normal;
+}
+.input-settings :is(input, textarea) {
+  min-width: 0;
+  width: 100%;
+  min-height: 44px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-sm);
+  background: var(--material-input);
+  color: var(--color-ink);
+  font: var(--weight-regular) var(--text-sm) / var(--leading-body) var(--font-interface);
+}
+.input-settings input::placeholder,
+.input-settings textarea::placeholder {
+  color: var(--color-ink-muted);
+  opacity: 1;
+}
+.input-settings :is(input, textarea):disabled {
+  opacity: 0.6;
+}
+.input-settings textarea {
+  min-height: 156px;
+  resize: vertical;
+}
+.input-sources legend {
+  font-weight: var(--weight-medium);
+  margin-bottom: var(--space-2);
+}
+.input-settings .input-sources {
+  gap: var(--space-2);
+  padding-block: var(--space-4) 0;
+  border-top: 1px solid var(--line-subtle);
+}
+.input-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.input-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 36px;
+  max-width: 100%;
+  background: var(--material-accent);
+  border: 0;
+  border-radius: var(--radius-pill);
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.input-chip:hover:not(:disabled) {
+  background: var(--material-accent-strong);
+}
+.input-settings .input-source-picker {
+  display: grid;
+  gap: 0;
+  padding: var(--space-1) var(--space-3);
+  background: var(--material-input);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-sm);
+}
+.input-source-picker > label,
+.input-settings .input-checkbox {
+  display: flex;
+  align-items: start;
+  gap: var(--space-3);
+  font-weight: var(--weight-regular);
+}
+.input-source-picker > label {
+  min-height: 44px;
+  padding-block: var(--space-2);
+  border-bottom: 1px solid var(--line-subtle);
+}
+.input-source-picker > .workspace-action {
+  justify-self: start;
+  margin-block: var(--space-1);
+}
+.input-source-picker > p {
+  padding-block: var(--space-3);
+}
+.input-source-picker small {
+  display: block;
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+.input-settings input[type="checkbox"] {
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  margin-top: calc(var(--space-1-5) / 2);
+  accent-color: var(--color-river-deep);
+}
+.input-advanced {
+  border-top: 1px solid var(--line-subtle);
+  padding-top: var(--space-4);
+}
+.input-advanced > summary {
+  min-height: var(--control-height);
+  font-weight: var(--weight-medium);
+}
+.input-advanced > p {
+  color: var(--color-ink-muted);
+}
+.input-advanced > :not(summary) {
+  margin-top: var(--space-3);
+}
+.input-form-actions {
+  justify-content: end;
+  border-top: 1px solid var(--line-subtle);
+  padding-top: var(--space-4);
+}
+.input-confirmation {
+  margin-block: var(--space-4);
+  padding-block: var(--space-4);
+  border-block: 1px solid var(--line-subtle);
+}
+.input-confirmation > :not(:first-child) {
+  margin-top: var(--space-2);
+}
+.input-confirmation .input-actions {
+  justify-content: end;
+}
+.input-setup-result {
+  display: grid;
+  gap: var(--space-4);
+}
+.input-setup-result input {
+  font-family: var(--font-technical);
+}
+.input-webhook {
+  display: grid;
+  gap: var(--space-2);
+  margin-block: var(--space-2);
+}
+.input-webhook > .input-actions {
+  justify-content: end;
+  gap: var(--space-1);
+}
+.input-copy-action {
+  color: var(--color-river-deep);
+  font-weight: var(--weight-semibold);
+}
+.input-setup-result > button {
+  justify-self: start;
+  margin-top: var(--space-2);
+}
+.input-payload pre {
+  max-width: 100%;
+  margin: var(--space-1) 0;
+  overflow: auto;
+  padding: var(--space-4);
+  border-radius: var(--radius-sm);
+  background: var(--material-input);
+  font: var(--text-xs) / var(--leading-body) var(--font-technical);
+}
+@container workspace (max-width: 1000px) {
+  .input-detail-content {
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 70ch;
+  }
+}
+@container workspace (max-width: 600px) {
+  .input-settings {
+    padding-inline: var(--space-4);
+  }
+  .input-event > summary {
+    grid-template-columns: 16px minmax(0, 1fr) auto;
+    gap: var(--space-2);
+  }
+  .input-event .input-state {
+    max-width: 10rem;
+    text-align: right;
+  }
+  .input-event time {
+    grid-column: 2 / -1;
+  }
+  .input-setup-result h3 {
+    max-width: 30ch;
+  }
+}
+@media (pointer: coarse) {
+  .input-settings :is(button, summary, .input-source-picker > label) {
+    min-height: 44px;
+  }
+}

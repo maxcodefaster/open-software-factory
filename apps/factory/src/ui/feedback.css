@@ -1,0 +1,161 @@
+.interaction-feedback {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1-5);
+  max-inline-size: 100%;
+  min-block-size: 1.35em;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  line-height: var(--leading-label);
+  overflow-wrap: anywhere;
+}
+
+.feedback-mark {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 1em;
+  inline-size: 1em;
+  block-size: 1em;
+  align-self: center;
+}
+
+.interaction-feedback:has(> span:last-child:empty) > .feedback-mark {
+  visibility: hidden;
+}
+
+.feedback-mark::before,
+.feedback-mark::after {
+  position: absolute;
+  box-sizing: border-box;
+  content: "";
+}
+
+[data-feedback="idle"] > .feedback-mark::before {
+  inset: 0.3em;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-pill);
+}
+
+[data-feedback="pending"] > .feedback-mark::before {
+  inset: 0.05em;
+  border: 1.5px solid currentColor;
+  border-inline-end-color: transparent;
+  border-radius: var(--radius-pill);
+  animation: feedback-working var(--duration-activity) linear infinite;
+}
+
+[data-feedback="success"] > .feedback-mark::before {
+  inset-block-start: 0.08em;
+  inset-inline-start: 0.3em;
+  inline-size: 0.35em;
+  block-size: 0.65em;
+  border-inline-end: 1.5px solid currentColor;
+  border-block-end: 1.5px solid currentColor;
+  transform: rotate(45deg);
+  animation: feedback-confirm var(--duration-fast) var(--ease-enter);
+}
+
+[data-feedback="error"] > .feedback-mark::before {
+  inset: 0;
+  border: 1.5px solid currentColor;
+  border-radius: var(--radius-pill);
+}
+
+[data-feedback="error"] > .feedback-mark::after {
+  inset: 0.22em 0.45em;
+  border-block-start: 0.35em solid currentColor;
+  border-block-end: 0.1em solid currentColor;
+}
+
+.interaction-feedback[data-feedback="success"],
+.copy-feedback[data-feedback="success"] {
+  color: var(--color-success);
+}
+
+.interaction-feedback[data-feedback="error"],
+.copy-feedback[data-feedback="error"],
+.copy-feedback-error {
+  color: var(--color-danger);
+}
+
+.save-feedback {
+  min-inline-size: 5.5rem;
+}
+
+.ticket-save-status {
+  display: flex;
+  justify-content: flex-end;
+  margin-block-start: var(--space-3);
+}
+
+.copy-feedback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1-5);
+}
+
+.copy-feedback[data-feedback="idle"] > .feedback-mark::before,
+.copy-feedback[data-feedback="idle"] > .feedback-mark::after {
+  inline-size: 0.65em;
+  block-size: 0.65em;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+
+.copy-feedback[data-feedback="idle"] > .feedback-mark::before {
+  inset: 0.05em auto auto 0.05em;
+}
+
+.copy-feedback[data-feedback="idle"] > .feedback-mark::after {
+  inset: auto 0.05em 0.05em auto;
+  background: var(--material-popover);
+}
+
+.copy-feedback-label {
+  display: inline-grid;
+}
+
+.copy-feedback-label > span,
+.copy-feedback-label::after {
+  grid-area: 1 / 1;
+}
+
+.copy-feedback-label::after {
+  content: "Copy failed";
+}
+
+.copy-feedback-reserve,
+.copy-feedback-label::after {
+  visibility: hidden;
+}
+
+.copy-feedback-error {
+  font-size: var(--text-sm);
+  line-height: var(--leading-label);
+  overflow-wrap: anywhere;
+}
+
+@keyframes feedback-working {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes feedback-confirm {
+  from {
+    opacity: 0;
+    transform: rotate(45deg) scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: rotate(45deg) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-feedback] > .feedback-mark::before,
+  [data-feedback] > .feedback-mark::after {
+    animation: none;
+  }
+}

@@ -27,6 +27,7 @@ import { FactoryLanguageTools } from "./factory-language-tools";
 import { LanguageGrammarDefinitionContribution } from "@theia/monaco/lib/browser/textmate/textmate-contribution";
 import { FactoryLanguageGrammars } from "./factory-language-grammars";
 import { FactoryChromeContribution } from "./factory-chrome";
+import { FactoryActivityNavigation } from "./factory-activity-navigation";
 import { FactoryWriterContribution } from "./factory-writer";
 import {
   FactoryRuntimeContribution,
@@ -82,6 +83,14 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
 
   bind(FactoryChromeContribution).toSelf().inSingletonScope();
   bind(FrontendApplicationContribution).toService(FactoryChromeContribution);
+  bind(FactoryActivityNavigation).toSelf().inSingletonScope();
+  bind(FrontendApplicationContribution).toService(FactoryActivityNavigation);
+  bind<ResourceResolver>(ResourceResolver).toDynamicValue(({ container }) => ({
+    resolve(uri) {
+      if (uri.scheme !== "factory-activity") throw new Error("Not a recorded activity diff");
+      return container.get(FactoryActivityNavigation).resolve(uri);
+    },
+  }));
   bind(FactoryWriterContribution).toSelf().inSingletonScope();
   bind(FrontendApplicationContribution).toService(FactoryWriterContribution);
 

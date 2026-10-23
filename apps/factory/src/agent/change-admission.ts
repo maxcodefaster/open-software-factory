@@ -8,6 +8,7 @@ import {
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import { buildBrowserInstructions } from "../../../../packages/conversation-domain/src/browser-tools";
 import { buildGoalInstructions } from "./build-completion";
+import { attachmentContextIn } from "../attachments/store";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import { skillInstructionText } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
@@ -29,16 +30,30 @@ import { buildKnowledgeContext } from "./knowledge-context";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 import { codingReasoningIn } from "../models/controller";
 import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import { monitoringChangeAuthorityIn } from "../monitoring/authority";
+import { ensureConversationIn } from "../project-agent/conversation-store";
 
 type Database = ReturnType<typeof createDatabase>;
 export type ChangeAgentInput =
-  | { kind: "change-start"; commandId: string; codingReasoning?: CodingReasoning }
-  | { kind: "change-prompt" | "change-repair"; commandId: string; text: string; resume?: boolean };
+  | {
+      kind: "change-start";
+      commandId: string;
+      codingReasoning?: CodingReasoning;
+      contextId?: string;
+    }
+  | {
+      kind: "change-prompt" | "change-repair";
+      commandId: string;
+      text: string;
+      resume?: boolean;
+      contextId?: string;
+    };
 
 type ChangeContext = {
   projectID: string;
   ticketID: string;
   revisionID: string;
+  monitoringIncidentID: string | null;
   title: string;
   description: string;
   canonicalContent: string;
@@ -48,6 +63,8 @@ type ChangeContext = {
   sessionID: string | null;
   sessionState: string | null;
   stopPending: boolean | null;
+  contextID: string | null;
+  nativeConfirmed: boolean;
 };
 
 export function createChangeAdmission(
@@ -56,13 +73,13 @@ export function createChangeAdmission(
     | string
     | ((
         sql: AgentTurnTransaction,
-        context: { projectID: string; userID: string },
+        context: { projectID: string; userID: string; personal?: boolean },
       ) => Promise<string>),
   resolveConnection?: (sql: AgentTurnTransaction) => Promise<ModelConnectionReference | undefined>,
 ) {
   const turns = createAgentTurnStore(database);
   const skills = createSkillController(database);
-  async function context(sql: AgentTurnTransaction, changeID: string) {
+  async function context(sql: AgentTurnTransaction, changeID: string, userID: string) {
     // Acquire locks before reading the approved revision. A joined statement
     // retains its pre-wait snapshot even after a concurrent writer commits.
     const locked = await sql<Array<{ id: string }>>`
@@ -75,12 +92,13 @@ export function createChangeAdmission(
       );
     const rows = await sql<ChangeContext[]>`
       SELECT change.project_id AS "projectID", change.ticket_id AS "ticketID",
-        revision.id AS "revisionID", ticket.title, ticket.description,
+        revision.id AS "revisionID", approval.monitoring_incident_id AS "monitoringIncidentID",ticket.title, ticket.description,
         revision.canonical_content AS "canonicalContent", conversation.id AS "conversationID",
         conversation.mode, conversation.version::float8 AS "conversationVersion",
         CASE WHEN COALESCE(session.implementation_session_confirmed_at, session.native_session_confirmed_at) IS NOT NULL
           THEN COALESCE(session.implementation_session_id, session.opencode_session_id) END AS "sessionID", session.state AS "sessionState",
-        session.stop_pending AS "stopPending"
+        session.stop_pending AS "stopPending",conversation.active_coding_context_id AS "contextID",
+        COALESCE(session.implementation_session_confirmed_at,session.native_session_confirmed_at) IS NOT NULL AS "nativeConfirmed"
       FROM factory.change change JOIN factory.ticket ticket ON ticket.id = change.ticket_id
       JOIN factory.requirement_approval approval ON approval.id = change.requirement_approval_id
       JOIN factory.requirement_revision revision ON revision.id = approval.requirement_revision_id
@@ -101,10 +119,13 @@ export function createChangeAdmission(
         "conflict",
         "Build requires an active Change and the latest approved Requirements",
       );
+    await ensureConversationIn(sql, rows[0].projectID, rows[0].ticketID, userID);
     // Read again after acquiring the Ticket lock. A writer may have committed
     // a new Conversation or version while the original joined query waited.
-    const conversations = await sql<Array<{ id: string; mode: string; version: number }>>`
-      SELECT id, mode, version::float8 AS version FROM factory.ticket_conversation
+    const conversations = await sql<
+      Array<{ id: string; mode: string; version: number; contextID: string | null }>
+    >`
+      SELECT id, mode, version::float8 AS version,active_coding_context_id AS "contextID" FROM factory.ticket_conversation
         WHERE ticket_id = ${rows[0].ticketID} FOR UPDATE`;
     const conversation = conversations[0];
     if (conversation && conversation.mode !== "build")
@@ -114,6 +135,7 @@ export function createChangeAdmission(
       conversationID: conversation?.id ?? null,
       conversationVersion: conversation?.version ?? null,
       mode: conversation?.mode ?? null,
+      contextID: conversation?.contextID ?? null,
     };
   }
   async function admitIn(
@@ -153,13 +175,28 @@ export function createChangeAdmission(
       else await projectAuthorityIn(sql, userID, command.projectId);
       return turns.admitIn(sql, command, previous.authority);
     }
-    const current = await context(sql, changeID);
+    const current = await context(sql, changeID, userID);
+    if (
+      (input.contextId ?? null) !== current.contextID &&
+      input.kind !== "change-repair" &&
+      !(input.kind === "change-prompt" && input.resume)
+    )
+      throw new CommandError(
+        "conflict",
+        "The active Coding conversation changed. Keep your draft and return to the active conversation.",
+      );
+    const [codingContext] = current.contextID
+      ? await sql<{ nativeID: string }[]>`SELECT native_session_id AS "nativeID"
+          FROM factory.conversation_context WHERE id=${current.contextID} AND change_id=${changeID}`
+      : [];
+    if (codingContext) current.sessionID = codingContext.nativeID;
     if (input.kind === "change-start" && input.codingReasoning)
       await projectDevelopmentAuthorityIn(sql, userID, current.projectID);
     else await projectAuthorityIn(sql, userID, current.projectID);
     const paused = await sql`SELECT pause.turn_id FROM factory.coding_pause pause
       JOIN factory.agent_turn turn ON turn.id=pause.turn_id
-      WHERE turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL`;
+      WHERE turn.change_id=${changeID} AND pause.resumed_by_turn_id IS NULL
+        AND turn.input->>'contextId' IS NOT DISTINCT FROM ${current.contextID}`;
     if (
       paused.length &&
       input.kind !== "change-repair" &&
@@ -196,11 +233,31 @@ export function createChangeAdmission(
     const firstAuthority = firstTurn
       ? agentTurnAuthorityInput.parse(firstTurn.authority)
       : undefined;
+    const monitoringIncidentID =
+      input.kind === "change-start"
+        ? current.monitoringIncidentID
+        : input.kind === "change-repair" && firstAuthority?.mode === "build"
+          ? firstAuthority.monitoringIncidentId
+          : undefined;
+    if (monitoringIncidentID) {
+      const delegated = await monitoringChangeAuthorityIn(
+        database,
+        sql,
+        changeID,
+        monitoringIncidentID,
+      );
+      if (delegated.userId !== userID)
+        throw new CommandError("forbidden", "Autofix must use its recorded Project delegation");
+    }
     const modelID =
       firstTurn?.modelId ??
       (typeof defaultModel === "string"
         ? defaultModel
-        : await defaultModel(sql, { projectID: current.projectID, userID }));
+        : await defaultModel(sql, {
+            projectID: current.projectID,
+            userID,
+            personal: !monitoringIncidentID,
+          }));
     const modelConnection = firstTurn
       ? firstAuthority?.modelConnection
       : await resolveConnection?.(sql);
@@ -249,7 +306,11 @@ export function createChangeAdmission(
           revisionIds: firstAuthority.skillRevisionIds,
           requiredRevisionIds: firstAuthority.requiredSkillRevisionIds,
         }
-      : await skills.resolveAssignment("build", sql, { projectID: current.projectID, userID });
+      : await skills.resolveAssignment("build", sql, {
+          projectID: current.projectID,
+          userID,
+          personal: !monitoringIncidentID,
+        });
     const skillRevisionIDs = assignedSkills.revisionIds;
     const admittedSkills = await skills.load(skillRevisionIDs, sql);
     const skillLoading = firstTurn ? (firstTurn.skillLoading ?? "eager") : "native";
@@ -282,6 +343,7 @@ export function createChangeAdmission(
       conversationId: current.conversationID,
       changeId: changeID,
       createdBy: userID,
+      ...(current.contextID ? { contextId: current.contextID } : {}),
     } satisfies AgentTurnCommand;
     return turns.admitIn(
       sql,
@@ -293,13 +355,14 @@ export function createChangeAdmission(
         modelId: modelID,
         ...(modelConnection ? { modelConnection } : {}),
         ...(codingReasoning ? { codingReasoning } : {}),
+        ...(monitoringIncidentID ? { monitoringIncidentId: monitoringIncidentID } : {}),
         skillRevisionIds: skillRevisionIDs,
         requiredSkillRevisionIds: assignedSkills.requiredRevisionIds,
         requirementRevisionId: current.revisionID,
         conversationVersion: current.conversationVersion,
       },
       async (transaction, record) => {
-        await claimAgentWriterIn(transaction, changeID, record.id);
+        await claimAgentWriterIn(transaction, changeID, record.id, userID);
         // A new human command owns recovery. The failed attempt and turn remain
         // immutable; runtime startup admits a new generation after safe cleanup.
         await transaction`UPDATE factory.change SET state='starting',failure=NULL,version=version+1
@@ -351,7 +414,7 @@ export function createChangeAdmission(
         await transaction`INSERT INTO factory.change_agent_turn_intent(
             turn_id, change_id, session_id, prompt_id, prompt_text, bootstrap, session_title, skill_loading, skill_manifest, skill_attachments
           ) VALUES (${record.id}, ${changeID}, ${current.sessionID ?? `ses_factory_${changeID.replaceAll("-", "")}`},
-            ${`msg_factory_${record.id.replaceAll("-", "")}`}, ${prompt}, ${input.kind === "change-start"}, ${current.title}, ${skillLoading}, ${manifest === null ? null : JSON.stringify(manifest)}::jsonb, ${JSON.stringify(attachments)}::jsonb)`;
+            ${`msg_factory_${record.id.replaceAll("-", "")}`}, ${prompt}, ${input.kind === "change-start" || !current.nativeConfirmed}, ${current.title}, ${skillLoading}, ${manifest === null ? null : JSON.stringify(manifest)}::jsonb, ${JSON.stringify(attachments)}::jsonb)`;
       },
     );
   }
@@ -392,6 +455,9 @@ export function createChangeAdmission(
       if (!rows[0]) throw new Error("Change Agent dispatch intent not found");
       return {
         ...rows[0],
+        text: [rows[0].text, await database.client.begin((sql) => attachmentContextIn(sql, turnID))]
+          .filter(Boolean)
+          .join("\n\n"),
         skillManifest:
           rows[0].skillManifest === null
             ? null

@@ -120,6 +120,8 @@ func browserWorkerArguments(channels []Channel) ([]string, error) {
 		"--no-category-extensions", "--no-category-webmcp", "--no-category-third-party",
 		"--no-category-pwa", "--no-category-network",
 		"--experimental-structured-content",
+		"--experimental-screencast", "--experimental-ffmpeg-path=/usr/local/bin/factory-recording-encoder",
+		"--experimental-screencast-fps=15",
 		"--redact-network-headers", "--screenshot-format=jpeg", "--screenshot-quality=75",
 		"--screenshot-max-width=1280", "--screenshot-max-height=720",
 	}

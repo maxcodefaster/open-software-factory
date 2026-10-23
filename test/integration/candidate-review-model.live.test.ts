@@ -19,19 +19,19 @@ import {
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 
-test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
-  "independent native Sol reviewer distinguishes a correct candidate from seeded behavioral defects",
+test.skipIf(process.env["FACTORY_REVIEW_MODEL_LIVE"] !== "1")(
+  "independent native configured reviewer distinguishes a correct candidate from seeded behavioral defects",
   async () => {
     const apiKey = process.env["FACTORY_MODEL_API_KEY"];
     const baseURL = process.env["FACTORY_MODEL_BASE_URL"];
     const modelID = process.env["FACTORY_AGENT_MODEL_ID"];
-    if (!apiKey || !baseURL || modelID !== "gpt-6.1-sol")
-      throw new Error("Explicit Azure Sol connection required");
+    if (!apiKey || !baseURL || !modelID)
+      throw new Error("Explicit configured Azure Coding connection required");
     const address = new URL(baseURL);
     if (address.protocol !== "https:" || !address.hostname.endsWith(".openai.azure.com"))
       throw new Error("This calibration requires the configured Azure endpoint");
     const capability = crypto.randomUUID();
-    const requests: Array<{ model: string; effort: string }> = [];
+    const requests: Array<{ model: string; effort: string; status?: number }> = [];
     const proxy = Bun.serve({
       hostname: "0.0.0.0",
       port: 0,
@@ -52,6 +52,7 @@ test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
           signal: request.signal,
           redirect: "error",
         });
+        requests.at(-1)!.status = result.status;
         return new Response(result.body, {
           status: result.status,
           headers: {
@@ -84,9 +85,14 @@ test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
       },
     ] as const;
     const results: unknown[] = [];
-    const evidence = resolve(".factory/test-results/reviewer-sol", crypto.randomUUID());
+    const evidence = resolve(".factory/test-results/reviewer-model", crypto.randomUUID());
     try {
-      for (const control of cases) {
+      const selectedCase = process.env["FACTORY_REVIEW_CASE"];
+      if (selectedCase && !cases.some((control) => control.name === selectedCase))
+        throw new Error("Unknown owned reviewer calibration case");
+      for (const control of cases.filter(
+        (control) => !selectedCase || control.name === selectedCase,
+      )) {
         const source = [
           "export function sum(a, b) {",
           ...(control.validate
@@ -114,8 +120,10 @@ test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
         let owned: Awaited<ReturnType<typeof pinnedOpenCode>> | undefined;
         let endpoint: ReturnType<typeof Bun.serve> | undefined;
         let renewal: ReturnType<typeof setInterval> | undefined;
+        let nativeSessionID: string | undefined;
         try {
           const turn = await f.activeReview();
+          nativeSessionID = turn.sessionID;
           renewal = setInterval(() => void f.turns.renew(turn.id, turn.ownerToken), 10_000);
           const files = {
             "sum.mjs": source,
@@ -162,7 +170,33 @@ test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
           endpoint = Bun.serve({
             hostname: "0.0.0.0",
             port: 0,
-            fetch: (request) => facade(request, session.id),
+            async fetch(request) {
+              const input = await request
+                .clone()
+                .json()
+                .catch(() => null);
+              const result = await facade(request, session.id);
+              if (input?.method === "tools/call") {
+                const output = await result
+                  .clone()
+                  .json()
+                  .catch(() => null);
+                await Bun.write(
+                  resolve(
+                    evidence,
+                    `${control.name}-tool-${String(input.id)
+                      .replace(/[^a-zA-Z0-9-]/g, "")
+                      .slice(0, 80)}.json`,
+                  ),
+                  JSON.stringify(
+                    { name: input.params?.name, arguments: input.params?.arguments, output },
+                    null,
+                    2,
+                  ),
+                );
+              }
+              return result;
+            },
           });
           const configuration = openCodeModelConfiguration({ modelID, reasoningEffort: "medium" });
           owned = await pinnedOpenCode(
@@ -231,6 +265,21 @@ test.skipIf(process.env["FACTORY_REVIEW_SOL_LIVE"] !== "1")(
             expect(report.findings.some((finding) => finding.severity === "blocking")).toBe(true);
         } finally {
           if (renewal) clearInterval(renewal);
+          if (owned && nativeSessionID) {
+            await Bun.write(
+              resolve(evidence, `${control.name}-native.json`),
+              JSON.stringify(
+                await owned.client.message
+                  .list(
+                    { sessionID: nativeSessionID, limit: 100 },
+                    { signal: AbortSignal.timeout(5_000) },
+                  )
+                  .catch(() => null),
+                null,
+                2,
+              ),
+            );
+          }
           await owned?.dispose();
           await endpoint?.stop(true);
           await f.dispose();

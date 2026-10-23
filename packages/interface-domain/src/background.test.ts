@@ -6,6 +6,12 @@ import {
 } from "./background";
 
 describe("Desktop Background", () => {
+  test("offers six distinct stable artwork keys", () => {
+    expect(desktopBackgroundKeys).toHaveLength(6);
+    expect(new Set(desktopBackgroundKeys).size).toBe(6);
+    for (const key of desktopBackgroundKeys) expect(isDesktopBackgroundKey(key)).toBe(true);
+  });
+
   test("has one stable default in the curated catalogue", () => {
     expect(desktopBackgroundKeys).toContain(defaultDesktopBackgroundKey);
   });

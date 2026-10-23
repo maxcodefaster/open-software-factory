@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test("an unconfirmed project creation becomes ready without a second button click", async ({
@@ -50,7 +51,7 @@ test("an unconfirmed project creation becomes ready without a second button clic
   });
   await page.route(`**/api/projects/${projectID}/setup`, (route) => route.fulfill({ json: [] }));
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page.getByRole("button", { name: "Continue setup", exact: true }).click();
   const setup = page.getByRole("region", { name: "Project setup", exact: true });
   await setup.getByLabel("Project name", { exact: true }).fill("Observed project");

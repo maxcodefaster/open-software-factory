@@ -1,14 +1,31 @@
-import { createSignal, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, onCleanup, Show } from "solid-js";
 import { markdownHTML } from "./markdown";
+import { createClipboardFeedback, setCopyButtonState } from "./ui/clipboard";
+import "./ui/feedback.css";
 
 export function MarkdownReader(props: {
   value: string;
   label: string;
+  scopeKey?: string | undefined;
   class: string;
   onEdit?: (() => void) | undefined;
   onNavigate?: ((href: string) => boolean) | undefined;
 }) {
-  const [copyError, setCopyError] = createSignal("");
+  const scope = createMemo(() => ({ value: props.value, key: props.scopeKey }));
+  const clipboard = createClipboardFeedback(scope);
+  const [copyButton, setCopyButton] = createSignal<HTMLButtonElement>();
+  createEffect(
+    () => ({ button: copyButton(), state: clipboard.state() }),
+    (current, previous) => {
+      if (previous?.button && previous.button !== current.button)
+        setCopyButtonState(previous.button, "idle");
+      if (current.button) setCopyButtonState(current.button, current.state);
+    },
+  );
+  onCleanup(() => {
+    const button = copyButton();
+    if (button) setCopyButtonState(button, "idle");
+  });
   return (
     <>
       <article
@@ -33,15 +50,9 @@ export function MarkdownReader(props: {
           }
           const button = target.closest<HTMLButtonElement>('button[aria-label="Copy code"]');
           if (button) {
-            try {
-              await navigator.clipboard.writeText(
-                button.closest("pre")?.querySelector("code")?.textContent ?? "",
-              );
-              button.textContent = "Copied";
-              setCopyError("");
-            } catch {
-              setCopyError("Could not copy. Select the code to copy manually.");
-            }
+            if (clipboard.state() === "pending") return;
+            setCopyButton(button);
+            await clipboard.copy(button.closest("pre")?.querySelector("code")?.textContent ?? "");
             return;
           }
           if (!target.closest("a,input,button")) props.onEdit?.();
@@ -53,8 +64,13 @@ export function MarkdownReader(props: {
           }
         }}
       />
-      <Show when={copyError()}>
-        <small role="status">{copyError()}</small>
+      <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {clipboard.state() === "success" ? "Code copied" : ""}
+      </span>
+      <Show when={clipboard.state() === "error"}>
+        <small class="copy-feedback-error" role="alert">
+          Could not copy. Select the code to copy manually.
+        </small>
       </Show>
     </>
   );

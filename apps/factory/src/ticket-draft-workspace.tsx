@@ -4,11 +4,16 @@ import { RichDocumentSurface } from "./rich-document-surface";
 import { documentBlocks, type DocumentEditor, type DocumentFormat } from "./document-editor";
 import { documentSlash, filterDocumentBlocks } from "./document-slash";
 import { editorPopoverPosition } from "./editor-popover-position";
+import { useAttachmentProject } from "./attachments/ui";
+import { attachmentIDs } from "../../../packages/conversation-domain/src/attachments";
+import { TicketActionBar } from "./ticket-action-bar";
 
 export const personalTicketDraftSchema = z.object({
   id: z.uuid(),
   title: z.string().max(200),
   description: z.string().max(10_000),
+  stage: z.enum(["inbox", "ready"]).optional(),
+  attachmentSequence: z.number().int().nonnegative().optional(),
 });
 export type PersonalTicketDraft = z.infer<typeof personalTicketDraftSchema>;
 
@@ -33,6 +38,8 @@ export function TicketDraftWorkspace(props: {
 }) {
   const [draft, setDraft] = createSignal(props.initial);
   const [error, setError] = createSignal("");
+  const attachmentProject = useAttachmentProject();
+  let attachmentKey = attachmentIDs(props.initial.description).join(",");
   const [menu, setMenu] = createSignal<{ query: string; range: Range; length: number }>();
   const [index, setIndex] = createSignal(0);
   const [selection, setSelection] = createSignal<{ range: Range }>();
@@ -43,6 +50,8 @@ export function TicketDraftWorkspace(props: {
       setError("");
       setMenu(undefined);
       setSelection(undefined);
+      attachmentKey = "";
+      if (attachmentIDs(props.initial.description).length) retain({});
     },
   );
   let editor: DocumentEditor | undefined;
@@ -87,13 +96,37 @@ export function TicketDraftWorkspace(props: {
     setSelection(undefined);
   }
   function retain(update: Partial<PersonalTicketDraft>) {
-    const value = { ...draft(), ...update };
+    const value = {
+      ...draft(),
+      ...update,
+      attachmentSequence: Math.max((draft().attachmentSequence ?? 0) + 1, Date.now() * 1000),
+    };
     setDraft(value);
     props.onChange(value);
     try {
       localStorage.setItem(props.storageKey, JSON.stringify(value));
     } catch {
       /* Memory retains this draft. */
+    }
+    const ids = attachmentIDs(value.description);
+    if (ids.join(",") !== attachmentKey) {
+      attachmentKey = ids.join(",");
+      const projectID = attachmentProject();
+      if (projectID)
+        void fetch(`/api/projects/${projectID}/attachment-drafts/${value.id}`, {
+          method: "PUT",
+          keepalive: true,
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ sequence: value.attachmentSequence, ids }),
+        })
+          .then((response) => {
+            if (!response.ok) throw new Error("Draft files could not be retained.");
+          })
+          .catch(() =>
+            setError(
+              "Your text is retained locally, but file links could not be saved. Keep this draft open and create the Ticket before leaving.",
+            ),
+          );
     }
   }
   function updateMenu(element: HTMLElement) {
@@ -128,16 +161,38 @@ export function TicketDraftWorkspace(props: {
     <section class="ticket-workspace ticket-draft-workspace" aria-label="New ticket draft">
       <div class="ticket-editor-frame" ref={frame}>
         <div class="ticket-document">
-          <small class="ticket-draft-status">Personal draft · not shared yet</small>
-          <input
-            class="ticket-draft-title"
-            aria-label="Ticket title"
-            placeholder="What should change?"
-            maxlength={200}
-            value={draft().title}
-            onInput={(event) => retain({ title: event.currentTarget.value })}
-          />
+          <header class="ticket-document-heading">
+            <TicketActionBar
+              actions={[
+                {
+                  id: "idea",
+                  label: "Create as idea",
+                  primary: draft().stage === "inbox",
+                  disabled: props.pending || !draft().title.trim(),
+                  run: () => void create("inbox"),
+                },
+                {
+                  id: "requirements",
+                  label: "Write requirements",
+                  primary: draft().stage !== "inbox",
+                  disabled: props.pending || !draft().title.trim(),
+                  run: () => void create("ready"),
+                },
+              ]}
+            />
+            <small class="ticket-draft-status">Personal draft · not shared yet</small>
+            <input
+              class="ticket-draft-title"
+              aria-label="Ticket title"
+              placeholder="What should change?"
+              maxlength={200}
+              value={draft().title}
+              onInput={(event) => retain({ title: event.currentTarget.value })}
+            />
+          </header>
           <RichDocumentSurface
+            attachmentDraftId={draft().id}
+            attachmentScopeKey={`ticket-draft:${draft().id}`}
             value={draft().description}
             label="Ticket description"
             field="description"
@@ -175,24 +230,6 @@ export function TicketDraftWorkspace(props: {
               }
             }}
           />
-          <div class="ticket-draft-actions">
-            <button
-              type="button"
-              class="quiet-button"
-              disabled={props.pending || !draft().title.trim()}
-              onClick={() => void create("inbox")}
-            >
-              Create as idea
-            </button>
-            <button
-              type="button"
-              class="primary-button"
-              disabled={props.pending || !draft().title.trim()}
-              onClick={() => void create("ready")}
-            >
-              Write requirements
-            </button>
-          </div>
           <Show when={error()}>
             <p role="alert">{error()}</p>
           </Show>

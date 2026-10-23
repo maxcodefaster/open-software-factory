@@ -27,6 +27,9 @@ import { WikiSearch } from "./knowledge/wiki-search";
 import { MarkdownEditor } from "./markdown-editor";
 import { MarkdownReader } from "./markdown-reader";
 import { bindPopoverKeyboard } from "./popover-keyboard";
+import { SaveFeedback } from "./ui/feedback";
+import { WorkspaceActionBar } from "./ui/workspace-actions";
+import { createWorkspaceNavigation, WorkspaceNavigationToggle } from "./ui/workspace-navigation";
 import { VersionHistory } from "./version-history";
 
 export type { KnowledgeDraft } from "./knowledge/draft";
@@ -71,6 +74,16 @@ export function KnowledgeWorkspace(props: {
   const [sourcesLoading, setSourcesLoading] = createSignal(false);
   let sourceRequest = 0;
   let workspace: HTMLDivElement | undefined;
+  let navigationRoot: HTMLDivElement | undefined;
+  let sidebar: HTMLElement | undefined;
+  const navigation = createWorkspaceNavigation({
+    root: () => navigationRoot,
+    panel: () => sidebar,
+    breakpoint: 760,
+  });
+  const navigationTitle = () => (
+    <WorkspaceNavigationToggle navigation={navigation} label="Browse Wiki pages" title="Pages" />
+  );
   const [draft, setDraft] = createSignal<KnowledgeDraft>();
   const draftTitle = () => draft()?.title ?? "";
   const draftBody = () => draft()?.body ?? "";
@@ -78,7 +91,7 @@ export function KnowledgeWorkspace(props: {
     const current = draft();
     return current ? draftDirty(current) : false;
   };
-  const [saveState, setSaveState] = createSignal<"idle" | "saving" | "failed">("idle");
+  const [saveState, setSaveState] = createSignal<"idle" | "saving" | "saved" | "failed">("idle");
   const [saveError, setSaveError] = createSignal("");
   const [compareOpen, setCompareOpen] = createSignal(false);
   const [pageMenuOpen, setPageMenuOpen] = createSignal(false);
@@ -94,6 +107,28 @@ export function KnowledgeWorkspace(props: {
     props.revisions.find((revision) => revision.id === historyRevisionID());
   const [restoreError, setRestoreError] = createSignal("");
   const [restoring, setRestoring] = createSignal(false);
+  async function restoreRevision(revision: KnowledgeRevision) {
+    const page = props.selectedPage;
+    if (!page) return;
+    setRestoring(true);
+    setRestoreError("");
+    try {
+      const saved = await props.onRestore(page.id, revision.id, page.version);
+      setDraft(
+        draftFrom({
+          id: saved.id,
+          version: saved.version,
+          title: saved.title,
+          body: withoutRepeatedTitle(saved.body, saved.title),
+        }),
+      );
+      closeHistory();
+    } catch (cause) {
+      setRestoreError(cause instanceof Error ? cause.message : "Revision could not be restored.");
+    } finally {
+      setRestoring(false);
+    }
+  }
   let historyRequest = 0;
   function closeHistory() {
     historyRequest += 1;
@@ -306,7 +341,7 @@ export function KnowledgeWorkspace(props: {
         };
         if (draftKey === key) {
           setDraft(acknowledged);
-          setSaveState("idle");
+          setSaveState("saved");
           retainDraft();
         } else {
           if (draftDirty(acknowledged)) props.drafts.set(key, acknowledged);
@@ -340,191 +375,328 @@ export function KnowledgeWorkspace(props: {
     }
   }
   return (
-    <div ref={workspace} class={`knowledge-workspace${historyOpen() ? " has-history" : ""}`}>
-      <aside class="knowledge-navigation">
-        <KnowledgeTree
-          projectID={props.projectID}
-          pages={props.pages}
-          documents={props.canDevelop ? props.documents : []}
-          canDevelop={props.canDevelop}
-          onSearch={() => setSearchOpen(true)}
-          selectedPageID={props.selectedPage?.id}
-          selectedDocumentPath={props.openDocument?.path}
-          search={false}
-          snippet={() => undefined}
-          onSelectPage={props.onSelectPage}
-          onOpenDocument={props.onOpenDocument}
-          onMove={props.onMove}
-        />
-        <Show when={["pending", "running", "failed"].includes(props.generation?.state ?? "")}>
-          <div class="knowledge-generation">
-            <Show when={["pending", "running"].includes(props.generation?.state ?? "")}>
-              <div>
-                <span class={`generation-dot ${props.generation?.state}`} />
-                <small role="status">Updating Wiki…</small>
-              </div>
-            </Show>
-            <Show when={props.generation?.failure}>
-              {(failure) => (
-                <div class="knowledge-update-error">
-                  <p role="alert">Update failed. Your saved pages are still available.</p>
-                  <details>
-                    <summary>Update details</summary>
-                    <pre>{failure()}</pre>
-                  </details>
+    <div ref={navigationRoot} class="wiki-workspace-container workspace-navigation-container">
+      <div ref={workspace} class={`knowledge-workspace${historyOpen() ? " has-history" : ""}`}>
+        <aside
+          ref={sidebar}
+          id={navigation.id}
+          class="knowledge-navigation"
+          aria-label="Wiki navigation"
+          data-navigation-open={navigation.open() ? "true" : "false"}
+        >
+          <KnowledgeTree
+            projectID={props.projectID}
+            pages={props.pages}
+            documents={props.canDevelop ? props.documents : []}
+            canDevelop={props.canDevelop}
+            onSearch={() => {
+              navigation.close();
+              setSearchOpen(true);
+            }}
+            selectedPageID={props.selectedPage?.id}
+            selectedDocumentPath={props.openDocument?.path}
+            search={false}
+            snippet={() => undefined}
+            onSelectPage={(id) => {
+              props.onSelectPage(id);
+              navigation.close(true);
+            }}
+            onOpenDocument={(path) => {
+              props.onOpenDocument(path);
+              navigation.close(true);
+            }}
+            onMove={props.onMove}
+          />
+          <Show when={["pending", "running", "failed"].includes(props.generation?.state ?? "")}>
+            <div class="knowledge-generation">
+              <Show when={["pending", "running"].includes(props.generation?.state ?? "")}>
+                <div>
+                  <span class={`generation-dot ${props.generation?.state}`} />
+                  <small role="status">Updating Wiki…</small>
                 </div>
-              )}
-            </Show>
-            <Show when={props.generation?.state === "failed"}>
-              <button
-                type="button"
-                class="quiet-button"
-                disabled={
-                  props.pending || ["pending", "running"].includes(props.generation?.state ?? "")
-                }
-                onClick={props.onGenerate}
-              >
-                Retry update
-              </button>
-            </Show>
-          </div>
-        </Show>
-      </aside>
-      <WikiNavigationResize projectID={props.projectID} workspace={() => workspace} />
-      <Show when={searchOpen()}>
-        <WikiSearch
-          query={props.searchQuery}
-          results={props.searchResults}
-          canDevelop={props.canDevelop}
-          onSearch={props.onSearch}
-          onClose={() => setSearchOpen(false)}
-          onSelect={(result) => {
-            if (result.kind === "page") props.onSelectPage(result.id);
-            else if (props.canDevelop) props.onOpenDocument(result.path);
-            setSearchOpen(false);
-          }}
-        />
-      </Show>
-
-      <main class="knowledge-content">
-        <Show
-          when={props.selectedPage || props.openDocument}
-          fallback={
-            <div class="empty-workspace">
-              <Icon name="knowledge" />
-              <p>
-                {["pending", "running"].includes(props.generation?.state ?? "")
-                  ? "Project Knowledge is being generated."
-                  : "Generate Project Knowledge from the current commit."}
-              </p>
-              <Show when={!["pending", "running"].includes(props.generation?.state ?? "")}>
+              </Show>
+              <Show when={props.generation?.failure}>
+                {(failure) => (
+                  <div class="knowledge-update-error">
+                    <p role="alert">Update failed. Your saved pages are still available.</p>
+                    <details>
+                      <summary>Update details</summary>
+                      <pre>{failure()}</pre>
+                    </details>
+                  </div>
+                )}
+              </Show>
+              <Show when={props.generation?.state === "failed"}>
                 <button
                   type="button"
                   class="quiet-button"
-                  disabled={props.pending}
+                  disabled={
+                    props.pending || ["pending", "running"].includes(props.generation?.state ?? "")
+                  }
                   onClick={props.onGenerate}
                 >
-                  Create Project Wiki
+                  Retry update
                 </button>
               </Show>
             </div>
-          }
-        >
-          <Show when={historicalRevision()}>
-            {(revision) => (
-              <article
-                class="knowledge-document historical-document"
-                aria-label="Selected knowledge revision"
-              >
-                <header class="knowledge-heading">
-                  <div class="knowledge-status-row">
-                    <small>
-                      {revision().kind === "human"
-                        ? (revision().author ?? "Human edit")
-                        : "AI update"}{" "}
-                      · {new Date(revision().createdAt).toLocaleString()}
-                    </small>
-                    <Show
-                      when={
-                        props.canDevelop &&
-                        revision().kind === "generated" &&
-                        revision().sourceCommitSha &&
-                        repositoryLink(props.repositoryURL, revision().sourceCommitSha ?? "")
-                      }
-                    >
-                      {(href) => (
-                        <a
-                          class="quiet-button"
-                          href={href()}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                        >
-                          View source change
-                        </a>
-                      )}
-                    </Show>
-                  </div>
-                  <div class="knowledge-title-row">
-                    <Icon name={props.selectedPage?.icon ?? "knowledge"} />
-                    <h2>{revision().title}</h2>
-                  </div>
-                </header>
-                <MarkdownReader
-                  class="knowledge-article markdown-body"
-                  label="Historical page"
-                  onNavigate={navigateWiki}
-                  value={withoutRepeatedTitle(revision().body, revision().title)}
-                />
-                <Show
-                  when={
-                    revision().kind !== "proposed" &&
-                    revision().id !== props.selectedPage?.currentRevisionId
-                  }
-                >
+          </Show>
+        </aside>
+        <WikiNavigationResize projectID={props.projectID} workspace={() => workspace} />
+        <Show when={searchOpen()}>
+          <WikiSearch
+            query={props.searchQuery}
+            results={props.searchResults}
+            canDevelop={props.canDevelop}
+            onSearch={props.onSearch}
+            onClose={() => setSearchOpen(false)}
+            onSelect={(result) => {
+              if (result.kind === "page") props.onSelectPage(result.id);
+              else if (props.canDevelop) props.onOpenDocument(result.path);
+              setSearchOpen(false);
+            }}
+          />
+        </Show>
+
+        <main class="knowledge-content">
+          <Show
+            when={props.selectedPage || props.openDocument}
+            fallback={
+              <div class="empty-workspace">
+                <div class="wiki-empty-navigation">{navigationTitle()}</div>
+                <Icon name="knowledge" />
+                <p>
+                  {["pending", "running"].includes(props.generation?.state ?? "")
+                    ? "Project Knowledge is being generated."
+                    : "Generate Project Knowledge from the current commit."}
+                </p>
+                <Show when={!["pending", "running"].includes(props.generation?.state ?? "")}>
                   <button
                     type="button"
-                    class="quiet-button"
-                    disabled={restoring() || dirty()}
-                    onClick={async () => {
-                      const page = props.selectedPage;
-                      if (!page) return;
-                      setRestoring(true);
-                      setRestoreError("");
-                      try {
-                        const saved = await props.onRestore(page.id, revision().id, page.version);
-                        setDraft(
-                          draftFrom({
-                            id: saved.id,
-                            version: saved.version,
-                            title: saved.title,
-                            body: withoutRepeatedTitle(saved.body, saved.title),
-                          }),
-                        );
-                        closeHistory();
-                      } catch (cause) {
-                        setRestoreError(
-                          cause instanceof Error
-                            ? cause.message
-                            : "Revision could not be restored.",
-                        );
-                      } finally {
-                        setRestoring(false);
-                      }
-                    }}
+                    class="workspace-action"
+                    data-primary="true"
+                    disabled={props.pending}
+                    onClick={props.onGenerate}
                   >
-                    Restore this version
+                    Create Project Wiki
                   </button>
                 </Show>
-                <Show when={restoreError()}>
-                  <p role="alert">{restoreError()}</p>
-                </Show>
-              </article>
-            )}
-          </Show>
-          <div class="knowledge-document" hidden={Boolean(historicalRevision())}>
-            <header class="knowledge-heading">
-              <div class="knowledge-status-row">
-                <div class="window-actions knowledge-page-actions" ref={pageMenu}>
+              </div>
+            }
+          >
+            <Show when={historicalRevision()}>
+              {(revision) => (
+                <article
+                  class="knowledge-document historical-document"
+                  aria-label="Selected knowledge revision"
+                >
+                  <header class="knowledge-heading">
+                    <WorkspaceActionBar
+                      label="Wiki revision actions"
+                      leading={navigationTitle()}
+                      status={
+                        <small>
+                          {revision().kind === "human"
+                            ? (revision().author ?? "Human edit")
+                            : "AI update"}{" "}
+                          · {new Date(revision().createdAt).toLocaleString()}
+                        </small>
+                      }
+                    >
+                      <Show
+                        when={
+                          props.canDevelop &&
+                          revision().kind === "generated" &&
+                          revision().sourceCommitSha &&
+                          repositoryLink(props.repositoryURL, revision().sourceCommitSha ?? "")
+                        }
+                      >
+                        {(href) => (
+                          <a
+                            class="workspace-action"
+                            href={href()}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          >
+                            View source change
+                          </a>
+                        )}
+                      </Show>
+                      <Show
+                        when={
+                          revision().kind !== "proposed" &&
+                          revision().id !== props.selectedPage?.currentRevisionId
+                        }
+                      >
+                        <button
+                          type="button"
+                          class="workspace-action"
+                          data-primary="true"
+                          disabled={restoring() || dirty()}
+                          onClick={() => void restoreRevision(revision())}
+                        >
+                          Restore this version
+                        </button>
+                      </Show>
+                    </WorkspaceActionBar>
+                    <div class="knowledge-title-row">
+                      <Icon name={props.selectedPage?.icon ?? "knowledge"} />
+                      <h2>{revision().title}</h2>
+                    </div>
+                  </header>
+                  <MarkdownReader
+                    class="knowledge-article markdown-body"
+                    label="Historical page"
+                    scopeKey={revision().id}
+                    onNavigate={navigateWiki}
+                    value={withoutRepeatedTitle(revision().body, revision().title)}
+                  />
+                  <Show when={restoreError()}>
+                    <p role="alert">{restoreError()}</p>
+                  </Show>
+                </article>
+              )}
+            </Show>
+            <div class="knowledge-document" hidden={Boolean(historicalRevision())}>
+              <header class="knowledge-heading">
+                <WorkspaceActionBar
+                  label="Wiki actions"
+                  leading={navigationTitle()}
+                  status={
+                    <Show when={!props.openDocument}>
+                      <SaveFeedback
+                        state={
+                          saveState() === "failed" || saveError()
+                            ? "error"
+                            : saveState() === "saving"
+                              ? "saving"
+                              : dirty()
+                                ? "dirty"
+                                : saveState() === "saved"
+                                  ? "saved"
+                                  : "idle"
+                        }
+                      />
+                    </Show>
+                  }
+                >
+                  <div class="knowledge-page-actions" ref={pageMenu}>
+                    <Show when={props.selectedPage && !props.openDocument}>
+                      <button
+                        type="button"
+                        class="workspace-action workspace-menu-trigger"
+                        aria-label="Page options"
+                        aria-haspopup="menu"
+                        aria-expanded={pageMenuOpen() ? "true" : "false"}
+                        onClick={() => setPageMenuOpen((open) => !open)}
+                      >
+                        <Icon name="more" />
+                      </button>
+                      <Show when={pageMenuOpen()}>
+                        <div class="knowledge-page-menu" role="menu" aria-label="Page options">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setPageMenuOpen(false);
+                              void openHistory();
+                            }}
+                          >
+                            <Icon name="history" />
+                            History
+                          </button>
+                          <Show when={editing()}>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setPageMenuOpen(false);
+                                setEditing(false);
+                              }}
+                            >
+                              <Icon name="knowledge" />
+                              Read page
+                            </button>
+                          </Show>
+                          <Show when={props.canDevelop}>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              aria-disabled={sourcesLoading() ? "true" : undefined}
+                              onClick={async () => {
+                                if (sourcesLoading()) return;
+                                const page = props.selectedPage;
+                                if (!page) return;
+                                const request = ++sourceRequest;
+                                setSourcesLoading(true);
+                                setSourcesError("");
+                                try {
+                                  const value = await props.onSources(page.id);
+                                  if (request === sourceRequest && props.canDevelop)
+                                    setSources(value);
+                                } catch {
+                                  if (request === sourceRequest)
+                                    setSourcesError("Sources could not be loaded.");
+                                } finally {
+                                  if (request === sourceRequest) setSourcesLoading(false);
+                                }
+                              }}
+                            >
+                              <Icon name="link" />
+                              {sourcesLoading() ? "Loading sources…" : "Sources"}
+                            </button>
+                            <Show when={sources()}>
+                              {(items) => (
+                                <div class="knowledge-menu-sources">
+                                  <For each={items()}>
+                                    {(citation) => (
+                                      <a
+                                        href={repositoryLink(
+                                          props.repositoryURL,
+                                          citation.commitSha,
+                                          citation.path,
+                                        )}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                      >
+                                        {citation.path}
+                                      </a>
+                                    )}
+                                  </For>
+                                  <Show when={items().length === 0}>
+                                    <small>No linked sources.</small>
+                                  </Show>
+                                </div>
+                              )}
+                            </Show>
+                            <Show when={sourcesError()}>
+                              <p role="alert">{sourcesError()}</p>
+                            </Show>
+                          </Show>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={props.pending || dirty()}
+                            onClick={() => {
+                              setPageMenuOpen(false);
+                              props.onArchive();
+                            }}
+                          >
+                            <Icon name="trash" />
+                            Archive page
+                          </button>
+                        </div>
+                      </Show>
+                    </Show>
+                  </div>
+                  <Show when={draft()?.conflict}>
+                    <button
+                      type="button"
+                      class="workspace-action"
+                      onClick={() => setCompareOpen((open) => !open)}
+                    >
+                      Compare changes
+                    </button>
+                  </Show>
                   <Show
                     when={
                       props.openDocument &&
@@ -537,312 +709,192 @@ export function KnowledgeWorkspace(props: {
                   >
                     {(href) => (
                       <a
-                        class="icon-button"
-                        aria-label="View in Git"
-                        title="View in Git"
+                        class="workspace-action"
                         href={href()}
                         target="_blank"
                         rel="noopener noreferrer"
                       >
-                        <Icon name="external" />
+                        View in Git
                       </a>
                     )}
                   </Show>
                   <Show when={props.openDocument && props.canDevelop}>
                     <button
                       type="button"
-                      class="icon-button"
-                      aria-label="Open Project IDE"
-                      title="Open Project IDE"
+                      class="workspace-action"
+                      data-primary="true"
                       onClick={props.onOpenIDE}
                     >
-                      <Icon name="ide" />
+                      Open Project IDE
                     </button>
                   </Show>
-                  <Show when={saveState() === "saving"}>
-                    <small role="status">Saving…</small>
+                </WorkspaceActionBar>
+                <div class="knowledge-title-row">
+                  <Show
+                    when={!props.openDocument && props.selectedPage}
+                    fallback={<Icon name="ticket" />}
+                  >
+                    {(page) => (
+                      <PageOrganization
+                        page={page()}
+                        pages={props.pages}
+                        onMove={props.onMove}
+                        onIcon={props.onIcon}
+                      />
+                    )}
                   </Show>
-                  <Show when={draft()?.conflict}>
-                    <button
-                      type="button"
-                      class="quiet-button"
-                      onClick={() => setCompareOpen((open) => !open)}
-                    >
-                      Compare changes
-                    </button>
-                  </Show>
-                  <Show when={props.selectedPage && !props.openDocument}>
-                    <button
-                      type="button"
-                      class="icon-button"
-                      aria-label="Page options"
-                      aria-haspopup="menu"
-                      aria-expanded={pageMenuOpen() ? "true" : "false"}
-                      onClick={() => setPageMenuOpen((open) => !open)}
-                    >
-                      <Icon name="more" />
-                    </button>
-                    <Show when={pageMenuOpen()}>
-                      <div class="knowledge-page-menu" role="menu" aria-label="Page options">
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            setPageMenuOpen(false);
-                            void openHistory();
-                          }}
-                        >
-                          <Icon name="history" />
-                          History
-                        </button>
-                        <Show when={editing()}>
+                  <Show
+                    when={editing() && !props.openDocument}
+                    fallback={
+                      <h2 aria-label={props.openDocument?.title ?? draftTitle()}>
+                        <Show when={!props.openDocument} fallback={props.openDocument?.title}>
                           <button
                             type="button"
-                            role="menuitem"
-                            onClick={() => {
-                              setPageMenuOpen(false);
-                              setEditing(false);
-                            }}
+                            class="knowledge-title-button"
+                            aria-label="Edit Knowledge title"
+                            onClick={beginEdit}
                           >
-                            <Icon name="knowledge" />
-                            Read page
+                            {draftTitle()}
                           </button>
                         </Show>
-                        <Show when={props.canDevelop}>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            aria-disabled={sourcesLoading() ? "true" : undefined}
-                            onClick={async () => {
-                              if (sourcesLoading()) return;
-                              const page = props.selectedPage;
-                              if (!page) return;
-                              const request = ++sourceRequest;
-                              setSourcesLoading(true);
-                              setSourcesError("");
-                              try {
-                                const value = await props.onSources(page.id);
-                                if (request === sourceRequest && props.canDevelop)
-                                  setSources(value);
-                              } catch {
-                                if (request === sourceRequest)
-                                  setSourcesError("Sources could not be loaded.");
-                              } finally {
-                                if (request === sourceRequest) setSourcesLoading(false);
-                              }
-                            }}
-                          >
-                            <Icon name="link" />
-                            {sourcesLoading() ? "Loading sources…" : "Sources"}
-                          </button>
-                          <Show when={sources()}>
-                            {(items) => (
-                              <div class="knowledge-menu-sources">
-                                <For each={items()}>
-                                  {(citation) => (
-                                    <a
-                                      href={repositoryLink(
-                                        props.repositoryURL,
-                                        citation.commitSha,
-                                        citation.path,
-                                      )}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                    >
-                                      {citation.path}
-                                    </a>
-                                  )}
-                                </For>
-                                <Show when={items().length === 0}>
-                                  <small>No linked sources.</small>
-                                </Show>
-                              </div>
-                            )}
-                          </Show>
-                          <Show when={sourcesError()}>
-                            <p role="alert">{sourcesError()}</p>
-                          </Show>
-                        </Show>
-                        <button
-                          type="button"
-                          role="menuitem"
-                          disabled={props.pending || dirty()}
-                          onClick={() => {
-                            setPageMenuOpen(false);
-                            props.onArchive();
-                          }}
-                        >
-                          <Icon name="trash" />
-                          Archive page
-                        </button>
-                      </div>
-                    </Show>
-                  </Show>
-                </div>
-              </div>
-              <div class="knowledge-title-row">
-                <Show
-                  when={!props.openDocument && props.selectedPage}
-                  fallback={<Icon name="ticket" />}
-                >
-                  {(page) => (
-                    <PageOrganization
-                      page={page()}
-                      pages={props.pages}
-                      onMove={props.onMove}
-                      onIcon={props.onIcon}
+                      </h2>
+                    }
+                  >
+                    <textarea
+                      aria-label="Knowledge page title"
+                      rows={1}
+                      value={draftTitle()}
+                      onInput={(event) => changeDraft("title", event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.preventDefault();
+                      }}
                     />
-                  )}
-                </Show>
-                <Show
-                  when={editing() && !props.openDocument}
-                  fallback={
-                    <h2 aria-label={props.openDocument?.title ?? draftTitle()}>
-                      <Show when={!props.openDocument} fallback={props.openDocument?.title}>
-                        <button
-                          type="button"
-                          class="knowledge-title-button"
-                          aria-label="Edit Knowledge title"
-                          onClick={beginEdit}
-                        >
-                          {draftTitle()}
-                        </button>
-                      </Show>
-                    </h2>
-                  }
-                >
-                  <textarea
-                    aria-label="Knowledge page title"
-                    rows={1}
-                    value={draftTitle()}
-                    onInput={(event) => changeDraft("title", event.currentTarget.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") event.preventDefault();
-                    }}
-                  />
-                </Show>
-              </div>
-            </header>
-            <Show when={saveState() === "failed" || saveError()}>
-              <div class="knowledge-save-error" role="alert">
-                <span>{saveError()} Your draft is retained.</span>
-                <button
-                  type="button"
-                  class="quiet-button"
-                  disabled={saveState() === "saving"}
-                  onClick={() => void save()}
-                >
-                  Retry
-                </button>
-              </div>
-            </Show>
-            <Show when={compareOpen() && draft()?.conflict}>
-              <section class="knowledge-compare" aria-label="Compare changes">
-                <p>
-                  This passage changed while you were editing. Choose a starting point; your draft
-                  has not been overwritten.
-                </p>
-                <div>
-                  <article>
-                    <h3>Your draft</h3>
-                    <pre>{draftBody()}</pre>
-                  </article>
-                  <article>
-                    <h3>Saved page</h3>
-                    <pre>
-                      {withoutRepeatedTitle(
-                        props.selectedPage?.currentBody ?? "",
-                        props.selectedPage?.title ?? "",
-                      )}
-                    </pre>
-                  </article>
+                  </Show>
                 </div>
-                <button
-                  type="button"
-                  class="quiet-button"
-                  onClick={() => {
-                    const page = props.selectedPage;
-                    const current = draft();
-                    if (!page || !current) return;
-                    setDraft({ ...current, base: pageSnapshot(page), conflict: false });
-                    setCompareOpen(false);
-                    scheduleSave();
-                  }}
-                >
-                  Keep my draft
-                </button>
-                <button
-                  type="button"
-                  class="quiet-button"
-                  onClick={() => {
-                    const page = props.selectedPage;
-                    if (!page) return;
-                    setDraft(draftFrom(pageSnapshot(page)));
-                    setCompareOpen(false);
-                    retainDraft();
-                  }}
-                >
-                  Use saved page
-                </button>
-              </section>
-            </Show>
-            <Show
-              when={editing()}
-              fallback={
-                <MarkdownReader
-                  class="knowledge-article markdown-body"
-                  label={props.openDocument ? "Repository document" : "Edit Knowledge body"}
-                  onNavigate={props.openDocument ? undefined : navigateWiki}
-                  onEdit={props.openDocument ? undefined : beginEdit}
-                  value={
-                    props.openDocument
-                      ? withoutRepeatedTitle(props.openDocument.body, props.openDocument.title)
-                      : draftBody()
-                  }
+              </header>
+              <Show when={saveState() === "failed" || saveError()}>
+                <div class="knowledge-save-error" role="alert">
+                  <span>{saveError()} Your draft is retained.</span>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    disabled={saveState() === "saving"}
+                    onClick={() => void save()}
+                  >
+                    Retry
+                  </button>
+                </div>
+              </Show>
+              <Show when={compareOpen() && draft()?.conflict}>
+                <section class="knowledge-compare" aria-label="Compare changes">
+                  <p>
+                    This passage changed while you were editing. Choose a starting point; your draft
+                    has not been overwritten.
+                  </p>
+                  <div>
+                    <article>
+                      <h3>Your draft</h3>
+                      <pre>{draftBody()}</pre>
+                    </article>
+                    <article>
+                      <h3>Saved page</h3>
+                      <pre>
+                        {withoutRepeatedTitle(
+                          props.selectedPage?.currentBody ?? "",
+                          props.selectedPage?.title ?? "",
+                        )}
+                      </pre>
+                    </article>
+                  </div>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    onClick={() => {
+                      const page = props.selectedPage;
+                      const current = draft();
+                      if (!page || !current) return;
+                      setDraft({ ...current, base: pageSnapshot(page), conflict: false });
+                      setCompareOpen(false);
+                      scheduleSave();
+                    }}
+                  >
+                    Keep my draft
+                  </button>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    onClick={() => {
+                      const page = props.selectedPage;
+                      if (!page) return;
+                      setDraft(draftFrom(pageSnapshot(page)));
+                      setCompareOpen(false);
+                      retainDraft();
+                    }}
+                  >
+                    Use saved page
+                  </button>
+                </section>
+              </Show>
+              <Show
+                when={editing()}
+                fallback={
+                  <MarkdownReader
+                    class="knowledge-article markdown-body"
+                    label={props.openDocument ? "Repository document" : "Edit Knowledge body"}
+                    scopeKey={`${props.projectID}:${props.openDocument?.path ?? props.selectedPage?.id}`}
+                    onNavigate={props.openDocument ? undefined : navigateWiki}
+                    onEdit={props.openDocument ? undefined : beginEdit}
+                    value={
+                      props.openDocument
+                        ? withoutRepeatedTitle(props.openDocument.body, props.openDocument.title)
+                        : draftBody()
+                    }
+                  />
+                }
+              >
+                <MarkdownEditor
+                  attachmentScopeKey={`wiki:${props.selectedPage?.id}`}
+                  value={draftBody()}
+                  onChange={(value) => changeDraft("body", value)}
                 />
-              }
-            >
-              <MarkdownEditor
-                value={draftBody()}
-                onChange={(value) => changeDraft("body", value)}
-              />
+              </Show>
+            </div>
+          </Show>
+        </main>
+        <Show when={historyOpen()}>
+          <div class="knowledge-version-panel">
+            <Show when={historyError()}>
+              <p role="alert">{historyError()}</p>
             </Show>
+            <VersionHistory
+              label="Knowledge history"
+              selectedID={historyRevisionID()}
+              loading={historyLoading()}
+              versions={props.revisions.map((revision) => ({
+                id: revision.id,
+                label:
+                  revision.id === props.selectedPage?.currentRevisionId
+                    ? "Current version"
+                    : revision.title,
+                author: revision.kind === "human" ? (revision.author ?? "Human edit") : "AI",
+                createdAt: revision.createdAt,
+                state:
+                  revision.kind === "proposed"
+                    ? "Proposed"
+                    : revision.kind === "human"
+                      ? "Human edit"
+                      : "AI update",
+              }))}
+              onSelect={setHistoryRevisionID}
+              onClose={closeHistory}
+              opener={
+                pageMenu?.querySelector<HTMLButtonElement>('button[aria-label="Page options"]') ??
+                undefined
+              }
+            />
           </div>
         </Show>
-      </main>
-      <Show when={historyOpen()}>
-        <div class="knowledge-version-panel">
-          <Show when={historyError()}>
-            <p role="alert">{historyError()}</p>
-          </Show>
-          <VersionHistory
-            label="Knowledge history"
-            selectedID={historyRevisionID()}
-            loading={historyLoading()}
-            versions={props.revisions.map((revision) => ({
-              id: revision.id,
-              label:
-                revision.id === props.selectedPage?.currentRevisionId
-                  ? "Current version"
-                  : revision.title,
-              author: revision.kind === "human" ? (revision.author ?? "Human edit") : "AI",
-              createdAt: revision.createdAt,
-              state:
-                revision.kind === "proposed"
-                  ? "Proposed"
-                  : revision.kind === "human"
-                    ? "Human edit"
-                    : "AI update",
-            }))}
-            onSelect={setHistoryRevisionID}
-            onClose={closeHistory}
-            opener={
-              pageMenu?.querySelector<HTMLButtonElement>('button[aria-label="Page options"]') ??
-              undefined
-            }
-          />
-        </div>
-      </Show>
+      </div>
     </div>
   );
 }

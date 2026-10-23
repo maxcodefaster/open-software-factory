@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
@@ -14,13 +14,16 @@ test("native source rejects timed-out human saves after Agent takeover and retai
   const temporary = await mkdtemp(join(tmpdir(), "factory-writer-source-"));
   const databaseFixture = await factoryProcess();
   const owned = await fixture(undefined, undefined, databaseFixture.connect());
-  let created = false;
   let sources: ReturnType<typeof createWorkspaceSourceController> | undefined;
   const previousImage = process.env["FACTORY_WORKSPACE_FILES_IMAGE"];
   async function docker(...args: string[]) {
-    const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "ignore" });
-    const output = await new Response(child.stdout).text();
-    if (await child.exited) throw new Error(`Owned source ${args[0]} failed`);
+    const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
+    const [output, error, status] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    if (status) throw new Error(`Owned source ${args[0]} failed: ${error.slice(-1200)}`);
     return output.trim();
   }
   try {
@@ -36,7 +39,17 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       token: "owned-source-capability-with-thirty-two-characters",
     };
     await writeFile(join(temporary, "access.json"), JSON.stringify(access), { mode: 0o644 });
-    const image = (await readFile(".factory/workspace-files-image", "utf8")).trim();
+    const image =
+      process.env["FACTORY_WORKSPACE_FILES_TEST_IMAGE"] ??
+      (await readFile(".factory/workspace-files-image", "utf8")).trim();
+    if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(image))
+      throw new Error("Owned source proof requires an exact image digest");
+    const evidence = join(".factory/test-results/change-writer-source", owner);
+    await mkdir(evidence, { recursive: true });
+    await writeFile(
+      join(evidence, "intent.json"),
+      JSON.stringify({ owner, container, image, temporary }),
+    );
     process.env["FACTORY_WORKSPACE_FILES_IMAGE"] = image;
     await docker(
       "run",
@@ -60,7 +73,6 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       "--listen",
       "0.0.0.0:4600",
     );
-    created = true;
     const port = (await docker("port", container, "4600/tcp")).split(":").at(-1);
     let origin = `http://127.0.0.1:${port}`;
     const native = async (operation: string, body: unknown, epoch?: string) =>
@@ -142,7 +154,9 @@ test("native source rejects timed-out human saves after Agent takeover and retai
       (await sources.forward(workspace.id, owned.userID, "write", save("retained human work"))).ok,
     ).toBe(true);
     const turnID = crypto.randomUUID();
-    await owned.database.client.begin((sql) => claimAgentWriterIn(sql, owned.changeID, turnID));
+    await owned.database.client.begin((sql) =>
+      claimAgentWriterIn(sql, owned.changeID, turnID, owned.userID),
+    );
     await writers.prepareAgent(owned.changeID, turnID);
     expect(
       (
@@ -157,7 +171,29 @@ test("native source rejects timed-out human saves after Agent takeover and retai
     await expect(
       sources.forward(workspace.id, owned.userID, "write", save("late")),
     ).rejects.toThrow("observation-only");
-    await docker("restart", container);
+    const previousStart = await docker("inspect", "--format", "{{.State.StartedAt}}", container);
+    const restart = Bun.spawn(["docker", "restart", "--timeout", "0", container], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const restartOutput = Promise.all([
+      new Response(restart.stdout).text(),
+      new Response(restart.stderr).text(),
+    ]);
+    try {
+      // The local Docker restart acknowledgement can outlive the actual restart.
+      // Confirm a different process start identity instead of resending the command.
+      await eventually(
+        () => docker("inspect", "--format", "{{.State.StartedAt}}", container),
+        (started) => started !== previousStart,
+        "The owned source process did not restart",
+        30_000,
+      );
+    } finally {
+      if (restart.exitCode === null) restart.kill("SIGKILL");
+      await restart.exited;
+      await restartOutput;
+    }
     origin = `http://127.0.0.1:${(await docker("port", container, "4600/tcp")).split(":").at(-1)}`;
     await eventually(
       () => native("stat", { path: "" }).catch(() => null),
@@ -177,7 +213,17 @@ test("native source rejects timed-out human saves after Agent takeover and retai
     expect(Buffer.from(retained.content, "base64").toString()).toBe("retained human work");
   } finally {
     await sources?.close();
-    if (created) {
+    const existing = await docker(
+      "container",
+      "ls",
+      "--all",
+      "--filter",
+      `name=^/${container}$`,
+      "--format",
+      "{{.Names}}",
+    );
+    if (existing) {
+      expect(existing).toBe(container);
       expect(
         await docker(
           "inspect",
@@ -194,4 +240,4 @@ test("native source rejects timed-out human saves after Agent takeover and retai
     if (previousImage === undefined) delete process.env["FACTORY_WORKSPACE_FILES_IMAGE"];
     else process.env["FACTORY_WORKSPACE_FILES_IMAGE"] = previousImage;
   }
-}, 60_000);
+}, 120_000);

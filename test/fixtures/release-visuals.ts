@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
+import { openProjectMenu } from "./project-menu";
 import type { releaseInstallation } from "./release-installation";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
@@ -80,7 +81,7 @@ export async function releaseProductVisuals(fixture: Fixture) {
   };
   await capture("board");
   await capture("board", 900);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await capture("project-menu", 900);
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Settings", exact: true }).click();

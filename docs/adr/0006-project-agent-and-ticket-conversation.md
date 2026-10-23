@@ -57,11 +57,17 @@ Developers and managers can discover allowed code paths and read numbered lines 
 Forgejo commit through the existing origin, inventory and blob-cache checks. Source data is not
 instructions. Paths must be discovered before reading; code citations must name inspected files.
 Contributors receive no code tools or code-derived conversation content. Every read, including
-memoized reuse, rechecks authority. Investigate and Plan receive no checkout, shell, Runtime
-capability or mutation tool. Build requires the latest exact Requirement Revision to have a human approval. Factory then
+memoized reuse, rechecks authority. Investigate and Plan receive no checkout, shell or Runtime
+capability. Personal Project Plan can create planning Tickets through the bounded
+[Factory MCP](0020-factory-actions-through-mcp.md); other mutation authority is unchanged.
+Build requires the latest exact Requirement Revision to have a human approval. Factory then
 creates or resumes the existing Change path and sends later turns to OpenCode in the Ticket
 Workspace. The interface shows one chronological Ticket Conversation and marks the authority
 change without exposing an agent picker.
+
+Retained conversation contexts, safe fresh Coding Sessions and research alongside implementation
+are defined in [ADR 0019](0019-conversation-contexts-and-shared-editing.md). The canonical Ticket
+history and its shared Workspace remain intact when a person starts or views another conversation.
 
 Mode is an internal authority boundary, not a user-selectable switch. Creating or moving a Ticket
 into Requirements is planning, not model admission. An explicitly started Interview records one

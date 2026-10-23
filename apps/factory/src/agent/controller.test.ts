@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyAgentTurn, projectMessages } from "./controller";
+import { classifyAgentTurn, projectMessages, navigationMessages } from "./controller";
 import { agentMessageSchema } from "../api-contracts";
 
 describe("Change Agent turn state", () => {
@@ -158,6 +158,74 @@ describe("Change Agent turn state", () => {
 });
 
 describe("Change Agent activity projection", () => {
+  test("recorded source diffs are omitted unless development access is confirmed", () => {
+    const messages = projectMessages({
+      data: [
+        {
+          id: "source-diff",
+          type: "assistant",
+          time: { created: 1 },
+          content: [
+            {
+              type: "tool",
+              name: "edit",
+              state: {
+                status: "completed",
+                input: { path: "src/app.ts" },
+                metadata: { diff: "private-recorded-diff" },
+              },
+              time: { created: 1 },
+            },
+          ],
+        },
+      ],
+    });
+    expect(JSON.stringify(navigationMessages(messages, false))).not.toContain(
+      "private-recorded-diff",
+    );
+    expect(JSON.stringify(navigationMessages(messages, true))).toContain("private-recorded-diff");
+  });
+  test("a bounded Assistant message identifies that Copy can only include its shown preview", () => {
+    const [message] = projectMessages({
+      data: [
+        {
+          id: "assistant-preview",
+          type: "assistant",
+          time: { created: 1 },
+          content: [{ type: "text", text: "a".repeat(8001) }],
+        },
+      ],
+    });
+    expect(message?.truncated).toBe(true);
+    expect(message?.text.length).toBe(8000);
+  });
+  test("bounded activity previews explicitly identify truncated commands and output", () => {
+    const [message] = projectMessages({
+      data: [
+        {
+          id: "assistant_long",
+          type: "assistant",
+          time: { created: 1 },
+          content: [
+            {
+              id: "long_command",
+              type: "tool",
+              name: "shell",
+              state: {
+                status: "completed",
+                input: { command: "x".repeat(600) },
+                content: [{ type: "text", text: "result".repeat(1000) }],
+              },
+              time: { created: 1 },
+            },
+          ],
+        },
+      ],
+    });
+    expect(message?.text).toHaveLength(500);
+    expect(message?.activity?.detail).toHaveLength(4000);
+    expect(message?.activity?.truncated).toBe(true);
+  });
   test("native browser activity keeps its identity without putting its namespace in the compact label", () => {
     const [message] = projectMessages({
       data: [
@@ -337,6 +405,7 @@ describe("Change Agent activity projection", () => {
           name: "write",
           status: "completed",
           detail: "Wrote 6 bytes",
+          navigation: { path: "src/version.txt" },
         },
       },
       {

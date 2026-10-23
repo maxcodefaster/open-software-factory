@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+
 test.setTimeout(30_000);
 
 async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
@@ -23,7 +25,7 @@ async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
     path: `**/api/projects/${projectID}/setup/inspection`,
     async open() {
       await signIn(page);
-      await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+      await openProjectMenu(page);
       await page.getByRole("button", { name: "Create project", exact: true }).click();
       await expect(page.getByRole("heading", { name: draft.name, exact: true })).toBeVisible();
       return page.getByRole("region", { name: "Project configuration", exact: true });
@@ -220,7 +222,7 @@ test("opening a created Project leaves setup without reading its disposed condit
     route.fulfill({ json: [] }),
   );
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page.getByRole("button", { name: "Create project", exact: true }).click();
   const setup = page.getByRole("region", { name: "Project setup", exact: true });
   await expect(setup.getByRole("heading", { name: draft.name })).toBeVisible();

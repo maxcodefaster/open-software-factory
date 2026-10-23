@@ -1,7 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import { createDatabase } from "../../packages/db/src/client";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 // Read-only local walkthrough. Never starts compute, calls a model or approves Delivery.
@@ -14,7 +15,7 @@ test("captures the Starter document and assistant at desktop and phone widths", 
   await mkdir(".factory/screenshots/ux-followup", { recursive: true });
   await page.setViewportSize({ width: 1440, height: 900 });
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: "factory-starter" }).click();
   await page
     .getByRole("region", { name: "requirements", exact: true })
@@ -99,7 +100,7 @@ test("the original Starter Ticket opens real source, PTY and its development Pre
     await mkdir(".factory/screenshots/ux-followup", { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: "factory-starter" }).click();
     for (const name of ["implementation", "review"]) {
       const stage = page.getByRole("region", { name, exact: true });
@@ -123,7 +124,8 @@ test("the original Starter Ticket opens real source, PTY and its development Pre
               response.url().endsWith(`/api/changes/${change.id}/ticket-workspace/ensure`) &&
               response.request().method() === "POST",
           );
-    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
     const response = ensured ? await ensured : undefined;
     if (response) expect(response.ok()).toBe(true);
     const runtime = response ? runtimeAttemptSchema.parse(await response.json()) : existingRuntime;
@@ -218,7 +220,7 @@ test("the original Starter opens an authenticated live Preview without changing 
     await mkdir(".factory/screenshots/ux-followup", { recursive: true });
     await page.setViewportSize({ width: 1440, height: 900 });
     await signIn(page);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: "factory-starter" }).click();
     for (const stage of ["ideas", "requirements", "implementation", "review"]) {
       await expect(page.getByRole("region", { name: stage, exact: true })).toBeVisible();

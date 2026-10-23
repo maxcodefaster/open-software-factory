@@ -6,6 +6,7 @@ import {
   removeEditorFixtureNamespaceInChild,
 } from "./editor-source-resources";
 import { eventually } from "./factory-process";
+import { openProjectMenu } from "./project-menu";
 
 export async function starterSetupDesktop(input: {
   browser: Browser;
@@ -57,7 +58,7 @@ export async function starterSetupDesktop(input: {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(base);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page
       .locator("#project-popover .project-choice")
       .filter({ hasText: "Turnkey Starter" })

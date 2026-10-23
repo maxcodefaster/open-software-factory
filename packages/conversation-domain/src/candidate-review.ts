@@ -73,6 +73,24 @@ export type CandidateReviewResult = z.infer<typeof candidateReviewResultInput>;
 
 export const candidateReviewCallInput = z.discriminatedUnion("name", [
   z.strictObject({
+    name: z.literal("review_scenario"),
+    arguments: z.strictObject({
+      id: z.string().regex(/^[a-z0-9-]{1,64}$/),
+      title: z.string().trim().min(1).max(200),
+      category: z.enum(["normal", "error", "boundary"]),
+      criterion: z.number().int().positive(),
+      expected: z.string().trim().min(1).max(1_000),
+    }),
+  }),
+  z.strictObject({
+    name: z.literal("review_scenario_result"),
+    arguments: z.strictObject({
+      id: z.string().regex(/^[a-z0-9-]{1,64}$/),
+      status: z.enum(["passed", "failed", "unverified"]),
+      observed: evidence,
+    }),
+  }),
+  z.strictObject({
     name: z.literal("review_files"),
     arguments: z.strictObject({
       changedOnly: z.boolean().default(true),
@@ -101,6 +119,10 @@ export const candidateReviewCallInput = z.discriminatedUnion("name", [
 export const candidateReviewToolCatalogue = candidateReviewCallInput.options.map((option) => ({
   name: option.shape.name.value,
   description: {
+    review_scenario:
+      "Begin a concrete case before inspecting it. Name the approved criterion, expected outcome and normal/error/boundary category. One case at a time.",
+    review_scenario_result:
+      "End the current case with the actual observed outcome. Factory binds intervening source/browser evidence and video chapter times. No observation means unverified.",
     review_files:
       "List exact candidate files and changes against the approved base, up to 200 at a time. Follow nextOffset for the remaining files.",
     review_read:
@@ -121,10 +143,18 @@ export const candidateReviewPermissions = [
     effect: "allow" as const,
   })),
   { action: "factory_browser_browser_*", resource: "*", effect: "allow" as const },
+  { action: "factory_browser_attachment_list", resource: "*", effect: "allow" as const },
+  { action: "factory_browser_attachment_read", resource: "*", effect: "allow" as const },
 ];
 
 export function reviewNeedsBrowser(paths: readonly string[]) {
-  return paths.some((path) => /\.(tsx|jsx|html|css|scss|sass|less|vue|svelte)$/i.test(path));
+  return paths.some(
+    (path) =>
+      /\.(tsx|jsx|html|css|scss|sass|less|vue|svelte)$/i.test(path) ||
+      /(?:^|\/)(?:pages|routes|components|views|hooks|stores|client|frontend)\/.*\.[jt]s$/i.test(
+        path,
+      ),
+  );
 }
 
 export function candidateReviewInstructions(input: {
@@ -143,6 +173,9 @@ export function candidateReviewInstructions(input: {
     "Inspect the immutable protected workflow to identify which repository checks passed. You may cite that exact successful CI result for executable-check requirements; do not claim you ran those commands or mark their execution unverified merely because this read-only Session has no shell. Still inspect the changed tests and their relevance independently.",
     "Check the approved requirements, changed code and relevant surrounding code. Forgejo already runs the protected checks on this exact commit. Do not claim tests you did not observe or treat CI alone as proof of user behavior.",
     "For user-facing changes, exercise the declared App, including relevant error, keyboard and mobile states, and inspect a screenshot. Browser provenance must name the exact candidate and an unmodified checkout. Report unavailable or mismatched behavior as unverified, never as passing.",
+    "Before each case, call factory_browser_review_scenario with a specific input/state and expected outcome. Then inspect the source or exercise the App and finish with review_scenario_result, stating expected versus observed behavior. Factory binds the observations between those calls to that case. Do not retroactively label earlier activity as a tested case.",
+    "Cover every approved criterion with a concrete case. Exercise the normal flow and relevant error and boundary cases, not just the happy path. A criterion about rejecting invalid input can use an error case; do not relabel it normal to satisfy coverage. Choose risks from the changed behavior: empty/invalid/extreme inputs, repeated submissions, reload/back navigation, denied access, stale state and narrow/keyboard operation. At least one relevant adverse case is required for a passed review. Do not invent unrelated cases or test credentials outside approved scope.",
+    "For user-facing cases, use the actual browser during each case, not source alone. Read snapshots after interactions and inspect visual results. The browser records the real QA flow when recording is enabled; scenario boundaries become chapters. Recording failure is not an App defect and must never cause a UI action or inference to be repeated.",
     "Record reproducible defects, with expected versus observed behavior, exact file/line or App steps and evidence. Only defects within approved scope block. Cosmetic preferences and speculative improvements are advisory, not new implementation scope.",
     "Use factory_browser_review_report once you have enough evidence. Cover every acceptance criterion using its one-based number. Mark missing proof unverified and return incomplete if you cannot finish. A passed verdict needs every criterion checked and no blocking findings. A changes-requested verdict needs at least one reproducible blocking finding.",
     "The report tool records compact review findings, not a completion form for the coding agent. Do not put JSON in your final answer. End with an ordinary brief summary. Native finish without an accepted report is incomplete, not approval.",

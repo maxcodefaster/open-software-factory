@@ -9,6 +9,10 @@ import { json } from "../http";
 import type { createBuildBrowserController } from "./browser-controller";
 import type { createCandidateReviewController } from "./candidate-review";
 import { candidateReviewCallInput } from "../../../../packages/conversation-domain/src/candidate-review";
+import { feedbackToolCallInput } from "../../../../packages/conversation-domain/src/visual-review";
+import type { createVisualReviewController } from "../review/controller";
+import { attachmentToolCallInput } from "../../../../packages/conversation-domain/src/attachments";
+import type { createAttachmentTools } from "../attachments/tools";
 
 const rpcInput = z.strictObject({
   jsonrpc: z.literal("2.0"),
@@ -100,8 +104,11 @@ export function createBuildBrowserEndpoint(
   controller: Pick<
     ReturnType<typeof createBuildBrowserController>,
     "authorize" | "authorizeRuntime" | "call"
-  >,
+  > &
+    Partial<Pick<ReturnType<typeof createBuildBrowserController>, "finishRecording">>,
   review?: ReturnType<typeof createCandidateReviewController>,
+  feedback?: ReturnType<typeof createVisualReviewController>,
+  attachments?: ReturnType<typeof createAttachmentTools>,
 ) {
   return async (request: Request, target: string | { attemptID: string; turnID: string }) => {
     if (request.headers.has("origin"))
@@ -151,6 +158,8 @@ export function createBuildBrowserEndpoint(
           tools: [
             ...buildBrowserToolCatalogue,
             ...((await review?.tools(authorized.session.turnID)) ?? []),
+            ...((await feedback?.tools(authorized.session.turnID)) ?? []),
+            ...(attachments?.tools() ?? []),
           ],
         });
       }
@@ -163,18 +172,51 @@ export function createBuildBrowserEndpoint(
               arguments: envelope.data.arguments,
             })
           : undefined;
-        if (!call && (!review || !reviewCall?.success))
+        const feedbackCall = envelope.success
+          ? feedbackToolCallInput.safeParse({
+              name: envelope.data.name,
+              arguments: envelope.data.arguments,
+            })
+          : undefined;
+        const attachmentCall = envelope.success
+          ? attachmentToolCallInput.safeParse({
+              name: envelope.data.name,
+              arguments: envelope.data.arguments,
+            })
+          : undefined;
+        if (
+          !call &&
+          (!review || !reviewCall?.success) &&
+          (!feedback || !feedbackCall?.success) &&
+          (!attachments || !attachmentCall?.success)
+        )
           return fail(-32602, "Unsupported browser tool or arguments");
         try {
-          if (!call && review && reviewCall?.success)
+          if (attachments && attachmentCall?.success)
             return reply(
-              await review.call(
+              await attachments.call(
                 authorized.session.turnID,
                 authorized.ownerToken,
-                reviewCall.data,
-                rpc.id,
+                attachmentCall.data,
               ),
             );
+          if (!call && feedback && feedbackCall?.success)
+            return reply(
+              await feedback.call(
+                authorized.session.turnID,
+                authorized.ownerToken,
+                feedbackCall.data,
+              ),
+            );
+          if (!call && review && reviewCall?.success) {
+            const result = await review.call(
+              authorized.session.turnID,
+              authorized.ownerToken,
+              reviewCall.data,
+              rpc.id,
+            );
+            return reply(result);
+          }
           if (!call) return fail(-32602, "Unsupported browser tool or arguments");
           const result = await controller.call(
             authorized.session,

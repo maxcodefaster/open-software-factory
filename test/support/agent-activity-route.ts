@@ -19,13 +19,24 @@ export async function streamedAgentView(initial: AgentView, origin: string) {
   let requests = 0;
   const readers = new Set<ServerResponse>();
   const frame = () => `data: ${JSON.stringify({ type: "snapshot", view })}\n\n`;
-  const server = createServer((_request, response) => {
-    requests++;
-    response.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-store",
+  const server = createServer((request, response) => {
+    const cors = {
       "access-control-allow-origin": origin,
       "access-control-allow-credentials": "true",
+      "access-control-allow-private-network": "true",
+      "access-control-allow-methods": "GET, OPTIONS",
+      "access-control-allow-headers": "cache-control, last-event-id",
+    };
+    if (request.method === "OPTIONS") {
+      response.writeHead(204, cors);
+      response.end();
+      return;
+    }
+    requests++;
+    response.writeHead(200, {
+      ...cors,
+      "content-type": "text/event-stream",
+      "cache-control": "no-store",
     });
     readers.add(response);
     response.write(frame());

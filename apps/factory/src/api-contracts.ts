@@ -119,6 +119,7 @@ export const projectSchema = z.object({
   id: z.string(),
   slug: z.string(),
   name: z.string(),
+  desktopBackgroundKey: z.enum(desktopBackgroundKeys),
   repositoryUrl: z.string(),
   defaultBranch: z.string(),
   devcontainerPath: z.string(),
@@ -169,6 +170,7 @@ export const requirementRevisionSchema = z.object({
   createdAt: z.string().optional(),
   approvalId: optionalString,
   approvedAt: optionalString,
+  monitoringIncidentId: optionalString,
   author: optionalString,
   authorKind: z.enum(["human", "ai"]).optional(),
 });
@@ -217,15 +219,61 @@ export const agentMessageSchema = z.object({
   role: z.enum(["user", "assistant", "tool"]),
   text: z.string(),
   at: z.number(),
+  truncated: z.boolean().optional(),
   activity: z
     .object({
       name: z.string(),
       status: z.enum(["pending", "streaming", "running", "completed", "error"]),
       detail: optionalString,
+      truncated: z.boolean().optional(),
+      navigation: z
+        .object({
+          path: z.string().min(1).max(1000),
+          diff: z.string().max(64_000).optional(),
+          truncated: z.boolean().optional(),
+        })
+        .optional(),
     })
     .optional(),
 });
 export type AgentMessage = z.infer<typeof agentMessageSchema>;
+
+const writerPersonSchema = z.object({ id: z.uuid(), name: z.string() });
+export const writerViewSchema = z.object({
+  state: z.enum(["unassigned", "human", "agent-preparing", "agent", "handoff"]),
+  epoch: z.number().int().positive(),
+  canWrite: z.boolean(),
+  yours: z.boolean(),
+  commandID: z.uuid().nullable(),
+  actor: z
+    .object({
+      kind: z.enum(["human", "agent"]),
+      user: writerPersonSchema.nullable(),
+      delegated: z.boolean(),
+      workState: z.string().nullable(),
+    })
+    .nullable(),
+  requester: writerPersonSchema.nullable(),
+  presence: z
+    .object({
+      idle: z.boolean(),
+      secondsSinceEdit: z.number().int().nonnegative().nullable(),
+      connected: z.boolean(),
+    })
+    .nullable()
+    .default(null),
+  handoffKind: z.enum(["takeover", "release"]).default("takeover"),
+  requests: z
+    .array(
+      z.object({
+        id: z.uuid(),
+        requester: writerPersonSchema,
+        epoch: z.number().int().positive(),
+      }),
+    )
+    .default([]),
+});
+export type WriterView = z.infer<typeof writerViewSchema>;
 
 export const agentViewSchema = z.object({
   computeWait: optionalString,
@@ -280,6 +328,30 @@ export const conversationViewSchema = z.object({
   ticketId: optionalString,
   mode: conversationModeInput,
   version: z.coerce.number(),
+  contextId: z.uuid().nullable().default(null),
+  activeCodingContextId: z.uuid().nullable().default(null),
+  isActiveCoding: z.boolean().default(true),
+  contexts: z
+    .array(
+      z.object({
+        id: z.uuid(),
+        kind: z.enum(["research", "coding"]),
+        title: z.string(),
+        ordinal: z.number().int().positive(),
+        original: z.boolean(),
+        createdAt: z.string(),
+      }),
+    )
+    .default([]),
+  codingHistory: z
+    .object({
+      messages: z.array(agentMessageSchema),
+      admittedMessages: z.array(agentMessageSchema),
+      messagesAvailable: z.boolean(),
+      turn: turnObservationInput.nullable(),
+    })
+    .nullable()
+    .default(null),
   entries: z.array(conversationEntrySchema),
   turn: turnObservationInput.optional(),
 });
@@ -294,6 +366,11 @@ export const conversationStreamEventSchema = z.discriminatedUnion("type", [
 export type ConversationStreamEvent = z.infer<typeof conversationStreamEventSchema>;
 
 export const deliveryViewSchema = z.object({
+  monitoringIncidentId: optionalString,
+  monitoringState: optionalString,
+  monitoringReason: optionalString,
+  monitoringPolicyId: optionalString,
+  openReviewThreads: z.number().int().nonnegative().optional(),
   verificationId: optionalString,
   checksStopId: optionalString,
   reviewId: optionalString,

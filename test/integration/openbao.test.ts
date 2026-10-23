@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { createOpenBaoEnvironmentSecrets } from "../../apps/factory/src/environments/openbao";
 import { createOpenBaoKV } from "../../apps/factory/src/secrets/openbao";
+import { createMCPSecrets } from "../../apps/factory/src/mcp/secrets";
 import { z } from "zod";
+import { createHmac } from "node:crypto";
+import { canonicalMCPJSON } from "../../apps/factory/src/mcp/controller";
 
 test("pinned OpenBao encrypts persistent values, limits Factory credentials and survives a sealed restart", async () => {
   const directory = await mkdtemp(join(tmpdir(), "factory-owned-openbao-"));
@@ -88,6 +91,46 @@ test("pinned OpenBao encrypts persistent values, limits Factory credentials and 
     await kv.create(modelKey, { value: "owned-model-sentinel" }, secret);
     expect(await kv.read(modelKey, secret)).toEqual({ value: "owned-model-sentinel" });
     await kv.create(importKey, { value: "owned-import-sentinel" }, secret);
+    const mcp = createMCPSecrets({
+      address: configuration.FACTORY_OPENBAO_URL,
+      tokenFile: configuration.FACTORY_OPENBAO_TOKEN_FILE,
+      caFile: configuration.FACTORY_OPENBAO_CA_FILE,
+    });
+    const connectionId = crypto.randomUUID();
+    const mcpCommandId = crypto.randomUUID();
+    const mcpKey = `mcp/${connectionId}/${mcpCommandId}`;
+    const material = {
+      verifier: "owned-verifier",
+      tokens: { token_type: "Bearer", access_token: "owned-mcp-encrypted-sentinel" },
+    };
+    const mcpFingerprint = (value: unknown) =>
+      createHmac("sha256", "owned-fingerprint-key").update(canonicalMCPJSON(value)).digest("hex");
+    const mcpValue = {
+      connectionId,
+      commandId: mcpCommandId,
+      digest: mcpFingerprint(material),
+      material,
+    };
+    await mcp.create(mcpKey, mcpValue);
+    expect(await mcp.read(mcpKey)).toEqual(mcpValue);
+    expect(mcpFingerprint((await mcp.read(mcpKey))?.material)).toBe(mcpValue.digest);
+    await expect(mcp.create(mcpKey, mcpValue)).rejects.toThrow("unavailable");
+    const readable = await fetch(`${configuration.FACTORY_OPENBAO_URL}/v1/factory/data/${mcpKey}`, {
+      tls: { ca: await readFile(configuration.FACTORY_OPENBAO_CA_FILE, "utf8") },
+      headers: { "X-Vault-Token": token },
+    });
+    expect(readable.status).toBe(200);
+    await readable.body?.cancel();
+    const replacement = await fetch(
+      `${configuration.FACTORY_OPENBAO_URL}/v1/factory/data/${mcpKey}`,
+      {
+        tls: { ca: await readFile(configuration.FACTORY_OPENBAO_CA_FILE, "utf8") },
+        method: "POST",
+        headers: { "X-Vault-Token": token, "content-type": "application/json" },
+        body: JSON.stringify({ data: mcpValue }),
+      },
+    );
+    expect(replacement.status).toBe(403);
     await kv.removeImport(importKey);
     expect(await kv.read(importKey, secret)).toBeUndefined();
     await expect(kv.removeImport(modelKey)).rejects.toThrow("Only temporary");

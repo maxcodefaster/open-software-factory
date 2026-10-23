@@ -38,11 +38,13 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           commitSHA: string;
           verificationID: string;
           supersedesID: string | null;
+          contextID: string | null;
         }[]
       >`
         SELECT change.project_id AS "projectID",change.ticket_id AS "ticketID",
           revision.id AS "revisionID",revision.canonical_content AS specification,ticket.title,
           conversation.id AS "conversationID",conversation.version::float8 AS "conversationVersion",
+          conversation.active_coding_context_id AS "contextID",
           review.base_sha AS "baseSHA",review.commit_sha AS "commitSHA",review.verification_id AS "verificationID",
           review.supersedes_id AS "supersedesID"
         FROM factory.change change
@@ -93,6 +95,7 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           projectId: change.projectID,
           conversationId: change.conversationID,
           createdBy: userID,
+          ...(change.contextID ? { contextId: change.contextID } : {}),
         },
         {
           ...authority,
@@ -112,7 +115,7 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           },
         },
         async (transaction, record) => {
-          await claimAgentWriterIn(transaction, changeID, record.id);
+          await claimAgentWriterIn(transaction, changeID, record.id, userID);
           await transaction`UPDATE factory.coding_pause pause SET resumed_by_turn_id=${record.id}
             FROM factory.candidate_review previous, factory.agent_turn previous_turn
             WHERE previous.id=${change.supersedesID} AND previous.change_id=${changeID}

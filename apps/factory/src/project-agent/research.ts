@@ -2,8 +2,19 @@ import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
+import { attachmentIDs } from "../../../../packages/conversation-domain/src/attachments";
 
 export const researchSource = z.enum(["knowledge", "ticket", "epic"]);
+export const projectSearchInput = z.strictObject({
+  query: z.string().trim().min(1).max(500),
+  source: researchSource.optional(),
+});
+export const projectReadInput = z.strictObject({
+  source: researchSource,
+  id: z.uuid(),
+  offset: z.number().int().min(0).max(2_000_000).default(0),
+  expectedVersion: z.number().int().nonnegative().optional(),
+});
 export const researchHit = z.object({
   source: researchSource,
   id: z.uuid(),
@@ -12,6 +23,7 @@ export const researchHit = z.object({
 });
 export const researchDocument = researchHit.extend({
   body: z.string(),
+  attachments: z.array(z.uuid()).optional(),
   version: z.number().int(),
   truncated: z.boolean(),
   nextOffset: z.number().int().nullable(),
@@ -145,6 +157,7 @@ export async function readResearch(
       source,
       excerpt: body.slice(0, 1200),
       body: body.slice(offset, offset + 16000),
+      attachments: attachmentIDs(body),
       truncated: body.length > offset + 16000,
       nextOffset: body.length > offset + 16000 ? offset + 16000 : null,
       relationships: relations,

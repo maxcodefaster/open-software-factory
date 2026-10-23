@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { ticketDetailSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
@@ -35,12 +36,12 @@ async function addRequirement(summary: string, ordinal: number) {
 async function openFixture(page: Page) {
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
 }
 
 async function openTicket(page: Page) {
-  await page.getByRole("region", { name: "requirements" }).getByRole("button").click();
+  await page.getByRole("region", { name: "requirements" }).locator(".ticket-card-body").click();
   await expect(page.getByRole("textbox", { name: "Ticket title" })).toHaveText(title);
 }
 
@@ -487,7 +488,7 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await expect(editor).toContainText("Recovered draft.");
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
   await page.getByRole("button", { name: "Knowledge", exact: true }).click();
   await page.getByRole("button", { name: title, exact: true }).click();
@@ -569,7 +570,7 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
       .toBe("Replacement Wiki intent.");
     await page.reload();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-    await page.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: projectSlug }).click();
     await page.getByRole("button", { name: "Knowledge", exact: true }).click();
     await page.getByRole("button", { name: title, exact: true }).click();
@@ -615,7 +616,7 @@ test("Wiki organization moves through keyboard controls and retains icons across
   await expect(page.getByRole("button", { name: "Child page", exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
   await page.getByRole("button", { name: "Knowledge", exact: true }).click();
   await expect(page.getByRole("button", { name: "Child page", exact: true })).toBeVisible();
@@ -723,7 +724,7 @@ test("Wiki drag movement rejects source writes and History restores a new human 
     })
     .toBeNull();
   await parent.dragTo(page.getByRole("button", { name: "Code docs", exact: true }));
-  await expect(page.getByRole("status")).toContainText("read-only");
+  await expect(page.locator(".wiki-tree-notice")).toContainText("read-only");
   const [before] = await database.client<
     Array<{ body: string; version: number }>
   >`SELECT current_body AS body,version::integer AS version FROM factory.knowledge_page WHERE id=${pageID}`;
@@ -794,7 +795,7 @@ test("Wiki insertion targets do not reorder on hover and navigation resize is re
   await expect(divider).toHaveAttribute("aria-valuenow", "184");
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
   await openKnowledge(page);
   await expect(divider).toHaveAttribute("aria-valuenow", "184");
@@ -1097,9 +1098,9 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
   expect(approvedDocument?.approvalId).toBeTruthy();
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await page.getByRole("region", { name: "requirements" }).getByRole("button").click();
+  await page.getByRole("region", { name: "requirements" }).locator(".ticket-card-body").click();
   await expect(summary).toHaveAttribute("aria-readonly", "false");
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "History", exact: true }).click();

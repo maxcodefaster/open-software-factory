@@ -7,6 +7,9 @@ import { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
 import { json } from "../http";
 import { workspaceWriteAuthorityIn } from "../access/change-writer";
+import { z } from "zod";
+import { executeEditingCommand } from "../access/writer-command";
+import type { createChangeWriterController } from "../access/writer-controller";
 
 type EditorAuthorization = { token: string; grant: DeveloperIDEGrant };
 type Workspace = { projectID: string; changeID: string | null; kind: string; available: boolean };
@@ -19,10 +22,10 @@ export function createDeveloperIDERuntime(
   >,
   hub: RuntimeHub,
   access: ReturnType<typeof createRuntimeAccess>,
-  writers?: {
-    view(changeID: string, userID: string): Promise<unknown>;
-    takeOver(changeID: string, userID: string, commandID: string): Promise<unknown>;
-  },
+  writers?: Pick<
+    ReturnType<typeof createChangeWriterController>,
+    "view" | "takeOver" | "activity" | "request" | "approve" | "release" | "takeIdle"
+  >,
 ) {
   const authority = createAccessController(database);
   const terminalGrants = new Map<
@@ -104,12 +107,37 @@ export function createDeveloperIDERuntime(
       request: Request,
       authorized: EditorAuthorization,
     ): Promise<Response | undefined> {
-      const writer = suffix.match(/^\/__factory\/workspaces\/([0-9a-f-]{36})\/writer$/);
+      const writer = suffix.match(
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/writer(?:\/(activity|request|approve|release|idle-takeover))?$/,
+      );
       if (writer?.[1]) {
         const source = await workspace(writer[1], authorized.grant.userID);
         if (!source.changeID)
           return json({ state: "human", canWrite: true, yours: true, epoch: 1 });
         if (!writers) throw new CommandError("unavailable", "Editing authority is unavailable");
+        if (writer[2] && writer[2] !== "activity") {
+          if (request.method !== "POST") return new Response(null, { status: 405 });
+          return json(
+            await executeEditingCommand(
+              writers,
+              writer[2],
+              source.changeID,
+              authorized.grant.userID,
+              await request.json(),
+            ),
+          );
+        }
+        if (writer[2]) {
+          if (request.method !== "POST") return new Response(null, { status: 405 });
+          const input = z
+            .strictObject({
+              epoch: z.number().int().positive(),
+              kind: z.enum(["edit", "heartbeat"]),
+            })
+            .parse(await request.json());
+          await writers.activity(source.changeID, authorized.grant.userID, input.epoch, input.kind);
+          return new Response(null, { status: 204 });
+        }
         if (request.method === "GET")
           return json(await writers.view(source.changeID, authorized.grant.userID));
         if (request.method === "POST") {
@@ -118,12 +146,23 @@ export function createDeveloperIDERuntime(
             !input ||
             typeof input !== "object" ||
             !("commandID" in input) ||
+            !("epoch" in input) ||
+            typeof input.epoch !== "number" ||
+            !Number.isSafeInteger(input.epoch) ||
+            input.epoch <= 0 ||
             typeof input.commandID !== "string" ||
             !/^[0-9a-f-]{36}$/.test(input.commandID)
           )
             throw new CommandError("conflict", "Editing takeover identity is invalid");
           return json(
-            await writers.takeOver(source.changeID, authorized.grant.userID, input.commandID),
+            await writers.takeOver(
+              source.changeID,
+              authorized.grant.userID,
+              input.commandID,
+              undefined,
+              undefined,
+              input.epoch,
+            ),
           );
         }
         return new Response(null, { status: 405 });

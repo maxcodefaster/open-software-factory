@@ -5,8 +5,9 @@ import { expect, type Page, test } from "@playwright/test";
 import ts from "typescript";
 import { ticketDetailSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { fulfillAgentView } from "../support/agent-activity-route";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -447,7 +448,7 @@ function hexID() {
 }
 
 async function selectProject(page: Page, slug = projectSlug) {
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
 }
 
@@ -1149,7 +1150,8 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
     .click();
   // Build follows the explicit IDE target, not Ticket selection alone. The
   // source service is intentionally absent in this controller-only UI fixture.
-  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
   const panel = page.locator(".agent-panel");
   const status = panel.locator(".agent-state");
   const draft = panel.getByLabel("Message conversation");
@@ -1557,7 +1559,8 @@ test("keeps Build ready, working and stopped states compact across workspace wid
     .getByRole("button")
     .filter({ hasText: "Build state visual check" })
     .click();
-  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
   for (const nextState of ["idle", "working", "stopped"] as const) {
     state = nextState;
     if (state === "idle") {
@@ -1871,8 +1874,8 @@ test("dismisses Project and Settings popovers with keyboard focus returned to th
 }) => {
   await signIn(page);
   await selectProject(page);
-  const projectOpener = page.getByRole("button", { name: "Open project menu" });
-  await projectOpener.click();
+  const projectOpener = page.getByRole("button", { name: "Settings", exact: true });
+  await openProjectMenu(page);
   const projects = page.getByRole("region", { name: "Projects", exact: true });
   await expect(projects).toBeVisible();
   await expect
@@ -1912,7 +1915,7 @@ test("dismisses Project and Settings popovers with keyboard focus returned to th
   await page.keyboard.press("Escape");
   await expect(settings).toHaveCount(0);
   await expect(settingsOpener).toBeFocused();
-  await projectOpener.click();
+  await openProjectMenu(page);
   await settingsOpener.click();
   await expect(projects).toHaveCount(0);
   await expect(settings).toBeVisible();
@@ -1987,8 +1990,8 @@ test("opens Project registration as a focused dialog and preserves rejected inpu
 }) => {
   await signIn(page);
   await selectProject(page);
-  const opener = page.getByRole("button", { name: "Open project menu" });
-  await opener.click();
+  const opener = page.getByRole("button", { name: "Settings", exact: true });
+  await openProjectMenu(page);
   await page.getByRole("button", { name: "Add project", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Connect a repository", exact: true });
   await expect(dialog).toBeVisible({ timeout: 5_000 });

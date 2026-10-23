@@ -1,6 +1,7 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type { DocumentBlockState, DocumentEditor, TableCommand } from "./document-editor";
 import { codeLanguages } from "./code-highlighting";
+import type { DocumentBlockState, DocumentEditor, TableCommand } from "./document-editor";
+import { CopyButton } from "./ui/feedback";
 
 const tableActions = [
   ["addColumnBefore", "Column before"],
@@ -20,7 +21,6 @@ export function DocumentBlockControls(props: {
   editable: boolean;
 }) {
   const [open, setOpen] = createSignal(false);
-  const [copy, setCopy] = createSignal("");
   const code = () => {
     const state = props.state;
     return state?.kind === "code" ? state : undefined;
@@ -53,7 +53,6 @@ export function DocumentBlockControls(props: {
     () => props.state,
     () => {
       setOpen(false);
-      setCopy("");
     },
   );
   createEffect(
@@ -111,25 +110,13 @@ export function DocumentBlockControls(props: {
                     <option value={code()?.language ?? ""}>{code()?.language}</option>
                   </Show>
                 </select>
-                <button
-                  type="button"
-                  aria-label="Copy code"
-                  onClick={async () => {
-                    const block = state();
-                    if (block.kind !== "code") return;
-                    try {
-                      await navigator.clipboard.writeText(block.text);
-                      setCopy("Copied");
-                    } catch {
-                      setCopy("Could not copy. Select the code to copy manually.");
-                    }
-                  }}
-                >
-                  Copy
-                </button>
-                <Show when={copy()}>
-                  <small role="status">{copy()}</small>
-                </Show>
+                <CopyButton
+                  value={code()?.text ?? ""}
+                  scope={code()?.element}
+                  accessibleLabel="Copy code"
+                  successMessage="Code copied"
+                  errorMessage="Could not copy. Select the code to copy manually."
+                />
               </Show>
             }
           >

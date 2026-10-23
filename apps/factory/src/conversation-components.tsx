@@ -5,12 +5,28 @@ import {
   interviewQuestionInput,
   interviewAnswerInput,
 } from "../../../packages/conversation-domain/src/conversation";
-import type { RequirementContent } from "../../../packages/requirement-domain/src/content";
 import type { AgentMessage, ConversationEntry } from "./api-contracts";
 import { markdownHTML } from "./markdown";
 import { composerKeyDown, resizeComposer } from "./assistant-interaction";
 import { interviewOptions } from "./interview-options";
+import { TextareaAttachments } from "./attachments/ui";
+import { attachmentText, readAttachmentContent } from "./attachments/composer";
+import { CopyButton } from "./ui/feedback";
+import { Icon } from "./icon";
+import { activeActivity, activityGroupSummary } from "./conversation-activity";
 
+function MessageCopy(props: { text: string; scope: string; user?: boolean }) {
+  return (
+    <div class="agent-message-actions">
+      <CopyButton
+        class="quiet-button"
+        value={props.text}
+        scope={props.scope}
+        accessibleLabel={props.user ? "Copy user message" : "Copy Assistant message"}
+      />
+    </div>
+  );
+}
 export function conversationQuestion(entry: ConversationEntry): InterviewQuestion | undefined {
   const parsed = interviewQuestionInput.safeParse(entry.payload["question"]);
   return parsed.success ? parsed.data : undefined;
@@ -122,20 +138,26 @@ function InterviewAnswerForm(props: {
         </fieldset>
       </Show>
       <Show when={customEnabled()}>
-        <textarea
-          rows={1}
-          onKeyDown={composerKeyDown}
-          name="custom"
-          aria-label="Custom answer"
-          placeholder={question.type === "free-text" ? question.placeholder : "Write your answer"}
-          value={customText()}
-          onInput={(event) => {
-            const text = event.currentTarget.value;
-            setCustomText(text);
-            resizeComposer(event.currentTarget);
-            retain({ selectedOptionIds: selected(), customText: text });
-          }}
-        />
+        <TextareaAttachments
+          disabled={props.pending}
+          scopeKey={props.storageKey}
+          content={customText()}
+        >
+          <textarea
+            rows={1}
+            onKeyDown={composerKeyDown}
+            name="custom"
+            aria-label="Custom answer"
+            placeholder={question.type === "free-text" ? question.placeholder : "Write your answer"}
+            value={attachmentText(customText())}
+            onInput={(event) => {
+              const text = readAttachmentContent(event.currentTarget);
+              setCustomText(text);
+              resizeComposer(event.currentTarget);
+              retain({ selectedOptionIds: selected(), customText: text });
+            }}
+          />
+        </TextareaAttachments>
       </Show>
       <button type="submit" class="agent-control primary" disabled={props.pending || !valid()}>
         Continue
@@ -147,7 +169,11 @@ function InterviewAnswerForm(props: {
   );
 }
 
-export function ChangeAgentMessage(props: { message: AgentMessage }) {
+export function ChangeAgentMessage(props: {
+  message: AgentMessage;
+  onActivityToggle?: (open: boolean) => void;
+  onNavigate?: ((message: AgentMessage, kind: "file" | "diff") => void) | undefined;
+}) {
   return (
     <Show
       when={props.message.activity}
@@ -155,28 +181,143 @@ export function ChangeAgentMessage(props: { message: AgentMessage }) {
         <article class={`agent-message ${props.message.role}`}>
           <small class="sr-only">{props.message.role === "user" ? "You" : "Assistant"}</small>
           <div class="markdown-body" innerHTML={markdownHTML(props.message.text)} />
+          <Show when={props.message.truncated}>
+            <p class="activity-truncation">
+              Shortened message preview. Copy includes only the shown text.
+            </p>
+          </Show>
+          <Show when={props.message.role !== "tool"}>
+            <div class="agent-message-actions">
+              <CopyButton
+                class="quiet-button"
+                value={props.message.text}
+                scope={props.message.id}
+                accessibleLabel={
+                  props.message.role === "user" ? "Copy user message" : "Copy Assistant message"
+                }
+              />
+            </div>
+          </Show>
         </article>
       }
     >
       {(activity) => (
-        <details class={`agent-activity ${activity().status}`}>
+        <details
+          class={`agent-activity ${activity().status}`}
+          onToggle={(event) => props.onActivityToggle?.(event.currentTarget.open)}
+        >
           <summary class="agent-activity-heading">
-            <span class="activity-indicator" aria-hidden="true" />
-            <span class="activity-name">{activity().name}</span>
+            <Icon name="chevron" />
+            <span class="activity-name sr-only">{activity().name}</span>
             <span class="activity-command" title={props.message.text}>
               {props.message.text}
             </span>
-            <span class="activity-status">{activity().status}</span>
+            <span class="activity-status">
+              <span class="activity-indicator" aria-hidden="true" />
+              {activity().status === "completed"
+                ? "Done"
+                : activity().status === "error"
+                  ? "Failed"
+                  : activity().status === "pending"
+                    ? "Queued"
+                    : "Running"}
+            </span>
           </summary>
           <div class="agent-activity-content">
+            <Show when={activity().navigation && props.onNavigate}>
+              <div class="agent-activity-navigation">
+                <button
+                  type="button"
+                  class="quiet-button"
+                  onClick={() => props.onNavigate?.(props.message, "file")}
+                >
+                  Open file in IDE
+                </button>
+                <Show when={activity().navigation?.diff}>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    onClick={() => props.onNavigate?.(props.message, "diff")}
+                  >
+                    Open recorded diff
+                  </button>
+                </Show>
+              </div>
+            </Show>
             <pre class="activity-command-full">{props.message.text}</pre>
             <Show when={activity().detail}>
               {(detail) => <pre class="activity-output">{detail()}</pre>}
+            </Show>
+            <Show when={activity().truncated}>
+              <p class="activity-truncation" role="note">
+                This is a shortened activity preview, not the complete command or output.
+              </p>
             </Show>
           </div>
         </details>
       )}
     </Show>
+  );
+}
+
+export function ChangeAgentActivityGroup(props: {
+  messages: AgentMessage[];
+  onNavigate?: ((message: AgentMessage, kind: "file" | "diff") => void) | undefined;
+}) {
+  const [expanded, setExpanded] = createSignal(false);
+  const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
+  const active = () => props.messages.filter(activeActivity).length;
+  const failed = () => props.messages.filter((item) => item.activity?.status === "error").length;
+  const contentID = () =>
+    `activity-group-${props.messages[0]?.id.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
+  return (
+    <section class="agent-activity-group" aria-label="Grouped tool activity">
+      <Show when={props.messages.length > 1}>
+        <button
+          type="button"
+          class="activity-group-toggle"
+          aria-expanded={expanded() ? "true" : "false"}
+          aria-controls={contentID()}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <Icon name="chevron" />
+          <span>{activityGroupSummary(props.messages)}</span>
+          <span class="activity-group-state">
+            {[active() ? `${active()} active` : "", failed() ? `${failed()} failed` : ""]
+              .filter(Boolean)
+              .join(" · ") || "Completed"}
+          </span>
+        </button>
+      </Show>
+      <div id={contentID()} class="activity-group-calls">
+        <For each={props.messages} keyed={(message) => message.id}>
+          {(message) => (
+            <div
+              hidden={
+                props.messages.length > 1 &&
+                !expanded() &&
+                !activeActivity(message()) &&
+                message().activity?.status !== "error" &&
+                !opened().has(message().id)
+              }
+            >
+              <ChangeAgentMessage
+                message={message()}
+                onNavigate={props.onNavigate}
+                onActivityToggle={(open) =>
+                  setOpened((previous) => {
+                    const next = new Set(previous);
+                    if (open) next.add(message().id);
+                    else next.delete(message().id);
+                    return next;
+                  })
+                }
+              />
+            </div>
+          )}
+        </For>
+      </div>
+    </section>
   );
 }
 
@@ -210,7 +351,9 @@ export function ConversationEntryCard(props: {
               {(props.answerSummary?.length ?? 0) > 88 ? "…" : ""}
             </summary>
             <p>{entry.body}</p>
+            <MessageCopy text={entry.body} scope={entry.id} />
             <div class="markdown-body" innerHTML={markdownHTML(props.answerSummary ?? "")} />
+            <MessageCopy text={props.answerSummary ?? ""} scope={`${entry.id}:answer`} user />
           </details>
         }
       >
@@ -219,6 +362,10 @@ export function ConversationEntryCard(props: {
             <p>{String(entry.payload["message"] ?? "")}</p>
           </Show>
           <strong>{entry.body}</strong>
+          <MessageCopy
+            text={[String(entry.payload["message"] ?? ""), entry.body].filter(Boolean).join("\n\n")}
+            scope={entry.id}
+          />
           <Show when={!props.answered}>
             <Show
               when={props.canAnswer}
@@ -246,6 +393,7 @@ export function ConversationEntryCard(props: {
     return (
       <article class="conversation-requirement">
         <div class="markdown-body" innerHTML={markdownHTML(entry.body)} />
+        <MessageCopy text={entry.body} scope={entry.id} />
         <Show when={entry.payload["epicProposal"] || !props.requirementVisible}>
           <button
             type="button"
@@ -307,6 +455,18 @@ export function ConversationEntryCard(props: {
           if (citation) props.onCitation(citation);
         }}
       />
+      <Show when={entry.actor !== "system"}>
+        <div class="agent-message-actions">
+          <CopyButton
+            class="quiet-button"
+            value={entry.body}
+            scope={entry.id}
+            accessibleLabel={
+              entry.actor === "user" ? "Copy user message" : "Copy Assistant message"
+            }
+          />
+        </div>
+      </Show>
       <Show when={entry.citations.length && !rendered().includes('class="inline-citation"')}>
         <details class="conversation-sources">
           <summary>Sources</summary>

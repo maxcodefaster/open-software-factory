@@ -14,6 +14,7 @@ import {
 import {
   conversationMessageInput,
   conversationModeCommandInput,
+  newConversationInput,
   interviewAnswerCommandInput,
 } from "../../../packages/conversation-domain/src/conversation";
 import { confirmEpicProposalInput } from "../../../packages/conversation-domain/src/epic-proposal";
@@ -22,7 +23,6 @@ import { createDatabase } from "../../../packages/db/src/client";
 import { createForgejoAccess } from "../../../packages/forge/src/access";
 import { createForgejoClient } from "../../../packages/forge/src/forge";
 import { identityConfigurationWrite } from "../../../packages/identity-domain/src/configuration";
-import { isDesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
 import { knowledgeEditInput } from "../../../packages/knowledge-domain/src/knowledge";
 import {
   projectImportOrigins,
@@ -47,17 +47,27 @@ import { createAccessRevocation } from "./access/revocation";
 import { createAccessRoutes } from "./access/routes";
 import { createRuntimeAccess } from "./access/runtime";
 import { createChangeWriterController } from "./access/writer-controller";
+import { executeEditingCommand } from "./access/writer-command";
 import { agentActivityResponse } from "./agent/activity-response";
 import { createBuildBrowserController } from "./agent/browser-controller";
 import { createBuildBrowserEndpoint } from "./agent/browser-endpoint";
+import { createAttachmentStore } from "./attachments/store";
+import { createAttachmentTools } from "./attachments/tools";
+import { createAttachmentRoutes } from "./attachments/routes";
 import { createCandidateReviewController } from "./agent/candidate-review";
-import { createAgentController } from "./agent/controller";
+import { createVisualReviewController } from "./review/controller";
+import { createReviewMedia } from "./review/media";
+import { reviewRequestBody } from "./review/http";
+import { createAgentController, navigationMessages } from "./agent/controller";
 import { createOpenCodeClient } from "./agent/opencode-client";
 import { createChangeController } from "./change/controller";
 import { createTicketDocumentController } from "./change/document";
 import { createTicketTrashController } from "./change/trash";
 import { CommandError } from "./command-error";
 import { createDeliveryController } from "./delivery/controller";
+import { createMonitoringController } from "./monitoring/controller";
+import { createMonitoringRoutes } from "./monitoring/routes";
+import { createMonitoringWorker } from "./monitoring/worker";
 import { createEnvironmentController } from "./environments/controller";
 import { createOpenBaoEnvironmentSecrets } from "./environments/openbao";
 import { createEnvironmentRoutes } from "./environments/routes";
@@ -84,7 +94,11 @@ import { createProjectRoute } from "./routes/projects";
 import { appTimeoutResponse } from "./runtime/app-timeout";
 import { createRuntimeWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
-import { scopeRuntimeEmbedding } from "./runtime/embedding";
+import {
+  scopeRuntimeEmbedding,
+  previewBridgeResponse,
+  previewRendererResponse,
+} from "./runtime/embedding";
 import {
   runtimeSourcePath,
   serveRuntimeRepository,
@@ -107,6 +121,10 @@ import { createProjectSetupRoutes } from "./setup/routes";
 import { createImportSecrets } from "./setup/secrets";
 import { createSkillController } from "./skills/controller";
 import { createSkillRoutes } from "./skills/routes";
+import { createMCPConnections } from "./mcp/connections";
+import { createMCPSecrets } from "./mcp/secrets";
+import { createMCPRoutes } from "./mcp/routes";
+import { createMCPSourceEndpoint } from "./mcp/sources";
 import { usageCatalogue } from "./usage/rates";
 import { createRecordedOpenCodeUsage } from "./usage/record-opencode";
 import { createUsageRoutes } from "./usage/routes";
@@ -202,6 +220,14 @@ await environmentController
   .recover()
   .catch(() => console.error("Environment save recovery is unavailable"));
 const skillRoutes = createSkillRoutes(createSkillController(database));
+const mcpConnections = createMCPConnections(
+  database,
+  createMCPSecrets(),
+  runtimeSecret,
+  factoryOrigin,
+);
+const mcpRoutes = createMCPRoutes(mcpConnections);
+await mcpConnections.recover().catch(() => console.error("MCP credential recovery is unavailable"));
 const usageRoutes = createUsageRoutes(database, factoryAuth);
 const runtimeHub = new RuntimeHub(async (attemptID, phase, error) => {
   await runtimeController.status(attemptID, phase, error);
@@ -231,10 +257,17 @@ const relayModel = createModelRelay(
       sessionID,
     ),
 );
+const reviewMedia = createReviewMedia(database);
+const attachmentStore = createAttachmentStore(database);
+const attachmentRoutes = createAttachmentRoutes(attachmentStore);
+const visualReview = createVisualReviewController(database, reviewMedia.bytes);
 buildBrowserController = createBuildBrowserController(database, runtimeHub, runtimeSecret);
+const mcpSourceEndpoint = createMCPSourceEndpoint(database, mcpConnections, buildBrowserController);
 const buildBrowserEndpoint = createBuildBrowserEndpoint(
   buildBrowserController,
   createCandidateReviewController(database),
+  visualReview,
+  createAttachmentTools(database, attachmentStore),
 );
 const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revokeAccess(token));
 const workspaceSources = createWorkspaceSourceController(database, runtimeSecret);
@@ -271,7 +304,13 @@ const developerIDEEdge = createDeveloperIDEEdge(
   factoryOrigin,
   createDeveloperIDERuntime(database, runtimeController, runtimeHub, runtimeAccess, {
     view: (changeID, userID) => changeWriters.view(changeID, userID),
-    takeOver: (changeID, userID, commandID) => changeWriters.takeOver(changeID, userID, commandID),
+    takeOver: (...args) => changeWriters.takeOver(...args),
+    activity: (changeID, userID, epoch, kind) =>
+      changeWriters.activity(changeID, userID, epoch, kind),
+    request: (...args) => changeWriters.request(...args),
+    release: (...args) => changeWriters.release(...args),
+    approve: (...args) => changeWriters.approve(...args),
+    takeIdle: (...args) => changeWriters.takeIdle(...args),
   }),
 );
 const revokeAccountAccess = createAccountRevocation({
@@ -367,8 +406,28 @@ projectAgentController = createProjectAgentController(
   database,
   changeController,
   knowledgeController,
+  mcpConnections,
+  (conversationID, contextID) => agentController.retainedMessages(conversationID, contextID),
 );
 await projectAgentController.recover();
+const monitoringController = createMonitoringController(
+  database,
+  runtimeSecret,
+  factoryOrigin,
+  (projectId) => {
+    void monitoringWorker.project(projectId).catch(() => {});
+  },
+);
+const monitoringWorker = createMonitoringWorker(database, {
+  mcp: mcpConnections,
+  code: knowledgeController,
+  changes: changeController,
+  agent: agentController,
+  delivery: deliveryController,
+  signingKey: runtimeSecret,
+});
+const monitoringRoutes = createMonitoringRoutes(monitoringController);
+await monitoringWorker.recover();
 await accessRevocation.start();
 
 function sameRuntimeOrigin(request: Request) {
@@ -586,6 +645,8 @@ async function route(request: Request) {
     );
   const url = factoryRequestURL(request, factoryOrigin);
   try {
+    const monitoringIntake = await monitoringRoutes.intake(request);
+    if (monitoringIntake) return monitoringIntake;
     const runtimeEnvironment = url.pathname.match(
       /^\/internal\/runtime-environment\/([0-9a-f-]{36})$/,
     );
@@ -616,6 +677,9 @@ async function route(request: Request) {
     );
     if (browserTool?.[1] && browserTool[2])
       return buildBrowserEndpoint(request, { attemptID: browserTool[1], turnID: browserTool[2] });
+    const sourceTool = url.pathname.match(/^\/internal\/mcp\/([0-9a-f-]+)\/([0-9a-f-]+)$/);
+    if (sourceTool?.[1] && sourceTool[2])
+      return mcpSourceEndpoint(request, sourceTool[1], sourceTool[2]);
     if (modelRelay) {
       const [, attemptID, suffix] = modelRelay;
       if (!attemptID || !suffix) return new Response("Not found", { status: 404 });
@@ -638,6 +702,16 @@ async function route(request: Request) {
       !sameFactoryOrigin(request)
     ) {
       return json({ error: "Factory command origin is invalid" }, 403);
+    }
+    if (
+      url.pathname.startsWith("/api/attachments/") ||
+      /^\/api\/projects\/[^/]+\/(?:attachments|attachment-drafts\/[^/]+)$/.test(url.pathname)
+    ) {
+      const session = await requireSession(request);
+      if (!session) return json({ error: "Authentication required" }, 401);
+      return (
+        (await attachmentRoutes(request, session.user.id)) ?? new Response(null, { status: 404 })
+      );
     }
     if (url.pathname === "/api/session") {
       const session = await factoryAuth.session(request);
@@ -722,6 +796,10 @@ async function route(request: Request) {
       }
       const skillResponse = await skillRoutes(request, session.user.id);
       if (skillResponse) return skillResponse;
+      const mcpResponse = await mcpRoutes(request, session.user.id);
+      if (mcpResponse) return mcpResponse;
+      const monitoringResponse = await monitoringRoutes.settings(request, session.user.id);
+      if (monitoringResponse) return monitoringResponse;
       const sourceResponse = await sourceRoutes(request, session.user.id);
       if (sourceResponse) return sourceResponse;
       const editorResponse = await developerIDERoutes(request, session.user.id);
@@ -747,15 +825,6 @@ async function route(request: Request) {
       const session = await requireSession(request);
       if (!session) return json({ error: "Authentication required" }, 401);
       if (request.method === "GET") return json(await uiPreferenceController.get(session.user.id));
-      if (request.method === "PUT") {
-        const body = (await request.json().catch(() => null)) as {
-          desktopBackgroundKey?: unknown;
-        } | null;
-        if (!isDesktopBackgroundKey(body?.desktopBackgroundKey)) {
-          return json({ error: "Desktop Background is invalid" }, 400);
-        }
-        return json(await uiPreferenceController.set(session.user.id, body.desktopBackgroundKey));
-      }
       return new Response(null, { status: 405 });
     }
     if (url.pathname === "/api/projects") return projects(request);
@@ -832,7 +901,7 @@ async function route(request: Request) {
       return new Response(null, { status: 405 });
     }
     const projectConversation = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/conversation(?:\/(message|mode|answer))?$/,
+      /^\/api\/projects\/([0-9a-f-]+)\/conversation(?:\/(message|mode|answer|new))?$/,
     );
     if (projectConversation) {
       const session = await requireSession(request);
@@ -845,9 +914,25 @@ async function route(request: Request) {
         if (ticketID && !/^[0-9a-f-]{36}$/.test(ticketID)) {
           return json({ error: "Ticket is invalid" }, 400);
         }
-        return json(await projectAgentController.get(projectID, ticketID, session.user.id));
+        const contextID = url.searchParams.get("contextId") ?? undefined;
+        if (contextID && contextID !== "original") z.uuid().parse(contextID);
+        return json(
+          await projectAgentController.get(projectID, ticketID, session.user.id, contextID),
+        );
       }
       if (request.method !== "POST") return new Response(null, { status: 405 });
+      if (action === "new") {
+        const input = newConversationInput.parse(await request.json());
+        return json(
+          await projectAgentController.newConversation(
+            projectID,
+            input.ticketId,
+            session.user.id,
+            input.commandId,
+          ),
+          201,
+        );
+      }
       if (action === "message") {
         const parsed = conversationMessageInput.safeParse(await request.json().catch(() => null));
         if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
@@ -861,6 +946,7 @@ async function route(request: Request) {
               parsed.data.commandId,
               parsed.data.intent,
               observer,
+              parsed.data.contextId,
             ),
           );
         return json(
@@ -871,6 +957,8 @@ async function route(request: Request) {
             session.user.id,
             parsed.data.commandId,
             parsed.data.intent,
+            undefined,
+            parsed.data.contextId,
           ),
           201,
         );
@@ -902,6 +990,7 @@ async function route(request: Request) {
             parsed.data.answer,
             session.user.id,
             parsed.data.commandId,
+            parsed.data.contextId,
           ),
           201,
         );
@@ -1009,20 +1098,61 @@ async function route(request: Request) {
       return new Response(null, { status: 405 });
     }
     const agentRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/agent(?:\/(activity|start|resume|prompt|request-changes|stop|check-stop))?$/,
+      /^\/api\/changes\/([0-9a-f-]+)\/agent(?:\/(activity|start|resume|prompt|request-changes|stop|check-stop|new-conversation))?$/,
     );
-    const writerRoute = url.pathname.match(/^\/api\/changes\/([0-9a-f-]{36})\/writer$/);
+    const writerRoute = url.pathname.match(
+      /^\/api\/changes\/([0-9a-f-]{36})\/writer(?:\/(status|activity|request|approve|release|idle-takeover))?$/,
+    );
     if (writerRoute?.[1]) {
       const session = await requireSession(request);
       if (!session) return json({ error: "Authentication required" }, 401);
+      if (writerRoute[2]) {
+        if (["request", "approve", "release", "idle-takeover"].includes(writerRoute[2])) {
+          if (request.method !== "POST") return new Response(null, { status: 405 });
+          return json(
+            await executeEditingCommand(
+              changeWriters,
+              writerRoute[2],
+              writerRoute[1],
+              session.user.id,
+              await request.json(),
+            ),
+          );
+        }
+        if (writerRoute[2] === "activity") {
+          if (request.method !== "POST") return new Response(null, { status: 405 });
+          const input = z
+            .strictObject({
+              epoch: z.number().int().positive(),
+              kind: z.enum(["edit", "heartbeat"]),
+            })
+            .parse(await request.json());
+          await changeWriters.activity(writerRoute[1], session.user.id, input.epoch, input.kind);
+          return new Response(null, { status: 204 });
+        }
+        if (request.method !== "GET") return new Response(null, { status: 405 });
+        return json(await changeWriters.status(writerRoute[1], session.user.id));
+      }
       if (request.method === "GET")
         return json(await changeWriters.view(writerRoute[1], session.user.id));
       if (request.method === "POST") {
-        const { commandID } = z
-          .object({ commandID: z.uuid() })
+        const { commandID, epoch } = z
+          .object({
+            commandID: z.uuid(),
+            epoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+          })
           .strict()
           .parse(await request.json());
-        return json(await changeWriters.takeOver(writerRoute[1], session.user.id, commandID));
+        return json(
+          await changeWriters.takeOver(
+            writerRoute[1],
+            session.user.id,
+            commandID,
+            undefined,
+            undefined,
+            epoch,
+          ),
+        );
       }
       return new Response(null, { status: 405 });
     }
@@ -1031,6 +1161,17 @@ async function route(request: Request) {
       if (!session) return json({ error: "Authentication required" }, 401);
       const [, changeID, action] = agentRoute;
       if (!changeID) return json({ error: "Change is required" }, 400);
+      const agentNavigationView = async (view: Awaited<ReturnType<typeof agentController.get>>) => {
+        const [change] = await database.client<{ projectID: string }[]>`
+          SELECT project_id AS "projectID" FROM factory.change WHERE id=${changeID}`;
+        if (!change) throw new CommandError("not-found", "Change not found");
+        const developer = await accessController.canDevelop(session.user.id, change.projectID);
+        return { ...view, messages: navigationMessages(view.messages, developer) };
+      };
+      const readAgent = async (history = true) =>
+        agentNavigationView(await agentController.get(changeID, undefined, history, true));
+      const agentResponse = async (work: ReturnType<typeof agentController.get>, status = 200) =>
+        json(await agentNavigationView(await work), status);
       if (action === "activity" && request.method === "GET")
         return agentActivityResponse({
           signal: request.signal,
@@ -1040,33 +1181,48 @@ async function route(request: Request) {
               throw new CommandError("forbidden", "Build activity access ended");
             await accessController.authorizeAPI(request, current.user.id);
           },
-          read: () => agentController.get(changeID),
+          read: () => readAgent(),
           subscribe: async (notify) => agentController.subscribeActivity(changeID, notify),
         });
       if (!action && request.method === "GET")
-        return json(
-          await agentController.get(changeID, undefined, url.searchParams.get("history") !== "0"),
-        );
+        return json(await readAgent(url.searchParams.get("history") !== "0"));
       if (request.method !== "POST") return new Response(null, { status: 405 });
+      if (action === "new-conversation") {
+        const input = z
+          .strictObject({ commandId: z.uuid(), contextId: z.uuid().nullable() })
+          .parse(await request.json());
+        return json(
+          {
+            contextId: await agentController.newConversation(
+              changeID,
+              session.user.id,
+              input.commandId,
+              input.contextId,
+            ),
+          },
+          201,
+        );
+      }
       if (action === "start") {
         const parsed = changeAgentStartInput.safeParse(await request.json().catch(() => null));
         if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return json(
-          await agentController.start(
+        return agentResponse(
+          agentController.start(
             changeID,
             session.user.id,
             parsed.data.commandId,
             parsed.data.codingReasoning,
+            parsed.data.contextId,
           ),
           202,
         );
       }
-      if (action === "stop") return json(await agentController.stop(changeID), 202);
+      if (action === "stop") return agentResponse(agentController.stop(changeID), 202);
       if (action === "resume") {
         const parsed = changeAgentResumeInput.safeParse(await request.json().catch(() => null));
         if (!parsed.success) return json({ error: "Resume request is invalid" }, 400);
-        return json(
-          await agentController.resume(
+        return agentResponse(
+          agentController.resume(
             changeID,
             session.user.id,
             parsed.data.commandId,
@@ -1080,17 +1236,19 @@ async function route(request: Request) {
           await request.json().catch(() => null),
         );
         if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return json(await agentController.recheckStop(changeID, parsed.data.stopId));
+        return agentResponse(agentController.recheckStop(changeID, parsed.data.stopId));
       }
       if (action === "prompt" || action === "request-changes") {
         const parsed = changeAgentPromptInput.safeParse(await request.json().catch(() => null));
         if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return json(
-          await agentController.prompt(
+        return agentResponse(
+          agentController.prompt(
             changeID,
             parsed.data.text,
             session.user.id,
             parsed.data.commandId,
+            false,
+            parsed.data.contextId,
           ),
           202,
         );
@@ -1113,7 +1271,8 @@ async function route(request: Request) {
         SELECT revision.id, revision.ticket_id AS "ticketId", revision.ordinal,
           revision.canonical_content AS "canonicalContent",
           revision.content_digest AS "contentDigest", revision.created_at AS "createdAt",
-          approval.id AS "approvalId", approval.approved_at AS "approvedAt", author.name AS author
+          approval.id AS "approvalId", approval.approved_at AS "approvedAt",
+          approval.monitoring_incident_id AS "monitoringIncidentId",author.name AS author
         FROM factory.requirement_revision revision
         LEFT JOIN auth."user" author ON author.id = revision.created_by
         LEFT JOIN factory.requirement_approval approval
@@ -1125,7 +1284,7 @@ async function route(request: Request) {
           revision.canonical_content AS "canonicalContent", revision.content_digest AS "contentDigest",
           revision.requirement_revision_id AS "requirementRevisionId", revision.created_at AS "createdAt", author.name AS author,
           revision.author_kind AS "authorKind", revision.proposal_entry_id AS "proposalEntryId",
-          approval.id AS "approvalId"
+          approval.id AS "approvalId",approval.monitoring_incident_id AS "monitoringIncidentId"
         FROM factory.ticket_document_revision revision LEFT JOIN auth."user" author ON author.id = revision.created_by
         LEFT JOIN factory.requirement_approval approval ON approval.requirement_revision_id = revision.requirement_revision_id
           AND EXISTS(SELECT 1 FROM factory.requirement_revision scope WHERE scope.id=revision.requirement_revision_id AND scope.canonical_content=revision.canonical_content)
@@ -1287,6 +1446,72 @@ async function route(request: Request) {
       return json({
         changes: await changeController.list(projectID ?? undefined, session.user.id),
       });
+    }
+    const visualReviewRoute = url.pathname.match(
+      /^\/api\/changes\/([0-9a-f-]+)\/review(?:\/(feedback|update|send|stills|media)(?:\/([0-9a-f-]+))?)?$/,
+    );
+    if (visualReviewRoute) {
+      const session = await requireSession(request);
+      if (!session) return json({ error: "Authentication required" }, 401);
+      const changeID = visualReviewRoute[1]!;
+      const action = visualReviewRoute[2];
+      const mediaID = visualReviewRoute[3];
+      if (!action && request.method === "GET")
+        return json(await visualReview.get(changeID, session.user.id));
+      if (action === "media" && mediaID && request.method === "GET")
+        return reviewMedia.read(changeID, session.user.id, mediaID, request.headers.get("range"));
+      if (action === "stills" && request.method === "POST") {
+        const form = await new Response(await reviewRequestBody(request, 2_162_688), {
+          headers: { "content-type": request.headers.get("content-type") ?? "" },
+        }).formData();
+        const file = form.get("frame");
+        if (!(file instanceof File) || file.size > 2_097_152)
+          throw new CommandError("conflict", "Annotation frame exceeds the 2 MiB limit");
+        return json(
+          await reviewMedia.still(
+            changeID,
+            session.user.id,
+            JSON.parse(String(form.get("context"))),
+            new Uint8Array(await file.arrayBuffer()),
+            z.uuid().parse(form.get("id")),
+          ),
+          201,
+        );
+      }
+      if (request.method === "POST" && ["feedback", "update", "send"].includes(action ?? "")) {
+        const input: unknown = JSON.parse((await reviewRequestBody(request, 32_768)).toString());
+        if (action === "feedback")
+          return json(await visualReview.create(changeID, session.user.id, input), 201);
+        if (action === "update")
+          return json(await visualReview.update(changeID, session.user.id, input));
+        const result = await visualReview.dispatch(
+          changeID,
+          session.user.id,
+          input,
+          (sql, text, commandID) =>
+            agentController.admitPromptIn(sql, changeID, session.user.id, text, commandID),
+        );
+        // Dispatch only newly persisted pending work. Reconnect and duplicate
+        // commands cannot admit a second inference.
+        void agentController.dispatchPending(changeID);
+        return json(result, 202);
+      }
+      return new Response(null, { status: 405 });
+    }
+    const recordingSettingRoute = url.pathname.match(
+      /^\/api\/projects\/([0-9a-f-]+)\/qa-recording$/,
+    );
+    if (recordingSettingRoute) {
+      const session = await requireSession(request);
+      if (!session) return json({ error: "Authentication required" }, 401);
+      const projectID = recordingSettingRoute[1]!;
+      if (request.method === "PUT") {
+        const input = z.strictObject({ enabled: z.boolean() }).parse(await request.json());
+        await visualReview.recordingSetting(projectID, session.user.id, input.enabled);
+      } else if (request.method !== "GET") return new Response(null, { status: 405 });
+      const [project] = await database.client<{ enabled: boolean }[]>`
+        SELECT qa_recording_enabled AS enabled FROM factory.project WHERE id=${projectID}`;
+      return json(project);
     }
     const deliveryRoute = url.pathname.match(
       /^\/api\/changes\/([0-9a-f-]+)\/delivery(?:\/(approve|retry-review|resume-checks))?$/,
@@ -1457,6 +1682,14 @@ async function route(request: Request) {
       if (channel === "ide" && suffix === "/__factory/processes") {
         return json(await runtimeController.processOutput(attemptID));
       }
+      if (channel === "app" && suffix === "/__factory/review-bridge.js" && request.method === "GET")
+        return previewBridgeResponse(factoryOrigin);
+      if (
+        channel === "app" &&
+        suffix === "/__factory/review-renderer.js" &&
+        request.method === "GET"
+      )
+        return previewRendererResponse();
       const processAction =
         channel === "ide"
           ? suffix?.match(
@@ -1517,7 +1750,11 @@ async function route(request: Request) {
       );
       return channel === "ide"
         ? scopeTheiaConnectionCookie(response, `/runtime/${attemptID}/ide/`)
-        : scopeRuntimeEmbedding(response, factoryOrigin);
+        : scopeRuntimeEmbedding(
+            response,
+            factoryOrigin,
+            `/runtime/${attemptID}/app/__factory/review-bridge.js`,
+          );
     }
     const appPreviewRequest = url.pathname.match(
       /^\/runtime\/([0-9a-f-]+)\/preview\/(app(?:-[a-z][a-z0-9-]{0,26})?)(\/.*)?$/,
@@ -1540,6 +1777,10 @@ async function route(request: Request) {
       if (!runtimeHub.hasAppChannel(attemptID, appChannel)) {
         return json({ error: "Declared App is not available" }, 404);
       }
+      if (suffix === "/__factory/review-bridge.js" && request.method === "GET")
+        return previewBridgeResponse(factoryOrigin);
+      if (suffix === "/__factory/review-renderer.js" && request.method === "GET")
+        return previewRendererResponse();
       const response = await runtimeHub.request(
         attemptID,
         appChannel,
@@ -1552,7 +1793,11 @@ async function route(request: Request) {
         },
         accessToken,
       );
-      return scopeRuntimeEmbedding(response, factoryOrigin);
+      return scopeRuntimeEmbedding(
+        response,
+        factoryOrigin,
+        `/runtime/${attemptID}/preview/${appChannel}/__factory/review-bridge.js`,
+      );
     }
     const runtimeSource = url.pathname.match(
       /^\/internal\/runtime-source\/([a-z0-9-]+)\/([0-9a-f]{64})(\/.*)?$/,
@@ -1835,6 +2080,12 @@ const reconcileKnowledge = async () => {
 };
 void reconcileKnowledge();
 setInterval(() => void reconcileKnowledge(), 15 * 60_000).unref();
+void reviewMedia.sweep().catch(() => console.error("Review media retention is unavailable"));
+void attachmentStore.sweep().catch(() => console.error("Attachment cleanup is unavailable"));
+setInterval(() => {
+  void reviewMedia.sweep().catch(() => console.error("Review media retention is unavailable"));
+  void attachmentStore.sweep().catch(() => console.error("Attachment cleanup is unavailable"));
+}, 60_000).unref();
 void wikiSourceUpdates.repair().catch(() => console.error("Wiki hook reconciliation failed"));
 setInterval(
   () =>
@@ -1852,5 +2103,16 @@ setInterval(
       .catch(() => console.error("Project image preparation needs retry")),
   2_000,
 ).unref();
+let mcpRecovering = false;
+setInterval(() => {
+  if (mcpRecovering) return;
+  mcpRecovering = true;
+  void mcpConnections
+    .recover()
+    .catch(() => console.error("MCP credential recovery is unavailable"))
+    .finally(() => {
+      mcpRecovering = false;
+    });
+}, 30_000).unref();
 
 import { z } from "zod";

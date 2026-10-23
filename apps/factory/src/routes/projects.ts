@@ -21,6 +21,7 @@ type ProjectRow = {
   id: string;
   slug: string;
   name: string;
+  desktopBackgroundKey: string;
   repositoryUrl: string;
   defaultBranch: string;
   devcontainerPath: string;
@@ -40,6 +41,7 @@ export function createProjectRoute(dependencies: ProjectRouteDependencies) {
     if (request.method === "GET") {
       const rows = await dependencies.database.client<ProjectRow[]>`
         SELECT id, slug, name, repository_url AS "repositoryUrl",
+          desktop_background_key AS "desktopBackgroundKey",
           default_branch AS "defaultBranch", devcontainer_path AS "devcontainerPath",
           created_at AS "createdAt"
         FROM factory.project
@@ -78,6 +80,7 @@ export function createProjectRoute(dependencies: ProjectRouteDependencies) {
           ${input.devcontainerPath}, ${session.user.id}
         )
         RETURNING id, slug, name, repository_url AS "repositoryUrl",
+          desktop_background_key AS "desktopBackgroundKey",
           default_branch AS "defaultBranch", devcontainer_path AS "devcontainerPath",
           created_at AS "createdAt"
       `;

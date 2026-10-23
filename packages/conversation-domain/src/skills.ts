@@ -3,6 +3,20 @@ import { z } from "zod";
 export const skillRoleInput = z.enum(["planning", "build"]);
 export type SkillRole = z.infer<typeof skillRoleInput>;
 
+export const skillInvocationViewInput = z.object({
+  skills: z
+    .array(
+      z.object({
+        id: z.uuid(),
+        key: z.string(),
+        name: z.string(),
+        description: z.string(),
+      }),
+    )
+    .max(16),
+  conflicts: z.array(z.string()).max(16),
+});
+
 export const skillRevisionIDsInput = z
   .array(z.uuid())
   .max(16)

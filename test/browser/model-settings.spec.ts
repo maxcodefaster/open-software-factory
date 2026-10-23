@@ -10,7 +10,7 @@ async function openFactoryModels(page: Page) {
   await settings
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
-    .filter({ has: page.getByRole("heading", { name: "Factory", exact: true }) })
+    .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
     .getByRole("button", { name: "Models", exact: true })
     .click();
   return settings;

@@ -9,6 +9,13 @@
   white-space: nowrap;
 }
 
+#status-bar-factory-writing {
+  max-width: min(360px, 38vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Hidden embedded startup must not persist the upstream 100px minimum as a
    barely usable Explorer. Wider saved layouts and normal sash resizing remain. */
 #theia-left-side-panel {
@@ -94,18 +101,25 @@
   border-bottom: 1px solid var(--theia-panel-border);
   display: flex;
   justify-content: space-between;
-  min-height: 31px;
-  padding: 0 8px;
+  min-height: 36px;
+  padding: 2px 8px;
+  gap: 4px 8px;
+  flex-wrap: wrap;
 }
 
 .factory-runtime-toolbar > div {
   display: flex;
-  gap: 2px;
+  gap: 4px;
+  flex-wrap: wrap;
 }
 
 .factory-runtime-toolbar .factory-runtime-primary {
-  background: var(--theia-list-activeSelectionBackground);
-  color: var(--theia-list-activeSelectionForeground);
+  background: var(--theia-button-background);
+  color: var(--theia-button-foreground);
+}
+
+.factory-runtime-toolbar .factory-runtime-primary:hover:not(:disabled) {
+  background: var(--theia-button-hoverBackground);
 }
 
 .factory-runtime-output-options {
@@ -116,34 +130,47 @@
 .factory-runtime-output-options summary {
   cursor: pointer;
   color: var(--theia-descriptionForeground);
-  font-size: 11px;
+  font-size: var(--theia-ui-font-size1);
 }
 
 .factory-runtime-output-options > div {
   display: flex;
   gap: 2px;
   padding-top: 4px;
+  flex-wrap: wrap;
 }
 
 .factory-runtime-toolbar button,
-.factory-terminal-tabs button {
+.factory-terminal-toolbar button {
   background: transparent;
   border: 0;
   border-radius: 4px;
   color: inherit;
   font: inherit;
-  font-size: 11px;
-  padding: 4px 7px;
+  font-size: var(--theia-ui-font-size1);
+  min-height: 28px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.factory-runtime-toolbar :is(button, summary):focus-visible,
+.factory-terminal-toolbar button:focus-visible,
+.factory-terminal-tabs input:focus-visible,
+.factory-runtime-process:focus-visible,
+.factory-compute-status button:focus-visible {
+  outline: 2px solid var(--theia-focusBorder);
+  outline-offset: -2px;
 }
 
 .factory-runtime-toolbar button:hover:not(:disabled),
-.factory-terminal-tabs button:hover:not(:disabled) {
+.factory-terminal-toolbar button:hover:not(:disabled) {
   background: var(--theia-list-hoverBackground);
 }
 
 .factory-runtime-toolbar button:disabled,
-.factory-terminal-tabs button:disabled {
-  opacity: 0.38;
+.factory-terminal-toolbar button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .factory-runtime-processes {
@@ -178,6 +205,8 @@
 .factory-runtime-process > span:nth-child(2) {
   display: grid;
   gap: 1px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .factory-runtime-process strong {
@@ -186,8 +215,8 @@
 }
 
 .factory-runtime-process small {
-  font-size: 10px;
-  opacity: 0.65;
+  font-size: 11px;
+  color: var(--theia-descriptionForeground);
 }
 
 .factory-runtime-state {
@@ -225,24 +254,51 @@
   white-space: pre-wrap;
 }
 
+@media (max-width: 600px) {
+  .factory-runtime-widget {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .factory-runtime-processes {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: 0;
+    border-bottom: 1px solid var(--theia-panel-border);
+  }
+}
+
 .factory-terminal-widget {
   background: var(--theia-editor-background);
   color: var(--theia-editor-foreground);
   display: grid;
-  grid-template-rows: 31px auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100%;
-  min-height: 132px;
+  min-height: 0;
   width: 100%;
 }
 
-.factory-terminal-tabs {
+.factory-terminal-toolbar {
   grid-row: 1;
+  display: flex;
   align-items: stretch;
+  min-width: 0;
+  min-height: 36px;
   border-bottom: 1px solid var(--theia-panel-border);
+  background: var(--theia-panel-background);
+}
+.factory-terminal-toolbar[hidden] {
+  display: none;
+}
+.factory-terminal-tabs {
+  flex: 1;
+  min-width: 0;
+  align-items: stretch;
   display: flex;
   gap: 1px;
   overflow-x: auto;
   padding: 0 6px;
+  scrollbar-width: thin;
 }
 
 .factory-terminal-tab {
@@ -257,6 +313,10 @@
 }
 
 .factory-terminal-tab > button:first-child {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   border-radius: 0;
   padding-left: 6px;
   padding-right: 4px;
@@ -275,14 +335,28 @@
 }
 
 .factory-terminal-close {
-  font-size: 15px !important;
-  line-height: 1 !important;
-  padding: 2px 5px !important;
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  padding: 4px;
+}
+.factory-terminal-close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+.factory-terminal-close[aria-busy="true"] {
+  opacity: 0.55;
+  cursor: wait;
 }
 
-.factory-terminal-add {
-  align-self: center;
-  font-size: 16px !important;
+.factory-terminal-toolbar .factory-terminal-add {
+  flex: none;
+  margin: 3px 6px 3px 0;
+  color: var(--theia-descriptionForeground);
+  white-space: nowrap;
 }
 
 .factory-terminal-panels,
@@ -309,6 +383,24 @@
   height: 100%;
   padding: 8px 10px;
 }
+.factory-terminal-host .xterm,
+.factory-terminal-host .xterm-viewport {
+  background-color: var(--theia-terminal-background, var(--theia-editor-background));
+}
+@media (pointer: coarse) {
+  .factory-terminal-toolbar {
+    min-height: 44px;
+  }
+  .factory-terminal-toolbar button {
+    min-height: 44px;
+  }
+  .factory-terminal-close {
+    min-width: 44px;
+  }
+  .factory-terminal-add {
+    margin-block: 0;
+  }
+}
 :root {
   --factory-ide-space: 4px;
   --factory-ide-control-radius: 4px;
@@ -332,6 +424,10 @@
 }
 .factory-writer-status[hidden] {
   display: none;
+}
+.factory-writer-status span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .factory-writer-status button {
   border: 0;

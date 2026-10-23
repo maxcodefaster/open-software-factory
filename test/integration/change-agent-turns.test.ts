@@ -9,6 +9,7 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 
 test("Build waits for OpenCode after IDE readiness without repeating a prompt", async () => {
   const owned = await fixture();
@@ -515,12 +516,28 @@ test("a Build mode round trip cannot restore uncertain external authority", asyn
 test("a Conversation created after null-context admission cannot grant old dispatch authority", async () => {
   const owned = await fixture();
   try {
-    const { turn } = await createChangeAdmission(owned.database, buildModelID).admit(
-      owned.changeID,
-      owned.userID,
-      { kind: "change-prompt", commandId: crypto.randomUUID(), text: "Bind absent context too" },
-    );
     const store = createAgentTurnStore(owned.database);
+    // Retained records can predate canonical conversation creation. New admission
+    // now establishes that scope first; keep this original-record fence explicit.
+    const { turn } = await store.admit(
+      {
+        kind: "change-prompt",
+        commandId: crypto.randomUUID(),
+        projectId: owned.projectID,
+        ticketId: owned.ticketID,
+        changeId: owned.changeID,
+        createdBy: owned.userID,
+        conversationId: null,
+        text: "Bind absent context too",
+      },
+      {
+        mode: "build",
+        modelId: buildModelID,
+        requirementRevisionId: owned.revisionID,
+        conversationVersion: null,
+      },
+      (sql, record) => claimAgentWriterIn(sql, owned.changeID, record.id, owned.userID),
+    );
     const owner = await store.claimPending(turn.id);
     if (!owner?.ownerToken) throw new Error("Owned claim required");
     expect(owner.authority).toMatchObject({ conversationVersion: null });

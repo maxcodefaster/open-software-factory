@@ -180,6 +180,7 @@ test.skipIf(!enabled)(
     let proxy: ReturnType<typeof Bun.serve<ProxySocket>> | undefined;
     let capturedPage: Page | undefined;
     const browserErrors: string[] = [];
+    const editingSignals: { workspaceID: string; kind: string }[] = [];
     const sourceRequests: Array<{ workspaceID: string; operation: string; status: number }> = [];
     const browser = await chromium.launch({ headless: true });
     let failed = false;
@@ -371,10 +372,22 @@ test.skipIf(!enabled)(
             });
           }
           const context = url.pathname.match(
-            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/(writer|runtime)(\/ensure)?$/,
+            /^\/__factory\/workspaces\/([0-9a-f-]{36})\/(writer|runtime)(\/(?:ensure|activity))?$/,
           );
           if (context?.[1]) {
             if (!sources.has(context[1])) return new Response(null, { status: 403 });
+            if (
+              context[2] === "writer" &&
+              context[3] === "/activity" &&
+              request.method === "POST"
+            ) {
+              const activity = (await request.json()) as { epoch: number; kind: string };
+              expect(Object.keys(activity).sort()).toEqual(["epoch", "kind"]);
+              expect(activity.epoch).toBe(1);
+              expect(["edit", "heartbeat"]).toContain(activity.kind);
+              editingSignals.push({ workspaceID: context[1], kind: activity.kind });
+              return new Response(null, { status: 204 });
+            }
             if (context[2] === "runtime" && context[3] && request.method === "POST" && tools) {
               await tools.start(context[1]);
               return Response.json(tools.context(context[1]), { status: 202 });
@@ -627,6 +640,63 @@ test.skipIf(!enabled)(
       );
       expect(await frame.locator("body").evaluate(() => performance.timeOrigin)).toBe(documentID);
       await page.screenshot({ path: resolve(artifacts, "selected-source.png") });
+      const navigate = async (
+        workspaceID: string,
+        path: string,
+        kind: "file" | "diff" = "file",
+      ) => {
+        const target = {
+          type: "factory:open-activity",
+          id: randomUUID(),
+          workspaceID,
+          path,
+          kind,
+          ...(kind === "diff" ? { diff: "--- app.ts\n+++ app.ts\n@@ -1 +1 @@\n-old\n+new" } : {}),
+        };
+        await page.evaluate((message) => {
+          document.querySelector("iframe")!.contentWindow!.postMessage(message, location.origin);
+        }, target);
+        return target.id;
+      };
+      await navigate(workspaceA, "unopened.txt");
+      await page.waitForTimeout(150);
+      await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+        "data-uri",
+        `factory-workspace://${workspaceB}/app.ts`,
+      );
+      await navigate(workspaceB, "unopened.txt");
+      await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+        "data-uri",
+        `factory-workspace://${workspaceB}/unopened.txt`,
+      );
+      const writesBeforeDiff = sourceRequests.filter(
+        (request) => request.operation === "write",
+      ).length;
+      const diffID = await navigate(workspaceB, "app.ts", "diff");
+      await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+        "data-uri",
+        `factory-activity://${workspaceB}/${diffID}/app.ts.diff`,
+      );
+      await browserExpect(frame.locator(".monaco-editor:visible .view-lines")).toContainText(
+        "Recorded tool diff",
+      );
+      const diffInput = frame.locator(
+        ".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])",
+      );
+      await diffInput.focus();
+      await diffInput.pressSequentially("must-not-edit");
+      await browserExpect(frame.locator(".monaco-editor:visible .view-lines")).not.toContainText(
+        "must-not-edit",
+      );
+      expect(sourceRequests.filter((request) => request.operation === "write")).toHaveLength(
+        writesBeforeDiff,
+      );
+      await page.screenshot({ path: resolve(artifacts, "chat-recorded-diff.png") });
+      await frame.locator(`[id="factory-workspace://${workspaceB}/app.ts"]`).dblclick();
+      await browserExpect(frame.locator(".monaco-editor:visible")).toHaveAttribute(
+        "data-uri",
+        `factory-workspace://${workspaceB}/app.ts`,
+      );
       await browserExpect(frame.locator("#status-bar-factory-buffer-workspace")).toHaveText(
         "File · Ticket · Fixture B",
       );
@@ -640,6 +710,21 @@ test.skipIf(!enabled)(
         "File · Personal · Fixture A",
       );
       await browserExpect(frame.getByText("Ticket · Fixture B", { exact: true })).toBeVisible();
+      editingSignals.length = 0;
+      const originalBufferInput = frame.locator(
+        ".monaco-editor:visible [role='textbox']:not([aria-hidden='true'])",
+      );
+      await originalBufferInput.focus();
+      await originalBufferInput.pressSequentially("Q");
+      await browserExpect(frame.locator(".monaco-editor:visible .view-lines")).toContainText("Q");
+      await originalBufferInput.press("Backspace");
+      await browserExpect
+        .poll(() =>
+          editingSignals
+            .filter((signal) => signal.kind === "edit")
+            .map((signal) => signal.workspaceID),
+        )
+        .toEqual([workspaceA]);
       await page.screenshot({ path: resolve(artifacts, "retained-buffer-workspace.png") });
       await page.locator("#a").click();
       await browserExpect(

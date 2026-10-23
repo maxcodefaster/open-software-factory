@@ -1,5 +1,5 @@
 type GroupableTicket = { id: string; epicId?: string | null };
-type EpicLabel = { id: string; title: string };
+type EpicLabel = { id: string; title: string; parentId?: string | null };
 
 export type BoardGroup<T> =
   | { kind: "ticket"; ticket: T }
@@ -14,7 +14,12 @@ export function boardGroups<T extends GroupableTicket>(
   const groups = new Map<string, Extract<BoardGroup<T>, { kind: "epic" }>>();
   const entries: BoardGroup<T>[] = [];
   for (const ticket of tickets) {
-    const epic = ticket.epicId ? labels.get(ticket.epicId) : undefined;
+    let epic = ticket.epicId ? labels.get(ticket.epicId) : undefined;
+    const visited = new Set<string>();
+    while (epic?.parentId && labels.has(epic.parentId) && !visited.has(epic.parentId)) {
+      visited.add(epic.id);
+      epic = labels.get(epic.parentId);
+    }
     if (!epic) {
       entries.push({ kind: "ticket", ticket });
       continue;

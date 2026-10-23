@@ -3,6 +3,7 @@ import { forgeUsername } from "../../../../packages/forge/src/access";
 import { CommandError } from "../command-error";
 import { lockChangeWriterIn } from "./change-writer";
 import { projectDevelopmentAuthorityIn } from "./controller";
+import { writerActivity, type WriterActivity } from "./writer-activity";
 
 type Database = ReturnType<typeof createDatabase>;
 type WriterView = {
@@ -11,6 +12,20 @@ type WriterView = {
   canWrite: boolean;
   yours: boolean;
   commandID: string | null;
+  actor: {
+    kind: "human" | "agent";
+    user: { id: string; name: string } | null;
+    delegated: boolean;
+    workState: string | null;
+  } | null;
+  requester: { id: string; name: string } | null;
+  presence: {
+    idle: boolean;
+    secondsSinceEdit: number | null;
+    connected: boolean;
+  } | null;
+  handoffKind: "takeover" | "release";
+  requests: { id: string; requester: { id: string; name: string }; epoch: number }[];
 };
 type RuntimeBoundary = {
   stop(attemptID: string): Promise<unknown>;
@@ -24,8 +39,10 @@ export function createChangeWriterController(options: {
   fenceSource?(changeID: string, epoch: string, writable: boolean): Promise<void>;
   agentUsername: string;
   stopDeadlineMs?: number;
+  activity?: WriterActivity;
 }) {
   const { database } = options;
+  const activity = options.activity ?? writerActivity;
   async function exclusive<T>(changeID: string, work: () => Promise<T>): Promise<T> {
     const connection = database.coordination();
     const key = `change-writer-operation:${changeID}`;
@@ -62,16 +79,222 @@ export function createChangeWriterController(options: {
     return database.client.begin(async (sql) => {
       const writer = await lockChangeWriterIn(sql, changeID);
       await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+      const [actor] = await sql<
+        { id: string; name: string; delegated: boolean; workState: string | null }[]
+      >`
+        SELECT account.id,left(account.name,160) AS name,
+          COALESCE(turn.authority ? 'monitoringIncidentId',false) AS delegated,
+          turn.state::text AS "workState"
+        FROM auth."user" account
+        LEFT JOIN factory.agent_turn turn ON turn.id=${writer.turnID}
+        WHERE account.id=COALESCE(${writer.userID}::uuid,turn.created_by)`;
+      const [requester] = writer.requestedBy
+        ? await sql<{ id: string; name: string }[]>`SELECT id,left(name,160) AS name
+          FROM auth."user" WHERE id=${writer.requestedBy}`
+        : [];
+      const presence =
+        writer.state === "human" && writer.userID
+          ? activity.snapshot(changeID, writer.userID, writer.epoch)
+          : null;
+      if (writer.state !== "human") activity.clear(changeID);
+      const requests =
+        writer.state === "human"
+          ? await sql<{ id: string; userID: string; name: string; epoch: number }[]>`
+          SELECT request.id,account.id AS "userID",left(account.name,160) AS name,
+            request.writer_epoch::float8 AS epoch
+          FROM factory.change_editing_request request JOIN auth."user" account ON account.id=request.requester_id
+          WHERE request.change_id=${changeID} AND request.writer_epoch=${writer.epoch}::bigint
+            AND request.state='requested' AND (request.owner_id=${userID} OR request.requester_id=${userID})
+          ORDER BY request.created_at,request.id`
+          : [];
       return {
         state: writer.state,
         epoch: Number(writer.epoch),
         canWrite: writer.state === "human" && writer.userID === userID,
         yours: writer.userID === userID || writer.requestedBy === userID,
         commandID: writer.requestedBy === userID ? writer.requestID : null,
+        actor: ["human", "agent", "agent-preparing"].includes(writer.state)
+          ? {
+              kind: writer.state === "human" ? "human" : "agent",
+              user: actor ? { id: actor.id, name: actor.name } : null,
+              delegated: actor?.delegated ?? false,
+              workState: actor?.workState ?? null,
+            }
+          : null,
+        requester: requester ?? null,
+        presence,
+        handoffKind: writer.handoffKind,
+        requests: requests.map((request) => ({
+          id: request.id,
+          requester: { id: request.userID, name: request.name },
+          epoch: request.epoch,
+        })),
       };
     });
   }
   return {
+    async activity(
+      changeID: string,
+      userID: string,
+      expectedEpoch: number,
+      kind: "edit" | "heartbeat",
+    ) {
+      await database.client.begin(async (sql) => {
+        const writer = await lockChangeWriterIn(sql, changeID);
+        await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+        if (
+          !writer.available ||
+          writer.state !== "human" ||
+          writer.userID !== userID ||
+          writer.epoch !== String(expectedEpoch)
+        )
+          throw new CommandError(
+            "conflict",
+            "Editing context changed. Keep your draft and check the current writer.",
+          );
+        activity.observe(changeID, userID, writer.epoch, kind);
+      });
+    },
+    /** Pure observation: opening the shared chat must never acquire editing. */
+    async status(changeID: string, userID: string): Promise<WriterView> {
+      return readView(changeID, userID);
+    },
+    async request(changeID: string, userID: string, commandID: string, expectedEpoch: number) {
+      await database.client.begin(async (sql) => {
+        const writer = await lockChangeWriterIn(sql, changeID);
+        await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+        const [previous] = await sql<{ changeID: string; userID: string; epoch: string }[]>`
+          SELECT change_id AS "changeID",requester_id AS "userID",writer_epoch::text AS epoch
+          FROM factory.change_editing_request WHERE id=${commandID}`;
+        if (previous) {
+          if (
+            previous.changeID !== changeID ||
+            previous.userID !== userID ||
+            previous.epoch !== String(expectedEpoch)
+          )
+            throw new CommandError(
+              "conflict",
+              "This editing request identity has different input.",
+            );
+          return;
+        }
+        if (
+          !writer.available ||
+          writer.state !== "human" ||
+          writer.userID === userID ||
+          writer.epoch !== String(expectedEpoch) ||
+          !writer.userID
+        )
+          throw new CommandError(
+            "conflict",
+            "The writer changed. Check the current editing status.",
+          );
+        await sql`INSERT INTO factory.change_editing_request(id,change_id,requester_id,owner_id,writer_epoch)
+          VALUES(${commandID},${changeID},${userID},${writer.userID},${writer.epoch}::bigint)
+          ON CONFLICT (change_id,requester_id,writer_epoch) WHERE state='requested' DO NOTHING`;
+      });
+      return readView(changeID, userID);
+    },
+    async approve(
+      changeID: string,
+      userID: string,
+      commandID: string,
+      requestID: string,
+      expectedEpoch: number,
+    ) {
+      const [request] = await database.client<{ requesterID: string }[]>`
+        SELECT requester_id AS "requesterID" FROM factory.change_editing_request
+        WHERE id=${requestID} AND change_id=${changeID} AND owner_id=${userID}`;
+      if (!request) throw new CommandError("not-found", "Editing request not found.");
+      await this.takeOver(changeID, request.requesterID, commandID, undefined, {
+        epoch: expectedEpoch,
+        approverID: userID,
+        requestID,
+      });
+      return readView(changeID, userID);
+    },
+    async takeIdle(changeID: string, userID: string, commandID: string, expectedEpoch: number) {
+      return this.takeOver(changeID, userID, commandID, undefined, { epoch: expectedEpoch });
+    },
+    async release(
+      changeID: string,
+      userID: string,
+      commandID: string,
+      expectedEpoch: number,
+    ): Promise<WriterView> {
+      return exclusive(changeID, async () => {
+        const intended = await database.client.begin(async (sql) => {
+          const writer = await lockChangeWriterIn(sql, changeID);
+          await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+          const [decision] = await sql<
+            { actorID: string; epoch: string; changeID: string; kind: string }[]
+          >`
+            SELECT actor_id AS "actorID",writer_epoch::text AS epoch,change_id AS "changeID",kind
+            FROM factory.change_editing_decision WHERE command_id=${commandID}`;
+          if (
+            decision &&
+            (decision.actorID !== userID ||
+              decision.changeID !== changeID ||
+              decision.epoch !== String(expectedEpoch) ||
+              decision.kind !== "release")
+          )
+            throw new CommandError(
+              "conflict",
+              "This editing decision identity has different input.",
+            );
+          if (decision && writer.state !== "handoff") return null;
+          if (
+            writer.state === "handoff" &&
+            writer.handoffKind === "release" &&
+            writer.requestedBy === userID &&
+            writer.requestID === commandID
+          )
+            return writer;
+          if (
+            !writer.available ||
+            writer.state !== "human" ||
+            writer.userID !== userID ||
+            writer.epoch !== String(expectedEpoch)
+          )
+            throw new CommandError(
+              "conflict",
+              "The writer changed. Your files have not been discarded.",
+            );
+          await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,writer_epoch,kind)
+            VALUES(${commandID},${changeID},${userID},${writer.epoch}::bigint,'release')`;
+          await sql`UPDATE factory.change_writer SET state='handoff',handoff_kind='release',
+            epoch=epoch+1,user_id=NULL,turn_id=NULL,requested_by=${userID},request_id=${commandID},
+            fence_required=true,fence_attempt_id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}),
+            updated_at=now() WHERE change_id=${changeID}`;
+          return lockChangeWriterIn(sql, changeID);
+        });
+        if (!intended) return readView(changeID, userID);
+        await options.fenceSource?.(changeID, intended.epoch, false);
+        await options.protect(changeID, []);
+        if (!(await stopped(intended.fenceAttemptID)))
+          throw new CommandError(
+            "conflict",
+            "Release saved. Previous commands have not stopped yet. Check editing status to continue.",
+          );
+        await database.client.begin(async (sql) => {
+          const writer = await lockChangeWriterIn(sql, changeID);
+          if (
+            writer.state !== "handoff" ||
+            writer.epoch !== intended.epoch ||
+            writer.handoffKind !== "release" ||
+            writer.requestID !== commandID
+          )
+            throw new CommandError("conflict", "Editing release changed before confirmation.");
+          await sql`UPDATE factory.change_writer SET state='unassigned',epoch=epoch+1,
+            requested_by=NULL,request_id=NULL,fence_required=false,updated_at=now()
+            WHERE change_id=${changeID}`;
+          await sql`UPDATE factory.change_editing_request SET state='superseded',decided_at=now()
+            WHERE change_id=${changeID} AND state='requested'`;
+        });
+        activity.clear(changeID);
+        return readView(changeID, userID);
+      });
+    },
     async view(changeID: string, userID: string): Promise<WriterView> {
       const [finished] = await database.client<
         { epoch: string }[]
@@ -88,7 +311,7 @@ export function createChangeWriterController(options: {
       const [pending] = await database.client<{ commandID: string }[]>`
         SELECT writer.request_id AS "commandID" FROM factory.change_writer writer
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id=writer.fence_attempt_id
-        WHERE writer.change_id=${changeID} AND writer.state='handoff'
+        WHERE writer.change_id=${changeID} AND writer.state='handoff' AND writer.handoff_kind='takeover'
           AND writer.requested_by=${userID} AND writer.request_id IS NOT NULL
           AND (writer.fence_attempt_id IS NULL OR attempt.state='stopped')`;
       // Continue only the same person's recorded request after positive teardown
@@ -139,11 +362,37 @@ export function createChangeWriterController(options: {
       userID: string,
       commandID: string,
       completedEpoch?: string,
+      humanTransfer?: { epoch: number; approverID?: string; requestID?: string },
+      observedEpoch?: number,
     ): Promise<WriterView> {
       return exclusive(changeID, async () => {
         const intended = await database.client.begin(async (sql) => {
           const writer = await lockChangeWriterIn(sql, changeID);
           await projectDevelopmentAuthorityIn(sql, userID, writer.projectID);
+          const continuing =
+            writer.state === "handoff" &&
+            writer.handoffKind === "takeover" &&
+            writer.requestedBy === userID &&
+            writer.requestID === commandID;
+          if (observedEpoch !== undefined && writer.epoch !== String(observedEpoch) && !continuing)
+            throw new CommandError(
+              "conflict",
+              "The writer changed. Check the current editing status before taking over.",
+            );
+          if (humanTransfer && writer.state !== "human" && !continuing)
+            throw new CommandError(
+              "conflict",
+              "Idle takeover applies only to the observed human writer. Agent and unconfirmed work must use explicit Stop.",
+            );
+          if (humanTransfer && continuing) {
+            const [decision] = await sql`SELECT command_id FROM factory.change_editing_decision
+              WHERE command_id=${commandID} AND change_id=${changeID} AND target_id=${userID}
+                AND actor_id=${humanTransfer.approverID ?? userID} AND writer_epoch=${humanTransfer.epoch}::bigint
+                AND kind=${humanTransfer.approverID ? "approve" : "idle-takeover"}
+                AND request_id IS NOT DISTINCT FROM ${humanTransfer.requestID ?? null}`;
+            if (!decision)
+              throw new CommandError("conflict", "The editing decision changed input.");
+          }
           if (completedEpoch) {
             const [settled] = await sql`SELECT change_id FROM factory.change_agent_session
               WHERE change_id=${changeID} AND state IN ('committed','stopped') AND NOT stop_pending
@@ -156,6 +405,40 @@ export function createChangeWriterController(options: {
             throw new CommandError("conflict", "This implementation is no longer active");
           if (writer.state === "human") {
             if (writer.userID === userID) return null;
+            let authorizedTransfer = false;
+            if (humanTransfer && writer.epoch === String(humanTransfer.epoch) && writer.userID) {
+              if (humanTransfer.approverID && humanTransfer.requestID) {
+                await projectDevelopmentAuthorityIn(
+                  sql,
+                  humanTransfer.approverID,
+                  writer.projectID,
+                );
+                const [request] = await sql`SELECT id FROM factory.change_editing_request
+                  WHERE id=${humanTransfer.requestID} AND change_id=${changeID}
+                    AND requester_id=${userID} AND owner_id=${humanTransfer.approverID}
+                    AND owner_id=${writer.userID} AND writer_epoch=${writer.epoch}::bigint AND state='requested'
+                  FOR UPDATE`;
+                if (!request)
+                  throw new CommandError("conflict", "This editing request is no longer current.");
+                authorizedTransfer = true;
+              } else {
+                authorizedTransfer = activity.snapshot(changeID, writer.userID, writer.epoch).idle;
+              }
+            }
+            if (humanTransfer && !authorizedTransfer)
+              throw new CommandError(
+                "conflict",
+                "The writer is active or changed. Request editing instead.",
+              );
+            if (authorizedTransfer) {
+              const kind = humanTransfer?.approverID ? "approve" : "idle-takeover";
+              await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,target_id,writer_epoch,kind,request_id)
+                VALUES(${commandID},${changeID},${humanTransfer?.approverID ?? userID},${userID},
+                  ${writer.epoch}::bigint,${kind},${humanTransfer?.requestID ?? null})`;
+              if (humanTransfer?.requestID)
+                await sql`UPDATE factory.change_editing_request SET state='accepted',
+                  decided_by=${humanTransfer.approverID ?? userID},decided_at=now() WHERE id=${humanTransfer.requestID}`;
+            }
             try {
               if (!writer.userID) throw new Error("Human writer identity is unavailable");
               await projectDevelopmentAuthorityIn(sql, writer.userID, writer.projectID);
@@ -166,25 +449,40 @@ export function createChangeWriterController(options: {
             }
             const [current] =
               await sql`SELECT change_id FROM factory.change_writer WHERE change_id=${changeID} AND state='human'`;
-            if (current)
+            if (current && !authorizedTransfer)
               throw new CommandError(
                 "conflict",
                 "Another developer is editing this implementation",
               );
           }
           if (writer.state === "handoff") {
-            if (writer.requestedBy === userID && writer.requestID === commandID) return writer;
+            if (
+              writer.handoffKind === "takeover" &&
+              writer.requestedBy === userID &&
+              writer.requestID === commandID
+            )
+              return writer;
             try {
               if (!writer.requestedBy) throw new Error("Takeover identity is unavailable");
               await projectDevelopmentAuthorityIn(sql, writer.requestedBy, writer.projectID);
             } catch (cause) {
               if (!(cause instanceof CommandError)) throw cause;
-              await sql`UPDATE factory.change_writer SET requested_by=${userID},request_id=${commandID},epoch=epoch+1,updated_at=now() WHERE change_id=${changeID}`;
+              await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,target_id,writer_epoch,kind)
+                VALUES(${commandID},${changeID},${userID},${userID},${writer.epoch}::bigint,'takeover')`;
+              await sql`UPDATE factory.change_writer SET requested_by=${userID},request_id=${commandID},
+                handoff_kind='takeover',epoch=epoch+1,updated_at=now() WHERE change_id=${changeID}`;
               return lockChangeWriterIn(sql, changeID);
             }
             throw new CommandError("conflict", "An editing takeover is already in progress");
           }
-          await sql`UPDATE factory.change_writer SET state='handoff',user_id=NULL,turn_id=NULL,
+          await sql`UPDATE factory.monitoring_incident incident SET state='blocked',
+            reason='A developer took over source editing. Automatic Delivery is disabled.',settled_at=now()
+            FROM factory.change change WHERE change.id=${changeID} AND incident.ticket_id=change.ticket_id
+              AND incident.state='implementing'`;
+          if (!humanTransfer)
+            await sql`INSERT INTO factory.change_editing_decision(command_id,change_id,actor_id,target_id,writer_epoch,kind)
+              VALUES(${commandID},${changeID},${userID},${userID},${writer.epoch}::bigint,'takeover')`;
+          await sql`UPDATE factory.change_writer SET state='handoff',handoff_kind='takeover',user_id=NULL,turn_id=NULL,
           epoch=epoch+1,requested_by=${userID},request_id=${commandID},fence_required=true,
           fence_attempt_id=(SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}),updated_at=now()
           WHERE change_id=${changeID}`;
@@ -239,6 +537,8 @@ export function createChangeWriterController(options: {
           // authorized save confirms it, including after a lost acknowledgement.
           await sql`UPDATE factory.change_writer SET state='human',epoch=epoch+1,user_id=${userID},requested_by=NULL,request_id=NULL,
           fence_required=false,updated_at=now() WHERE change_id=${changeID}`;
+          await sql`UPDATE factory.change_editing_request SET state='superseded',decided_at=now()
+            WHERE change_id=${changeID} AND state='requested'`;
         });
         return readView(changeID, userID);
       });

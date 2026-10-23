@@ -16,6 +16,20 @@
   font-size: var(--text-lg);
   font-weight: var(--weight-medium);
 }
+.settings-content[data-skills="true"] {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.settings-content[data-skills="true"] > .settings-configuration-host {
+  flex: 1;
+  min-height: 0;
+}
+.settings-content[data-skills="true"] .settings-configuration,
+.skill-library-host {
+  height: 100%;
+  min-height: 0;
+}
 .settings-sidebar section {
   display: grid;
   gap: var(--space-1);
@@ -29,6 +43,11 @@
   overflow-wrap: anywhere;
 }
 .settings-sidebar button {
+  width: 100%;
+  min-height: 36px;
+  font-family: var(--font-interface);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-label);
   padding: var(--space-2);
   text-align: left;
   border: 1px solid transparent;
@@ -36,6 +55,10 @@
   background: transparent;
   font-size: var(--text-sm);
   color: var(--color-ink-muted);
+}
+.settings-sidebar .settings-admin-group {
+  border-top: 1px solid var(--line-subtle);
+  padding-top: var(--space-5);
 }
 .settings-sidebar button[aria-current="page"] {
   background: var(--material-accent);
@@ -52,6 +75,13 @@
 }
 .settings-content-heading {
   padding: var(--space-5) var(--space-6) var(--space-3);
+}
+.settings-content-heading[data-library="true"] {
+  display: none;
+}
+.settings-navigation-title {
+  display: none;
+  margin: 0;
 }
 .settings-content-heading small {
   color: var(--color-ink-muted);
@@ -71,37 +101,104 @@
 @media (max-width: 760px) {
   .settings-layout {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(0, 1fr);
   }
   .settings-sidebar {
-    display: flex;
-    gap: var(--space-5);
+    display: none;
+    position: absolute;
+    z-index: var(--layer-menu);
+    top: var(--navigation-menu-top, var(--space-12));
+    left: var(--navigation-menu-left, var(--space-3));
+    width: min(20rem, calc(100% - var(--space-4)));
+    max-height: var(--navigation-menu-height, calc(100% - var(--space-12)));
     min-width: 0;
-    overflow-x: auto;
-    padding: var(--space-3) var(--space-4);
-    border-right: 0;
-    border-bottom: 1px solid var(--line-subtle);
-    background: var(--material-panel);
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: var(--space-3);
+    border: 0;
+    border-radius: var(--radius-md);
+    background: var(--material-popover);
+    box-shadow: var(--shadow-float);
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  .settings-sidebar[data-navigation-open="true"] {
+    display: block;
   }
   .settings-sidebar > h2 {
     display: none;
   }
   .settings-sidebar section {
-    flex: none;
-    grid-auto-flow: column;
-    grid-template-rows: auto auto;
-    margin: 0;
+    margin-bottom: var(--space-3);
   }
   .settings-sidebar h3 {
-    grid-column: 1 / -1;
     margin: 0 0 var(--space-1);
   }
   .settings-sidebar button {
-    grid-row: 2;
-    white-space: nowrap;
+    min-height: 44px;
   }
-  .settings-content-heading {
+  .settings-sidebar .settings-admin-group {
+    padding-top: var(--space-3);
+  }
+  .settings-sidebar section:last-child {
+    margin-bottom: 0;
+  }
+  .settings-content-heading,
+  .settings-content-heading[data-library="true"] {
+    display: flex;
+    align-items: center;
+    min-height: var(--space-12);
+    padding: var(--space-2) var(--space-4) 0;
+  }
+  .settings-content-heading > small,
+  .settings-wide-title {
+    display: none;
+  }
+  .settings-content .workspace-navigation-trigger {
+    display: inline-flex;
+  }
+  .settings-content .settings-navigation-title {
+    display: block;
+    margin: 0;
+  }
+  .settings-content .workspace-action-leading {
+    display: flex;
+  }
+  .settings-content:has(> .settings-configuration-host:not([hidden]) .input-overview-heading)
+    > .settings-content-heading,
+  .settings-content:has(
+      > .settings-configuration-host:not([hidden])
+        .skill-library-host:not([hidden])
+        .skill-library-heading:not([hidden])
+    )
+    > .settings-content-heading,
+  .settings-content:has(
+      > .settings-configuration-host:not([hidden])
+        .mcp-library:not([data-monitoring="true"])
+        > .skill-library-heading:not([hidden])
+    )
+    > .settings-content-heading {
+    display: none;
+  }
+  .settings-content
+    .skill-library:not([data-monitoring="true"])
+    > .skill-library-heading
+    > .skill-library-title {
+    display: none;
+  }
+  .settings-content .input-overview-heading {
+    gap: var(--space-1) var(--space-2);
+  }
+  .settings-content .input-overview-heading .workspace-action-status {
+    order: 2;
+    flex: 1 1 100%;
+    max-width: none;
+    margin-top: var(--space-2);
+  }
+  .settings-content .model-settings-body,
+  .settings-content .skill-library-heading {
     padding-inline: var(--space-4);
+  }
+  .settings-content .skill-library-heading {
+    padding-top: var(--space-2);
   }
   .settings-content .settings-scope-description {
     padding-inline: var(--space-4);

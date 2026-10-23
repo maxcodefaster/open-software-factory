@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test("an uncertain background Interview stays visible without resending inference", async ({
@@ -44,7 +45,7 @@ test("an uncertain background Interview stays visible without resending inferenc
       });
     });
     await signIn(page);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page
       .getByRole("region", { name: "Projects", exact: true })
       .getByRole("button")

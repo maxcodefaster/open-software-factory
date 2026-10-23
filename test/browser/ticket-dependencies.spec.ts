@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 960 }, contextOptions: { reducedMotion: "reduce" } });
@@ -29,7 +30,7 @@ test("named prerequisites block Build and remain linked after cancellation until
       .parse(await (await page.request.get("/api/session")).json()).session.user.id;
     await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${projectId}, ${slug}, 'Dependency QA', 'https://example.invalid/dependency-qa.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
-    await page.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     async function createEpic(title: string, parentId: string | null = null) {
       return createPlanningEpic({
@@ -41,11 +42,16 @@ test("named prerequisites block Build and remain linked after cancellation until
       });
     }
     const root = await createEpic("Release");
-    const child = await createEpic("Onboarding", root);
-    async function createTicket(title: string) {
+    await createEpic("Onboarding", root);
+    async function createTicket(title: string, requirements = false) {
       await page.getByRole("button", { name: "New Ticket", exact: true }).click();
       await page.getByLabel("Ticket title", { exact: true }).fill(title);
-      await page.getByRole("button", { name: "Create as idea", exact: true }).click();
+      await page
+        .getByRole("button", {
+          name: requirements ? "Write requirements" : "Create as idea",
+          exact: true,
+        })
+        .click();
       await expect(page.getByLabel("Ticket title", { exact: true })).toHaveText(title);
       await expect
         .poll(async () => {
@@ -68,8 +74,7 @@ test("named prerequisites block Build and remain linked after cancellation until
       .getByRole("button", { name: "Release", exact: true })
       .click();
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-    await page.getByLabel("Filter by Epic").selectOption(root);
-    const second = await createTicket("Build onboarding on the sign-in contract");
+    const second = await createTicket("Build onboarding on the sign-in contract", true);
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
     await page.getByRole("menuitem", { name: "Assign to Epic…", exact: true }).click();
     await page
@@ -90,7 +95,7 @@ test("named prerequisites block Build and remain linked after cancellation until
     await expect(prerequisites.getByText("Awaiting delivery", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Add dependency", exact: true })).toBeHidden();
     const revisionResponse = await page.request.post(`/api/tickets/${second}/requirements`, {
-      headers: { origin: "http://127.0.0.1:3000" },
+      headers: { origin: new URL(page.url()).origin },
       data: {
         summary: "Build onboarding on the delivered contract",
         acceptanceCriteria: ["Use the delivered sign-in contract"],
@@ -102,31 +107,38 @@ test("named prerequisites block Build and remain linked after cancellation until
     expect(
       (
         await page.request.post(`/api/tickets/${second}/requirements/${revision.id}/approve`, {
-          headers: { origin: "http://127.0.0.1:3000" },
+          headers: { origin: new URL(page.url()).origin },
         })
       ).status(),
     ).toBe(201);
     await page.reload();
     const board = page.getByRole("region", { name: "Ticket board", exact: true });
-    await board.locator(".epic-stack > summary").filter({ hasText: "Onboarding" }).click();
-    await board.getByRole("button", { name: /Build onboarding on the sign-in contract/ }).click();
+    await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
+    const rootFolder = page.getByRole("dialog", { name: "Release", exact: true });
+    await rootFolder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    const childFolder = page.getByRole("dialog", { name: "Onboarding", exact: true });
+    await childFolder
+      .getByRole("button", { name: /Build onboarding on the sign-in contract/ })
+      .click();
     await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
     const denied = await page.request.post(`/api/tickets/${second}/change`, {
-      headers: { origin: "http://127.0.0.1:3000" },
+      headers: { origin: new URL(page.url()).origin },
     });
     expect(denied.status()).toBe(409);
     expect(z.object({ error: z.string() }).parse(await denied.json()).error).toContain(
       "Publish the sign-in contract",
     );
-    await mkdir(".factory/screenshots", { recursive: true });
-    await page.screenshot({ path: ".factory/screenshots/dependencies-ticket-wide.png" });
+    await mkdir(".factory/test-results/epic-folders", { recursive: true });
+    await page.screenshot({
+      path: ".factory/test-results/epic-folders/dependencies-ticket-wide.png",
+    });
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-    await expect(board.getByText("Blocked by", { exact: true })).toBeVisible();
-    await page.getByLabel("Filter by Epic").selectOption(root);
-    await expect(board.locator(".epic-progress")).toHaveText("0/2 done");
-    await page.getByLabel("Filter by Epic").selectOption(child);
-    await expect(board.locator(".ticket-card")).toHaveCount(1);
-    const blockedCard = board
+    await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
+    await expect(rootFolder.locator(".epic-progress")).toHaveText("0/2 done");
+    await rootFolder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    await expect(childFolder.getByText("Blocked by", { exact: true })).toBeVisible();
+    await expect(childFolder.locator(".ticket-card")).toHaveCount(1);
+    const blockedCard = childFolder
       .locator(".ticket-card")
       .filter({ hasText: "Build onboarding on the sign-in contract" });
     await blockedCard
@@ -145,16 +157,23 @@ test("named prerequisites block Build and remain linked after cancellation until
     await page.keyboard.press("Escape");
     await expect(page.getByRole("dialog", { name: "Add dependency", exact: true })).toBeHidden();
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
-    await page.getByLabel("Filter by Epic").selectOption(root);
-    await page.screenshot({ path: ".factory/screenshots/dependencies-board-wide.png" });
+    await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
+    await page.screenshot({
+      path: ".factory/test-results/epic-folders/dependencies-board-wide.png",
+    });
     await database.client`UPDATE factory.ticket SET state = 'cancelled' WHERE id = ${first}`;
-    await board.getByRole("button", { name: /Build onboarding on the sign-in contract/ }).click();
+    await rootFolder.getByRole("button", { name: "Open Epic Onboarding", exact: true }).click();
+    await childFolder
+      .getByRole("button", { name: /Build onboarding on the sign-in contract/ })
+      .click();
     await expect(
       prerequisites.getByText("Cancelled · still blocking", { exact: true }),
     ).toBeVisible();
     await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
     await page.setViewportSize({ width: 430, height: 860 });
-    await page.screenshot({ path: ".factory/screenshots/dependencies-ticket-narrow.png" });
+    await page.screenshot({
+      path: ".factory/test-results/epic-folders/dependencies-ticket-narrow.png",
+    });
     expect(
       await page
         .locator(".ticket-document")

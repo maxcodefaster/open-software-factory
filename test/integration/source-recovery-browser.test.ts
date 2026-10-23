@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
-import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { chromium, expect as visible } from "@playwright/test";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { factoryProcess } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
 
 test("failed file access can be explicitly restarted without discarding the editor or starting compute", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -150,7 +151,7 @@ test("failed file access can be explicitly restarted without discarding the edit
       return route.fulfill({ json: source() });
     });
     await page.goto(fixture.base);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.getByRole("button", { name: "IDE", exact: true }).click();
     const frame = page.locator('iframe[title="Factory IDE"]');

@@ -1,10 +1,11 @@
 import { expect } from "bun:test";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { chromium, expect as visible, type Page } from "@playwright/test";
+import { chromium, type Page, expect as visible } from "@playwright/test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
+import { openProjectMenu } from "./project-menu";
 
 const stateInput = z
   .object({
@@ -172,7 +173,7 @@ export async function releaseInstallation(name: string) {
     return page;
   }
   async function selectProject(page: Page) {
-    await page.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
   }
   async function save(stage: string, elapsedMS: number) {

@@ -55,6 +55,7 @@ class TerminalView {
   #resizeDisposable: { dispose(): void };
   #reconnectTimer: number | undefined;
   #disposed = false;
+  #closing = false;
 
   constructor(
     readonly id: string,
@@ -68,7 +69,7 @@ class TerminalView {
       convertEol: true,
       cursorBlink: true,
       fontFamily: styles.getPropertyValue("--theia-code-font-family").trim(),
-      fontSize: 12,
+      fontSize: 13,
       lineHeight: 1.3,
       scrollback: 2_000,
       theme: factoryTerminalTheme,
@@ -81,8 +82,14 @@ class TerminalView {
       if (
         this.host.dataset.connectionState === "connected" &&
         this.#socket?.readyState === WebSocket.OPEN
-      )
+      ) {
+        window.dispatchEvent(
+          new CustomEvent("factory:editing-activity", {
+            detail: { workspaceID: this.runtime.workspaceID },
+          }),
+        );
         this.#socket.send(encoder.encode(data));
+      }
     });
     this.#resizeDisposable = this.terminal.onResize(({ cols, rows }) => {
       if (
@@ -100,12 +107,23 @@ class TerminalView {
   }
 
   show(visible: boolean) {
+    if (this.host.hidden === !visible) return;
     this.host.hidden = !visible;
     if (visible) queueMicrotask(() => this.fit.fit());
   }
 
   focus() {
     this.terminal.focus();
+  }
+
+  beginClose() {
+    if (this.#disposed || this.#closing) return false;
+    this.#closing = true;
+    return true;
+  }
+
+  cancelClose() {
+    this.#closing = false;
   }
 
   dispose() {
@@ -161,6 +179,9 @@ class TerminalView {
       this.host.dataset.connectionState = "disconnected";
       this.host.setAttribute("aria-busy", "true");
       this.terminal.options.disableStdin = true;
+      // Deleting this session closes its socket before the HTTP result can arrive.
+      // That is not a compute disconnect and must not rebuild the active view.
+      if (this.#closing) return;
       if ([1000, 1008, 1012].includes(event.code)) {
         this.terminal.write(
           "\r\nThis Runtime Attempt is no longer connected. Select Terminal to check compute.\r\n",
@@ -178,7 +199,9 @@ class TerminalView {
 
 @injectable()
 export class FactoryTerminalWidget extends BaseWidget {
+  readonly #toolbar = document.createElement("div");
   readonly #tabs = document.createElement("div");
+  readonly #add = document.createElement("button");
   readonly #panels = document.createElement("div");
   readonly #views = new Map<string, TerminalView>();
   readonly #catalogue = new Map<string, StoredTerminal[]>();
@@ -202,9 +225,30 @@ export class FactoryTerminalWidget extends BaseWidget {
     this.node.setAttribute("aria-label", "Workspace terminals");
     this.#tabs.className = "factory-terminal-tabs";
     this.#tabs.setAttribute("role", "tablist");
+    this.#tabs.setAttribute("aria-label", "Terminal sessions");
+    this.#toolbar.className = "factory-terminal-toolbar";
+    this.#add.type = "button";
+    this.#add.className = "factory-terminal-add";
+    this.#add.textContent = "New terminal";
+    this.#add.addEventListener("click", () => {
+      if (
+        !this.#runtime ||
+        this.#terminals.length >= 8 ||
+        !factoryWriteContext.allows(this.#runtime.workspaceID)
+      )
+        return;
+      const terminal = this.#newTerminal(this.#terminals.length + 1);
+      this.#terminals = [...this.#terminals, terminal];
+      this.#activeID = terminal.id;
+      this.#save();
+      this.#render();
+      this.#views.get(terminal.id)?.focus();
+    });
+    this.#toolbar.append(this.#tabs, this.#add);
     this.#panels.className = "factory-terminal-panels";
     this.#status.className = "factory-compute-status";
-    this.node.append(this.#tabs, this.#status, this.#panels);
+    this.#status.setAttribute("role", "status");
+    this.node.append(this.#toolbar, this.#status, this.#panels);
     this.#contextSubscription = factoryRuntimeContext.subscribe((state) => {
       const runtime = readyRuntime(state);
       if (runtime?.attemptID !== this.#runtime?.attemptID) {
@@ -212,7 +256,19 @@ export class FactoryTerminalWidget extends BaseWidget {
         this.#terminals = runtime
           ? (this.#catalogue.get(runtime.attemptID) ?? readStoredTerminals(runtime))
           : [];
-        this.#activeID = this.#terminals[0]?.id;
+        let selected: string | null = null;
+        try {
+          if (runtime) {
+            selected = localStorage.getItem(`${terminalStorageKey(runtime)}:active`);
+            if (localStorage.getItem(terminalStorageKey(runtime)) !== null)
+              this.#initialized.add(runtime.attemptID);
+          }
+        } catch {
+          /* Keep the first retained session if storage is unavailable. */
+        }
+        this.#activeID =
+          this.#terminals.find((terminal) => terminal.id === selected)?.id ??
+          this.#terminals[0]?.id;
       }
       this.#render();
     });
@@ -254,22 +310,38 @@ export class FactoryTerminalWidget extends BaseWidget {
   }
 
   #newTerminal(index: number): StoredTerminal {
+    while (this.#terminals.some((terminal) => terminal.name === `Terminal ${index}`)) index++;
     return { id: crypto.randomUUID().replaceAll("-", ""), name: `Terminal ${index}` };
   }
 
   #save() {
     if (!this.#runtime) return;
     this.#catalogue.set(this.#runtime.attemptID, this.#terminals);
-    localStorage.setItem(terminalStorageKey(this.#runtime), JSON.stringify(this.#terminals));
+    try {
+      localStorage.setItem(terminalStorageKey(this.#runtime), JSON.stringify(this.#terminals));
+      if (this.#activeID)
+        localStorage.setItem(`${terminalStorageKey(this.#runtime)}:active`, this.#activeID);
+      else localStorage.removeItem(`${terminalStorageKey(this.#runtime)}:active`);
+    } catch {
+      /* Storage failure must not prevent use of a live terminal. */
+    }
   }
 
   #render() {
     if (!this.#attached) return;
     this.#tabs.replaceChildren();
-    for (const view of this.#views.values()) view.show(false);
     this.#status.replaceChildren();
     const workspaceID = factoryRuntimeContext.value?.workspaceID;
     const canWrite = !!workspaceID && factoryWriteContext.allows(workspaceID);
+    this.#toolbar.hidden = !this.#runtime || !canWrite;
+    this.#add.disabled = !this.#runtime || !canWrite || this.#terminals.length >= 8;
+    for (const view of this.#views.values())
+      view.show(
+        canWrite &&
+          this.isVisible &&
+          view.runtime.attemptID === this.#runtime?.attemptID &&
+          view.id === this.#activeID,
+      );
     this.#status.hidden = Boolean(this.#runtime) && canWrite;
     if (!canWrite && workspaceID) {
       const copy = document.createElement("p");
@@ -298,6 +370,13 @@ export class FactoryTerminalWidget extends BaseWidget {
       this.#save();
     }
     this.#initialized.add(this.#runtime.attemptID);
+    this.#add.disabled = this.#terminals.length >= 8;
+    if (this.#terminals.length === 0) {
+      this.#status.hidden = false;
+      const copy = document.createElement("p");
+      copy.textContent = "No open terminals. Choose New terminal to start a session.";
+      this.#status.append(copy);
+    }
     for (const terminal of this.#terminals) {
       let view = this.#views.get(terminal.id);
       if (!view) {
@@ -306,64 +385,117 @@ export class FactoryTerminalWidget extends BaseWidget {
         this.#panels.append(view.host);
       }
       view.show(terminal.id === this.#activeID);
+      view.host.id = `factory-terminal-panel-${terminal.id}`;
+      view.host.setAttribute("role", "tabpanel");
+      view.host.setAttribute("aria-labelledby", `factory-terminal-tab-${terminal.id}`);
       const tab = document.createElement("div");
       tab.className = "factory-terminal-tab";
       tab.classList.toggle("active", terminal.id === this.#activeID);
-      tab.setAttribute("role", "tab");
-      tab.setAttribute("aria-selected", String(terminal.id === this.#activeID));
+      tab.setAttribute("role", "presentation");
       const select = document.createElement("button");
       select.type = "button";
       select.textContent = terminal.name;
+      select.id = `factory-terminal-tab-${terminal.id}`;
+      select.setAttribute("role", "tab");
+      select.setAttribute("aria-selected", String(terminal.id === this.#activeID));
+      select.setAttribute("aria-controls", view.host.id);
+      select.tabIndex = terminal.id === this.#activeID ? 0 : -1;
+      select.title = `${terminal.name}. Double-click or press F2 to rename.`;
       select.addEventListener("click", () => {
-        this.#activeID = terminal.id;
-        this.#render();
+        this.#select(terminal.id);
         this.#views.get(terminal.id)?.focus();
       });
       select.addEventListener("dblclick", () => this.#rename(terminal, select));
+      select.addEventListener("keydown", (event) => {
+        if (event.key === "F2") {
+          event.preventDefault();
+          this.#rename(terminal, select);
+          return;
+        }
+        const index = this.#terminals.findIndex((item) => item.id === terminal.id);
+        const next =
+          event.key === "ArrowRight"
+            ? this.#terminals[(index + 1) % this.#terminals.length]
+            : event.key === "ArrowLeft"
+              ? this.#terminals[(index - 1 + this.#terminals.length) % this.#terminals.length]
+              : event.key === "Home"
+                ? this.#terminals[0]
+                : event.key === "End"
+                  ? this.#terminals.at(-1)
+                  : undefined;
+        if (!next) return;
+        event.preventDefault();
+        this.#select(next.id);
+        this.#focusTab();
+      });
       const close = document.createElement("button");
       close.type = "button";
       close.className = "factory-terminal-close";
       close.setAttribute("aria-label", `Close ${terminal.name}`);
-      close.textContent = "×";
-      close.addEventListener("click", () => void this.#close(terminal.id));
+      const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      icon.setAttribute("viewBox", "0 0 24 24");
+      icon.setAttribute("aria-hidden", "true");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", "m7 7 10 10M17 7 7 17");
+      icon.append(path);
+      close.append(icon);
+      close.addEventListener("click", () => {
+        if (close.getAttribute("aria-busy") === "true") return;
+        close.setAttribute("aria-busy", "true");
+        void this.#close(terminal.id).finally(() => {
+          close.removeAttribute("aria-busy");
+        });
+      });
       tab.append(select, close);
       this.#tabs.append(tab);
     }
-    const add = document.createElement("button");
-    add.type = "button";
-    add.className = "factory-terminal-add";
-    add.setAttribute("aria-label", "New terminal");
-    add.textContent = "+";
-    add.disabled = this.#terminals.length >= 8;
-    add.addEventListener("click", () => {
-      const terminal = this.#newTerminal(this.#terminals.length + 1);
-      this.#terminals = [...this.#terminals, terminal];
-      this.#activeID = terminal.id;
-      this.#save();
-      this.#render();
-    });
-    this.#tabs.append(add);
+  }
+
+  #select(id: string) {
+    this.#activeID = id;
+    this.#save();
+    for (const view of this.#views.values())
+      view.show(view.runtime.attemptID === this.#runtime?.attemptID && view.id === id);
+    for (const tab of this.#tabs.querySelectorAll<HTMLButtonElement>('[role="tab"]')) {
+      const active = tab.id === `factory-terminal-tab-${id}`;
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+      tab.parentElement?.classList.toggle("active", active);
+    }
+  }
+
+  #focusTab() {
+    const tab = this.#tabs.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]');
+    tab?.focus({ preventScroll: true });
+    tab?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }
 
   #rename(terminal: StoredTerminal, button: HTMLButtonElement) {
     const input = document.createElement("input");
     input.value = terminal.name;
     input.setAttribute("aria-label", "Terminal name");
-    const commit = () => {
+    let finished = false;
+    const commit = (restoreFocus: boolean) => {
+      if (finished) return;
+      finished = true;
       const name = input.value.trim().slice(0, 32) || terminal.name;
       this.#terminals = this.#terminals.map((candidate) =>
         candidate.id === terminal.id ? { ...candidate, name } : candidate,
       );
       this.#save();
       this.#render();
+      if (restoreFocus)
+        requestAnimationFrame(() => {
+          if (!this.isDisposed && this.isVisible) this.#focusTab();
+        });
     };
-    input.addEventListener("blur", commit, { once: true });
+    input.addEventListener("blur", () => commit(false), { once: true });
     input.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") input.blur();
-      if (event.key === "Escape") {
-        input.value = terminal.name;
-        input.blur();
-      }
+      if (event.key !== "Enter" && event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.key === "Escape") input.value = terminal.name;
+      commit(true);
     });
     button.replaceWith(input);
     input.select();
@@ -372,17 +504,19 @@ export class FactoryTerminalWidget extends BaseWidget {
   async #close(id: string) {
     const view = this.#views.get(id);
     const runtime = view?.runtime;
-    if (!runtime) return;
+    if (!view || !runtime || !view.beginClose()) return;
     const path = factoryTerminalClosePath(runtime, id);
+    const returnFocus = this.node.contains(document.activeElement);
     try {
       if (!path) throw new Error("Terminal context is unavailable");
       const response = await fetch(path, { method: "DELETE", credentials: "same-origin" });
       if (!response.ok) throw new Error("Terminal could not be closed");
     } catch {
+      view.cancelClose();
       this.#views
         .get(id)
         ?.terminal.write(
-          "\r\nTerminal close failed. The session is still available; retry closing it.\r\n",
+          "\r\nTerminal close failed. Closure was not confirmed; retry closing this session.\r\n",
         );
       return;
     }
@@ -392,7 +526,11 @@ export class FactoryTerminalWidget extends BaseWidget {
     const closingIndex = original.findIndex((terminal) => terminal.id === id);
     const retained = original.filter((terminal) => terminal.id !== id);
     this.#catalogue.set(runtime.attemptID, retained);
-    localStorage.setItem(terminalStorageKey(runtime), JSON.stringify(retained));
+    try {
+      localStorage.setItem(terminalStorageKey(runtime), JSON.stringify(retained));
+    } catch {
+      /* The live session catalogue is still retained in memory. */
+    }
     if (this.#runtime?.attemptID !== runtime.attemptID) return;
     this.#terminals = retained;
     if (this.#activeID === id) {
@@ -400,8 +538,14 @@ export class FactoryTerminalWidget extends BaseWidget {
         this.#terminals[Math.min(closingIndex, this.#terminals.length - 1)]?.id ??
         this.#terminals[0]?.id;
     }
+    const focus = returnFocus && this.node.contains(document.activeElement);
     this.#save();
     this.#render();
+    if (focus) {
+      const active = this.#views.get(this.#activeID ?? "");
+      if (active) active.focus();
+      else this.#add.focus({ preventScroll: true });
+    }
   }
 }
 

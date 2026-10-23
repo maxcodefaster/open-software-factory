@@ -49,7 +49,6 @@ import {
   type PrerequisiteView,
   prerequisiteIsDelivered,
 } from "../../../packages/ticket-domain/src/dependency";
-import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
 import {
   type FactoryZeroContext,
   type FactoryZeroSchema,
@@ -74,9 +73,10 @@ import {
   retainAgentActivity,
 } from "./agent-view-state";
 import { apiRequest, emptyResponseSchema } from "./api-client";
-import { repositoryBrowserURL, repositoryLink } from "./knowledge/source-link";
 import type { Epic } from "./api-contracts";
 import {
+  type AgentMessage,
+  type WriterView,
   type AgentView,
   type AppPreview,
   agentViewSchema,
@@ -113,27 +113,35 @@ import {
   ticketDetailSchema,
   ticketDocumentSaveSchema,
   type UIPreference,
-  uiPreferenceSchema,
 } from "./api-contracts";
-import { desktopBackgrounds } from "./artworks";
+import { orderedDesktopBackgrounds } from "./artworks";
 import { composerKeyDown, followConversation, resizeComposer } from "./assistant-interaction";
+import { readAttachmentContent, restoreAttachmentContent } from "./attachments/composer";
+import { AttachmentProvider, TextareaAttachments } from "./attachments/ui";
+import { groupConversationActivities } from "./conversation-activity";
 import {
+  ChangeAgentActivityGroup,
   ChangeAgentMessage,
   ConversationEntryCard,
   conversationQuestion,
 } from "./conversation-components";
 import { streamConversation } from "./conversation-stream";
+import { ConversationSwitcher } from "./conversation-switcher";
+import { CopyButton } from "./ui/feedback";
 import { conversationTimeline } from "./conversation-timeline";
 import { bindDialogKeyboard } from "./dialog-keyboard";
 import { DockAppButton, DockButton } from "./dock";
-import { EpicControls, type EpicEdit } from "./epic-controls";
+import type { EpicEdit } from "./epic-controls";
 import { EpicProposalWorkspace } from "./epic-proposal-workspace";
 import { Icon } from "./icon";
+import type { ActivityNavigationRequest } from "./ide-messages";
+import { repositoryBrowserURL, repositoryLink } from "./knowledge/source-link";
 import type { KnowledgeDraft } from "./knowledge-workspace";
 import { createLifecyclePoller } from "./lifecycle-poller";
 import { markdownHTML } from "./markdown";
 import { bindPopoverKeyboard } from "./popover-keyboard";
 import { createProjectSetupInteraction, ProjectSetupPanel, SetupEmptyBoard } from "./setup/panel";
+import { ChatSkillPicker } from "./skills/chat-picker";
 import { TicketBoardContents } from "./ticket-board";
 import {
   type PersonalTicketDraft,
@@ -160,6 +168,7 @@ import {
   updateWorkspaceTabState,
   type WorkspaceTab,
 } from "./workspace-tabs";
+import { ChangeWriterStatus } from "./writer-status";
 
 const KnowledgeWorkspace = lazy(async () => ({
   default: (await import("./knowledge-workspace")).KnowledgeWorkspace,
@@ -261,8 +270,39 @@ function FactoryWorkspace(props: {
       /* Visible state remains usable. */
     }
   }
+  const conversationScope = () =>
+    `${selectedProjectID() ?? "none"}:${assistantTicketID() ?? "none"}`;
+  const [conversationSelections, setConversationSelections] = createSignal<Record<string, string>>(
+    (() => {
+      try {
+        return z
+          .record(z.string(), z.string())
+          .parse(
+            JSON.parse(sessionStorage.getItem(`chat-contexts:${props.session.user.id}`) ?? "{}"),
+          );
+      } catch {
+        return {};
+      }
+    })(),
+  );
+  createEffect(conversationSelections, (selections) => {
+    try {
+      sessionStorage.setItem(`chat-contexts:${props.session.user.id}`, JSON.stringify(selections));
+    } catch {
+      /* Context selection still works for this page. */
+    }
+  });
+  const selectedConversation = () => conversationSelections()[conversationScope()];
+  const [conversationReadyKey, setConversationReadyKey] = createSignal<string>();
+  const assistantContextLoading = () =>
+    Boolean(selectedProjectID() && conversationReadyKey() !== assistantKey());
+  const [ideNavigation, setIDENavigation] = createSignal<ActivityNavigationRequest>();
+  const [codingWriter, setCodingWriter] = createSignal<{
+    changeID: string;
+    view: WriterView | undefined;
+  }>();
   const assistantKey = () =>
-    `assistant:${selectedProjectID() ?? "none"}:${assistantTicketID() ?? "none"}`;
+    `assistant:${conversationScope()}:${selectedConversation() ?? "original"}`;
   const assistantPending = () =>
     (pendingContexts()[assistantKey()] ?? 0) > 0 ||
     ["pending", "dispatching", "running"].includes(conversation()?.turn?.state ?? "");
@@ -330,8 +370,21 @@ function FactoryWorkspace(props: {
       ?.some(
         (member) => member.projectId === selectedProjectID() && member.role === "developer",
       ) === true;
-  const [desktopBackgroundKey, setDesktopBackgroundKey] = createSignal(
-    props.uiPreference.desktopBackgroundKey,
+  const desktopBackgroundKey = () =>
+    selectedProject()?.desktopBackgroundKey ?? props.uiPreference.desktopBackgroundKey;
+  const [backgroundSaves, setBackgroundSaves] = createSignal<Record<string, boolean>>({});
+  const [backgroundPickerExpanded, setBackgroundPickerExpanded] = createSignal(false);
+  const [backgroundPickerFirstKey, setBackgroundPickerFirstKey] =
+    createSignal<DesktopBackgroundKey>(props.uiPreference.desktopBackgroundKey);
+  const backgroundChoices = createMemo(() => orderedDesktopBackgrounds(backgroundPickerFirstKey()));
+  createEffect(
+    () => [settingsOpen(), selectedProjectID()] as const,
+    ([open]) => {
+      if (!open) return;
+      // Snapshot on open, not on selection, so saving never moves the focused choice.
+      setBackgroundPickerFirstKey(desktopBackgroundKey());
+      setBackgroundPickerExpanded(false);
+    },
   );
   const [codingReasoningChoices, setCodingReasoningChoices] = createSignal<
     Record<string, CodingReasoning | undefined>
@@ -440,7 +493,8 @@ function FactoryWorkspace(props: {
     const value = storedConversation();
     return value &&
       value.projectId === selectedProjectID() &&
-      (value.ticketId ?? undefined) === assistantTicketID()
+      (value.ticketId ?? undefined) === assistantTicketID() &&
+      (!selectedConversation() || (value.contextId ?? "original") === selectedConversation())
       ? value
       : undefined;
   };
@@ -449,6 +503,14 @@ function FactoryWorkspace(props: {
     // captured turn state has the same document version.
     conversationReadGeneration++;
     setConversation(value);
+    if (value && !selectedConversation())
+      setConversationSelections((previous) => ({
+        ...previous,
+        [conversationScope()]: value.contextId ?? "original",
+      }));
+    setConversationReadyKey(
+      `assistant:${conversationScope()}:${value?.contextId ?? selectedConversation() ?? "original"}`,
+    );
     for (const entry of value?.entries ?? []) {
       const parsed = epicProposalInput.safeParse(entry.payload["epicProposal"]);
       if (parsed.success && !epicProposals()[entry.id])
@@ -470,7 +532,13 @@ function FactoryWorkspace(props: {
     identity: string | null | undefined = assistantTicketID(),
     projectID = selectedProjectID(),
   ) {
-    return JSON.stringify([projectID, kind, identity ?? null]);
+    const context = selectedConversation();
+    return JSON.stringify([
+      projectID,
+      kind,
+      identity ?? null,
+      ...(context && context !== "original" ? [context] : []),
+    ]);
   }
   function acknowledgeCommand(scope: string, ...commandIds: string[]) {
     if (agentCommandIds.forget(scope, ...commandIds))
@@ -534,8 +602,16 @@ function FactoryWorkspace(props: {
     let restoredCommand: ReturnType<typeof agentCommandIds.latest>;
     const retain = () => {
       const key = previousScope ?? scope();
-      if (element.value) messageDrafts.set(key, element.value);
+      if (readAttachmentContent(element)) messageDrafts.set(key, readAttachmentContent(element));
       else messageDrafts.delete(key);
+      try {
+        const storageKey = `chat-draft:${props.session.user.id}:${key}`;
+        if (readAttachmentContent(element))
+          sessionStorage.setItem(storageKey, readAttachmentContent(element));
+        else sessionStorage.removeItem(storageKey);
+      } catch {
+        /* Keep the visible draft when browser storage is unavailable. */
+      }
     };
     const reset = () => queueMicrotask(retain);
     element.addEventListener("input", retain);
@@ -554,8 +630,8 @@ function FactoryWorkspace(props: {
               restoredCommand &&
               agentCommandIds.latest(key)?.commandId !== restoredCommand.commandId
             ) {
-              if (element.value === restoredCommand.draft) {
-                element.value = "";
+              if (readAttachmentContent(element) === restoredCommand.draft) {
+                restoreAttachmentContent(element, "");
                 messageDrafts.delete(key);
               }
               restoredCommand = undefined;
@@ -566,7 +642,13 @@ function FactoryWorkspace(props: {
           if (previousScope) retain();
           previousScope = key;
           restoredCommand = agentCommandIds.latest(key);
-          element.value = messageDrafts.get(key) ?? restoredCommand?.draft ?? "";
+          restoreAttachmentContent(
+            element,
+            messageDrafts.get(key) ??
+              sessionStorage.getItem(`chat-draft:${props.session.user.id}:${key}`) ??
+              restoredCommand?.draft ??
+              "",
+          );
           queueMicrotask(() => resizeComposer(element));
           setRestoredMessageScope(restoredCommand?.draft ? key : undefined);
         } catch (cause) {
@@ -985,11 +1067,15 @@ function FactoryWorkspace(props: {
     ticketID = assistantTicketID(),
   ) {
     const generation = ++conversationReadGeneration;
+    const selection = selectedConversation();
     if (!projectID) {
       setConversation(undefined);
       return;
     }
-    const query = ticketID ? `?ticketId=${encodeURIComponent(ticketID)}` : "";
+    const params = new URLSearchParams();
+    if (ticketID) params.set("ticketId", ticketID);
+    if (selection) params.set("contextId", selection);
+    const query = params.size ? `?${params}` : "";
     const value = await apiRequest(
       conversationViewSchema.nullable(),
       `/api/projects/${projectID}/conversation${query}`,
@@ -998,7 +1084,8 @@ function FactoryWorkspace(props: {
       workspaceDisposed ||
       generation !== conversationReadGeneration ||
       selectedProjectID() !== projectID ||
-      assistantTicketID() !== ticketID
+      assistantTicketID() !== ticketID ||
+      selectedConversation() !== selection
     )
       return;
     try {
@@ -1012,7 +1099,7 @@ function FactoryWorkspace(props: {
     await Promise.all([refreshLifecycleState(), refreshTicketDetail(), refreshConversation()]);
   }
   createEffect(
-    () => [agentOpen(), selectedProjectID(), assistantTicketID()] as const,
+    () => [agentOpen(), selectedProjectID(), assistantTicketID(), selectedConversation()] as const,
     ([open, projectID, ticketID]) => {
       if (!open || !projectID) return;
       void refreshLifecycleState();
@@ -1151,17 +1238,32 @@ function FactoryWorkspace(props: {
   }
 
   async function chooseDesktopBackground(key: DesktopBackgroundKey) {
-    const previous = desktopBackgroundKey();
-    setDesktopBackgroundKey(key);
+    const project = selectedProject();
+    const client = zero();
+    if (!project || !client || !canManageProject() || backgroundSaves()[project.id]) return;
+    if (key === project.desktopBackgroundKey) return;
+    setBackgroundSaves((current) => ({ ...current, [project.id]: true }));
     try {
-      await apiRequest(uiPreferenceSchema, "/api/ui-preference", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ desktopBackgroundKey: key }),
-      });
+      await commitZeroMutation(
+        client.mutate(
+          zeroMutators.projects.setBackground({
+            projectId: project.id,
+            desktopBackgroundKey: key,
+          }),
+        ).server,
+      );
     } catch (cause) {
-      setDesktopBackgroundKey(previous);
-      setError(cause instanceof Error ? cause.message : "Background could not be saved");
+      setError(
+        `Background for ${project.name} could not be saved. ${
+          cause instanceof Error ? cause.message : "Try again."
+        }`,
+      );
+    } finally {
+      setBackgroundSaves((current) => {
+        const next = { ...current };
+        delete next[project.id];
+        return next;
+      });
     }
   }
 
@@ -1270,14 +1372,15 @@ function FactoryWorkspace(props: {
     return result.ok;
   }
 
-  function openTicketDraft(proposed?: PersonalTicketDraft) {
+  function openTicketDraft(proposed?: PersonalTicketDraft, stage?: "inbox" | "ready") {
     const projectID = selectedProjectID();
     if (!projectID) return;
     const retained = personalDrafts.get(projectID) ?? readPersonalTicketDraft(personalDraftKey());
-    const draft =
+    const previous =
       retained.title.trim() || retained.description.trim() ? retained : (proposed ?? retained);
+    const draft = stage ? { ...previous, stage } : previous;
     personalDrafts.set(projectID, draft);
-    if (proposed && draft === proposed) {
+    if (proposed || stage) {
       try {
         localStorage.setItem(personalDraftKey(), JSON.stringify(draft));
       } catch {
@@ -1640,14 +1743,89 @@ function FactoryWorkspace(props: {
     });
   }
 
+  async function newConversation(coding: boolean) {
+    if (assistantContextLoading()) return;
+    const projectID = selectedProjectID();
+    const ticketID = assistantTicketID();
+    const changeID = selectedChange()?.id;
+    const key = assistantKey();
+    const scope = agentCommandScope(coding ? "new-coding-conversation" : "new-conversation");
+    if (!projectID || (coding && !changeID)) return;
+    await mutate(async () => {
+      const previous = agentCommandIds.latest(scope);
+      const retained = previous
+        ? z
+            .object({
+              projectID: z.uuid(),
+              ticketID: z.uuid().optional(),
+              contextId: z.uuid().nullable(),
+            })
+            .parse(JSON.parse(previous.input))
+        : undefined;
+      if (retained && (retained.projectID !== projectID || retained.ticketID !== ticketID))
+        throw new Error("Recover the existing conversation request before creating another one.");
+      const contextId = retained
+        ? retained.contextId
+        : (conversation()?.activeCodingContextId ?? null);
+      const commandId =
+        previous?.commandId ??
+        agentCommandIds.forInput(scope, JSON.stringify({ projectID, ticketID, contextId }));
+      if (coding) {
+        const result = await apiRequest(
+          z.object({ contextId: z.uuid() }),
+          `/api/changes/${changeID}/agent/new-conversation`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ commandId, contextId }),
+          },
+        );
+        acknowledgeCommand(scope, commandId);
+        if (assistantKey() !== key) return;
+        setConversationSelections((previous) => ({
+          ...previous,
+          [conversationScope()]: result.contextId,
+        }));
+        await refreshServerState();
+      } else {
+        const result = await apiRequest(
+          conversationViewSchema,
+          `/api/projects/${projectID}/conversation/new`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ commandId, ...(ticketID ? { ticketId: ticketID } : {}) }),
+          },
+        );
+        acknowledgeCommand(scope, commandId);
+        if (assistantKey() !== key) return;
+        setConversationSelections((previous) => ({
+          ...previous,
+          [conversationScope()]: result.contextId ?? "original",
+        }));
+        publishConversation(result);
+      }
+    });
+  }
+
   async function startAgent() {
+    if (assistantContextLoading()) return;
     const change = selectedChange();
     if (!change) return;
+    if (codingWriterBlocked()) {
+      setError(
+        "Request editing or wait for release before starting Coding. Your draft is retained.",
+      );
+      return;
+    }
     const scope = agentCommandScope("change-start", change.id);
     await mutate(async () => {
       if (!(await prepareBuildConversation(change.id))) return;
       const codingReasoning = agent().turn ? undefined : chosenCodingReasoning();
-      const input = { ...(codingReasoning ? { codingReasoning } : {}) };
+      const input = {
+        ...(codingReasoning ? { codingReasoning } : {}),
+        ...(conversation()?.contextId ? { contextId: conversation()!.contextId } : {}),
+      };
       const commandId = agentCommandIds.forInput(
         scope,
         codingReasoning ? JSON.stringify({ changeID: change.id, ...input }) : change.id,
@@ -1690,9 +1868,11 @@ function FactoryWorkspace(props: {
   async function prepareBuildConversation(changeID: string) {
     const projectID = selectedProjectID();
     const ticketID = selectedTicketID();
+    const selected = selectedConversation();
     const current = () =>
       selectedProjectID() === projectID &&
       selectedTicketID() === ticketID &&
+      selectedConversation() === selected &&
       selectedChange()?.id === changeID &&
       conversationMode() === "build";
     if (!projectID || !ticketID || !current()) return false;
@@ -1753,15 +1933,25 @@ function FactoryWorkspace(props: {
 
   async function promptAgent(event: SubmitEvent) {
     event.preventDefault();
+    if (assistantContextLoading()) return;
     const change = selectedChange();
     if (!change) return;
+    if (codingWriterBlocked()) {
+      setError(
+        "Request editing or wait for release before sending Coding instructions. Your draft is retained.",
+      );
+      return;
+    }
     const form = event.currentTarget as HTMLFormElement;
-    const data = new FormData(form);
-    const text = String(data.get("message") ?? "").trim();
+    const input = form.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
+    const text = input ? readAttachmentContent(input).trim() : "";
     if (!text) return;
     const scope = agentCommandScope("change-prompt", change.id);
+    const contextId = conversation()?.contextId ?? undefined;
+    const targetKey = assistantKey();
     await mutate(async () => {
       if (!(await prepareBuildConversation(change.id))) return;
+      if (assistantKey() !== targetKey || historicalCoding()) return;
       const commandId = agentCommandIds.forInput(
         scope,
         JSON.stringify({ changeID: change.id, text }),
@@ -1771,39 +1961,29 @@ function FactoryWorkspace(props: {
       const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent/${action}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, text }),
+        body: JSON.stringify({ commandId, text, ...(contextId ? { contextId } : {}) }),
       });
       acknowledgeCommand(scope, commandId);
-      if (selectedChange()?.id === change.id) {
+      if (selectedChange()?.id === change.id && assistantKey() === targetKey) {
         publishAgentView(change.id, value);
         // Pending disables the composer, so FormData omits its submitted value.
         const input = form.elements.namedItem("message") as HTMLTextAreaElement | null;
-        if (input?.value.trim() === text) form.reset();
+        if (input && readAttachmentContent(input).trim() === text) form.reset();
       }
     });
   }
 
-  function requestCorrections() {
-    const change = selectedChange();
-    if (!change || change.state !== "active") return;
-    setCorrectionTarget(change.id);
-    setAgentOpen(true);
-    void refreshLifecycleState();
-    queueMicrotask(() =>
-      agentPanelElement?.querySelector<HTMLTextAreaElement>('textarea[name="message"]')?.focus(),
-    );
-  }
-
   async function sendConversationMessage(event: SubmitEvent) {
     event.preventDefault();
+    if (assistantContextLoading()) return;
     if (assistantPending()) return;
     if (canPromptBuild()) {
       await promptAgent(event);
       return;
     }
     const form = event.currentTarget as HTMLFormElement;
-    const data = new FormData(form);
-    const text = String(data.get("message") ?? "").trim();
+    const input = form.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
+    const text = input ? readAttachmentContent(input).trim() : "";
     if (!text) return;
     await sendProjectMessage(text, form);
   }
@@ -1840,9 +2020,13 @@ function FactoryWorkspace(props: {
     const projectID = selectedProjectID();
     if (!projectID) return;
     const ticketID = assistantTicketID();
+    const contextID = conversation()?.contextId ?? undefined;
     if (!intent && clarificationPaused() && unansweredClarification(conversation()?.entries ?? []))
       intent = "project-research";
-    const query = ticketID ? `?ticketId=${encodeURIComponent(ticketID)}` : "";
+    const query = `?${new URLSearchParams({
+      ...(ticketID ? { ticketId: ticketID } : {}),
+      ...(contextID ? { contextId: contextID } : {}),
+    })}`;
     const scope = agentCommandScope("project-message");
     const streamKey = assistantKey();
     let streamTurnId: string | undefined;
@@ -1855,13 +2039,19 @@ function FactoryWorkspace(props: {
       });
     let commandId: string | undefined;
     const contextIsCurrent = () =>
-      !workspaceDisposed && selectedProjectID() === projectID && assistantTicketID() === ticketID;
+      !workspaceDisposed &&
+      selectedProjectID() === projectID &&
+      assistantTicketID() === ticketID &&
+      (conversation()?.contextId ?? undefined) === contextID;
     const clearSubmittedDraft = () => {
       if (commandId) acknowledgeCommand(scope, commandId);
       if (
         form &&
         contextIsCurrent() &&
-        (form.elements.namedItem("message") as HTMLTextAreaElement | null)?.value.trim() === text
+        (() => {
+          const input = form.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
+          return input && readAttachmentContent(input).trim() === text;
+        })()
       )
         form.reset();
     };
@@ -1869,7 +2059,7 @@ function FactoryWorkspace(props: {
       async () => {
         if (!contextIsCurrent()) return;
         const mode = ticketID && selectedChange() ? "investigate" : "plan";
-        if (conversation()?.mode !== mode) {
+        if (!contextID && conversation()?.mode !== mode) {
           const contextualConversation = await apiRequest(
             conversationViewSchema,
             `/api/projects/${projectID}/conversation/mode`,
@@ -1900,6 +2090,7 @@ function FactoryWorkspace(props: {
               text,
               commandId,
               ...(intent ? { intent } : {}),
+              ...(contextID ? { contextId: contextID } : {}),
             }),
           },
           (event) => {
@@ -1963,11 +2154,16 @@ function FactoryWorkspace(props: {
     const projectID = selectedProjectID();
     if (!projectID) return;
     const ticketID = assistantTicketID();
+    const contextKey = assistantKey();
+    const contextID = conversation()?.contextId ?? undefined;
     const contextIsCurrent = () =>
-      selectedProjectID() === projectID && assistantTicketID() === ticketID;
+      selectedProjectID() === projectID &&
+      assistantTicketID() === ticketID &&
+      assistantKey() === contextKey;
     const form = event.currentTarget as HTMLFormElement;
     const data = new FormData(form);
-    const customText = String(data.get("custom") ?? "").trim();
+    const customInput = form.querySelector<HTMLTextAreaElement>('textarea[name="custom"]');
+    const customText = customInput ? readAttachmentContent(customInput).trim() : "";
     const answer = {
       selectedOptionIds:
         question.type === "single-select" && customText ? [] : data.getAll("option").map(String),
@@ -1998,6 +2194,7 @@ function FactoryWorkspace(props: {
                 questionEntryId: questionEntryID,
                 commandId,
                 answer,
+                ...(contextID ? { contextId: contextID } : {}),
               }),
             },
           );
@@ -2076,12 +2273,7 @@ function FactoryWorkspace(props: {
   const ticketList = () => (tickets.data() as Ticket[] | undefined) ?? [];
   const epicList = () => epics.data() ?? [];
   const scopedTickets = () => {
-    const active = ticketList().filter((ticket) => !ticket.trashedAt && !ticket.convertedToEpicId);
-    const selected = selectedEpicID();
-    if (!selected) return active;
-    if (selected === "ungrouped") return active.filter((ticket) => !ticket.epicId);
-    const family = epicFamilyIds(epicList(), selected);
-    return active.filter((ticket) => ticket.epicId && family.has(ticket.epicId));
+    return ticketList().filter((ticket) => !ticket.trashedAt && !ticket.convertedToEpicId);
   };
   const historyTickets = () => scopedTickets().filter((ticket) => lane(ticket) === "history");
   const knowledgePageList = () => knowledgePages.data() ?? [];
@@ -2109,15 +2301,19 @@ function FactoryWorkspace(props: {
       : undefined;
   };
   const conversationMode = (): ConversationMode =>
-    preparingImplementation() ||
-    (correctionTarget() && assistantTicketID() && correctionTarget() === selectedChange()?.id)
-      ? "build"
-      : assistantContext({
-          view: workspaceView(),
-          ideChangeId:
-            activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.changeID : undefined,
-          ticketChangeId: assistantTicketID() ? selectedChange()?.id : undefined,
-        });
+    conversation()?.contexts.find((context) => context.id === conversation()?.contextId)?.kind ===
+    "research"
+      ? conversation()!.mode
+      : conversation()?.mode === "build" ||
+          preparingImplementation() ||
+          (correctionTarget() && assistantTicketID() && correctionTarget() === selectedChange()?.id)
+        ? "build"
+        : assistantContext({
+            view: workspaceView(),
+            ideChangeId:
+              activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.changeID : undefined,
+            ticketChangeId: assistantTicketID() ? selectedChange()?.id : undefined,
+          });
   const interviewAnswers = createMemo(() => {
     const answers = new Map<string, string>();
     for (const entry of conversation()?.entries ?? [])
@@ -2186,7 +2382,34 @@ function FactoryWorkspace(props: {
   const canPromptBuild = () =>
     conversationMode() === "build" &&
     agentCanRun() &&
-    (correctionTarget() === selectedChange()?.id || !buildAgentNeedsStart(agent()));
+    !historicalCoding() &&
+    (Boolean(conversation()?.contextId) ||
+      correctionTarget() === selectedChange()?.id ||
+      !buildAgentNeedsStart(agent()));
+  const codingWriterBlocked = () => {
+    const current = codingWriter();
+    return (
+      current?.changeID === selectedChange()?.id &&
+      (current?.view?.state === "handoff" ||
+        (current?.view?.state === "human" && !current.view.canWrite))
+    );
+  };
+  const historicalCoding = () =>
+    conversation()?.mode === "build" && !conversation()?.isActiveCoding;
+  const retainedCodingDraft = () => {
+    if (!historicalCoding()) return "";
+    const scope = agentCommandScope("change-prompt", selectedChange()?.id);
+    try {
+      return (
+        messageDrafts.get(scope) ??
+        sessionStorage.getItem(`chat-draft:${props.session.user.id}:${scope}`) ??
+        agentCommandIds.latest(scope)?.draft ??
+        ""
+      );
+    } catch {
+      return messageDrafts.get(scope) ?? "";
+    }
+  };
   const agentTurnBusy = () =>
     ["starting", "working"].includes(agent().state) ||
     ["pending", "dispatching", "running"].includes(agent().turn?.state ?? "");
@@ -2342,9 +2565,42 @@ function FactoryWorkspace(props: {
       await refreshServerState();
     });
   }
+  async function openChatActivity(message: AgentMessage, kind: "file" | "diff") {
+    const navigation = message.activity?.navigation;
+    const projectID = selectedProjectID();
+    const changeID = selectedChange()?.id;
+    const target = ideTargets().find((candidate) => candidate.changeId === changeID);
+    if (!navigation || !projectID || !changeID || !target || !canDevelopProject()) return;
+    await openIDETarget(target);
+    const tab = activeWorkspaceTab();
+    if (
+      selectedProjectID() !== projectID ||
+      tab?.changeID !== changeID ||
+      tab.view !== "ide" ||
+      !tab.workspaceID
+    )
+      return;
+    setIDENavigation({
+      id: crypto.randomUUID(),
+      workspaceID: tab.workspaceID,
+      path: navigation.path,
+      kind,
+      ...(navigation.diff ? { diff: navigation.diff } : {}),
+      ...(navigation.truncated ? { truncated: true } : {}),
+    });
+  }
   async function openPreviewTarget(target: RuntimeDockTarget) {
-    const existing = workspaceTabs().find((tab) => tab.id === target.id && tab.view === "preview");
-    if (existing?.appChannel) {
+    const existing = workspaceTabs().find(
+      (tab) =>
+        tab.view === "preview" &&
+        (tab.id === `preview:${target.id}` ||
+          Boolean(
+            target.attemptId &&
+              tab.attemptID === target.attemptId &&
+              tab.appChannel === target.appChannel,
+          )),
+    );
+    if (existing && (existing.attemptID || existing.appChannel)) {
       activateWorkspaceTab(existing);
       return;
     }
@@ -2378,6 +2634,21 @@ function FactoryWorkspace(props: {
       );
       await refreshServerState();
     });
+  }
+  function ticketPreviewTarget(changeID: string) {
+    const owned = new Set(
+      attempts()
+        .filter(
+          (attempt) =>
+            attempt.projectId === selectedProjectID() &&
+            attempt.changeId === changeID &&
+            attempt.state === "ready",
+        )
+        .map((attempt) => attempt.id),
+    );
+    return previewTargets().find(
+      (target) => target.attemptId && owned.has(target.attemptId) && target.appChannel,
+    );
   }
   function openDevelopmentPreview(attemptID: string, process: string, label: string) {
     const attempt = attempts().find(
@@ -2524,11 +2795,18 @@ function FactoryWorkspace(props: {
   const latestRequirement = () =>
     requirementContent(detail()?.documentRevisions[0] ?? latestRevision());
   const visibleConversation = createMemo(() =>
-    conversationTimeline(
-      conversation()?.entries ?? [],
-      assistantTicketID() && selectedChange()
-        ? [...agent().messages, ...(agent().admittedMessages ?? [])]
-        : [],
+    groupConversationActivities(
+      conversationTimeline(
+        conversation()?.entries ?? [],
+        assistantTicketID() && selectedChange() && conversationMode() === "build"
+          ? historicalCoding()
+            ? [
+                ...(conversation()?.codingHistory?.messages ?? []),
+                ...(conversation()?.codingHistory?.admittedMessages ?? []),
+              ]
+            : [...agent().messages, ...(agent().admittedMessages ?? [])]
+          : [],
+      ),
     ),
   );
 
@@ -2568,65 +2846,283 @@ function FactoryWorkspace(props: {
   );
 
   return (
-    <main
-      class={`factory-desktop${agentOpen() ? " agent-is-open" : ""}${agentOverlay() ? " agent-is-overlay" : ""}`}
-      data-background={desktopBackgroundKey()}
+    <AttachmentProvider
+      projectId={selectedProjectID()}
+      scopeKey={`${contextKey()}:${assistantKey()}:${selectedKnowledgePageID() ?? ""}:${activeWorkspaceTab()?.id ?? ""}`}
     >
-      <h1 class="sr-only">Delivery floor</h1>
+      <main
+        class={`factory-desktop${agentOpen() ? " agent-is-open" : ""}${agentOverlay() ? " agent-is-overlay" : ""}`}
+        data-background={desktopBackgroundKey()}
+      >
+        <h1 class="sr-only">Delivery floor</h1>
 
-      <Show when={projectMenuOpen() || settingsOpen()}>
-        <button
-          type="button"
-          class="popover-backdrop"
-          aria-label="Close menu"
-          tabindex={-1}
-          onClick={() => {
-            setProjectMenuOpen(false);
-            setSettingsOpen(false);
-          }}
-        />
-      </Show>
-
-      <header class="factory-topbar" inert={agentOverlay() || registrationOpen()}>
-        <div class="topbar-start">
+        <Show when={projectMenuOpen() || settingsOpen()}>
           <button
             type="button"
-            class={agentOpen() ? "icon-button agent-toggle open" : "icon-button agent-toggle"}
-            aria-label="Toggle Agent panel"
-            ref={agentToggleElement}
-            aria-expanded={agentOpen() ? "true" : "false"}
-            data-state={agentOpen() ? "open" : "closed"}
-            data-tooltip="Agent"
-            onPointerDown={() => {
-              if (!agentOpen()) rememberAgentOpener();
+            class="popover-backdrop"
+            aria-label="Close menu"
+            tabindex={-1}
+            onClick={() => {
+              setProjectMenuOpen(false);
+              setSettingsOpen(false);
             }}
-            onClick={(event) => {
-              if (!agentOpen() && event.detail === 0) rememberAgentOpener();
-              setAgentOpen((open) => !open);
-            }}
-          >
-            <Icon name={agentOpen() ? "agent-panel" : "agent"} />
-          </button>
-          <div class="context-control" ref={projectControlElement}>
+          />
+        </Show>
+
+        <header class="factory-topbar" inert={agentOverlay() || registrationOpen()}>
+          <div class="topbar-start">
             <button
               type="button"
-              class="context-button"
-              aria-label="Open project menu"
-              aria-expanded={projectMenuOpen() ? "true" : "false"}
-              aria-controls="project-popover"
-              onClick={() => {
-                setProjectMenuOpen((open) => !open);
-                setSettingsOpen(false);
+              class={agentOpen() ? "icon-button agent-toggle open" : "icon-button agent-toggle"}
+              aria-label="Toggle Agent panel"
+              ref={agentToggleElement}
+              aria-expanded={agentOpen() ? "true" : "false"}
+              data-state={agentOpen() ? "open" : "closed"}
+              data-tooltip="Agent"
+              onPointerDown={() => {
+                if (!agentOpen()) rememberAgentOpener();
+              }}
+              onClick={(event) => {
+                if (!agentOpen() && event.detail === 0) rememberAgentOpener();
+                setAgentOpen((open) => !open);
               }}
             >
-              <span class="context-pair">
-                <span>
-                  <small>Project</small>
-                  {setupVisible() ? "New project" : (selectedProject()?.name ?? "Choose project")}
-                </span>
-              </span>
-              <Icon name="chevron" />
+              <Icon name={agentOpen() ? "agent-panel" : "agent"} />
             </button>
+          </div>
+
+          <nav class="workspace-dock" aria-label="Workspace dock">
+            <DockButton
+              label="Desktop"
+              icon="home"
+              active={!workspaceVisible()}
+              onClick={() => setWorkspaceVisible(false)}
+            />
+            <Show when={!setupVisible() && selectedProject()}>
+              <DockButton
+                label="Knowledge"
+                icon="knowledge"
+                active={workspaceVisible() && workspaceView() === "knowledge"}
+                open={workspaceTabs().some((tab) => tab.view === "knowledge")}
+                onClick={() => void openKnowledge()}
+                onMinimize={() => setWorkspaceVisible(false)}
+              />
+            </Show>
+            <Show when={!setupVisible() && detail()}>
+              <DockButton
+                label="Ticket"
+                icon="ticket"
+                active={workspaceVisible() && workspaceView() === "ticket"}
+                open={workspaceTabs().some((tab) => tab.view === "ticket")}
+                onMinimize={() => setWorkspaceVisible(false)}
+                onClick={() => {
+                  const openTicket = workspaceTabs().find(
+                    (tab) => tab.view === "ticket" && tab.ticketID === selectedTicketID(),
+                  );
+                  if (openTicket) activateWorkspaceTab(openTicket);
+                  else {
+                    const ticketID = selectedTicketID();
+                    if (ticketID) selectTicket(ticketID);
+                  }
+                }}
+              />
+            </Show>
+            <Show when={!setupVisible() && ideTargets().length > 0}>
+              <DockAppButton
+                label="IDE"
+                icon="ide"
+                active={workspaceVisible() && workspaceView() === "ide"}
+                open={workspaceTabs().some((tab) => tab.view === "ide")}
+                targets={ideTargets()}
+                selectedID={
+                  activeWorkspaceTab()?.view === "ide"
+                    ? activeWorkspaceTab()?.id.slice(4)
+                    : undefined
+                }
+                preferredID={
+                  ideTargets().find((target) => target.changeId === selectedChange()?.id)?.id
+                }
+                onSelect={(target) => void openIDETarget(target)}
+                onMinimize={() => setWorkspaceVisible(false)}
+              />
+            </Show>
+            <Show when={!setupVisible() && previewTargets().length > 0}>
+              <DockAppButton
+                label="Preview"
+                icon="preview"
+                active={workspaceVisible() && workspaceView() === "preview"}
+                open={workspaceTabs().some((tab) => tab.view === "preview")}
+                targets={previewTargets()}
+                selectedID={
+                  activeWorkspaceTab()?.view === "preview"
+                    ? activeWorkspaceTab()?.appChannel
+                      ? activeWorkspaceTab()?.id
+                      : activeWorkspaceTab()?.id.slice(8)
+                    : undefined
+                }
+                onSelect={(target) => void openPreviewTarget(target)}
+                onMinimize={() => setWorkspaceVisible(false)}
+              />
+            </Show>
+            <DockButton
+              label="Inbox"
+              icon="inbox"
+              active={workspaceVisible() && workspaceView() === "inbox"}
+              open={workspaceTabs().some((tab) => tab.view === "inbox")}
+              onClick={() => openWorkspaceTab({ id: "inbox", view: "inbox", label: "Inbox" })}
+              onMinimize={() => setWorkspaceVisible(false)}
+            />
+          </nav>
+
+          <div
+            class="topbar-end settings-control"
+            ref={(element) => {
+              settingsControlElement = element;
+              projectControlElement = element;
+            }}
+          >
+            <button
+              type="button"
+              class="icon-button"
+              aria-label="Settings"
+              aria-expanded={settingsOpen() ? "true" : "false"}
+              aria-controls="settings-popover"
+              data-tooltip="Settings"
+              onClick={() => {
+                setSettingsOpen((open) => !open);
+                setProjectMenuOpen(false);
+              }}
+            >
+              <Icon name="settings" />
+            </button>
+            <Show when={settingsOpen()}>
+              <section
+                class="floating-menu settings-menu"
+                id="settings-popover"
+                aria-label="Settings"
+                ref={settingsPopover}
+              >
+                <div class="settings-identity">
+                  <small>Signed in as</small>
+                  <strong>{props.session.user.name}</strong>
+                  <span>{props.session.user.email}</span>
+                </div>
+                <button
+                  type="button"
+                  class="settings-model-link settings-project-link"
+                  aria-label="Open project menu"
+                  aria-controls="project-popover"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setProjectMenuOpen(true);
+                  }}
+                >
+                  <Icon name="home" />
+                  <span>{selectedProject()?.name ?? "Choose project"}</span>
+                  <small>Switch project</small>
+                </button>
+                <button
+                  type="button"
+                  class="settings-model-link"
+                  aria-label="Open settings"
+                  onClick={openSettings}
+                >
+                  <Icon name="settings" />
+                  <span>Open settings</span>
+                  <small>
+                    Account{selectedProject() ? ", Project" : ""}
+                    {props.session.systemManager ? ", Factory" : ""}
+                  </small>
+                </button>
+                <Show when={selectedProject()}>
+                  <button
+                    type="button"
+                    class="settings-model-link"
+                    onClick={() => {
+                      setSettingsOpen(false);
+                      openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
+                    }}
+                  >
+                    <Icon name="inbox" />
+                    <span>Trash</span>
+                  </button>
+                </Show>
+                <Show when={!setupVisible() && selectedProject()}>
+                  <fieldset
+                    class="background-picker"
+                    aria-busy={backgroundSaves()[selectedProjectID() ?? ""] ? "true" : "false"}
+                  >
+                    <legend>Project background</legend>
+                    <p class="background-hint">
+                      Shared with everyone in {selectedProject()?.name}.
+                      <Show when={!canManageProject()}> Only project managers can change it.</Show>
+                    </p>
+                    <div class="background-options" id="background-options">
+                      <For each={backgroundChoices()}>
+                        {(background, index) => (
+                          <button
+                            type="button"
+                            class={`background-option background-${background.key}`}
+                            hidden={!backgroundPickerExpanded() && index() >= 2}
+                            aria-pressed={
+                              desktopBackgroundKey() === background.key ? "true" : "false"
+                            }
+                            disabled={!canManageProject()}
+                            aria-disabled={
+                              backgroundSaves()[selectedProjectID() ?? ""] ? "true" : undefined
+                            }
+                            onClick={() => void chooseDesktopBackground(background.key)}
+                          >
+                            <span class="background-preview" aria-hidden="true" />
+                            <span class="background-copy">
+                              <strong>{background.title}</strong>
+                              <small>
+                                {background.artist}, {background.date}
+                              </small>
+                            </span>
+                            <span class="background-selection" aria-hidden="true" />
+                          </button>
+                        )}
+                      </For>
+                    </div>
+                    <button
+                      type="button"
+                      class="background-expand"
+                      aria-expanded={backgroundPickerExpanded() ? "true" : "false"}
+                      aria-controls="background-options"
+                      onClick={() => setBackgroundPickerExpanded((expanded) => !expanded)}
+                    >
+                      <Show when={!backgroundPickerExpanded()}>
+                        <span class="background-peek" aria-hidden="true">
+                          <span
+                            class={`background-option background-${backgroundChoices()[2]?.key}`}
+                          >
+                            <span class="background-preview" />
+                            <span class="background-copy">
+                              <strong>{backgroundChoices()[2]?.title}</strong>
+                              <small>
+                                {backgroundChoices()[2]?.artist}, {backgroundChoices()[2]?.date}
+                              </small>
+                            </span>
+                          </span>
+                        </span>
+                      </Show>
+                      <span class="background-expand-label">
+                        {backgroundPickerExpanded()
+                          ? "Show fewer backgrounds"
+                          : `Show all ${backgroundChoices().length} backgrounds`}
+                        <Icon name="chevron" />
+                      </span>
+                    </button>
+                    <Show when={backgroundSaves()[selectedProjectID() ?? ""]}>
+                      <p class="background-hint" role="status">
+                        Saving project background…
+                      </p>
+                    </Show>
+                  </fieldset>
+                </Show>
+              </section>
+            </Show>
             <Show when={projectMenuOpen()}>
               <section
                 class="floating-menu project-menu"
@@ -2635,10 +3131,7 @@ function FactoryWorkspace(props: {
                 ref={projectPopover}
               >
                 <div class="menu-heading">
-                  <div>
-                    <small>Workspace</small>
-                    <strong>Projects</strong>
-                  </div>
+                  <strong>Projects</strong>
                   <Show when={props.session.systemManager}>
                     <button
                       type="button"
@@ -2698,1211 +3191,1249 @@ function FactoryWorkspace(props: {
               </section>
             </Show>
           </div>
-        </div>
+        </header>
 
-        <nav class="workspace-dock" aria-label="Workspace dock">
-          <DockButton
-            label="Desktop"
-            icon="home"
-            active={!workspaceVisible()}
-            onClick={() => setWorkspaceVisible(false)}
-          />
-          <Show when={!setupVisible() && selectedProject()}>
-            <DockButton
-              label="Knowledge"
-              icon="knowledge"
-              active={workspaceVisible() && workspaceView() === "knowledge"}
-              open={workspaceTabs().some((tab) => tab.view === "knowledge")}
-              onClick={() => void openKnowledge()}
-              onMinimize={() => setWorkspaceVisible(false)}
-            />
+        <div class="desktop-notices">
+          <Show when={error() && !registrationOpen()}>
+            <p class="error-toast" role="alert">
+              {error()}
+            </p>
           </Show>
-          <Show when={!setupVisible() && detail()}>
-            <DockButton
-              label="Ticket"
-              icon="ticket"
-              active={workspaceVisible() && workspaceView() === "ticket"}
-              open={workspaceTabs().some((tab) => tab.view === "ticket")}
-              onMinimize={() => setWorkspaceVisible(false)}
-              onClick={() => {
-                const openTicket = workspaceTabs().find(
-                  (tab) => tab.view === "ticket" && tab.ticketID === selectedTicketID(),
-                );
-                if (openTicket) activateWorkspaceTab(openTicket);
-                else {
-                  const ticketID = selectedTicketID();
-                  if (ticketID) selectTicket(ticketID);
-                }
-              }}
-            />
-          </Show>
-          <Show when={!setupVisible() && ideTargets().length > 0}>
-            <DockAppButton
-              label="IDE"
-              icon="ide"
-              active={workspaceVisible() && workspaceView() === "ide"}
-              open={workspaceTabs().some((tab) => tab.view === "ide")}
-              targets={ideTargets()}
-              selectedID={
-                activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.id.slice(4) : undefined
-              }
-              preferredID={
-                ideTargets().find((target) => target.changeId === selectedChange()?.id)?.id
-              }
-              onSelect={(target) => void openIDETarget(target)}
-              onMinimize={() => setWorkspaceVisible(false)}
-            />
-          </Show>
-          <Show when={!setupVisible() && previewTargets().length > 0}>
-            <DockAppButton
-              label="Preview"
-              icon="preview"
-              active={workspaceVisible() && workspaceView() === "preview"}
-              open={workspaceTabs().some((tab) => tab.view === "preview")}
-              targets={previewTargets()}
-              selectedID={
-                activeWorkspaceTab()?.view === "preview"
-                  ? activeWorkspaceTab()?.appChannel
-                    ? activeWorkspaceTab()?.id
-                    : activeWorkspaceTab()?.id.slice(8)
-                  : undefined
-              }
-              onSelect={(target) => void openPreviewTarget(target)}
-              onMinimize={() => setWorkspaceVisible(false)}
-            />
-          </Show>
-          <DockButton
-            label="Inbox"
-            icon="inbox"
-            active={workspaceVisible() && workspaceView() === "inbox"}
-            open={workspaceTabs().some((tab) => tab.view === "inbox")}
-            onClick={() => openWorkspaceTab({ id: "inbox", view: "inbox", label: "Inbox" })}
-            onMinimize={() => setWorkspaceVisible(false)}
-          />
-        </nav>
-
-        <div class="topbar-end settings-control" ref={settingsControlElement}>
-          <button
-            type="button"
-            class="icon-button"
-            aria-label="Settings"
-            aria-expanded={settingsOpen() ? "true" : "false"}
-            aria-controls="settings-popover"
-            data-tooltip="Settings"
-            onClick={() => {
-              setSettingsOpen((open) => !open);
-              setProjectMenuOpen(false);
-            }}
-          >
-            <Icon name="settings" />
-          </button>
-          <Show when={settingsOpen()}>
-            <section
-              class="floating-menu settings-menu"
-              id="settings-popover"
-              aria-label="Settings"
-              ref={settingsPopover}
-            >
-              <div class="settings-identity">
-                <small>Signed in as</small>
-                <strong>{props.session.user.name}</strong>
-                <span>{props.session.user.email}</span>
-              </div>
+          <Show when={syncError()}>
+            <div class="sync-notice" role="status">
+              Updates paused. Showing the last known state.
               <button
                 type="button"
-                class="settings-model-link"
-                aria-label="Open settings"
-                onClick={openSettings}
+                class="quiet-button"
+                onClick={() => void refreshLifecycleState()}
               >
-                <Icon name="settings" />
-                <span>Open settings</span>
-                <small>
-                  Account{selectedProject() ? ", Project" : ""}
-                  {props.session.systemManager ? ", Factory" : ""}
-                </small>
-              </button>
-              <Show when={selectedProject()}>
-                <button
-                  type="button"
-                  class="settings-model-link"
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
-                  }}
-                >
-                  <Icon name="inbox" />
-                  <span>Trash</span>
-                </button>
-              </Show>
-              <fieldset class="background-picker">
-                <legend>Desktop background</legend>
-                <For each={desktopBackgrounds}>
-                  {(background) => (
-                    <button
-                      type="button"
-                      class={`background-option background-${background.key}`}
-                      aria-pressed={desktopBackgroundKey() === background.key ? "true" : "false"}
-                      onClick={() => void chooseDesktopBackground(background.key)}
-                    >
-                      <span class="background-preview" aria-hidden="true" />
-                      <span class="background-copy">
-                        <strong>{background.title}</strong>
-                        <small>
-                          {background.artist}, {background.date}
-                        </small>
-                      </span>
-                      <span class="background-selection" aria-hidden="true" />
-                    </button>
-                  )}
-                </For>
-              </fieldset>
-            </section>
-          </Show>
-        </div>
-      </header>
-
-      <div class="desktop-notices">
-        <Show when={error() && !registrationOpen()}>
-          <p class="error-toast" role="alert">
-            {error()}
-          </p>
-        </Show>
-        <Show when={syncError()}>
-          <div class="sync-notice" role="status">
-            Updates paused. Showing the last known state.
-            <button type="button" class="quiet-button" onClick={() => void refreshLifecycleState()}>
-              Retry
-            </button>
-          </div>
-        </Show>
-      </div>
-
-      <section
-        class={workspaceVisible() ? "kanban-desktop obscured" : "kanban-desktop"}
-        aria-label="Ticket board"
-        inert={agentOverlay() || registrationOpen()}
-      >
-        <Show
-          when={!setupVisible() && selectedProject()}
-          fallback={
-            setupVisible() ? (
-              <SetupEmptyBoard />
-            ) : (
-              <DesktopEmpty onChoose={() => setProjectMenuOpen(true)} />
-            )
-          }
-        >
-          <div class="board-toolbar">
-            <EpicControls
-              projectId={selectedProjectID() ?? ""}
-              projectName={selectedProject()?.name ?? "Project"}
-              epics={epicList()}
-              tickets={ticketList()}
-              selectedId={selectedEpicID()}
-              pending={pending()}
-              onSelect={setSelectedEpicID}
-              onSave={saveEpic}
-            />
-            <div class="board-toolbar-actions">
-              <Show when={historyTickets().length > 0}>
-                <button
-                  type="button"
-                  class="board-history-button"
-                  aria-pressed={boardHistoryOpen() ? "true" : "false"}
-                  onClick={() => setBoardHistoryOpen((open) => !open)}
-                >
-                  <span>{boardHistoryOpen() ? "Active work" : "History"}</span>
-                  <Show when={!boardHistoryOpen()}>
-                    <span class="history-count">{historyTickets().length}</span>
-                  </Show>
-                </button>
-              </Show>
-              <button
-                type="button"
-                class="new-ticket-button"
-                aria-label="New Ticket"
-                onClick={() => openTicketDraft()}
-              >
-                <span>+</span> New ticket
+                Retry
               </button>
             </div>
-          </div>
-          <TicketBoardContents
-            tickets={scopedTickets()}
-            epics={epicList()}
-            archivedTickets={scopedTickets().filter((ticket) => lane(ticket) === "history")}
-            historyOpen={boardHistoryOpen()}
+          </Show>
+        </div>
+
+        <section
+          class={workspaceVisible() ? "kanban-desktop obscured" : "kanban-desktop"}
+          aria-label="Ticket board"
+          inert={agentOverlay() || registrationOpen()}
+        >
+          <Show
+            when={!setupVisible() && selectedProject()}
+            fallback={
+              setupVisible() ? (
+                <SetupEmptyBoard />
+              ) : (
+                <DesktopEmpty onChoose={() => setProjectMenuOpen(true)} />
+              )
+            }
+          >
+            <div class="board-toolbar">
+              <span class="board-project-name">{selectedProject()?.name}</span>
+              <div class="board-toolbar-actions">
+                <Show when={historyTickets().length > 0}>
+                  <button
+                    type="button"
+                    class="board-history-button"
+                    aria-pressed={boardHistoryOpen() ? "true" : "false"}
+                    onClick={() => setBoardHistoryOpen((open) => !open)}
+                  >
+                    <span>{boardHistoryOpen() ? "Active work" : "History"}</span>
+                    <Show when={!boardHistoryOpen()}>
+                      <span class="history-count">{historyTickets().length}</span>
+                    </Show>
+                  </button>
+                </Show>
+              </div>
+            </div>
+            <TicketBoardContents
+              tickets={scopedTickets()}
+              epics={epicList()}
+              archivedTickets={scopedTickets().filter((ticket) => lane(ticket) === "history")}
+              historyOpen={boardHistoryOpen()}
+              pending={pending()}
+              selectedTicketID={selectedTicketID()}
+              stage={lane}
+              status={boardStatus}
+              blockers={blockersFor}
+              reference={ticketReference}
+              onSelect={selectTicket}
+              onCreate={(stage) => openTicketDraft(undefined, stage)}
+              epicID={selectedEpicID()}
+              onEpic={setSelectedEpicID}
+              onSaveEpic={saveEpic}
+            />
+          </Show>
+        </section>
+
+        <Show when={registrationOpen()}>
+          <ProjectRegistration
             pending={pending()}
-            selectedTicketID={selectedTicketID()}
-            stage={lane}
-            status={boardStatus}
-            blockers={blockersFor}
-            reference={ticketReference}
-            onSelect={selectTicket}
+            error={error()}
+            opener={projectControlElement?.querySelector<HTMLButtonElement>("button") ?? undefined}
+            onSubmit={register}
+            onClose={() => setRegistrationOpen(false)}
           />
         </Show>
-      </section>
-
-      <Show when={registrationOpen()}>
-        <ProjectRegistration
-          pending={pending()}
-          error={error()}
-          opener={projectControlElement?.querySelector<HTMLButtonElement>("button") ?? undefined}
-          onSubmit={register}
-          onClose={() => setRegistrationOpen(false)}
-        />
-      </Show>
-      <Show when={agentOverlay()}>
-        <button
-          type="button"
-          class="agent-overlay-backdrop"
-          aria-label="Dismiss Agent overlay"
-          tabindex={-1}
-          onClick={() => setAgentOpen(false)}
-        />
-      </Show>
-      <Show when={agentPresence.present()}>
-        <aside
-          class="agent-panel"
-          data-closing={agentPresence.closing() ? "true" : "false"}
-          onAnimationEnd={(event) => {
-            if (event.target === event.currentTarget && event.animationName === "panel-out")
-              agentPresence.finishExit();
-          }}
-          aria-hidden={agentOpen() ? "false" : "true"}
-          {...(agentOverlay()
-            ? { role: "dialog" as const, "aria-modal": "true" as const }
-            : { role: "complementary" as const })}
-          aria-label="Agent panel"
-          inert={!agentOpen() || registrationOpen()}
-          ref={agentPanelElement}
-        >
-          <header>
-            <Show
-              when={preparingImplementation()}
-              fallback={<span class="sr-only">Assistant</span>}
-            >
-              <span class="agent-implementation-title" title={detail()?.ticket.title}>
-                {detail()?.ticket.title}
-              </span>
-            </Show>
-            <button
-              type="button"
-              class="bare-icon window-minimize-control"
-              aria-label="Minimize Agent panel"
-              onClick={() => setAgentOpen(false)}
-            >
-              <Icon name="minimize" />
-            </button>
-          </header>
-          <Show when={setupVisible() && projectSetup}>
-            {(setup) => (
-              <ProjectSetupPanel
-                setup={setup()}
-                onSettings={openSettings}
-                onProject={selectProject}
-              />
-            )}
-          </Show>
-          <Show when={!setupVisible()}>
-            <Show when={preparingImplementation()}>
-              <div class="agent-status">
-                <span class="agent-state">Ready to build</span>
-                <button
-                  type="button"
-                  class="quiet-button"
-                  onClick={() => setImplementationPreparation(undefined)}
+        <Show when={agentOverlay()}>
+          <button
+            type="button"
+            class="agent-overlay-backdrop"
+            aria-label="Dismiss Agent overlay"
+            tabindex={-1}
+            onClick={() => setAgentOpen(false)}
+          />
+        </Show>
+        <Show when={agentPresence.present()}>
+          <aside
+            class="agent-panel"
+            data-closing={agentPresence.closing() ? "true" : "false"}
+            onAnimationEnd={(event) => {
+              if (event.target === event.currentTarget && event.animationName === "panel-out")
+                agentPresence.finishExit();
+            }}
+            aria-hidden={agentOpen() ? "false" : "true"}
+            {...(agentOverlay()
+              ? { role: "dialog" as const, "aria-modal": "true" as const }
+              : { role: "complementary" as const })}
+            aria-label="Agent panel"
+            inert={!agentOpen() || registrationOpen()}
+            ref={agentPanelElement}
+          >
+            <Show when={setupVisible() || preparingImplementation()}>
+              <header>
+                <Show
+                  when={preparingImplementation()}
+                  fallback={<span class="sr-only">Assistant</span>}
                 >
-                  Back to conversation
-                </button>
-              </div>
-            </Show>
-            <Show when={conversationMode() === "build" && selectedChange()}>
-              <div class="agent-status">
-                <span class="agent-state">
-                  {!agentViewLoaded()
-                    ? "Loading implementation…"
-                    : agent().state === "idle" && !agentCanRun()
-                      ? "Build unavailable"
-                      : buildAgentStatus(agent())}
-                </span>
-                <span class={`runtime-presence ${ticketWorkspaceReady() ? "ready" : ""}`}>
-                  <i />
-                  {ticketWorkspaceStatus()}
-                </span>
-              </div>
-            </Show>
-            <Show when={conversationMode() === "build" && selectedChange() && agent().stopPending}>
-              <section class="agent-stop-notice" aria-label="Stop recovery">
-                <p class="agent-stop-copy" role="status">
-                  Stop saved. OpenCode confirmation is still missing. New Build work is blocked.
-                </p>
-                <details>
-                  <summary class="agent-stop-explanation">Why is Build blocked?</summary>
-                  <p class="agent-stop-detail">
-                    {agent().lastError?.startsWith("Stop remains unconfirmed.")
-                      ? agent().lastError
-                      : "Factory cannot yet prove that execution and queued input are settled."}
-                  </p>
-                  <p class="agent-stop-detail">
-                    Factory will not resend uncertain commands. Stop does not roll back workspace
-                    edits.
-                  </p>
-                  <Show when={agent().runtimeState !== "ready" || !agent().messagesAvailable}>
-                    <p class="agent-stop-detail">
-                      Live workspace status is unavailable. Queued input may survive a restart;
-                      reconnecting alone does not confirm Stop.
-                    </p>
-                  </Show>
-                  <p class="agent-stop-detail">
-                    Checking status only reads the current outcome. It does not restart work.
-                  </p>
-                  <Show when={agent().stopId}>
-                    <p class="agent-stop-detail">
-                      Recheck confirmation checks OpenCode and saves confirmation only when it can
-                      prove this Stop. It will not resend interruption, cancel input or start
-                      compute.
-                    </p>
-                    <button
-                      type="button"
-                      class="agent-control agent-stop-check"
-                      disabled={pending()}
-                      onClick={() => void recheckStopConfirmation()}
-                    >
-                      Recheck confirmation
-                    </button>
-                  </Show>
-                </details>
-                <button
-                  type="button"
-                  class="agent-control agent-stop-check"
-                  disabled={pending()}
-                  onClick={() => void checkStopStatus()}
-                >
-                  Check Stop status
-                </button>
-              </section>
-            </Show>
-            <Show
-              when={
-                conversationMode() === "build" &&
-                selectedChange() &&
-                agent().commitOperation &&
-                !agent().stopPending
-              }
-            >
-              <p class="agent-activity-notice" role="status" aria-label="Commit recovery">
-                {buildAgentHint(agent())}
-              </p>
-            </Show>
-            <Show
-              when={
-                conversationMode() === "build" &&
-                selectedChange() &&
-                buildAgentActivityNotice(agent())
-              }
-            >
-              <p class="agent-activity-notice" role="status">
-                {buildAgentActivityNotice(agent())}
-              </p>
-            </Show>
-            <Show
-              when={
-                conversationMode() === "build" &&
-                selectedChange() &&
-                agent().state === "working" &&
-                !agent().runtimeConnected &&
-                !agent().stopPending &&
-                !agent().commitOperation
-              }
-            >
-              <p class="agent-activity-notice" role="status" aria-label="Build connection">
-                {buildAgentHint(agent())}
-              </p>
-            </Show>
-            <div
-              class="agent-messages conversation-history"
-              aria-live="polite"
-              ref={(element) => {
-                conversationScroll?.dispose();
-                conversationScroll = followConversation(element);
-              }}
-            >
-              <For each={visibleConversation()} keyed={(item) => item.id}>
-                {(item) => {
-                  const conversationEntry = () => {
-                    const current = item();
-                    return current.kind === "conversation" ? current.entry : undefined;
-                  };
-                  const agentMessage = () => {
-                    const current = item();
-                    return current.kind === "change-agent" ? current.message : undefined;
-                  };
-                  return (
-                    <Show
-                      when={conversationEntry()}
-                      fallback={
-                        <Show when={agentMessage()}>
-                          {(message) => <ChangeAgentMessage message={message()} />}
-                        </Show>
-                      }
-                    >
-                      {(entry) => (
-                        <ConversationEntryCard
-                          entry={entry()}
-                          answered={
-                            answeredQuestionIDs().has(entry().id) ||
-                            Boolean(answerSummary(entry().id))
-                          }
-                          answerSummary={answerSummary(entry().id)}
-                          requirementCurrent={
-                            latestRevision()?.id === entry().requirementRevisionId
-                          }
-                          requirementApproved={Boolean(
-                            detail()?.revisions.find(
-                              (revision) => revision.id === entry().requirementRevisionId,
-                            )?.approvalId,
-                          )}
-                          requirementVisible={
-                            workspaceView() === "ticket" && Boolean(assistantTicketID())
-                          }
-                          pending={assistantPending()}
-                          initialAnswer={restoredInterviewAnswer(entry().id)}
-                          answerStorageKey={`interview-answer:${props.session.user.id}:${entry().id}`}
-                          canAnswer={
-                            pendingInterview() && currentInterviewQuestion()?.id === entry().id
-                          }
-                          onPause={() => pauseClarification(true)}
-                          onResume={() => {
-                            pauseClarification(false);
-                            setAgentOpen(true);
-                          }}
-                          onAnswer={(event, question) =>
-                            void answerInterview(event, entry().id, question)
-                          }
-                          onReviewRequirements={() => {
-                            const epic = epicProposals()[entry().id];
-                            if (epic) {
-                              const ticketID = assistantTicketID();
-                              openWorkspaceTab({
-                                id: `epic-proposal:${entry().id}`,
-                                view: "epic-proposal",
-                                label: epic.epic.title,
-                                proposalID: entry().id,
-                                ...(ticketID ? { ticketID } : {}),
-                              });
-                              setAgentOpen(false);
-                              return;
-                            }
-                            const ticketID = assistantTicketID();
-                            if (ticketID) {
-                              selectTicket(ticketID);
-                              return;
-                            }
-                            const ticket = z
-                              .object({
-                                title: z.string().max(200),
-                                description: z.string().max(10_000),
-                              })
-                              .safeParse(entry().payload["ticket"]);
-                            const requirement = requirementContentInput.safeParse(
-                              entry().payload["requirement"],
-                            );
-                            if (!ticket.success || !requirement.success) return;
-                            const description = [
-                              ticket.data.description,
-                              requirement.data.summary,
-                              "## Acceptance criteria",
-                              ...requirement.data.acceptanceCriteria.map(
-                                (value) => `- [ ] ${value}`,
-                              ),
-                              ...(requirement.data.nonGoals.length
-                                ? [
-                                    "## Out of scope",
-                                    ...requirement.data.nonGoals.map((value) => `- ${value}`),
-                                  ]
-                                : []),
-                            ].join("\n\n");
-                            if (description.length > 10_000) {
-                              setError(
-                                "This proposal is too long for a Ticket draft. Ask for a more concise version.",
-                              );
-                              return;
-                            }
-                            openTicketDraft({
-                              id: entry().id,
-                              title: ticket.data.title,
-                              description,
-                            });
-                          }}
-                          onCitation={({ source, id, commitSha, path }) => {
-                            if (source === "ticket") {
-                              const ticket = ticketList().find((candidate) => candidate.id === id);
-                              if (ticket) selectTicket(id);
-                            } else if (source === "epic") {
-                              setSelectedEpicID(id);
-                            } else if (source === "code") {
-                              const repository = browserRepository();
-                              const link =
-                                repository && commitSha && path
-                                  ? repositoryLink(repository, commitSha, path)
-                                  : undefined;
-                              if (link) window.open(link, "_blank", "noopener,noreferrer");
-                            } else {
-                              setOpenRepositoryDocument(undefined);
-                              setSelectedKnowledgePageID(id);
-                              setKnowledgeHistory([]);
-                              void openKnowledge();
-                            }
-                          }}
-                        />
-                      )}
-                    </Show>
-                  );
-                }}
-              </For>
-              <Show when={streamedAnswer()}>
-                <article
-                  class="agent-message assistant"
-                  aria-label="Assistant streaming response"
-                  aria-busy="true"
-                >
-                  <div
-                    class="markdown-body"
-                    innerHTML={markdownHTML(streamedAnswer()?.text ?? "")}
-                  />
-                </article>
-              </Show>
-              <Show when={assistantPending() && !streamedAnswer()}>
-                <section
-                  class="assistant-reply-placeholder"
-                  role="status"
-                  aria-label="Assistant responding"
-                  aria-busy="true"
-                >
-                  <span>
-                    {(() => {
-                      const progress = conversation()?.turn?.progress;
-                      if (!progress) return "Preparing a response…";
-                      const label = {
-                        guidance: "Loading Project guidance…",
-                        thinking: "Preparing a response…",
-                        searching: "Searching the Project…",
-                        reading: "Reading Project sources…",
-                        validating: "Checking the response…",
-                      }[progress.phase];
-                      return `${label}${progress.completedLookups ? ` · ${progress.completedLookups} research steps completed` : ""}`;
-                    })()}
+                  <span class="agent-implementation-title" title={detail()?.ticket.title}>
+                    {detail()?.ticket.title}
                   </span>
-                  <div class="assistant-skeleton" aria-hidden="true">
-                    <span />
-                    <span />
-                    <span />
-                  </div>
+                </Show>
+                <button
+                  type="button"
+                  class="bare-icon window-minimize-control"
+                  aria-label="Minimize Agent panel"
+                  onClick={() => setAgentOpen(false)}
+                >
+                  <Icon name="minimize" />
+                </button>
+              </header>
+            </Show>
+            <Show when={setupVisible() && projectSetup}>
+              {(setup) => (
+                <ProjectSetupPanel
+                  setup={setup()}
+                  onSettings={openSettings}
+                  onProject={selectProject}
+                />
+              )}
+            </Show>
+            <Show when={!setupVisible()}>
+              <ConversationSwitcher
+                scopeKey={conversationScope()}
+                title={
+                  assistantTicketID()
+                    ? (ticketList().find((ticket) => ticket.id === assistantTicketID())?.title ??
+                      "Ticket chat")
+                    : (selectedProject()?.name ?? "Project chat")
+                }
+                onMinimize={preparingImplementation() ? undefined : () => setAgentOpen(false)}
+                conversation={conversation()}
+                ticket={Boolean(assistantTicketID())}
+                coding={Boolean(
+                  assistantTicketID() && canDevelopProject() && conversationMode() === "build",
+                )}
+                busy={assistantPending() || assistantContextLoading()}
+                restartReason={
+                  codingWriterBlocked()
+                    ? "Editing is held or being transferred. Request editing or wait for release."
+                    : !agentViewLoaded()
+                      ? "Loading the shared implementation status. Wait for confirmation."
+                      : !agentCanRun()
+                        ? "This implementation is not active. Create a follow-up Ticket or ask about the Project."
+                        : undefined
+                }
+                canRestart={
+                  agentCanRun() &&
+                  !codingWriterBlocked() &&
+                  !agentTurnBusy() &&
+                  !agent().stopPending &&
+                  !agentNeedsResolution() &&
+                  ["committed", "stopped"].includes(agent().state)
+                }
+                onSelect={(id) =>
+                  setConversationSelections((previous) => ({
+                    ...previous,
+                    [conversationScope()]: id,
+                  }))
+                }
+                onResearch={() => void newConversation(false)}
+                onCoding={() => void newConversation(true)}
+              />
+              <Show when={preparingImplementation()}>
+                <div class="agent-status">
+                  <span class="agent-state">Ready to build</span>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    onClick={() => setImplementationPreparation(undefined)}
+                  >
+                    Back to conversation
+                  </button>
+                </div>
+              </Show>
+              <Show when={conversationMode() === "build" && selectedChange()}>
+                <div class="agent-status">
+                  <span class="agent-state">
+                    {!agentViewLoaded()
+                      ? "Loading implementation…"
+                      : agent().state === "idle" && !agentCanRun()
+                        ? "Build unavailable"
+                        : buildAgentStatus(agent())}
+                  </span>
+                  <span class={`runtime-presence ${ticketWorkspaceReady() ? "ready" : ""}`}>
+                    <i />
+                    {ticketWorkspaceStatus()}
+                  </span>
+                </div>
+              </Show>
+              <Show
+                when={conversationMode() === "build" && selectedChange() && agent().stopPending}
+              >
+                <section class="agent-stop-notice" aria-label="Stop recovery">
+                  <p class="agent-stop-copy" role="status">
+                    Stop saved. OpenCode confirmation is still missing. New Build work is blocked.
+                  </p>
+                  <details>
+                    <summary class="agent-stop-explanation">Why is Build blocked?</summary>
+                    <p class="agent-stop-detail">
+                      {agent().lastError?.startsWith("Stop remains unconfirmed.")
+                        ? agent().lastError
+                        : "Factory cannot yet prove that execution and queued input are settled."}
+                    </p>
+                    <p class="agent-stop-detail">
+                      Factory will not resend uncertain commands. Stop does not roll back workspace
+                      edits.
+                    </p>
+                    <Show when={agent().runtimeState !== "ready" || !agent().messagesAvailable}>
+                      <p class="agent-stop-detail">
+                        Live workspace status is unavailable. Queued input may survive a restart;
+                        reconnecting alone does not confirm Stop.
+                      </p>
+                    </Show>
+                    <p class="agent-stop-detail">
+                      Checking status only reads the current outcome. It does not restart work.
+                    </p>
+                    <Show when={agent().stopId}>
+                      <p class="agent-stop-detail">
+                        Recheck confirmation checks OpenCode and saves confirmation only when it can
+                        prove this Stop. It will not resend interruption, cancel input or start
+                        compute.
+                      </p>
+                      <button
+                        type="button"
+                        class="agent-control agent-stop-check"
+                        disabled={pending()}
+                        onClick={() => void recheckStopConfirmation()}
+                      >
+                        Recheck confirmation
+                      </button>
+                    </Show>
+                  </details>
+                  <button
+                    type="button"
+                    class="agent-control agent-stop-check"
+                    disabled={pending()}
+                    onClick={() => void checkStopStatus()}
+                  >
+                    Check Stop status
+                  </button>
                 </section>
               </Show>
               <Show
                 when={
-                  visibleConversation().length === 0 &&
-                  !assistantPending() &&
-                  !["uncertain", "failed", "stopped"].includes(conversation()?.turn?.state ?? "")
+                  conversationMode() === "build" &&
+                  selectedChange() &&
+                  agent().commitOperation &&
+                  !agent().stopPending
                 }
               >
-                <div class="agent-empty compact">
-                  <Icon name="agent" />
-                  <p>
-                    {conversationMode() === "build"
-                      ? preparingImplementation()
-                        ? "Choose reasoning for this Ticket's first Build."
-                        : !agentViewLoaded()
-                          ? "Loading implementation…"
-                          : selectedChange()
-                            ? buildAgentEmptyMessage(agent())
-                            : "Approve the latest Requirement Revision to start Build."
-                      : assistantTicketID()
-                        ? "Ask about this Ticket, or tell me what needs clarifying."
-                        : "Ask about the Project, or describe a change you want to work on."}
-                  </p>
-                </div>
-              </Show>
-            </div>
-            <div class={`agent-input-shell${pendingInterview() ? " interview-active" : ""}`}>
-              <div class="assistant-context-row">
-                <AgentBlockers
-                  projectID={selectedProjectID()}
-                  mode={conversationMode()}
-                  settingsOpen={workspaceView() === "settings"}
-                  onSettings={openSettings}
-                  turn={
-                    preparingImplementation()
-                      ? undefined
-                      : conversationMode() === "build" && selectedChange()
-                        ? agent().turn
-                        : conversation()?.turn
-                  }
-                />
-              </div>
-              <Show when={conversationMode() !== "build" && agentTurnBusy()}>
-                <div class="agent-activity-notice" role="status">
-                  <span>Implementation continues in its Workspace.</span>
-                  <button
-                    type="button"
-                    class="agent-control"
-                    aria-label="Stop OpenCode"
-                    onClick={() => void stopAgent()}
-                  >
-                    <Icon name="stop" /> Stop
-                  </button>
-                </div>
+                <p class="agent-activity-notice" role="status" aria-label="Commit recovery">
+                  {buildAgentHint(agent())}
+                </p>
               </Show>
               <Show
                 when={
-                  restoredMessageScope() ===
-                  agentCommandScope(
-                    conversationMode() === "build" ? "change-prompt" : "project-message",
-                    conversationMode() === "build" ? selectedChange()?.id : assistantTicketID(),
-                  )
+                  conversationMode() === "build" &&
+                  selectedChange() &&
+                  buildAgentActivityNotice(agent())
                 }
               >
-                <p class="agent-activity-notice" role="status" aria-label="Message recovery">
-                  Previous send unconfirmed. Re-send unchanged text to check it.
+                <p class="agent-activity-notice" role="status">
+                  {buildAgentActivityNotice(agent())}
                 </p>
               </Show>
-              <Show when={conversationMode() === "build"}>
-                <Show
-                  when={
-                    !preparingImplementation() &&
-                    agent().lastError &&
-                    !agent().codingPause &&
-                    !(
-                      agent().stopPending &&
-                      agent().lastError?.startsWith("Stop remains unconfirmed.")
-                    )
-                  }
-                >
-                  <p class="inline-error">{agent().lastError}</p>
-                </Show>
-                <Show when={!preparingImplementation() && agent().codingPause}>
-                  <p class="agent-activity-notice" role="status">
-                    Coding is paused. Existing code is retained. Resume from the Ticket after its
-                    allowance is available.
-                  </p>
-                </Show>
-                <Show when={!preparingImplementation() && agentViewLoaded() && !agentCanRun()}>
-                  <p class="agent-unavailable">
-                    {selectedChange()?.state === "branch-pending"
-                      ? "Preparing the Change branch. Implementation will be available when it is ready."
-                      : `This Change is ${selectedChange()?.state ?? "unavailable"}. OpenCode is read-only.`}
-                  </p>
-                </Show>
-                <Show when={preparingImplementation()}>
-                  <Show when={preparingImplementation()?.failure}>
-                    <p class="inline-error" role="alert">
-                      {preparingImplementation()?.failure}
-                    </p>
-                  </Show>
-                  <p class="agent-activity-notice">
-                    Start approves this specification and begins implementation.
-                  </p>
-                </Show>
-                <Show when={preparingImplementation() || (agentCanRun() && !agent().codingPause)}>
-                  <form
-                    class="agent-composer build-composer"
-                    onSubmit={(event) => {
-                      const prepared = preparingImplementation();
-                      if (prepared) {
-                        event.preventDefault();
-                        void implementTicket(prepared.revisionID, prepared.reasoning);
-                      } else if (!canPromptBuild()) {
-                        event.preventDefault();
-                        void startAgent();
-                      } else void promptAgent(event);
-                    }}
-                    onReset={(event) => {
-                      const input = event.currentTarget.querySelector("textarea");
-                      queueMicrotask(() => {
-                        if (input) resizeComposer(input);
-                      });
-                    }}
-                  >
-                    <Show when={canPromptBuild()}>
-                      <textarea
-                        rows={1}
-                        onKeyDown={composerKeyDown}
-                        onInput={(event) => resizeComposer(event.currentTarget)}
-                        ref={(element) =>
-                          restoreMessageDraft(element, () =>
-                            agentCommandScope("change-prompt", selectedChange()?.id),
-                          )
+              <Show
+                when={
+                  conversationMode() === "build" &&
+                  selectedChange() &&
+                  agent().state === "working" &&
+                  !agent().runtimeConnected &&
+                  !agent().stopPending &&
+                  !agent().commitOperation
+                }
+              >
+                <p class="agent-activity-notice" role="status" aria-label="Build connection">
+                  {buildAgentHint(agent())}
+                </p>
+              </Show>
+              <div
+                class="agent-messages conversation-history"
+                aria-live="polite"
+                ref={(element) => {
+                  conversationScroll?.dispose();
+                  conversationScroll = followConversation(element);
+                }}
+              >
+                <For each={visibleConversation()} keyed={(item) => item.id}>
+                  {(item) => {
+                    const conversationEntry = () => {
+                      const current = item();
+                      return current.kind === "conversation" ? current.entry : undefined;
+                    };
+                    const agentMessage = () => {
+                      const current = item();
+                      return current.kind === "change-agent" ? current.message : undefined;
+                    };
+                    const activityMessages = () => {
+                      const current = item();
+                      return current.kind === "activity-group" ? current.messages : undefined;
+                    };
+                    return (
+                      <Show
+                        when={conversationEntry()}
+                        fallback={
+                          <Show
+                            when={activityMessages()}
+                            fallback={
+                              <Show when={agentMessage()}>
+                                {(message) => (
+                                  <ChangeAgentMessage
+                                    message={message()}
+                                    onNavigate={
+                                      canDevelopProject()
+                                        ? (message, kind) => void openChatActivity(message, kind)
+                                        : undefined
+                                    }
+                                  />
+                                )}
+                              </Show>
+                            }
+                          >
+                            {(messages) => (
+                              <ChangeAgentActivityGroup
+                                messages={messages()}
+                                onNavigate={
+                                  canDevelopProject()
+                                    ? (message, kind) => void openChatActivity(message, kind)
+                                    : undefined
+                                }
+                              />
+                            )}
+                          </Show>
                         }
-                        name="message"
-                        aria-label="Message conversation"
-                        placeholder={
-                          agent().state === "failed"
-                            ? "Describe what to fix in the retained code…"
-                            : agent().state === "stopped"
-                              ? "Ask a question or describe the next change…"
-                              : agentTurnBusy()
-                                ? "Prepare your next instructions, or Stop to change direction…"
-                                : "Ask a question or describe the next change…"
-                        }
-                        disabled={pending()}
-                      />
-                    </Show>
-                    <div class="agent-compose-toolbar">
-                      <Show when={canDevelopProject()}>
-                        <Show
-                          when={preparingImplementation() || agentViewLoaded()}
-                          fallback={
-                            <span class="agent-model-controls">Loading implementation…</span>
-                          }
-                        >
-                          <BuildModelControls
-                            projectID={selectedProjectID()}
-                            changeID={selectedChange()?.id}
-                            turn={preparingImplementation() ? undefined : agent().turn}
-                            sessionAvailable={
-                              !preparingImplementation() && agent().sessionAvailable
+                      >
+                        {(entry) => (
+                          <ConversationEntryCard
+                            entry={entry()}
+                            answered={
+                              answeredQuestionIDs().has(entry().id) ||
+                              Boolean(answerSummary(entry().id))
                             }
-                            disabled={
-                              pending() ||
-                              (!preparingImplementation() &&
-                                (agentTurnBusy() ||
-                                  agentNeedsResolution() ||
-                                  Boolean(agent().commitOperation) ||
-                                  agent().stopPending))
+                            answerSummary={answerSummary(entry().id)}
+                            requirementCurrent={
+                              latestRevision()?.id === entry().requirementRevisionId
                             }
-                            reasoning={
-                              preparingImplementation()?.reasoning ?? chosenCodingReasoning()
+                            requirementApproved={Boolean(
+                              detail()?.revisions.find(
+                                (revision) => revision.id === entry().requirementRevisionId,
+                              )?.approvalId,
+                            )}
+                            requirementVisible={
+                              workspaceView() === "ticket" && Boolean(assistantTicketID())
                             }
-                            onChange={(value) => {
-                              if (preparingImplementation()) {
-                                setImplementationPreparation((previous) =>
-                                  previous ? { ...previous, reasoning: value } : previous,
+                            pending={assistantPending()}
+                            initialAnswer={restoredInterviewAnswer(entry().id)}
+                            answerStorageKey={`interview-answer:${props.session.user.id}:${entry().id}`}
+                            canAnswer={
+                              pendingInterview() && currentInterviewQuestion()?.id === entry().id
+                            }
+                            onPause={() => pauseClarification(true)}
+                            onResume={() => {
+                              pauseClarification(false);
+                              setAgentOpen(true);
+                            }}
+                            onAnswer={(event, question) =>
+                              void answerInterview(event, entry().id, question)
+                            }
+                            onReviewRequirements={() => {
+                              const epic = epicProposals()[entry().id];
+                              if (epic) {
+                                const ticketID = assistantTicketID();
+                                openWorkspaceTab({
+                                  id: `epic-proposal:${entry().id}`,
+                                  view: "epic-proposal",
+                                  label: epic.epic.title,
+                                  proposalID: entry().id,
+                                  ...(ticketID ? { ticketID } : {}),
+                                });
+                                setAgentOpen(false);
+                                return;
+                              }
+                              const ticketID = assistantTicketID();
+                              if (ticketID) {
+                                selectTicket(ticketID);
+                                return;
+                              }
+                              const ticket = z
+                                .object({
+                                  title: z.string().max(200),
+                                  description: z.string().max(10_000),
+                                })
+                                .safeParse(entry().payload["ticket"]);
+                              const requirement = requirementContentInput.safeParse(
+                                entry().payload["requirement"],
+                              );
+                              if (!ticket.success || !requirement.success) return;
+                              const description = [
+                                ticket.data.description,
+                                requirement.data.summary,
+                                "## Acceptance criteria",
+                                ...requirement.data.acceptanceCriteria.map(
+                                  (value) => `- [ ] ${value}`,
+                                ),
+                                ...(requirement.data.nonGoals.length
+                                  ? [
+                                      "## Out of scope",
+                                      ...requirement.data.nonGoals.map((value) => `- ${value}`),
+                                    ]
+                                  : []),
+                              ].join("\n\n");
+                              if (description.length > 10_000) {
+                                setError(
+                                  "This proposal is too long for a Ticket draft. Ask for a more concise version.",
                                 );
                                 return;
                               }
-                              const changeID = selectedChange()?.id;
-                              if (changeID)
-                                setCodingReasoningChoices((previous) => ({
-                                  ...previous,
-                                  [changeID]: value,
-                                }));
+                              openTicketDraft({
+                                id: entry().id,
+                                title: ticket.data.title,
+                                description,
+                              });
+                            }}
+                            onCitation={({ source, id, commitSha, path }) => {
+                              if (source === "ticket") {
+                                const ticket = ticketList().find(
+                                  (candidate) => candidate.id === id,
+                                );
+                                if (ticket) selectTicket(id);
+                              } else if (source === "epic") {
+                                setSelectedEpicID(id);
+                              } else if (source === "attachment") {
+                                window.open(
+                                  `/api/attachments/${encodeURIComponent(id)}`,
+                                  "_blank",
+                                  "noopener,noreferrer",
+                                );
+                              } else if (source === "code") {
+                                const repository = browserRepository();
+                                const link =
+                                  repository && commitSha && path
+                                    ? repositoryLink(repository, commitSha, path)
+                                    : undefined;
+                                if (link) window.open(link, "_blank", "noopener,noreferrer");
+                              } else {
+                                setOpenRepositoryDocument(undefined);
+                                setSelectedKnowledgePageID(id);
+                                setKnowledgeHistory([]);
+                                void openKnowledge();
+                              }
                             }}
                           />
-                        </Show>
+                        )}
                       </Show>
-                      <div class="composer-actions">
-                        <Show
-                          when={
-                            !preparingImplementation() &&
-                            (agentNeedsResolution() || agentTurnBusy())
-                          }
-                          fallback={
-                            <button
-                              type="submit"
-                              class="agent-control primary"
-                              aria-label={
-                                preparingImplementation()
-                                  ? "Start implementation"
-                                  : !canPromptBuild()
-                                    ? agent().state === "failed"
-                                      ? "Retry implementation"
-                                      : "Start implementation"
-                                    : "Send message"
-                              }
-                              disabled={
-                                pending() ||
-                                (!preparingImplementation() &&
-                                  (!agentViewLoaded() ||
-                                    agentNeedsResolution() ||
-                                    Boolean(agent().commitOperation) ||
-                                    agent().stopPending)) ||
-                                (!canPromptBuild() && !modelRelayConfigured()) ||
-                                blockersFor(selectedTicketID() ?? "").length > 0
-                              }
-                              title={
-                                !modelRelayConfigured()
-                                  ? "Connect a Factory model before starting implementation"
-                                  : preparingImplementation()
-                                    ? "Start this specification with the selected reasoning"
-                                    : buildAgentHint(agent())
-                              }
-                            >
-                              <Icon name={canPromptBuild() ? "send" : "play"} />
-                              <Show
-                                when={!canPromptBuild()}
-                                fallback={
-                                  <span class="sr-only">
-                                    {agent().state === "stopped" ? "Resume" : "Send"}
-                                  </span>
-                                }
-                              >
-                                {!preparingImplementation() && agent().state === "failed"
-                                  ? "Retry"
-                                  : "Start"}
-                              </Show>
-                            </button>
-                          }
-                        >
-                          <button
-                            type="button"
-                            class="agent-control"
-                            aria-label={
-                              agentNeedsResolution() ? "Stop unresolved turn" : "Stop OpenCode"
-                            }
-                            disabled={pending() || agent().stopPending}
-                            onClick={() => void stopAgent()}
-                          >
-                            <Icon name="stop" />
-                            <span class="sr-only">
-                              {agentNeedsResolution() ? "Stop unresolved turn" : "Stop"}
-                            </span>
-                          </button>
-                        </Show>
-                      </div>
-                    </div>
-                  </form>
-                  <Show when={!modelRelayConfigured()}>
-                    <p class="agent-configuration-note">
-                      Model connection required before implementation can start.
-                    </p>
-                  </Show>
-                </Show>
-              </Show>
-              <Show when={conversationMode() !== "build" && !interviewOwnsComposer()}>
-                <form
-                  class="agent-composer conversation-composer"
-                  onSubmit={sendConversationMessage}
-                  onReset={(event) => {
-                    const input = event.currentTarget.querySelector("textarea");
-                    queueMicrotask(() => {
-                      if (input) resizeComposer(input);
-                    });
+                    );
                   }}
+                </For>
+                <Show when={streamedAnswer()}>
+                  <article
+                    class="agent-message assistant"
+                    aria-label="Assistant streaming response"
+                    aria-busy="true"
+                  >
+                    <div
+                      class="markdown-body"
+                      innerHTML={markdownHTML(streamedAnswer()?.text ?? "")}
+                    />
+                  </article>
+                </Show>
+                <Show when={assistantPending() && !streamedAnswer()}>
+                  <section
+                    class="assistant-reply-placeholder"
+                    role="status"
+                    aria-label="Assistant responding"
+                    aria-busy="true"
+                  >
+                    <span>
+                      {(() => {
+                        const progress = conversation()?.turn?.progress;
+                        if (!progress) return "Preparing a response…";
+                        const label = {
+                          guidance: "Loading Project guidance…",
+                          thinking: "Preparing a response…",
+                          searching: "Searching the Project…",
+                          reading: "Reading Project sources…",
+                          validating: "Checking the response…",
+                        }[progress.phase];
+                        return `${label}${progress.completedLookups ? ` · ${progress.completedLookups} research steps completed` : ""}`;
+                      })()}
+                    </span>
+                    <div class="assistant-skeleton" aria-hidden="true">
+                      <span />
+                      <span />
+                      <span />
+                    </div>
+                  </section>
+                </Show>
+                <Show
+                  when={
+                    visibleConversation().length === 0 &&
+                    !assistantPending() &&
+                    !["uncertain", "failed", "stopped"].includes(conversation()?.turn?.state ?? "")
+                  }
                 >
-                  <textarea
-                    rows={1}
-                    onKeyDown={composerKeyDown}
-                    onInput={(event) => resizeComposer(event.currentTarget)}
-                    ref={(element) =>
-                      restoreMessageDraft(element, () => agentCommandScope("project-message"))
-                    }
-                    name="message"
-                    aria-label="Message conversation"
-                    placeholder={conversationPlaceholder()}
-                    disabled={assistantPending() || !selectedProject()}
-                  />
-                  <div class="agent-compose-toolbar">
-                    <button
-                      type="submit"
-                      class="agent-control primary"
-                      aria-label="Send message"
-                      disabled={assistantPending() || !selectedProject()}
+                  <div class="agent-empty compact">
+                    <Icon name="agent" />
+                    <p>
+                      {conversationMode() === "build"
+                        ? preparingImplementation()
+                          ? "Choose reasoning for this Ticket's first Build."
+                          : !agentViewLoaded()
+                            ? "Loading implementation…"
+                            : selectedChange()
+                              ? buildAgentEmptyMessage(agent())
+                              : "Approve the latest Requirement Revision to start Build."
+                        : assistantTicketID()
+                          ? "Ask about this Ticket, or tell me what needs clarifying."
+                          : "Ask about the Project, or describe a change you want to work on."}
+                    </p>
+                  </div>
+                </Show>
+              </div>
+              <Show when={canDevelopProject()}>
+                <ChangeWriterStatus
+                  changeID={assistantTicketID() ? selectedChange()?.id : undefined}
+                  active={agentOpen()}
+                  onStatus={(changeID, view) => {
+                    setCodingWriter({ changeID, view });
+                  }}
+                />
+              </Show>
+              <div class={`agent-input-shell${pendingInterview() ? " interview-active" : ""}`}>
+                <Show when={historicalCoding()}>
+                  <div class="agent-activity-notice" role="status">
+                    <p>
+                      Previous conversation. Viewing it does not change the shared active Coding
+                      context. Your drafts stay with their conversation.
+                    </p>
+                    <Show
+                      when={
+                        conversation()?.codingHistory &&
+                        !conversation()?.codingHistory?.messagesAvailable
+                      }
                     >
-                      <Icon name="send" />
-                      <span class="sr-only">Send</span>
+                      <p>
+                        Live history is unavailable. Saved prompts and snapshots are retained.
+                        Viewing history does not start compute.
+                      </p>
+                    </Show>
+                    <Show when={retainedCodingDraft()}>
+                      {(draft) => (
+                        <details class="conversation-retained-draft">
+                          <summary>Unsent draft</summary>
+                          <p>{draft()}</p>
+                          <CopyButton
+                            class="quiet-button"
+                            value={draft()}
+                            scope={assistantKey()}
+                            accessibleLabel="Copy retained draft"
+                          />
+                        </details>
+                      )}
+                    </Show>
+                    <button
+                      type="button"
+                      class="quiet-button"
+                      onClick={() =>
+                        setConversationSelections((previous) => ({
+                          ...previous,
+                          [conversationScope()]:
+                            conversation()?.activeCodingContextId ?? "original",
+                        }))
+                      }
+                    >
+                      Return to active Coding
                     </button>
                   </div>
-                </form>
-              </Show>
-            </div>
-          </Show>
-        </aside>
-      </Show>
-
-      <section
-        class={`workspace-window workspace-window-${workspaceView() ?? "minimized"}`}
-        aria-label={`${workspaceView() ?? "minimized"} workspace`}
-        data-closing={workspaceWindow.closing() ? "true" : "false"}
-        onAnimationEnd={(event) => {
-          if (event.target === event.currentTarget && event.animationName === "window-out")
-            workspaceWindow.finishExit();
-        }}
-        aria-hidden={workspaceVisible() ? "false" : "true"}
-        hidden={!workspaceWindow.present() || workspaceTabs().length === 0}
-        inert={!workspaceVisible() || agentOverlay() || registrationOpen()}
-      >
-        <WorkspaceTabbar
-          tabs={workspaceTabs()}
-          activeTabID={activeWorkspaceTab()?.id}
-          onActivate={activateWorkspaceTab}
-          onClose={closeWorkspaceTab}
-          onMinimize={() => setWorkspaceVisible(false)}
-        />
-        <div
-          class="workspace-view-body"
-          role="tabpanel"
-          id={workspacePanelID}
-          aria-labelledby={activeWorkspaceLabelID()}
-        >
-          <Loading
-            on={activeWorkspaceTab()?.id}
-            fallback={
-              <p class="muted" role="status">
-                Opening workspace…
-              </p>
-            }
-          >
-            <Switch>
-              <Match when={workspaceView() === "epic-proposal" && activeWorkspaceTab()?.proposalID}>
-                <Show when={epicProposals()[activeWorkspaceTab()?.proposalID ?? ""]} keyed>
-                  {(proposal) => (
-                    <EpicProposalWorkspace
-                      id={activeWorkspaceTab()?.proposalID ?? ""}
-                      initial={proposal}
-                      storageKey={`epic-proposal:${props.session.user.id}:${activeWorkspaceTab()?.proposalID}`}
-                      pending={pending()}
-                      onConfirm={(value) =>
-                        confirmEpicWork(activeWorkspaceTab()?.proposalID ?? "", value)
+                </Show>
+                <Show when={!historicalCoding()}>
+                  <div class="assistant-context-row">
+                    <AgentBlockers
+                      projectID={selectedProjectID()}
+                      mode={conversationMode()}
+                      settingsOpen={workspaceView() === "settings"}
+                      onSettings={openSettings}
+                      turn={
+                        preparingImplementation()
+                          ? undefined
+                          : conversationMode() === "build" && selectedChange()
+                            ? agent().turn
+                            : conversation()?.turn
                       }
                     />
-                  )}
-                </Show>
-              </Match>
-              <Match when={workspaceView() === "ticket-draft"}>
-                <TicketDraftWorkspace
-                  storageKey={personalDraftKey()}
-                  initial={
-                    personalDrafts.get(selectedProjectID() ?? "") ??
-                    readPersonalTicketDraft(personalDraftKey())
-                  }
-                  pending={pending()}
-                  onCreate={publishTicketDraft}
-                  onChange={(draft) => {
-                    const projectID = selectedProjectID();
-                    if (projectID) personalDrafts.set(projectID, draft);
-                    updateWorkspaceTab({
-                      id: `ticket-draft:${projectID}`,
-                      view: "ticket-draft",
-                      label: draft.title || "New ticket",
-                    });
-                  }}
-                />
-              </Match>
-              <Match when={workspaceView() === "ticket" && detail()}>
-                <Show when={detail()}>
-                  {(current) => (
-                    <TicketWorkspace
-                      drafts={ticketDrafts}
-                      current={current()}
-                      storageKey={`ticket-edit:${props.session.user.id}:${current().ticket.id}`}
-                      onConfirmRequirements={confirmRequirements}
-                      clarificationAction={ticketClarificationAction()}
-                      ticketReference={ticketReference(current().ticket.id)}
-                      change={selectedChange()}
-                      delivery={delivery()}
-                      latestRevision={latestRevision()}
-                      latestRequirement={latestRequirement()}
-                      pending={pending()}
-                      buildInProgress={agentTurnBusy()}
-                      epics={epicList()}
-                      dependencies={{
-                        prerequisites: prerequisitesFor(current().ticket.id),
-                        candidates: dependencyCandidates(current().ticket.id),
-                        admitted: Boolean(selectedChange()),
-                        pending: pending(),
-                        onOpen: selectTicket,
-                        onAdd: (id) => editDependency("add", id),
-                        onRemove: (id) => void editDependency("remove", id),
-                      }}
-                      onAssignEpic={(epicId) => void assignTicketEpic(epicId)}
-                      onInterview={() => void beginRequirementsInterview()}
-                      onWriteRequirements={() => void moveTicket(current().ticket, "ready")}
-                      onSaveDocument={saveTicketDocument}
-                      onFollowUp={() => void createFollowUp()}
-                      onOpenTicket={selectTicket}
-                      onOpenEpic={(id) => {
-                        setSelectedEpicID(id);
-                        setWorkspaceVisible(false);
-                      }}
-                      onTrash={() => void ticketTrashCommand(current().ticket.id, "trash")}
-                      onRestore={() => void ticketTrashCommand(current().ticket.id, "restore")}
-                      onImplement={(revisionID) =>
-                        void implementTicket(revisionID, preparingImplementation()?.reasoning)
-                      }
-                      onCodingOptions={openCodingOptions}
-                      codingOptionsOpen={Boolean(preparingImplementation() && agentOpen())}
-                      implementationAvailable={modelRelayConfigured()}
-                      codingPause={agent().codingPause}
-                      computeWait={agent().computeWait}
-                      onResumeCoding={() => void resumeCoding()}
-                      onStopImplementation={() => void stopAgent()}
-                      onOpenIDE={() => {
-                        const target = ideTargets().find(
-                          (candidate) => candidate.changeId === selectedChange()?.id,
-                        );
-                        if (target) void openIDETarget(target);
-                      }}
-                      onApproveDelivery={(changeID) => void approveDelivery(changeID)}
-                      onRetryReview={(changeID) => void retryReview(changeID)}
-                      onResumeChecks={(changeID) => void resumeChecks(changeID)}
-                      canDevelop={canDevelopProject()}
-                      onRequestChanges={requestCorrections}
-                    />
-                  )}
-                </Show>
-              </Match>
-              <Match when={workspaceView() === "knowledge"}>
-                <KnowledgeWorkspace
-                  projectID={selectedProjectID() ?? ""}
-                  userID={props.session.user.id}
-                  repositoryURL={browserRepository() ?? ""}
-                  canDevelop={canDevelopProject()}
-                  onOpenIDE={() => {
-                    const target = ideTargets().find((entry) => !entry.changeId);
-                    if (target) void openIDETarget(target);
-                  }}
-                  onRestore={(pageID, revisionID, expectedVersion) =>
-                    apiRequest(knowledgeSaveSchema, `/api/knowledge/pages/${pageID}/restore`, {
-                      method: "POST",
-                      headers: { "content-type": "application/json" },
-                      body: JSON.stringify({ revisionID, expectedVersion }),
-                    })
-                  }
-                  drafts={knowledgeDrafts}
-                  pages={knowledgePageList()}
-                  selectedPage={selectedKnowledgePage()}
-                  documents={repositoryDocuments()}
-                  openDocument={openRepositoryDocument()}
-                  generation={knowledgeGeneration()}
-                  revisions={knowledgeHistory()}
-                  searchResults={knowledgeSearch()}
-                  searchQuery={knowledgeSearchQuery()}
-                  pending={pending()}
-                  onSelectPage={(pageID) => {
-                    setSelectedKnowledgePageID(pageID);
-                    setOpenRepositoryDocument(undefined);
-                    setKnowledgeHistory([]);
-                  }}
-                  onOpenDocument={(path) => void openDocument(path)}
-                  onGenerate={() => void mutate(generateKnowledge)}
-                  onSearch={(query) => void searchProjectKnowledge(query)}
-                  onSavePage={editKnowledgePage}
-                  onHistory={loadKnowledgeHistory}
-                  onSources={async (pageID) =>
-                    (
-                      await apiRequest(
-                        knowledgeSourcesSchema,
-                        `/api/knowledge/pages/${pageID}/sources`,
+                  </div>
+                  <Show when={conversationMode() !== "build" && agentTurnBusy()}>
+                    <div class="agent-activity-notice" role="status">
+                      <span>Implementation continues in its Workspace.</span>
+                      <button
+                        type="button"
+                        class="agent-control"
+                        aria-label="Stop OpenCode"
+                        onClick={() => void stopAgent()}
+                      >
+                        <Icon name="stop" /> Stop
+                      </button>
+                    </div>
+                  </Show>
+                  <Show
+                    when={
+                      restoredMessageScope() ===
+                      agentCommandScope(
+                        conversationMode() === "build" ? "change-prompt" : "project-message",
+                        conversationMode() === "build" ? selectedChange()?.id : assistantTicketID(),
                       )
-                    ).citations
-                  }
-                  onArchive={() => void archiveKnowledgePage()}
-                  onMove={async ({ pageId, parentId, beforeId }) => {
-                    const page = knowledgePageList().find((entry) => entry.id === pageId);
-                    const projectId = selectedProjectID();
-                    const client = zero();
-                    if (!page || !projectId || !client) throw new Error("Wiki page not found");
-                    await commitZeroMutation(
-                      client.mutate(
-                        zeroMutators.knowledge.move({
-                          projectId,
-                          pageId,
-                          parentId,
-                          beforeId,
-                          expectedMetadataVersion: page.metadataVersion,
-                        }),
-                      ).server,
-                    );
-                  }}
-                  onIcon={async (icon) => {
-                    const page = selectedKnowledgePage();
-                    const client = zero();
-                    if (!page || !client) throw new Error("Wiki page not found");
-                    await commitZeroMutation(
-                      client.mutate(
-                        zeroMutators.knowledge.setIcon({
-                          projectId: page.projectId,
-                          pageId: page.id,
-                          expectedMetadataVersion: page.metadataVersion,
-                          icon,
-                        }),
-                      ).server,
-                    );
-                  }}
-                />
-              </Match>
-              <Match when={workspaceView() === "inbox"}>
-                <InboxWorkspace />
-              </Match>
-              <Match when={workspaceView() === "trash"}>
-                <TrashWorkspace
-                  tickets={ticketList().filter((ticket) => ticket.trashedAt)}
-                  pending={pending()}
-                  onOpen={selectTicket}
-                  onRestore={(id) => void ticketTrashCommand(id, "restore")}
-                  onRetry={(id) => void ticketTrashCommand(id, "trash")}
-                />
-              </Match>
-            </Switch>
-          </Loading>
-          <For each={workspaceTabs().filter((tab) => tab.view === "settings")}>
-            {(tab) => (
-              <div
-                class="settings-tab-panel"
-                hidden={workspaceView() !== "settings" || activeWorkspaceTab()?.id !== tab.id}
-              >
-                <SettingsWorkspace
-                  active={workspaceView() === "settings" && activeWorkspaceTab()?.id === tab.id}
-                  userID={props.session.user.id}
-                  initialSelection={tab.settingsSelection}
-                  project={tab.settingsProject}
-                  systemManager={props.session.systemManager}
-                  projectManager={canManageSettingsProject(tab.settingsProject?.id)}
-                  onModelsChanged={refreshModelAvailability}
-                  developer={
-                    props.session.systemManager ||
-                    memberships
-                      .data()
-                      ?.some(
-                        (member) =>
-                          member.projectId === tab.settingsProject?.id &&
-                          member.role === "developer",
-                      ) === true
-                  }
-                />
+                    }
+                  >
+                    <p class="agent-activity-notice" role="status" aria-label="Message recovery">
+                      Previous send unconfirmed. Re-send unchanged text to check it.
+                    </p>
+                  </Show>
+                  <Show when={conversationMode() === "build"}>
+                    <Show
+                      when={
+                        !preparingImplementation() &&
+                        agent().lastError &&
+                        !agent().codingPause &&
+                        !(
+                          agent().stopPending &&
+                          agent().lastError?.startsWith("Stop remains unconfirmed.")
+                        )
+                      }
+                    >
+                      <p class="inline-error">{agent().lastError}</p>
+                    </Show>
+                    <Show when={!preparingImplementation() && agent().codingPause}>
+                      <p class="agent-activity-notice" role="status">
+                        Coding is paused. Existing code is retained. Resume from the Ticket after
+                        its allowance is available.
+                      </p>
+                    </Show>
+                    <Show when={!preparingImplementation() && agentViewLoaded() && !agentCanRun()}>
+                      <p class="agent-unavailable">
+                        {selectedChange()?.state === "branch-pending"
+                          ? "Preparing the Change branch. Implementation will be available when it is ready."
+                          : `This Change is ${selectedChange()?.state ?? "unavailable"}. OpenCode is read-only.`}
+                      </p>
+                    </Show>
+                    <Show when={preparingImplementation()}>
+                      <Show when={preparingImplementation()?.failure}>
+                        <p class="inline-error" role="alert">
+                          {preparingImplementation()?.failure}
+                        </p>
+                      </Show>
+                      <p class="agent-activity-notice">
+                        Start approves this specification and begins implementation.
+                      </p>
+                    </Show>
+                    <Show
+                      when={preparingImplementation() || (agentCanRun() && !agent().codingPause)}
+                    >
+                      <form
+                        class="agent-composer build-composer"
+                        onSubmit={(event) => {
+                          const prepared = preparingImplementation();
+                          if (prepared) {
+                            event.preventDefault();
+                            void implementTicket(prepared.revisionID, prepared.reasoning);
+                          } else if (!canPromptBuild()) {
+                            event.preventDefault();
+                            void startAgent();
+                          } else void promptAgent(event);
+                        }}
+                        onReset={(event) => {
+                          const input = event.currentTarget.querySelector("textarea");
+                          queueMicrotask(() => {
+                            if (input) resizeComposer(input);
+                          });
+                        }}
+                      >
+                        <Show when={canPromptBuild()}>
+                          <TextareaAttachments
+                            disabled={pending() || assistantContextLoading()}
+                            scopeKey={agentCommandScope("change-prompt", selectedChange()?.id)}
+                          >
+                            <textarea
+                              rows={1}
+                              onKeyDown={composerKeyDown}
+                              onInput={(event) => resizeComposer(event.currentTarget)}
+                              ref={(element) =>
+                                restoreMessageDraft(element, () =>
+                                  agentCommandScope("change-prompt", selectedChange()?.id),
+                                )
+                              }
+                              name="message"
+                              aria-label="Message conversation"
+                              placeholder={
+                                codingWriterBlocked()
+                                  ? "Editing is held or being transferred. You can keep drafting…"
+                                  : agent().state === "failed"
+                                    ? "Describe what to fix in the retained code…"
+                                    : agent().state === "stopped"
+                                      ? "Ask a question or describe the next change…"
+                                      : agentTurnBusy()
+                                        ? "Prepare your next instructions, or Stop to change direction…"
+                                        : "Ask a question or describe the next change…"
+                              }
+                              disabled={pending() || assistantContextLoading()}
+                            />
+                          </TextareaAttachments>
+                        </Show>
+                        <div class="agent-compose-toolbar">
+                          <Show when={canPromptBuild()}>
+                            <ChatSkillPicker
+                              projectID={selectedProjectID()}
+                              workType="build"
+                              changeID={selectedChange()?.id}
+                              scope={agentCommandScope("change-prompt", selectedChange()?.id)}
+                              disabled={pending() || assistantContextLoading()}
+                            />
+                          </Show>
+                          <Show when={canDevelopProject()}>
+                            <Show
+                              when={preparingImplementation() || agentViewLoaded()}
+                              fallback={
+                                <span class="agent-model-controls">Loading implementation…</span>
+                              }
+                            >
+                              <BuildModelControls
+                                projectID={selectedProjectID()}
+                                changeID={selectedChange()?.id}
+                                turn={preparingImplementation() ? undefined : agent().turn}
+                                sessionAvailable={
+                                  !preparingImplementation() && agent().sessionAvailable
+                                }
+                                disabled={
+                                  pending() ||
+                                  (!preparingImplementation() &&
+                                    (agentTurnBusy() ||
+                                      agentNeedsResolution() ||
+                                      Boolean(agent().commitOperation) ||
+                                      agent().stopPending))
+                                }
+                                reasoning={
+                                  preparingImplementation()?.reasoning ?? chosenCodingReasoning()
+                                }
+                                onChange={(value) => {
+                                  if (preparingImplementation()) {
+                                    setImplementationPreparation((previous) =>
+                                      previous ? { ...previous, reasoning: value } : previous,
+                                    );
+                                    return;
+                                  }
+                                  const changeID = selectedChange()?.id;
+                                  if (changeID)
+                                    setCodingReasoningChoices((previous) => ({
+                                      ...previous,
+                                      [changeID]: value,
+                                    }));
+                                }}
+                              />
+                            </Show>
+                          </Show>
+                          <div class="composer-actions">
+                            <Show
+                              when={
+                                !preparingImplementation() &&
+                                (agentNeedsResolution() || agentTurnBusy())
+                              }
+                              fallback={
+                                <button
+                                  type="submit"
+                                  class="agent-control primary"
+                                  aria-label={
+                                    preparingImplementation()
+                                      ? "Start implementation"
+                                      : !canPromptBuild()
+                                        ? agent().state === "failed"
+                                          ? "Retry implementation"
+                                          : "Start implementation"
+                                        : "Send message"
+                                  }
+                                  disabled={
+                                    pending() ||
+                                    assistantContextLoading() ||
+                                    codingWriterBlocked() ||
+                                    (!preparingImplementation() &&
+                                      (!agentViewLoaded() ||
+                                        agentNeedsResolution() ||
+                                        Boolean(agent().commitOperation) ||
+                                        agent().stopPending)) ||
+                                    (!canPromptBuild() && !modelRelayConfigured()) ||
+                                    blockersFor(selectedTicketID() ?? "").length > 0
+                                  }
+                                  title={
+                                    !modelRelayConfigured()
+                                      ? "Connect a Factory model before starting implementation"
+                                      : preparingImplementation()
+                                        ? "Start this specification with the selected reasoning"
+                                        : buildAgentHint(agent())
+                                  }
+                                >
+                                  <Icon name={canPromptBuild() ? "send" : "play"} />
+                                  <Show
+                                    when={!canPromptBuild()}
+                                    fallback={
+                                      <span class="sr-only">
+                                        {agent().state === "stopped" ? "Resume" : "Send"}
+                                      </span>
+                                    }
+                                  >
+                                    {!preparingImplementation() && agent().state === "failed"
+                                      ? "Retry"
+                                      : "Start"}
+                                  </Show>
+                                </button>
+                              }
+                            >
+                              <button
+                                type="button"
+                                class="agent-control"
+                                aria-label={
+                                  agentNeedsResolution() ? "Stop unresolved turn" : "Stop OpenCode"
+                                }
+                                disabled={pending() || agent().stopPending}
+                                onClick={() => void stopAgent()}
+                              >
+                                <Icon name="stop" />
+                                <span class="sr-only">
+                                  {agentNeedsResolution() ? "Stop unresolved turn" : "Stop"}
+                                </span>
+                              </button>
+                            </Show>
+                          </div>
+                        </div>
+                      </form>
+                      <Show when={!modelRelayConfigured()}>
+                        <p class="agent-configuration-note">
+                          Model connection required before implementation can start.
+                        </p>
+                      </Show>
+                    </Show>
+                  </Show>
+                  <Show when={conversationMode() !== "build" && !interviewOwnsComposer()}>
+                    <form
+                      class="agent-composer conversation-composer"
+                      onSubmit={sendConversationMessage}
+                      onReset={(event) => {
+                        const input = event.currentTarget.querySelector("textarea");
+                        queueMicrotask(() => {
+                          if (input) resizeComposer(input);
+                        });
+                      }}
+                    >
+                      <TextareaAttachments
+                        disabled={
+                          assistantPending() || assistantContextLoading() || !selectedProject()
+                        }
+                        scopeKey={agentCommandScope("project-message")}
+                        privacy={assistantTicketID() ? "send" : "personal"}
+                      >
+                        <textarea
+                          rows={1}
+                          onKeyDown={composerKeyDown}
+                          onInput={(event) => resizeComposer(event.currentTarget)}
+                          ref={(element) =>
+                            restoreMessageDraft(element, () => agentCommandScope("project-message"))
+                          }
+                          name="message"
+                          aria-label="Message conversation"
+                          placeholder={conversationPlaceholder()}
+                          disabled={
+                            assistantPending() || assistantContextLoading() || !selectedProject()
+                          }
+                        />
+                      </TextareaAttachments>
+                      <div class="agent-compose-toolbar">
+                        <ChatSkillPicker
+                          projectID={selectedProjectID()}
+                          workType="planning"
+                          scope={agentCommandScope("project-message")}
+                          disabled={assistantPending()}
+                        />
+                        <button
+                          type="submit"
+                          class="agent-control primary"
+                          aria-label="Send message"
+                          disabled={
+                            assistantPending() || assistantContextLoading() || !selectedProject()
+                          }
+                        >
+                          <Icon name="send" />
+                          <span class="sr-only">Send</span>
+                        </button>
+                      </div>
+                    </form>
+                  </Show>
+                </Show>
               </div>
-            )}
-          </For>
-          <RuntimeWorkspaceTabs
-            projectID={selectedProjectID() ?? ""}
+            </Show>
+          </aside>
+        </Show>
+
+        <section
+          class={`workspace-window workspace-window-${workspaceView() ?? "minimized"}`}
+          aria-label={`${workspaceView() ?? "minimized"} workspace`}
+          data-closing={workspaceWindow.closing() ? "true" : "false"}
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget && event.animationName === "window-out")
+              workspaceWindow.finishExit();
+          }}
+          aria-hidden={workspaceVisible() ? "false" : "true"}
+          hidden={!workspaceWindow.present() || workspaceTabs().length === 0}
+          inert={!workspaceVisible() || agentOverlay() || registrationOpen()}
+        >
+          <WorkspaceTabbar
             tabs={workspaceTabs()}
             activeTabID={activeWorkspaceTab()?.id}
-            attempts={attempts()}
-            previews={appPreviews()}
-            pending={pending()}
+            onActivate={activateWorkspaceTab}
+            onClose={closeWorkspaceTab}
+            onMinimize={() => setWorkspaceVisible(false)}
           />
-          <DeveloperIDEWorkspace
-            userID={props.session.user.id}
-            projectID={selectedProjectID()}
-            allowed={canDevelopProject()}
-            preparingSelection={projectMenuOpen()}
-            workspaceID={
-              activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.workspaceID : undefined
-            }
-            active={workspaceView() === "ide"}
-            onDevelopmentPreview={(message) => {
-              const projectID = selectedProjectID();
-              void refreshServerState()
-                .then(() => {
-                  if (selectedProjectID() !== projectID) return;
-                  if (
-                    attempts().some(
-                      (attempt) =>
-                        attempt.id === message.attemptID &&
-                        attempt.workspaceId === message.workspaceID,
-                    )
-                  )
-                    openDevelopmentPreview(message.attemptID, message.process, message.label);
-                })
-                .catch((cause: unknown) =>
-                  setError(cause instanceof Error ? cause.message : "Preview is unavailable."),
+          <div
+            class="workspace-view-body"
+            role="tabpanel"
+            id={workspacePanelID}
+            aria-labelledby={activeWorkspaceLabelID()}
+          >
+            <Loading
+              on={activeWorkspaceTab()?.id}
+              fallback={
+                <p class="muted" role="status">
+                  Opening workspace…
+                </p>
+              }
+            >
+              <Switch>
+                <Match
+                  when={workspaceView() === "epic-proposal" && activeWorkspaceTab()?.proposalID}
+                >
+                  <Show when={epicProposals()[activeWorkspaceTab()?.proposalID ?? ""]} keyed>
+                    {(proposal) => (
+                      <EpicProposalWorkspace
+                        id={activeWorkspaceTab()?.proposalID ?? ""}
+                        initial={proposal}
+                        storageKey={`epic-proposal:${props.session.user.id}:${activeWorkspaceTab()?.proposalID}`}
+                        pending={pending()}
+                        onConfirm={(value) =>
+                          confirmEpicWork(activeWorkspaceTab()?.proposalID ?? "", value)
+                        }
+                      />
+                    )}
+                  </Show>
+                </Match>
+                <Match when={workspaceView() === "ticket-draft"}>
+                  <TicketDraftWorkspace
+                    storageKey={personalDraftKey()}
+                    initial={
+                      personalDrafts.get(selectedProjectID() ?? "") ??
+                      readPersonalTicketDraft(personalDraftKey())
+                    }
+                    pending={pending()}
+                    onCreate={publishTicketDraft}
+                    onChange={(draft) => {
+                      const projectID = selectedProjectID();
+                      if (projectID) personalDrafts.set(projectID, draft);
+                      updateWorkspaceTab({
+                        id: `ticket-draft:${projectID}`,
+                        view: "ticket-draft",
+                        label: draft.title || "New ticket",
+                      });
+                    }}
+                  />
+                </Match>
+                <Match when={workspaceView() === "ticket" && detail()}>
+                  <Show when={detail()}>
+                    {(current) => (
+                      <TicketWorkspace
+                        drafts={ticketDrafts}
+                        current={current()}
+                        storageKey={`ticket-edit:${props.session.user.id}:${current().ticket.id}`}
+                        onConfirmRequirements={confirmRequirements}
+                        clarificationAction={ticketClarificationAction()}
+                        ticketReference={ticketReference(current().ticket.id)}
+                        change={selectedChange()}
+                        delivery={delivery()}
+                        latestRevision={latestRevision()}
+                        latestRequirement={latestRequirement()}
+                        pending={pending()}
+                        buildInProgress={agentTurnBusy()}
+                        epics={epicList()}
+                        dependencies={{
+                          prerequisites: prerequisitesFor(current().ticket.id),
+                          candidates: dependencyCandidates(current().ticket.id),
+                          admitted: Boolean(selectedChange()),
+                          pending: pending(),
+                          onOpen: selectTicket,
+                          onAdd: (id) => editDependency("add", id),
+                          onRemove: (id) => void editDependency("remove", id),
+                        }}
+                        onAssignEpic={(epicId) => void assignTicketEpic(epicId)}
+                        onInterview={() => void beginRequirementsInterview()}
+                        onWriteRequirements={() => void moveTicket(current().ticket, "ready")}
+                        onSaveDocument={saveTicketDocument}
+                        onFollowUp={() => void createFollowUp()}
+                        onOpenTicket={selectTicket}
+                        onOpenEpic={(id) => {
+                          setSelectedEpicID(id);
+                          setWorkspaceVisible(false);
+                        }}
+                        onTrash={() => void ticketTrashCommand(current().ticket.id, "trash")}
+                        onRestore={() => void ticketTrashCommand(current().ticket.id, "restore")}
+                        onImplement={(revisionID) =>
+                          void implementTicket(revisionID, preparingImplementation()?.reasoning)
+                        }
+                        onCodingOptions={openCodingOptions}
+                        codingOptionsOpen={Boolean(preparingImplementation() && agentOpen())}
+                        implementationAvailable={modelRelayConfigured()}
+                        codingPause={agent().codingPause}
+                        computeWait={agent().computeWait}
+                        onResumeCoding={() => void resumeCoding()}
+                        onStopImplementation={() => void stopAgent()}
+                        onOpenIDE={() => {
+                          const target = ideTargets().find(
+                            (candidate) => candidate.changeId === selectedChange()?.id,
+                          );
+                          if (target) void openIDETarget(target);
+                        }}
+                        onOpenPreview={
+                          selectedChange() && ticketPreviewTarget(selectedChange()!.id)
+                            ? () => {
+                                const target = ticketPreviewTarget(selectedChange()!.id);
+                                if (target) void openPreviewTarget(target);
+                              }
+                            : undefined
+                        }
+                        active={workspaceVisible() && workspaceView() === "ticket"}
+                        onApproveDelivery={(changeID) => void approveDelivery(changeID)}
+                        onRetryReview={(changeID) => void retryReview(changeID)}
+                        onResumeChecks={(changeID) => void resumeChecks(changeID)}
+                        canDevelop={canDevelopProject()}
+                        userID={props.session.user.id}
+                      />
+                    )}
+                  </Show>
+                </Match>
+                <Match when={workspaceView() === "knowledge"}>
+                  <KnowledgeWorkspace
+                    projectID={selectedProjectID() ?? ""}
+                    userID={props.session.user.id}
+                    repositoryURL={browserRepository() ?? ""}
+                    canDevelop={canDevelopProject()}
+                    onOpenIDE={() => {
+                      const target = ideTargets().find((entry) => !entry.changeId);
+                      if (target) void openIDETarget(target);
+                    }}
+                    onRestore={(pageID, revisionID, expectedVersion) =>
+                      apiRequest(knowledgeSaveSchema, `/api/knowledge/pages/${pageID}/restore`, {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ revisionID, expectedVersion }),
+                      })
+                    }
+                    drafts={knowledgeDrafts}
+                    pages={knowledgePageList()}
+                    selectedPage={selectedKnowledgePage()}
+                    documents={repositoryDocuments()}
+                    openDocument={openRepositoryDocument()}
+                    generation={knowledgeGeneration()}
+                    revisions={knowledgeHistory()}
+                    searchResults={knowledgeSearch()}
+                    searchQuery={knowledgeSearchQuery()}
+                    pending={pending()}
+                    onSelectPage={(pageID) => {
+                      setSelectedKnowledgePageID(pageID);
+                      setOpenRepositoryDocument(undefined);
+                      setKnowledgeHistory([]);
+                    }}
+                    onOpenDocument={(path) => void openDocument(path)}
+                    onGenerate={() => void mutate(generateKnowledge)}
+                    onSearch={(query) => void searchProjectKnowledge(query)}
+                    onSavePage={editKnowledgePage}
+                    onHistory={loadKnowledgeHistory}
+                    onSources={async (pageID) =>
+                      (
+                        await apiRequest(
+                          knowledgeSourcesSchema,
+                          `/api/knowledge/pages/${pageID}/sources`,
+                        )
+                      ).citations
+                    }
+                    onArchive={() => void archiveKnowledgePage()}
+                    onMove={async ({ pageId, parentId, beforeId }) => {
+                      const page = knowledgePageList().find((entry) => entry.id === pageId);
+                      const projectId = selectedProjectID();
+                      const client = zero();
+                      if (!page || !projectId || !client) throw new Error("Wiki page not found");
+                      await commitZeroMutation(
+                        client.mutate(
+                          zeroMutators.knowledge.move({
+                            projectId,
+                            pageId,
+                            parentId,
+                            beforeId,
+                            expectedMetadataVersion: page.metadataVersion,
+                          }),
+                        ).server,
+                      );
+                    }}
+                    onIcon={async (icon) => {
+                      const page = selectedKnowledgePage();
+                      const client = zero();
+                      if (!page || !client) throw new Error("Wiki page not found");
+                      await commitZeroMutation(
+                        client.mutate(
+                          zeroMutators.knowledge.setIcon({
+                            projectId: page.projectId,
+                            pageId: page.id,
+                            expectedMetadataVersion: page.metadataVersion,
+                            icon,
+                          }),
+                        ).server,
+                      );
+                    }}
+                  />
+                </Match>
+                <Match when={workspaceView() === "inbox"}>
+                  <InboxWorkspace />
+                </Match>
+                <Match when={workspaceView() === "trash"}>
+                  <TrashWorkspace
+                    tickets={ticketList().filter((ticket) => ticket.trashedAt)}
+                    pending={pending()}
+                    onOpen={selectTicket}
+                    onRestore={(id) => void ticketTrashCommand(id, "restore")}
+                    onRetry={(id) => void ticketTrashCommand(id, "trash")}
+                  />
+                </Match>
+              </Switch>
+            </Loading>
+            <For each={workspaceTabs().filter((tab) => tab.view === "settings")}>
+              {(tab) => (
+                <div
+                  class="settings-tab-panel"
+                  hidden={workspaceView() !== "settings" || activeWorkspaceTab()?.id !== tab.id}
+                >
+                  <SettingsWorkspace
+                    active={workspaceView() === "settings" && activeWorkspaceTab()?.id === tab.id}
+                    userID={props.session.user.id}
+                    initialSelection={tab.settingsSelection}
+                    project={tab.settingsProject}
+                    systemManager={props.session.systemManager}
+                    projectManager={canManageSettingsProject(tab.settingsProject?.id)}
+                    onModelsChanged={refreshModelAvailability}
+                    onOpenTicket={(ticketID, projectID) => {
+                      if (selectedProjectID() !== projectID) selectProject(projectID);
+                      selectTicket(ticketID);
+                    }}
+                    developer={
+                      props.session.systemManager ||
+                      memberships
+                        .data()
+                        ?.some(
+                          (member) =>
+                            member.projectId === tab.settingsProject?.id &&
+                            member.role === "developer",
+                        ) === true
+                    }
+                  />
+                </div>
+              )}
+            </For>
+            <RuntimeWorkspaceTabs
+              projectID={selectedProjectID() ?? ""}
+              tabs={workspaceTabs()}
+              activeTabID={workspaceVisible() ? activeWorkspaceTab()?.id : undefined}
+              attempts={attempts()}
+              previews={appPreviews()}
+              pending={pending()}
+              userID={props.session.user.id}
+              canDevelop={canDevelopProject()}
+              onOpenTicket={(changeID) => {
+                const change = changes().find(
+                  (candidate) =>
+                    candidate.id === changeID && candidate.projectId === selectedProjectID(),
                 );
-            }}
-          />
-        </div>
-      </section>
-    </main>
+                if (change) selectTicket(change.ticketId);
+              }}
+            />
+            <DeveloperIDEWorkspace
+              userID={props.session.user.id}
+              projectID={selectedProjectID()}
+              allowed={canDevelopProject()}
+              preparingSelection={projectMenuOpen()}
+              workspaceID={
+                activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.workspaceID : undefined
+              }
+              active={workspaceView() === "ide"}
+              navigation={ideNavigation()}
+              onNavigationOutcome={(id, error) => {
+                if (ideNavigation()?.id !== id) return;
+                setIDENavigation(undefined);
+                if (error) setError(error);
+              }}
+              onDevelopmentPreview={(message) => {
+                const projectID = selectedProjectID();
+                void refreshServerState()
+                  .then(() => {
+                    if (selectedProjectID() !== projectID) return;
+                    if (
+                      attempts().some(
+                        (attempt) =>
+                          attempt.id === message.attemptID &&
+                          attempt.workspaceId === message.workspaceID,
+                      )
+                    )
+                      openDevelopmentPreview(message.attemptID, message.process, message.label);
+                  })
+                  .catch((cause: unknown) =>
+                    setError(cause instanceof Error ? cause.message : "Preview is unavailable."),
+                  );
+              }}
+            />
+          </div>
+        </section>
+      </main>
+    </AttachmentProvider>
   );
 }

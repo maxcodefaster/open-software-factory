@@ -1,7 +1,8 @@
-import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
+import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
@@ -29,7 +30,7 @@ test.beforeEach(async ({ page }) => {
   } finally {
     await database.client.end();
   }
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page
     .getByRole("button")
     .filter({ hasText: `product-ux-${projectID}` })
@@ -42,7 +43,10 @@ test.afterEach(async () => {
 });
 
 test("active dock apps minimize and restore the same retained Ticket tab", async ({ page }) => {
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   const view = page.locator(".workspace-window");
   await expect(view).toBeVisible();
   const tabs = await page.getByRole("tab").allTextContents();
@@ -74,16 +78,23 @@ test("Models and Skills are visible entry points in Settings", async ({ page }) 
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
     .filter({ has: page.getByRole("heading", { name: "Personal", exact: true }) });
-  await expect(personal.getByRole("button", { name: "Models", exact: true })).toBeVisible({
+  await expect(personal.getByRole("button", { name: "Model overrides", exact: true })).toBeVisible({
     timeout: 3_000,
   });
-  await expect(personal.getByRole("button", { name: "Skills", exact: true })).toBeVisible({
+  await expect(
+    page
+      .getByRole("navigation", { name: "Settings navigation" })
+      .getByRole("button", { name: "Skills", exact: true }),
+  ).toBeVisible({
     timeout: 3_000,
   });
 });
 
 test("Requirements offers the Interview directly", async ({ page }) => {
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await expect(
     page.getByRole("button", { name: "Clarify requirements", exact: true }),
   ).toBeVisible();
@@ -92,7 +103,10 @@ test("Requirements offers the Interview directly", async ({ page }) => {
 test("Enter sends, Shift+Enter preserves a line and navigation selects context automatically", async ({
   page,
 }) => {
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   const input = page.getByRole("textbox", { name: "Message conversation", exact: true });
   const singleLine = await input.boundingBox();
@@ -142,7 +156,7 @@ test("rich slash and selection formatting save a new immutable Spec", async ({ p
       VALUES(${crypto.randomUUID()}, ${ticketID}, 1, ${original}, ${createHash("sha256").update(original).digest("hex")}, ${userID})`;
     await page
       .getByRole("region", { name: "requirements", exact: true })
-      .getByRole("button")
+      .locator(".ticket-card-body")
       .click();
     const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
     await expect(summary.locator("strong")).toHaveText("first run");
@@ -235,7 +249,10 @@ test("slash commands stay beside the caret in a dense document", async ({ page }
   } finally {
     await database.client.end();
   }
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
   await summary.click();
   await summary.press("ControlOrMeta+Home");
@@ -283,7 +300,7 @@ test("new answers respect a reader's scroll position and pending feedback is imm
     version: 1,
     entries,
   };
-  await page.route(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}`, (route) =>
+  await page.route(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}*`, (route) =>
     route.fulfill({ json: view }),
   );
   let release: (() => void) | undefined;
@@ -309,7 +326,10 @@ test("new answers respect a reader's scroll position and pending feedback is imm
       },
     });
   });
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   const history = page.locator(".conversation-history");
   await expect(history.locator("h2")).toHaveCount(28);
@@ -337,14 +357,15 @@ test("an Epic stack retains expansion through fresh board projections", async ({
     await database.client`UPDATE factory.ticket SET epic_id = ${epicID} WHERE id = ${ticketID}`;
     const stack = page.locator(".epic-stack");
     await expect(stack).toBeVisible();
-    await stack.locator("summary").click();
-    const card = stack.getByRole("button");
+    await stack.getByRole("button", { name: "Open Epic First developer experience" }).click();
+    const folder = page.getByRole("dialog", { name: "First developer experience", exact: true });
+    const card = folder.locator(".ticket-card-body");
     await expect(card).toBeVisible();
     await database.client`UPDATE factory.ticket SET title = ${title + " updated"}, version = version + 1 WHERE id = ${ticketID}`;
     await expect(card).toContainText("updated");
-    await expect(stack).toHaveAttribute("open", "");
-    await mkdir(".factory/screenshots", { recursive: true });
-    await page.screenshot({ path: ".factory/screenshots/ux-revision-epic-stack.png" });
+    await expect(folder).toBeVisible();
+    await mkdir(".factory/test-results/epic-folders", { recursive: true });
+    await page.screenshot({ path: ".factory/test-results/epic-folders/live-folder-update.png" });
     await card.click();
     await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
       title + " updated",

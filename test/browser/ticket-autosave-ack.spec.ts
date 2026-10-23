@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test("a newer background read cannot discard the exact autosave acknowledgement", async ({
@@ -37,7 +38,7 @@ test("a newer background read cannot discard the exact autosave acknowledgement"
       await page.route(`**/api/projects/${projectID}/${action}/ensure`, (route) =>
         route.fulfill({ status: 503, json: { error: "This document fixture starts no runtime" } }),
       );
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.locator(".ticket-card-body").filter({ hasText: "Retain my requirements" }).click();
     const criterion = page.getByRole("textbox", { name: "Acceptance criterion 1", exact: true });

@@ -1,8 +1,9 @@
-import { expect, test } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
+import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const { FACTORY_ADMIN_EMAIL, FACTORY_ADMIN_PASSWORD, FACTORY_TEST_REPOSITORY_URL } = process.env;
@@ -35,7 +36,7 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
 
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button", { name: "Add project" }).click();
   await page.getByLabel("Name").fill("Recovery fixture");
   const slug = `recovery-fixture-${crypto.randomUUID()}`;

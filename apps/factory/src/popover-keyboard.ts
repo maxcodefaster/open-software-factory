@@ -24,7 +24,7 @@ export function bindPopoverKeyboard(
         event.preventDefault();
         (
           element.querySelector<HTMLElement>(
-            '[aria-current="true"], [data-popover-option]:not(:disabled)',
+            '[aria-current="true"], [aria-current="page"], [data-popover-option]:not(:disabled)',
           ) ?? available[0]
         )?.focus();
       }
@@ -60,10 +60,13 @@ export function bindPopoverKeyboard(
   element.addEventListener("keydown", keydown);
   element.addEventListener("focusout", focusout);
   queueMicrotask(() => {
-    if (disposed || !element.isConnected) return;
+    // A delayed native toggle must not override a control that already received focus.
+    if (disposed || !element.isConnected || element.contains(document.activeElement)) return;
     (
       element.querySelector<HTMLElement>("input:not(:disabled)") ??
-      element.querySelector<HTMLElement>('[aria-current="true"], [aria-pressed="true"]') ??
+      element.querySelector<HTMLElement>(
+        '[aria-current="true"], [aria-current="page"], [aria-pressed="true"]',
+      ) ??
       buttons()[0]
     )?.focus({ preventScroll: true });
   });

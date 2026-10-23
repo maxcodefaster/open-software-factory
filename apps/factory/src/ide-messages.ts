@@ -6,6 +6,15 @@ export type DevelopmentPreviewMessage = {
   label: string;
 };
 
+export type ActivityNavigationRequest = {
+  id: string;
+  workspaceID: string;
+  path: string;
+  kind: "file" | "diff";
+  diff?: string;
+  truncated?: boolean;
+};
+
 export function developmentPreviewMessage(value: unknown): DevelopmentPreviewMessage | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const candidate = value as Partial<DevelopmentPreviewMessage>;

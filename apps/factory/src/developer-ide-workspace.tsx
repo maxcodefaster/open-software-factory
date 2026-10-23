@@ -2,6 +2,7 @@ import { createEffect, createSignal, onCleanup, Show } from "solid-js";
 import { apiRequest } from "./api-client";
 import { developerIDEViewSchema, sourceWorkspaceViewSchema } from "./api-contracts";
 import { developmentPreviewMessage, type DevelopmentPreviewMessage } from "./ide-messages";
+import type { ActivityNavigationRequest } from "./ide-messages";
 import { selectedSourcePreparation } from "./selected-source-preparation";
 import { recoverWorkspaceSource } from "./source-recovery";
 import { confirmAccessStopped } from "./access-stop";
@@ -17,10 +18,13 @@ export function DeveloperIDEWorkspace(props: {
   workspaceID: string | undefined;
   active: boolean;
   onDevelopmentPreview: (message: DevelopmentPreviewMessage) => void;
+  navigation?: ActivityNavigationRequest | undefined;
+  onNavigationOutcome?: ((id: string, error?: string) => void) | undefined;
 }) {
   const [attachment, setAttachment] = createSignal<{ epoch: number; url: string }>();
   const [ready, setReady] = createSignal(false);
   const [selected, setSelected] = createSignal<string>();
+  let sentNavigation: string | undefined;
   const [availableSource, setAvailableSource] = createSignal<string>();
   const [editorError, setEditorError] = createSignal("");
   const [editorSlow, setEditorSlow] = createSignal(false);
@@ -258,11 +262,39 @@ export function DeveloperIDEWorkspace(props: {
     },
   );
   createEffect(
+    () =>
+      [
+        props.navigation,
+        props.workspaceID,
+        props.allowed,
+        props.active,
+        selected(),
+        ready(),
+      ] as const,
+    ([target, workspaceID, allowed, active, selectedID, editorReady]) => {
+      if (
+        !target ||
+        !allowed ||
+        !active ||
+        !editorReady ||
+        target.workspaceID !== workspaceID ||
+        selectedID !== workspaceID ||
+        sentNavigation === target.id
+      )
+        return;
+      const origin = editorOrigin();
+      if (!origin || !frame?.contentWindow) return;
+      sentNavigation = target.id;
+      frame.contentWindow.postMessage({ ...target, type: "factory:open-activity" }, origin);
+    },
+  );
+  createEffect(
     () => true,
     () => {
       const receive = (event: MessageEvent<unknown>) => {
         if (event.source !== frame?.contentWindow || event.origin !== editorOrigin()) return;
         const message = event.data;
+        const navigation = props.navigation;
         if (!message || typeof message !== "object" || !("type" in message)) return;
         const preview = developmentPreviewMessage(message);
         if (
@@ -274,6 +306,7 @@ export function DeveloperIDEWorkspace(props: {
           return;
         }
         if (message.type === "factory:ide-ready") {
+          sentNavigation = undefined;
           setEditorError("");
           setReady(true);
         } else if (
@@ -282,6 +315,20 @@ export function DeveloperIDEWorkspace(props: {
           message.workspaceID === props.workspaceID
         )
           setSelected(props.workspaceID);
+        else if (
+          message.type === "factory:activity-opened" &&
+          "id" in message &&
+          "workspaceID" in message &&
+          navigation &&
+          message.id === navigation.id &&
+          message.workspaceID === navigation.workspaceID
+        )
+          props.onNavigationOutcome?.(
+            navigation.id,
+            "error" in message && typeof message.error === "string"
+              ? message.error.slice(0, 500)
+              : undefined,
+          );
       };
       window.addEventListener("message", receive);
       return () => window.removeEventListener("message", receive);

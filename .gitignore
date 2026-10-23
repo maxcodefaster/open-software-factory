@@ -10,6 +10,7 @@ test-results/
 *.tsbuildinfo
 .DS_Store
 /.factory/
+.impeccable/
 deploy/theia-ide/browser-app/esbuild.mjs
 deploy/theia-ide/browser-app/gen-esbuild.browser.mjs
 deploy/theia-ide/browser-app/gen-esbuild.node.mjs

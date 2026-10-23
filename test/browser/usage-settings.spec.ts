@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test.use({ trace: "off" });
@@ -116,7 +117,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   await settings
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
-    .filter({ has: page.getByRole("heading", { name: "Factory", exact: true }) })
+    .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
     .getByRole("button", { name: "Usage & limits", exact: true })
     .click();
   const usage = page.getByRole("region", { name: "Usage & limits" });
@@ -209,7 +210,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
       .filter({ hasNot: page.getByRole("heading", { name: /^(Factory|Personal)$/ }) })
       .count())
   ) {
-    await page.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(page);
     await page
       .getByRole("region", { name: "Projects", exact: true })
       .getByRole("button")

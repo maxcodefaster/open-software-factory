@@ -201,6 +201,7 @@ export function KnowledgeTree(props: {
                 <button
                   type="button"
                   class="tree-page"
+                  aria-current={props.selectedPageID === page.id ? "page" : undefined}
                   aria-label={page.title}
                   onClick={() => props.onSelectPage(page.id)}
                 >
@@ -265,6 +266,7 @@ export function KnowledgeTree(props: {
               <button
                 type="button"
                 class="tree-page"
+                aria-current={props.selectedDocumentPath === document.path ? "page" : undefined}
                 aria-label={document.path}
                 onClick={() => props.onOpenDocument(document.path)}
               >

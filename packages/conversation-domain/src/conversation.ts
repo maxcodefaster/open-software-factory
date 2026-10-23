@@ -8,7 +8,7 @@ export type ConversationMode = z.infer<typeof conversationModeInput>;
 
 export const sourceCitationInput = z
   .object({
-    source: z.enum(["knowledge", "ticket", "epic", "code"]),
+    source: z.enum(["knowledge", "ticket", "epic", "code", "attachment"]),
     id: z.uuid(),
     label: z.string().trim().min(1).max(200),
     reference: z.number().int().min(1).max(12).optional(),
@@ -71,6 +71,7 @@ export const conversationMessageInput = z
   .object({
     commandId: z.uuid(),
     ticketId: z.uuid().optional(),
+    contextId: z.uuid().optional(),
     text: z.string().trim().min(1).max(12_000),
     intent: z.enum(["requirements-interview", "project-research"]).optional(),
   })
@@ -86,11 +87,17 @@ export const conversationModeCommandInput = z
   })
   .strict();
 
+export const newConversationInput = z.strictObject({
+  commandId: z.uuid(),
+  ticketId: z.uuid().optional(),
+});
+
 export const interviewAnswerCommandInput = z
   .object({
     commandId: z.uuid(),
     ticketId: z.uuid().optional(),
     questionEntryId: z.uuid(),
+    contextId: z.uuid().optional(),
     answer: interviewAnswerInput,
   })
   .strict();

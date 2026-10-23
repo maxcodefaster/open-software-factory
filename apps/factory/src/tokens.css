@@ -105,6 +105,7 @@
   --control-height: 32px;
   --control-icon-size: 16px;
 
+  --space-0: 0px;
   --space-0-5: 2px;
   --space-1: 4px;
   --space-1-5: 6px;
@@ -156,10 +157,10 @@
   --motion-icon-start-scale: 0.9;
   --motion-activity-opacity: 0.35;
 
-  --topbar-height: 72px;
+  --topbar-height: calc(72px + env(safe-area-inset-top, 0px));
   --agent-panel-width: clamp(320px, 30vw, 430px);
   --window-gutter: 28px;
-  --window-top: 82px;
+  --window-top: calc(var(--topbar-height) + var(--space-2));
   --window-bottom: 22px;
   --window-compact-width: 42rem;
   --window-compact-height: 30rem;
@@ -231,6 +232,36 @@
   --desktop-art-position: center 48%;
   --desktop-art-filter: saturate(0.54) brightness(1.18) contrast(0.76);
   --desktop-art-scrim: linear-gradient(rgb(239 239 232 / 43%), rgb(227 232 225 / 31%));
+}
+
+[data-background="gulf-of-marseille"] {
+  --color-river: #597994;
+  --color-river-deep: #355978;
+  --surface-rgb: 244 249 252;
+  --desktop-art: url("/art/gulf-of-marseille.jpg");
+  --desktop-art-position: center 48%;
+  --desktop-art-filter: saturate(0.7) brightness(1.08) contrast(0.88);
+  --desktop-art-scrim: linear-gradient(rgb(237 244 248 / 43%), rgb(224 236 245 / 30%));
+}
+
+[data-background="scene-on-the-ice"] {
+  --color-river: #6c8286;
+  --color-river-deep: #405e65;
+  --surface-rgb: 248 251 250;
+  --desktop-art: url("/art/scene-on-the-ice.jpg");
+  --desktop-art-position: center 52%;
+  --desktop-art-filter: saturate(0.6) brightness(1.04) contrast(0.9);
+  --desktop-art-scrim: linear-gradient(rgb(242 247 246 / 27%), rgb(231 240 241 / 20%));
+}
+
+[data-background="moonlit-landscape"] {
+  --color-river: #85718a;
+  --color-river-deep: #624b69;
+  --surface-rgb: 251 247 252;
+  --desktop-art: url("/art/moonlit-landscape.jpg");
+  --desktop-art-position: center 46%;
+  --desktop-art-filter: saturate(0.65) brightness(1.24) contrast(0.8);
+  --desktop-art-scrim: linear-gradient(rgb(239 231 242 / 37%), rgb(224 216 235 / 27%));
 }
 
 @media (prefers-reduced-motion: reduce) {

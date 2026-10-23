@@ -12,6 +12,7 @@ export function verificationEnvironment(environment: Record<string, string | und
       (key.endsWith("_LIVE") || key.includes("_PROOF") || /MODEL.*(KEY|TOKEN|BASE_URL)/.test(key))
     )
       delete env[key];
+    else if (key.startsWith("FACTORY_ATTACHMENT_S3_")) delete env[key];
   return env;
 }
 

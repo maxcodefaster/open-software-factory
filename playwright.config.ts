@@ -21,7 +21,7 @@ export default defineConfig({
   timeout: lane === "ui" ? 180_000 : 720_000,
   expect: { timeout: 30_000 },
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000",
     headless: true,
     trace: "retain-on-failure",
     ...(PLAYWRIGHT_CHROMIUM_EXECUTABLE

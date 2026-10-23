@@ -3,6 +3,7 @@ import { createProjectSetupController } from "../../apps/factory/src/setup/contr
 import type { ImportCredential } from "../../apps/factory/src/setup/secrets";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
+import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
 
 test("retained setup and ambiguous import recover without duplicate repositories with one application connection", async () => {
   const process = await factoryProcess();
@@ -131,6 +132,11 @@ test("retained setup and ambiguous import recover without duplicate repositories
     await restarted.recover();
     const finished = await restarted.view(manager);
     expect(finished?.state).toBe("created");
+    const [createdProject] = await database.client<{ id: string; key: string }[]>`
+      SELECT id,desktop_background_key AS key FROM factory.project`;
+    if (!createdProject || !finished?.projectID) throw new Error("Created Project is missing");
+    expect(createdProject.id).toBe(finished.projectID);
+    expect(isDesktopBackgroundKey(createdProject.key)).toBe(true);
     expect(creates).toBe(1);
     expect(credentials.size).toBe(0);
     expect(removed).toBe(1);
@@ -146,6 +152,9 @@ test("retained setup and ambiguous import recover without duplicate repositories
       )[0]?.["manage_project"],
     ).toBe(true);
     await restarted.create(manager, { ...command, importToken: undefined });
+    const recoveredProjects = await database.client<{ id: string; key: string }[]>`
+      SELECT id,desktop_background_key AS key FROM factory.project`;
+    expect([...recoveredProjects]).toEqual([createdProject]);
     expect(creates).toBe(1);
     expect(
       JSON.stringify(await database.client`SELECT * FROM factory.project_repository_intent`),

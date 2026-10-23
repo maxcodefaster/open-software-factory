@@ -8,15 +8,16 @@ import {
   inheritedSkillSettingsView,
   systemSkillSettingsView,
 } from "../../packages/conversation-domain/src/skill-inheritance";
-import { releaseInstallation } from "../fixtures/release-installation";
-import { releasePlanning } from "../fixtures/release-planning";
+import { eventually } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { releaseBuild, releaseInspection } from "../fixtures/release-build";
-import { releaseWorkspace } from "../fixtures/release-workspace";
+import { releaseCleanup } from "../fixtures/release-cleanup";
 import { releaseDelivery } from "../fixtures/release-delivery";
 import { releaseDependent } from "../fixtures/release-dependent";
-import { releaseVisuals, releaseProductVisuals } from "../fixtures/release-visuals";
-import { releaseCleanup } from "../fixtures/release-cleanup";
-import { eventually } from "../fixtures/factory-process";
+import { releaseInstallation } from "../fixtures/release-installation";
+import { releasePlanning } from "../fixtures/release-planning";
+import { releaseProductVisuals, releaseVisuals } from "../fixtures/release-visuals";
+import { releaseWorkspace } from "../fixtures/release-workspace";
 
 const installationName = process.env["FACTORY_RELEASE_INSTALLATION"];
 const phase = process.env["FACTORY_RELEASE_PHASE"] ?? "setup";
@@ -116,7 +117,7 @@ test.skipIf(!installationName)(
         .parse(await fixture.command(admin, "/api/projects"));
       let project = projects.projects.find((value) => value.slug === fixture.slug);
       if (!project) {
-        await adminPage.getByRole("button", { name: "Open project menu" }).click();
+        await openProjectMenu(adminPage);
         await adminPage.getByRole("button", { name: "Add project", exact: true }).click();
         await adminPage.getByLabel("Name", { exact: true }).fill("Release proof");
         await adminPage.getByLabel("Slug", { exact: true }).fill(fixture.slug);

@@ -8,6 +8,7 @@ import {
   string,
   table,
 } from "@rocicorp/zero";
+import type { DesktopBackgroundKey } from "../../interface-domain/src/background";
 
 const project = table("project")
   .from("factory.project")
@@ -15,6 +16,7 @@ const project = table("project")
     id: string(),
     slug: string(),
     name: string(),
+    desktopBackgroundKey: enumeration<DesktopBackgroundKey>().from("desktop_background_key"),
     repositoryUrl: string().from("repository_url"),
     defaultBranch: string().from("default_branch"),
     devcontainerPath: string().from("devcontainer_path"),

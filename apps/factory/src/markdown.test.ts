@@ -44,6 +44,20 @@ test("raw HTML, unsafe and encoded URLs cannot create executable markup", () => 
     'href="https://example.com',
   );
 });
+
+test("only authenticated Factory image paths render and file links retain their download identity", () => {
+  const id = crypto.randomUUID();
+  const image = markdownHTML(`![Visual <reference>](/api/attachments/${id})`);
+  expect(image).toContain(`src="/api/attachments/${id}/previews/0"`);
+  expect(image).toContain(`href="/api/attachments/${id}" target="_blank"`);
+  expect(image).toContain('aria-label="Open image Visual &lt;reference&gt; in new tab"');
+  expect(image).toContain("Visual &lt;reference&gt;");
+  expect(markdownHTML("![External](https://example.invalid/track.png)")).not.toContain("<img");
+  expect(markdownHTML("![Inline](data:image/png;base64,AAAA)")).not.toContain("<img");
+  expect(markdownHTML(`[Brief.pdf](/api/attachments/${id})`)).toContain(
+    'class="factory-attachment-file" download',
+  );
+});
 test("duplicate title suppression never removes or matches a different authored heading", () => {
   expect(documentRepeatsTitle("\n# Factory starter\n\nBody", "Factory starter")).toBe(true);
   expect(documentRepeatsTitle("# Factory starter guide\n", "Factory starter")).toBe(false);
@@ -53,6 +67,8 @@ test("duplicate title suppression never removes or matches a different authored 
 test("document code controls copy text without interpreting language or code markup", () => {
   const html = markdownHTML('```ts\nconst safe = "<script>";\n```', true);
   expect(html).toContain('aria-label="Copy code"');
+  expect(html).toContain('class="copy-feedback" data-feedback="idle"');
+  expect(html).toContain("<span data-copy-label>Copy</span>");
   expect(html).toContain("hljs-keyword");
   expect(html).not.toContain("<script>");
   expect(markdownHTML("```ts\nconst safe = true;\n```")).not.toContain("Copy code");

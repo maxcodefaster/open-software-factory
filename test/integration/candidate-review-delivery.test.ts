@@ -12,9 +12,11 @@ import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
+import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
 
-async function setup() {
-  const f = await candidateReviewFixture();
+async function setup(autofix = false) {
+  const f = await candidateReviewFixture(undefined, undefined, autofix);
   await f.database.client`INSERT INTO factory.pull_request_operation(
     id,change_id,repository_owner,repository_name,base_branch,head_branch,first_head_sha,
     title,body,idempotency_key,state,pull_request_number,pull_request_url,completed_at)
@@ -23,13 +25,28 @@ async function setup() {
     FROM factory.change WHERE id=${f.changeID}`;
   let head = f.commit;
   let base = "a".repeat(40);
+  let merges = 0;
+  let changedFiles = ["src/invoice.ts", "test/invoice.test.ts"];
+  let baseReads = 0;
+  let beforeMergeRead: (() => Promise<void>) | undefined;
   const reviews: string[] = [];
   const corrections: string[] = [];
   const forge = {
     getPullRequest: async () => ({ number: 1, headSha: head, merged: false }),
-    getDefaultBranch: async () => ({ headSha: base }),
+    getDefaultBranch: async () => {
+      baseReads++;
+      if (baseReads > 1) await beforeMergeRead?.();
+      return { headSha: base };
+    },
+    listFiles: async (_repository: unknown, ref: string) =>
+      changedFiles.map((path) => ({
+        path,
+        sha: ref === "a".repeat(40) ? "b".repeat(40) : "c".repeat(40),
+        size: 10,
+      })),
     listActionRuns: async () => [],
     mergeFastForward: async () => {
+      merges++;
       base = head;
       return { headSha: head };
     },
@@ -84,6 +101,14 @@ async function setup() {
     reviews,
     corrections,
     complete,
+    merges: () => merges,
+    base: () => base,
+    setFiles: (files: string[]) => {
+      changedFiles = files;
+    },
+    beforeMergeRead: (callback: () => Promise<void>) => {
+      beforeMergeRead = callback;
+    },
     setHead: (value: string) => {
       head = value;
     },
@@ -101,6 +126,248 @@ const passed = candidateReviewResultInput.parse({
   ],
   findings: [],
   ui: "not-applicable",
+});
+
+test("Autofix records delegated Delivery provenance and merges only the exact independently reviewed application candidate", async () => {
+  const f = await setup(true);
+  try {
+    if (!f.monitoring) throw new Error("Missing owned monitoring delegation");
+    await expect(
+      f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID),
+    ).rejects.toThrow("eligible");
+    await f.complete(passed);
+    const review = await f.turns.getByCommand(f.reviewID);
+    expect(review?.authority).toMatchObject({
+      mode: "build",
+      monitoringIncidentId: f.monitoring.incidentID,
+    });
+    expect(
+      await f.database
+        .client`SELECT turn_id FROM factory.agent_turn_mcp WHERE turn_id=${review?.id ?? null}`,
+    ).toHaveLength(0);
+    await f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID);
+    await observe(
+      () => f.controller.get(f.changeID),
+      (value) => value?.["mergeState"] === "succeeded",
+    );
+    expect(f.merges()).toBe(1);
+    expect(f.base()).toBe(f.commit);
+    const [approval] = await f.database.client<
+      { incident: string; policy: string; commit: string; review: string }[]
+    >`
+      SELECT monitoring_incident_id AS incident,monitoring_policy_id AS policy,commit_sha AS commit,candidate_review_id AS review
+      FROM factory.delivery_approval WHERE change_id=${f.changeID}`;
+    expect(approval).toEqual({
+      incident: f.monitoring.incidentID,
+      policy: f.monitoring.policyID,
+      commit: f.commit,
+      review: f.reviewID,
+    });
+    expect(
+      await f.database.client`SELECT id FROM factory.monitoring_evidence
+      WHERE incident_id=${f.monitoring.incidentID} AND kind='delivery-candidate' AND commit_sha=${f.commit}`,
+    ).toHaveLength(1);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test.each(["package.json", ".forgejo/workflows/check.yml", "infra/runtime.ts"])(
+  "Autofix cannot approve operational or dependency changes in %s",
+  async (path) => {
+    const f = await setup(true);
+    try {
+      if (!f.monitoring) throw new Error("Missing owned monitoring delegation");
+      await f.complete(passed);
+      f.setFiles([path]);
+      await expect(
+        f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID),
+      ).rejects.toThrow("application-code");
+      expect(f.merges()).toBe(0);
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+    } finally {
+      await f.dispose();
+    }
+  },
+);
+
+test("Autofix cannot approve an open human Thread or stale candidate", async () => {
+  const f = await setup(true);
+  try {
+    if (!f.monitoring) throw new Error("Missing owned monitoring delegation");
+    await f.complete(passed);
+    const human = createVisualReviewController(f.database);
+    const feedback = await human.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "thread",
+      body: "The observed edge case still needs checking.",
+    });
+    await expect(
+      f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID),
+    ).rejects.toThrow("open review Threads");
+    await human.update(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      feedbackId: feedback.feedbackId,
+      expectedVersion: 1,
+      action: "resolve",
+    });
+    f.setHead("e".repeat(40));
+    await expect(
+      f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID),
+    ).rejects.toThrow("eligible");
+    expect(f.merges()).toBe(0);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("disabling Autofix after approval but before merge fences the irreversible command", async () => {
+  const f = await setup(true);
+  const reached = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  try {
+    if (!f.monitoring) throw new Error("Missing owned monitoring delegation");
+    await f.complete(passed);
+    f.beforeMergeRead(async () => {
+      reached.resolve();
+      await release.promise;
+    });
+    await f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID);
+    await reached.promise;
+    await createMonitoringController(
+      f.database,
+      "owned-key",
+      "https://factory.example",
+      () => {},
+    ).change(f.projectID, f.monitoring.hookID, f.userID, "disable", {
+      commandId: crypto.randomUUID(),
+      expectedVersion: 1,
+    });
+    release.resolve();
+    await observe(
+      () => f.controller.get(f.changeID),
+      (value) => value?.["mergeState"] === "failed",
+    );
+    expect(f.merges()).toBe(0);
+    expect(f.base()).toBe("a".repeat(40));
+  } finally {
+    release.resolve();
+    await f.dispose();
+  }
+});
+
+test("human source takeover disables delegated Delivery without removing explicit human approval", async () => {
+  const f = await setup(true);
+  try {
+    if (!f.monitoring) throw new Error("Missing owned monitoring delegation");
+    await f.complete(passed);
+    const writer = await f.writers.takeOver(f.changeID, f.userID, crypto.randomUUID());
+    expect(writer.canWrite).toBe(true);
+    const details = await f.controller.get(f.changeID);
+    expect(details?.["monitoringState"]).toBe("blocked");
+    expect(details?.["monitoringReason"]).toContain("source editing");
+    await expect(
+      f.controller.approve(f.changeID, f.userID, f.monitoring.incidentID),
+    ).rejects.toThrow();
+    expect(f.merges()).toBe(0);
+    await f.controller.approve(f.changeID, f.userID);
+    await observe(
+      () => f.controller.get(f.changeID),
+      (value) => value?.["mergeState"] === "succeeded",
+    );
+    const [approval] = await f.database.client<{ policy: string | null }[]>`
+      SELECT monitoring_policy_id AS policy FROM factory.delivery_approval WHERE change_id=${f.changeID}`;
+    expect(approval?.policy).toBeNull();
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("ordinary comments do not block Delivery, but open and implemented Threads do", async () => {
+  const f = await setup();
+  try {
+    await f.complete(passed);
+    const human = createVisualReviewController(f.database);
+    await human.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "comment",
+      body: "Looks good.",
+    });
+    const thread = await human.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "thread",
+      body: "Please check the empty state.",
+    });
+    expect((await f.controller.get(f.changeID))?.["openReviewThreads"]).toBe(1);
+    await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow("open review Threads");
+    await f.database
+      .client`UPDATE factory.review_feedback SET state='implemented' WHERE id=${thread.feedbackId!}`;
+    await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow("open review Threads");
+    await human.update(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      feedbackId: thread.feedbackId,
+      expectedVersion: 1,
+      action: "resolve",
+    });
+    await f.controller.approve(f.changeID, f.userID);
+    expect((await f.controller.get(f.changeID))?.["approvedAt"]).toBeDefined();
+    await expect(
+      human.create(f.changeID, f.userID, {
+        commandId: crypto.randomUUID(),
+        kind: "thread",
+        body: "Too late to race the merge",
+      }),
+    ).rejects.toThrow("read-only");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("Delivery rechecks Threads after waiting on the shared Change lock", async () => {
+  const f = await setup();
+  const locked = Promise.withResolvers<void>(),
+    release = Promise.withResolvers<void>();
+  let writer: Promise<unknown> | undefined;
+  try {
+    await f.complete(passed);
+    writer = f.database.client.begin(async (sql) => {
+      await sql`SELECT id FROM factory.change WHERE id=${f.changeID} FOR UPDATE`;
+      await sql`INSERT INTO factory.review_feedback(id,change_id,author_id,kind,commit_sha)
+        VALUES(${crypto.randomUUID()},${f.changeID},${f.userID},'thread',${f.commit})`;
+      locked.resolve();
+      await release.promise;
+    });
+    await locked.promise;
+    const approving = f.controller.approve(f.changeID, f.userID).then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+    await observe(
+      async () => {
+        const [row] = await f.database.client<{ waiting: boolean }[]>`
+        SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+          AND wait_event_type='Lock' AND position('FOR UPDATE OF change,ticket' IN query)>0) AS waiting`;
+        return row?.waiting;
+      },
+      Boolean,
+      "Delivery did not contend for the Change lock",
+    );
+    release.resolve();
+    await writer;
+    const failure = await approving;
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("open review Threads");
+    const approvals = await f.database
+      .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`;
+    expect(approvals).toHaveLength(0);
+  } finally {
+    release.resolve();
+    await writer?.catch(() => {});
+    await f.dispose();
+  }
 });
 
 test("a settled Stop can resume submitted checks without repeating implementation or clearing a later Stop", async () => {

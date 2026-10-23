@@ -189,11 +189,11 @@ export function createModelSettingsController(
     async resolve(
       role: ModelRole,
       sql: AgentTurnTransaction,
-      context: { projectID: string; userID: string },
+      context: { projectID: string; userID: string; personal?: boolean },
     ) {
       await lock(sql);
       const view = await inherited(sql, context.projectID, context.userID);
-      const effective = view.effective[role];
+      const effective = (context.personal === false ? view.projectEffective : view.effective)[role];
       if (!effective.available)
         throw new CommandError(
           "unavailable",

@@ -16,6 +16,7 @@ export const createTicketInput = z
     projectId: z.uuid(),
     title: z.string().trim().min(1).max(200),
     description: z.string().max(10_000).default(""),
+    state: z.enum(["inbox", "ready"]).optional(),
   })
   .strict();
 

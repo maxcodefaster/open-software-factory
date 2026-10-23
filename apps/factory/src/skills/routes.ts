@@ -5,6 +5,7 @@ import {
 } from "../../../../packages/conversation-domain/src/skill-library";
 import {
   skillPublishInput,
+  skillRoleInput,
   systemSkillSettingsInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import { json } from "../http";
@@ -20,6 +21,16 @@ export function createSkillRoutes(skills: ReturnType<typeof createSkillControlle
     const projectId = new URL(request.url).searchParams.get("project") ?? undefined;
     if (projectId && !z.uuid().safeParse(projectId).success)
       return json({ error: "Invalid Project" }, 400);
+    const invocations = path.match(/^\/api\/projects\/([0-9a-f-]{36})\/skills\/invocations$/);
+    if (invocations?.[1]) {
+      if (request.method !== "GET") return new Response(null, { status: 405 });
+      const query = new URL(request.url).searchParams;
+      const role = skillRoleInput.safeParse(query.get("role"));
+      const change = query.get("change") ?? undefined;
+      if (!role.success || (change && !z.uuid().safeParse(change).success))
+        return json({ error: "Invalid Skill work context" }, 400);
+      return json(await skills.invocations(invocations[1], userID, role.data, change));
+    }
     if (path === "/api/skills/import/preview" || path === "/api/skills/import/repository") {
       if (request.method !== "POST") return new Response(null, { status: 405 });
       try {

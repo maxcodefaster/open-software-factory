@@ -1,13 +1,13 @@
 import { test } from "bun:test";
-import { chromium, expect } from "@playwright/test";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { chromium, expect } from "@playwright/test";
+import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
-import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
-import { signIn, stopProjectRuntimes, deleteFactoryProject } from "../support/factory-fixture";
+import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 
 const enabled = process.env["FACTORY_RUN_SOURCE_STORAGE_PROOF"] === "1";
 
@@ -110,9 +110,7 @@ test.skipIf(!enabled)(
     let cleanupFailure: { cause: unknown } | undefined;
     try {
       await signIn(page);
-      await expect(
-        page.getByRole("button", { name: "Open project menu", exact: true }),
-      ).toBeVisible();
+      await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
       const { session } = await (await page.request.get("/api/session")).json();
       if (!session) throw new Error("Missing fixture owner");
       await writeFile(

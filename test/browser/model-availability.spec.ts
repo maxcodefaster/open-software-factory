@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test("saving a first managed Coding model enables Implement without reloading the workspace", async ({
@@ -110,7 +111,7 @@ test("saving a first managed Coding model enables Implement without reloading th
           json: { error: "No runtime in this model settings fixture" },
         }),
       );
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.locator(".ticket-card-body").filter({ hasText: "Ready after model setup" }).click();
     const implement = page.getByRole("button", { name: "Implement", exact: true });
@@ -123,7 +124,7 @@ test("saving a first managed Coding model enables Implement without reloading th
     await settings
       .getByRole("navigation", { name: "Settings navigation" })
       .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Factory", exact: true }) })
+      .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
       .getByRole("button", { name: "Models", exact: true })
       .click();
     const coding = settings.getByRole("region", { name: "Coding", exact: true });

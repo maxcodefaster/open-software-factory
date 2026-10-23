@@ -25,6 +25,9 @@ import {
 import { createUsageObservations } from "../agent/usage-observations";
 import type { ChangeView } from "../change/types";
 import { CommandError } from "../command-error";
+import { createAttachmentTools } from "../attachments/tools";
+import { attachmentContextIn, readableAttachmentIn } from "../attachments/store";
+import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 import { codeReadInput } from "../knowledge/code-read";
 import type { createKnowledgeController } from "../knowledge/controller";
 import { createModelConnections } from "../models/connections";
@@ -43,6 +46,7 @@ import {
   type ConversationEntry,
   type ConversationRow,
   lockConversation,
+  ensureConversationIn,
 } from "./conversation-store";
 import { persistProjectOutput } from "./effects";
 import { createEpicConfirmation } from "./epic-confirmation";
@@ -51,6 +55,11 @@ import { isRequirementsInterview } from "./interview-intent";
 import { readResearch, searchResearch } from "./research";
 import { ProjectAgentOutputError } from "./structured-output";
 import { admittedProjectContext, admittedTicketContext } from "./ticket-context";
+import type { createMCPConnections } from "../mcp/connections";
+import { mcpSourceTools } from "../mcp/sources";
+import { mcpDigest } from "../mcp/controller";
+import { contextIn, contextsIn } from "./conversation-contexts";
+import { connectFactoryMCP } from "../mcp/factory";
 
 export { projectAgentStructuredOutput, projectAgentStructuredOutputFor } from "./adapter";
 
@@ -104,6 +113,11 @@ export function createProjectAgentController(
   database: Database,
   changes: ChangeController,
   knowledge?: Pick<ReturnType<typeof createKnowledgeController>, "codePaths" | "code">,
+  mcp?: ReturnType<typeof createMCPConnections>,
+  retainedMessages?: (
+    conversationID: string,
+    contextID?: string,
+  ) => Promise<{ messages: unknown[]; messagesAvailable: boolean } | undefined>,
 ) {
   const turns = createAgentTurnStore(database);
   const modelSettings = createModelSettingsController(database);
@@ -136,46 +150,20 @@ export function createProjectAgentController(
     return rows[0];
   }
 
-  async function conversationByID(conversationID: string) {
+  async function conversationByID(conversationID: string, contextID?: string) {
     const rows = await database.client<ConversationRow[]>`
       SELECT id, project_id AS "projectId", ticket_id AS "ticketId", mode,
-        version::integer AS version
+        version::integer AS version,active_coding_context_id AS "activeCodingContextId"
       FROM factory.ticket_conversation WHERE id = ${conversationID}
     `;
-    return rows[0];
-  }
-
-  async function ensureConversationIn(
-    transaction: AgentTurnTransaction,
-    projectID: string,
-    ticketID: string | undefined,
-    userID: string,
-  ) {
-    const key = `conversation:${projectID}:${ticketID ?? userID}`;
-    await transaction`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
-    const projects = await transaction<Array<{ id: string }>>`
-      SELECT project.id FROM factory.project project
-      LEFT JOIN factory.ticket ticket ON ticket.id = ${ticketID ?? null}
-      WHERE project.id = ${projectID}
-        AND (${ticketID ?? null}::uuid IS NULL OR (ticket.project_id = project.id AND ticket.converted_to_epic_id IS NULL))
-    `;
-    if (!projects[0]) throw new Error("Project or Ticket not found");
-    const existing = await transaction<ConversationRow[]>`
-      SELECT id, project_id AS "projectId", ticket_id AS "ticketId", mode, version::integer AS version
-      FROM factory.ticket_conversation
-      WHERE project_id = ${projectID} AND (
-        (${ticketID ?? null}::uuid IS NULL AND ticket_id IS NULL AND created_by = ${userID})
-        OR ticket_id = ${ticketID ?? null}
-      ) LIMIT 1
-    `;
-    if (existing[0]) return existing[0];
-    const rows = await transaction<ConversationRow[]>`
-      INSERT INTO factory.ticket_conversation(id, project_id, ticket_id, created_by)
-      VALUES (${crypto.randomUUID()}, ${projectID}, ${ticketID ?? null}, ${userID})
-      RETURNING id, project_id AS "projectId", ticket_id AS "ticketId", mode, version::integer AS version
-    `;
-    if (!rows[0]) throw new Error("Conversation could not be created");
-    return rows[0];
+    const current = rows[0];
+    if (!current || !contextID) return current;
+    const context = await database.client.begin((sql) => contextIn(sql, conversationID, contextID));
+    return {
+      ...current,
+      contextId: contextID,
+      ...(context.kind === "research" ? { mode: context.mode, version: 1 } : {}),
+    };
   }
 
   async function ensureConversation(
@@ -188,13 +176,17 @@ export function createProjectAgentController(
     );
   }
 
-  async function entries(conversationID: string) {
+  async function entries(conversationID: string, contextID?: string) {
+    const context = contextID
+      ? await database.client.begin((sql) => contextIn(sql, conversationID, contextID))
+      : undefined;
     return database.client<ConversationEntry[]>`
       SELECT id, ordinal::integer AS ordinal, kind, actor, mode, body, payload, citations,
         in_reply_to_entry_id AS "inReplyToEntryId",
         requirement_revision_id AS "requirementRevisionId", created_at AS "createdAt"
       FROM factory.conversation_entry
       WHERE conversation_id = ${conversationID}
+        AND payload->>'contextId' IS NOT DISTINCT FROM ${context?.original ? null : (contextID ?? null)}
       ORDER BY ordinal
     `;
   }
@@ -238,6 +230,14 @@ export function createProjectAgentController(
     const allowed = new Set(
       rows.map((row) => `${row.source}:${row.id}`).filter((key) => projectSources.has(key)),
     );
+    for (const citation of parsed.filter((value) => value.source === "attachment")) {
+      if (!projectSources.has(`attachment:${citation.id}`)) continue;
+      const asset = await database.client.begin((sql) =>
+        readableAttachmentIn(sql, userID, citation.id),
+      );
+      if (asset.projectId === projectID && asset.state === "ready")
+        allowed.add(`attachment:${asset.id}`);
+    }
     for (const citation of parsed.filter(
       (value) => value.source === "code" && value.id === projectID,
     )) {
@@ -260,13 +260,44 @@ export function createProjectAgentController(
 
   async function view(current: ConversationRow | undefined, userID: string) {
     if (!current) return null;
+    let developer = await createAccessController(database).canDevelop(userID, current.projectId);
     const [history, turn] = await Promise.all([
-      entries(current.id),
-      readTurnObservation(database, { conversationID: current.id }),
+      entries(current.id, current.contextId),
+      readTurnObservation(database, {
+        conversationID: current.id,
+        ...(current.contextId ? { contextID: current.contextId } : {}),
+      }),
     ]);
+    let codingHistory: unknown = null;
+    if (
+      developer &&
+      current.mode === "build" &&
+      (current.contextId ?? null) !== (current.activeCodingContextId ?? null)
+    ) {
+      const [archive] = await database.client<
+        { transcript: Record<string, unknown> }[]
+      >`SELECT transcript
+        FROM factory.conversation_context WHERE conversation_id=${current.id} AND
+        (id=${current.contextId ?? null} OR (${current.contextId ?? null}::uuid IS NULL AND original)) LIMIT 1`;
+      codingHistory = archive?.transcript ?? null;
+      if (archive && archive.transcript["messagesAvailable"] !== true && retainedMessages) {
+        const observed = await retainedMessages(current.id, current.contextId);
+        if (observed) codingHistory = { ...archive.transcript, ...observed };
+      }
+    }
+    await createAccessController(database).requireProject(userID, current.projectId);
+    developer = await createAccessController(database).canDevelop(userID, current.projectId);
+    if (!developer) codingHistory = null;
     return {
       ...current,
-      entries: (await createAccessController(database).canDevelop(userID, current.projectId))
+      contextId: current.contextId ?? null,
+      activeCodingContextId: current.activeCodingContextId ?? null,
+      contexts: await database.client.begin((sql) => contextsIn(sql, current.id)),
+      codingHistory,
+      isActiveCoding:
+        current.mode === "build" &&
+        (current.contextId ?? null) === (current.activeCodingContextId ?? null),
+      entries: developer
         ? history
         : history.filter(
             (entry) =>
@@ -292,12 +323,8 @@ export function createProjectAgentController(
       await transaction`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${request.commandId}`}))`;
       // A proposal can bind a draft to a Ticket. Resolve replay before looking for a new draft.
       const previous = await turns.getByCommand(request.commandId, transaction);
-      await projectAuthorityIn(
-        transaction,
-        request.createdBy,
-        previous?.command.projectId ?? request.projectId,
-      );
       if (previous) {
+        await projectAuthorityIn(transaction, request.createdBy, previous.command.projectId);
         if (previous.command.kind !== request.kind || previous.authority.mode === "build") {
           throw new CommandError(
             "conflict",
@@ -313,12 +340,16 @@ export function createProjectAgentController(
           previous.authority,
         );
       }
-      const current = await ensureConversationIn(
+      const root = await ensureConversationIn(
         transaction,
         request.projectId,
         request.ticketId ?? undefined,
         request.createdBy,
       );
+      const current = request.contextId
+        ? await lockConversation(transaction, root.id, request.contextId)
+        : root;
+      if (!current) throw new CommandError("conflict", "This conversation is read-only.");
       if (current.mode === "build")
         throw new CommandError("conflict", "Build messages belong to the Change Agent");
       const command = agentTurnCommandInput.parse({ ...request, conversationId: current.id });
@@ -340,7 +371,7 @@ export function createProjectAgentController(
         requiredSkillRevisionIds: assignedSkills.requiredRevisionIds,
       };
       return turns.admitIn(transaction, command, authority, async (transaction, record) => {
-        const locked = await lockConversation(transaction, current.id);
+        const locked = await lockConversation(transaction, current.id, request.contextId);
         if (!locked || locked.mode !== current.mode || locked.version !== current.version) {
           throw new CommandError("conflict", "The conversation changed before admission");
         }
@@ -371,6 +402,7 @@ export function createProjectAgentController(
             inReplyToEntryId: null,
             requirementRevisionId: null,
             createdBy: command.createdBy,
+            ...(command.contextId ? { contextId: command.contextId } : {}),
           });
           return;
         }
@@ -387,11 +419,13 @@ export function createProjectAgentController(
           WHERE answer.in_reply_to_entry_id = question.id AND answer.kind = 'answer'
         ) AS answered, EXISTS(SELECT 1 FROM factory.conversation_entry newer
           WHERE newer.conversation_id=question.conversation_id AND newer.ordinal>question.ordinal
+            AND newer.payload->>'contextId' IS NOT DISTINCT FROM question.payload->>'contextId'
             AND (newer.kind IN ('question','requirement') OR
               (newer.kind='user-message' AND coalesce(newer.payload->>'intent','')!='project-research'))) AS superseded
         FROM factory.conversation_entry question
         WHERE question.id = ${command.questionEntryId} AND question.conversation_id = ${current.id}
           AND question.kind = 'question'
+          AND question.payload->>'contextId' IS NOT DISTINCT FROM ${command.contextId ?? null}
       `;
         const found = questions[0];
         if (!found) throw new CommandError("conflict", "Interview question not found");
@@ -427,6 +461,7 @@ export function createProjectAgentController(
           inReplyToEntryId: command.questionEntryId,
           requirementRevisionId: null,
           createdBy: command.createdBy,
+          ...(command.contextId ? { contextId: command.contextId } : {}),
         });
       });
     });
@@ -448,7 +483,7 @@ export function createProjectAgentController(
     let history: ConversationEntry[];
     let loadedSkills: SkillRevision[];
     try {
-      history = await entries(command.conversationId);
+      history = await entries(command.conversationId, command.contextId);
       if (
         !(await createAccessController(database).canDevelop(command.createdBy, command.projectId))
       )
@@ -480,7 +515,11 @@ export function createProjectAgentController(
             "completed",
             "Answer saved. Next question ready.",
             async (transaction) => {
-              const current = await lockConversation(transaction, conversationID);
+              const current = await lockConversation(
+                transaction,
+                conversationID,
+                command.contextId,
+              );
               if (!current || current.version !== authority.conversationVersion)
                 throw new CommandError("conflict", "Interview changed");
               await appendConversationEntry(transaction, current.id, {
@@ -500,6 +539,7 @@ export function createProjectAgentController(
                 citations: [],
                 inReplyToEntryId: null,
                 requirementRevisionId: null,
+                ...(command.contextId ? { contextId: command.contextId } : {}),
               });
             },
           );
@@ -586,8 +626,54 @@ export function createProjectAgentController(
         );
         return hits;
       }
+      let factoryMCP: Awaited<ReturnType<typeof connectFactoryMCP>> | undefined;
       try {
+        const attachmentTools = createAttachmentTools(database);
+        const observedRead = async (
+          source: "knowledge" | "ticket" | "epic",
+          id: string,
+          offset?: number,
+          expectedVersion?: number,
+        ) => {
+          const result = await readResearch(
+            database,
+            command.projectId,
+            command.createdBy,
+            source,
+            id,
+            offset,
+            expectedVersion,
+          );
+          projectSources.add(`${source}:${id}`);
+          await attachmentTools.discover(
+            owner.id,
+            token,
+            (result.attachments ?? []).map((id) => attachmentURL(id)).join("\n"),
+          );
+          return result;
+        };
+        factoryMCP = await connectFactoryMCP({
+          database,
+          turn: owner,
+          ownerToken: token,
+          signal: abort.signal,
+          authorize: authorizeExecution,
+          created: (id) => projectSources.add(`ticket:${id}`),
+          search: ({ query, source }) => observedSearch(query, source),
+          read: ({ source, id, offset, expectedVersion }) =>
+            observedRead(source, id, offset, expectedVersion),
+        });
         output = await generateProjectResponse({
+          factoryTools: factoryMCP.tools,
+          attachmentContext: await database.client.begin((sql) =>
+            attachmentContextIn(sql, owner.id),
+          ),
+          attachmentRead: async (call) => {
+            const result = await attachmentTools.call(owner.id, token, call);
+            if (call.name === "attachment_read")
+              projectSources.add(`attachment:${call.arguments.id}`);
+            return result;
+          },
           requirementsInterview: isRequirementsInterview(command, history),
           mode:
             command.kind === "project-message" && command.intent === "project-research"
@@ -628,6 +714,33 @@ export function createProjectAgentController(
             model: authority.modelId,
           }),
           skills: loadedSkills,
+          mcpTools: mcp
+            ? await mcpSourceTools(
+                mcp,
+                owner.id,
+                command.projectId,
+                command.createdBy,
+                async () => {
+                  if (!(await turns.validateExecution(owner.id, token)))
+                    throw new CommandError(
+                      "forbidden",
+                      "MCP lookup no longer owns this conversation",
+                    );
+                },
+                abort.signal,
+                async (connectionId, tool, digest, result) => {
+                  const current = await turns.validateExecution(owner.id, token, async (sql) => {
+                    await sql`INSERT INTO factory.mcp_observation(id,turn_id,connection_id,tool_name,tool_digest,result_digest,is_error)
+                  VALUES(${crypto.randomUUID()},${owner.id},${connectionId},${tool},${digest},${mcpDigest(result.content)},${result.isError})`;
+                  });
+                  if (!current)
+                    throw new CommandError(
+                      "forbidden",
+                      "MCP observation no longer owns this conversation",
+                    );
+                },
+              )
+            : [],
           requiredSkillRevisionIds: authority.requiredSkillRevisionIds,
           skillsLoaded: async (revisionIDs) => {
             const owned = await turns.validateExecution(owner.id, token, async (sql) => {
@@ -642,19 +755,7 @@ export function createProjectAgentController(
           research: {
             authorize: authorizeExecution,
             search: observedSearch,
-            read: async (source, id, offset, expectedVersion) => {
-              const result = await readResearch(
-                database,
-                command.projectId,
-                command.createdBy,
-                source,
-                id,
-                offset,
-                expectedVersion,
-              );
-              projectSources.add(`${source}:${id}`);
-              return result;
-            },
+            read: observedRead,
             ...(knowledge &&
             (await createAccessController(database).canDevelop(
               command.createdBy,
@@ -713,6 +814,8 @@ export function createProjectAgentController(
                 : "The provider outcome could not be established. The same command will not be submitted again.",
         );
         throw lostAuthority ?? cause;
+      } finally {
+        await factoryMCP?.close();
       }
       try {
         output.citations = await validatedCitations(
@@ -794,9 +897,52 @@ export function createProjectAgentController(
         void recoverTurn(record.id).catch(() => {});
       }
     },
-    async get(projectID: string, ticketID: string | undefined, userID: string) {
+    async get(projectID: string, ticketID: string | undefined, userID: string, contextID?: string) {
       await createAccessController(database).requireProject(userID, projectID);
-      return view(await conversation(projectID, ticketID, userID), userID);
+      const root = await conversation(projectID, ticketID, userID);
+      if (!root) return null;
+      const full = await conversationByID(root.id);
+      return view(
+        await conversationByID(
+          root.id,
+          contextID === "original"
+            ? undefined
+            : (contextID ?? full?.activeCodingContextId ?? undefined),
+        ),
+        userID,
+      );
+    },
+    async newConversation(
+      projectID: string,
+      ticketID: string | undefined,
+      userID: string,
+      commandID: string,
+    ) {
+      const id = await database.client.begin(async (sql) => {
+        const root = await ensureConversationIn(sql, projectID, ticketID, userID);
+        await lockConversation(sql, root.id);
+        const [previous] = await sql<
+          { id: string; conversationID: string; userID: string; kind: string }[]
+        >`
+          SELECT id,conversation_id AS "conversationID",created_by AS "userID",kind
+          FROM factory.conversation_context WHERE command_id=${commandID}`;
+        if (previous) {
+          if (
+            previous.conversationID !== root.id ||
+            previous.userID !== userID ||
+            previous.kind !== "research"
+          )
+            throw new CommandError("conflict", "This conversation command has different input.");
+          return previous.id;
+        }
+        const id = crypto.randomUUID();
+        await sql`INSERT INTO factory.conversation_context(id,conversation_id,command_id,kind,ordinal,title,created_by,mode)
+          VALUES(${id},${root.id},${commandID},'research',
+            (SELECT COALESCE(MAX(ordinal),0)+1 FROM factory.conversation_context WHERE conversation_id=${root.id}),
+            'New conversation',${userID},${ticketID && root.mode === "build" ? "investigate" : "plan"})`;
+        return id;
+      });
+      return this.get(projectID, ticketID, userID, id);
     },
     async message(
       projectID: string,
@@ -806,6 +952,7 @@ export function createProjectAgentController(
       commandID: string,
       intent?: "requirements-interview" | "project-research",
       observer?: ProjectResponseObserver,
+      contextID?: string,
     ) {
       const { turn } = await admitProject({
         kind: "project-message",
@@ -815,12 +962,16 @@ export function createProjectAgentController(
         createdBy: userID,
         text,
         ...(intent ? { intent } : {}),
+        ...(contextID ? { contextId: contextID } : {}),
       });
       observer?.admitted(turn.id);
       await respond(turn, observer);
       if (!turn.command.conversationId) throw new Error("Project conversation required");
       await createAccessController(database).requireProject(userID, projectID);
-      return view(await conversationByID(turn.command.conversationId), userID);
+      return view(
+        await conversationByID(turn.command.conversationId, turn.command.contextId),
+        userID,
+      );
     },
     async answer(
       projectID: string,
@@ -829,6 +980,7 @@ export function createProjectAgentController(
       answer: InterviewAnswer,
       userID: string,
       commandID: string,
+      contextID?: string,
     ) {
       const { turn } = await admitProject({
         kind: "project-answer",
@@ -838,10 +990,14 @@ export function createProjectAgentController(
         createdBy: userID,
         questionEntryId: questionEntryID,
         answer,
+        ...(contextID ? { contextId: contextID } : {}),
       });
       await respond(turn);
       if (!turn.command.conversationId) throw new Error("Project conversation required");
-      return view(await conversationByID(turn.command.conversationId), userID);
+      return view(
+        await conversationByID(turn.command.conversationId, turn.command.contextId),
+        userID,
+      );
     },
     async setMode(
       projectID: string,
@@ -849,6 +1005,36 @@ export function createProjectAgentController(
       nextMode: ConversationMode,
       userID: string,
     ) {
+      if (nextMode !== "build") {
+        const id = await database.client.begin(async (sql) => {
+          const scope = await ensureConversationIn(sql, projectID, ticketID, userID);
+          const current = await lockConversation(sql, scope.id);
+          if (!current) throw new CommandError("not-found", "Conversation not found");
+          const [coding] = current.ticketId
+            ? await sql`SELECT id FROM factory.change WHERE ticket_id=${current.ticketId}`
+            : [];
+          if (coding)
+            throw new CommandError(
+              "conflict",
+              "This Ticket keeps its Coding conversation. Use Ask about this Project for separate research.",
+            );
+          if (current.mode !== nextMode) {
+            await sql`UPDATE factory.ticket_conversation SET mode=${nextMode},version=version+1,updated_at=now() WHERE id=${current.id}`;
+            await appendConversationEntry(sql, current.id, {
+              kind: "mode-change",
+              actor: "system",
+              mode: nextMode,
+              body: `Switched to ${nextMode}.`,
+              payload: { from: current.mode, to: nextMode },
+              citations: [],
+              inReplyToEntryId: null,
+              requirementRevisionId: null,
+            });
+          }
+          return current.id;
+        });
+        return view(await conversationByID(id), userID);
+      }
       const current = await ensureConversation(projectID, ticketID, userID);
       const requirements = current.ticketId
         ? await database.client<Array<{ latestId: string | null; approvedId: string | null }>>`

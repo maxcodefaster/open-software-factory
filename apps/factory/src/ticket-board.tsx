@@ -1,8 +1,11 @@
-import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, Show } from "solid-js";
 import { boardStages, type BoardStage } from "../../../packages/interface-domain/src/ticket-board";
-import type { Epic, Ticket } from "./api-contracts";
 import { boardGroups } from "../../../packages/interface-domain/src/board-groups";
+import { epicFamilyIds } from "../../../packages/ticket-domain/src/epic";
 import type { PrerequisiteView } from "../../../packages/ticket-domain/src/dependency";
+import type { Epic, Ticket } from "./api-contracts";
+import { EpicEditor, type EpicEdit } from "./epic-controls";
+import { Icon } from "./icon";
 
 export function TicketBoardContents(props: {
   tickets: readonly Ticket[];
@@ -15,160 +18,337 @@ export function TicketBoardContents(props: {
   status: (ticket: Ticket) => string;
   blockers: (ticketID: string) => readonly PrerequisiteView[];
   reference: (ticketID: string) => string;
-  onSelect: (ticketID: string) => void;
+  onSelect(ticketID: string): void;
+  onCreate(stage: "inbox" | "ready"): void;
+  epicID: string;
+  onEpic(id: string): void;
+  onSaveEpic(input: EpicEdit, current?: Epic): Promise<boolean>;
 }) {
-  const exceptionalStatus = (ticket: Ticket) => {
-    const status = props.status(ticket);
-    return ["Idea", "Requirements", "Implementation"].includes(status) ? undefined : status;
+  const [editing, setEditing] = createSignal(false);
+  const selected = () => props.epics.find((epic) => epic.id === props.epicID);
+  const family = () => epicFamilyIds(props.epics, props.epicID);
+  const members = () =>
+    props.tickets.filter((ticket) => ticket.epicId && family().has(ticket.epicId));
+  let dialog: HTMLDialogElement | undefined;
+  let opener: HTMLElement | undefined;
+  const close = () => props.onEpic("");
+  const open = (id: string, element: HTMLElement) => {
+    if (!selected()) opener = element;
+    props.onEpic(id);
   };
-  return (
-    <Show
-      when={!props.historyOpen}
-      fallback={
-        <div class="board board-history board-enter">
-          <section class="ticket-archive" aria-label="history">
-            <header class="ticket-archive-heading">
-              <span>Completed &amp; cancelled</span>
-              <span>{props.archivedTickets.length} tickets</span>
-            </header>
-            <For each={props.archivedTickets}>
-              {(ticket) => (
-                <button
-                  type="button"
-                  class="ticket-archive-row"
-                  disabled={props.pending}
-                  onClick={() => props.onSelect(ticket.id)}
-                >
-                  <small class="ticket-archive-reference">{props.reference(ticket.id)}</small>
-                  <strong class="ticket-archive-title">{ticket.title}</strong>
-                  <span class="ticket-archive-status">{props.status(ticket)}</span>
-                </button>
-              )}
-            </For>
-          </section>
-        </div>
+  createEffect(
+    () => selected()?.id,
+    (id) => {
+      setEditing(false);
+      if (id) {
+        opener ??=
+          document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
+        if (dialog && !dialog.open) dialog.showModal();
+        queueMicrotask(() => {
+          if (selected()?.id !== id || !dialog?.open) return;
+          (
+            dialog.querySelector<HTMLElement>(".epic-folder-content button") ??
+            dialog.querySelector<HTMLElement>(".epic-folder-actions button:last-child")
+          )?.focus({ preventScroll: true });
+        });
+      } else {
+        dialog?.close();
+        if (opener?.isConnected) opener.focus({ preventScroll: true });
+        opener = undefined;
       }
+    },
+  );
+  const Card = (input: { ticket: Ticket }) => (
+    <article
+      class={props.selectedTicketID === input.ticket.id ? "ticket-card selected" : "ticket-card"}
     >
-      <p class="board-scroll-hint">
-        Swipe through 4 stages <span aria-hidden="true">→</span>
-      </p>
-      <div class="board board-enter">
-        <For each={boardStages}>
-          {(stage) => {
-            const tickets = () =>
-              props.tickets.filter((ticket) => props.stage(ticket) === stage.id);
-            const groups = createMemo(
-              () =>
-                new Map(
-                  boardGroups(tickets(), props.epics).map((group) => [
-                    group.kind === "epic" ? `epic:${group.epic.id}` : `ticket:${group.ticket.id}`,
-                    group,
-                  ]),
-                ),
-            );
-            return (
-              <section class="lane" aria-label={stage.id}>
-                <header class="lane-heading">
-                  <span>{stage.label}</span>
-                  <span>{tickets().length}</span>
-                </header>
-                <For each={[...groups().keys()]}>
-                  {(key) => {
-                    const group = () => groups().get(key);
-                    const epicTitle = () => {
-                      const current = group();
-                      return current?.kind === "epic" ? current.epic.title : "";
-                    };
-                    const members = () => {
-                      const current = group();
-                      return current?.kind === "epic"
-                        ? current.tickets
-                        : current
-                          ? [current.ticket]
-                          : [];
-                    };
-                    const [expanded, setExpanded] = createSignal(
-                      members().some((ticket) => ticket.id === props.selectedTicketID),
-                    );
-                    createEffect(
-                      () => props.selectedTicketID,
-                      (ticketID) => {
-                        if (ticketID && members().some((ticket) => ticket.id === ticketID))
-                          setExpanded(true);
-                      },
-                    );
-                    const cards = () => (
-                      <For each={members()}>
-                        {(ticket) => (
-                          <article
-                            class={
-                              props.selectedTicketID === ticket.id
-                                ? "ticket-card selected"
-                                : "ticket-card"
-                            }
-                          >
-                            <button
-                              type="button"
-                              class="ticket-card-body"
-                              disabled={props.pending}
-                              onClick={() => props.onSelect(ticket.id)}
-                            >
-                              <small>{props.reference(ticket.id)}</small>
-                              <strong>{ticket.title}</strong>
-                              <Show when={exceptionalStatus(ticket)}>
-                                {(status) => <span>{status()}</span>}
-                              </Show>
-                            </button>
-                            <Show when={props.blockers(ticket.id).length}>
-                              <div class="ticket-card-blockers">
-                                <small>Blocked by</small>
-                                <For each={props.blockers(ticket.id)}>
-                                  {(prerequisite) => (
-                                    <button
-                                      type="button"
-                                      class="dependency-link"
-                                      disabled={props.pending}
-                                      onClick={() => props.onSelect(prerequisite.id)}
-                                    >
-                                      {prerequisite.title}
-                                    </button>
-                                  )}
-                                </For>
-                              </div>
-                            </Show>
-                          </article>
-                        )}
-                      </For>
-                    );
-                    return key.startsWith("epic:") ? (
-                      <details
-                        class="epic-stack"
-                        open={expanded()}
-                        onToggle={(event) => setExpanded(event.currentTarget.open)}
+      <button
+        type="button"
+        class="ticket-card-body"
+        disabled={props.pending}
+        onClick={() => {
+          close();
+          props.onSelect(input.ticket.id);
+        }}
+      >
+        <small>{props.reference(input.ticket.id)}</small>
+        <strong>{input.ticket.title}</strong>
+        <Show
+          when={!["Idea", "Requirements", "Implementation"].includes(props.status(input.ticket))}
+        >
+          <span>{props.status(input.ticket)}</span>
+        </Show>
+      </button>
+      <Show when={props.blockers(input.ticket.id).length}>
+        <div class="ticket-card-blockers">
+          <small>Blocked by</small>
+          <For each={props.blockers(input.ticket.id)}>
+            {(prerequisite) => (
+              <button
+                type="button"
+                class="dependency-link"
+                disabled={props.pending}
+                onClick={() => {
+                  close();
+                  props.onSelect(prerequisite.id);
+                }}
+              >
+                {prerequisite.title}
+              </button>
+            )}
+          </For>
+        </div>
+      </Show>
+    </article>
+  );
+  const Folder = (input: { epic: { id: string; title: string }; tickets: readonly Ticket[] }) => (
+    <article class="epic-stack">
+      <button
+        type="button"
+        class="epic-stack-open"
+        aria-label={`Open Epic ${input.epic.title}`}
+        aria-haspopup="dialog"
+        onClick={(event) => open(input.epic.id, event.currentTarget)}
+      >
+        <Icon name="folder" />
+        <span class="epic-stack-label">
+          <strong>{input.epic.title}</strong>
+          <Show when={input.tickets[0]}>
+            <span class="epic-stack-preview">{input.tickets[0]?.title}</span>
+          </Show>
+        </span>
+        <small>{input.tickets.length}</small>
+      </button>
+    </article>
+  );
+  const emptyRoots = () =>
+    props.epics.filter((epic) => {
+      if (epic.parentId && props.epics.some((parent) => parent.id === epic.parentId)) return false;
+      const ids = epicFamilyIds(props.epics, epic.id);
+      return !props.tickets.some((ticket) => ticket.epicId && ids.has(ticket.epicId));
+    });
+  return (
+    <>
+      <Show
+        when={!props.historyOpen}
+        fallback={
+          <div class="board board-history board-enter">
+            <section class="ticket-archive" aria-label="history">
+              <header class="ticket-archive-heading">
+                <span>Completed &amp; cancelled</span>
+                <span>{props.archivedTickets.length} tickets</span>
+              </header>
+              <For each={props.archivedTickets}>
+                {(ticket) => (
+                  <button
+                    type="button"
+                    class="ticket-archive-row"
+                    disabled={props.pending}
+                    onClick={() => props.onSelect(ticket.id)}
+                  >
+                    <small class="ticket-archive-reference">{props.reference(ticket.id)}</small>
+                    <strong class="ticket-archive-title">{ticket.title}</strong>
+                    <span class="ticket-archive-status">{props.status(ticket)}</span>
+                  </button>
+                )}
+              </For>
+            </section>
+          </div>
+        }
+      >
+        <p class="board-scroll-hint">
+          Swipe through 4 stages <span aria-hidden="true">→</span>
+        </p>
+        <div class="board board-enter">
+          <For each={boardStages}>
+            {(stage) => {
+              const tickets = () =>
+                props.tickets.filter((ticket) => props.stage(ticket) === stage.id);
+              return (
+                <section class="lane" aria-label={stage.id}>
+                  <header class="lane-heading">
+                    <span>{stage.label}</span>
+                    <div class="lane-heading-actions">
+                      <span>{tickets().length}</span>
+                      <Show when={stage.id === "ideas" || stage.id === "requirements"}>
+                        <button
+                          type="button"
+                          class="bare-icon lane-create"
+                          aria-label={stage.id === "ideas" ? "New idea" : "New Ticket"}
+                          title={stage.id === "ideas" ? "New idea" : "New ticket in Requirements"}
+                          onClick={() => props.onCreate(stage.id === "ideas" ? "inbox" : "ready")}
+                        >
+                          <Icon name="plus" />
+                        </button>
+                      </Show>
+                    </div>
+                  </header>
+                  <For
+                    each={boardGroups(tickets(), props.epics)}
+                    keyed={(group) =>
+                      group.kind === "epic" ? `epic:${group.epic.id}` : `ticket:${group.ticket.id}`
+                    }
+                  >
+                    {(group) => {
+                      const epic = () => {
+                        const value = group();
+                        return value.kind === "epic" ? value : undefined;
+                      };
+                      const ticket = () => {
+                        const value = group();
+                        return value.kind === "ticket" ? value.ticket : undefined;
+                      };
+                      return (
+                        <Show
+                          when={epic()}
+                          fallback={
+                            <Show when={ticket()}>{(value) => <Card ticket={value()} />}</Show>
+                          }
+                        >
+                          {(value) => <Folder epic={value().epic} tickets={value().tickets} />}
+                        </Show>
+                      );
+                    }}
+                  </For>
+                  <Show when={stage.id === "ideas"}>
+                    <For each={emptyRoots()} keyed={(epic) => epic.id}>
+                      {(epic) => <Folder epic={epic()} tickets={[]} />}
+                    </For>
+                  </Show>
+                </section>
+              );
+            }}
+          </For>
+        </div>
+      </Show>
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: Native Escape/onCancel and the Close button handle keyboard dismissal; this click handles only the backdrop. */}
+      <dialog
+        ref={dialog}
+        class="epic-folder"
+        aria-labelledby="epic-folder-title"
+        onCancel={(event) => {
+          event.preventDefault();
+          close();
+        }}
+        onClick={(event) => {
+          if (event.target !== event.currentTarget) return;
+          const bounds = event.currentTarget.getBoundingClientRect();
+          if (
+            event.clientX < bounds.left ||
+            event.clientX > bounds.right ||
+            event.clientY < bounds.top ||
+            event.clientY > bounds.bottom
+          )
+            close();
+        }}
+      >
+        <Show when={selected()}>
+          {(epic) => (
+            <>
+              <header class="epic-folder-heading">
+                <div>
+                  <Show when={props.epics.find((parent) => parent.id === epic().parentId)}>
+                    {(parent) => (
+                      <button
+                        type="button"
+                        class="workspace-action"
+                        onClick={() => props.onEpic(parent().id)}
                       >
-                        <summary>
-                          <span class="epic-stack-label">
-                            <strong>{epicTitle()}</strong>
-                            <Show when={!expanded()}>
-                              <span class="epic-stack-preview">{members()[0]?.title}</span>
-                            </Show>
-                          </span>
-                          <small>
-                            {members().length} {members().length === 1 ? "ticket" : "tickets"}
-                          </small>
-                        </summary>
-                        <div class="epic-stack-tickets">{cards()}</div>
-                      </details>
-                    ) : (
-                      cards()
-                    );
-                  }}
+                        {parent().title}
+                      </button>
+                    )}
+                  </Show>
+                  <h2 id="epic-folder-title">{epic().title}</h2>
+                  <span class="epic-progress">
+                    {members().filter((ticket) => ticket.state === "done").length}/
+                    {members().length} done
+                    <Show when={members().some((ticket) => ticket.state === "cancelled")}>
+                      {" · "}
+                      {members().filter((ticket) => ticket.state === "cancelled").length} cancelled
+                    </Show>
+                  </span>
+                </div>
+                <div class="epic-folder-actions">
+                  <button
+                    type="button"
+                    class="workspace-action"
+                    aria-label="Edit Epic"
+                    disabled={props.pending}
+                    onClick={() => setEditing(true)}
+                  >
+                    Edit
+                  </button>
+                  <button type="button" class="bare-icon" aria-label="Close Epic" onClick={close}>
+                    <Icon name="close" />
+                  </button>
+                </div>
+              </header>
+              <Show when={epic().description}>
+                <p class="epic-folder-description">{epic().description}</p>
+              </Show>
+              <div class="epic-folder-content">
+                <For
+                  each={props.epics.filter((child) => child.parentId === epic().id)}
+                  keyed={(child) => child.id}
+                >
+                  {(child) => (
+                    <Folder
+                      epic={child()}
+                      tickets={members().filter(
+                        (ticket) =>
+                          ticket.epicId &&
+                          epicFamilyIds(props.epics, child().id).has(ticket.epicId),
+                      )}
+                    />
+                  )}
                 </For>
-              </section>
-            );
+                <For each={[...boardStages, { id: "history", label: "Completed & cancelled" }]}>
+                  {(stage) => (
+                    <Show
+                      when={members().some(
+                        (ticket) => ticket.epicId === epic().id && props.stage(ticket) === stage.id,
+                      )}
+                    >
+                      <section class="epic-folder-stage" aria-label={stage.label}>
+                        <h3>{stage.label}</h3>
+                        <div class="epic-folder-tickets">
+                          <For
+                            each={members().filter(
+                              (ticket) =>
+                                ticket.epicId === epic().id && props.stage(ticket) === stage.id,
+                            )}
+                            keyed={(ticket) => ticket.id}
+                          >
+                            {(ticket) => <Card ticket={ticket()} />}
+                          </For>
+                        </div>
+                      </section>
+                    </Show>
+                  )}
+                </For>
+                <Show
+                  when={
+                    !members().length && !props.epics.some((child) => child.parentId === epic().id)
+                  }
+                >
+                  <p class="epic-folder-empty">No tickets in this Epic yet.</p>
+                </Show>
+              </div>
+            </>
+          )}
+        </Show>
+      </dialog>
+      <Show when={editing() && selected()}>
+        <EpicEditor
+          current={selected()}
+          epics={props.epics}
+          pending={props.pending}
+          onClose={() => setEditing(false)}
+          onSave={async (input) => {
+            if (await props.onSaveEpic(input, selected())) setEditing(false);
           }}
-        </For>
-      </div>
-    </Show>
+        />
+      </Show>
+    </>
   );
 }

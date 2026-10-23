@@ -27,16 +27,45 @@ every create has deterministic identity, idempotency and ambiguous-outcome recov
 | Work | Engine | Authority |
 | --- | --- | --- |
 | Investigate | Mastra in the Factory server | Authorized Project research; no execution Sandbox |
-| Plan | Mastra in the Factory server | Typed questions and proposals; human confirmation grants scope |
+| Plan | Mastra in the Factory server | Questions, proposals and explicit Project Ticket creation; implementation requires human approval |
 | Build | OpenCode 2 in the primary Dev Container | One approved Change, with separate implementation and read-only review Sessions |
 
 Engine assignment is fixed. Models, role instructions and eligible Skills are configurable.
-Settings → Skills provides private authoring, a curated starter collection, package import previews
-and manager-reviewed sharing. Anyone can keep a personal library across the instance; activation
-choices are per Project. Required rules identify their Factory or Project source. Other choices
+Personal Project Chat uses a turn-bound Factory MCP for existing source reads and explicit Ticket
+creation. Creation shares the UI's planning command and saves an atomic conversation receipt;
+it cannot approve requirements or start implementation. Other Project/Ticket contexts and external
+MCP-library sources acquire no new writes. See [Factory MCP](adr/0020-factory-actions-through-mcp.md).
+Settings → Skills library brings accessible personal, Project and Factory guidance into one
+searchable gallery. Details separate personal activation from the permission-gated Manage view
+for shared defaults and sharing reviews. New Skills and import previews are private by default;
+saving does not enable them. Anyone can keep a personal library across the instance; activation
+choices are per Project and work type. Required rules identify their Factory or Project source. Other choices
 inherit individually and version updates are explicitly adopted for new work. See
 [the engine decision](adr/0008-fixed-role-agent-engines.md) for package admission and privacy.
 The editor leads with Name, When to use and Instructions; files and source details are optional.
+
+Settings → Libraries → MCP connections applies the same discovery and selection structure to remote external
+context. Exact definition sharing, authenticated connections and Project grants remain separate.
+OAuth material lives in OpenBao. Admission retains approved tool contracts and credential epochs;
+each lookup rechecks current access and execution ownership. Mastra uses native tools and OpenCode
+uses a turn-bound Factory facade without provider tokens. Independent review cannot inherit
+library tools. See [the MCP decision](adr/0015-managed-mcp-library.md) for read-only review and
+network boundaries.
+
+Inputs add named Project-bound JSON webhooks with saved tasks and shared MCP source selections.
+The existing Project Agent automatically prepares grounded requirements, with no mode selection.
+Prepared Tickets have no approval or Change. Background work excludes personal configuration and
+retains source, Skill and model intent before inference. Explicit sources must be consulted;
+empty selections inherit shared defaults at the saved policy revision. Human-approved Build retains
+those sources, but independent review cannot acquire them. Duplicates coalesce and uncertain
+inference is not replayed. See [the Inputs decision](adr/0018-project-inputs.md).
+
+An explicit advanced delegation retains bounded monitoring Autofix. Eligible
+requirements and Delivery Approvals identify the immutable delegation. The normal Verification,
+independent review, exact-source and open-Thread gates still apply. Disabling, rotation, authority
+loss and source changes fence further automatic work. See
+[the Autofix decision](adr/0016-delegated-monitoring-autofix.md).
+
 Admission freezes the exact target, input, effective configuration and current authority before
 external work. Navigation and reconnect never retarget an admitted turn. Unknown provider outcomes
 remain uncertain and require an explicit new human retry. An expired lease alone does not authorize
@@ -176,7 +205,7 @@ edited Epic/member proposals. New member Tickets enter Requirements without auto
 ```text
 Approved requirements -> commissioned Change -> OpenCode edits and local checks
   -> Factory commit and controlled push -> Forgejo pull request
-  -> fresh Verification -> independent Candidate Review -> exact human Delivery Approval
+  -> fresh Verification -> independent Candidate Review -> exact Delivery Approval
   -> fast-forward merge -> healthy Staging replacement
 ```
 
@@ -184,8 +213,9 @@ Verification runs the protected default-branch workflow against the exact Change
 Sandbox, with a repository-scoped one-job Forgejo runner. The Change and recorded default-branch
 heads must still match the approved values; movement invalidates Delivery. A correction needs a
 new commit and Verification. Staging retains its previous healthy Preview until replacement is ready.
-After successful Verification, the same admitted Coding model reviews the exact candidate in a fresh
-OpenCode Session without implementation history. Fixed session permissions deny native execution,
+After successful Verification, a fresh OpenCode Session reviews the exact candidate with the same
+admitted Coding model and reasoning, without implementation history.
+Fixed session permissions deny native execution,
 editing, Skill execution and descendants. The existing Factory MCP facade supplies bounded,
 immutable base/candidate file reads and diffs, App inspection and a review-report tool. No generic
 agent registry, extra model-default role or second orchestration engine is introduced.
@@ -195,12 +225,43 @@ Only a settled review with accepted coverage and no blocking findings can pass. 
 require actual App inspection and an exact-candidate screenshot; dirty or different-commit browser
 observations cannot be accepted. The prompt also requires relevant UI behavior beyond that file
 classification. A fresh reviewer is an evaluator, not a guarantee that every defect will be detected.
-Factory persists compact findings, source-read evidence and screenshot digests/provenance, not image
-blobs or another transcript. Screenshot images retain the browser's existing ephemeral lifetime.
+Factory persists compact findings, source-read evidence and screenshot digests/provenance.
+New reviews begin concrete scenarios before observation, cover every criterion and include the
+normal flow and a relevant adverse case before passing. Scenario outcomes bind the intervening source
+or exact-candidate browser observations. UI cases need actual browser observations.
+The existing browser records one protected WebM with scenario chapters. The pinned MCP and
+Chromium remain unchanged; a fixed adapter invokes the pinned FFmpeg with bounded worker threads.
+Recording availability is separate from QA outcome and cannot replay inference or App mutations.
+The video is published through bounded internal chunks, never included in model context.
+Ordinary tool screenshots remain ephemeral. Explicit human annotation stills and QA recordings use
+the existing installation state volume. Reads recheck Project access, use no-store responses and
+support video byte ranges.
+The Ticket is the shared human review surface: one QA player with scenario chips, open Threads,
+comments and folded resolved Threads. General feedback needs no image anchor. Its Open Live Preview
+action reuses the matching Factory tab; only ticket-bound Previews expose the comment affordance.
+The isolated App bridge selects an element without screen capture permission. A pinned, lazy
+DOM renderer may provide an explicitly labelled element reconstruction; absence or upload failure
+does not prevent saving the anchor. App script policy and runtime access remain unchanged.
+Preview provenance retains its Runtime Attempt basis, page and transient view identity, not a claim
+that the current checkout is clean. Old anchors are not applied to another document or edited view.
+Newer complete recordings replace older videos regardless of comments; stills and human feedback
+remain. The last video expires thirty days after delivery or cancellation. Unattached stills expire
+after one day. Publication/deletion intent and media identity stay durable across recovery.
+Human comments do not block Delivery. Open Threads, including agent-reported implemented Threads,
+block approval under the same Change lock. Only the author or an existing authorized developer
+resolves them. One explicit Request revision admits the complete version-checked batch of
+actionable open Threads in the retained implementation Session. Ordinary comments are discussion,
+not work orders. Dispatched Threads are not automatically repeated; implemented Threads await
+human rechecking, and Needs changes explicitly makes them actionable again. Failed or stopped
+revision work permits an explicit retry. The admitted batch is available to the agent through
+bounded list/read tools rather than injecting every discussion into the prompt.
+No comment, reply, resolution, reconnect or recording failure starts work.
 Blocking findings request a bounded targeted correction in the retained implementation Session.
 Missing proof stays incomplete. An explicit retry creates another fresh review attempt for the same
 candidate without changing the old result. Changed Requirements or new source invalidate review eligibility. Human
 Delivery Approval records the exact settled review as well as the commit and Verification.
+Eligible monitoring fixes can instead use an active Project delegation, recorded as the approval
+basis and rechecked before merge. Operational file changes and human editing require human Delivery.
 Delivery ends at Staging, rather than a production application deployment.
 Cleanup confirms no writers on the delivered Change branch while retaining its protected source
 ref and history. It does not temporarily remove protection to force branch deletion.
@@ -238,7 +299,13 @@ outcome unconfirmed, never authorization to replace an immutable resource identi
 advance through ID-ordered batches so busy early rows cannot indefinitely hide later Workspaces.
 
 The Solid desktop uses shared semantic tokens, bundled Sansita/Inter and curated local artwork.
-Wallpaper keys are durable user preferences. Open windows, panel visibility and geometry are
+Wallpaper keys are durable shared Project settings. Project managers choose from six bundled
+public-domain paintings. Creation assigns a random least-used artwork among the creator's
+accessible Projects, serialized across concurrent creates and retained through recovery.
+Existing Projects inherit their creator's previous personal choice, or the original default.
+Zero synchronizes Project background changes for all members; only active Project managers
+and Factory administrators may change them. Previous personal preferences remain retained for
+the non-Project desktop. Open windows, panel visibility and geometry are
 navigation state. Minimize retains work and dirty buffers; reduced motion and transparency have
 usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 
@@ -265,7 +332,10 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Change | Isolated implementation of one approved Requirement Revision |
 | Verification | Evaluation of one exact Change commit in a fresh runtime |
 | Candidate Review | Independent, read-only AI evaluation of one exact verified Change commit |
-| Delivery Approval | Immutable human approval of one verified commit for merge and promotion |
+| Review Scenario | A named expected/observed normal, error or boundary case bound to actual review evidence |
+| Review Thread | Human feedback requiring explicit human resolution before Delivery |
+| Review Comment | Human feedback without a Delivery gate or automatic agent execution |
+| Delivery Approval | Immutable human decision or active monitoring delegation accepting one verified, reviewed commit for merge and promotion |
 | Promotion | Adopt the merged default-branch commit; switch Staging only when ready |
 | App | Named Project service declared by its System Contract |
 | Preview | Authenticated browser endpoint for one declared App |
@@ -280,10 +350,13 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Project Environment | Independent Development or Main-Preview variables and registry access |
 | Development Image Prebuild | Exact prepared development image, not a released application artifact |
 | Project Agent | Checkout-free investigation, Requirements and Knowledge work |
+| Factory MCP | Turn-bound Project research and explicit Ticket creation through existing Factory commands |
 | Change Agent | Implementation in one approved Ticket Workspace |
 | Change Agent Session | Resumable coding conversation shared with that Workspace |
 | Project Conversation | Project-scoped history separate from Ticket conversations |
 | Ticket Conversation | One visible history spanning research, planning and implementation |
+| Conversation Context | Retained messages and admitted work of one conversation within personal Project or shared Ticket history |
+| Active Coding Context | The Ticket's shared conversational execution target, independent of which history a person views |
 | Conversation Mode | Investigate, Plan or Build authority for the next turn |
 | Agent Turn | One durably admitted unit of work; explicit retry creates another identity |
 | Agent Role | Product responsibility, distinct from human access and execution engine |
@@ -292,6 +365,13 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Effective Agent Configuration | Frozen role, model and eligible Skills for one admitted turn |
 | Factory Policy | Binding constraint; lower scopes can tighten but cannot widen it |
 | Model Connection | Managed provider access; credentials are not conversation content |
+| MCP Definition / Revision | Reusable remote source configuration and its exact immutable version, without credentials |
+| MCP Connection | Separately authorized external access with reviewed tool contracts |
+| MCP Project Grant | Explicit permission for one Project to use a Factory-owned connection |
+| Monitoring Delegation | A manager-developer's explicit Project-bound authority for eligible application-code Autofix and Delivery |
+| Monitoring Incident | One deduplicated monitoring defect and its retained diagnosis, work and outcome |
+| Input | Named Project webhook with a saved task, shared source policy and explicit delegation |
+| Input event | One deduplicated external request with retained context and preparation outcome |
 | Agent Usage | Observed consumption; a missing observation is not zero |
 | Coding Budget | Optional monthly estimated-cost start threshold for Coding work |
 | Finish Reserve | Shared allowance for commissioned work, without an invoice-ceiling guarantee |
@@ -309,6 +389,8 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Knowledge Generation | Attempt to update Knowledge from one exact commit; omission never deletes |
 | Repository Document | Source-controlled Markdown read from an exact commit, edited through source |
 | Assistant Context | Known Project/work at admission; later navigation does not retarget it |
+| Attachment | Immutable human-supplied file with retained original content and identified derived images/text |
+| Attachment Reference | Authored association to a document revision, conversation, feedback discussion or exact admitted Agent Turn |
 | Desktop Background | Curated artwork selected by stable Factory key |
 | UI Preference | Durable presentation choice, excluding transient navigation and window state |
 
@@ -329,6 +411,13 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | [0011](adr/0011-delivered-branch-retention.md) | Delivered branches retain source behind a closed write fence |
 | [0012](adr/0012-independent-candidate-review.md) | Independent review uses a fresh, read-only OpenCode Session |
 | [0013](adr/0013-kubernetes-native-installation.md) | One Helm installation on existing Kubernetes, independent of the workstation |
+| [0014](adr/0014-qa-recordings-and-human-review.md) | Protected QA recordings, retained annotation stills and explicit human review decisions |
+| [0015](adr/0015-managed-mcp-library.md) | Shared MCP selection with separate credentials, Project grants and reviewed remote reads |
+| [0016](adr/0016-delegated-monitoring-autofix.md) | Project-bound monitoring delegates eligible application fixes and exact reviewed Delivery |
+| [0017](adr/0017-private-revision-bound-attachments.md) | Private object storage, immutable human file references and reference-safe retention |
+| [0018](adr/0018-project-inputs.md) | Generic Project Inputs automatically prepare requirements, without implicit implementation authority |
+| [0019](adr/0019-conversation-contexts-and-shared-editing.md) | Retained conversations, checkout-free parallel research and explicit shared editing decisions |
+| [0020](adr/0020-factory-actions-through-mcp.md) | Factory MCP for turn-bound Project Chat research and Ticket creation |
 
 ## Verification and operating limits
 

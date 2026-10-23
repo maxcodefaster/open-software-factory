@@ -3,10 +3,13 @@ import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import type { AgentView } from "../../apps/factory/src/api-contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import type { ReviewFeedback } from "../../packages/conversation-domain/src/visual-review";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { fulfillAgentView, streamedAgentView } from "../support/agent-activity-route";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { serveChatAssets } from "../support/chat-assets";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -16,6 +19,7 @@ let revisionID = "";
 const title = "A calm implementation journey";
 
 test.beforeEach(async ({ page }) => {
+  await serveChatAssets(page);
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   const { session } = await (await page.request.get("/api/session")).json();
@@ -27,6 +31,12 @@ test.beforeEach(async ({ page }) => {
   );
   await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
     route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no IDE" } }),
+  );
+  // Scripted Changes have no database review. Individual review cases override this route.
+  await page.route("**/api/changes/*/review", (route) =>
+    route.fulfill({
+      json: { feedback: [], recordingEnabled: true, recording: null, scenarios: [] },
+    }),
   );
   const canonical = canonicalRequirementContent({
     summary: "Make the **starter** welcoming.",
@@ -51,11 +61,292 @@ test.afterEach(async () => {
 });
 
 async function selectProject(page: Parameters<typeof signIn>[0]) {
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page
     .getByRole("button")
     .filter({ hasText: `implementation-ux-${projectID}` })
     .click();
+}
+
+for (const state of [
+  { id: "personal-draft", primary: "Write requirements" },
+  { id: "idea", primary: "Write requirements" },
+  { id: "requirements", primary: "Implement" },
+  { id: "proposal", primary: "Confirm answers" },
+  { id: "preparing", primary: "" },
+  { id: "coding", primary: "" },
+  { id: "coding-paused", primary: "Resume implementation" },
+  { id: "reviewing", primary: "" },
+  { id: "revision", primary: "Request revision" },
+  { id: "checks-paused", primary: "Resume checks" },
+  { id: "review-retry", primary: "Retry review" },
+  { id: "ready-to-deliver", primary: "Deliver" },
+  { id: "delivered", primary: "Create follow-up" },
+]) {
+  test(`Ticket action bar is consistent in ${state.id}`, async ({ page }) => {
+    test.setTimeout(60_000);
+    const evidence = ".factory/test-results/ticket-action-bar/states";
+    await mkdir(evidence, { recursive: true });
+    const changeID = crypto.randomUUID();
+    const turnID = crypto.randomUUID();
+    const hasChange = !["personal-draft", "idea", "requirements", "proposal"].includes(state.id);
+    const preparing = state.id === "preparing";
+    const coding = state.id === "coding";
+    const paused = state.id === "coding-paused";
+    const delivered = state.id === "delivered";
+    const reviewState =
+      state.id === "reviewing"
+        ? "running"
+        : state.id === "review-retry"
+          ? "incomplete"
+          : state.id === "checks-paused"
+            ? "stopped"
+            : "passed";
+    const { session } = await (await page.request.get("/api/session")).json();
+    const database = createDatabase(1);
+    try {
+      await database.client`UPDATE factory.ticket
+        SET state=${state.id === "idea" ? "inbox" : delivered ? "done" : hasChange ? "in-progress" : "ready"}
+        WHERE id=${ticketID}`;
+    } finally {
+      await database.client.end();
+    }
+    if (state.id === "proposal") {
+      const detail = await (await page.request.get(`/api/tickets/${ticketID}`)).json();
+      await page.route(`**/api/tickets/${ticketID}`, (route) =>
+        route.fulfill({
+          json: {
+            ...detail,
+            proposal: {
+              id: crypto.randomUUID(),
+              ticket: { title, description: "A proposed, not yet approved requirement." },
+              requirement: {
+                summary: "Make the starter welcoming.",
+                acceptanceCriteria: ["A clear first action."],
+                nonGoals: [],
+              },
+              base: { version: detail.ticket.version, documentId: null, revisionId: revisionID },
+            },
+          },
+        }),
+      );
+    }
+    await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+      route.fulfill({
+        json: {
+          changes: hasChange
+            ? [
+                {
+                  id: changeID,
+                  projectId: projectID,
+                  ticketId: ticketID,
+                  branchName: "factory/owned-action-bar",
+                  baseSha: "a".repeat(40),
+                  state: delivered ? "delivered" : preparing ? "starting" : "active",
+                  runtimeState: preparing ? "create-intended" : "ready",
+                  branchState: "succeeded",
+                  implementationState: preparing
+                    ? "starting"
+                    : coding || paused
+                      ? "working"
+                      : "committed",
+                  buildTurnState:
+                    preparing || paused ? "pending" : coding ? "running" : "completed",
+                },
+              ]
+            : [],
+        },
+      }),
+    );
+    await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+      fulfillAgentView(route, {
+        json: {
+          state: preparing || paused ? "starting" : coding ? "working" : "committed",
+          sessionAvailable: true,
+          runtimeConnected: !preparing,
+          messagesAvailable: true,
+          messages: [],
+          stopPending: false,
+          stopId: null,
+          codingPause: paused ? { turnID, reason: "finish-reserve-used" } : null,
+        },
+      }),
+    );
+    await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
+      route.fulfill({
+        json:
+          preparing || coding || paused
+            ? {}
+            : {
+                verificationState: state.id === "checks-paused" ? "cancelled" : "succeeded",
+                reviewState,
+                reviewCurrent: true,
+                openReviewThreads: state.id === "revision" ? 1 : 0,
+                ...(state.id === "checks-paused" ? { checksStopId: crypto.randomUUID() } : {}),
+              },
+      }),
+    );
+    await page.route(`**/api/changes/${changeID}/review`, (route) =>
+      route.fulfill({
+        json: {
+          feedback:
+            state.id === "revision"
+              ? [
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "thread",
+                    state: "open",
+                    version: 1,
+                    authorId: session.user.id,
+                    author: "Reviewer",
+                    commitSha: "a".repeat(40),
+                    annotation: null,
+                    createdAt: new Date().toISOString(),
+                    messages: [
+                      {
+                        id: crypto.randomUUID(),
+                        author: "Reviewer",
+                        body: "Keep the entered draft after validation.",
+                        createdAt: new Date().toISOString(),
+                      },
+                    ],
+                  },
+                ]
+              : [],
+          recordingEnabled: false,
+          recording: null,
+          scenarios: [],
+          canSendCorrections: state.id === "revision",
+          readOnly: delivered,
+        },
+      }),
+    );
+    let commands = 0;
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        /\/(?:implement|message|start|resume|deliver|send|retry-review)$/.test(
+          new URL(request.url()).pathname,
+        )
+      )
+        commands++;
+    });
+    await selectProject(page);
+    if (state.id === "personal-draft") {
+      await page.getByRole("button", { name: "New Ticket", exact: true }).click();
+      await page.getByRole("textbox", { name: "Ticket title", exact: true }).fill(title);
+    } else {
+      if (delivered) await page.getByRole("button", { name: /History/ }).click();
+      await page
+        .getByRole("region", { name: "Ticket board" })
+        .getByRole("button")
+        .filter({ hasText: title })
+        .last()
+        .click();
+    }
+    const toolbar = page.locator(".ticket-header-actions");
+    await expect(toolbar).toBeVisible();
+    if (hasChange) {
+      await expect(page.getByRole("button", { name: "Ticket actions", exact: true })).toBeVisible();
+      await expect(page.getByRole("region", { name: "Visual review", exact: true })).toBeVisible();
+    }
+    if (preparing)
+      await expect(page.locator(".ticket-checks > summary")).toHaveText("Preparing implementation");
+    if (coding)
+      await expect(page.locator(".ticket-checks > summary")).toHaveText(
+        "Implementation in progress",
+      );
+    if (state.id === "reviewing")
+      await expect(page.locator(".ticket-checks > summary")).toHaveText(
+        "Independent review in progress",
+      );
+    if (state.primary)
+      await expect(toolbar.locator('[data-primary="true"]')).toHaveText(state.primary);
+    else await expect(toolbar.locator('[data-primary="true"]')).toHaveCount(0);
+    for (const width of [1440, 900, 430, 320]) {
+      await page.setViewportSize({ width, height: 960 });
+      await page.mouse.move(1, 1);
+      for (const button of await toolbar.locator(":scope > button:visible").all())
+        await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+      const metrics = await toolbar.evaluate((element) => {
+        const buttons = [...element.querySelectorAll<HTMLButtonElement>(":scope > button")].filter(
+          (button) => button.getClientRects().length,
+        );
+        return {
+          icons: buttons.reduce(
+            (count, button) => count + button.querySelectorAll("svg").length,
+            0,
+          ),
+          styles: buttons.map((button) => {
+            const style = getComputedStyle(button);
+            return [style.backgroundColor, style.borderWidth, style.boxShadow, style.minHeight];
+          }),
+          last: buttons.at(-1)?.getAttribute("data-primary"),
+        };
+      });
+      expect(metrics.icons).toBe(0);
+      for (const style of metrics.styles)
+        expect(style).toEqual(["rgba(0, 0, 0, 0)", "0px", "none", "32px"]);
+      if (state.primary) expect(metrics.last).toBe("true");
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+        true,
+      );
+      await toolbar.evaluate((element) => {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && element.contains(active)) active.blur();
+      });
+      await page.locator(".ticket-document-heading").screenshot({
+        path: `${evidence}/${state.id}-${width}.png`,
+      });
+      if (state.id !== "personal-draft") {
+        const opener = toolbar.getByRole("button", { name: "Ticket actions", exact: true });
+        await opener.click();
+        const menu = page.getByRole("menu", { name: "Ticket actions", exact: true });
+        await expect(menu).toBeVisible();
+        const bounds = await menu.boundingBox();
+        expect(bounds!.x).toBeGreaterThanOrEqual(0);
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(960);
+        if (state.id === "revision" && width === 430) {
+          const refreshed = page.waitForResponse(
+            (response) => new URL(response.url()).pathname === `/api/changes/${changeID}/review`,
+          );
+          await page.evaluate(
+            (id) => window.dispatchEvent(new CustomEvent("factory-review-changed", { detail: id })),
+            changeID,
+          );
+          await refreshed;
+          await expect(menu).toBeVisible();
+          expect(
+            await menu
+              .locator("svg")
+              .first()
+              .evaluate((element) => getComputedStyle(element).fill),
+          ).toBe("none");
+          const feedbackLabel = await menu
+            .getByRole("menuitem", { name: "Add feedback", exact: true })
+            .locator("span")
+            .boundingBox();
+          const reloadLabel = await menu
+            .getByRole("menuitem", { name: "Reload review", exact: true })
+            .locator("span")
+            .boundingBox();
+          expect(Math.abs(feedbackLabel!.x - reloadLabel!.x)).toBeLessThanOrEqual(1);
+          await page.screenshot({
+            path: `${evidence}/revision-menu-430.png`,
+            animations: "disabled",
+          });
+          await expect(menu).toBeVisible();
+        }
+        await page.keyboard.press("Escape");
+        await expect(opener).toBeFocused();
+      }
+    }
+    expect(commands).toBe(0);
+    expect(errors).toEqual([]);
+  });
 }
 
 test("the specification leads while request details remain available and editable without repeated prose", async ({
@@ -69,7 +360,7 @@ test("the specification leads while request details remain available and editabl
     await selectProject(page);
     await page
       .getByRole("region", { name: "requirements", exact: true })
-      .getByRole("button")
+      .locator(".ticket-card-body")
       .click();
     const details = page.locator(".ticket-request-details");
     const description = page.getByRole("textbox", { name: "Ticket description", exact: true });
@@ -394,7 +685,10 @@ test("Implement is one explicit recoverable action and does not open IDE or Assi
     return route.fulfill({ status: 202, contentType: "application/json", body: "{}" });
   });
   await selectProject(page);
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await expect(page.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Start Change", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Implement", exact: true }).click();
@@ -452,7 +746,10 @@ test("developer Coding options choose reasoning before the normal atomic Impleme
       : route.fulfill({ status: 202, json: {} });
   });
   await selectProject(page);
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   async function openOptions() {
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
     await page
@@ -506,7 +803,10 @@ test("developer Coding options choose reasoning before the normal atomic Impleme
   await page.reload();
   await page.setViewportSize({ width: 1440, height: 900 });
   await selectProject(page);
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await openOptions();
   await expect(reasoning).toHaveValue("high");
   expect(requests).toHaveLength(1);
@@ -602,7 +902,10 @@ test("an admitted Coding-options request with a lost response reconnects to its 
   );
   await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
   await selectProject(page);
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Coding options…", exact: true }).click();
   const panel = page.locator(".agent-panel");
@@ -706,7 +1009,8 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
     .getByRole("region", { name: "implementation", exact: true })
     .getByRole("button")
     .click();
-  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Retry implementation", exact: true }),
@@ -842,7 +1146,8 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
     .getByRole("region", { name: "implementation", exact: true })
     .getByRole("button")
     .click();
-  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const panel = page.locator(".agent-panel");
   const reasoning = panel.getByLabel("Reasoning", { exact: true });
@@ -906,7 +1211,8 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
     .getByRole("region", { name: "implementation", exact: true })
     .getByRole("button")
     .click();
-  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   await expect(reasoning).toHaveValue("high");
   expect(starts).toHaveLength(1);
@@ -976,7 +1282,7 @@ for (const role of ["developer", "product-contributor"] as const) {
     const password = "owned-coding-model-scope-password";
     const email = `coding-model-${projectID}@factory.local`;
     const created = await page.request.post("/api/admin/users", {
-      headers: { origin: "http://127.0.0.1:3000" },
+      headers: { origin: new URL(page.url()).origin },
       data: { name: `Coding model ${role}`, email, password },
     });
     expect(created.status()).toBe(201);
@@ -995,7 +1301,7 @@ for (const role of ["developer", "product-contributor"] as const) {
     let hasChange = false;
     try {
       const membership = await page.request.post(`/api/projects/${projectID}/members`, {
-        headers: { origin: "http://127.0.0.1:3000" },
+        headers: { origin: new URL(page.url()).origin },
         // Managing a Project does not grant developer access.
         data: { email, role, manageProject: role === "product-contributor" },
       });
@@ -1053,6 +1359,11 @@ for (const role of ["developer", "product-contributor"] as const) {
       await member.route(`**/api/changes/${changeID}/delivery`, (route) =>
         route.fulfill({ json: {} }),
       );
+      await member.route(`**/api/changes/${changeID}/review`, (route) =>
+        route.fulfill({
+          json: { feedback: [], recording: null, recordingEnabled: false, scenarios: [] },
+        }),
+      );
       await member.goto("/");
       await member.getByLabel("Email", { exact: true }).fill(email);
       await member.getByLabel("Password", { exact: true }).fill(password);
@@ -1060,7 +1371,7 @@ for (const role of ["developer", "product-contributor"] as const) {
       await selectProject(member);
       await member
         .getByRole("region", { name: "requirements", exact: true })
-        .getByRole("button")
+        .locator(".ticket-card-body")
         .click();
       await member.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
       const panel = member.locator(".agent-panel");
@@ -1089,24 +1400,33 @@ for (const role of ["developer", "product-contributor"] as const) {
       );
       await expect(controls).toHaveCount(0);
       await member.screenshot({ path: `${evidence}/${role}-investigate.png` });
-      await member.getByRole("button", { name: "Request changes", exact: true }).click();
-      await expect(panel.locator(".agent-state")).toHaveText("Submitted for verification");
-      await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
-      if (role === "developer") {
-        await expect(panel.getByLabel("Reasoning", { exact: true })).toBeVisible();
-        await expect(panel.getByLabel("Reasoning", { exact: true })).toBeDisabled();
-      } else {
-        await expect(controls).toHaveCount(0);
-        await expect(panel.locator("select")).toHaveCount(0);
-        await expect(member.getByRole("button", { name: "Open IDE", exact: true })).toHaveCount(0);
-      }
-      await member.screenshot({ path: `${evidence}/${role}-coding.png` });
+      await expect(
+        member.getByRole("button", { name: "Request changes", exact: true }),
+      ).toHaveCount(0);
+      await member.getByRole("button", { name: "Add feedback", exact: true }).click();
+      const composer = member.getByRole("form", { name: "Add review feedback" });
+      await composer
+        .getByRole("textbox", { name: "Review comment" })
+        .fill("Keep the first action clear.");
+      await composer.getByRole("combobox", { name: "Feedback type" }).selectOption("thread");
+      await expect(controls).toHaveCount(0);
+      await expect(composer.getByRole("combobox")).toHaveCount(1);
+      await expect(
+        composer.getByRole("button", { name: "Save feedback", exact: true }),
+      ).toBeEnabled();
+      if (role !== "developer")
+        await expect(member.getByRole("menuitem", { name: "Open IDE", exact: true })).toHaveCount(
+          0,
+        );
+      await member.screenshot({ path: `${evidence}/${role}-review-feedback.png` });
       await member.setViewportSize({ width: 390, height: 844 });
-      await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
+      await expect(
+        composer.getByRole("button", { name: "Save feedback", exact: true }),
+      ).toBeVisible();
       expect(await member.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
         390,
       );
-      await member.screenshot({ path: `${evidence}/${role}-coding-narrow.png` });
+      await member.screenshot({ path: `${evidence}/${role}-review-feedback-narrow.png` });
       expect(errors).toEqual([]);
     } finally {
       await context.close();
@@ -1206,10 +1526,17 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
     .getByRole("region", { name: "implementation", exact: true })
     .getByRole("button")
     .click();
-  await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const rows = page.locator("details.agent-activity");
   await expect(rows).toHaveCount(3);
+  const group = page.getByRole("region", { name: "Grouped tool activity" });
+  const expandActivities = group.getByRole("button", { name: /2 commands · 1 file read/ });
+  await expect(expandActivities).toHaveAttribute("aria-expanded", "false");
+  await expect(rows.first()).toBeHidden();
+  await expect(rows.last()).toBeVisible();
+  await expandActivities.click();
   const row = rows.first();
   const summary = row.locator("summary");
   await expect(row).not.toHaveAttribute("open");
@@ -1343,7 +1670,8 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
       .getByRole("region", { name: "implementation", exact: true })
       .getByRole("button")
       .click();
-    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     const rows = page.locator("details.agent-activity");
     await expect(rows).toHaveCount(1);
@@ -1458,7 +1786,8 @@ test("admitted instructions remain visible before native dispatch and appear onc
       .getByRole("region", { name: "implementation", exact: true })
       .getByRole("button")
       .click();
-    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     const panel = page.locator(".agent-panel");
     await expect(panel.getByText(text, { exact: true })).toHaveCount(1);
@@ -1843,13 +2172,13 @@ for (const reviewState of ["incomplete", "stopped"] as const)
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   const changeID = crypto.randomUUID();
-  let received: { commandId: string; text: string } | undefined;
+  let received: { commandId: string; feedback: { id: string; version: number }[] } | undefined;
   let researchRequests = 0;
   let state = "committed";
-  let holdRead = false;
-  const held = Promise.withResolvers<void>();
-  const release = Promise.withResolvers<void>();
+  const feedback: ReviewFeedback[] = [];
+  const { session } = await (await page.request.get("/api/session")).json();
   const agent = {
     state: "committed",
     sessionAvailable: true,
@@ -1882,18 +2211,43 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
     route.fulfill({ json: { changes: [change] } }),
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, async (route) => {
-    const snapshot = { ...agent, state };
-    if (holdRead) {
-      holdRead = false;
-      held.resolve();
-      await release.promise;
-    }
-    await fulfillAgentView(route, { json: snapshot });
-  });
-  await page.route(`**/api/changes/${changeID}/agent/stop`, (route) => {
-    state = "stopped";
-    return route.fulfill({ json: { ...agent, state } });
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, { json: { ...agent, state } }),
+  );
+  await page.route(`**/api/changes/${changeID}/review`, (route) =>
+    route.fulfill({
+      json: {
+        feedback,
+        recording: null,
+        recordingEnabled: false,
+        scenarios: [],
+        canSendCorrections: state === "committed",
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/review/feedback`, (route) => {
+    const input = route.request().postDataJSON() as { kind: "comment" | "thread"; body: string };
+    const id = crypto.randomUUID();
+    feedback.push({
+      id,
+      kind: input.kind,
+      state: "open",
+      version: 1,
+      authorId: session.user.id,
+      author: "Reviewer",
+      commitSha: "d".repeat(40),
+      annotation: null,
+      createdAt: new Date().toISOString(),
+      messages: [
+        {
+          id: crypto.randomUUID(),
+          author: "Reviewer",
+          body: input.body,
+          createdAt: new Date().toISOString(),
+        },
+      ],
+    });
+    return route.fulfill({ json: { feedbackId: id } });
   });
   await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
     route.fulfill({
@@ -1913,36 +2267,46 @@ test("Review corrections send to the retained Build without IDE; checks and cont
     researchRequests += 1;
     return route.fulfill({ json: conversation });
   });
-  await page.route(`**/api/changes/${changeID}/agent/request-changes`, (route) => {
+  await page.route(`**/api/changes/${changeID}/review/send`, (route) => {
     received = route.request().postDataJSON();
     state = "working";
-    return route.fulfill({ json: { ...agent, state } });
+    for (const item of feedback) if (item.kind === "thread") item.correctionState = "running";
+    return route.fulfill({ json: { turnId: crypto.randomUUID() } });
   });
   await selectProject(page);
   await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
   await expect(page.getByRole("button", { name: "Deliver", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
   await expect(
-    page.getByRole("link", { name: "Review source changes", exact: true }),
+    page.getByRole("menuitem", { name: "Review source changes", exact: true }),
   ).toHaveAttribute("href", "http://127.0.0.1:33030/owned/starter/pulls/1/files");
   await expect(
-    page.getByRole("link", { name: "Review source changes", exact: true }),
+    page.getByRole("menuitem", { name: "Review source changes", exact: true }),
   ).toHaveAttribute("rel", "noreferrer");
-  await expect(page.getByRole("link", { name: "Review source changes", exact: true })).toHaveCSS(
-    "text-decoration-line",
-    "none",
-  );
+  await expect(
+    page.getByRole("menuitem", { name: "Review source changes", exact: true }),
+  ).toHaveCSS("text-decoration-line", "none");
+  await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: "Cancel Change", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Open Forgejo checks" })).toBeHidden();
   await page.locator(".ticket-checks summary").click();
   await expect(page.getByRole("link", { name: "Open Forgejo checks" })).toBeVisible();
-  await page.getByRole("button", { name: "Request changes", exact: true }).click();
-  const input = page.getByRole("textbox", { name: "Message conversation", exact: true });
-  await expect(input).toBeVisible();
-  await expect(page.locator(".agent-state")).toHaveText("Submitted for verification");
-  await expect(
-    page.getByText("Review the submitted changes, or describe a correction.", { exact: true }),
-  ).toBeVisible();
-  await expect(page.getByText("Workspace status unavailable", { exact: true })).toBeVisible();
+  await page.locator(".ticket-checks summary").click();
+  const review = page.getByRole("region", { name: "Visual review", exact: true });
+  await page
+    .locator(".ticket-header-actions")
+    .getByRole("button", { name: "Add feedback", exact: true })
+    .click();
+  const input = review.getByRole("textbox", { name: "Review comment", exact: true });
+  await input.fill("The rest of the flow is clear.");
+  await review.getByRole("button", { name: "Save feedback", exact: true }).click();
+  expect(received).toBeUndefined();
+  await page
+    .locator(".ticket-header-actions")
+    .getByRole("button", { name: "Add feedback", exact: true })
+    .click();
+  await review.getByRole("combobox", { name: "Feedback type" }).selectOption("thread");
+  await input.fill("Correct the first action within the original requirements.");
   await mkdir(".factory/test-results/implementation-journey", { recursive: true });
   await page.screenshot({
     path: ".factory/test-results/implementation-journey/source-submitted-not-complete-wide.png",
@@ -1953,51 +2317,40 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
   await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(page.getByText("Details", { exact: true })).toHaveCount(0);
-  await input.fill("Correct the first action within the original requirements.");
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      ),
-  );
-  await expect(input).toBeFocused();
-  await input.press("Enter");
+  await review.getByRole("button", { name: "Save feedback", exact: true }).click();
+  expect(received).toBeUndefined();
+  await expect(review.getByRole("checkbox")).toHaveCount(0);
+  await page
+    .locator(".ticket-header-actions")
+    .getByRole("button", { name: "Request revision", exact: true })
+    .click();
   await expect
-    .poll(() => received?.text)
-    .toBe("Correct the first action within the original requirements.");
+    .poll(() => received?.feedback)
+    .toEqual(
+      feedback
+        .filter((item) => item.kind === "thread")
+        .map((item) => ({ id: item.id, version: item.version })),
+    );
   expect(researchRequests).toBe(0);
-  await expect(page.locator(".agent-state")).toHaveText("Working");
-  await expect(input).toHaveValue("");
+  await expect(review.getByText("Revision in progress", { exact: true })).toBeVisible();
   // The command response arrives before the cached Change reflects the new turn.
   await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Request revision", exact: true })).toHaveCount(0);
   await mkdir(".factory/test-results/implementation-journey", { recursive: true });
   await page.screenshot({
     path: ".factory/test-results/implementation-journey/correction-composer-cleared.png",
   });
+  await page
+    .locator(".ticket-header-actions")
+    .getByRole("button", { name: "Add feedback", exact: true })
+    .click();
   await input.fill("Keep this newer draft while the accepted correction runs.");
-  holdRead = true;
-  await held.promise;
-  await page.getByRole("button", { name: "Stop OpenCode", exact: true }).click();
-  await expect(page.locator(".agent-state")).toHaveText("Stopped");
-  const oldResponse = page.waitForResponse(
-    (response) => new URL(response.url()).pathname === `/api/changes/${changeID}/agent/activity`,
-  );
-  release.resolve();
-  await oldResponse;
-  // Assert in the next rendered frame, before a later truthful poll can conceal rollback.
-  await page.evaluate(
-    () =>
-      new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
-      ),
-  );
-  await expect(page.locator(".agent-state")).toHaveText("Stopped", { timeout: 100 });
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Reload review", exact: true }).click();
   await expect(input).toHaveValue("Keep this newer draft while the accepted correction runs.");
   await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
   await mkdir(".factory/test-results/implementation-journey", { recursive: true });
-  await page.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
   await page.screenshot({
     path: ".factory/test-results/implementation-journey/review-desktop.png",
   });
@@ -2012,7 +2365,10 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await selectProject(page);
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });
@@ -2020,13 +2376,13 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(settings.getByRole("heading", { name: "Personal", exact: true })).toBeVisible();
   await expect(
-    settings.getByRole("heading", { name: "Implementation UX", exact: true }),
+    settings.getByRole("heading", { name: "Project · Implementation UX", exact: true }),
   ).toBeVisible();
-  await expect(settings.getByRole("heading", { name: "Factory", exact: true })).toBeVisible();
+  await expect(
+    settings.getByRole("heading", { name: "Factory administration", exact: true }),
+  ).toBeVisible();
   const skills = settings
     .getByRole("navigation", { name: "Settings navigation" })
-    .locator("section")
-    .filter({ has: page.getByRole("heading", { name: "Personal", exact: true }) })
     .getByRole("button", { name: "Skills", exact: true });
   await skills.click();
   await page.getByRole("tab", { name: title, exact: true }).click();
@@ -2138,12 +2494,22 @@ test("post-start human edits and selected History retain immutable scope without
 
 test("Trash and Restore preserve an unimplemented Ticket without dispatch", async ({ page }) => {
   await selectProject(page);
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
   await expect(summary).toContainText("starter");
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "Move to Trash", exact: true }).click();
   await expect(page.getByRole("button", { name: "Restore", exact: true })).toBeEnabled();
+  const actions = page.locator(".ticket-header-actions");
+  await expect(actions.locator('[data-primary="true"]')).toHaveText("Restore");
+  await expect(actions.locator(":scope > :last-child")).toHaveAttribute("data-primary", "true");
+  await mkdir(".factory/test-results/ticket-action-bar/states", { recursive: true });
+  await page.locator(".ticket-document-heading").screenshot({
+    path: ".factory/test-results/ticket-action-bar/states/trashed-1440.png",
+  });
   await expect(summary).toHaveAttribute("aria-readonly", "true");
   await page.getByRole("button", { name: "Restore", exact: true }).click();
   await expect(page.getByRole("button", { name: "Restore", exact: true })).toHaveCount(0);

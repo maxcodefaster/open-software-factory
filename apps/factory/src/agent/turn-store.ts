@@ -14,6 +14,10 @@ import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { codingBudgetIn } from "../usage/policy";
+import { createMCPLibrary } from "../mcp/controller";
+import { monitoringChangeAuthorityIn, inputTicketAssignmentsIn } from "../monitoring/authority";
+import { freezeAttachmentContextIn } from "../attachments/store";
+import { lockConversation } from "../project-agent/conversation-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type TurnRow = {
@@ -56,30 +60,42 @@ function leaseDuration(milliseconds: number) {
   return milliseconds;
 }
 
-async function currentAuthorityIn(sql: AgentTurnTransaction, record: AgentTurnRecord) {
+async function currentAuthorityIn(
+  database: Database,
+  sql: AgentTurnTransaction,
+  record: AgentTurnRecord,
+) {
   const { command, authority } = record;
   if (authority.mode === "build" && "changeId" in command) {
     // Writer transitions take Change before membership. Agent validation must
     // keep this order rather than deadlocking a concurrent human save/handoff.
     await lockChangeWriterIn(sql, command.changeId);
+  } else if (command.ticketId) {
+    const [ticket] = await sql<{ trashed: boolean }[]>`SELECT
+      (trashed_at IS NOT NULL OR converted_to_epic_id IS NOT NULL) AS trashed
+      FROM factory.ticket WHERE id=${command.ticketId} FOR SHARE`;
+    if (!ticket || ticket.trashed) return false;
   }
   try {
     await projectAuthorityIn(sql, command.createdBy, command.projectId);
+    if (authority.mode === "build" && authority.monitoringIncidentId && "changeId" in command) {
+      const delegated = await monitoringChangeAuthorityIn(
+        database,
+        sql,
+        command.changeId,
+        authority.monitoringIncidentId,
+      );
+      if (delegated.userId !== command.createdBy) return false;
+    }
   } catch (cause) {
     if (cause instanceof CommandError) return false;
     throw cause;
   }
   if (authority.mode !== "build") {
-    const rows = await sql<Array<{ mode: string; version: number }>>`
-      SELECT mode, version::float8 AS version FROM factory.ticket_conversation
-        WHERE id = ${command.conversationId} FOR UPDATE`;
-    if (command.ticketId) {
-      const [ticket] = await sql<Array<{ trashed: boolean }>>`
-        SELECT (trashed_at IS NOT NULL OR converted_to_epic_id IS NOT NULL) AS trashed FROM factory.ticket
-        WHERE id = ${command.ticketId} FOR SHARE`;
-      if (!ticket || ticket.trashed) return false;
-    }
-    return rows[0]?.mode === authority.mode && rows[0].version === authority.conversationVersion;
+    const current = command.conversationId
+      ? await lockConversation(sql, command.conversationId, command.contextId)
+      : undefined;
+    return current?.mode === authority.mode && current.version === authority.conversationVersion;
   }
   if (!("changeId" in command)) return false;
   const locked = await sql<Array<{ id: string }>>`
@@ -126,13 +142,16 @@ async function currentAuthorityIn(sql: AgentTurnTransaction, record: AgentTurnRe
     SELECT change_id AS id FROM factory.change_agent_session
       WHERE change_id = ${command.changeId} AND stop_pending`;
   if (stopping[0]) return false;
-  const conversations = await sql<Array<{ id: string; mode: string; version: number }>>`
-    SELECT id, mode, version::float8 AS version FROM factory.ticket_conversation
+  const conversations = await sql<
+    Array<{ id: string; mode: string; version: number; contextID: string | null }>
+  >`
+    SELECT id, mode, version::float8 AS version,active_coding_context_id AS "contextID" FROM factory.ticket_conversation
       WHERE ticket_id = ${command.ticketId} FOR UPDATE`;
   if (command.conversationId === null)
     return conversations.length === 0 && authority.conversationVersion === null;
   return (
     conversations[0]?.id === command.conversationId &&
+    (conversations[0].contextID ?? undefined) === command.contextId &&
     conversations[0].mode === "build" &&
     conversations[0].version === authority.conversationVersion
   );
@@ -147,7 +166,7 @@ export function createAgentTurnStore(database: Database) {
       const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
         AND change_id IS NOT NULL AND state = 'completed' FOR UPDATE`;
       if (!rows[0]) return false;
-      const current = await currentAuthorityIn(sql, turn(rows[0]));
+      const current = await currentAuthorityIn(database, sql, turn(rows[0]));
       await persist(sql, current);
       return current;
     });
@@ -162,6 +181,20 @@ export function createAgentTurnStore(database: Database) {
     const command = agentTurnCommandInput.parse(rawCommand);
     const authority = agentTurnAuthorityInput.parse(rawAuthority);
     assertAgentTurnAuthority(command, authority);
+    const monitoring =
+      authority.mode === "build" && authority.monitoringIncidentId && "changeId" in command
+        ? await monitoringChangeAuthorityIn(
+            database,
+            transaction,
+            command.changeId,
+            authority.monitoringIncidentId,
+          )
+        : null;
+    if (
+      monitoring &&
+      (monitoring.userId !== command.createdBy || monitoring.projectId !== command.projectId)
+    )
+      throw new CommandError("forbidden", "Autofix must use its recorded Project delegation");
     const digest = fingerprint(command);
     await transaction`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${command.commandId}`}))`;
     const existing = await transaction<TurnRow[]>`
@@ -181,6 +214,8 @@ export function createAgentTurnStore(database: Database) {
           SELECT id FROM factory.agent_turn WHERE project_id = ${command.projectId}
             AND ticket_id IS NOT DISTINCT FROM ${command.ticketId}
             AND (${command.ticketId}::uuid IS NOT NULL OR created_by = ${command.createdBy})
+            AND (CASE WHEN change_id IS NULL THEN input->>'contextId' ELSE NULL END)
+              IS NOT DISTINCT FROM ${!("changeId" in command) ? (command.contextId ?? null) : null}
             AND (state IN ('pending', 'dispatching', 'running') OR (change_id IS NOT NULL AND state = 'uncertain'))
         `;
     if (active[0])
@@ -200,7 +235,46 @@ export function createAgentTurnStore(database: Database) {
         `;
     if (!rows[0]) throw new Error("Agent Turn admission was not recorded");
     const record = turn(rows[0]);
+    if (!(authority.mode === "build" && authority.review)) {
+      const [initial] =
+        authority.mode === "build" && "changeId" in command
+          ? await transaction<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
+            WHERE change_id=${command.changeId} AND id<>${record.id} AND input->>'kind'<>'change-review'
+            ORDER BY created_at,id LIMIT 1`
+          : [];
+      if (initial)
+        await transaction`INSERT INTO factory.agent_turn_mcp(turn_id,connection_id,credential_epoch,revision_id,policy_version,tools,required)
+          SELECT ${record.id},connection_id,credential_epoch,revision_id,policy_version,tools,required
+          FROM factory.agent_turn_mcp WHERE turn_id=${initial.id}`;
+      else {
+        const inputSources =
+          monitoring?.assignments ??
+          (authority.mode === "build" && command.ticketId
+            ? await inputTicketAssignmentsIn(
+                database,
+                transaction,
+                command.ticketId,
+                command.projectId,
+                command.createdBy,
+              )
+            : []);
+        for (const source of inputSources) {
+          await transaction`INSERT INTO factory.agent_turn_mcp(turn_id,connection_id,credential_epoch,revision_id,policy_version,tools,required)
+            VALUES(${record.id},${source.connectionId},${source.credentialEpoch},${source.revisionId},
+              ${source.policyVersion},${JSON.stringify(source.tools)}::jsonb,true)`;
+        }
+        await createMCPLibrary(database).admitIn(
+          transaction,
+          record.id,
+          command.projectId,
+          command.createdBy,
+          authority.mode === "build" ? "build" : "planning",
+          !monitoring,
+        );
+      }
+    }
     await persistInput?.(transaction, record);
+    await freezeAttachmentContextIn(transaction, record);
     return { turn: record, replayed: false };
   }
 
@@ -210,7 +284,7 @@ export function createAgentTurnStore(database: Database) {
       const [row] = await sql<
         TurnRow[]
       >`SELECT * FROM factory.agent_turn WHERE id=${id} AND state='pending' FOR UPDATE`;
-      if (!row || !(await currentAuthorityIn(sql, turn(row))))
+      if (!row || !(await currentAuthorityIn(database, sql, turn(row))))
         throw new CommandError("conflict", "Paused work no longer has execution authority");
       const budget = await codingBudgetIn(sql, turn(row).command.projectId, true);
       if (!budget.allowed)
@@ -269,7 +343,7 @@ export function createAgentTurnStore(database: Database) {
         const owned = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn
           WHERE id = ${id} AND state = 'pending' AND owner_token = ${ownerToken}
             AND owner_expires_at > clock_timestamp() FOR UPDATE`;
-        if (!owned[0] || !(await currentAuthorityIn(sql, turn(owned[0])))) return null;
+        if (!owned[0] || !(await currentAuthorityIn(database, sql, turn(owned[0])))) return null;
         const record = turn(owned[0]);
         if (record.authority.mode === "build") {
           const budget = await codingBudgetIn(sql, record.command.projectId, true);
@@ -298,7 +372,7 @@ export function createAgentTurnStore(database: Database) {
         const rows = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
           AND owner_token = ${ownerToken} AND owner_expires_at > clock_timestamp()
           AND state IN ('pending', 'dispatching', 'running') FOR UPDATE`;
-        if (!rows[0] || !(await currentAuthorityIn(sql, turn(rows[0])))) return false;
+        if (!rows[0] || !(await currentAuthorityIn(database, sql, turn(rows[0])))) return false;
         // Authority locks can outlast the lease. Do not authorize an external
         // operation using the ownership snapshot from before that wait.
         const live = await sql<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
@@ -352,7 +426,7 @@ export function createAgentTurnStore(database: Database) {
         const [owned] = await sql<
           TurnRow[]
         >`SELECT * FROM factory.agent_turn WHERE id=${id} AND owner_token=${ownerToken} FOR UPDATE`;
-        if (!owned || !(await currentAuthorityIn(sql, turn(owned)))) return false;
+        if (!owned || !(await currentAuthorityIn(database, sql, turn(owned)))) return false;
         const rows = await sql<Array<{ id: string }>>`
         UPDATE factory.agent_turn SET owner_expires_at = clock_timestamp() + ${duration} * interval '1 millisecond',
           updated_at = now()
@@ -383,7 +457,8 @@ export function createAgentTurnStore(database: Database) {
         const admitted = await sql<TurnRow[]>`SELECT * FROM factory.agent_turn WHERE id = ${id}
           AND state = 'dispatching' AND owner_token = ${ownerToken}
           AND owner_expires_at > clock_timestamp() FOR UPDATE`;
-        if (!admitted[0] || !(await currentAuthorityIn(sql, turn(admitted[0])))) return false;
+        if (!admitted[0] || !(await currentAuthorityIn(database, sql, turn(admitted[0]))))
+          return false;
         const rows = await sql<
           Array<{ id: string }>
         >`UPDATE factory.agent_turn SET state = 'running', updated_at = now()
@@ -419,7 +494,7 @@ export function createAgentTurnStore(database: Database) {
           FOR UPDATE
         `;
         if (!owned[0]) return false;
-        if (persistOutcome && !(await currentAuthorityIn(transaction, turn(owned[0]))))
+        if (persistOutcome && !(await currentAuthorityIn(database, transaction, turn(owned[0]))))
           return false;
         await persistOutcome?.(transaction);
         const settled = await transaction<Array<{ id: string }>>`

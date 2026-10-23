@@ -4,6 +4,7 @@ import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ServerWebSocket } from "bun";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { fixture } from "../fixtures/change-agent-turns";
@@ -72,6 +73,13 @@ test.each(cases)(
       let owned: Awaited<ReturnType<typeof fixture>>;
       try {
         owned = await fixture(undefined, baseSHA, databaseProcess.connect());
+        // This transport/Git fixture owns an empty instruction selection.
+        // It is not the native Skill-installation proof, and must not inherit
+        // first-use library defaults merely because its database is external.
+        const empty = JSON.stringify({ required: [], optional: [], selected: [] });
+        await owned.database
+          .client`INSERT INTO factory.system_skill_settings(singleton,version,planning,build,updated_by)
+          VALUES(true,1,${empty}::jsonb,${empty}::jsonb,${owned.userID}) ON CONFLICT DO NOTHING`;
       } catch (cause) {
         await databaseProcess.dispose();
         throw cause;
@@ -89,6 +97,7 @@ test.each(cases)(
       const controller = owned.controller();
       const recovery = owned.controller();
       let server: Bun.Server<RuntimeSocketData> | undefined;
+      let serverPort: number | undefined;
       try {
         server = Bun.serve<RuntimeSocketData>({
           hostname: "127.0.0.1",
@@ -126,6 +135,15 @@ test.each(cases)(
                 });
                 if (loseNext && message.action === lostAction) {
                   loseNext = false;
+                  if (message.error) {
+                    lost.reject(
+                      new Error(
+                        `Owned native Git operation failed before acknowledgement loss: ${message.error}`,
+                      ),
+                    );
+                    owned.hub.message(socket, raw);
+                    return;
+                  }
                   // Git has executed in Go; its acknowledgement never reaches Factory.
                   socket.terminate();
                   lost.resolve();
@@ -141,13 +159,19 @@ test.each(cases)(
             },
           },
         });
-        const controlURL = `ws://127.0.0.1:${server.port}`;
+        serverPort = server.port;
+        const controlURL = `ws://127.0.0.1:${serverPort}`;
         const changes = await owned.database.client<{ branch: string }[]>`
         SELECT branch_name AS branch FROM factory.change WHERE id = ${owned.changeID}`;
         const branch = changes[0]?.branch;
         if (!branch) throw new Error("Owned native Change missing");
         await command(["git", "init", "--bare", remote], scratch);
         await git("remote", "add", "origin", remote);
+        // Push authority names the Project destination, not the checkout's
+        // mutable origin. Bind this owned Project to its actual bare remote.
+        await owned.database
+          .client`UPDATE factory.project SET repository_url=${pathToFileURL(remote).href}
+          WHERE id=${owned.projectID}`;
         await git("push", "origin", `HEAD:refs/heads/${branch}`);
         const pushCount = resolve(remote, "owned-push-count");
         const hook = resolve(remote, "hooks/pre-receive");
@@ -199,7 +223,14 @@ test.each(cases)(
           owned.userID,
           crypto.randomUUID(),
         );
-        await owned.requested;
+        await Promise.race([
+          owned.requested,
+          Bun.sleep(15_000).then(async () => {
+            throw new Error(
+              `Owned native prompt was not dispatched: ${JSON.stringify(await controller.get(owned.changeID))}`,
+            );
+          }),
+        ]);
         owned.finish();
         owned.release();
         await Promise.race([
@@ -281,8 +312,10 @@ test.each(cases)(
             if (native.exitCode === null) native.kill("SIGKILL");
             await native.exited;
           }
-          if (server) {
-            const port = Number(server.url.port);
+          if (serverPort) {
+            // Bun resolves url lazily. Reading it after stop can report port
+            // zero rather than the listener this fixture actually owned.
+            const port = serverPort;
             await observe(
               () => listenerClosed(port),
               (stopped) => stopped,

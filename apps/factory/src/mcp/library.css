@@ -1,0 +1,200 @@
+.mcp-library .mcp-gallery {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.mcp-cover {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 5px 12px color-mix(in srgb, var(--color-ink) 13%, transparent);
+}
+.mcp-service-endpoint {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  overflow-wrap: anywhere;
+}
+.mcp-card-meta,
+.mcp-connection-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.mcp-card-meta {
+  flex-wrap: wrap;
+  column-gap: var(--space-3);
+  margin-top: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+.mcp-connection-state[data-state="ready"] {
+  color: var(--color-river-deep);
+}
+.mcp-library .mcp-connection-state svg {
+  width: 14px;
+  height: 14px;
+}
+.mcp-library .mcp-detail-heading {
+  grid-template-columns: 210px minmax(0, 1fr);
+  gap: var(--space-6);
+}
+.mcp-library .mcp-editor {
+  max-width: 680px;
+  display: grid;
+  gap: var(--space-4);
+}
+.mcp-definition-settings {
+  display: grid;
+  gap: var(--space-4);
+}
+.mcp-definition-settings > :is(label, p) {
+  margin-top: var(--space-4);
+}
+.mcp-definition-settings > summary {
+  cursor: pointer;
+  font-weight: var(--weight-medium);
+}
+.mcp-library fieldset:not(.workspace-action-bar) {
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+.mcp-library legend {
+  margin-bottom: var(--space-2);
+  font-weight: var(--weight-medium);
+}
+.mcp-library .mcp-checkbox {
+  display: flex;
+  align-items: start;
+  gap: var(--space-2);
+}
+.mcp-library input[type="checkbox"] {
+  width: 18px;
+  min-height: 18px;
+  flex: 0 0 18px;
+  accent-color: var(--color-river-deep);
+}
+.mcp-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+.mcp-recommendations {
+  margin-top: var(--space-8);
+}
+.mcp-recommendations > p {
+  margin-block: var(--space-2) var(--space-5);
+  max-width: 65ch;
+  color: var(--color-ink-muted);
+}
+.mcp-library :is(.mcp-connection, .mcp-tool-review, .mcp-grants) {
+  display: grid;
+  gap: var(--space-4);
+  margin-top: var(--space-8);
+  max-width: 65ch;
+  width: 100%;
+  margin-inline: auto;
+}
+.mcp-library .mcp-tool {
+  display: grid;
+  gap: var(--space-2);
+  padding-block: var(--space-4);
+  border-bottom: 1px solid var(--line-subtle);
+  font-weight: var(--weight-regular);
+}
+.mcp-tool .mcp-checkbox {
+  min-height: 44px;
+  align-items: center;
+}
+.mcp-tool > :is(span, small) {
+  overflow-wrap: anywhere;
+}
+.mcp-library .mcp-endpoint {
+  overflow-wrap: anywhere;
+  color: var(--color-ink-muted);
+}
+.mcp-library .skill-library-error {
+  color: var(--color-danger);
+  margin-bottom: var(--space-3);
+}
+.mcp-monitoring-setup {
+  padding-block: 0 var(--space-5);
+  border-bottom: 1px solid var(--line-subtle);
+  margin-bottom: var(--space-5);
+}
+.mcp-monitoring-setup h2 {
+  margin-block: var(--space-4) var(--space-2);
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-medium);
+  overflow-wrap: anywhere;
+}
+.mcp-monitoring-setup p,
+.mcp-monitoring-next p {
+  max-width: 65ch;
+  line-height: 1.6;
+}
+.mcp-monitoring-setup p {
+  margin-bottom: 0;
+}
+.mcp-monitoring-setup .skill-back {
+  margin-bottom: 0;
+}
+.mcp-library .mcp-monitoring-next {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 65ch;
+  margin: var(--space-6) auto 0;
+  padding-block: var(--space-5);
+  border-top: 1px solid var(--line-subtle);
+}
+.mcp-monitoring-next > button {
+  justify-self: start;
+}
+.mcp-library[data-monitoring="true"] {
+  display: block;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.mcp-library[data-monitoring="true"]
+  :is(.skill-gallery-scroll, .skill-gallery-detail, .skill-editor-screen) {
+  overflow: visible;
+}
+.mcp-library[data-monitoring="true"] .skill-library-title h2 {
+  font-size: var(--text-lg);
+}
+.mcp-library[data-monitoring="true"] .mcp-recommendations {
+  margin-top: var(--space-5);
+}
+@container skill-library (max-width: 680px) {
+  .mcp-library .mcp-gallery {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .mcp-library .mcp-detail-heading {
+    grid-template-columns: 160px minmax(0, 1fr);
+  }
+}
+@container skill-library (max-width: 540px) {
+  .mcp-library .mcp-detail-heading {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-5);
+  }
+  .mcp-detail-heading .mcp-cover {
+    width: min(100%, 240px);
+  }
+  .mcp-library .mcp-actions > button {
+    flex: 1 1 auto;
+  }
+}
+@container skill-library (max-width: 360px) {
+  .mcp-library .mcp-gallery {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

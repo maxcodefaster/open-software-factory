@@ -112,3 +112,31 @@ test("a current custom answer appears once with selected IDs and its question as
   expect(JSON.parse(context).currentInput.inReplyToEntryId).toBe("question-id");
   expect(JSON.parse(context).currentInput.answer.hasCustomText).toBe(true);
 });
+
+test("committed Factory actions remain in core context when ordinary background is omitted", () => {
+  const ticketID = crypto.randomUUID();
+  const receipt = entry(1, {
+    actor: "system",
+    kind: "agent-message",
+    body: "The requested Ticket was created.",
+    payload: { factoryAction: { kind: "create-ticket", result: { id: ticketID, state: "ready" } } },
+  });
+  const background = Array.from({ length: 10 }, (_, index) =>
+    entry(index + 2, {
+      actor: "project-agent",
+      kind: "agent-message",
+      body: "Background".repeat(10_000),
+    }),
+  );
+  const data = JSON.parse(
+    projectModelContext({
+      prompt: "Which ticket did you create?",
+      history: [receipt, ...background],
+    }),
+  );
+  expect(data.omittedBackgroundEntries).toBeGreaterThan(0);
+  expect(
+    data.conversation.find((value: { id: string }) => value.id === receipt.id).payload.factoryAction
+      .result.id,
+  ).toBe(ticketID);
+});

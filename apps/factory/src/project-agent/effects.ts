@@ -12,7 +12,7 @@ export async function persistProjectOutput(
   const { command, authority } = turn;
   if (authority.mode === "build" || !command.conversationId)
     throw new Error("Project turn required");
-  const current = await lockConversation(transaction, command.conversationId);
+  const current = await lockConversation(transaction, command.conversationId, command.contextId);
   if (
     !current ||
     current.mode !== authority.mode ||
@@ -43,6 +43,7 @@ export async function persistProjectOutput(
       citations: output.citations,
       inReplyToEntryId: null,
       requirementRevisionId: null,
+      ...(command.contextId ? { contextId: command.contextId } : {}),
     });
     return;
   }
@@ -65,6 +66,7 @@ export async function persistProjectOutput(
       citations: output.citations,
       inReplyToEntryId: null,
       requirementRevisionId: null,
+      ...(command.contextId ? { contextId: command.contextId } : {}),
     });
     return;
   }
@@ -100,5 +102,6 @@ export async function persistProjectOutput(
     citations: output.citations,
     inReplyToEntryId: null,
     requirementRevisionId: null,
+    ...(command.contextId ? { contextId: command.contextId } : {}),
   });
 }

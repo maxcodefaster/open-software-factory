@@ -16,6 +16,7 @@ import {
   type ModelSettingsView,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import { apiRequest, APIRequestError } from "../api-client";
+import { WorkspaceActionBar } from "../ui/workspace-actions";
 import { reasoningLabels } from "./reasoning";
 
 const catalogue = z.object({
@@ -306,19 +307,24 @@ export function ModelConnectionSettings(props: {
                 Connections <span>Keys encrypted in OpenBao</span>
               </summary>
               <section class="model-credentials-body" aria-label="API connections">
-                <header>
-                  <p class="model-settings-note">
-                    Saved keys are never shown here or sent to chat.
-                  </p>
+                <WorkspaceActionBar
+                  label="Model connection actions"
+                  status={
+                    <p class="model-settings-note">
+                      Saved keys are never shown here or sent to chat.
+                    </p>
+                  }
+                >
                   <button
                     type="button"
-                    class="quiet-button"
+                    class="workspace-action"
+                    data-primary="true"
                     disabled={disabled() || Boolean(pendingSave)}
                     onClick={() => edit()}
                   >
                     Add connection
                   </button>
-                </header>
+                </WorkspaceActionBar>
                 <For each={current().connections.filter((entry) => entry.configured)}>
                   {(entry) => (
                     <div class="model-credential-row">

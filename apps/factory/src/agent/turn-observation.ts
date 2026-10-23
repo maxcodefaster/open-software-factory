@@ -3,7 +3,9 @@ import { turnObservationInput } from "../../../../packages/conversation-domain/s
 import type { createDatabase } from "../../../../packages/db/src/client";
 
 type Database = ReturnType<typeof createDatabase>;
-type Target = { changeID: string; turnID?: string } | { conversationID: string };
+type Target =
+  | { changeID: string; turnID?: string }
+  | { conversationID: string; contextID?: string };
 
 // Internal read only. Callers authorize the containing Project/Change/conversation.
 export async function readTurnObservation(database: Database, target: Target) {
@@ -25,9 +27,15 @@ export async function readTurnObservation(database: Database, target: Target) {
     WHERE (${"changeID" in target ? target.changeID : null}::uuid IS NOT NULL
       AND turn.change_id = ${"changeID" in target ? target.changeID : null}
       AND (${"turnID" in target ? (target.turnID ?? null) : null}::uuid IS NULL
-        OR turn.id = ${"turnID" in target ? (target.turnID ?? null) : null}))
+        OR turn.id = ${"turnID" in target ? (target.turnID ?? null) : null})
+      AND (${"turnID" in target ? (target.turnID ?? null) : null}::uuid IS NOT NULL
+        OR turn.input->>'contextId' IS NOT DISTINCT FROM
+          (SELECT conversation.active_coding_context_id::text FROM factory.ticket_conversation conversation
+            JOIN factory.change change ON change.ticket_id=conversation.ticket_id
+            WHERE change.id=${"changeID" in target ? target.changeID : null})))
       OR (${"conversationID" in target ? target.conversationID : null}::uuid IS NOT NULL
         AND turn.conversation_id = ${"conversationID" in target ? target.conversationID : null}
+        AND turn.input->>'contextId' IS NOT DISTINCT FROM ${"contextID" in target ? (target.contextID ?? null) : null}
         AND turn.change_id IS NULL)
     ORDER BY turn.created_at DESC, turn.id DESC LIMIT 1`;
   const row = rows[0];

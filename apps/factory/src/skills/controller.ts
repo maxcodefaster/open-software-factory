@@ -8,6 +8,7 @@ import {
   resolveRoleSkills,
 } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import { librarySkillAssignments } from "../../../../packages/conversation-domain/src/skill-library";
+import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import {
   type SkillContent,
   type SkillPublish,
@@ -128,6 +129,41 @@ export function createSkillController(database: ReturnType<typeof createDatabase
   }
 
   return {
+    async invocations(projectID: string, userID: string, role: SkillRole, changeID?: string) {
+      return database.client.begin(async (sql) => {
+        await lock(sql, true);
+        await projectAuthorityIn(sql, userID, projectID);
+        let ids: string[] | undefined;
+        if (changeID) {
+          if (role !== "build")
+            throw new CommandError("conflict", "A Change selects Coding guidance only");
+          const [change] = await sql`SELECT id FROM factory.change
+            WHERE id=${changeID} AND project_id=${projectID}`;
+          if (!change) throw new CommandError("not-found", "Change not found");
+          const [first] = await sql<{ authority: unknown }[]>`
+            SELECT authority FROM factory.agent_turn
+            WHERE change_id=${changeID} AND NOT (authority ? 'review')
+            ORDER BY created_at,id LIMIT 1`;
+          if (first) ids = agentTurnAuthorityInput.parse(first.authority).skillRevisionIds;
+        }
+        ids ??= (await this.resolveAssignment(role, sql, { projectID, userID })).revisionIds;
+        const revisions = await this.load(ids, sql);
+        const counts = new Map<string, number>();
+        for (const revision of revisions)
+          counts.set(revision.content.key, (counts.get(revision.content.key) ?? 0) + 1);
+        return {
+          skills: revisions
+            .filter((revision) => counts.get(revision.content.key) === 1)
+            .map(({ id, content }) => ({
+              id,
+              key: content.key,
+              name: content.name,
+              description: content.description,
+            })),
+          conflicts: [...counts].filter(([, count]) => count > 1).map(([key]) => key),
+        };
+      });
+    },
     library,
     async getLibrary(userID: string, projectID?: string) {
       return database.client.begin(async (sql) => {
@@ -253,13 +289,19 @@ export function createSkillController(database: ReturnType<typeof createDatabase
     async resolveAssignment(
       role: SkillRole,
       sql: AgentTurnTransaction,
-      context: { projectID: string; userID: string },
+      context: { projectID: string; userID: string; personal?: boolean },
     ) {
       await lock(sql, true);
       const legacy = await inherited(sql, context.projectID, context.userID);
       const view = await library.viewIn(sql, context.userID, context.projectID, legacy);
       try {
-        const assignments = librarySkillAssignments(view.entries, view.choices, role);
+        const assignments = librarySkillAssignments(
+          view.entries,
+          context.personal === false
+            ? view.choices.filter((choice) => choice.scope !== "personal")
+            : view.choices,
+          role,
+        );
         const ids = assignments.map((item) => item.revisionId);
         if (ids.length > 16) throw new Error("At most 16 skills can be enabled per role");
         return {

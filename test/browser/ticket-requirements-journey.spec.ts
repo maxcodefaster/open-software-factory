@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -39,7 +40,7 @@ test.afterEach(async () => {
 });
 async function selectProject(page: Page) {
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
 }
 async function draft(page: Page, title: string, description: string) {

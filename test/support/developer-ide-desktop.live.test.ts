@@ -1,23 +1,24 @@
 import { expect, test } from "bun:test";
-import { chromium, expect as browserExpect, type Page, type Request } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { expect as browserExpect, chromium, type Page, type Request } from "@playwright/test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
 import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
+import { createDatabase } from "../../packages/db/src/client";
 import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
-import { eventually } from "../fixtures/factory-process";
+import { proveDesktopRuntime } from "../fixtures/developer-ide-desktop-runtime";
 import {
   editorFixtureNamespaces,
   finishedPrebuildNamespace,
-  removeEditorFixtureNamespaceInChild,
   recordedEditorIdentity,
+  removeEditorFixtureNamespaceInChild,
 } from "../fixtures/editor-source-resources";
+import { eventually } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject } from "./factory-fixture";
-import { proveDesktopRuntime } from "../fixtures/developer-ide-desktop-runtime";
 import { slice20StartupTargetFailures } from "./runtime-startup";
 
 const enabled = process.env["FACTORY_RUN_DEVELOPER_IDE_DESKTOP_PROOF"] === "1";
@@ -141,7 +142,7 @@ test.skipIf(!enabled)(
         .join("; ");
       const selectProject = async (index: number) => {
         if (!page) throw new Error("Owned desktop missing");
-        await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+        await openProjectMenu(page);
         await page
           .getByRole("button")
           .filter({ hasText: `desktop-editor-${proofID}-${index}` })

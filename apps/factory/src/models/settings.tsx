@@ -1,4 +1,5 @@
-import { For, Show } from "solid-js";
+import { Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { SkillLibrary } from "../skills/library";
 import { ProjectModelSettings } from "./project-settings";
 import { SystemModelSettings } from "./system-settings";
@@ -10,6 +11,7 @@ export function ModelSettings(props: {
   category: "models" | "skills";
   scope: "personal" | "project" | "system";
   onModelsChanged?: (() => Promise<void>) | undefined;
+  navigation?: JSX.Element;
 }) {
   return (
     <section class="settings-configuration" aria-label="Agent settings">
@@ -43,19 +45,14 @@ export function ModelSettings(props: {
           </Show>
         </>
       </Show>
-      <For each={["personal", "project", "system"] as const}>
-        {(scope) => (
-          <div hidden={props.category !== "skills" || props.scope !== scope}>
-            <SkillLibrary
-              scope={scope}
-              projectId={props.project?.id}
-              active={
-                props.active !== false && props.category === "skills" && props.scope === scope
-              }
-            />
-          </div>
-        )}
-      </For>
+      <div class="skill-library-host" hidden={props.category !== "skills"}>
+        <SkillLibrary
+          navigation={props.navigation}
+          projectId={props.project?.id}
+          projectName={props.project?.name}
+          active={props.active !== false && props.category === "skills"}
+        />
+      </div>
     </section>
   );
 }

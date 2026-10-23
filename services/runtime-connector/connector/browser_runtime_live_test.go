@@ -153,6 +153,9 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		return result
 	}
 	snapshot := call("browser_snapshot", `{}`)
+	if snapshot.StructuredContent == nil || snapshot.StructuredContent.Page != "/cold" {
+		t.Fatal("exact declared page path was not observed")
+	}
 	if len(snapshot.Content) == 0 || !strings.Contains(snapshot.Content[0].Text, "Only primary loopback") {
 		t.Fatal("real proxy did not reach the primary's loopback-only App")
 	}
@@ -179,6 +182,15 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	if len(input) != 2 {
 		t.Fatal("keyboard fixture input unavailable", snapshot.Content[0].Text)
 	}
+	scope.ExpiresAt = time.Now().Add(25 * time.Second)
+	if _, err := manager.recording(connection, scope, "browser-recording-start"); err != nil {
+		// This owned fixture contains only its static test page. Keep a native
+		// encoder diagnostic in test evidence, never in product/model output.
+		native := manager.sessions[scope.SessionID]
+		raw, diagnostic := native.rpc(connection, "tools/call", map[string]any{"name": "screencast_start", "arguments": map[string]any{"filePath": browserRecordingPath, "pageId": native.pageID}})
+		t.Fatal("actual pinned recording start", err, diagnostic, string(raw))
+	}
+	captureStarted := time.Now()
 	call("browser_click", fmt.Sprintf(`{"uid":%q}`, input[1]))
 	call("browser_press_key", `{"key":"Tab"}`)
 	focused := call("browser_snapshot", `{}`)
@@ -190,6 +202,9 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	call("browser_resize", `{"width":390,"height":720}`)
 	call("browser_wait", `{"text":"Viewport 390x720"}`)
 	mobile := call("browser_screenshot", `{}`)
+	if mobile.StructuredContent == nil || mobile.StructuredContent.RecordingTimeMS == nil {
+		t.Fatal("actual encoder position is unavailable for scenario chapters")
+	}
 	mobileImage := false
 	for _, content := range mobile.Content {
 		if content.Type != "image" {
@@ -213,6 +228,60 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	}
 	call("browser_resize", `{"width":1280,"height":720}`)
 	call("browser_wait", `{"text":"Viewport 1280x720"}`)
+	call("browser_resize", `{"width":1280,"height":240}`)
+	call("browser_wait", `{"text":"Viewport 1280x240"}`)
+	manifest, err := manager.recording(connection, scope, "browser-recording-finish")
+	if err != nil {
+		t.Fatal("actual pinned recording finish", err)
+	}
+	var recorded struct {
+		Bytes      int64 `json:"bytes"`
+		DurationMS int64 `json:"durationMs"`
+	}
+	if json.Unmarshal([]byte(manifest), &recorded) != nil || recorded.Bytes <= 0 || recorded.DurationMS <= 0 {
+		t.Fatal("recording manifest unavailable", manifest)
+	}
+	var video bytes.Buffer
+	for offset := int64(0); offset < recorded.Bytes; offset += browserRecordingChunk {
+		scope.Call = browserToolCall{Arguments: json.RawMessage(fmt.Sprintf(`{"offset":%d}`, offset))}
+		part, err := manager.recording(connection, scope, "browser-recording-chunk")
+		if err != nil {
+			t.Fatal("bounded recording export", err)
+		}
+		var chunk struct {
+			Offset int64  `json:"offset"`
+			Data   string `json:"data"`
+		}
+		if json.Unmarshal([]byte(part), &chunk) != nil || chunk.Offset != offset {
+			t.Fatal("chunk manifest", part)
+		}
+		data, err := base64.StdEncoding.DecodeString(chunk.Data)
+		if err != nil {
+			t.Fatal(err)
+		}
+		video.Write(data)
+	}
+	if int64(video.Len()) != recorded.Bytes || !bytes.HasPrefix(video.Bytes(), []byte{0x1a, 0x45, 0xdf, 0xa3}) {
+		t.Fatal("exported recording did not match its WebM manifest")
+	}
+	if err := os.WriteFile(filepath.Join(root, "manager-qa.webm"), video.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	recordingBrowser, _ := browserRuntimeNames(scope.SessionID)
+	cpu, _ := manager.docker(context.Background(), "exec", recordingBrowser, "cat", "/sys/fs/cgroup/cpu.stat")
+	peak, _ := manager.docker(context.Background(), "exec", recordingBrowser, "cat", "/sys/fs/cgroup/memory.peak")
+	encoder, _ := manager.docker(context.Background(), "exec", recordingBrowser, "cat", "/tmp/factory-recording-usage.json")
+	var encoderUsage map[string]any
+	if json.Unmarshal(encoder, &encoderUsage) != nil || encoderUsage["encoderExitCode"] != float64(0) {
+		t.Fatal("actual encoder process measurements unavailable", string(encoder))
+	}
+	measurement, _ := json.Marshal(map[string]any{"bytes": recorded.Bytes, "durationMs": recorded.DurationMS,
+		"captureAndExportMs": time.Since(captureStarted).Milliseconds(), "fps": 15, "width": 1280, "height": 720,
+		"browserContainerCPU": string(cpu), "browserContainerPeakMemoryBytes": strings.TrimSpace(string(peak)),
+		"encoder": encoderUsage,
+		"scope":   "Whole isolated browser container, including Chrome and encoder; not encoder-only"})
+	os.WriteFile(filepath.Join(root, "recording-measurement.json"), measurement, 0600)
+	call("browser_resize", `{"width":1280,"height":720}`)
 	// A real model can think longer than the short execution lease between
 	// tools. The ordinary ten-second controller heartbeat must keep this same
 	// browser and its UI state alive without another App action or reopening.

@@ -2,9 +2,10 @@ import { test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
-import { factoryProcess } from "../fixtures/factory-process";
 import type { AgentView } from "../../apps/factory/src/api-contracts";
 import { turnObservationInput } from "../../packages/conversation-domain/src/turn-observation";
+import { factoryProcess } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
 
 test("Build preparation distinguishes lost history and retains correction routing after compute stops", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -129,7 +130,7 @@ test("Build preparation distinguishes lost history and retains correction routin
       await route.fulfill({ status: 202, json: view() });
     });
     await page.goto(fixture.base);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page
       .getByRole("region", { name: "implementation", exact: true })

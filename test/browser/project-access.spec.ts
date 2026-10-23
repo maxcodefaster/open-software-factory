@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test("managers create accounts and Project access; developers see only their Project and lose revoked access", async ({
@@ -51,7 +52,7 @@ test("managers create accounts and Project access; developers see only their Pro
         VALUES (${id}, ${`access-qa-${id}`}, ${projectName}, 'https://example.invalid/access-qa.git',
           'main', '.devcontainer/devcontainer.json', ${administrator})`;
     }
-    await page.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(page);
     await page.getByRole("button", { name: new RegExp(name) }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
@@ -59,7 +60,7 @@ test("managers create accounts and Project access; developers see only their Pro
     const navigation = dialog.getByRole("navigation", { name: "Settings navigation" });
     await navigation
       .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Factory", exact: true }) })
+      .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
       .getByRole("button", { name: "People & access", exact: true })
       .click();
     await expect(dialog.getByRole("region", { name: "Managed accounts" })).toBeVisible();
@@ -103,7 +104,7 @@ test("managers create accounts and Project access; developers see only their Pro
     await developer.getByLabel("Email", { exact: true }).fill(email);
     await developer.getByLabel("Password", { exact: true }).fill(password);
     await developer.getByRole("button", { name: "Sign in", exact: true }).click();
-    await developer.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(developer);
     await expect(developer.getByRole("button", { name: new RegExp(name) })).toBeVisible();
     await expect(developer.getByRole("button", { name: new RegExp(otherName) })).toHaveCount(0);
     await expect(developer.getByRole("button", { name: "Add project", exact: true })).toHaveCount(
@@ -150,7 +151,7 @@ test("managers create accounts and Project access; developers see only their Pro
     expect((await developer.request.get(`/api/projects/${projectID}/conversation`)).status()).toBe(
       404,
     );
-    await developer.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(developer);
     await expect(developer.getByRole("button", { name: new RegExp(name) })).toHaveCount(0);
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     await expect(dialog).toBeHidden();

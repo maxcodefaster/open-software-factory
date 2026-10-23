@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
@@ -46,12 +47,15 @@ test.beforeEach(async ({ page }) => {
   } finally {
     await db.client.end();
   }
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page
     .getByRole("button")
     .filter({ hasText: `polish-${projectID}` })
     .click();
-  await page.getByRole("region", { name: "requirements", exact: true }).getByRole("button").click();
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeVisible();
 });
 
@@ -704,7 +708,7 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
     };
     await route.fulfill({ json: setup });
   });
-  await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+  await openProjectMenu(page);
   await page
     .locator(".project-menu")
     .getByRole("button", { name: /Create project|Continue project setup/ })

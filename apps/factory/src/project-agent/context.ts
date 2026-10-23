@@ -26,6 +26,7 @@ function content(entry: ConversationEntry) {
       "accepted",
       "roundId",
       "roundIndex",
+      "factoryAction",
     ]
       .filter((key) => entry.payload[key] !== undefined)
       .map((key) => [key, entry.payload[key]]),
@@ -54,7 +55,8 @@ export function projectModelContext(input: {
     : ordered.findLast((entry) => entry.actor === "user" && entry.body === input.prompt);
   const earlier = ordered.filter((entry) => entry.id !== current?.id);
   const decisions = earlier.filter(
-    (entry) => entry.actor === "user" || entry.requirementRevisionId,
+    (entry) =>
+      entry.actor === "user" || entry.requirementRevisionId || entry.payload["factoryAction"],
   );
   const questionIDs = new Set(
     [...decisions, ...(current ? [current] : [])].map((entry) => entry.inReplyToEntryId),

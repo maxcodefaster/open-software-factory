@@ -7,6 +7,7 @@
       "!**/coverage",
       "!**/node_modules",
       "!**/.factory",
+      "!**/.impeccable",
       "!deploy/theia-ide/factory-ide-extension/lib",
       "!deploy/theia-ide/browser-app/lib",
       "!deploy/theia-ide/browser-app/src-gen",

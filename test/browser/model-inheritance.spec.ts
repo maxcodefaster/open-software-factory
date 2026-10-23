@@ -3,6 +3,7 @@ import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
 import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import { createDatabase } from "../../packages/db/src/client";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 
 test("Project managers set model defaults and locks; developers select and Reset their own models", async ({
@@ -34,7 +35,7 @@ test("Project managers set model defaults and locks; developers select and Reset
     await current.getByLabel("Email", { exact: true }).fill(email);
     await current.getByLabel("Password", { exact: true }).fill(password);
     await current.getByRole("button", { name: "Sign in", exact: true }).click();
-    await current.getByRole("button", { name: "Open project menu" }).click();
+    await openProjectMenu(current);
     await current.getByRole("button", { name: new RegExp(name) }).click();
   }
   async function open(current: Page, group = "Personal") {
@@ -90,7 +91,7 @@ test("Project managers set model defaults and locks; developers select and Reset
     await expect(
       managerDialog
         .getByRole("navigation", { name: "Settings navigation" })
-        .getByRole("heading", { name: "Factory", exact: true }),
+        .getByRole("heading", { name: "Factory administration", exact: true }),
     ).toHaveCount(0);
     await managerDialog
       .getByRole("combobox", { name: /^Investigate & Plan/ })

@@ -1,8 +1,7 @@
-import { createPatch } from "diff";
 import { createEffect, createSignal, For, Show } from "solid-js";
+import type { JSX } from "@solidjs/web";
 import { z } from "zod";
 import {
-  resolveLibraryChoice,
   type SkillLibraryEntry,
   type SkillLibraryView,
   type SkillScope,
@@ -11,99 +10,168 @@ import {
 import {
   type SkillContent,
   type SkillRevision,
-  type SkillRole,
   skillContentInput,
   skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
 import { apiRequest } from "../api-client";
+import { Icon } from "../icon";
+import { WorkspaceActionBar } from "../ui/workspace-actions";
+import type { ChooseSkill } from "./choice-controls";
+import { skillCover, skillSummary } from "./cover";
+import { SkillGalleryDetail } from "./gallery-detail";
+import { matchesSkill, type SkillFilters, skillAvailability } from "./gallery-state";
+import { SkillImportPanel } from "./import-panel";
 import { SkillRevisionDetails } from "./revision-details";
 import { SkillRevisionEditor } from "./revision-editor";
 import "./library.css";
 
 const resultInput = z.object({ content: skillContentInput, warnings: z.array(z.string()) });
-const savedInput = z.object({ saved: z.boolean() });
 export function SkillLibrary(props: {
-  scope: SkillScope;
   projectId?: string | undefined;
+  projectName?: string | undefined;
   active?: boolean | undefined;
+  navigation?: JSX.Element;
 }) {
   const [view, setView] = createSignal<SkillLibraryView>();
   const [query, setQuery] = createSignal("");
-  const [role, setRole] = createSignal<SkillRole>("planning");
+  const [owner, setOwner] = createSignal<SkillFilters["owner"]>("all");
+  const [role, setRole] = createSignal<SkillFilters["role"]>("all");
+  const [availability, setAvailability] = createSignal<SkillFilters["availability"]>("all");
+  const [filtersOpen, setFiltersOpen] = createSignal(false);
+  const [managing, setManaging] = createSignal(false);
+  const [managementTarget, setManagementTarget] = createSignal<"project" | "system">("project");
+  const [selected, setSelected] = createSignal<string>();
   const [editing, setEditing] = createSignal<{
     content: SkillContent;
     entry?: SkillLibraryEntry;
     warnings?: string[];
   }>();
-  const [inspected, setInspected] = createSignal<SkillRevision>();
+  const [editorOpen, setEditorOpen] = createSignal(false);
+  const [importing, setImporting] = createSignal(false);
+  const [inspected, setInspected] = createSignal<{ proposalId: string; revision: SkillRevision }>();
   const [busy, setBusy] = createSignal(false);
+  const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal("");
   const [status, setStatus] = createSignal("");
-  const [repository, setRepository] = createSignal("");
-  const [commit, setCommit] = createSignal("");
-  const [path, setPath] = createSignal("");
-  const [shareTarget, setShareTarget] = createSignal<"project" | "system">(
-    props.projectId ? "project" : "system",
-  );
+  const canManage = () => view()?.canManageProject || view()?.canManageSystem;
+  const managementScope = () =>
+    view()?.canManageProject && props.projectId
+      ? view()?.canManageSystem
+        ? managementTarget()
+        : "project"
+      : "system";
+  const scope = (): SkillScope => (managing() && canManage() ? managementScope() : "personal");
   const suffix = () => (props.projectId ? `?project=${props.projectId}` : "");
   let sequence = 0;
-  async function load(url = `/api/skills${suffix()}`) {
+  let detailHeading: HTMLHeadingElement | undefined;
+  let newButton: HTMLButtonElement | undefined;
+  let actionMenu: HTMLDetailsElement | undefined;
+  let actionTrigger: HTMLElement | undefined;
+  let filterRoot: HTMLDivElement | undefined;
+  let filterButton: HTMLButtonElement | undefined;
+  let libraryRoot: HTMLDivElement | undefined;
+  let galleryScroll: HTMLDivElement | undefined;
+  let savedScroll = 0;
+  const filterID = `skill-filters-${crypto.randomUUID()}`;
+  function clearFeedback() {
+    setStatus("");
+    setError("");
+  }
+  function focusWorkflow(selector: string) {
+    requestAnimationFrame(() => {
+      const heading = libraryRoot?.querySelector<HTMLHeadingElement>(selector);
+      heading?.closest(".skill-editor-screen")?.scrollTo(0, 0);
+      heading?.focus({ preventScroll: true });
+    });
+  }
+  const report = (cause: unknown) =>
+    setError(cause instanceof Error ? cause.message : "Could not load library. Try reloading.");
+  async function load() {
     const request = ++sequence;
+    setLoading(true);
     try {
-      const next = await apiRequest(skillLibraryView, url);
-      if (request === sequence) setView(next);
-    } catch (cause) {
-      if (request === sequence)
-        setError(cause instanceof Error ? cause.message : "Could not load library");
+      const next = await apiRequest(skillLibraryView, `/api/skills${suffix()}`);
+      if (request !== sequence) return;
+      setView(next);
+      if (!next.canManageProject && !next.canManageSystem) setManaging(false);
+      return next;
+    } finally {
+      if (request === sequence) setLoading(false);
     }
   }
   createEffect(
-    () => ({ url: `/api/skills${suffix()}`, scope: props.scope, active: props.active }),
-    ({ url, active }) => {
-      if (active !== false) {
-        void load(url);
-      }
+    () => ({ projectId: props.projectId, active: props.active }),
+    ({ active }) => {
+      if (active !== false) void load().catch(report);
       return () => {
         sequence++;
       };
     },
   );
-  const canEditScope = () =>
-    props.scope === "personal" ||
-    (props.scope === "system" ? view()?.canManageSystem : view()?.canManageProject);
+  createEffect(
+    () => props.active,
+    (active) => {
+      if (active === false) return;
+      const dismiss = (event: PointerEvent) => {
+        if (!(event.target instanceof Node)) return;
+        if (filtersOpen() && !filterRoot?.contains(event.target)) setFiltersOpen(false);
+        if (actionMenu?.open && !actionMenu.contains(event.target)) actionMenu.open = false;
+      };
+      document.addEventListener("pointerdown", dismiss);
+      return () => document.removeEventListener("pointerdown", dismiss);
+    },
+  );
+  const selectedEntry = () => view()?.entries.find((entry) => entry.id === selected());
   const entries = () =>
-    view()?.entries.filter(
-      (entry) =>
-        (props.scope === "personal" ||
-          entry.scope === "system" ||
-          (props.scope === "project" && entry.scope === "project")) &&
-        entry.revisions[0] &&
-        `${entry.revisions[0].content.name} ${entry.revisions[0].content.description}`
-          .toLowerCase()
-          .includes(query().toLowerCase()),
-    ) ?? [];
-  const ownChoice = (entry: SkillLibraryEntry) =>
-    view()?.choices.find(
-      (choice) =>
-        choice.libraryId === entry.id && choice.role === role() && choice.scope === props.scope,
+    (view()?.entries ?? [])
+      .filter(
+        (entry) =>
+          entry.revisions.length &&
+          (!managing() ||
+            (entry.scope !== "personal" && (scope() !== "system" || entry.scope === "system"))) &&
+          matchesSkill(entry, view()?.choices ?? [], scope(), {
+            query: query(),
+            owner: owner(),
+            role: role(),
+            availability: availability(),
+          }),
+      )
+      .toSorted((a, b) =>
+        (a.revisions[0]?.content.name ?? "").localeCompare(b.revisions[0]?.content.name ?? ""),
+      );
+  const proposals = () =>
+    (view()?.proposals ?? []).filter(
+      (proposal) =>
+        proposal.target === scope() &&
+        (proposal.target === "system" ? view()?.canManageSystem : view()?.canManageProject),
     );
-  const effective = (entry: SkillLibraryEntry) =>
-    resolveLibraryChoice(
-      (view()?.choices ?? [])
-        .filter((choice) => props.scope === "personal" || choice.scope !== "personal")
-        .filter((choice) => props.scope !== "system" || choice.scope === "system"),
-      entry.id,
-      role(),
-    );
-  const inheritedRequired = (entry: SkillLibraryEntry) =>
-    resolveLibraryChoice(
-      (view()?.choices ?? []).filter(
-        (choice) =>
-          choice.scope !== props.scope && (props.scope === "personal" || choice.scope === "system"),
-      ),
-      entry.id,
-      role(),
-    )?.state === "required";
+  function clearFilters() {
+    setQuery("");
+    setOwner("all");
+    setRole("all");
+    setAvailability("all");
+  }
+  function openSkill(id: string) {
+    savedScroll = galleryScroll?.scrollTop ?? 0;
+    closeActions();
+    setFiltersOpen(false);
+    setSelected(id);
+    requestAnimationFrame(() => {
+      detailHeading?.closest(".skill-gallery-detail")?.scrollTo(0, 0);
+      detailHeading?.focus({ preventScroll: true });
+    });
+  }
+  function closeSkill() {
+    const id = selected();
+    setSelected(undefined);
+    requestAnimationFrame(() => {
+      if (galleryScroll) galleryScroll.scrollTop = savedScroll;
+      const target =
+        document.getElementById(`skill-open-${id}`) ??
+        document.querySelector<HTMLInputElement>(".skill-search input");
+      target?.focus({ preventScroll: true });
+    });
+  }
   async function mutate(action: () => Promise<unknown>, message: string) {
     if (busy()) return;
     setBusy(true);
@@ -111,42 +179,59 @@ export function SkillLibrary(props: {
     setStatus("");
     try {
       const result = await action();
-      await load();
       setStatus(typeof result === "string" ? result : message);
+      try {
+        await load();
+      } catch {
+        setError("The action completed, but the library could not refresh. Reload to see it.");
+      }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not save skill choices");
+      report(cause);
     } finally {
       setBusy(false);
     }
   }
-  function choose(
-    entry: SkillLibraryEntry,
-    state: "inherit" | "enable" | "disable" | "required",
-    revisionId?: string,
-  ) {
+  const choose: ChooseSkill = (entry, target, selectedRole, state, revisionId) => {
+    const current = skillAvailability(entry, view()?.choices ?? [], target, selectedRole);
     void mutate(
       () =>
-        apiRequest(savedInput, "/api/skills/choices", {
+        apiRequest(z.object({ saved: z.boolean() }), "/api/skills/choices", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             libraryId: entry.id,
-            scope: props.scope,
+            scope: target,
             ...(props.projectId ? { projectId: props.projectId } : {}),
-            role: role(),
+            role: selectedRole,
             state,
-            revisionId:
-              revisionId ??
-              ownChoice(entry)?.revisionId ??
-              effective(entry)?.revisionId ??
-              entry.revisions[0]?.id,
-            expectedVersion: ownChoice(entry)?.version ?? 0,
+            revisionId: revisionId ?? current.revision?.id,
+            expectedVersion: current.own?.version ?? 0,
           }),
         }),
-      "Choice saved for new work",
+      target === "personal"
+        ? "Choice saved for your new work in this Project"
+        : `Default saved for new ${target === "system" ? "Factory" : "Project"} work`,
     );
+  };
+  function edit(entry?: SkillLibraryEntry) {
+    clearFeedback();
+    if (!editing())
+      setEditing({
+        ...(entry ? { entry } : {}),
+        content: entry?.revisions[0]?.content ?? {
+          key: "custom-skill",
+          name: "",
+          description: "",
+          instructions: "",
+          roles: ["planning", "build"],
+          references: [],
+        },
+      });
+    setEditorOpen(true);
+    focusWorkflow(".skill-editor h3");
   }
   function checkSource(entry: SkillLibraryEntry) {
+    if (editing()) return;
     void mutate(async () => {
       const revision = entry.revisions[0];
       if (!revision) return;
@@ -157,497 +242,503 @@ export function SkillLibrary(props: {
         ]),
         `/api/skills/revisions/${revision.id}/source-update${suffix()}`,
       );
-      if (result.current) {
-        return "The pinned source is current";
-      }
+      if (result.current) return "The pinned source is current";
       setEditing({
         entry,
         content: { ...result.content, key: revision.content.key, name: revision.content.name },
         warnings: [
           ...result.warnings,
-          "A newer pinned source is available. Compare it with this saved version. Factory adaptations and your edits are not merged automatically.",
+          "A newer pinned source is available. Compare it with the saved version. Factory adaptations and your edits are not merged automatically.",
         ],
       });
+      setEditorOpen(true);
+      focusWorkflow(".skill-editor h3");
     }, "Source check complete");
   }
-  async function importFiles(list: FileList | null) {
-    if (!list?.length || busy()) return;
-    setBusy(true);
-    setError("");
-    try {
-      const selected = [...list];
-      const root = selected.find((file) => file.name === "SKILL.md");
-      if (!root) throw new Error("Choose SKILL.md or a directory containing it");
-      const prefix = root.webkitRelativePath
-        ? root.webkitRelativePath.slice(0, -"SKILL.md".length)
-        : "";
-      if (selected.length > 65 || selected.reduce((sum, file) => sum + file.size, 0) > 1_400_000)
-        throw new Error("Package is too large");
-      const files = [];
-      for (const file of selected) {
-        const relative = file.webkitRelativePath || file.name;
-        if (prefix && !relative.startsWith(prefix))
-          throw new Error("Select one complete skill directory");
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        let body: string;
-        let encoding: "utf8" | "base64" = "utf8";
-        try {
-          body = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-        } catch {
-          let binary = "";
-          for (const byte of bytes) binary += String.fromCharCode(byte);
-          body = btoa(binary);
-          encoding = "base64";
-        }
-        files.push({ path: relative.slice(prefix.length), body, encoding });
-      }
-      const preview = await apiRequest(resultInput, "/api/skills/import/preview", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ files }),
-      });
-      setEditing(preview);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not preview import");
-    } finally {
-      setBusy(false);
-    }
-  }
-  async function importRepository(event: SubmitEvent) {
-    event.preventDefault();
-    if (busy()) return;
-    setBusy(true);
-    setError("");
-    try {
-      setEditing(
-        await apiRequest(resultInput, "/api/skills/import/repository", {
+  function share(entry: SkillLibraryEntry, target: "project" | "system") {
+    void mutate(
+      () =>
+        apiRequest(z.object({ id: z.uuid() }), "/api/skills/share", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ repository: repository(), commit: commit(), path: path() }),
+          body: JSON.stringify({
+            id: crypto.randomUUID(),
+            revisionId: entry.revisions[0]?.id,
+            target,
+            ...(target === "project" ? { projectId: props.projectId } : {}),
+          }),
         }),
-      );
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not preview repository");
-    } finally {
-      setBusy(false);
-    }
+      "Exact version proposed for sharing",
+    );
+  }
+  function closeActions() {
+    if (actionMenu) actionMenu.open = false;
+  }
+  function returnFromEditor() {
+    requestAnimationFrame(() =>
+      selectedEntry() ? detailHeading?.focus({ preventScroll: true }) : newButton?.focus(),
+    );
   }
   return (
-    <div class="model-settings-body skill-library">
-      <Show
-        when={editing()}
-        fallback={
-          <>
-            <p class="model-settings-note">
-              A shared library for this instance, with choices for each Project. Enabled skills load
-              when relevant. Existing Changes keep their original versions. Personal versions used
-              in shared Project work can be inspected by collaborators.
-            </p>
-            <div class="skill-library-toolbar">
-              <label>
-                Search skills
-                <input
-                  type="search"
-                  value={query()}
-                  onInput={(event) => setQuery(event.currentTarget.value)}
-                />
-              </label>
-              <Show when={canEditScope()}>
+    <div
+      class="skill-library"
+      data-detail={selectedEntry() ? "true" : "false"}
+      ref={(element) => {
+        libraryRoot = element;
+      }}
+    >
+      <header
+        class="skill-library-heading"
+        hidden={Boolean(selectedEntry()) && !editorOpen() && !importing()}
+      >
+        <WorkspaceActionBar label="Skills library actions" leading={props.navigation}>
+          <details
+            class="skill-action-menu"
+            ref={(element) => {
+              actionMenu = element;
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeActions();
+                actionTrigger?.focus();
+              }
+            }}
+          >
+            <summary
+              class="workspace-action workspace-menu-trigger"
+              aria-label="Library actions"
+              ref={(element) => {
+                actionTrigger = element;
+              }}
+            >
+              <Icon name="more" />
+            </summary>
+            <div class="skill-action-options">
+              <button
+                type="button"
+                class="quiet-button"
+                disabled={busy() || Boolean(editing()) || editorOpen() || importing()}
+                title={editing() ? "Finish or discard your draft before importing" : undefined}
+                onClick={() => {
+                  closeActions();
+                  clearFeedback();
+                  setImporting(true);
+                  focusWorkflow(".skill-import-panel h3");
+                }}
+              >
+                Import
+              </button>
+              <Show when={canManage()}>
                 <button
                   type="button"
-                  class="primary-button"
-                  disabled={busy()}
-                  onClick={() =>
-                    setEditing({
-                      content: {
-                        key: "custom-skill",
-                        name: "",
-                        description: "",
-                        instructions: "",
-                        roles: ["planning", "build"],
-                        references: [],
-                      },
-                    })
-                  }
+                  class="quiet-button"
+                  disabled={editorOpen() || importing()}
+                  onClick={() => {
+                    closeActions();
+                    setManaging(true);
+                    setOwner("all");
+                    setSelected(undefined);
+                    void load().catch(report);
+                  }}
                 >
-                  New skill
+                  Manage
                 </button>
               </Show>
             </div>
-            <Show when={canEditScope()}>
-              <details class="skill-library-import">
-                <summary>Import a skill</summary>
-                <p>
-                  Preview a SKILL.md or its complete directory before installing. Public GitHub
-                  imports require an exact commit.
-                </p>
+          </details>
+          <button
+            ref={(element) => {
+              newButton = element;
+            }}
+            type="button"
+            class="workspace-action"
+            data-primary="true"
+            disabled={busy() || importing()}
+            onClick={() => edit()}
+          >
+            {editing() ? "Resume draft" : "Add skill"}
+          </button>
+        </WorkspaceActionBar>
+        <div class="skill-library-title">
+          <h2>Skills library</h2>
+          <Show when={!editorOpen() && !importing()}>
+            <span class="skill-result-count" aria-live="polite">
+              {view() ? `${entries().length} ${entries().length === 1 ? "skill" : "skills"}` : ""}
+            </span>
+          </Show>
+        </div>
+        <div class="skill-library-tools">
+          <Show when={!editorOpen() && !importing()}>
+            <label class="skill-search">
+              <Icon name="search" />
+              <input
+                type="search"
+                aria-label="Search skills"
+                placeholder="Find a skill"
+                value={query()}
+                onInput={(event) => setQuery(event.currentTarget.value)}
+              />
+            </label>
+            <div
+              class="skill-filter-control"
+              ref={(element) => {
+                filterRoot = element;
+              }}
+            >
+              <button
+                ref={(element) => {
+                  filterButton = element;
+                }}
+                type="button"
+                class="workspace-action skill-filter-toggle"
+                aria-label="Filters"
+                aria-expanded={filtersOpen() ? "true" : "false"}
+                aria-controls={filterID}
+                onClick={() => {
+                  closeActions();
+                  setFiltersOpen((open) => !open);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setFiltersOpen(false);
+                    filterButton?.focus();
+                  }
+                }}
+              >
+                Filter
+                {owner() !== "all" || role() !== "all" || availability() !== "all"
+                  ? ` · ${[owner(), role(), availability()].filter((value) => value !== "all").length}`
+                  : ""}
+              </button>
+              <div class="skill-filter-options" id={filterID} hidden={!filtersOpen()}>
                 <label>
-                  SKILL.md
-                  <input
-                    type="file"
-                    accept=".md"
-                    disabled={busy()}
-                    onChange={(event) => void importFiles(event.currentTarget.files)}
-                  />
+                  Ownership
+                  <select
+                    value={owner()}
+                    onChange={(event) =>
+                      setOwner(event.currentTarget.value as SkillFilters["owner"])
+                    }
+                  >
+                    <option value="all">All owners</option>
+                    <Show when={!managing()}>
+                      <option value="personal">Only me</option>
+                    </Show>
+                    <option value="project">Project</option>
+                    <option value="system">Factory</option>
+                  </select>
                 </label>
                 <label>
-                  Skill directory
-                  <input
-                    type="file"
-                    multiple
-                    {...{ webkitdirectory: "" }}
-                    disabled={busy()}
-                    onChange={(event) => void importFiles(event.currentTarget.files)}
-                  />
+                  Work type
+                  <select
+                    value={role()}
+                    onChange={(event) => setRole(event.currentTarget.value as SkillFilters["role"])}
+                  >
+                    <option value="all">All work types</option>
+                    <option value="planning">Investigate &amp; Plan</option>
+                    <option value="build">Build</option>
+                  </select>
                 </label>
-                <form onSubmit={(event) => void importRepository(event)}>
-                  <label>
-                    Repository URL
-                    <input
-                      required
-                      type="url"
-                      placeholder="https://github.com/owner/repository"
-                      value={repository()}
-                      onInput={(event) => setRepository(event.currentTarget.value)}
-                    />
-                  </label>
-                  <label>
-                    Exact commit
-                    <input
-                      required
-                      pattern="[a-f0-9]{40}"
-                      value={commit()}
-                      onInput={(event) => setCommit(event.currentTarget.value)}
-                    />
-                  </label>
-                  <label>
-                    Skill path
-                    <input
-                      required
-                      placeholder="skills/my-skill/SKILL.md"
-                      value={path()}
-                      onInput={(event) => setPath(event.currentTarget.value)}
-                    />
-                  </label>
-                  <button class="quiet-button" type="submit" disabled={busy()}>
-                    Preview import
-                  </button>
-                </form>
-              </details>
-            </Show>
-            <div class="skill-library-role">
-              <label>
-                Choices for
-                <select
-                  value={role()}
-                  onChange={(event) => setRole(event.currentTarget.value as SkillRole)}
-                >
-                  <option value="planning">Investigate &amp; Plan</option>
-                  <option value="build">Build</option>
-                </select>
-              </label>
-              <Show when={props.scope === "personal" && !props.projectId}>
-                <p>
-                  Select a Project to enable skills. Your personal library is available across
-                  Projects.
-                </p>
-              </Show>
+                <label>
+                  Availability
+                  <select
+                    value={availability()}
+                    onChange={(event) =>
+                      setAvailability(event.currentTarget.value as SkillFilters["availability"])
+                    }
+                  >
+                    <option value="all">Any availability</option>
+                    <option value="enabled">Enabled</option>
+                    <option value="disabled">Off</option>
+                    <option value="required">Required</option>
+                    <option value="updates">Updates available</option>
+                  </select>
+                </label>
+              </div>
             </div>
-            <For each={entries()}>
-              {(entry) => {
-                const latest = () => entry.revisions[0];
-                const choice = () => effective(entry);
-                const current = () =>
-                  entry.revisions.find((revision) => revision.id === choice()?.revisionId);
-                const locked = () => inheritedRequired(entry);
-                const updateAvailable = () => current() && current()?.id !== latest()?.id;
-                return (
-                  <article class="skill-card" aria-label={latest()?.content.name}>
-                    <div class="skill-card-heading">
-                      <div>
-                        <strong>{latest()?.content.name}</strong>
-                        <p>{latest()?.content.description}</p>
-                      </div>
-                      <small>
-                        {entry.scope === "personal"
-                          ? "Only me"
-                          : entry.scope === "project"
-                            ? "Project"
-                            : "Factory"}{" "}
-                        · v{current()?.revision ?? latest()?.revision}
-                      </small>
-                    </div>
-                    <div class="skill-library-controls">
-                      <Show
-                        when={(current() ?? latest())?.content.roles.includes(role())}
-                        fallback={
-                          <small>
-                            {(current() ?? latest())?.content.roles.includes("build")
-                              ? "Build only"
-                              : "Investigate & Plan only"}
-                          </small>
-                        }
-                      >
-                        <label>
-                          {locked()
-                            ? `Required by ${choice()?.scope === "system" ? "Factory" : "Project"}`
-                            : "Use in new work"}
-                          <select
-                            aria-label={`${latest()?.content.name} choice`}
-                            disabled={
-                              busy() ||
-                              !canEditScope() ||
-                              locked() ||
-                              (props.scope !== "system" && !props.projectId)
-                            }
-                            value={ownChoice(entry)?.state ?? "inherit"}
-                            onChange={(event) =>
-                              choose(
-                                entry,
-                                event.currentTarget.value as
-                                  | "inherit"
-                                  | "enable"
-                                  | "disable"
-                                  | "required",
-                              )
-                            }
-                          >
-                            <option value="inherit">
-                              Inherit
-                              {choice()
-                                ? ` (${choice()?.state === "disable" ? "off" : "on"})`
-                                : " (off)"}
-                            </option>
-                            <option value="enable">Enable</option>
-                            <option value="disable">Disable</option>
-                            <Show when={props.scope !== "personal"}>
-                              <option value="required">Required</option>
-                            </Show>
-                          </select>
-                        </label>
-                      </Show>
-                      <small>
-                        /{latest()?.content.key}
-                        {latest()?.content.manualOnly ? " · Manual only" : ""}
-                      </small>
-                      <Show when={entry.editable && entry.scope === props.scope}>
-                        <button
-                          type="button"
-                          class="quiet-button"
-                          onClick={() => {
-                            const revision = latest();
-                            if (revision) setEditing({ content: revision.content, entry });
-                          }}
-                        >
-                          Edit
-                        </button>
-                      </Show>
-                      <Show when={entry.scope === "personal" && props.scope === "personal"}>
-                        <label>
-                          Share with
-                          <select
-                            aria-label={`${latest()?.content.name} sharing scope`}
-                            value={shareTarget()}
-                            onChange={(event) =>
-                              setShareTarget(event.currentTarget.value as "project" | "system")
-                            }
-                          >
-                            <Show when={props.projectId}>
-                              <option value="project">Project</option>
-                            </Show>
-                            <option value="system">Factory</option>
-                          </select>
-                        </label>
-                        <button
-                          type="button"
-                          class="quiet-button"
-                          disabled={busy() || (shareTarget() === "project" && !props.projectId)}
-                          onClick={() =>
-                            void mutate(
-                              () =>
-                                apiRequest(z.object({ id: z.uuid() }), "/api/skills/share", {
-                                  method: "POST",
-                                  headers: { "content-type": "application/json" },
-                                  body: JSON.stringify({
-                                    id: crypto.randomUUID(),
-                                    revisionId: latest()?.id,
-                                    target: shareTarget(),
-                                    ...(shareTarget() === "project"
-                                      ? { projectId: props.projectId }
-                                      : {}),
-                                  }),
-                                }),
-                              "Exact version proposed for sharing",
-                            )
-                          }
-                        >
-                          Propose sharing
-                        </button>
-                      </Show>
-                    </div>
-                    <Show when={updateAvailable()}>
-                      <details class="skill-update">
-                        <summary>Update available · v{latest()?.revision}</summary>
-                        <p>Review the changed package, then adopt this version for new work.</p>
-                        <pre>
-                          {createPatch(
-                            latest()?.content.key ?? "skill",
-                            JSON.stringify(current()?.content, null, 2),
-                            JSON.stringify(latest()?.content, null, 2),
-                            `v${current()?.revision}`,
-                            `v${latest()?.revision}`,
-                          )}
-                        </pre>
-                        <button
-                          type="button"
-                          class="quiet-button"
-                          disabled={
-                            busy() ||
-                            locked() ||
-                            !canEditScope() ||
-                            !latest()?.content.roles.includes(role())
-                          }
-                          onClick={() =>
-                            choose(
-                              entry,
-                              ownChoice(entry)?.state === "required" ? "required" : "enable",
-                              latest()?.id,
-                            )
-                          }
-                        >
-                          Use this version
-                        </button>
-                      </details>
-                    </Show>
-                    <Show when={current() ?? latest()}>
-                      {(revision) => (
-                        <SkillRevisionDetails
-                          revision={revision()}
-                          onCheckUpdate={
-                            entry.editable && entry.scope === props.scope
-                              ? () => checkSource(entry)
-                              : undefined
-                          }
-                          busy={busy()}
-                        />
-                      )}
-                    </Show>
-                  </article>
+          </Show>
+        </div>
+      </header>
+      <div class="skill-editor-screen" hidden={!editorOpen()}>
+        <Show when={editing()}>
+          {(editor) => (
+            <SkillRevisionEditor
+              content={editor().content}
+              entry={editor().entry}
+              warnings={editor().warnings}
+              scope="personal"
+              projectId={props.projectId}
+              canManageProject={view()?.canManageProject ?? false}
+              canManageSystem={view()?.canManageSystem ?? false}
+              onCancel={() => {
+                setEditorOpen(false);
+                returnFromEditor();
+              }}
+              onDiscard={() => {
+                setEditorOpen(false);
+                setEditing(undefined);
+                returnFromEditor();
+              }}
+              onSaved={(saved) => {
+                setEditorOpen(false);
+                setEditing(undefined);
+                if (saved.scope === "personal") setManaging(false);
+                else if (managing()) setManagementTarget(saved.scope);
+                setSelected(saved.libraryId);
+                void mutate(async () => saved, "Skill saved. Choose where to enable it.").then(
+                  () => {
+                    if (selectedEntry()?.id === saved.libraryId) {
+                      requestAnimationFrame(() => {
+                        detailHeading?.closest(".skill-gallery-detail")?.scrollTo(0, 0);
+                        detailHeading?.focus({ preventScroll: true });
+                      });
+                    }
+                  },
                 );
               }}
-            </For>
-            <Show when={view() && !entries().length}>
-              <p>No matching skills.</p>
-            </Show>
-            <For each={view()?.proposals}>
-              {(proposal) => (
-                <article class="skill-card">
-                  <strong>{proposal.name}</strong>
-                  <p>
-                    Exact version proposed for{" "}
-                    {proposal.target === "system" ? "Factory" : "this Project"}.
-                  </p>
-                  <button
-                    type="button"
-                    class="quiet-button"
-                    onClick={() =>
-                      void mutate(async () => {
-                        setInspected(
-                          await apiRequest(
-                            skillRevisionInput,
-                            `/api/skills/revisions/${proposal.revisionId}${suffix()}`,
-                          ),
-                        );
-                      }, "Proposal opened")
-                    }
-                  >
-                    Inspect proposed version
-                  </button>
-                  <Show
-                    when={
-                      proposal.target === "system"
-                        ? view()?.canManageSystem
-                        : view()?.canManageProject
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="quiet-button"
-                      disabled={busy() || inspected()?.id !== proposal.revisionId}
-                      onClick={() =>
-                        void mutate(
-                          () =>
-                            apiRequest(
+            />
+          )}
+        </Show>
+      </div>
+      <div class="skill-editor-screen" hidden={!importing()}>
+        <SkillImportPanel
+          onCancel={() => {
+            setImporting(false);
+            requestAnimationFrame(() => actionTrigger?.focus({ preventScroll: true }));
+          }}
+          onPreview={(preview) => {
+            clearFeedback();
+            setEditing(preview);
+            setImporting(false);
+            setEditorOpen(true);
+            focusWorkflow(".skill-editor h3");
+          }}
+        />
+      </div>
+      <div class="skill-library-browser" hidden={editorOpen() || importing()}>
+        <Show when={managing() && !selectedEntry()}>
+          <div class="skill-library-context">
+            <nav aria-label="Skill library views">
+              <button
+                type="button"
+                class="quiet-button"
+                aria-pressed={managing() ? "false" : "true"}
+                onClick={() => {
+                  setManaging(false);
+                  setSelected(undefined);
+                }}
+              >
+                Browse skills
+              </button>
+            </nav>
+            <label>
+              Manage defaults for
+              <select
+                value={managementScope()}
+                onChange={(event) => {
+                  setManagementTarget(event.currentTarget.value as "project" | "system");
+                  setOwner("all");
+                  setSelected(undefined);
+                  setInspected(undefined);
+                }}
+              >
+                <Show when={view()?.canManageProject && props.projectId}>
+                  <option value="project">{props.projectName ?? "This Project"}</option>
+                </Show>
+                <Show when={view()?.canManageSystem}>
+                  <option value="system">Everyone in Factory</option>
+                </Show>
+              </select>
+            </label>
+            <p>Shared defaults, not personal choices.</p>
+          </div>
+        </Show>
+        <div class="skill-library-layout">
+          <div
+            class="skill-gallery-scroll"
+            hidden={Boolean(selectedEntry())}
+            ref={(element) => {
+              galleryScroll = element;
+            }}
+          >
+            <Show when={managing()}>
+              <section class="skill-proposals" aria-label="Sharing review queue">
+                <h3>Sharing review · {proposals().length}</h3>
+                <Show when={!proposals().length}>
+                  <p>No sharing proposals awaiting your review.</p>
+                </Show>
+                <For each={proposals()}>
+                  {(proposal) => (
+                    <section class="skill-proposal" aria-label={proposal.name}>
+                      <h4>{proposal.name}</h4>
+                      <p>Review the exact proposed version before adding a separate shared copy.</p>
+                      <button
+                        type="button"
+                        class="quiet-button"
+                        disabled={busy()}
+                        onClick={() =>
+                          void mutate(async () => {
+                            const revision = await apiRequest(
+                              skillRevisionInput,
+                              `/api/skills/revisions/${proposal.revisionId}${suffix()}`,
+                            );
+                            setInspected({ proposalId: proposal.id, revision });
+                          }, "Proposed version opened")
+                        }
+                      >
+                        Inspect proposed version
+                      </button>
+                      <Show when={inspected()?.proposalId === proposal.id}>
+                        <Show when={inspected()?.revision}>
+                          {(revision) => <SkillRevisionDetails revision={revision()} expanded />}
+                        </Show>
+                      </Show>
+                      <button
+                        type="button"
+                        class="quiet-button"
+                        disabled={busy() || inspected()?.proposalId !== proposal.id}
+                        onClick={() =>
+                          void mutate(async () => {
+                            const result = await apiRequest(
                               z.object({ libraryId: z.uuid() }),
                               `/api/skills/share/${proposal.id}/accept`,
                               { method: "POST" },
-                            ),
-                          "Version added to the shared library. Enable it for new work.",
-                        )
-                      }
-                    >
-                      Add to shared library
-                    </button>
-                  </Show>
-                </article>
-              )}
-            </For>
-            <Show when={view()?.sharedVersions.length}>
-              <details>
+                            );
+                            setSelected(result.libraryId);
+                            setInspected(undefined);
+                          }, "Version added to the shared library. Enable it for new work.")
+                        }
+                      >
+                        Add to shared library
+                      </button>
+                    </section>
+                  )}
+                </For>
+              </section>
+            </Show>
+            <section class="skill-gallery" aria-label="Skill gallery">
+              <For each={entries()}>
+                {(entry) => {
+                  const states = () =>
+                    (["planning", "build"] as const)
+                      .filter((item) => role() === "all" || item === role())
+                      .map((item) => ({
+                        role: item,
+                        ...skillAvailability(entry, view()?.choices ?? [], scope(), item),
+                      }))
+                      .filter((item) => item.compatible);
+                  const revision = () => states()[0]?.revision ?? entry.revisions[0];
+                  return (
+                    <article class="skill-gallery-card" aria-label={revision()?.content.name}>
+                      <button
+                        id={`skill-open-${entry.id}`}
+                        type="button"
+                        class="skill-tile"
+                        aria-label={`Inspect ${revision()?.content.name}`}
+                        aria-pressed={selected() === entry.id ? "true" : "false"}
+                        onClick={() => openSkill(entry.id)}
+                      >
+                        <img
+                          class="skill-cover"
+                          src={skillCover(entry.id)}
+                          width="384"
+                          height="512"
+                          alt=""
+                          loading="lazy"
+                          decoding="async"
+                        />
+                        <span class="skill-tile-caption">
+                          <span class="skill-tile-title">{revision()?.content.name}</span>
+                          <span class="skill-tile-description">
+                            <Show when={revision()}>{(item) => skillSummary(item().content)}</Show>
+                          </span>
+                        </span>
+                      </button>
+                    </article>
+                  );
+                }}
+              </For>
+            </section>
+            <Show when={view() && !entries().length}>
+              <div class="skill-library-empty">
+                <h3>No matching skills</h3>
+                <p>
+                  Try another search or clear the filters. You can also create or import a skill.
+                </p>
+                <button type="button" class="quiet-button" onClick={clearFilters}>
+                  Clear filters
+                </button>
+              </div>
+            </Show>
+            <Show when={view()?.sharedVersions.length && !managing()}>
+              <details class="skill-shared-history">
                 <summary>Versions used in shared work</summary>
                 <p>
-                  These exact personal versions were admitted to this Project. Their authors' other
-                  versions remain private.
+                  Only these exact personal versions are visible. Other private versions stay
+                  private.
                 </p>
                 <For each={view()?.sharedVersions}>
                   {(revision) => (
-                    <article class="skill-card">
-                      <strong>
+                    <section>
+                      <h4>
                         {revision.content.name} · v{revision.revision}
-                      </strong>
+                      </h4>
                       <SkillRevisionDetails revision={revision} />
-                    </article>
+                    </section>
                   )}
                 </For>
               </details>
             </Show>
-            <Show when={inspected()}>
-              {(revision) => <SkillRevisionDetails revision={revision()} />}
-            </Show>
-          </>
-        }
-      >
-        {(editor) => (
-          <SkillRevisionEditor
-            content={editor().content}
-            entry={editor().entry}
-            warnings={editor().warnings}
-            scope={props.scope}
-            projectId={props.projectId}
-            canManageProject={view()?.canManageProject ?? false}
-            canManageSystem={view()?.canManageSystem ?? false}
-            onCancel={() => setEditing(undefined)}
-            onSaved={() => {
-              setEditing(undefined);
-              setStatus("Skill saved. Choose where to enable it.");
-              void load();
-            }}
-          />
-        )}
-      </Show>
-      <p role="status">{busy() ? "Saving…" : status()}</p>
+          </div>
+          <Show when={selectedEntry()}>
+            {(entry) => (
+              <Show when={view()}>
+                {(library) => (
+                  <SkillGalleryDetail
+                    entry={entry()}
+                    view={library()}
+                    scope={scope()}
+                    projectId={props.projectId}
+                    projectName={props.projectName}
+                    busy={busy()}
+                    hasDraft={Boolean(editing())}
+                    preferredRole={role()}
+                    onChoose={choose}
+                    onClose={closeSkill}
+                    onEdit={edit}
+                    onShare={share}
+                    onCheckSource={checkSource}
+                    onHeading={(element) => {
+                      detailHeading = element;
+                    }}
+                  />
+                )}
+              </Show>
+            )}
+          </Show>
+        </div>
+      </div>
+      <p role="status" class="skill-library-status">
+        {busy() ? "Saving…" : loading() ? "Loading skills…" : status()}
+      </p>
       <Show when={error()}>
-        <p role="alert">{error()}</p>
-        <button
-          type="button"
-          class="quiet-button"
-          onClick={() => {
-            setError("");
-            void load();
-          }}
-        >
-          Reload library
-        </button>
+        <div class="skill-library-error">
+          <p role="alert">{error()}</p>
+          <button
+            type="button"
+            class="quiet-button"
+            disabled={busy() || loading()}
+            onClick={() => {
+              setError("");
+              void load().catch(report);
+            }}
+          >
+            Reload library
+          </button>
+        </div>
       </Show>
     </div>
   );

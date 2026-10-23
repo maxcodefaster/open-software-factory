@@ -4,7 +4,14 @@ export function resizeComposer(element: HTMLTextAreaElement) {
 }
 
 export function composerKeyDown(event: KeyboardEvent) {
-  if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+  if (
+    event.defaultPrevented ||
+    event.key !== "Enter" ||
+    event.shiftKey ||
+    event.isComposing ||
+    event.keyCode === 229
+  )
+    return;
   event.preventDefault();
   const element = event.currentTarget as HTMLTextAreaElement;
   const submitter = element.form?.querySelector<HTMLButtonElement>('button[type="submit"]');

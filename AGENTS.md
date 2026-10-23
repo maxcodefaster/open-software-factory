@@ -6,7 +6,10 @@
   later work, prepare speculative APIs or reopen completed programmes.
 - Use the root README for commands/layout, `docs/README.md` for domain and service boundaries,
   and the relevant `docs/adr` decision when changing that boundary. Read what the task needs.
-- Maintained Markdown is limited to `README.md`, `AGENTS.md` and numbered ADRs in `docs/adr`.
+- Maintained Markdown is limited to `README.md`, `AGENTS.md`, numbered ADRs in `docs/adr`
+  and the UI product brief at `apps/factory/PRODUCT.md`. The product brief summarizes durable
+  product facts and links to the existing documentation; task plans and design specifications
+  still belong in the task or issue.
   Put generated evidence under `.factory/test-results/`; do not add checkpoint or audit reports.
 - Preserve changes made by others and use `apply_patch` for manual edits.
 - Keep `/Users/max/Code/software-factory` read-only. Port isolated behavior only within the requested

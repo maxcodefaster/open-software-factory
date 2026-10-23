@@ -11,6 +11,7 @@ import { integer, record, text, uuid, validator } from "./validation";
 import { assignTicketEpicMutator, epicMutators } from "./epics";
 import { dependencyMutators } from "./dependencies";
 import { knowledgeMutators } from "./knowledge";
+import { projectMutators } from "./projects";
 
 type Json<T> = ReadonlyJSONObject & T;
 type CreateArgs = Json<{
@@ -108,6 +109,7 @@ async function ticketFor(
 }
 
 export const zeroMutators = defineMutators({
+  projects: projectMutators,
   knowledge: knowledgeMutators,
   epics: epicMutators,
   dependencies: dependencyMutators,

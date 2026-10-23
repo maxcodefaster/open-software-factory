@@ -7,6 +7,7 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn, teardownFactoryProject } from "../support/factory-fixture";
 
 const repositoryURL = "http://127.0.0.1:33030/factory-mutation/runtime-fixture.git";
@@ -129,7 +130,7 @@ test("keeps the actual Monaco palette on cold load and iframe refresh", async ({
   await mkdir(".factory/test-results/runtime-console", { recursive: true });
   const { slug } = await createRuntimeConsoleFixture();
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   await page.getByRole("menuitem", { name: /Inspect runtime console/ }).click();
@@ -185,7 +186,7 @@ test("opens real Staging Preview without a development workspace", async ({ page
   await mkdir(".factory/test-results/runtime-console", { recursive: true });
   const { slug } = await createRuntimeConsoleFixture();
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
   await page.getByRole("button", { name: "Preview", exact: true }).click();
   const preview = page.frameLocator('iframe[title="Factory Preview"]');
@@ -223,7 +224,7 @@ test("retains complete native stdin when closing another terminal", async ({ pag
   testInfo.setTimeout(360_000);
   const { slug } = await createRuntimeConsoleFixture();
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   await page.getByRole("menuitem", { name: /Inspect runtime console/ }).click();
@@ -257,7 +258,7 @@ test("retains complete native stdin when closing another terminal", async ({ pag
     await terminals
       .locator(".factory-terminal-tab")
       .filter({ hasText: "Terminal 1" })
-      .getByRole("button")
+      .getByRole("tab")
       .first()
       .click();
     await expect(activeHost).toHaveAttribute("data-connection-state", "connected");
@@ -269,7 +270,7 @@ test("retains complete native stdin when closing another terminal", async ({ pag
     await terminals
       .locator(".factory-terminal-tab")
       .filter({ hasText: "Terminal 2" })
-      .getByRole("button")
+      .getByRole("tab")
       .first()
       .click();
     await expect(activeHost.locator(".xterm-rows")).toContainText("Terminal close failed");
@@ -277,7 +278,7 @@ test("retains complete native stdin when closing another terminal", async ({ pag
     await terminals
       .locator(".factory-terminal-tab")
       .filter({ hasText: "Terminal 1" })
-      .getByRole("button")
+      .getByRole("tab")
       .first()
       .click();
     await page.context().unroute(closePattern);
@@ -327,7 +328,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
   const { slug } = await createRuntimeConsoleFixture();
 
   await signIn(page);
-  await page.getByRole("button", { name: "Open project menu" }).click();
+  await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
   await expect(page.getByText("Inspect runtime console", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "IDE", exact: true }).click();
@@ -604,7 +605,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
   await terminal
     .locator(".factory-terminal-tab")
     .filter({ hasText: "Terminal 1" })
-    .getByRole("button")
+    .getByRole("tab")
     .first()
     .click();
   await terminal.locator(".xterm:visible").click({ force: true });
@@ -769,7 +770,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
   await ide
     .locator(".factory-terminal-tab")
     .filter({ hasText: "Terminal 1" })
-    .getByRole("button")
+    .getByRole("tab")
     .first()
     .click();
   await ide.locator(".factory-terminal-host:not([hidden]) .xterm").click({ force: true });
@@ -807,7 +808,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
   await reconnected
     .locator(".factory-terminal-tab")
     .filter({ hasText: "Terminal 1" })
-    .getByRole("button")
+    .getByRole("tab")
     .first()
     .click();
   await reconnected.locator(".factory-terminal-host:not([hidden]) .xterm").click({ force: true });

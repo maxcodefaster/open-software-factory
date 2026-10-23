@@ -27,6 +27,7 @@ type ImplementationAdmission = {
   commandID: string;
   revisionID: string;
   codingReasoning?: CodingReasoning;
+  expectedBaseSHA?: string;
   admitBuild(sql: AgentTurnTransaction, changeID: string): Promise<unknown>;
 };
 
@@ -493,6 +494,11 @@ export function createChangeController(
         const base = await forge.getDefaultBranch(repository);
         if (base.name !== input.defaultBranch)
           throw new Error("Project default branch does not match Forge");
+        if (implementation?.expectedBaseSHA && base.headSha !== implementation.expectedBaseSHA)
+          throw new CommandError(
+            "conflict",
+            "The default branch changed after monitoring diagnosis. Review the incident against the current source.",
+          );
         const identity = changeIdentity(ticketID, input.approvalID);
         await sql`
             INSERT INTO factory.change(

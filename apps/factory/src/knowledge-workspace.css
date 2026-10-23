@@ -3,6 +3,7 @@
   display: grid;
   min-width: 0;
   min-height: 0;
+  height: 100%;
   grid-column: 1 / -1;
   grid-template-columns: var(--wiki-nav-width, 14rem) var(--space-1) minmax(0, 1fr);
 }
@@ -157,19 +158,13 @@
 .knowledge-version-panel > .version-history {
   flex: 1;
 }
-@media (max-width: 900px) {
+@media (max-width: 760px) {
   .knowledge-workspace.has-history {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr) auto;
   }
-  .knowledge-workspace.has-history > .knowledge-navigation {
-    display: none;
-  }
-  .knowledge-workspace.has-history > .wiki-navigation-resize {
-    display: none;
-  }
   .version-history {
-    max-height: var(--history-narrow-height);
+    max-height: min(var(--history-narrow-height), 40dvh);
     border-top: 1px solid var(--line-subtle);
     border-left: 0;
   }
@@ -184,8 +179,7 @@
 }
 
 .knowledge-nav-heading,
-.knowledge-generation,
-.knowledge-status-row {
+.knowledge-generation {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -193,19 +187,6 @@
 }
 .knowledge-page-actions {
   position: relative;
-  margin-left: auto;
-}
-.knowledge-page-actions .icon-button svg {
-  width: var(--space-5);
-  height: var(--space-5);
-}
-.knowledge-page-actions .icon-button {
-  width: var(--space-7);
-  height: var(--space-7);
-  border-radius: var(--radius-sm);
-  border: 0;
-  box-shadow: none;
-  background: transparent;
 }
 .knowledge-page-menu {
   position: absolute;
@@ -218,13 +199,6 @@
   border-radius: var(--radius-sm);
   background: var(--material-document-popover);
   box-shadow: var(--shadow-float);
-}
-.knowledge-status-row a.quiet-button {
-  color: var(--color-ink-muted);
-  text-decoration: none;
-}
-.knowledge-status-row a.quiet-button:hover {
-  color: var(--color-ink);
 }
 .knowledge-page-menu button {
   display: flex;
@@ -306,7 +280,7 @@
 .knowledge-text-diff .diff-unchanged {
   color: var(--muted-ink);
 }
-@media (max-width: 600px) {
+@container workspace (max-width: 600px) {
   .knowledge-compare > div {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -639,10 +613,6 @@
   margin-bottom: var(--space-4);
 }
 
-.knowledge-status-row {
-  min-height: var(--space-8);
-}
-
 .knowledge-heading small,
 .knowledge-citations small {
   color: var(--muted-ink);
@@ -945,4 +915,56 @@
 .knowledge-history code {
   color: var(--muted-ink);
   font-size: var(--text-xs);
+}
+
+.wiki-workspace-container {
+  grid-column: 1 / -1;
+}
+.wiki-empty-navigation {
+  position: absolute;
+  top: var(--space-4);
+  left: var(--space-4);
+}
+@media (max-width: 760px) {
+  .knowledge-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .knowledge-navigation {
+    display: none;
+    position: absolute;
+    z-index: var(--layer-menu);
+    top: var(--navigation-menu-top, var(--space-12));
+    left: var(--navigation-menu-left, var(--space-3));
+    width: min(20rem, calc(100% - var(--space-4)));
+    max-height: var(--navigation-menu-height, calc(100% - var(--space-12)));
+    overflow: auto;
+    overscroll-behavior: contain;
+    border: 0;
+    border-radius: var(--radius-md);
+    background: var(--material-document-popover);
+    box-shadow: var(--shadow-float);
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  .knowledge-navigation[data-navigation-open="true"] {
+    display: flex;
+  }
+  .wiki-navigation-resize {
+    display: none;
+  }
+  .knowledge-workspace .workspace-navigation-trigger {
+    display: inline-flex;
+  }
+  .knowledge-workspace .workspace-action-leading {
+    display: flex;
+  }
+  .knowledge-workspace .workspace-action-status {
+    order: 2;
+    flex-basis: 100%;
+  }
+}
+@media (pointer: coarse) {
+  .knowledge-tree button {
+    min-height: 44px;
+  }
 }

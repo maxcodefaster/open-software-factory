@@ -7,6 +7,11 @@ const conversation: ConversationView = {
   projectId: "owned",
   mode: "plan",
   version: 1,
+  contextId: null,
+  activeCodingContextId: null,
+  isActiveCoding: false,
+  contexts: [],
+  codingHistory: null,
   entries: [],
 };
 const turnId = crypto.randomUUID();

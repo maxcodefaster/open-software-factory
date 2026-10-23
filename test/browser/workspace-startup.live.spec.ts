@@ -1,17 +1,18 @@
-import { expect, test, type Page, type FrameLocator } from "@playwright/test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { createDatabase } from "../../packages/db/src/client";
+import { expect, type FrameLocator, type Page, test } from "@playwright/test";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
-import { signIn, teardownFactoryProject } from "../support/factory-fixture";
-import { startupMeasurements, type StartupMeasurement } from "../support/runtime-startup";
 import { changeIdentity } from "../../packages/change-domain/src/change";
+import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { signIn, teardownFactoryProject } from "../support/factory-fixture";
+import { type StartupMeasurement, startupMeasurements } from "../support/runtime-startup";
 
 const execute = promisify(execFile);
 const origin = "http://127.0.0.1:3000";
@@ -139,9 +140,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
   try {
     await mkdir(directory, { recursive: true });
     await signIn(page);
-    await expect(
-      page.getByRole("button", { name: "Open project menu", exact: true }),
-    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const { session } = await (await page.request.get("/api/session", { timeout: 30_000 })).json();
     if (!session) throw new Error("Missing authenticated fixture owner");
     const base = await forge.getDefaultBranch(repository);
@@ -163,7 +162,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
     });
     fixtureCreated = true;
     await page.reload();
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page
       .getByRole("region", { name: "implementation", exact: true })
@@ -179,7 +178,8 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
         { timeout: 30_000 },
       );
       const started = performance.now();
-      await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
       const response = await ensure;
       expect(response.ok()).toBe(true);
       const runtime = runtimeAttemptSchema.parse(await response.json());

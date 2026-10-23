@@ -1,7 +1,8 @@
-import { test, expect } from "bun:test";
+import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
 
 test("security Settings is a keyboard-accessible tab, reauthenticates in place, and fits narrow screens", async () => {
   const owned = await factoryProcess();
@@ -167,7 +168,7 @@ test("a Product Contributor manages members without receiving code authority", a
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(owned.base);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button", { name: /Team workspace/ }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
@@ -200,7 +201,7 @@ test("a Product Contributor manages members without receiving code authority", a
       "Another Project Manager must grant Developer access",
     );
     await page.reload();
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button", { name: /Team workspace/ }).click();
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();

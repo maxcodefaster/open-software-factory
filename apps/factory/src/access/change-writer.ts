@@ -1,6 +1,7 @@
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { projectDevelopmentAuthorityIn } from "./controller";
+import { writerActivity } from "./writer-activity";
 
 export async function lockChangeWriterIn(sql: AgentTurnTransaction, changeID: string) {
   // Admission already orders Change before membership. Source and handoff use
@@ -21,10 +22,11 @@ export async function lockChangeWriterIn(sql: AgentTurnTransaction, changeID: st
       fenceRequired: boolean;
       requestedBy: string | null;
       requestID: string | null;
+      handoffKind: "takeover" | "release";
     }[]
   >`SELECT state,epoch::text, user_id AS "userID",turn_id AS "turnID"
     ,fence_attempt_id AS "fenceAttemptID",fence_required AS "fenceRequired",
-    requested_by AS "requestedBy",request_id AS "requestID"
+    requested_by AS "requestedBy",request_id AS "requestID",handoff_kind AS "handoffKind"
     FROM factory.change_writer WHERE change_id=${changeID} FOR UPDATE`;
   if (!writer) throw new CommandError("unavailable", "Change writing authority is unavailable");
   return { ...writer, ...change };
@@ -34,8 +36,26 @@ export async function claimAgentWriterIn(
   sql: AgentTurnTransaction,
   changeID: string,
   turnID: string,
+  commissionerID: string,
 ) {
   const writer = await lockChangeWriterIn(sql, changeID);
+  if (writer.state === "human" && writer.userID !== commissionerID) {
+    let activeHolder = true;
+    try {
+      if (!writer.userID)
+        throw new CommandError("conflict", "Human writer identity is unavailable");
+      await projectDevelopmentAuthorityIn(sql, writer.userID, writer.projectID);
+    } catch (cause) {
+      if (!(cause instanceof CommandError) || !["forbidden", "not-found"].includes(cause.code))
+        throw cause;
+      activeHolder = false;
+    }
+    if (activeHolder)
+      throw new CommandError(
+        "conflict",
+        "Another developer holds editing. Request editing or wait for release before commissioning Coding. Your draft is unchanged.",
+      );
+  }
   let fencePrevious = writer.state === "human";
   if (writer.state === "handoff")
     throw new CommandError("conflict", "Wait for editing takeover before starting the Agent");
@@ -68,6 +88,7 @@ export async function claimAgentWriterIn(
   await sql`UPDATE factory.change_writer SET state='agent-preparing',turn_id=${turnID},user_id=NULL,
     fence_required=fence_required OR ${fencePrevious},fence_attempt_id=CASE WHEN fence_required THEN fence_attempt_id ELSE (SELECT runtime_attempt_id FROM factory.change WHERE id=${changeID}) END,
     requested_by=NULL,request_id=NULL,
+    handoff_kind='takeover',
     epoch=epoch+1,updated_at=now() WHERE change_id=${changeID}`;
 }
 
@@ -94,6 +115,8 @@ export async function workspaceWriteAuthorityIn(
       "conflict",
       "This Workspace is observation-only. Take over editing before changing files or running commands.",
     );
+  if (writer && workspace.changeID)
+    writerActivity.observe(workspace.changeID, userID, writer.epoch, "edit");
   return { ...workspace, writerEpoch: writer?.epoch };
 }
 

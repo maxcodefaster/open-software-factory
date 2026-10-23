@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
+import { openProjectMenu } from "../fixtures/project-menu";
 
 test("setup side panel retains its draft through minimize, refresh and Factory Settings", async () => {
   const process = await factoryProcess(undefined, {
@@ -31,7 +32,7 @@ test("setup side panel retains its draft through minimize, refresh and Factory S
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await page.goto(process.base);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button", { name: "Create project", exact: true }).click();
     await visible(page.getByRole("region", { name: "Empty project board" })).toBeVisible();
     const setup = page.getByRole("region", { name: "Project setup" });
@@ -102,7 +103,7 @@ test("setup questions retain answers across refresh and minimize; readiness resu
     );
     const page = await context.newPage();
     await page.goto(process.base);
-    await page.getByRole("button", { name: "Open project menu", exact: true }).click();
+    await openProjectMenu(page);
     await page.getByRole("button", { name: "Create project", exact: true }).click();
     const setup = page.getByRole("region", { name: "Project setup" });
     await visible(setup.getByLabel("Project name", { exact: true })).toBeVisible();

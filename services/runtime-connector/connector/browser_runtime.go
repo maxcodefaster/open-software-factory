@@ -34,22 +34,27 @@ type browserRuntimeRequest struct {
 }
 
 type browserRuntime struct {
-	scope      browserRuntimeRequest
-	directory  string
-	ctx        context.Context
-	cancel     context.CancelFunc
-	mu         sync.Mutex
-	authority  sync.Mutex
-	expiresAt  time.Time
-	input      io.WriteCloser
-	responses  chan browserMCPReply
-	command    *exec.Cmd
-	wait       chan error
-	sequence   int
-	pageID     int
-	app        string
-	pendingApp string
-	closed     bool
+	scope            browserRuntimeRequest
+	directory        string
+	ctx              context.Context
+	cancel           context.CancelFunc
+	mu               sync.Mutex
+	authority        sync.Mutex
+	expiresAt        time.Time
+	input            io.WriteCloser
+	responses        chan browserMCPReply
+	command          *exec.Cmd
+	wait             chan error
+	sequence         int
+	pageID           int
+	app              string
+	pendingApp       string
+	closed           bool
+	recordingStarted time.Time
+	recordingEnded   time.Time
+	recordingBytes   int64
+	recordingIndexed bool
+	pagePath         string
 }
 
 type browserRuntimeManager struct {
@@ -124,6 +129,8 @@ func (manager *browserRuntimeManager) handle(ctx context.Context, message Messag
 			err = manager.renew(request)
 		case "browser-call":
 			response.Data, err = manager.call(ctx, request)
+		case "browser-recording-start", "browser-recording-finish", "browser-recording-chunk":
+			response.Data, err = manager.recording(ctx, request, message.Action)
 		default:
 			err = errors.New("unsupported browser operation")
 		}
@@ -589,6 +596,7 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 			return "", err
 		}
 	}
+	recordingPosition := manager.recordingPosition(bounded, runtime)
 	raw, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": dispatch.Name, "arguments": dispatch.Arguments})
 	if err != nil {
 		runtime.cancel()
@@ -620,10 +628,15 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 			return "", err
 		}
 	}
+	if page := browserObservedPage(raw, runtime.app, runtime.pageID); page != "" {
+		runtime.pagePath = page
+	}
 	result.StructuredContent, err = manager.observationContext(bounded, scope, runtime.app)
 	if err != nil {
 		return "", err
 	}
+	result.StructuredContent.RecordingTimeMS = recordingPosition
+	result.StructuredContent.Page = runtime.pagePath
 	if scope.Call.Name == "browser_screenshot" && !result.IsError {
 		if err := manager.writeScreenshot(bounded, runtime, result); err != nil {
 			return "", err

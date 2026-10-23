@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, onSettled, Show } from "solid-js";
 import {
   type TicketBoardInput,
   ticketBoardStatus,
@@ -20,11 +20,14 @@ import { editorCommandHeight, editorPopoverPosition } from "./editor-popover-pos
 import { editorTextRectangles } from "./editor-text-rectangles";
 import { markdownHTML } from "./markdown";
 import { RequirementDocument } from "./requirement-document";
+import { type ReviewActions, ReviewPanel, ReviewThreadStatus } from "./review/panel";
 import { RichDocumentSurface } from "./rich-document-surface";
 import { sourceReviewURL } from "./source-review";
+import { TicketActionBar, type TicketHeaderAction } from "./ticket-action-bar";
 import { TicketChecks } from "./ticket-checks";
 import { TicketDependencies, type TicketDependenciesProps } from "./ticket-dependencies";
 import { TicketSecondaryActions } from "./ticket-secondary-actions";
+import { SaveFeedback } from "./ui/feedback";
 import { VersionHistory } from "./version-history";
 
 type TicketView = {
@@ -136,11 +139,13 @@ export type TicketWorkspaceProps = {
   onResumeCoding?(): void;
   onStopImplementation(): void;
   onOpenIDE(): void;
+  onOpenPreview?: (() => void) | undefined;
+  active?: boolean | undefined;
   onApproveDelivery(changeID: string): void;
   onRetryReview?(changeID: string): void;
   onResumeChecks?(changeID: string): void;
   canDevelop: boolean;
-  onRequestChanges(): void;
+  userID?: string;
 };
 
 type EditorField = "title" | "description" | "summary" | "acceptance" | "non-goal";
@@ -189,6 +194,7 @@ function sameRequirement(left: RequirementContent, right: RequirementContent) {
 }
 
 type TextSurfaceProps = {
+  attachmentScopeKey?: string | undefined;
   value: string;
   label: string;
   field: EditorField;
@@ -277,6 +283,10 @@ function RichTextSurface(props: TextSurfaceProps) {
 }
 
 export function TicketWorkspace(props: TicketWorkspaceProps) {
+  const [openReviewThreads, setOpenReviewThreads] = createSignal<number>();
+  const [reviewActions, setReviewActions] = createSignal<ReviewActions>();
+  const reviewScope = createMemo(() => props.change?.id);
+  createEffect(reviewScope, () => setOpenReviewThreads(undefined));
   const [editing, setEditing] = createSignal(false);
   const [draftTitle, setDraftTitle] = createSignal(props.current.ticket.title);
   const [draftDescription, setDraftDescription] = createSignal(props.current.ticket.description);
@@ -290,6 +300,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
   const [linkEditing, setLinkEditing] = createSignal(false);
   const [editorError, setEditorError] = createSignal("");
   const [saving, setSaving] = createSignal(false);
+  const [savedDocument, setSavedDocument] = createSignal(false);
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
   let baseVersion = props.current.ticket.version;
   let baseDocumentID: string | null = props.current.documentRevisions[0]?.id ?? null;
@@ -432,6 +443,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     !implementationBusy() &&
     props.delivery?.verificationState === "succeeded" &&
     props.delivery?.reviewState === "passed" &&
+    !(openReviewThreads() ?? props.delivery?.openReviewThreads ?? 0) &&
     !props.delivery.approvedAt;
   const nextRevisionOrdinal = () =>
     (currentDocument()?.ordinal ?? props.latestRevision?.ordinal ?? 0) + 1;
@@ -476,6 +488,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       if (key === draftKey) return;
       retainDraft();
       draftKey = key;
+      setSavedDocument(false);
       let draft = props.drafts.get(key);
       if (!draft) {
         try {
@@ -570,6 +583,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
   function beginEditing() {
     setEditing(true);
     setEditorError("");
+    setSavedDocument(false);
   }
 
   function cancelEditing() {
@@ -881,6 +895,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     } finally {
       setSaving(false);
     }
+    if (props.current.ticket.id !== ticketID) return;
     if (!saved) {
       setEditorError(
         "Could not save. Your draft is retained; check the connection or changes made elsewhere.",
@@ -888,7 +903,6 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       retainDraft();
       return;
     }
-    if (props.current.ticket.id !== ticketID) return;
     baseVersion = saved.ticketVersion;
     baseDocumentID = saved.id;
     baseRequirementRevisionID = saved.requirementRevisionId;
@@ -906,6 +920,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     if (key) props.drafts.delete(key);
     if (draftKey !== key) return;
     setEditing(false);
+    setSavedDocument(true);
     retainDraft();
   }
 
@@ -952,6 +967,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
           scheduleAutosave();
         } else {
           setEditing(false);
+          setSavedDocument(true);
           retainDraft();
         }
       }
@@ -980,6 +996,143 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
     return undefined;
   };
   const implementationDisabled = () => Boolean(implementationDisabledReason());
+  const canInterview = () =>
+    !props.current.ticket.trashedAt &&
+    !props.current.ticket.convertedToEpicId &&
+    !props.latestRevision?.approvalId &&
+    !props.change &&
+    !proposal();
+  const headerActions = createMemo(() => {
+    const actions: TicketHeaderAction[] = [];
+    const ticket = props.current.ticket;
+    const review = reviewActions();
+    if (canInterview() && !props.clarificationAction.status)
+      actions.push({
+        id: "interview",
+        label: props.clarificationAction.label,
+        disabled: hasChanges(),
+        run: props.onInterview,
+      });
+    if (ticket.convertedToEpicId)
+      actions.push({
+        id: "epic",
+        label: "Open Epic",
+        run: () => ticket.convertedToEpicId && props.onOpenEpic(ticket.convertedToEpicId),
+      });
+    if (props.change && props.onOpenPreview)
+      actions.push({ id: "preview", label: "Open Live Preview", run: props.onOpenPreview });
+    if (!ticket.trashedAt && review?.addFeedback)
+      actions.push({ id: "feedback", label: "Add feedback", run: review.addFeedback });
+    if (ticket.trashedAt)
+      actions.push({
+        id: "restore",
+        label: "Restore",
+        primary: true,
+        disabled: props.pending || Boolean(ticket.trashStopPending),
+        run: props.onRestore,
+      });
+    if (proposal())
+      actions.push({
+        id: "confirm",
+        label: "Confirm answers",
+        primary: true,
+        disabled: props.pending || saving() || proposal()?.base.version !== ticket.version,
+        run: () => void confirmProposal(),
+      });
+    if (canDeliver())
+      actions.push({
+        id: "deliver",
+        label: "Deliver",
+        primary: true,
+        disabled: props.pending,
+        run: () => props.change && props.onApproveDelivery(props.change.id),
+      });
+    if (
+      !ticket.trashedAt &&
+      !ticket.convertedToEpicId &&
+      ["inbox", "backlog"].includes(ticket.state) &&
+      !props.change &&
+      !proposal()
+    )
+      actions.push({
+        id: "requirements",
+        label: "Write requirements",
+        primary: true,
+        disabled: props.pending || saving() || hasChanges(),
+        run: props.onWriteRequirements,
+      });
+    if (canImplement() && !props.codingOptionsOpen)
+      actions.push({
+        id: "implement",
+        label: "Implement",
+        primary: true,
+        disabled: implementationDisabled(),
+        title: implementationDisabledReason(),
+        run: () => props.latestRevision && props.onImplement(props.latestRevision.id),
+      });
+    if (!ticket.trashedAt && props.codingPause)
+      actions.push({
+        id: "resume-coding",
+        label: "Resume implementation",
+        primary: true,
+        disabled:
+          props.pending || ["dispatching", "running"].includes(props.change?.buildTurnState ?? ""),
+        run: () => props.onResumeCoding?.(),
+      });
+    if (
+      !ticket.trashedAt &&
+      props.canDevelop &&
+      props.delivery?.checksStopId &&
+      props.onResumeChecks
+    )
+      actions.push({
+        id: "resume-checks",
+        label: "Resume checks",
+        primary: true,
+        disabled: props.pending,
+        run: () => props.change && props.onResumeChecks?.(props.change.id),
+      });
+    if (
+      !ticket.trashedAt &&
+      (props.change?.state === "active" ||
+        (props.change?.state === "starting" &&
+          ["stopped", "failed"].includes(props.change.runtimeState ?? ""))) &&
+      !implementationBusy() &&
+      !props.codingPause &&
+      ["incomplete", "failed", "stopped"].includes(props.delivery?.reviewState ?? "") &&
+      props.onRetryReview
+    )
+      actions.push({
+        id: "retry-review",
+        label: "Retry review",
+        primary: true,
+        disabled: props.pending,
+        run: () => props.change && props.onRetryReview?.(props.change.id),
+      });
+    if (!ticket.trashedAt && review?.revision)
+      actions.push({
+        id: "revision",
+        label: review.revision.sending ? "Requesting revision…" : "Request revision",
+        primary: true,
+        disabled: props.pending || review.revision.disabled,
+        title: `Revise ${review.revision.count} open ${review.revision.count === 1 ? "Thread" : "Threads"}. Comments stay in the discussion.`,
+        run: review.revision.request,
+      });
+    if (!ticket.trashedAt && props.change?.state === "delivered")
+      actions.push({
+        id: "follow-up",
+        label: "Create follow-up",
+        primary: true,
+        disabled: props.pending || hasChanges(),
+        run: props.onFollowUp,
+      });
+    return actions;
+  });
+  const compactActions = createMemo(() => {
+    const actions = headerActions();
+    const primary = actions.find((action) => action.primary)?.id;
+    return primary ? actions.filter((action) => action.id !== primary) : [];
+  });
 
   return (
     <div class={`ticket-layout${historyOpen() ? " has-inspector" : ""}`}>
@@ -1005,7 +1158,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
             )}
           </Show>
           <article
-            class="ticket-document"
+            class={`ticket-document${props.change ? " has-review" : ""}`}
             hidden={Boolean(historicalRevision())}
             aria-label={proposal() ? "Elaborated requirements" : "Ticket document"}
             ref={documentElement}
@@ -1013,6 +1166,16 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
           >
             <header class="ticket-document-heading">
               <div class="ticket-status-row">
+                <RichTextSurface
+                  value={draftTitle()}
+                  label="Ticket title"
+                  field="title"
+                  editable={canEditSpecification()}
+                  plain={true}
+                  placeholder="Untitled ticket"
+                  class="ticket-inline-title"
+                  {...richTextHandlers({ field: "title", update: setDraftTitle })}
+                />
                 <Show when={props.current.proposal && !proposal()}>
                   <span class="ticket-document-notice" role="status">
                     The Ticket changed. Your current text is kept; clarify again for a new proposal.
@@ -1020,7 +1183,32 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                 </Show>
                 <div class="ticket-status-context">
                   <span>{props.ticketReference}</span>
-                  <span>{effectiveStatus()}</span>
+                  <Show when={props.change} fallback={<span>{effectiveStatus()}</span>}>
+                    <TicketChecks
+                      details={props.delivery}
+                      fallback={effectiveStatus()}
+                      building={implementationBusy() && !props.computeWait && !props.codingPause}
+                      preparing={implementationPreparing()}
+                      unsubmitted={
+                        props.change?.state === "active" &&
+                        ((props.change.implementationState !== undefined &&
+                          props.change.implementationState !== "committed") ||
+                          ["failed", "stopped", "uncertain"].includes(
+                            props.change.buildTurnState ?? "",
+                          ))
+                      }
+                    />
+                  </Show>
+                  <Show
+                    when={
+                      props.change &&
+                      (openReviewThreads() ?? props.delivery?.openReviewThreads) !== undefined
+                    }
+                  >
+                    <ReviewThreadStatus
+                      count={openReviewThreads() ?? props.delivery?.openReviewThreads ?? 0}
+                    />
+                  </Show>
                   <Show
                     when={
                       !props.change &&
@@ -1035,241 +1223,67 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                     )}
                   </Show>
                 </div>
-                <div class="ticket-header-actions">
-                  <Show when={props.canDevelop && sourceReviewURL(props.delivery?.pullRequestUrl)}>
-                    {(href) => (
-                      <a
-                        class="quiet-button"
-                        aria-label="Review source changes"
-                        href={href()}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Review changes
-                      </a>
-                    )}
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      props.change &&
-                      props.canDevelop &&
-                      !["cancelled", "cancelling", "delivered"].includes(props.change.state)
-                    }
-                  >
-                    <button type="button" class="quiet-button" onClick={props.onOpenIDE}>
-                      Open IDE
-                    </button>
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      props.change?.state === "active" &&
-                      props.change.implementationState === "committed" &&
-                      !implementationBusy()
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="quiet-button"
-                      disabled={props.pending}
-                      onClick={props.onRequestChanges}
-                    >
-                      Request changes
-                    </button>
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      !props.current.ticket.convertedToEpicId &&
-                      ["inbox", "backlog"].includes(props.current.ticket.state) &&
-                      !props.change &&
-                      !proposal()
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={props.pending || saving() || hasChanges()}
-                      onClick={props.onWriteRequirements}
-                    >
-                      Write requirements
-                    </button>
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      !props.current.ticket.convertedToEpicId &&
-                      !props.latestRevision?.approvalId &&
-                      !props.change &&
-                      !proposal()
-                    }
-                  >
+                <TicketActionBar
+                  actions={headerActions()}
+                  status={
+                    canInterview() && props.clarificationAction.status
+                      ? props.clarificationAction.label
+                      : undefined
+                  }
+                  menu={
                     <Show
-                      when={!props.clarificationAction.status}
-                      fallback={
-                        <span class="clarification-status" role="status">
-                          {props.clarificationAction.label}
-                        </span>
+                      when={
+                        !props.current.ticket.convertedToEpicId ||
+                        props.current.revisions.length ||
+                        props.current.documentRevisions.length
                       }
                     >
-                      <button
-                        type="button"
-                        class="quiet-button"
-                        disabled={hasChanges()}
-                        onClick={props.onInterview}
-                      >
-                        {props.clarificationAction.label}
-                      </button>
+                      <TicketSecondaryActions
+                        compactActions={compactActions()}
+                        onReloadReview={reviewActions()?.reload}
+                        onOpenIDE={
+                          !props.current.ticket.trashedAt &&
+                          props.change &&
+                          props.canDevelop &&
+                          !["cancelled", "cancelling", "delivered"].includes(props.change.state)
+                            ? props.onOpenIDE
+                            : undefined
+                        }
+                        reviewSourceURL={
+                          props.canDevelop
+                            ? sourceReviewURL(props.delivery?.pullRequestUrl)
+                            : undefined
+                        }
+                        onCodingOptions={
+                          props.canDevelop && canImplement()
+                            ? () =>
+                                props.latestRevision &&
+                                props.onCodingOptions(props.latestRevision.id)
+                            : undefined
+                        }
+                        codingOptionsDisabled={implementationDisabled()}
+                        converted={Boolean(props.current.ticket.convertedToEpicId)}
+                        epics={props.epics}
+                        epicID={props.current.ticket.epicId}
+                        pending={props.pending}
+                        pullRequestUrl={props.delivery?.pullRequestUrl}
+                        failure={props.change?.failure}
+                        cleanupError={props.delivery?.cleanupError}
+                        canStop={implementationBusy()}
+                        onAssignEpic={props.onAssignEpic}
+                        onStop={props.onStopImplementation}
+                        dependencies={props.dependencies}
+                        trashed={Boolean(props.current.ticket.trashedAt)}
+                        onTrash={props.onTrash}
+                        historyAvailable={Boolean(
+                          props.current.revisions.length || props.current.documentRevisions.length,
+                        )}
+                        historyOpen={historyOpen()}
+                        onHistory={() => (historyOpen() ? closeHistory() : setHistoryOpen(true))}
+                      />
                     </Show>
-                  </Show>
-                  <Show when={props.current.ticket.convertedToEpicId}>
-                    <button
-                      type="button"
-                      class="quiet-button"
-                      onClick={() => {
-                        const id = props.current.ticket.convertedToEpicId;
-                        if (id) props.onOpenEpic(id);
-                      }}
-                    >
-                      Open Epic
-                    </button>
-                  </Show>
-                  <Show when={proposal()}>
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={
-                        props.pending ||
-                        saving() ||
-                        proposal()?.base.version !== props.current.ticket.version
-                      }
-                      onClick={() => void confirmProposal()}
-                    >
-                      Confirm answers
-                    </button>
-                  </Show>
-                  <Show when={props.current.ticket.trashedAt}>
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={props.pending || Boolean(props.current.ticket.trashStopPending)}
-                      onClick={props.onRestore}
-                    >
-                      Restore
-                    </button>
-                  </Show>
-                  <Show when={canDeliver()}>
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={props.pending}
-                      onClick={() => props.change && props.onApproveDelivery(props.change.id)}
-                    >
-                      Deliver
-                    </button>
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      props.canDevelop &&
-                      props.delivery?.checksStopId &&
-                      props.onResumeChecks
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="secondary-button"
-                      disabled={props.pending}
-                      onClick={() => props.change && props.onResumeChecks?.(props.change.id)}
-                    >
-                      Resume checks
-                    </button>
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.trashedAt &&
-                      (props.change?.state === "active" ||
-                        (props.change?.state === "starting" &&
-                          ["stopped", "failed"].includes(props.change.runtimeState ?? ""))) &&
-                      !implementationBusy() &&
-                      !props.codingPause &&
-                      ["incomplete", "failed", "stopped"].includes(
-                        props.delivery?.reviewState ?? "",
-                      ) &&
-                      props.onRetryReview
-                    }
-                  >
-                    <button
-                      type="button"
-                      class="secondary-button"
-                      disabled={props.pending}
-                      onClick={() => props.change && props.onRetryReview?.(props.change.id)}
-                    >
-                      Retry review
-                    </button>
-                  </Show>
-                  <Show
-                    when={!props.current.ticket.trashedAt && props.change?.state === "delivered"}
-                  >
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={props.pending || hasChanges()}
-                      onClick={props.onFollowUp}
-                    >
-                      Create follow-up
-                    </button>
-                  </Show>
-                  <Show when={canImplement() && !props.codingOptionsOpen}>
-                    <button
-                      type="button"
-                      class="primary-button"
-                      disabled={implementationDisabled()}
-                      title={implementationDisabledReason()}
-                      onClick={() =>
-                        props.latestRevision && props.onImplement(props.latestRevision.id)
-                      }
-                    >
-                      Implement
-                    </button>
-                  </Show>
-                  <Show
-                    when={
-                      !props.current.ticket.convertedToEpicId ||
-                      props.current.revisions.length ||
-                      props.current.documentRevisions.length
-                    }
-                  >
-                    <TicketSecondaryActions
-                      onCodingOptions={
-                        props.canDevelop && canImplement()
-                          ? () =>
-                              props.latestRevision && props.onCodingOptions(props.latestRevision.id)
-                          : undefined
-                      }
-                      codingOptionsDisabled={implementationDisabled()}
-                      converted={Boolean(props.current.ticket.convertedToEpicId)}
-                      epics={props.epics}
-                      epicID={props.current.ticket.epicId}
-                      pending={props.pending}
-                      pullRequestUrl={props.delivery?.pullRequestUrl}
-                      failure={props.change?.failure}
-                      cleanupError={props.delivery?.cleanupError}
-                      canStop={implementationBusy()}
-                      onAssignEpic={props.onAssignEpic}
-                      onStop={props.onStopImplementation}
-                      dependencies={props.dependencies}
-                      trashed={Boolean(props.current.ticket.trashedAt)}
-                      onTrash={props.onTrash}
-                      historyAvailable={Boolean(
-                        props.current.revisions.length || props.current.documentRevisions.length,
-                      )}
-                      historyOpen={historyOpen()}
-                      onHistory={() => (historyOpen() ? closeHistory() : setHistoryOpen(true))}
-                    />
-                  </Show>
-                </div>
+                  }
+                />
               </div>
               <Show when={props.computeWait && !props.codingPause}>
                 <p class="agent-activity-notice" role="status">
@@ -1277,17 +1291,6 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                   Source editing remains available.
                 </p>
               </Show>
-              <TicketChecks
-                details={props.delivery}
-                building={implementationBusy() && !props.computeWait && !props.codingPause}
-                preparing={implementationPreparing()}
-                unsubmitted={
-                  props.change?.state === "active" &&
-                  ((props.change.implementationState !== undefined &&
-                    props.change.implementationState !== "committed") ||
-                    ["failed", "stopped", "uncertain"].includes(props.change.buildTurnState ?? ""))
-                }
-              />
               <Show when={props.codingPause}>
                 <div class="agent-activity-notice coding-pause-notice" role="status">
                   <span>
@@ -1296,17 +1299,6 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                       : "Coding paused at its allowance."}{" "}
                     Existing code is retained.
                   </span>
-                  <button
-                    type="button"
-                    class="quiet-button"
-                    disabled={
-                      props.pending ||
-                      ["dispatching", "running"].includes(props.change?.buildTurnState ?? "")
-                    }
-                    onClick={() => props.onResumeCoding?.()}
-                  >
-                    Resume implementation
-                  </button>
                 </div>
               </Show>
               <Show when={props.current.origin}>
@@ -1352,110 +1344,102 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                   </button>
                 </div>
               </Show>
-              <RichTextSurface
-                value={draftTitle()}
-                label="Ticket title"
-                field="title"
-                editable={canEditSpecification()}
-                plain={true}
-                placeholder="Untitled ticket"
-                class="ticket-inline-title"
-                {...richTextHandlers({ field: "title", update: setDraftTitle })}
-              />
-              <details
-                class="ticket-request-details"
-                ref={requestDetailsElement}
-                open={
-                  !separateSummary() ||
-                  Boolean(requestDetailsElement?.contains(document.activeElement))
-                }
-              >
-                <summary hidden={!separateSummary()}>Request details</summary>
-                {/* Keep the editor mounted and never fold focused text when a proposal arrives. */}
-                <RichTextSurface
-                  value={draftDescription()}
-                  label="Ticket description"
-                  field="description"
-                  editable={canEditSpecification()}
-                  placeholder="Add planning context"
-                  class="ticket-inline-description markdown-body"
-                  {...richTextHandlers({
-                    field: "description",
-                    slash: true,
-                    update: setDraftDescription,
-                  })}
-                />
-              </details>
-              <Show when={separateSummary()}>
-                <RichTextSurface
-                  value={draftSummary()}
-                  label="Specification summary"
-                  field="summary"
-                  editable={canEditSpecification()}
-                  placeholder="Describe the intended product change. Type / for blocks."
-                  class="ticket-inline-description ticket-specification-summary markdown-body"
-                  {...richTextHandlers({ field: "summary", slash: true, update: setDraftSummary })}
-                />
-              </Show>
             </header>
 
-            <TicketDependencies {...props.dependencies} />
-
-            <Show
-              when={props.latestRevision || proposal() || props.current.ticket.state === "ready"}
+            <Show when={props.change && props.userID}>
+              <ReviewPanel
+                changeID={props.change!.id}
+                userID={props.userID!}
+                canDevelop={props.canDevelop}
+                readOnly={["delivering", "delivered", "cancelled"].includes(props.change!.state)}
+                active={props.active}
+                onThreadCount={setOpenReviewThreads}
+                onActions={setReviewActions}
+                onOpenPreview={props.onOpenPreview}
+              />
+            </Show>
+            <section
+              class={`ticket-requirements${props.change ? " is-review-context" : ""}`}
+              aria-label="Ticket requirements"
             >
-              <section class="spec-section revision-section" aria-label="Specification">
-                <div
-                  class={`specification-document ${canEditSpecification() ? "editable" : "locked"}`}
+              <Show when={props.change}>
+                <h3 class="ticket-requirements-heading">Requirements</h3>
+              </Show>
+              <div class="ticket-requirements-intro">
+                <details
+                  class="ticket-request-details"
+                  ref={requestDetailsElement}
+                  open={
+                    !separateSummary() ||
+                    Boolean(requestDetailsElement?.contains(document.activeElement))
+                  }
                 >
-                  <div class="specification-block">
-                    <h4>Acceptance criteria</h4>
-                    <div class="criteria-list specification-block-list">
-                      <For each={draftAcceptance()}>
-                        {(criterion, index) => (
-                          <div class="specification-list-item acceptance-item">
-                            <span class="requirement-marker" aria-hidden="true">
-                              ·
-                            </span>
-                            <RichTextSurface
-                              value={criterion.value()}
-                              label={`Acceptance criterion ${index() + 1}`}
-                              field="acceptance"
-                              editable={canEditSpecification()}
-                              placeholder="Add a verifiable outcome"
-                              class="specification-rich-text markdown-body"
-                              onElement={(element) => acceptanceElements.set(index(), element)}
-                              {...richTextHandlers({
-                                field: "acceptance",
-                                slash: true,
-                                update: criterion.setValue,
-                              })}
-                            />
-                          </div>
-                        )}
-                      </For>
-                    </div>
-                  </div>
-                  <Show when={draftNonGoals().some((block) => block.value().trim()) || editing()}>
+                  <summary hidden={!separateSummary()}>Request details</summary>
+                  {/* Keep the editor mounted and never fold focused text when a proposal arrives. */}
+                  <RichTextSurface
+                    attachmentScopeKey={`ticket:${props.current.ticket.id}:description`}
+                    value={draftDescription()}
+                    label="Ticket description"
+                    field="description"
+                    editable={canEditSpecification()}
+                    placeholder="Add planning context"
+                    class="ticket-inline-description markdown-body"
+                    {...richTextHandlers({
+                      field: "description",
+                      slash: true,
+                      update: setDraftDescription,
+                    })}
+                  />
+                </details>
+                <Show when={separateSummary()}>
+                  <RichTextSurface
+                    attachmentScopeKey={`ticket:${props.current.ticket.id}:summary`}
+                    value={draftSummary()}
+                    label="Specification summary"
+                    field="summary"
+                    editable={canEditSpecification()}
+                    placeholder="Describe the intended product change. Type / for blocks."
+                    class="ticket-inline-description ticket-specification-summary markdown-body"
+                    {...richTextHandlers({
+                      field: "summary",
+                      slash: true,
+                      update: setDraftSummary,
+                    })}
+                  />
+                </Show>
+              </div>
+
+              <TicketDependencies {...props.dependencies} />
+
+              <Show
+                when={props.latestRevision || proposal() || props.current.ticket.state === "ready"}
+              >
+                <section class="spec-section revision-section" aria-label="Specification">
+                  <div
+                    class={`specification-document ${canEditSpecification() ? "editable" : "locked"}`}
+                  >
                     <div class="specification-block">
-                      <h4>Out of scope</h4>
-                      <div class="plain-list specification-block-list">
-                        <For each={draftNonGoals()}>
-                          {(nonGoal, index) => (
-                            <div class="specification-list-item non-goal-item">
-                              <span aria-hidden="true">·</span>
+                      <h4>Acceptance criteria</h4>
+                      <div class="criteria-list specification-block-list">
+                        <For each={draftAcceptance()}>
+                          {(criterion, index) => (
+                            <div class="specification-list-item acceptance-item">
+                              <span class="requirement-marker" aria-hidden="true">
+                                ·
+                              </span>
                               <RichTextSurface
-                                value={nonGoal.value()}
-                                label={`Non-goal ${index() + 1}`}
-                                field="non-goal"
+                                attachmentScopeKey={`ticket:${props.current.ticket.id}:acceptance:${index()}`}
+                                value={criterion.value()}
+                                label={`Acceptance criterion ${index() + 1}`}
+                                field="acceptance"
                                 editable={canEditSpecification()}
-                                placeholder="Add an explicit exclusion"
+                                placeholder="Add a verifiable outcome"
                                 class="specification-rich-text markdown-body"
-                                onElement={(element) => nonGoalElements.set(index(), element)}
+                                onElement={(element) => acceptanceElements.set(index(), element)}
                                 {...richTextHandlers({
-                                  field: "non-goal",
+                                  field: "acceptance",
                                   slash: true,
-                                  update: nonGoal.setValue,
+                                  update: criterion.setValue,
                                 })}
                               />
                             </div>
@@ -1463,22 +1447,55 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                         </For>
                       </div>
                     </div>
-                  </Show>
-                </div>
-              </section>
-            </Show>
+                    <Show when={draftNonGoals().some((block) => block.value().trim()) || editing()}>
+                      <div class="specification-block">
+                        <h4>Out of scope</h4>
+                        <div class="plain-list specification-block-list">
+                          <For each={draftNonGoals()}>
+                            {(nonGoal, index) => (
+                              <div class="specification-list-item non-goal-item">
+                                <span aria-hidden="true">·</span>
+                                <RichTextSurface
+                                  attachmentScopeKey={`ticket:${props.current.ticket.id}:non-goal:${index()}`}
+                                  value={nonGoal.value()}
+                                  label={`Non-goal ${index() + 1}`}
+                                  field="non-goal"
+                                  editable={canEditSpecification()}
+                                  placeholder="Add an explicit exclusion"
+                                  class="specification-rich-text markdown-body"
+                                  onElement={(element) => nonGoalElements.set(index(), element)}
+                                  {...richTextHandlers({
+                                    field: "non-goal",
+                                    slash: true,
+                                    update: nonGoal.setValue,
+                                  })}
+                                />
+                              </div>
+                            )}
+                          </For>
+                        </div>
+                      </div>
+                    </Show>
+                  </div>
+                </section>
+              </Show>
+            </section>
 
-            <Show when={saving() || (editing() && hasChanges())}>
-              <div class="ticket-editor-actions">
-                <span role="status">
-                  {saving()
-                    ? "Saving…"
+            <div class="ticket-save-status">
+              <SaveFeedback
+                state={
+                  saving()
+                    ? "saving"
                     : editorError()
-                      ? "Draft retained"
-                      : "Changes will save automatically"}
-                </span>
-              </div>
-            </Show>
+                      ? "error"
+                      : editing() && hasChanges()
+                        ? "dirty"
+                        : savedDocument()
+                          ? "saved"
+                          : "idle"
+                }
+              />
+            </div>
             <Show when={editorError()}>
               <p class="inline-error" role="alert">
                 {editorError()}

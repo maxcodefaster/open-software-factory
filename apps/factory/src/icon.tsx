@@ -3,6 +3,11 @@ import { Match, Switch } from "solid-js";
 export type IconName =
   | "agent"
   | "agent-panel"
+  | "attachment"
+  | "file"
+  | "folder"
+  | "plus"
+  | "info"
   | "chevron"
   | "close"
   | "external"
@@ -11,6 +16,7 @@ export type IconName =
   | "link"
   | "trash"
   | "check"
+  | "comment"
   | "home"
   | "ide"
   | "inbox"
@@ -18,6 +24,10 @@ export type IconName =
   | "minimize"
   | "more"
   | "play"
+  | "pause"
+  | "skip-back"
+  | "skip-forward"
+  | "fullscreen"
   | "send"
   | "preview"
   | "settings"
@@ -29,6 +39,22 @@ export function Icon(props: { name: IconName }) {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <Switch>
+        <Match when={props.name === "folder"}>
+          <path d="M3 7V5a1 1 0 0 1 1-1h6l2 3h8a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z" />
+        </Match>
+        <Match when={props.name === "plus"}>
+          <path d="M12 5v14M5 12h14" />
+        </Match>
+        <Match when={props.name === "info"}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 11v6m0-10h.01" />
+        </Match>
+        <Match when={props.name === "attachment"}>
+          <path d="m8 12 7-7a3.5 3.5 0 0 1 5 5L10 20a5 5 0 0 1-7-7L13 3m-5 9 7-7m-9 9a2 2 0 0 0 3 3l9-9" />
+        </Match>
+        <Match when={props.name === "file"}>
+          <path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8l-5-5Zm0 0v5h5M8 13h8M8 17h5" />
+        </Match>
         <Match when={props.name === "epic"}>
           <path d="m12 3-9 5 9 5 9-5-9-5ZM3 12l9 5 9-5M3 16l9 5 9-5" />
         </Match>
@@ -44,6 +70,10 @@ export function Icon(props: { name: IconName }) {
         </Match>
         <Match when={props.name === "check"}>
           <path d="m5 12 4 4L19 6" />
+        </Match>
+        <Match when={props.name === "comment"}>
+          <path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2Z" />
+          <path d="M7 9h10M7 13h6" />
         </Match>
         <Match when={props.name === "agent"}>
           <path d="M12 3.5 14 10l6.5 2-6.5 2-2 6.5-2-6.5-6.5-2 6.5-2 2-6.5Z" />
@@ -85,6 +115,18 @@ export function Icon(props: { name: IconName }) {
         </Match>
         <Match when={props.name === "play"}>
           <path d="m9 7 8 5-8 5V7Z" />
+        </Match>
+        <Match when={props.name === "pause"}>
+          <path d="M9 6v12M15 6v12" />
+        </Match>
+        <Match when={props.name === "skip-back"}>
+          <path d="M5 6v12m13-12-9 6 9 6V6Z" />
+        </Match>
+        <Match when={props.name === "skip-forward"}>
+          <path d="M19 6v12M6 6l9 6-9 6V6Z" />
+        </Match>
+        <Match when={props.name === "fullscreen"}>
+          <path d="M8 4H4v4m12-4h4v4M4 16v4h4m12-4v4h-4" />
         </Match>
         <Match when={props.name === "send"}>
           <path d="M12 19V5m-6 6 6-6 6 6" />

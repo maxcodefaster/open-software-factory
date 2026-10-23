@@ -5,6 +5,7 @@ RUN go mod download
 COPY services/runtime-connector ./
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-browser-worker ./cmd/factory-browser-worker
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-browser-app-proxy ./cmd/factory-browser-app-proxy
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-recording-encoder ./cmd/factory-recording-encoder
 
 FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS mcp
 WORKDIR /opt/factory/browser-mcp
@@ -22,8 +23,10 @@ RUN chromium="$(find /ms-playwright -type f -path '/ms-playwright/chromium-*/chr
   && test -n "$chromium" && cp -a "$(dirname "$chromium")" /chromium
 
 FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+# Playwright's minimal encoder cannot decode Puppeteer's PNG frames. Use the
+# exact Debian FFmpeg package, without changing Chromium or the MCP upstream.
 RUN apt-get update && apt-get install --yes --no-install-recommends \
-    ca-certificates fonts-liberation fonts-noto-color-emoji \
+    ca-certificates fonts-liberation fonts-noto-color-emoji ffmpeg=7:5.1.9-0+deb12u1 \
     libasound2 libatk-bridge2.0-0 libatk1.0-0 libatspi2.0-0 libcairo2 libcups2 \
     libdbus-1-3 libdrm2 libgbm1 libglib2.0-0 libnspr4 libnss3 libpango-1.0-0 \
     libx11-6 libxcb1 libxcomposite1 libxdamage1 libxext6 libxfixes3 libxkbcommon0 libxrandr2 \
@@ -32,7 +35,9 @@ COPY --from=browsers /chromium /opt/factory/chromium-bin
 COPY --from=mcp /opt/factory/browser-mcp /opt/factory/browser-mcp
 COPY --from=worker /factory-browser-worker /usr/local/bin/factory-browser-worker
 COPY --from=worker /factory-browser-app-proxy /usr/local/bin/factory-browser-app-proxy
+COPY --from=worker /factory-recording-encoder /usr/local/bin/factory-recording-encoder
 RUN ln -s /opt/factory/chromium-bin/chrome /opt/factory/chromium \
+  && ln -s /usr/bin/ffmpeg /usr/local/bin/ffmpeg \
   && node --version \
   && /opt/factory/chromium --version \
   && test "$(/opt/factory/chromium --version | awk '{print $NF}' | cut -d . -f 1)" -ge 149
