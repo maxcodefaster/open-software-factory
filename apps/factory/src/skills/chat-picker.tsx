@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import {
   type SkillRole,
   skillInvocationViewInput,
@@ -39,15 +39,21 @@ export function ChatSkillPicker(props: {
       "max-height": `${Math.max(96, rectangle.top - 16)}px`,
     });
   };
-  createEffect(
-    () => [props.projectID, props.workType, props.changeID, props.scope, props.disabled] as const,
-    () => {
-      request?.abort();
-      popup?.hidePopover();
-      setView(undefined);
-      setError("");
-    },
+  const contextKey = createMemo(() =>
+    JSON.stringify([
+      props.projectID,
+      props.workType,
+      props.changeID,
+      props.scope,
+      Boolean(props.disabled),
+    ]),
   );
+  createEffect(contextKey, () => {
+    request?.abort();
+    popup?.hidePopover();
+    setView(undefined);
+    setError("");
+  });
   createEffect(open, (visible) => {
     if (!visible) return;
     place();

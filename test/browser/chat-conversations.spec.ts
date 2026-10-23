@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
@@ -9,6 +10,105 @@ import { serveChatAssets } from "../support/chat-assets";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
+test("planning Skill selection survives an unchanged conversation refresh without sending", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await serveChatAssets(page);
+  await signIn(page);
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  const { session } = await (await page.request.get("/api/session")).json();
+  const projectID = crypto.randomUUID();
+  const slug = `skill-refresh-${projectID}`;
+  const database = createDatabase(1);
+  const skillsReady = Promise.withResolvers<void>();
+  let conversationReads = 0;
+  let commissioned = 0;
+  const conversation = conversationViewSchema.parse({
+    id: crypto.randomUUID(),
+    projectId: projectID,
+    mode: "plan",
+    version: 1,
+    entries: [],
+    isActiveCoding: false,
+  });
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(?:conversation\/message|agent\/(?:start|prompt)|runtime-attempts\/[^/]+\/start)$/.test(
+        new URL(request.url()).pathname,
+      )
+    )
+      commissioned++;
+  });
+  for (const source of ["source-workspace", "developer-ide"])
+    await page.route(`**/api/projects/${projectID}/${source}/ensure`, (route) =>
+      route.fulfill({ status: 503, json: { error: "Owned Skill proof starts no runtime" } }),
+    );
+  await page.route(`**/api/projects/${projectID}/conversation{,?*}`, (route) => {
+    conversationReads++;
+    return route.fulfill({ json: conversation });
+  });
+  await page.route(
+    `**/api/projects/${projectID}/skills/invocations?role=planning`,
+    async (route) => {
+      await skillsReady.promise;
+      await route.fulfill({
+        json: {
+          skills: [
+            {
+              id: crypto.randomUUID(),
+              key: "review-reference",
+              name: "Review the reference",
+              description: "Inspect the supplied reference.",
+            },
+          ],
+          conflicts: [],
+        },
+      });
+    },
+  );
+  try {
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${slug},'Skill refresh proof','https://example.invalid/owned-skill-refresh.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+    await openProjectMenu(page);
+    await page.getByRole("button").filter({ hasText: slug }).click();
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    const draft = page.getByRole("textbox", { name: "Message conversation", exact: true });
+    const suggestions = page.getByRole("listbox", { name: "Available Skills", exact: true });
+    await expect(draft).toBeEnabled();
+    await draft.fill("/rev");
+    await expect(suggestions).toBeVisible();
+    await expect(suggestions).toContainText("Loading available Skills…");
+    const reads = conversationReads;
+    await expect.poll(() => conversationReads).toBeGreaterThanOrEqual(reads + 2);
+    await expect(draft).toBeFocused({ timeout: 2_000 });
+    await expect(suggestions).toBeVisible({ timeout: 2_000 });
+    skillsReady.resolve();
+    await expect(suggestions.getByRole("option", { name: /Review the reference/ })).toBeVisible();
+    await mkdir(".factory/test-results/skill-refresh", { recursive: true });
+    await page.screenshot({
+      path: ".factory/test-results/skill-refresh/planning-options-wide.png",
+    });
+    await draft.press("Enter");
+    await expect(draft).toHaveValue("/review-reference ");
+    await expect(suggestions).not.toBeVisible();
+    expect(commissioned).toBe(0);
+    await page.screenshot({ path: ".factory/test-results/skill-refresh/planning-wide.png" });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await draft.fill("/rev");
+    await expect(suggestions.getByRole("option", { name: /Review the reference/ })).toBeVisible();
+    await page.screenshot({ path: ".factory/test-results/skill-refresh/planning-narrow.png" });
+    await draft.press("Escape");
+    await expect(draft).toHaveValue("/rev");
+    expect(commissioned).toBe(0);
+  } finally {
+    skillsReady.resolve();
+    await deleteFactoryProject(projectID, database);
+    await database.client.end();
+  }
+});
+
 test("personal conversation history keeps drafts scoped through selection and reload without starting work", async ({
   page,
 }) => {
