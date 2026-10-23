@@ -170,12 +170,20 @@ export function createVisualReviewController(
               "This discussion exceeds the context read limit. Ask the human to summarize it in a new Thread.",
             );
           result = { content: [{ type: "text", text }] };
-          if (feedback.mediaID && mediaBytes)
-            result.content.push({
-              type: "image",
-              mimeType: "image/jpeg",
-              data: Buffer.from(await mediaBytes(feedback.mediaID)).toString("base64"),
-            });
+          if (feedback.mediaID && mediaBytes) {
+            try {
+              result.content.push({
+                type: "image",
+                mimeType: "image/jpeg",
+                data: Buffer.from(await mediaBytes(feedback.mediaID)).toString("base64"),
+              });
+            } catch {
+              result.content.push({
+                type: "text",
+                text: "Saved feedback image is unavailable. The complete discussion and saved source context are included; inspect the current App before claiming a fix.",
+              });
+            }
+          }
         }
       });
       if (!allowed || !result)

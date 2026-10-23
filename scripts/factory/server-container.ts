@@ -167,6 +167,7 @@ export async function prepareFactoryServerContainer(
     await writeFile(kubeconfig, configuration.stdout, { mode: 0o600 });
     const environment = {
       ...input.environment,
+      FACTORY_STATE_DIRECTORY: directory,
       NODE_ENV: input.environment["NODE_ENV"] ?? "development",
       KUBECONFIG: "/run/factory/kubeconfig",
       FACTORY_KUBERNETES_CONTEXT: input.environment["FACTORY_KUBERNETES_CONTEXT"] ?? "",

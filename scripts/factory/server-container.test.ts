@@ -148,6 +148,8 @@ test("server launch persists identity and keeps secrets out of arguments and pub
     expect(environment).toContain("FACTORY_MODEL_API_KEY=private-provider-key");
     expect(environment).toContain("KUBECONFIG=/run/factory/kubeconfig");
     expect(environment).toContain("NODE_ENV=development");
+    expect(environment).toContain(`FACTORY_STATE_DIRECTORY=${directory}\n`);
+    expect(prepared.command).toContain(`type=bind,src=${directory},dst=${directory}`);
     expect(environment).not.toContain("HOME=");
     expect((await stat(resolve(privateDirectory, "environment"))).mode & 0o777).toBe(0o600);
     expect((await stat(resolve(privateDirectory, "kubeconfig"))).mode & 0o777).toBe(0o600);

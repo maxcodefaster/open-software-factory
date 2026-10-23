@@ -626,3 +626,98 @@ test("the correction agent may request rechecking but cannot resolve or silently
     await f.dispose();
   }
 });
+
+test("revision tools retain the complete discussion when its supplementary saved image is missing", async () => {
+  const f = await candidateReviewFixture();
+  const directory = await mkdtemp(join(tmpdir(), "factory-revision-media-"));
+  const media = createReviewMedia(f.database, directory);
+  const controller = createVisualReviewController(f.database, media.bytes);
+  const jpeg = new Uint8Array(32);
+  jpeg.set([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1]);
+  try {
+    const frame = await media.still(
+      f.changeID,
+      f.userID,
+      { source: "preview", attemptId: f.attemptID, representation: "dom-reconstruction" },
+      jpeg,
+    );
+    const thread = await controller.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "thread",
+      body: "Clear the stale validation error after a successful rename.",
+      annotation: {
+        source: "preview",
+        attemptId: f.attemptID,
+        mediaId: frame.id,
+        page: "/tasks",
+        element: "alert Enter a task title.",
+      },
+    });
+    await controller.update(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      feedbackId: thread.feedbackId,
+      expectedVersion: 1,
+      action: "reply",
+      body: "Also prevent an older failure from replacing a newer success.",
+    });
+    const correction = await controller.dispatch(
+      f.changeID,
+      f.userID,
+      { commandId: crypto.randomUUID(), feedback: [{ id: thread.feedbackId!, version: 2 }] },
+      async (sql, text, commandId) =>
+        (
+          await createChangeAdmission(f.database, buildModelID).admitIn(sql, f.changeID, f.userID, {
+            kind: "change-prompt",
+            text,
+            commandId,
+          })
+        ).turn.id,
+    );
+    const turn = await f.turns.claimPending(correction.turnId!);
+    if (!turn?.ownerToken) throw new Error("Missing correction owner");
+    await f.writers.prepareAgent(f.changeID, turn.id);
+    await f.database
+      .client`UPDATE factory.change_agent_turn_intent SET runtime_attempt_id=${f.attemptID} WHERE turn_id=${turn.id}`;
+    await f.database
+      .client`UPDATE factory.change_agent_session SET active_turn_id=${turn.id},state='starting' WHERE change_id=${f.changeID}`;
+    await f.turns.beginDispatch(turn.id, turn.ownerToken);
+    const call = { name: "feedback_read", arguments: { feedbackId: thread.feedbackId } };
+    const complete = await controller.call(turn.id, turn.ownerToken, call);
+    expect(complete.isError).not.toBe(true);
+    expect(complete.content[1]).toEqual({
+      type: "image",
+      mimeType: "image/jpeg",
+      data: Buffer.from(jpeg).toString("base64"),
+    });
+    await rm(join(directory, "review-media", frame.id));
+    const withoutImage = await controller.call(turn.id, turn.ownerToken, call);
+    expect(withoutImage.isError).not.toBe(true);
+    expect(withoutImage.content[0]).toEqual(complete.content[0]);
+    expect(withoutImage.content).toContainEqual({
+      type: "text",
+      text: "Saved feedback image is unavailable. The complete discussion and saved source context are included; inspect the current App before claiming a fix.",
+    });
+    const discussion = withoutImage.content[0];
+    if (discussion?.type !== "text") throw new Error("Missing complete discussion");
+    expect(JSON.parse(discussion.text)).toMatchObject({
+      id: thread.feedbackId,
+      messages: [
+        "Clear the stale validation error after a successful rename.",
+        "Also prevent an older failure from replacing a newer success.",
+      ],
+    });
+    expect((await controller.get(f.changeID, f.userID)).feedback[0]).toMatchObject({
+      state: "open",
+      version: 2,
+    });
+    await expect(
+      controller.call(turn.id, turn.ownerToken, {
+        name: "feedback_read",
+        arguments: { feedbackId: crypto.randomUUID() },
+      }),
+    ).rejects.toThrow("not in this revision batch");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await f.dispose();
+  }
+});

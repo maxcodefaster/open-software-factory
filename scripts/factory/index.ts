@@ -839,6 +839,7 @@ async function startServer(
   await chmod(serverLogFile, 0o600);
   const environment = {
     ...process.env,
+    FACTORY_STATE_DIRECTORY: stateDirectory,
     FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
     ...(process.env["FACTORY_OPENBAO_URL"]
       ? {}
