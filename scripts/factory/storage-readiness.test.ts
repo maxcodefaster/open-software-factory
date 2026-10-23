@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -269,6 +269,57 @@ test("a bound volume and zero exit code do not bypass a still-Running Pod", () =
       "readiness was not confirmed",
     );
     expect(cluster.calls.some((call) => call.args[0] === "delete")).toBe(false);
+  }));
+
+test("default cleanup allows serial Pod, claim and Namespace deletion to settle", () =>
+  fixture(async (directory, cluster) => {
+    let now = Date.now();
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const command: typeof runCommand = async (argv, input, limits) => {
+      if (limits?.timeoutMS === 1)
+        throw new Error("Infrastructure command timed out; outcome is unconfirmed");
+      const result = await cluster.run(argv, input, limits);
+      if (argv.includes("delete")) now += 45_000;
+      return result;
+    };
+    try {
+      const result = await requireWritableRuntimeStorage(
+        { stateDirectory: directory, image, intervalMS: 1 },
+        command,
+      );
+      const diagnostic = JSON.parse(await readFile(result.diagnosticFile, "utf8"));
+      expect(diagnostic).toMatchObject({ verified: true, cleanupConfirmed: true });
+      expect(cluster.resources.size).toBe(0);
+    } finally {
+      clock.mockRestore();
+    }
+  }));
+
+test("an expired Namespace cleanup deadline is not reported as unavailable observation", () =>
+  fixture(async (directory, cluster) => {
+    let now = Date.now();
+    let expiredCalls = 0;
+    const clock = spyOn(Date, "now").mockImplementation(() => now);
+    const command: typeof runCommand = async (argv, input, limits) => {
+      if (limits?.timeoutMS === 1) {
+        expiredCalls++;
+        throw new Error("Infrastructure command timed out; outcome is unconfirmed");
+      }
+      const result = await cluster.run(argv, input, limits);
+      const path = argv[argv.indexOf("--raw") + 1];
+      if (argv.includes("delete") && path?.match(/^\/api\/v1\/namespaces\/[^/]+$/)) now += 101;
+      return result;
+    };
+    try {
+      await expect(requireWritableRuntimeStorage(options(directory), command)).rejects.toThrow(
+        "Namespace cleanup is not confirmed",
+      );
+      expect(expiredCalls).toBe(0);
+      const intent = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
+      expect(intent.cleanupIntended).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
   }));
 
 test("a backing volume bound to another claim is never patched or deleted", () =>

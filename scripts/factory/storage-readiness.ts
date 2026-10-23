@@ -353,7 +353,8 @@ async function storageCheck(
     throw new Error("Storage-check cleanup is not confirmed");
   }
   async function cleanup() {
-    deadline = Date.now() + (input.cleanupTimeoutMS ?? 120_000);
+    // Pod termination, volume reclamation and Namespace finalization converge serially.
+    deadline = Date.now() + (input.cleanupTimeoutMS ?? 180_000);
     const currentNamespace = await get("Namespace", namespace, false);
     if (currentNamespace) {
       requireOwner(currentNamespace, intent.namespaceUID);
@@ -404,15 +405,18 @@ async function storageCheck(
       }
     }
     if (intent.volume) {
+      let volumePresent = true;
       while (Date.now() < deadline) {
         const volume = await get("PersistentVolume", intent.volume.name, false);
-        if (!volume) break;
+        if (!volume) {
+          volumePresent = false;
+          break;
+        }
         if (volume.metadata.uid !== intent.volume.uid)
           throw new Error("Storage-check volume identity changed during cleanup");
         await Bun.sleep(input.intervalMS ?? 1_000);
       }
-      if (await get("PersistentVolume", intent.volume.name, false))
-        throw new Error("Storage-check volume cleanup is not confirmed");
+      if (volumePresent) throw new Error("Storage-check volume cleanup is not confirmed");
     }
     if (currentNamespace) {
       const listing = z
@@ -446,14 +450,17 @@ async function storageCheck(
           preconditions: { uid: intent.namespaceUID },
         });
       }
+      let namespacePresent = true;
       while (Date.now() < deadline) {
         const remaining = await get("Namespace", namespace, false);
-        if (!remaining) break;
+        if (!remaining) {
+          namespacePresent = false;
+          break;
+        }
         requireOwner(remaining, intent.namespaceUID);
         await Bun.sleep(input.intervalMS ?? 1_000);
       }
-      if (await get("Namespace", namespace, false))
-        throw new Error("Storage-check Namespace cleanup is not confirmed");
+      if (namespacePresent) throw new Error("Storage-check Namespace cleanup is not confirmed");
     }
     await rm(intentFile);
   }
