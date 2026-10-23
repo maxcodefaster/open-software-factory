@@ -24,8 +24,9 @@ function canonical(value: unknown): string {
 export const monitoringDigest = (value: unknown) =>
   createHash("sha256").update(canonical(value)).digest("hex");
 
-// This removes named secret/user/request fields, not every possible secret in
-// free text. Providers must redact data before sending it to a shared Project.
+// This removes named secret/user fields and structured HTTP requests, not every
+// possible secret in free text. A plain-text request is product feedback.
+// Providers must redact data before sending it to a shared Project.
 const privateField =
   /(?:password|secret|token|authorization|credential|cookie|api.?key|private.?key)|^(?:headers|request|user|users|email|ip_address|session|env|callback|projectId|userId|connectionId|policyId)$/i;
 const transientField =
@@ -50,7 +51,12 @@ function compact(value: unknown, depth = 0): unknown {
   if (value && typeof value === "object")
     return Object.fromEntries(
       Object.entries(value)
-        .filter(([key]) => !privateField.test(key) && !transientField.test(key))
+        .filter(
+          ([key, item]) =>
+            (!privateField.test(key) ||
+              (key.toLowerCase() === "request" && typeof item === "string")) &&
+            !transientField.test(key),
+        )
         .slice(0, 50)
         .map(([key, item]) => [key.slice(0, 100), compact(item, depth + 1)]),
     );

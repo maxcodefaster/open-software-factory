@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
 import { mcpSourceAlias } from "../../apps/factory/src/mcp/sources";
+import { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
 import { monitoringFixture } from "../fixtures/monitoring";
 
 for (const { consult, explicit } of [
@@ -109,3 +109,64 @@ for (const { consult, explicit } of [
       await f.dispose();
     }
   });
+
+test("Input intake retains plain-text requests and does not coalesce different feedback", async () => {
+  const f = await monitoringFixture();
+  try {
+    const hookId = crypto.randomUUID();
+    const saved = await f.controller.save(f.projectId, f.userId, {
+      id: hookId,
+      commandId: crypto.randomUUID(),
+      expectedVersion: 0,
+      name: "Product feedback",
+      enabled: true,
+      delegation: "prepare-ticket",
+      connectionIds: [],
+    });
+    if (!saved.url) throw new Error("Owned Input URL missing");
+    const send = (request: string, timestamp: string) =>
+      f.routes.intake(
+        new Request(saved.url!, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: "Task feedback",
+            timestamp,
+            context: { request, token: "private-token-sentinel" },
+            request: {
+              headers: { authorization: "private-auth-sentinel" },
+              body: "private-http-body-sentinel",
+            },
+          }),
+        }),
+      );
+    const first = "Show the remaining count above the list, independent of its filter.";
+    const second = "Show the completed count below the list.";
+    expect(await (await send(first, "first"))?.json()).toMatchObject({
+      accepted: 1,
+      duplicates: 0,
+    });
+    expect(await (await send(second, "second"))?.json()).toMatchObject({
+      accepted: 1,
+      duplicates: 0,
+    });
+    expect(await (await send(first, "third"))?.json()).toMatchObject({
+      accepted: 0,
+      duplicates: 1,
+    });
+    const rows = await f.database.client<
+      { context: string; occurrences: number; state: string }[]
+    >`SELECT context,occurrences::integer,state FROM factory.monitoring_incident
+      WHERE hook_id=${hookId} ORDER BY received_at,id`;
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => JSON.parse(row.context).context.request)).toEqual([first, second]);
+    expect(rows.map((row) => row.occurrences)).toEqual([2, 1]);
+    expect(rows.every((row) => row.state === "queued")).toBe(true);
+    expect(JSON.stringify(rows)).not.toContain("private-");
+    expect(await f.database.client`SELECT id FROM factory.ticket`).toHaveLength(0);
+    expect(await f.database.client`SELECT id FROM factory.change`).toHaveLength(0);
+    expect(await f.database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
+  } finally {
+    await f.dispose();
+  }
+});

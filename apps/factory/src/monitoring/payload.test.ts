@@ -126,3 +126,42 @@ test("generic requests retain message bodies and distinguish content while stabl
     monitoringSignals({ title: "Changed description", id: "owned-42" })[0]!.fingerprint,
   );
 });
+
+test("plain-text Input requests survive redaction without retaining HTTP request metadata", () => {
+  const request =
+    "Show the remaining-task count above the list, independent of its filter. " +
+    "Update it after adding, completing, reopening or deleting a task.";
+  const first = monitoringSignals({
+    title: "Task feedback",
+    context: {
+      request,
+      token: "private-token-sentinel",
+      user: { email: "private-user-sentinel" },
+    },
+    request: {
+      headers: { authorization: "private-auth-sentinel" },
+      body: "private-http-body-sentinel",
+    },
+  })[0]!;
+  expect(JSON.parse(first.context).context.request).toBe(request);
+  expect(first.context).not.toContain("private-");
+  expect(JSON.parse(first.context).payload).not.toHaveProperty("request");
+  expect(
+    monitoringSignals({
+      title: "Task feedback",
+      context: { request: "Show the completed-task count below the list." },
+    })[0]!.fingerprint,
+  ).not.toBe(first.fingerprint);
+});
+
+test("plain-text request fields keep the existing text and URL bounds", () => {
+  const first = monitoringSignals({
+    title: "Request context",
+    request: "x".repeat(3_000),
+    context: { Request: "https://source.example/feedback?token=private#private" },
+  })[0]!;
+  const context = JSON.parse(first.context);
+  expect(context.payload.request).toBe("x".repeat(2_000));
+  expect(context.context.Request).toBe("https://source.example/feedback");
+  expect(first.context).not.toContain("private");
+});
