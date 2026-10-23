@@ -355,7 +355,10 @@ The native launcher still owns startup and Stop. It records the exact image/cont
 before creation, keeps credentials out of command arguments and reuses the selected image and
 runtime host on later restarts. It mounts the configured OpenBao token and CA files read-only,
 including a local CA stored outside installation state. Neither a static neighbour entry nor a
-network repair loop is needed. Rebuild the image and explicitly select it to adopt source or UI changes. Setting
+network repair loop is needed. For the Linux server, the launcher also binds the existing local
+Forgejo port on that exact private node address so Sandbox Git operations can reach it. The
+loopback binding and browser-facing Forgejo identity stay unchanged; PostgreSQL and Zero remain
+loopback-only. Rebuild the image and explicitly select it to adopt source or UI changes. Setting
 `FACTORY_SERVER_IMAGE=native` explicitly returns to a host process.
 
 Compose supplies only the source-development data services. It is not another Factory installation

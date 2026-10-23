@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import {
+  factoryServerComposeOverlay,
   prepareFactoryServerContainer,
   requireFactoryServerImage,
   requireFactoryServerRuntimeHost,
@@ -15,6 +16,19 @@ const containerID = "b".repeat(64);
 const startupID = "b253ade6-c86e-41b4-a9c2-1bd78e8a311c";
 const ok = (stdout = "") => ({ exitCode: 0, stdout, stderr: "" });
 const missing = () => ({ exitCode: 1, stdout: "", stderr: "Error: No such container" });
+
+test("Linux server networking adds only the exact private Forgejo binding", () => {
+  expect(factoryServerComposeOverlay("192.168.139.2", 51419)).toEqual({
+    services: { forgejo: { ports: ["192.168.139.2:51419:3000"] } },
+  });
+  expect(factoryServerComposeOverlay("10.12.0.4", 33030)).toEqual({
+    services: { forgejo: { ports: ["10.12.0.4:33030:3000"] } },
+  });
+  for (const host of ["0.0.0.0", "127.0.0.1", "8.8.8.8", "host.orb.internal", "192.168.1.2:80"])
+    expect(() => factoryServerComposeOverlay(host, 33030)).toThrow("private IPv4");
+  for (const port of [0, 1023, 65536, 33030.5, Number.NaN])
+    expect(() => factoryServerComposeOverlay("192.168.139.2", port)).toThrow("listener port");
+});
 
 async function fixture(nodeEnv?: string) {
   const directory = await mkdtemp(resolve(tmpdir(), "factory-server-container-"));

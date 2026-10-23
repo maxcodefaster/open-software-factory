@@ -46,6 +46,13 @@ export function requireFactoryServerRuntimeHost(value: string | undefined) {
   );
 }
 
+export function factoryServerComposeOverlay(runtimeHost: string, forgejoPort: number) {
+  const host = requireFactoryServerRuntimeHost(runtimeHost);
+  if (!Number.isInteger(forgejoPort) || forgejoPort < 1024 || forgejoPort > 65535)
+    throw new Error("Invalid local Forgejo listener port");
+  return { services: { forgejo: { ports: [`${host}:${forgejoPort}:3000`] } } };
+}
+
 function requireIntent(value: ContainerIntent, directory: string) {
   requireFactoryServerRuntimeHost(value.runtimeHost);
   if (

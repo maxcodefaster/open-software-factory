@@ -37,6 +37,7 @@ import { requireSafeRegistryStorage } from "./registry-storage";
 import { requireRuntimeNamespacesAbsent, resetDisposable } from "./reset";
 import { publishRuntimeImage } from "./runtime-publication";
 import {
+  factoryServerComposeOverlay,
   prepareFactoryServerContainer,
   requireFactoryServerImage,
   requireFactoryServerRuntimeHost,
@@ -1039,6 +1040,13 @@ async function selectServerImage() {
   );
   serverImage = await requireFactoryServerImage(reference);
   process.env["FACTORY_RUNTIME_HOST"] = runtimeHost;
+  const networkFile = resolve(stateDirectory, "linux-server.compose.json");
+  await writeFile(
+    networkFile,
+    JSON.stringify(factoryServerComposeOverlay(runtimeHost, forgejoPort)),
+    { mode: 0o600 },
+  );
+  composeArguments.push("-f", networkFile);
 }
 
 async function restart() {
