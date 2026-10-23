@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import type { AgentView } from "../../apps/factory/src/api-contracts";
+import { type AgentView, conversationViewSchema } from "../../apps/factory/src/api-contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import type { ReviewFeedback } from "../../packages/conversation-domain/src/visual-review";
 import { createDatabase } from "../../packages/db/src/client";
@@ -1711,6 +1711,173 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
     await page.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
     await expect.poll(stream.readers).toBe(0);
     expect(mutations).toBe(0);
+  } finally {
+    await stream.dispose();
+  }
+});
+
+test("returning to the same Ticket keeps its retained Coding stream observable", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  const changeID = crypto.randomUUID();
+  const contextID = crypto.randomUUID();
+  const database = createDatabase(1);
+  try {
+    await database.client`UPDATE factory.ticket SET state='in-progress' WHERE id=${ticketID}`;
+  } finally {
+    await database.client.end();
+  }
+  await page.route(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}{,&*}`, (route) =>
+    route.fulfill({
+      json: conversationViewSchema.parse({
+        id: contextID,
+        projectId: projectID,
+        ticketId: ticketID,
+        mode: "build",
+        version: 1,
+        entries: [],
+        contextId: contextID,
+        activeCodingContextId: contextID,
+        isActiveCoding: true,
+        contexts: [
+          {
+            id: contextID,
+            kind: "coding",
+            title: "Original Coding",
+            ordinal: 1,
+            original: true,
+            createdAt: new Date(0).toISOString(),
+          },
+        ],
+      }),
+    }),
+  );
+  const view: AgentView = {
+    state: "waiting",
+    runtimeState: "ready",
+    sessionAvailable: true,
+    runtimeConnected: true,
+    messagesAvailable: true,
+    stopPending: false,
+    stopId: null,
+    commitOperation: {
+      id: crypto.randomUUID(),
+      state: "push-intended",
+      lastError: "Owned Forge observation unavailable.",
+    },
+    messages: [
+      {
+        id: "retained-implementation",
+        role: "assistant",
+        text: "Retained implementation output.",
+        at: 1,
+      },
+    ],
+  };
+  const stream = await streamedAgentView(view, new URL(page.url()).origin);
+  let mutations = 0;
+  page.on("request", (request) => {
+    if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
+      mutations++;
+  });
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-retained-stream",
+            baseSha: "a".repeat(40),
+            state: "active",
+            branchState: "succeeded",
+            implementationState: "waiting",
+            buildTurnState: "completed",
+            runtimeState: "ready",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
+    route.fulfill({ json: view }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent/activity`, (route) =>
+    route.continue({ url: stream.url }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await page.route(`**/api/changes/${changeID}/writer{,/status}`, (route) =>
+    route.fulfill({
+      json: {
+        state: "agent",
+        epoch: 1,
+        canWrite: false,
+        yours: false,
+        commandID: null,
+        actor: null,
+        requester: null,
+      },
+    }),
+  );
+  const workspaceID = crypto.randomUUID();
+  const source = {
+    workspaceID,
+    serviceID: "owned-retained-activity",
+    epoch: 1,
+    state: "preparing",
+    failure: null,
+  };
+  await page.route(`**/api/changes/${changeID}/source-workspace/ensure`, (route) =>
+    route.fulfill({ json: source }),
+  );
+  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) =>
+    route.fulfill({ json: source }),
+  );
+  try {
+    await selectProject(page);
+    const ticket = page
+      .getByRole("region", { name: "implementation", exact: true })
+      .getByRole("button");
+    await ticket.click();
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    await expect(page.getByText("Retained implementation output.", { exact: true })).toBeVisible();
+    await expect(page.getByRole("status", { name: "Commit recovery" })).toBeVisible();
+    await page.getByRole("button", { name: "Desktop", exact: true }).click();
+    await ticket.click();
+    stream.publish({
+      ...view,
+      messages: [
+        {
+          id: "retained-after-return",
+          role: "assistant",
+          text: "The same Change remains observable after returning.",
+          at: 2,
+        },
+      ],
+    });
+    await expect(
+      page.getByText("The same Change remains observable after returning.", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("status", { name: "Commit recovery" })).toBeVisible();
+    await expect(page.getByText("Loading implementation…", { exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("textbox", { name: "Specification summary", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect.poll(stream.readers).toBe(1);
+    expect(mutations).toBe(0);
+    await mkdir(".factory/test-results/retained-agent-stream", { recursive: true });
+    await page.screenshot({
+      path: ".factory/test-results/retained-agent-stream/returned-wide.png",
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({
+      path: ".factory/test-results/retained-agent-stream/returned-narrow.png",
+    });
   } finally {
     await stream.dispose();
   }

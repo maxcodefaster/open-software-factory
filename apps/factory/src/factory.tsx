@@ -446,6 +446,7 @@ function FactoryWorkspace(props: {
   }
   function resetAgentView() {
     agentReadFence.commandPublished();
+    setAgentActivityRevision((revision) => revision + 1);
     lastAgentSnapshot = undefined;
     setObservedAgentChangeID(undefined);
     setAgent({
