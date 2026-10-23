@@ -353,8 +353,10 @@ async function storageCheck(
     throw new Error("Storage-check cleanup is not confirmed");
   }
   async function cleanup() {
-    // Pod termination, volume reclamation and Namespace finalization converge serially.
-    deadline = Date.now() + (input.cleanupTimeoutMS ?? 180_000);
+    // Each serial Kubernetes operation gets its own bounded convergence window.
+    // A slow Pod or reclaimer must not leave the next operation a spent deadline.
+    const phaseTimeoutMS = input.cleanupTimeoutMS ?? 180_000;
+    deadline = Date.now() + phaseTimeoutMS;
     const currentNamespace = await get("Namespace", namespace, false);
     if (currentNamespace) {
       requireOwner(currentNamespace, intent.namespaceUID);
@@ -363,6 +365,7 @@ async function storageCheck(
         await persist();
       }
       await remove("Pod", "pods", probeName, intent.podUID);
+      deadline = Date.now() + phaseTimeoutMS;
       const claim = await get("PersistentVolumeClaim", claimName);
       if (claim) {
         requireOwner(claim, intent.claimUID);
@@ -405,6 +408,7 @@ async function storageCheck(
       }
     }
     if (intent.volume) {
+      deadline = Date.now() + phaseTimeoutMS;
       let volumePresent = true;
       while (Date.now() < deadline) {
         const volume = await get("PersistentVolume", intent.volume.name, false);
@@ -419,6 +423,7 @@ async function storageCheck(
       if (volumePresent) throw new Error("Storage-check volume cleanup is not confirmed");
     }
     if (currentNamespace) {
+      deadline = Date.now() + phaseTimeoutMS;
       const listing = z
         .object({ items: z.array(resource) })
         .parse(

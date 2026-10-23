@@ -271,7 +271,7 @@ test("a bound volume and zero exit code do not bypass a still-Running Pod", () =
     expect(cluster.calls.some((call) => call.args[0] === "delete")).toBe(false);
   }));
 
-test("default cleanup allows serial Pod, claim and Namespace deletion to settle", () =>
+test("each serial cleanup phase can settle without consuming the next phase's deadline", () =>
   fixture(async (directory, cluster) => {
     let now = Date.now();
     const clock = spyOn(Date, "now").mockImplementation(() => now);
@@ -279,7 +279,7 @@ test("default cleanup allows serial Pod, claim and Namespace deletion to settle"
       if (limits?.timeoutMS === 1)
         throw new Error("Infrastructure command timed out; outcome is unconfirmed");
       const result = await cluster.run(argv, input, limits);
-      if (argv.includes("delete")) now += 45_000;
+      if (argv.includes("delete")) now += 90_000;
       return result;
     };
     try {
