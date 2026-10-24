@@ -10,6 +10,7 @@ export function MarkdownReader(props: {
   class: string;
   onEdit?: (() => void) | undefined;
   onNavigate?: ((href: string) => boolean) | undefined;
+  wikiPages?: readonly { slug: string; title: string }[] | undefined;
 }) {
   const scope = createMemo(() => ({ value: props.value, key: props.scopeKey }));
   const clipboard = createClipboardFeedback(scope);
@@ -32,7 +33,7 @@ export function MarkdownReader(props: {
         class={props.class}
         tabindex={props.onEdit ? "0" : undefined}
         aria-label={props.label}
-        innerHTML={markdownHTML(props.value, true)}
+        innerHTML={markdownHTML(props.value, true, [], props.wikiPages)}
         onClick={async (event) => {
           const target = event.target;
           if (!(target instanceof HTMLElement)) return;

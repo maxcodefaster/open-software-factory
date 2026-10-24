@@ -144,6 +144,28 @@ function AttachedRuntimeFrame(props: {
     const timer = setTimeout(() => setPhase("failed"), 30_000);
     return () => clearTimeout(timer);
   });
+  createEffect(
+    () => ({ preview: props.title === "Preview", attemptID: props.attemptID }),
+    (current) => {
+      if (!current.preview || !current.attemptID) return;
+      const origin = appRuntimeOrigin(location.origin, current.attemptID, "app");
+      const ready = (event: MessageEvent) => {
+        if (
+          event.origin !== origin ||
+          event.source !== frame?.contentWindow ||
+          !event.data ||
+          typeof event.data !== "object" ||
+          event.data.type !== "factory-preview-document-ready"
+        )
+          return;
+        // The document is attached even if a nonessential image is still loading.
+        // This is not App health, runtime readiness or review evidence.
+        setPhase("loaded");
+      };
+      window.addEventListener("message", ready);
+      return () => window.removeEventListener("message", ready);
+    },
+  );
 
   function reload() {
     if (!frame) return;

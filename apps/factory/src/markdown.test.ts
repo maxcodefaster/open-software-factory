@@ -107,3 +107,28 @@ test("duplicate citation numbers never redirect a claim to an ambiguous source",
     "data-citation",
   );
 });
+
+test("Wiki references link only known pages without changing code, existing links or ordinary Markdown", () => {
+  const pages = [{ slug: "task-management", title: "Managing tasks" }];
+  const html = markdownHTML(
+    "See #wiki/task-management. Also `#wiki/task-management`.\n\n" +
+      "[Existing](#wiki/task-management) and [#wiki/task-management](https://example.com).\n\n" +
+      "```txt\n#wiki/task-management\n```\n\n" +
+      "Unknown #wiki/missing and #wiki/task-management-extra stay text.",
+    true,
+    [],
+    pages,
+  );
+  expect(html).toContain(
+    '<a href="#wiki/task-management" rel="noopener noreferrer">Managing tasks</a>.',
+  );
+  expect(html).toContain("<code>#wiki/task-management</code>");
+  expect(html).toContain('href="#wiki/task-management" rel="noopener noreferrer">Existing</a>');
+  expect(html).toContain(
+    'href="https://example.com" rel="noopener noreferrer">#wiki/task-management</a>',
+  );
+  expect(html).not.toContain('href="#wiki/missing"');
+  expect(html).not.toContain('href="#wiki/task-management-extra"');
+  expect(html.match(/href="#wiki\/task-management"/g)).toHaveLength(2);
+  expect(markdownHTML("See #wiki/task-management.")).not.toContain("href=");
+});

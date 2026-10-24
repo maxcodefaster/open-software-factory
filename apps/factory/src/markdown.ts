@@ -57,8 +57,9 @@ export function markdownHTML(
   markdown: string,
   codeControls = false,
   citations: readonly { reference: number; label: string }[] = [],
+  wikiPages: readonly { slug: string; title: string }[] = [],
 ): string {
-  if (!citations.length)
+  if (!citations.length && !wikiPages.length)
     return (codeControls ? documentReader : reader).parse(markdown, { async: false });
   // References keep their admitted numbers when an unauthorized source is removed.
   // Ambiguous or unknown numbers remain text, never links to a different source.
@@ -69,6 +70,28 @@ export function markdownHTML(
       references.has(citation.reference) ? undefined : citation.label,
     );
   const citedReader = createReader(codeControls);
+  if (wikiPages.length) {
+    const pages = new Map(wikiPages.map((page) => [page.slug, page.title]));
+    citedReader.use({
+      extensions: [
+        {
+          name: "factoryWikiReference",
+          level: "inline",
+          start: (source) => source.indexOf("#wiki/"),
+          tokenizer(source) {
+            if (this.lexer.state.inLink) return;
+            const match = /^#wiki\/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w/-])/.exec(source);
+            const title = match && pages.get(match[1]!);
+            if (!match || !title) return;
+            return { type: "factoryWikiReference", raw: match[0], slug: match[1], title };
+          },
+          renderer(token) {
+            return `<a href="#wiki/${escapeHTML(token["slug"])}" rel="noopener noreferrer">${escapeHTML(token["title"])}</a>`;
+          },
+        },
+      ],
+    });
+  }
   citedReader.use({
     extensions: [
       {

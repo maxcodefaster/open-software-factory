@@ -548,6 +548,7 @@ export function KnowledgeWorkspace(props: {
                     label="Historical page"
                     scopeKey={revision().id}
                     onNavigate={navigateWiki}
+                    wikiPages={props.pages.filter((page) => page.state === "active")}
                     value={withoutRepeatedTitle(revision().body, revision().title)}
                   />
                   <Show when={restoreError()}>
@@ -843,6 +844,11 @@ export function KnowledgeWorkspace(props: {
                     label={props.openDocument ? "Repository document" : "Edit Knowledge body"}
                     scopeKey={`${props.projectID}:${props.openDocument?.path ?? props.selectedPage?.id}`}
                     onNavigate={props.openDocument ? undefined : navigateWiki}
+                    wikiPages={
+                      props.openDocument
+                        ? undefined
+                        : props.pages.filter((page) => page.state === "active")
+                    }
                     onEdit={props.openDocument ? undefined : beginEdit}
                     value={
                       props.openDocument

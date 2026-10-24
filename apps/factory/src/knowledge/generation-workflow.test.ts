@@ -23,6 +23,7 @@ test.each([
   "invalid-plan-always",
   "verbose-topic-plan",
   "source-hungry-checker",
+  "bare-wiki-reference",
 ])(
   "real Mastra checked progressive workflow: %s",
   async (scenario) => {
@@ -152,13 +153,17 @@ test.each([
                 : [
                     {
                       body:
-                        scenario === "verbose-overview" &&
-                        !prompt.issues?.length &&
-                        prompt.topic.slug === "overview"
-                          ? "x".repeat(1201)
-                          : !prompt.issues?.length && prompt.topic.slug === "overview"
-                            ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
-                            : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
+                        scenario === "bare-wiki-reference" &&
+                        prompt.topic.slug === "guide-1" &&
+                        !prompt.issues?.length
+                          ? "See #wiki/overview for the verified orientation."
+                          : scenario === "verbose-overview" &&
+                              !prompt.issues?.length &&
+                              prompt.topic.slug === "overview"
+                            ? "x".repeat(1201)
+                            : !prompt.issues?.length && prompt.topic.slug === "overview"
+                              ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
+                              : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
                       ...(scenario === "wrong-parent" && prompt.topic.slug !== "overview"
                         ? { parentSlug: null }
                         : {}),
@@ -244,6 +249,8 @@ test.each([
           publications++;
           for (const page of output.pages) {
             expect(page.body).not.toContain("## Sources");
+            if (scenario === "bare-wiki-reference")
+              expect(page.body).not.toContain("See #wiki/overview");
             pages.push({
               id: crypto.randomUUID(),
               slug: page.slug,
@@ -293,6 +300,7 @@ test.each([
           "invalid-plan-once",
           "verbose-topic-plan",
           "source-hungry-checker",
+          "bare-wiki-reference",
         ].includes(scenario)
       ) {
         await expect(run).rejects.toThrow(
@@ -321,7 +329,7 @@ test.each([
       expect(result.pages).toEqual([]);
       expect(read.size).toBe(64);
       expect(publications).toBe(4);
-      expect(writes).toBe(5);
+      expect(writes).toBe(scenario === "bare-wiki-reference" ? 6 : 5);
       expect(checks).toBe(scenario === "source-hungry-checker" ? 8 : 4);
       expect(researches).toBe(
         ["invalid-research", "repair-needs-rejected-research", "unread-research-once"].includes(

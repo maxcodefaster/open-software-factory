@@ -467,4 +467,11 @@ function installPreviewBridge(factoryOrigin: string) {
     attributes: true,
     subtree: true,
   });
+  const documentReady = () => {
+    if (parent !== window)
+      parent.postMessage({ type: "factory-preview-document-ready" }, factoryOrigin);
+  };
+  if (document.readyState === "loading")
+    document.addEventListener("DOMContentLoaded", documentReady, { once: true });
+  else documentReady();
 }

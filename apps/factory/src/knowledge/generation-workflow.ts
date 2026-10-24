@@ -15,6 +15,7 @@ import { projectModelConnection } from "../project-agent/adapter";
 import { isStructuredOutputFailure } from "../project-agent/structured-output";
 import { createMastraUsage } from "../usage/mastra";
 import type { WikiGenerationInput } from "./generation-agent";
+import { wikiLinkIssues } from "./wiki-links";
 import {
   WikiSourceEvidenceError,
   WikiTopicPlanError,
@@ -61,7 +62,8 @@ No generated timestamps, hashes or Sources footers. Factory supplies provenance.
 Factory binds page identities and parents from the validated plan and current pages.
 Use source tools before the final step when needed. The last step is reserved for your structured
 result, without tools. Report missing evidence or uncertainty rather than inventing unsupported facts.
-Bodies exclude their separate title. Internal Wiki links use #wiki/<slug> only for existing checked pages.
+Bodies exclude their separate title. Write internal Wiki links as Markdown [Page title](#wiki/page-slug),
+using the exact title and slug of an existing checked page. Never write a bare #wiki/ reference.
 Do not archive or delete pages. Cite only paths actually read. Never link to not-yet-published pages.`;
 
 export const wikiReviewTask =
@@ -454,9 +456,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               );
             if (/^(?:#{1,6}\s+)?sources\s*:?\s*$/im.test(page.body))
               issues.push("Source footer belongs in Factory");
-            for (const match of page.body.matchAll(/\]\(#wiki\/([a-z0-9-]+)\)/g))
-              if (!pages.some((page) => page.slug === match[1] && page.state === "active"))
-                issues.push(`Unavailable internal link ${match[1]}`);
+            issues.push(...wikiLinkIssues(page.body, pages));
           }
           if (issues.length) return { round: inputData.round + 1, issues, output };
           const review = await ask(
