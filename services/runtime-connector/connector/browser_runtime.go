@@ -54,6 +54,8 @@ type browserRuntime struct {
 	recordingEnded   time.Time
 	recordingBytes   int64
 	recordingIndexed bool
+	recordingMu      sync.Mutex
+	recordingFinish  *browserRecordingFinalization
 	pagePath         string
 }
 

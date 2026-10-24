@@ -14,6 +14,58 @@ const browserRecordingPath = "/tmp/factory-review.webm"
 const browserRecordingLimit = 96 << 20
 const browserRecordingChunk = 48 << 10
 
+type browserRecordingFinalization struct {
+	done chan struct{}
+	data string
+	err  error
+}
+
+// Upstream queues copies of its last frame for an unchanged interval at Stop.
+// Keep draining while the actual encoder advances, but retain the short
+// no-progress bound and the same revocable runtime context.
+func (manager *browserRuntimeManager) stopRecording(runtime *browserRuntime, stallLimit time.Duration) (json.RawMessage, error) {
+	ctx, cancel := context.WithCancel(runtime.ctx)
+	defer cancel()
+	type reply struct {
+		data json.RawMessage
+		err  error
+	}
+	done := make(chan reply, 1)
+	go func() {
+		data, err := runtime.rpc(ctx, "tools/call", map[string]any{
+			"name": "screencast_stop", "arguments": map[string]any{"pageId": runtime.pageID},
+		})
+		done <- reply{data, err}
+	}()
+	lastProgress := time.Now()
+	lastPosition := int64(-1)
+	ticker := time.NewTicker(min(time.Second, stallLimit/3))
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-done:
+			return result.data, result.err
+		case <-ctx.Done():
+			cancel()
+			<-done
+			return nil, errors.New("recording browser authority ended")
+		case <-ticker.C:
+			probe, end := context.WithDeadline(ctx, lastProgress.Add(stallLimit))
+			position := manager.recordingPosition(probe, runtime)
+			end()
+			if position != nil && *position > lastPosition {
+				lastPosition = *position
+				lastProgress = time.Now()
+			}
+			if time.Since(lastProgress) >= stallLimit {
+				cancel()
+				<-done
+				return nil, errors.New("recording encoder stopped making progress")
+			}
+		}
+	}
+}
+
 // Encoder position, not wall time: the upstream recorder can omit startup or
 // unchanged frames. Only this bounded numeric observation leaves the container.
 func (manager *browserRuntimeManager) recordingPosition(ctx context.Context, runtime *browserRuntime) *int64 {
@@ -48,6 +100,32 @@ func (manager *browserRuntimeManager) recording(ctx context.Context, scope brows
 	if err := runtime.renewAuthority(scope, true); err != nil {
 		return "", err
 	}
+	if action == "browser-recording-finish" {
+		// Upstream encodes the final unchanged interval only when stopped.
+		// Start that one RPC once; short status requests must not replay it or
+		// prevent ordinary authority renewal while the encoder drains.
+		runtime.recordingMu.Lock()
+		finish := runtime.recordingFinish
+		if finish == nil {
+			finish = &browserRecordingFinalization{done: make(chan struct{})}
+			runtime.recordingFinish = finish
+			go func() {
+				finish.data, finish.err = manager.recordingOperation(runtime, scope, action)
+				close(finish.done)
+			}()
+		}
+		runtime.recordingMu.Unlock()
+		select {
+		case <-finish.done:
+			return finish.data, finish.err
+		default:
+			return `{"state":"pending"}`, nil
+		}
+	}
+	return manager.recordingOperation(runtime, scope, action)
+}
+
+func (manager *browserRuntimeManager) recordingOperation(runtime *browserRuntime, scope browserRuntimeRequest, action string) (string, error) {
 	runtime.mu.Lock()
 	defer runtime.mu.Unlock()
 	if runtime.closed || runtime.ctx.Err() != nil || runtime.command == nil || runtime.pageID == 0 {
@@ -57,7 +135,13 @@ func (manager *browserRuntimeManager) recording(ctx context.Context, scope brows
 	defer cancel()
 	tool := func(name string, args map[string]any) error {
 		args["pageId"] = runtime.pageID
-		raw, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": name, "arguments": args})
+		var raw json.RawMessage
+		var err error
+		if name == "screencast_stop" {
+			raw, err = manager.stopRecording(runtime, 15*time.Second)
+		} else {
+			raw, err = runtime.rpc(bounded, "tools/call", map[string]any{"name": name, "arguments": args})
+		}
 		if err != nil {
 			// A lost RPC invalidates protocol synchronization, not just video.
 			runtime.cancel()
@@ -100,6 +184,10 @@ func (manager *browserRuntimeManager) recording(ctx context.Context, scope brows
 			}
 			runtime.recordingEnded = time.Now()
 		}
+		// Indexing and file probes keep their original short I/O deadline.
+		indexContext, endIndex := context.WithTimeout(runtime.ctx, 15*time.Second)
+		defer endIndex()
+		bounded = indexContext
 		name, _ := browserRuntimeNames(scope.SessionID)
 		if _, err := manager.inspectOwned(bounded, name, scope); err != nil {
 			return "", err

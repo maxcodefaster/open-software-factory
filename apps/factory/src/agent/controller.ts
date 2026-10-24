@@ -1423,7 +1423,7 @@ export function createAgentController(
             await usageJournal.settle(turnID, "completed");
             const reviewTurn = await turns.get(turnID);
             if (reviewTurn?.authority.mode === "build" && reviewTurn.authority.review) {
-              await browser?.finishTurnRecording(turnID, ownerToken);
+              await browser?.finishTurnRecording(turnID, ownerToken, observationController.signal);
               const reviewID = reviewTurn.authority.review.reviewId;
               const [review] = await database.client<{ result: unknown }[]>`
                 SELECT result FROM factory.candidate_review WHERE id=${reviewID} AND turn_id=${turnID}`;

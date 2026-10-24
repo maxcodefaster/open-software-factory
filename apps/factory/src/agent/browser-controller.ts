@@ -600,26 +600,43 @@ export function createBuildBrowserController(
       }
     },
 
-    async finishRecording(session: BrowserSession, ownerToken: string) {
+    async finishRecording(session: BrowserSession, ownerToken: string, signal?: AbortSignal) {
       const [recording] = await database.client<
         { id: string }[]
       >`SELECT id FROM factory.review_media
         WHERE browser_session_id=${session.id} AND kind='recording' AND state='recording'`;
       if (!recording) return;
       try {
-        const output = await dispatch(session, ownerToken, "browser-recording-finish");
-        const manifest = z
-          .object({
-            bytes: z.number().int().positive().max(maximumRecordingBytes),
-            durationMs: z.number().int().nonnegative(),
-          })
-          .parse(JSON.parse(output.data ?? ""));
+        const manifestInput = z.object({
+          bytes: z.number().int().positive().max(maximumRecordingBytes),
+          durationMs: z.number().int().nonnegative(),
+        });
+        let manifest: z.infer<typeof manifestInput>;
+        for (;;) {
+          const output = await dispatch(
+            session,
+            ownerToken,
+            "browser-recording-finish",
+            undefined,
+            signal,
+          );
+          const value: unknown = JSON.parse(output.data ?? "");
+          if (z.strictObject({ state: z.literal("pending") }).safeParse(value).success) {
+            await delay(500, undefined, { signal });
+            continue;
+          }
+          manifest = manifestInput.parse(value);
+          break;
+        }
         const chunks: Buffer[] = [];
         for (let offset = 0; offset < manifest.bytes; offset += 49_152) {
-          const output = await dispatch(session, ownerToken, "browser-recording-chunk", {
-            name: "recording_chunk",
-            arguments: { offset },
-          });
+          const output = await dispatch(
+            session,
+            ownerToken,
+            "browser-recording-chunk",
+            { name: "recording_chunk", arguments: { offset } },
+            signal,
+          );
           const chunk = z
             .object({ offset: z.number().int(), data: z.string().max(65_536) })
             .parse(JSON.parse(output.data ?? ""));
@@ -636,6 +653,7 @@ export function createBuildBrowserController(
         // Slow state-volume I/O must not hold the turn lock and starve its
         // ownership heartbeat. Publication is a separate, short fenced commit.
         const proof = await media.stage(recording.id, bytes);
+        signal?.throwIfAborted();
         await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
           await currentIn(sql, session, ownerToken);
           const [enabled] = await sql`SELECT project.id FROM factory.project project
@@ -651,7 +669,7 @@ export function createBuildBrowserController(
       }
     },
 
-    async finishTurnRecording(turnID: string, ownerToken: string) {
+    async finishTurnRecording(turnID: string, ownerToken: string, signal?: AbortSignal) {
       try {
         const [latest] = await database.client<
           { id: string }[]
@@ -659,7 +677,7 @@ export function createBuildBrowserController(
         WHERE turn_id=${turnID} AND owner_id=${ownerIdentity(ownerToken)}
           AND state='active' ORDER BY ordinal DESC LIMIT 1`;
         const session = latest ? await row(latest.id) : undefined;
-        if (session) await this.finishRecording(session, ownerToken);
+        if (session) await this.finishRecording(session, ownerToken, signal);
       } catch {
         // Media failure must not change the QA verdict or block exact cleanup.
       }

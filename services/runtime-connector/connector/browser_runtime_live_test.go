@@ -230,15 +230,45 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	call("browser_wait", `{"text":"Viewport 1280x720"}`)
 	call("browser_resize", `{"width":1280,"height":240}`)
 	call("browser_wait", `{"text":"Viewport 1280x240"}`)
-	manifest, err := manager.recording(connection, scope, "browser-recording-finish")
-	if err != nil {
-		t.Fatal("actual pinned recording finish", err)
+	// A reviewer may read source or compose its report while the App stays
+	// unchanged. Keep ordinary authority alive without generating App actions.
+	// Finishing must also publish the recorder's final quiet interval.
+	quiet := time.NewTimer(60 * time.Second)
+	heartbeat := time.NewTicker(10 * time.Second)
+quietRecording:
+	for {
+		select {
+		case <-quiet.C:
+			break quietRecording
+		case <-heartbeat.C:
+			renewal := scope
+			renewal.ExpiresAt = time.Now().Add(25 * time.Second)
+			if err := manager.renew(renewal); err != nil {
+				t.Fatal("renewing quiet recording", err)
+			}
+		}
+	}
+	heartbeat.Stop()
+	scope.ExpiresAt = time.Now().Add(25 * time.Second)
+	finishStarted := time.Now()
+	var manifest string
+	for {
+		scope.ExpiresAt = time.Now().Add(25 * time.Second)
+		var err error
+		manifest, err = manager.recording(connection, scope, "browser-recording-finish")
+		if err != nil {
+			t.Fatal("actual pinned recording finish", err)
+		}
+		if manifest != `{"state":"pending"}` {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 	var recorded struct {
 		Bytes      int64 `json:"bytes"`
 		DurationMS int64 `json:"durationMs"`
 	}
-	if json.Unmarshal([]byte(manifest), &recorded) != nil || recorded.Bytes <= 0 || recorded.DurationMS <= 0 {
+	if json.Unmarshal([]byte(manifest), &recorded) != nil || recorded.Bytes <= 0 || recorded.DurationMS < 60_000 {
 		t.Fatal("recording manifest unavailable", manifest)
 	}
 	var video bytes.Buffer
@@ -276,7 +306,8 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("actual encoder process measurements unavailable", string(encoder))
 	}
 	measurement, _ := json.Marshal(map[string]any{"bytes": recorded.Bytes, "durationMs": recorded.DurationMS,
-		"captureAndExportMs": time.Since(captureStarted).Milliseconds(), "fps": 15, "width": 1280, "height": 720,
+		"captureAndExportMs": time.Since(captureStarted).Milliseconds(), "finishAndExportMs": time.Since(finishStarted).Milliseconds(),
+		"quietIntervalMs": 60_000, "fps": 15, "width": 1280, "height": 720,
 		"browserContainerCPU": string(cpu), "browserContainerPeakMemoryBytes": strings.TrimSpace(string(peak)),
 		"encoder": encoderUsage,
 		"scope":   "Whole isolated browser container, including Chrome and encoder; not encoder-only"})
@@ -396,7 +427,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 	if imageReference == "" || parentReference == "" {
 		t.Skip("requires explicit browser and parent proof images")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Minute)
 	defer cancel()
 	docker := func(args ...string) string {
 		t.Helper()
@@ -484,7 +515,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
 		"--mount", "type=bind,src="+filepath.Join(statePath, "workspace")+",dst=/tmp/project",
 		"--mount", "type=bind,src="+binary+",dst=/test,readonly", "--env", "FACTORY_BROWSER_RUNTIME_APP_FIXTURE=1",
-		"--entrypoint", "/test", "docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20", "-test.run=^TestBrowserRuntimeAppFixture$", "-test.timeout=180s")
+		"--entrypoint", "/test", "docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20", "-test.run=^TestBrowserRuntimeAppFixture$", "-test.timeout=360s")
 	if output, err := exec.CommandContext(ctx, "docker", "exec", primaryID, "git", "--version").CombinedOutput(); err == nil {
 		t.Fatal("primary must exercise the no-Git Dev Container", string(output))
 	}
@@ -497,7 +528,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 		"--env", "FACTORY_BROWSER_RUNTIME_MANAGER_FIXTURE=1", "--env", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath,
 		"--env", "FACTORY_BROWSER_FIXTURE_ID="+owned, "--env", "FACTORY_BROWSER_FIXTURE_IMAGE="+image,
 		"--env", "FACTORY_BROWSER_FIXTURE_PRIMARY="+primaryID, "--entrypoint", "/test", parentImage,
-		"-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=180s")
+		"-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=360s")
 	output, startedErr := exec.CommandContext(ctx, "docker", "start", "--attach", runnerName).CombinedOutput()
 	// Retain bounded fixture diagnostics and evidence even if an assertion failed.
 	os.WriteFile(filepath.Join(root, "fixture-output.txt"), output, 0600)
