@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import ts from "typescript";
-import { ticketDetailSchema } from "../../apps/factory/src/api-contracts";
+import {
+  developerIDEViewSchema,
+  sourceWorkspaceViewSchema,
+  ticketDetailSchema,
+} from "../../apps/factory/src/api-contracts";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { fulfillAgentView } from "../support/agent-activity-route";
@@ -24,114 +29,68 @@ const frameFocusScript = ts.transpileModule(
   { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } },
 ).outputText;
 
-test("distinguishes running compute from a still-attaching IDE document", async ({ page }) => {
-  const attemptID = crypto.randomUUID();
+test("distinguishes prepared editor access from a still-attaching IDE document", async ({
+  page,
+}) => {
   const requested = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            workspaceId: "attachment-fixture",
-            workspaceKind: "personal",
-            runtimeKind: "personal",
-            ownerUserId: userID,
-            state: "ready",
-          },
-        ],
-      },
-    }),
-  );
-  await page.route("**/api/runtime-access?*", async (route) => {
-    requested.resolve();
-    await release.promise;
-    await route.fulfill({
-      contentType: "text/html",
-      body: '<!doctype html><html><body><textarea aria-label="Attached editor"></textarea></body></html>',
-    });
+  const fixture = await mockDeveloperIDE(page, {
+    beforeDocument: async () => {
+      requested.resolve();
+      await release.promise;
+    },
   });
   try {
     await signIn(page);
     await selectProject(page);
     await page.getByRole("button", { name: "IDE", exact: true }).click();
     await requested.promise;
-    const connection = page.getByRole("status", { name: "IDE connection" });
-    await expect(connection).toHaveText("Workspace is running. Opening IDE…", { timeout: 3_000 });
+    const connection = page.getByRole("status").filter({ hasText: "Opening your editor…" });
+    await expect(connection).toBeVisible();
     const frame = page.locator('iframe[title="Factory IDE"]');
-    await expect(frame).toHaveAttribute("inert", "");
+    await expect(frame.locator("..")).toHaveAttribute("aria-busy", "true");
     await page.mouse.move(0, 0);
     await page.screenshot({ path: `${evidenceDirectory}/ide-attaching.png`, fullPage: true });
     release.resolve();
     await expect(
-      page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Attached editor"),
+      page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Unsaved editor draft"),
     ).toBeVisible();
     await expect(connection).toHaveCount(0);
-    await expect(frame).not.toHaveAttribute("inert", "");
+    await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+    await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
+    expect(fixture.computeRequests).toEqual([]);
   } finally {
     release.resolve();
   }
 });
 
 test("recovers a rejected IDE access document without restarting compute", async ({ page }) => {
-  const attemptID = crypto.randomUUID();
-  let documentRequests = 0;
-  let computeRequests = 0;
-  page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().endsWith("workspace/ensure")) {
-      computeRequests++;
-    }
-  });
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            workspaceId: "rejected-attachment-fixture",
-            workspaceKind: "personal",
-            runtimeKind: "personal",
-            ownerUserId: userID,
-            state: "ready",
-          },
-        ],
-      },
-    }),
-  );
-  await page.route("**/api/runtime-access?*", (route) => {
-    documentRequests++;
-    return documentRequests === 1
-      ? route.fulfill({ status: 409, json: { error: "Runtime is not ready" } })
-      : route.fulfill({
-          contentType: "text/html",
-          body: '<!doctype html><html><body><textarea aria-label="Recovered editor"></textarea></body></html>',
-        });
-  });
+  const fixture = await mockDeveloperIDE(page, { rejectFirstAccess: true });
   await signIn(page);
   await selectProject(page);
   await page.getByRole("button", { name: "IDE", exact: true }).click();
-  const connection = page.getByRole("status", { name: "IDE connection" });
-  await expect(connection).toContainText("Could not open IDE", { timeout: 3_000 });
+  const connection = page
+    .getByRole("status")
+    .filter({ hasText: "Editor access was rejected. Retry opening it." });
+  await expect(connection).toBeVisible();
   const frame = page.locator('iframe[title="Factory IDE"]');
-  await expect(frame).toHaveAttribute("inert", "");
-  const startsBeforeReload = computeRequests;
+  await expect(frame.locator("..")).toHaveAttribute("aria-busy", "true");
   await page.mouse.move(0, 0);
   await page.screenshot({
     path: `${evidenceDirectory}/ide-attachment-rejected.png`,
     fullPage: true,
   });
-  await connection.getByRole("button", { name: "Reload view" }).click();
+  await page.getByRole("button", { name: "Retry editor connection" }).click();
   await expect(
-    page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Recovered editor"),
+    page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Unsaved editor draft"),
   ).toBeVisible();
   await expect(connection).toHaveCount(0);
-  await expect(frame).not.toHaveAttribute("inert", "");
-  expect(documentRequests).toBe(2);
-  expect(computeRequests).toBe(startsBeforeReload);
-  await expect(frame).toHaveAttribute("data-runtime-attempt-id", attemptID);
+  await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
+  await expect(frame).toHaveAttribute("data-editor-epoch", "1");
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  expect(fixture.documentRequests).toBe(2);
+  expect(fixture.computeRequests).toEqual([]);
+  expect(fixture.stopRequests).toEqual([]);
 });
 
 let database: ReturnType<typeof createDatabase> | undefined;
@@ -139,72 +98,207 @@ let projectID = "";
 let projectSlug = "";
 let additionalProjectIDs: string[] = [];
 
-for (const view of ["IDE", "Preview"] as const) {
-  test(`${view} retains its document during reconnect without restarting compute`, async ({
-    page,
-  }) => {
-    const attemptID = crypto.randomUUID();
-    let reconnecting = false;
-    let documents = 0;
-    let creates = 0;
-    page.on("request", (request) => {
-      if (
-        request.method() === "POST" &&
-        /\/(personal-workspace|ticket-workspace|staging)\/ensure$/.test(request.url())
-      )
-        creates++;
-    });
-    await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-      route.fulfill({
-        json: {
-          attempts: [
-            {
-              id: attemptID,
-              projectId: projectID,
-              workspaceId: view === "IDE" ? "reconnect-workspace" : undefined,
-              workspaceKind: view === "IDE" ? "personal" : undefined,
-              runtimeKind: view === "IDE" ? "personal" : "staging",
-              currentStaging: view === "Preview",
-              ownerUserId: userID,
-              state: reconnecting ? "starting" : "ready",
-              failure: reconnecting ? "child connector reconnecting" : null,
-            },
-          ],
-        },
-      }),
-    );
-    await page.route("**/api/runtime-access?*", (route) => {
-      documents++;
-      return route.fulfill({
-        contentType: "text/html",
-        body: '<!doctype html><html><body><textarea aria-label="Unsaved runtime draft"></textarea></body></html>',
-      });
-    });
-    await signIn(page);
-    await selectProject(page);
-    await page.getByRole("button", { name: view, exact: true }).click();
-    const frame = page.locator(`iframe[title="Factory ${view}"]`);
-    const editor = page
-      .frameLocator(`iframe[title="Factory ${view}"]`)
-      .getByLabel("Unsaved runtime draft");
-    await editor.fill("Keep this exact document and draft");
-    reconnecting = true;
-    const status = page.getByRole("status", { name: `${view} connection` });
-    await expect(status).toHaveText("Connection interrupted. Reconnecting to the same Workspace…");
-    await expect(frame).toHaveAttribute("inert", "");
-    await expect(frame).toHaveAttribute("data-runtime-attempt-id", attemptID);
-    await page.screenshot({
-      path: `.factory/screenshots/${view.toLowerCase()}-reconnecting.png`,
-      fullPage: true,
-    });
-    reconnecting = false;
-    await expect(status).toHaveCount(0);
-    await expect(editor).toHaveValue("Keep this exact document and draft");
-    await expect(frame).not.toHaveAttribute("inert", "");
-    expect(documents).toBe(1);
-    expect(creates).toBe(0);
+async function mockDeveloperIDE(
+  page: Page,
+  options: {
+    rejectFirstAccess?: boolean;
+    beforeDocument?: () => Promise<void>;
+  } = {},
+) {
+  const workspaceID = crypto.randomUUID();
+  const fixture = {
+    workspaceID,
+    documentRequests: 0,
+    computeRequests: [] as string[],
+    stopRequests: [] as string[],
+  };
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const path = new URL(request.url()).pathname;
+    if (/\/(?:personal-workspace|ticket-workspace|staging)\/ensure$/.test(path))
+      fixture.computeRequests.push(path);
+    if (/\/(?:developer-ide|source)\/stop$/.test(path)) fixture.stopRequests.push(path);
   });
+  const source = sourceWorkspaceViewSchema.parse({
+    workspaceID,
+    serviceID: `fixture-source-${workspaceID}`,
+    epoch: 1,
+    state: "ready",
+    failure: null,
+  });
+  const editor = developerIDEViewSchema.parse({
+    serviceID: `fixture-editor-${projectID}`,
+    epoch: 1,
+    state: "ready",
+    failure: null,
+  });
+  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
+    route.fulfill({ json: source }),
+  );
+  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) =>
+    route.fulfill({ json: source }),
+  );
+  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
+    route.fulfill({ json: editor }),
+  );
+  await page.route("**/api/developer-ide", (route) => route.fulfill({ json: editor }));
+  const factoryOrigin = new URL(process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000")
+    .origin;
+  const editorURL = `${developerIDEOrigin(factoryOrigin, userID, 1)}/ux-trust-editor`;
+  await page.route("**/api/developer-ide/access?*", async (route) => {
+    fixture.documentRequests++;
+    if (options.rejectFirstAccess && fixture.documentRequests === 1) {
+      await route.fulfill({ status: 409, json: { error: "Editor access is not ready" } });
+      return;
+    }
+    await options.beforeDocument?.();
+    // A document navigation lets Playwright intercept the isolated origin too;
+    // routing only applies to the initial request in an HTTP redirect chain.
+    await route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><script>location.replace(${JSON.stringify(editorURL)})</script>`,
+    });
+  });
+  await page.route(editorURL, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><body>
+        <textarea aria-label="Unsaved editor draft"></textarea>
+        <script>
+          const factoryOrigin = ${JSON.stringify(factoryOrigin)};
+          window.addEventListener("message", event => {
+            if (event.source !== parent || event.origin !== factoryOrigin ||
+                event.data?.type !== "factory:select-workspace") return;
+            parent.postMessage({
+              type: "factory:workspace-selected", workspaceID: event.data.workspaceID
+            }, factoryOrigin);
+          });
+          parent.postMessage({ type: "factory:ide-ready" }, factoryOrigin);
+        </script>
+      </body></html>`,
+    }),
+  );
+  return fixture;
 }
+
+test("IDE retains its document during compute reconnect without restarting compute", async ({
+  page,
+}) => {
+  const fixture = await mockDeveloperIDE(page);
+  const attemptID = crypto.randomUUID();
+  let reconnecting = false;
+  let reconnectReads = 0;
+  let recoveredReads = 0;
+  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) => {
+    if (reconnecting) reconnectReads++;
+    else if (reconnectReads) recoveredReads++;
+    return route.fulfill({
+      json: {
+        attempts: [
+          {
+            id: attemptID,
+            projectId: projectID,
+            workspaceId: fixture.workspaceID,
+            workspaceKind: "personal",
+            runtimeKind: "personal",
+            ownerUserId: userID,
+            state: reconnecting ? "starting" : "ready",
+            failure: reconnecting ? "child connector reconnecting" : null,
+          },
+        ],
+      },
+    });
+  });
+  await signIn(page);
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  const frame = page.locator('iframe[title="Factory IDE"]');
+  const editor = page
+    .frameLocator('iframe[title="Factory IDE"]')
+    .getByLabel("Unsaved editor draft");
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  await editor.fill("Keep this exact document and draft");
+  reconnecting = true;
+  await expect.poll(() => reconnectReads).toBeGreaterThan(0);
+  await expect(editor).toHaveValue("Keep this exact document and draft");
+  await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
+  reconnecting = false;
+  await expect.poll(() => recoveredReads).toBeGreaterThan(0);
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  await expect(frame).toHaveAttribute("data-editor-epoch", "1");
+  await expect(editor).toHaveValue("Keep this exact document and draft");
+  await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
+  expect(fixture.documentRequests).toBe(1);
+  expect(fixture.computeRequests).toEqual([]);
+  expect(fixture.stopRequests).toEqual([]);
+  await page.screenshot({
+    path: `${evidenceDirectory}/ide-reconnected.png`,
+    fullPage: true,
+  });
+});
+
+test("Preview retains its document during reconnect without restarting compute", async ({
+  page,
+}) => {
+  const attemptID = crypto.randomUUID();
+  let reconnecting = false;
+  let documents = 0;
+  let creates = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(personal-workspace|ticket-workspace|staging)\/ensure$/.test(request.url())
+    )
+      creates++;
+  });
+  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        attempts: [
+          {
+            id: attemptID,
+            projectId: projectID,
+            runtimeKind: "staging",
+            currentStaging: true,
+            ownerUserId: userID,
+            state: reconnecting ? "starting" : "ready",
+            failure: reconnecting ? "child connector reconnecting" : null,
+          },
+        ],
+      },
+    }),
+  );
+  await page.route("**/api/runtime-access?*", (route) => {
+    documents++;
+    return route.fulfill({
+      contentType: "text/html",
+      body: '<!doctype html><html><body><textarea aria-label="Unsaved runtime draft"></textarea></body></html>',
+    });
+  });
+  await signIn(page);
+  await selectProject(page);
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  const frame = page.locator('iframe[title="Factory Preview"]');
+  const editor = page
+    .frameLocator('iframe[title="Factory Preview"]')
+    .getByLabel("Unsaved runtime draft");
+  await editor.fill("Keep this exact document and draft");
+  reconnecting = true;
+  const status = page.getByRole("status", { name: "Preview connection" });
+  await expect(status).toHaveText("Connection interrupted. Reconnecting to the same Workspace…");
+  await expect(frame).toHaveAttribute("inert", "");
+  await expect(frame).toHaveAttribute("data-runtime-attempt-id", attemptID);
+  await page.screenshot({
+    path: `${evidenceDirectory}/preview-reconnecting.png`,
+    fullPage: true,
+  });
+  reconnecting = false;
+  await expect(status).toHaveCount(0);
+  await expect(editor).toHaveValue("Keep this exact document and draft");
+  await expect(frame).not.toHaveAttribute("inert", "");
+  expect(documents).toBe(1);
+  expect(creates).toBe(0);
+});
 
 test("startup Stop, reconnect and detached chat preserve the same Build ownership", async ({
   page,
@@ -592,9 +686,19 @@ async function insertChangedTicket(
   return ticketID;
 }
 
-test.beforeEach(async () => {
+test.beforeEach(async ({ page }) => {
   await mkdir(evidenceDirectory, { recursive: true });
   await mkdir(cleanupEvidenceDirectory, { recursive: true });
+  // UI fixtures must never prepare real source, editor, compute or model resources.
+  // Specific controlled responses registered by a test take precedence.
+  await page.route(
+    /\/api\/(?:projects\/[^/]+\/(?:source-workspace|developer-ide|personal-workspace|staging)\/ensure|changes\/[^/]+\/(?:source-workspace|ticket-workspace)\/ensure|workspaces\/[^/]+\/source(?:\/(?:ensure|stop))?|developer-ide(?:\/stop)?|(?:projects|changes)\/[^/]+\/(?:conversation\/message|agent\/(?:start|message|stop)))(?:\?|$)/,
+    (route) =>
+      route.fulfill({
+        status: 503,
+        json: { error: "Controlled UI fixture does not prepare native resources" },
+      }),
+  );
   database = createDatabase(1);
   projectID = crypto.randomUUID();
   projectSlug = `ux-trust-${projectID.slice(0, 8)}`;
