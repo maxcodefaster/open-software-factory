@@ -28,6 +28,16 @@ type ReviewScope = {
 };
 type Inventory = Array<{ path: string; sha: string; size: number }>;
 
+function hasCaseObservation(evidence: ReviewScope["evidence"], id: string, kind: "app" | "source") {
+  return evidence.some(
+    (item) =>
+      item["scenarioId"] === id &&
+      (kind === "app"
+        ? item["kind"] === "browser"
+        : item["kind"] === "source" && (item["revision"] === "candidate" || item["diff"] === true)),
+  );
+}
+
 export function createCandidateReviewController(
   database: Database,
   forgeOverride?: ReturnType<typeof createForgejoClient>,
@@ -213,13 +223,30 @@ export function createCandidateReviewController(
                 "conflict",
                 "Finish the current case; use an approved criterion and at most 64 cases",
               );
-            await sql`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected)
-              VALUES(${scope.id},${args.id},${args.title},${args.category},${args.criterion},${args.expected})`;
+            await sql`INSERT INTO factory.review_scenario(review_id,id,title,category,observation_kind,criterion,expected)
+              VALUES(${scope.id},${args.id},${args.title},${args.category},${args.observationKind},${args.criterion},${args.expected})`;
           } else {
             const args = call.arguments;
+            const [scenario] = await sql<
+              { observationKind: "app" | "source" | null }[]
+            >`SELECT observation_kind AS "observationKind" FROM factory.review_scenario
+              WHERE review_id=${scope.id} AND id=${args.id} AND ended_at IS NULL FOR UPDATE`;
+            if (!scenario) throw new CommandError("conflict", "Case is not currently active");
+            const kind = scenario.observationKind ?? "app";
+            if (
+              args.status !== "unverified" &&
+              !hasCaseObservation(current.evidence, args.id, kind)
+            )
+              throw new CommandError(
+                "conflict",
+                kind === "app"
+                  ? `App case ${args.id} needs its own actual App observation before its result. Keep this case active and inspect the App; do not replay an unconfirmed mutation.`
+                  : `Source case ${args.id} needs its own immutable candidate source read or diff before its result.`,
+              );
             const positions = current.evidence.flatMap((item) => {
               const context = item["context"];
               if (
+                kind !== "app" ||
                 item["scenarioId"] !== args.id ||
                 item["kind"] !== "browser" ||
                 !context ||
@@ -238,15 +265,6 @@ export function createCandidateReviewController(
             const times = positions
               .filter((item) => item.session === mediaSession)
               .map((item) => item.time);
-            if (
-              args.status !== "unverified" &&
-              !current.evidence.some(
-                (item) =>
-                  item["scenarioId"] === args.id &&
-                  ["source", "browser"].includes(String(item["kind"])),
-              )
-            )
-              throw new CommandError("conflict", "Case needs observations made after it began");
             const updated = await sql`UPDATE factory.review_scenario SET ended_at=clock_timestamp(),
               status=${args.status},observed=${args.observed},
               media_started_ms=${times.length ? Math.min(...times) : null},media_session_id=${mediaSession ?? null}
@@ -300,9 +318,16 @@ export function createCandidateReviewController(
               throw new CommandError("conflict", "App review needs an exact-candidate screenshot");
             if (current.coverageVersion >= 1 && result.verdict === "passed") {
               const cases = await sql<
-                { id: string; criterion: number; category: string; status: string | null }[]
+                {
+                  id: string;
+                  criterion: number;
+                  category: string;
+                  status: string | null;
+                  observationKind: "app" | "source" | null;
+                }[]
               >`
-                SELECT id,criterion,category,status FROM factory.review_scenario WHERE review_id=${scope.id}`;
+                SELECT id,criterion,category,status,observation_kind AS "observationKind"
+                FROM factory.review_scenario WHERE review_id=${scope.id}`;
               if (
                 cases.some((item) => item.status !== "passed") ||
                 result.criteria.some(
@@ -315,19 +340,37 @@ export function createCandidateReviewController(
                   "conflict",
                   "Passing review needs observed normal coverage, every approved criterion and a relevant adverse case",
                 );
+              const unobserved = cases.filter(
+                (item) =>
+                  !hasCaseObservation(
+                    current.evidence,
+                    item.id,
+                    item.observationKind ?? (uiRequired ? "app" : "source"),
+                  ),
+              );
+              if (unobserved.length)
+                throw new CommandError(
+                  "conflict",
+                  `Review cases need their own declared observations: ${unobserved.map((item) => item.id).join(", ")}`,
+                );
               if (
-                result.ui === "checked" &&
-                cases.some(
+                uiRequired &&
+                (!cases.some(
                   (item) =>
-                    !current.evidence.some(
-                      (observation) =>
-                        observation["scenarioId"] === item.id && observation["kind"] === "browser",
-                    ),
-                )
+                    (item.observationKind ?? "app") === "app" &&
+                    item.category === "normal" &&
+                    hasCaseObservation(current.evidence, item.id, "app"),
+                ) ||
+                  !cases.some(
+                    (item) =>
+                      (item.observationKind ?? "app") === "app" &&
+                      ["error", "boundary"].includes(item.category) &&
+                      hasCaseObservation(current.evidence, item.id, "app"),
+                  ))
               )
                 throw new CommandError(
                   "conflict",
-                  "User-facing cases need their own actual App observations",
+                  "User-facing changes need actual normal and adverse App cases; source checks cannot replace them",
                 );
             }
           }

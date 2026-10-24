@@ -55,6 +55,23 @@ test("chapter navigation moves to the adjacent boundary without restarting playb
   expect(adjacentScenario(chapters, 0, -1)).toBeUndefined();
 });
 
+test("source checks are outcomes, not invented video chapters", () => {
+  const scenarios = [
+    ...chapters,
+    {
+      id: "checks",
+      title: "Protected checks",
+      category: "normal" as const,
+      observationKind: "source" as const,
+      startedMs: 8000,
+      endedMs: 10000,
+      status: "passed" as const,
+    },
+  ];
+  expect(scenarioAt(scenarios, 9)?.id).toBe("empty");
+  expect(adjacentScenario(scenarios, 5, 1)?.id).toBe("retry");
+});
+
 test("review clocks handle an unloaded recording and recordings longer than an hour", () => {
   expect(reviewTime(Number.NaN)).toBe("0:00");
   expect(reviewTime(-5)).toBe("0:00");

@@ -217,6 +217,11 @@ and Stop have settled. That creates a fresh attempt, never replays the old infer
 review still requires deliberate human approval of the exact commit before Staging promotion,
 unless an eligible monitoring fix has an active explicit Delivery delegation.
 New independent reviews name concrete normal and relevant adverse cases before observing them.
+Each case fixes whether it checks the App or immutable source. App cases require their own actual
+App observation before they can finish as passed or failed. Source checks use their own candidate
+read or diff and may cite Factory-confirmed exact-commit CI for executable checks. They cannot
+replace normal and adverse App coverage for user-facing changes, and are labelled Source check
+without an invented video position.
 The QA & review panel shows expected versus observed scenario outcomes even without a recording.
 When available, selectable chapters navigate each case in one real browser QA video, not duplicate
 clips. Recording failure or Project-level disable does not turn a successful App observation into

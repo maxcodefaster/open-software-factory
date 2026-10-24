@@ -336,6 +336,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Review Thread | Human feedback requiring explicit human resolution before Delivery |
 | Review Comment | Human feedback without a Delivery gate or automatic agent execution |
 | Delivery Approval | Immutable human decision or active monitoring delegation accepting one verified, reviewed commit for merge and promotion |
+| Review Case | A criterion-bound check with a fixed App or immutable-source observation kind and an expected versus observed outcome |
 | Promotion | Adopt the merged default-branch commit; switch Staging only when ready |
 | App | Named Project service declared by its System Contract |
 | Preview | Authenticated browser endpoint for one declared App |

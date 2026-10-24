@@ -297,7 +297,10 @@ export function ReviewPanel(props: {
         .replaceAll(">", "&gt;")
         .replaceAll("\n\n", "\n");
     const cues = scenarios
-      .filter((scenario) => scenario.hasRecordingPosition !== false)
+      .filter(
+        (scenario) =>
+          scenario.observationKind !== "source" && scenario.hasRecordingPosition !== false,
+      )
       .map(
         (scenario) =>
           `${time(scenario.startedMs)} --> ${time(Math.max(scenario.startedMs + 1, scenario.endedMs ?? duration))}\n${text([scenario.title, scenario.expected ? `Expected: ${scenario.expected}` : "", scenario.observed ? `Observed: ${scenario.observed}` : ""].filter(Boolean).join("\n"))}`,
@@ -330,7 +333,9 @@ export function ReviewPanel(props: {
     if (
       video.paused &&
       view()?.scenarios.some(
-        (item) => item.id === selectedScenario() && item.hasRecordingPosition === false,
+        (item) =>
+          item.id === selectedScenario() &&
+          (item.observationKind === "source" || item.hasRecordingPosition === false),
       )
     )
       return;
@@ -1022,11 +1027,16 @@ export function ReviewPanel(props: {
                           type="button"
                           aria-pressed={selectedScenario() === scenario.id ? "true" : "false"}
                           onClick={() => {
-                            if (scenario.hasRecordingPosition === false) video?.pause();
+                            if (
+                              scenario.observationKind === "source" ||
+                              scenario.hasRecordingPosition === false
+                            )
+                              video?.pause();
                             setSelectedScenario(scenario.id);
                             if (
                               video &&
                               view()?.recording?.state === "complete" &&
+                              scenario.observationKind !== "source" &&
                               scenario.hasRecordingPosition !== false
                             ) {
                               seek(scenario.startedMs / 1000);
@@ -1045,8 +1055,12 @@ export function ReviewPanel(props: {
                             <span class="sr-only">{scenario.status ?? "Unfinished"}: </span>
                           </span>
                           <span>{scenario.title}</span>
+                          <Show when={scenario.observationKind === "source"}>
+                            <small>Source check</small>
+                          </Show>
                           <Show
                             when={
+                              scenario.observationKind !== "source" &&
                               view()?.recording?.state === "complete" &&
                               scenario.hasRecordingPosition === false
                             }

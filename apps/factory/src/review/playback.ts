@@ -15,7 +15,7 @@ export function reviewTime(seconds: number, precise = false) {
 
 export function timedScenarios(scenarios: readonly Scenario[]) {
   return scenarios
-    .filter((item) => item.hasRecordingPosition !== false)
+    .filter((item) => item.observationKind !== "source" && item.hasRecordingPosition !== false)
     .toSorted((a, b) => a.startedMs - b.startedMs);
 }
 

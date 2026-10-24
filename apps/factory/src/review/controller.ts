@@ -206,16 +206,25 @@ export function createVisualReviewController(
           AND state IN ('pending','dispatching','running','uncertain') LIMIT 1`;
         const scenarios = recording
           ? await sql`
-              SELECT scenario.id,title,category,expected,observed,
+              SELECT scenario.id,title,category,observation_kind AS "observationKind",expected,observed,
                 LEAST(COALESCE(media.duration_ms,0),COALESCE(media_started_ms,0))::float8 AS "startedMs",
-                GREATEST(COALESCE(media_started_ms,0),
-                  COALESCE(LEAD(media_started_ms) OVER(ORDER BY started_at,scenario.id),media.duration_ms))::float8 AS "endedMs",
+                LEAST(COALESCE(media.duration_ms,0),GREATEST(COALESCE(media_started_ms,0),
+                  COALESCE(next_case.next_ms,media.duration_ms,0)))::float8 AS "endedMs",
                 (media_started_ms IS NOT NULL AND media_session_id IS NOT DISTINCT FROM media.browser_session_id)
                   AS "hasRecordingPosition",status
               FROM factory.review_scenario scenario JOIN factory.review_media media ON media.review_id=scenario.review_id
+              LEFT JOIN LATERAL (
+                SELECT following.media_started_ms AS next_ms FROM factory.review_scenario following
+                WHERE following.review_id=scenario.review_id
+                  AND (following.started_at,following.id)>(scenario.started_at,scenario.id)
+                  AND following.observation_kind IS DISTINCT FROM 'source'
+                  AND following.media_started_ms IS NOT NULL
+                  AND following.media_session_id IS NOT DISTINCT FROM media.browser_session_id
+                ORDER BY following.started_at,following.id LIMIT 1
+              ) next_case ON true
               WHERE media.id=${recording["id"] as string} ORDER BY started_at,scenario.id`
           : review
-            ? await sql`SELECT id,title,category,expected,observed,0::float8 AS "startedMs",NULL::float8 AS "endedMs",status
+            ? await sql`SELECT id,title,category,observation_kind AS "observationKind",expected,observed,0::float8 AS "startedMs",NULL::float8 AS "endedMs",status
               FROM factory.review_scenario WHERE review_id=${review.id} ORDER BY started_at,id`
             : [];
         return visualReviewSchema.parse({

@@ -376,6 +376,44 @@ test("new complete video replaces annotated video but keeps stills; remaining vi
   }
 });
 
+test("source checks stay outside video chapters and do not extend the preceding App chapter", async () => {
+  const f = await candidateReviewFixture();
+  const directory = await mkdtemp(join(tmpdir(), "factory-source-case-timing-"));
+  const media = createReviewMedia(f.database, directory);
+  const controller = createVisualReviewController(f.database);
+  try {
+    const recordingID = crypto.randomUUID();
+    await f.database.client`
+      INSERT INTO factory.review_media(id,change_id,review_id,kind,commit_sha,state)
+      VALUES(${recordingID},${f.changeID},${f.reviewID},'recording',${f.commit},'intended')`;
+    await media.publish(recordingID, new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]), 10000);
+    for (const [index, item] of [
+      { id: "first-app", kind: "app", position: 1000 },
+      { id: "source-check", kind: "source", position: null },
+      { id: "second-app", kind: "app", position: 6000 },
+    ].entries())
+      await f.database.client`
+        INSERT INTO factory.review_scenario(review_id,id,title,category,observation_kind,
+          criterion,expected,observed,status,started_at,ended_at,media_started_ms)
+        VALUES(${f.reviewID},${item.id},${item.id},'normal',${item.kind},1,'Expected','Observed','passed',
+          ${new Date(1700000000000 + index * 1000).toISOString()},${new Date(1700000000500 + index * 1000).toISOString()},${item.position})`;
+    const view = await controller.get(f.changeID, f.userID);
+    expect(view.scenarios.find((item) => item.id === "first-app")).toMatchObject({
+      observationKind: "app",
+      startedMs: 1000,
+      endedMs: 6000,
+      hasRecordingPosition: true,
+    });
+    expect(view.scenarios.find((item) => item.id === "source-check")).toMatchObject({
+      observationKind: "source",
+      hasRecordingPosition: false,
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await f.dispose();
+  }
+});
+
 test("image-free Preview anchors are idempotent and retain only their own Change's Runtime Attempt", async () => {
   const f = await candidateReviewFixture();
   const controller = createVisualReviewController(f.database);

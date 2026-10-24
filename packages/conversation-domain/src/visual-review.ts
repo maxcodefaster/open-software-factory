@@ -106,6 +106,7 @@ export const visualReviewSchema = z.object({
       id: z.string(),
       title: z.string(),
       category: z.enum(["normal", "error", "boundary"]),
+      observationKind: z.enum(["app", "source"]).nullish(),
       startedMs: z.number().nonnegative(),
       endedMs: z.number().nonnegative().nullable(),
       status: z.enum(["passed", "failed", "unverified"]).nullable(),

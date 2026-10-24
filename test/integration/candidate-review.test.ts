@@ -7,6 +7,7 @@ import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
+import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 
 function sourceFixture(ui = false) {
   const path = ui ? "src/app.tsx" : "src/sum.ts";
@@ -56,6 +57,7 @@ async function observedCases(
           id,
           title: category === "normal" ? "Ordinary sum" : "Zero boundary",
           category,
+          observationKind: context ? "app" : "source",
           criterion: 1,
           expected: "Adds operands correctly",
         },
@@ -224,6 +226,296 @@ test("frontend review rejects missing, dirty and different-commit screenshots", 
     expect((await f.review())?.result).toMatchObject({ verdict: "passed", ui: "checked" });
     expect(JSON.stringify((await f.review())?.evidence)).toContain("screenshotSHA256");
     expect(JSON.stringify((await f.review())?.evidence)).not.toContain("aGVsbG8=");
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("a frontend review can cover protected checks with an observed source-only case", async () => {
+  const f = await candidateReviewFixture(
+    canonicalRequirementContent({
+      summary: "Review the App and its protected checks",
+      acceptanceCriteria: ["The App behaves correctly", "The protected repository checks pass"],
+      nonGoals: [],
+    }),
+  );
+  const source = sourceFixture(true);
+  const controller = createCandidateReviewController(f.database, source.forge);
+  try {
+    const turn = await f.activeReview();
+    const context = {
+      sessionId: crypto.randomUUID(),
+      turnId: turn.id,
+      changeId: f.changeID,
+      runtimeAttemptId: f.attemptID,
+      generation: 1,
+      app: "app",
+      headCommit: f.commit,
+      workingTreeModified: false,
+      observedAt: new Date().toISOString(),
+    };
+    await controller.observeBrowser(
+      turn.id,
+      turn.ownerToken,
+      { name: "browser_screenshot", arguments: {} },
+      "candidate-screenshot",
+      {
+        structuredContent: context,
+        content: [{ type: "image", mimeType: "image/jpeg", data: "aGVsbG8=" }],
+      },
+    );
+    await observedCases(controller, turn, source.path, context);
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario",
+        arguments: {
+          id: "protected-checks",
+          title: "Protected source checks",
+          category: "normal",
+          observationKind: "source",
+          criterion: 2,
+          expected: "The exact verified candidate has relevant protected checks",
+        },
+      },
+      "checks-start",
+    );
+    await expect(
+      (async () => {
+        await f.database.client`
+        UPDATE factory.review_scenario SET observation_kind='app'
+        WHERE review_id=${f.reviewID} AND id='protected-checks'`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      { name: "review_read", arguments: { path: source.path } },
+      "checks-read",
+    );
+    await controller.observeBrowser(
+      turn.id,
+      turn.ownerToken,
+      { name: "browser_snapshot", arguments: {} },
+      "incidental-source-case-app-view",
+      {
+        structuredContent: { ...context, recordingTimeMs: 5000 },
+        content: [{ type: "text", text: "The App remained visible during source inspection" }],
+      },
+    );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario_result",
+        arguments: {
+          id: "protected-checks",
+          status: "passed",
+          observed:
+            "Inspected the immutable source; Factory already confirmed this exact candidate's CI",
+        },
+      },
+      "checks-result",
+    );
+    const [sourceCase] = await f.database.client<
+      { kind: string; position: string | null; session: string | null }[]
+    >`SELECT observation_kind AS kind,media_started_ms::text AS position,media_session_id AS session
+      FROM factory.review_scenario WHERE review_id=${f.reviewID} AND id='protected-checks'`;
+    expect(sourceCase).toEqual({ kind: "source", position: null, session: null });
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_report",
+        arguments: {
+          ...passed,
+          ui: "checked",
+          criteria: [
+            passed.criteria[0],
+            {
+              criterion: 2,
+              status: "passed",
+              evidence: "Exact successful CI and inspected source",
+            },
+          ],
+        },
+      },
+      "mixed-report",
+    );
+    expect((await f.review())?.result).toMatchObject({ verdict: "passed" });
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("an App case cannot be closed as passing before its own App observation", async () => {
+  const f = await candidateReviewFixture();
+  const source = sourceFixture(true);
+  const controller = createCandidateReviewController(f.database, source.forge);
+  try {
+    const turn = await f.activeReview();
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario",
+        arguments: {
+          id: "app-case",
+          title: "Actual App behavior",
+          category: "normal",
+          criterion: 1,
+          expected: "The visible App behaves correctly",
+        },
+      },
+      "app-start",
+    );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      { name: "review_read", arguments: { path: source.path } },
+      "source-only",
+    );
+    await expect(
+      controller.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_scenario_result",
+          arguments: { id: "app-case", status: "passed", observed: "Only source was inspected" },
+        },
+        "premature-result",
+      ),
+    ).rejects.toThrow("actual App observation");
+    const [row] = await f.database.client<{ active: boolean; status: string | null }[]>`
+      SELECT ended_at IS NULL AS active,status FROM factory.review_scenario
+      WHERE review_id=${f.reviewID} AND id='app-case'`;
+    expect(row).toEqual({ active: true, status: null });
+    await controller.observeBrowser(
+      turn.id,
+      turn.ownerToken,
+      { name: "browser_snapshot", arguments: {} },
+      "actual-app-observation",
+      {
+        structuredContent: {
+          sessionId: crypto.randomUUID(),
+          turnId: turn.id,
+          changeId: f.changeID,
+          runtimeAttemptId: f.attemptID,
+          generation: 1,
+          app: "app",
+          headCommit: f.commit,
+          workingTreeModified: false,
+          observedAt: new Date().toISOString(),
+        },
+        content: [{ type: "text", text: "The active case inspected the actual App" }],
+      },
+    );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario_result",
+        arguments: {
+          id: "app-case",
+          status: "passed",
+          observed: "The App matched its expected state",
+        },
+      },
+      "observed-result",
+    );
+    const [completed] = await f.database.client<{ active: boolean; status: string }[]>`
+      SELECT ended_at IS NULL AS active,status FROM factory.review_scenario
+      WHERE review_id=${f.reviewID} AND id='app-case'`;
+    expect(completed).toEqual({ active: false, status: "passed" });
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("source checks cannot replace normal and adverse App coverage for user-facing changes", async () => {
+  const f = await candidateReviewFixture();
+  const source = sourceFixture(true);
+  const controller = createCandidateReviewController(f.database, source.forge);
+  try {
+    const turn = await f.activeReview();
+    await controller.observeBrowser(
+      turn.id,
+      turn.ownerToken,
+      { name: "browser_screenshot", arguments: {} },
+      "global-screenshot",
+      {
+        structuredContent: {
+          sessionId: crypto.randomUUID(),
+          turnId: turn.id,
+          changeId: f.changeID,
+          runtimeAttemptId: f.attemptID,
+          generation: 1,
+          app: "app",
+          headCommit: f.commit,
+          workingTreeModified: false,
+          observedAt: new Date().toISOString(),
+        },
+        content: [{ type: "image", mimeType: "image/jpeg", data: "aGVsbG8=" }],
+      },
+    );
+    await observedCases(controller, turn, source.path);
+    await expect(
+      controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_report", arguments: { ...passed, ui: "checked" } },
+        "source-cannot-certify-ui",
+      ),
+    ).rejects.toThrow("source checks cannot replace");
+    expect((await f.review())?.result).toBeNull();
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("a source case needs its own candidate read or diff, not merely a base read", async () => {
+  const f = await candidateReviewFixture();
+  const source = sourceFixture();
+  const controller = createCandidateReviewController(f.database, source.forge);
+  try {
+    const turn = await f.activeReview();
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_scenario",
+        arguments: {
+          id: "source-case",
+          title: "Current source check",
+          category: "normal",
+          observationKind: "source",
+          criterion: 1,
+          expected: "The candidate uses correct addition",
+        },
+      },
+      "source-start",
+    );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      { name: "review_read", arguments: { path: source.path, revision: "base" } },
+      "base-read",
+    );
+    const result = {
+      name: "review_scenario_result",
+      arguments: { id: "source-case", status: "passed", observed: "Inspected addition" },
+    };
+    await expect(controller.call(turn.id, turn.ownerToken, result, "too-early")).rejects.toThrow(
+      "immutable candidate source",
+    );
+    await controller.call(
+      turn.id,
+      turn.ownerToken,
+      { name: "review_diff", arguments: { path: source.path } },
+      "candidate-diff",
+    );
+    await controller.call(turn.id, turn.ownerToken, result, "source-observed");
   } finally {
     await f.dispose();
   }

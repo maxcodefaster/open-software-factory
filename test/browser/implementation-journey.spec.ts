@@ -68,6 +68,123 @@ async function selectProject(page: Parameters<typeof signIn>[0]) {
     .click();
 }
 
+test("review distinguishes source checks from App video timing", async ({ page }) => {
+  const changeID = crypto.randomUUID();
+  const recordingID = crypto.randomUUID();
+  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
+    route.fulfill({
+      json: {
+        changes: [
+          {
+            id: changeID,
+            projectId: projectID,
+            ticketId: ticketID,
+            branchName: "factory/owned-source-case",
+            baseSha: "a".repeat(40),
+            state: "active",
+            runtimeState: "ready",
+            branchState: "succeeded",
+            implementationState: "committed",
+            buildTurnState: "completed",
+          },
+        ],
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
+    fulfillAgentView(route, {
+      json: {
+        state: "committed",
+        sessionAvailable: true,
+        runtimeConnected: true,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+      },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
+    route.fulfill({
+      json: { verificationState: "succeeded", reviewState: "passed", reviewCurrent: true },
+    }),
+  );
+  await page.route(`**/api/changes/${changeID}/review/media/${recordingID}`, (route) =>
+    route.fulfill({ status: 503, body: "Controlled video unavailability, not an App result." }),
+  );
+  await page.route(`**/api/changes/${changeID}/review`, (route) =>
+    route.fulfill({
+      json: {
+        feedback: [],
+        recordingEnabled: true,
+        recordingCurrent: true,
+        recording: {
+          id: recordingID,
+          state: "complete",
+          commitSha: "b".repeat(40),
+          durationMs: 15000,
+          reason: null,
+        },
+        scenarios: [
+          {
+            id: "source-check",
+            title: "Protected repository checks",
+            category: "normal",
+            observationKind: "source",
+            startedMs: 0,
+            endedMs: null,
+            hasRecordingPosition: false,
+            status: "passed",
+            expected: "The reviewed commit has relevant protected checks.",
+            observed: "Read the exact workflow and tests; Factory confirmed the same commit's CI.",
+          },
+          {
+            id: "app-check",
+            title: "Invalid App input",
+            category: "error",
+            observationKind: "app",
+            startedMs: 0,
+            endedMs: null,
+            hasRecordingPosition: false,
+            status: "passed",
+            expected: "Invalid input is rejected.",
+            observed: "The App showed its validation error.",
+          },
+        ],
+      },
+    }),
+  );
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "Ticket board" })
+    .getByRole("button")
+    .filter({ hasText: title })
+    .click();
+  const review = page.getByRole("region", { name: "Visual review", exact: true });
+  const source = review.getByRole("button", { name: /Protected repository checks Source check/ });
+  await expect(source).toBeVisible();
+  await expect(source).not.toContainText("Timing unavailable");
+  await expect(review.getByRole("button", { name: /Invalid App input/ })).toContainText(
+    "Timing unavailable",
+  );
+  await source.click();
+  await expect(
+    review.getByRole("definition").filter({ hasText: "The reviewed commit" }),
+  ).toBeVisible();
+  await expect(
+    review.getByText("Read the exact workflow and tests; Factory confirmed the same commit's CI.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  const evidence = ".factory/test-results/review-case-observations";
+  await mkdir(evidence, { recursive: true });
+  await page.screenshot({ path: `${evidence}/source-check-wide.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(source).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: `${evidence}/source-check-narrow.png`, fullPage: true });
+});
+
 for (const state of [
   { id: "personal-draft", primary: "Write requirements" },
   { id: "idea", primary: "Write requirements" },

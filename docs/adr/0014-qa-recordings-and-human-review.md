@@ -13,6 +13,15 @@ context. Video deletion retains the original recording metadata, so an earlier c
 can still be saved with its reviewed commit and timestamp without restoring the video.
 Encoder process measurements stay ephemeral.
 
+Each Review Case fixes its observation kind before work begins. App cases need their own actual
+App observation; source cases need their own immutable candidate read or diff and may cite the
+Factory-confirmed exact-commit Verification for executable checks. Normal/error/boundary describes
+the tested condition, not its evidence source. Source checks cannot replace normal and adverse
+App coverage for user-facing changes. They are labelled separately and have no invented video
+chapter position. A result without its required observation is rejected while the case remains
+active, so the reviewer can gather missing evidence without replaying an App mutation. Existing
+case intent and completed outcomes are not rewritten.
+
 Human comments and resolvable Threads are separate from immutable candidate-review results.
 Open Threads block Delivery under the same Change lock used by approval. Only an explicit
 correction submission admits work in the retained implementation Session. The agent can request
