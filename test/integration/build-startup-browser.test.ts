@@ -87,7 +87,12 @@ test("Build preparation distinguishes lost history and retains correction routin
     page = await context.newPage();
     await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
     page.on("request", (request) => {
-      if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
+      if (
+        request.method() === "POST" &&
+        /\/_server\/data\/(?:startCoding|resumeCoding|stopCoding|checkCodingStop|newCodingConversation|sendCodingPrompt|requestCodingChanges|startPersonalWorkspace|startTicketWorkspace|stopRuntimeAttempt)-/.test(
+          new URL(request.url()).pathname,
+        )
+      )
         mutations++;
     });
     await mockFactoryFunctions(page, {
@@ -104,7 +109,9 @@ test("Build preparation distinguishes lost history and retains correction routin
         },
       },
     });
-    await mockAgentView(page, changeID, async () => view(), { activity: false });
+    // Native stream snapshots carry the controlled status. Unavailable history
+    // is represented by messagesAvailable, not the real server's unrelated idle stream.
+    await mockAgentView(page, changeID, async () => view(), { activity: true });
     const lifecyclePage = page;
     await mockFactoryFunctions(lifecyclePage, {
       runtime: {
@@ -134,6 +141,8 @@ test("Build preparation distinguishes lost history and retains correction routin
             verificationState: "succeeded",
             verificationCommitSha: "b".repeat(40),
             verificationSummary: "The earlier submitted commit passed its exact checks.",
+            reviewState: "passed",
+            reviewCurrent: state === "committed",
           });
         },
       },
@@ -212,7 +221,7 @@ test("Build preparation distinguishes lost history and retains correction routin
     });
     state = "committed";
     turn = { ...turn, state: "completed" };
-    await visible(checks.locator("summary")).toContainText("Checks passed");
+    await visible(checks.locator("summary")).toContainText("Checks and independent review passed");
     await visible(checks.locator(".check-indicator")).toHaveClass(/passed/);
     state = "failed";
     turn = { ...turn, state: "failed" };
@@ -234,7 +243,10 @@ test("Build preparation distinguishes lost history and retains correction routin
     await visible.poll(() => prompts.length).toBe(1);
     await visible(
       narrowPanel.getByRole("button", { name: "Send message", exact: true }),
-    ).toBeDisabled();
+    ).toHaveCount(0);
+    await visible(
+      narrowPanel.getByRole("button", { name: "Stop OpenCode", exact: true }),
+    ).toBeVisible();
     if (prompts[0]?.text !== correction || researchRequests || mutations !== 1)
       throw Error("Correction must make exactly one scoped Build request, never research or Start");
     await page.screenshot({

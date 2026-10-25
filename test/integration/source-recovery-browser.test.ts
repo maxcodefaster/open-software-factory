@@ -10,6 +10,7 @@ import { chromium, expect as visible } from "@playwright/test";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 test("failed file access can be explicitly restarted without discarding the editor or starting compute", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -46,7 +47,7 @@ test("failed file access can be explicitly restarted without discarding the edit
         "--outDir",
         frontend,
       ],
-      { stdout: "ignore", stderr: "pipe" },
+      { env: productionBuildEnvironment(process.env), stdout: "ignore", stderr: "pipe" },
     );
     const buildError = await new Response(build.stderr).text();
     if (await build.exited)

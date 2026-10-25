@@ -8,8 +8,24 @@ import {
   needsTheiaTestBuild,
   needsStarterTestDependencies,
   prerequisiteFingerprint,
+  productionBuildEnvironment,
   verificationEnvironment,
 } from "./test-prerequisites";
+
+test("owned frontend builds cannot inherit development transport from Bun's test environment", () => {
+  for (const nodeEnvironment of [undefined, "test", "development", "production"]) {
+    const parent = {
+      NODE_ENV: nodeEnvironment,
+      PATH: "/pinned-tools",
+      FACTORY_BUILD_DIRECTORY: "/owned/frontend",
+    };
+    expect(productionBuildEnvironment(parent)).toEqual({
+      ...parent,
+      NODE_ENV: "production",
+    });
+    expect(parent.NODE_ENV).toBe(nodeEnvironment);
+  }
+});
 
 test("only the real local TLS IdP fixture adds its CA to the child process", async () => {
   expect(needsOIDCTestCA('import { oidcProviderFixture } from "../fixtures/oidc-provider";')).toBe(

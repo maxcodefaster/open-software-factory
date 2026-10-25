@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { factoryProcess } from "../fixtures/factory-process";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 test("actual Factory chat groups retained activity and preserves native disclosure through reconnect", async () => {
   const owned = await factoryProcess();
@@ -22,6 +23,7 @@ test("actual Factory chat groups retained activity and preserves native disclosu
         frontend,
       ],
       {
+        env: productionBuildEnvironment(process.env),
         stdout: "ignore",
         stderr: "pipe",
       },

@@ -118,7 +118,7 @@ if (import.meta.main) {
       if (buildDirectory) {
         env["FACTORY_BUILD_DIRECTORY"] = buildDirectory;
         const build = Bun.spawn([process.execPath, "run", "factory:build"], {
-          env,
+          env: prerequisites.productionBuildEnvironment(env),
           stdout: "inherit",
           stderr: "inherit",
         });

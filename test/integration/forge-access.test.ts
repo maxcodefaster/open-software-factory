@@ -288,6 +288,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       FACTORY_FORGEJO_ADMIN_TOKEN: token,
     });
     await wiredFactory.start();
+    let reloads = 0;
     const wiring = {
       factoryURL: wiredFactory.base,
       forgeURL: origin,
@@ -304,6 +305,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
             command(["docker", "cp", source, `${container}:${destination}`]),
         }),
       reload: async () => {
+        reloads++;
         await command(["docker", "restart", container]);
         await eventually(
           () => fetch(`${origin}/api/healthz`).catch(() => undefined),
@@ -313,8 +315,12 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
         );
       },
     };
-    await ensureLocalForgeIdentity(wiring);
-    await ensureLocalForgeIdentity(wiring);
+    const identity = await ensureLocalForgeIdentity(wiring);
+    expect(reloads).toBe(1);
+    expect(
+      await ensureLocalForgeIdentity({ ...wiring, retainedSourceID: identity.sourceID }),
+    ).toEqual(identity);
+    expect(reloads).toBe(1);
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext();
     const page = await context.newPage();

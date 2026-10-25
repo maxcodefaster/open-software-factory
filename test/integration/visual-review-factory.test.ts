@@ -16,6 +16,7 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 // Real Factory entry, auth, planning cache, Ticket and review commands. Only the
 // runtime observation/transport is scripted; this test starts no Sandbox or model.
@@ -42,7 +43,7 @@ test("review fits the actual Factory Ticket and retains human work in its existi
         "--outDir",
         frontend,
       ],
-      { stdout: "ignore", stderr: "pipe" },
+      { env: productionBuildEnvironment(process.env), stdout: "ignore", stderr: "pipe" },
     );
     const buildError = await new Response(build.stderr).text();
     if (await build.exited)
@@ -309,7 +310,7 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     );
     const buttonStyle = await primary.evaluate((node) => {
       const reference = document.createElement("button");
-      reference.className = "ticket-header-action";
+      reference.className = "workspace-action ticket-header-action";
       reference.setAttribute("data-primary", "true");
       reference.textContent = "Implement";
       node.parentElement!.append(reference);

@@ -16,6 +16,13 @@ export function verificationEnvironment(environment: Record<string, string | und
   return env;
 }
 
+// Bun tests set NODE_ENV=test. A built frontend is served by the real backend,
+// not Vite's development proxy, so it must not compile import.meta.env.DEV=true.
+// Keep the test runner's own environment unchanged.
+export function productionBuildEnvironment(environment: Record<string, string | undefined>) {
+  return { ...environment, NODE_ENV: "production" };
+}
+
 export function needsTheiaTestBuild(source: string) {
   return scanner
     .scanImports(source)
