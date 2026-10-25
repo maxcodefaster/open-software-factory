@@ -153,6 +153,10 @@ session-reported, exact-Attempt identities, never backend-local `file://` access
 remain syntax-only. Arbitrary language plugins, shell commands, server edits, general formatting
 and refactoring are not part of the preset.
 
+The separate [Factorybox admission command](../deploy/factorybox/README.md) controls dedicated
+private-store workers for integration proofs. It does not change Workspace Start or reserve
+selection. [ADR 0021](adr/0021-factorybox-worker-admission.md) records the canonical-source boundary.
+
 Every Sandbox uses the same topology:
 
 ```text

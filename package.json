@@ -23,6 +23,7 @@
     "lint": "biome lint .",
     "typecheck": "bun scripts/testing/typecheck.ts",
     "runtime:conformance": "bun scripts/runtime/conformance.ts",
+    "factorybox:worker": "bun scripts/runtime/factorybox-worker.ts",
     "connector:check": "bun run connector:check:host && bun run connector:check:linux",
     "connector:check:host": "cd services/runtime-connector && go test -race ./... && go vet ./...",
     "connector:check:linux": "bun scripts/testing/connector-linux.ts",
