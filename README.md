@@ -31,6 +31,12 @@ then supply the browser-facing Factory and Forgejo origins. See the chart's
 Ingress, credentials and retained data. Development images may be built locally; the installed
 application does not build its own tools or require a source checkout on the operator's machine.
 
+The image workflow publishes only when a GitHub release is published, never on branch pushes or
+pull requests. A release tag such as `v0.1.0` must point to a commit contained in `main`.
+Native AMD64 and ARM64 jobs build the runtime roles and Factory, then publish their combined
+manifests. Existing versioned architecture images are not overwritten. Publishing Factory does
+not admit a Factorybox worker or activate an installation.
+
 For local browser access, install with `deploy/helm/factory/values.local.yaml` and your
 cluster-reachable application image. Then run:
 

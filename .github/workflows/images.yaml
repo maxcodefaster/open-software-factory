@@ -1,19 +1,35 @@
 name: Publish distribution images
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Immutable release version, for example 0.1.0
-        required: true
-        type: string
+  release:
+    types: [published]
 permissions:
   contents: read
   packages: write
 concurrency:
-  group: distribution-${{ inputs.version }}
+  group: distribution-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 jobs:
+  release:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+      - name: Validate release tag and consolidated source
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.-]+)?$ ]]
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
+          git merge-base --is-ancestor HEAD origin/main
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
   roles:
+    needs: release
     strategy:
       fail-fast: false
       matrix:
@@ -24,7 +40,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      RELEASE: ${{ inputs.version }}
+      RELEASE: ${{ needs.release.outputs.version }}
       ARCH: ${{ matrix.arch }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
@@ -44,6 +60,10 @@ jobs:
           docker buildx create --use
           for role in runtime-host build-runtime-host verification-runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
+            if docker buildx imagetools inspect "$image" > /dev/null 2>&1; then
+              echo "Architecture image already exists: $image"
+              exit 1
+            fi
             dockerfile=deploy/runtime-host/Dockerfile
             target=(--target "$role")
             if [[ "$role" == browser-tools || "$role" == workspace-files ]]; then
@@ -54,12 +74,12 @@ jobs:
               --file "$dockerfile" "${target[@]}" --tag "$image" .
           done
   manifests:
-    needs: roles
+    needs: [release, roles]
     runs-on: ubuntu-24.04
     outputs:
       artifacts: ${{ steps.publish.outputs.artifacts }}
     env:
-      RELEASE: ${{ inputs.version }}
+      RELEASE: ${{ needs.release.outputs.version }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
       - name: Publish multi-architecture role manifests
@@ -80,7 +100,7 @@ jobs:
           done
           printf 'artifacts=%s\n' "$artifacts" >> "$GITHUB_OUTPUT"
   factory:
-    needs: manifests
+    needs: [release, manifests]
     strategy:
       fail-fast: false
       matrix:
@@ -91,7 +111,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     env:
-      RELEASE: ${{ inputs.version }}
+      RELEASE: ${{ needs.release.outputs.version }}
       ARCH: ${{ matrix.arch }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
@@ -105,14 +125,18 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker buildx create --use
+          if docker buildx imagetools inspect "$IMAGE_ROOT/factory:$RELEASE-$ARCH" > /dev/null 2>&1; then
+            echo 'Factory architecture image already exists. Choose a new release version.'
+            exit 1
+          fi
           docker buildx build --platform "linux/$ARCH" --provenance=false --push \
             --file deploy/factory/Dockerfile --build-arg FACTORY_RUNTIME_ARTIFACTS \
             --tag "$IMAGE_ROOT/factory:$RELEASE-$ARCH" .
   distribution:
-    needs: factory
+    needs: [release, factory]
     runs-on: ubuntu-24.04
     env:
-      RELEASE: ${{ inputs.version }}
+      RELEASE: ${{ needs.release.outputs.version }}
       IMAGE_ROOT: ghcr.io/${{ github.repository }}
     steps:
       - name: Publish multi-architecture Factory manifest

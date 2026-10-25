@@ -30,14 +30,28 @@ test("application build tools match the upstream artifact pins", async () => {
   expect(dockerfile).toContain('"scripts/kubernetes/start.ts"');
 });
 
-test("publication is explicit and builds both architectures natively", async () => {
+test("only published releases build and publish both architectures natively", async () => {
   const workflow = parse(
     await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
   );
-  expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);
+  expect(workflow.on).toEqual({ release: { types: ["published"] } });
+  expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
+  const validate = workflow.jobs.release.steps.find(
+    (step: { id?: string }) => step.id === "version",
+  );
+  expect(validate.env.RELEASE_TAG).toBe("${{ github.event.release.tag_name }}");
+  expect(validate.run).toContain('version="${RELEASE_TAG#v}"');
+  expect(validate.run).toContain("git merge-base --is-ancestor HEAD origin/main");
+  expect(workflow.jobs.roles.needs).toBe("release");
+  expect(workflow.jobs.distribution.needs).toEqual(["release", "factory"]);
   for (const job of ["roles", "factory"])
     expect(workflow.jobs[job].strategy.matrix.include).toEqual([
       { arch: "amd64", runner: "ubuntu-24.04" },
       { arch: "arm64", runner: "ubuntu-24.04-arm" },
     ]);
+  for (const job of ["roles", "manifests", "factory", "distribution"])
+    expect(workflow.jobs[job].env.RELEASE).toBe("${{ needs.release.outputs.version }}");
+  expect(JSON.stringify(workflow)).not.toContain("setup-qemu");
+  expect(workflow.jobs.factory.needs).toContain("manifests");
+  expect(workflow.jobs.manifests.needs).toContain("roles");
 });
