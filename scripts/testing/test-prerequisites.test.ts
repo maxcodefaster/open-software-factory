@@ -1,10 +1,48 @@
 import { expect, test } from "bun:test";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  appendOwnedTestCA,
+  needsOIDCTestCA,
   needsTheiaTestBuild,
   needsStarterTestDependencies,
   prerequisiteFingerprint,
   verificationEnvironment,
 } from "./test-prerequisites";
+
+test("only the real local TLS IdP fixture adds its CA to the child process", async () => {
+  expect(needsOIDCTestCA('import { oidcProviderFixture } from "../fixtures/oidc-provider";')).toBe(
+    true,
+  );
+  expect(needsOIDCTestCA('const text = "fixtures/oidc-provider";')).toBe(false);
+  const directory = await mkdtemp(join(tmpdir(), "factory-test-ca-"));
+  const original = join(directory, "existing.pem");
+  const certificate =
+    "-----BEGIN CERTIFICATE-----\nowned-public-test-ca\n-----END CERTIFICATE-----";
+  const env: Record<string, string | undefined> = {
+    NODE_EXTRA_CA_CERTS: original,
+    UNRELATED: "preserved",
+  };
+  try {
+    await writeFile(original, "existing-public-ca\n");
+    await appendOwnedTestCA(env, certificate, directory);
+    const bundle = env["NODE_EXTRA_CA_CERTS"]!;
+    expect(bundle).not.toBe(original);
+    expect(await readFile(original, "utf8")).toBe("existing-public-ca\n");
+    expect(await readFile(bundle, "utf8")).toContain("existing-public-ca\n");
+    expect(await readFile(bundle, "utf8")).toContain(certificate);
+    expect(env["NODE_TLS_REJECT_UNAUTHORIZED"]).toBeUndefined();
+    expect(env["UNRELATED"]).toBe("preserved");
+    await appendOwnedTestCA(env, certificate, directory);
+    expect(env["NODE_EXTRA_CA_CERTS"]).toBe(bundle);
+    await expect(appendOwnedTestCA(env, "PRIVATE KEY", directory)).rejects.toThrow(
+      "public certificates only",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("both Starter proof entrypoints prepare the template's locked dependencies", () => {
   expect(needsStarterTestDependencies(["test/integration/starter.test.ts"])).toBe(true);

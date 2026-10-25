@@ -4,6 +4,7 @@ import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
 
 test("automatic preparation coalesces exact jobs, bounds producers and fences results to runtime environment", async () => {
   const process = await factoryProcess();
@@ -76,6 +77,7 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
       VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended','owned-preparation','runtime-2',${(await database.client<{ hash: string }[]>`SELECT parent_connector_token_hash AS hash FROM factory.runtime_attempt WHERE id=${owned.attemptID}`)[0]!.hash},${"c".repeat(64)},now(),${owned.userID})`;
     await database.client`UPDATE factory.project_image_preparation SET runtime_attempt_id=${producerID} WHERE id=${preparationID}`;
     await freezeRuntimeArtifacts(database.client, producerID, {
+      factoryboxProfile: ownedFactoryboxProfile,
       hostImages: {
         development: "registry.test/runtime@sha256:" + "d".repeat(64),
         build: undefined,

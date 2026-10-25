@@ -9,7 +9,10 @@ test("Build freezes only authorized active Project Knowledge in its exact dispat
   const archivedID = crypto.randomUUID();
   const otherProjectID = crypto.randomUUID();
   const otherPageID = crypto.randomUUID();
+  const outsiderID = crypto.randomUUID();
   try {
+    await owned.database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${outsiderID},'Unrelated Project reader',${`knowledge-outsider-${outsiderID}@factory.local`},true)`;
     await owned.database.client`INSERT INTO factory.project(id, slug, name, repository_url,
       default_branch, devcontainer_path, created_by) VALUES(${otherProjectID}, ${`knowledge-denial-${otherProjectID}`},
       'Other Project', 'https://example.invalid/other.git', 'main', '.devcontainer/devcontainer.json', ${owned.userID})`;
@@ -49,7 +52,7 @@ test("Build freezes only authorized active Project Knowledge in its exact dispat
     await admission.admit(owned.changeID, owned.userID, request);
     expect((await admission.intent(turn.turn.id)).text).toBe(intent.text);
     await expect(
-      admission.admit(owned.changeID, crypto.randomUUID(), {
+      admission.admit(owned.changeID, outsiderID, {
         ...request,
         commandId: crypto.randomUUID(),
       }),
@@ -60,6 +63,7 @@ test("Build freezes only authorized active Project Knowledge in its exact dispat
       await sql`DELETE FROM factory.knowledge_revision WHERE page_id IN (${pageID}, ${archivedID}, ${otherPageID})`;
       await sql`DELETE FROM factory.knowledge_page WHERE id IN (${pageID}, ${archivedID}, ${otherPageID})`;
       await sql`DELETE FROM factory.project WHERE id = ${otherProjectID}`;
+      await sql`DELETE FROM auth."user" WHERE id = ${outsiderID}`;
     });
     await owned.dispose();
   }

@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
-import { createDatabase } from "../../packages/db/src/client";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test("Wiki search combines active pages and source documents without repeating exact reads", async () => {
-  const database = createDatabase(1);
+  const host = await factoryProcess();
+  const database = host.connect(1);
   const projectID = crypto.randomUUID();
-  const userID = "01994a7d-0000-7000-8000-000000000001";
+  const userID = crypto.randomUUID();
   const owner = process.env["FACTORY_FORGEJO_OWNER"] ?? "factory-mutation";
   const previous = {
     FACTORY_FORGEJO_OWNER: process.env["FACTORY_FORGEJO_OWNER"],
@@ -31,6 +32,9 @@ test("Wiki search combines active pages and source documents without repeating e
     },
   });
   try {
+    await database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${userID},'Owned Wiki administrator',${`wiki-admin-${projectID}@factory.local`},true)`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${userID})`;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${`wiki-search-${projectID}`},'Wiki search',${`http://forge.invalid/${owner}/wiki.git`},'main','.devcontainer/devcontainer.json',${userID})`;
     for (const state of ["active", "archived"] as const) {
@@ -71,7 +75,10 @@ test("Wiki search combines active pages and source documents without repeating e
     await database.client`DELETE FROM factory.project_membership WHERE project_id=${projectID}`;
     await database.client`DELETE FROM auth."user" WHERE email=${`wiki-reader-${projectID}@factory.local`}`;
     await database.client`DELETE FROM factory.project WHERE id=${projectID}`;
+    await database.client`DELETE FROM factory.administrator WHERE user_id=${userID}`;
+    await database.client`DELETE FROM auth."user" WHERE id=${userID}`;
     await database.client.end();
+    await host.dispose();
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;

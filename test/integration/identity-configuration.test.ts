@@ -159,7 +159,7 @@ test("native company sign-in check survives restart and unrelated state cookies 
     const secondID = crypto.randomUUID();
     await control.save(admin.user.id, { commandID: firstID, version: 0, configuration });
     const first = await post("sign-in/sso", { setupCommandID: firstID }, adminCookie);
-    expect(first.status).toBe(200);
+    expect(first.status, first.status === 200 ? undefined : await first.clone().text()).toBe(200);
     await control.save(admin.user.id, { commandID: secondID, version: 0, configuration });
     const second = await post("sign-in/sso", { setupCommandID: secondID }, adminCookie);
     expect(second.status).toBe(200);

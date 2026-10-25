@@ -24,6 +24,28 @@ export function needsTheiaTestBuild(source: string) {
     );
 }
 
+export function needsOIDCTestCA(source: string) {
+  return scanner.scanImports(source).some(({ path }) => /\/fixtures\/oidc-provider$/.test(path));
+}
+
+export async function appendOwnedTestCA(
+  env: Record<string, string | undefined>,
+  certificate: string,
+  directory: string,
+) {
+  if (!certificate.includes("-----BEGIN CERTIFICATE-----") || certificate.includes("PRIVATE KEY"))
+    throw new Error("Owned test CA must contain public certificates only");
+  const previous = env["NODE_EXTRA_CA_CERTS"];
+  const existing = previous ? await readFile(previous, "utf8") : "";
+  if (existing.includes(certificate.trim())) return;
+  const bundle = `${existing.trimEnd()}\n${certificate.trim()}\n`;
+  const digest = new Bun.CryptoHasher("sha256").update(bundle).digest("hex");
+  await mkdir(directory, { recursive: true });
+  const path = resolve(directory, `oidc-ca-${digest}.pem`);
+  await writeFile(path, bundle, { mode: 0o600 });
+  env["NODE_EXTRA_CA_CERTS"] = path;
+}
+
 export function needsStarterTestDependencies(selected: readonly string[]) {
   return selected.some((path) =>
     ["/starter.test.ts", "/starter-preview-auth.test.ts"].some((suffix) => path.endsWith(suffix)),
@@ -64,12 +86,21 @@ export async function prepareTestPrerequisites(
   selected: string[],
   env: Record<string, string | undefined>,
 ) {
-  const theia = (
-    await Promise.all(selected.map((path) => readFile(resolve(root, path), "utf8")))
-  ).some(needsTheiaTestBuild);
+  const sources = await Promise.all(selected.map((path) => readFile(resolve(root, path), "utf8")));
+  const theia = sources.some(needsTheiaTestBuild);
   const starter = needsStarterTestDependencies(selected);
-  if (!theia && !starter) return;
   const cache = resolve(root, ".factory/cache/test-prerequisites");
+  if (sources.some(needsOIDCTestCA)) {
+    const mkcert = Bun.spawn(["mise", "exec", "--", "mkcert", "-CAROOT"], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const caRoot = (await new Response(mkcert.stdout).text()).trim();
+    if ((await mkcert.exited) !== 0 || !caRoot) throw new Error("Owned OIDC test CA unavailable");
+    await appendOwnedTestCA(env, await readFile(resolve(caRoot, "rootCA.pem"), "utf8"), cache);
+  }
+  if (!theia && !starter) return;
   await mkdir(cache, { recursive: true });
   for (const target of [
     ...(theia ? [{ name: "theia", directory: "deploy/theia-ide" }] : []),

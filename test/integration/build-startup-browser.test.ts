@@ -166,7 +166,8 @@ test("Build preparation distinguishes lost history and retains correction routin
       .getByRole("button")
       .filter({ hasText: "Initial Build startup" })
       .click();
-    await page.getByRole("button", { name: "Open IDE", exact: true }).click();
+    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
     const panel = page.getByRole("complementary", { name: "Agent panel" });
     if (!(await panel.isVisible()))
       await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();

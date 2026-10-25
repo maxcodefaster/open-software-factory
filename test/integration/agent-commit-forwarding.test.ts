@@ -4,7 +4,6 @@ import type { ServerWebSocket } from "bun";
 import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { fixture } from "../fixtures/change-agent-turns";
 
@@ -38,7 +37,7 @@ async function forwarding(connections?: number) {
     action: "git-prepare-commit" as const,
     expectedSha: "a".repeat(40),
   };
-  const database = connections ? createDatabase(connections) : owned.database;
+  const database = connections ? owned.connect(connections) : owned.database;
   const hub = new RuntimeHub(async () => {});
   const frames: Record<string, string>[] = [];
   const parent = {
@@ -124,8 +123,8 @@ test.each([
     }
     if (boundary === "mode")
       await owned.database
-        .client`INSERT INTO factory.ticket_conversation(id, project_id, ticket_id, mode, created_by)
-        VALUES (${crypto.randomUUID()}, ${owned.projectID}, ${owned.ticketID}, 'plan', ${owned.userID})`;
+        .client`UPDATE factory.ticket_conversation SET mode='plan',version=version+1
+        WHERE project_id=${owned.projectID} AND ticket_id=${owned.ticketID}`;
     if (boundary === "generation")
       await owned.database
         .client`UPDATE factory.change SET runtime_attempt_id = NULL WHERE id = ${owned.changeID}`;

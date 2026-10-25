@@ -5,6 +5,7 @@ import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-c
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
 
 async function bounded<T>(work: Promise<T>, boundary: string) {
   return Promise.race([
@@ -16,6 +17,7 @@ async function bounded<T>(work: Promise<T>, boundary: string) {
 }
 
 test("Forge reconciliation, writer handoff and reserve waits leave a one-connection application pool usable", async () => {
+  const restoreConfiguration = installOwnedRuntimeConfiguration();
   const host = await factoryProcess();
   const database = host.connect(1);
   const release = Promise.withResolvers<void>();
@@ -96,5 +98,6 @@ test("Forge reconciliation, writer handoff and reserve waits leave a one-connect
     await reconcile?.catch(() => undefined);
     await reserve?.close();
     await host.dispose();
+    restoreConfiguration();
   }
 }, 60_000);

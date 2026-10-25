@@ -51,8 +51,9 @@ test("actual Factory chat groups retained activity and preserves native disclosu
     const base = owned.base;
     child = Bun.spawn(
       [
-        "node",
-        resolve("node_modules/@playwright/test/cli.js"),
+        process.execPath,
+        "--no-env-file",
+        "node_modules/@playwright/test/cli.js",
         "test",
         "test/browser/implementation-journey.spec.ts",
         "test/browser/chat-conversations.spec.ts",

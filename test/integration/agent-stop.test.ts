@@ -4,6 +4,7 @@ import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { ensureConversationIn } from "../../apps/factory/src/project-agent/conversation-store";
 
 type Owned = Awaited<ReturnType<typeof fixture>>;
 
@@ -137,6 +138,9 @@ function afterPublication(owned: Owned, after: () => Promise<void>) {
 
 test("a held Stop cannot interrupt newer work admitted into the same Session", async () => {
   const owned = await fixture();
+  await owned.database.client.begin((sql) =>
+    ensureConversationIn(sql, owned.projectID, owned.ticketID, owned.userID),
+  );
   const entered = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   const request = owned.hub.request.bind(owned.hub);

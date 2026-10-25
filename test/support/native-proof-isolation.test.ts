@@ -52,6 +52,7 @@ test("owned UI hosts and compiled-function browser runners disable implicit work
     "test/integration/server-function-ui-fixtures.test.ts",
     "test/integration/server-function-workspaces.test.ts",
     "test/integration/server-functions.test.ts",
+    "test/integration/chat-factory-browser.test.ts",
   ]) {
     const source = await readFile(file, "utf8");
     expect(
