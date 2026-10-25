@@ -10,6 +10,14 @@ development: false
 developmentZeroURL: ""
 adminEmail: admin@factory.local
 
+# Exact private image and node tuple admitted with Factorybox native acceptance.
+factorybox:
+  image: ""
+  executableSHA256: ""
+  nodeName: ""
+  kernel: ""
+executionReserveTarget: 0
+
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.
 storageClass: ""
 stateSize: 1Gi

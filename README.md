@@ -8,8 +8,9 @@ Factory records the delegation rather than pretending a human reviewed generated
 
 The application uses Solid 2, Bun and PostgreSQL. Zero supplies planning mutations and cached read
 projections. Mastra handles Project research and Requirements Interviews; OpenCode 2 implements
-approved Changes. Forgejo owns Git and Verification runs. Every execution Sandbox uses Envbox,
-Sysbox, a private Docker daemon, the Dev Containers CLI and the Factory Runtime Connector.
+approved Changes. Forgejo owns Git and Verification runs. Every new execution Sandbox uses an
+admitted Factorybox worker, pinned Sysbox and CRIU, a private Docker daemon, the Dev Containers CLI
+and the Factory Runtime Connector.
 
 ## Install into existing Kubernetes
 
@@ -20,8 +21,9 @@ install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
 
 The chart runs Factory, PostgreSQL, Forgejo, Zero and encrypted OpenBao in Kubernetes. Internal
 callbacks use Services and the application uses its ServiceAccount, without a personal kubeconfig
-or a mounted host Docker socket. Envbox execution still requires compatible Linux workers,
-permission for privileged outer Pods and usable persistent storage.
+or a mounted host Docker socket. Factorybox execution requires an admitted Linux node/kernel
+profile, permission for privileged outer Pods and usable persistent storage. Supply the exact
+private worker image and executable hash in the chart's `factorybox` values.
 
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's

@@ -4,7 +4,7 @@ import { createIdleCompute, executionIdleMS } from "../../apps/factory/src/runti
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
-test("idle compute records Stop before execution and leaves Workspace source/approval intact", async () => {
+test("idle compute records Pause before execution and leaves Workspace source/approval intact", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
   let idle: ReturnType<typeof createIdleCompute> | undefined;
@@ -15,11 +15,11 @@ test("idle compute records Stop before execution and leaves Workspace source/app
       database,
       { claimIdle: () => true, releaseIdle: () => {} },
       {
-        async stop(attemptID) {
+        async pause(attemptID) {
           expect(attemptID).toBe(owned.attemptID);
           const [intent] = await database.client<Array<{ state: string; stopped: boolean }>>`
           SELECT state,stop_intended_at IS NOT NULL AS stopped FROM factory.runtime_attempt WHERE id=${attemptID}`;
-          expect(intent).toEqual({ state: "stop-intended", stopped: true });
+          expect(intent).toEqual({ state: "pausing", stopped: false });
           stops++;
         },
       },
@@ -68,7 +68,7 @@ test("idle compute records Stop before execution and leaves Workspace source/app
         releaseIdle() {},
       },
       {
-        async stop(id) {
+        async pause(id) {
           expect(id).toBe(tail);
         },
       },
@@ -85,7 +85,7 @@ test("idle compute records Stop before execution and leaves Workspace source/app
   }
 }, 60_000);
 
-test("idle Stop waits for Build admission and retains pending, working and uncertain work", async () => {
+test("idle Pause waits for Build admission and retains pending, working and uncertain work", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
   const admitted = Promise.withResolvers<void>();
@@ -105,7 +105,7 @@ test("idle Stop waits for Build admission and retains pending, working and uncer
         releaseIdle() {},
       },
       {
-        async stop() {
+        async pause() {
           throw new Error("Active work must not stop");
         },
       },
@@ -174,7 +174,7 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
         },
       },
       {
-        async stop() {
+        async pause() {
           throw new Error("Uncommitted intent cannot stop compute");
         },
       },

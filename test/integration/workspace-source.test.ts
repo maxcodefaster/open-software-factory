@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { hashConnectorToken, runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import type {
@@ -18,6 +19,32 @@ async function ownedSourceFixture(maxConnections = 10) {
   const developerID = crypto.randomUUID();
   const otherDeveloperID = crypto.randomUUID();
   const contributorID = crypto.randomUUID();
+  const directory = resolve(".factory/test-results", `source-repository-${projectID}`);
+  await mkdir(resolve(".factory/test-results"), { recursive: true });
+  await mkdir(directory);
+  await writeFile(resolve(directory, "owner"), projectID, { flag: "wx" });
+  const repository = resolve(directory, "repository");
+  for (const args of [
+    ["init", "-b", "main", repository],
+    [
+      "-C",
+      repository,
+      "-c",
+      "user.name=Source fixture",
+      "-c",
+      "user.email=source@factory.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "Owned source fixture",
+    ],
+  ]) {
+    const command = Bun.spawn(["git", ...args], { stdout: "ignore", stderr: "pipe" });
+    if (await command.exited)
+      throw new Error(
+        `Owned Source repository setup failed: ${await new Response(command.stderr).text()}`,
+      );
+  }
   for (const [id, role] of [
     [developerID, "developer"],
     [otherDeveloperID, "developer"],
@@ -25,7 +52,7 @@ async function ownedSourceFixture(maxConnections = 10) {
   ] as const) {
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Source fixture user',${`${id}@factory.invalid`})`;
     if (id === developerID)
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`source-${projectID}`},'Independent source',${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${developerID})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`source-${projectID}`},'Independent source',${`file://${repository}`},'main','.devcontainer/devcontainer.json',${developerID})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${id},${role},${developerID})`;
   }
   const previousImages = {
@@ -48,9 +75,64 @@ async function ownedSourceFixture(maxConnections = 10) {
       }
       await database.client.end({ timeout: 2 });
       await processFixture.dispose();
+      if ((await readFile(resolve(directory, "owner"), "utf8")) !== projectID)
+        throw new Error("Owned source test repository changed before cleanup");
+      await rm(directory, { recursive: true });
     },
   };
 }
+
+test("new Source placement uses the admitted Factorybox node before any execution exists", async () => {
+  const fixture = await ownedSourceFixture();
+  const previous = process.env["FACTORY_FACTORYBOX_NODE"];
+  process.env["FACTORY_FACTORYBOX_NODE"] = "admitted-worker";
+  const requested: SourceResources[] = [];
+  const observed: SourceResourceObservation = {
+    namespaceUID: "placement-namespace",
+    claimUID: "placement-claim",
+    podUID: "placement-pod",
+    storageNode: "admitted-worker",
+    ready: true,
+    failed: false,
+  };
+  const sources = createWorkspaceSourceController(fixture.database, "source-placement-fixture", {
+    async executionNode() {
+      throw new Error("Source does not need running execution");
+    },
+    async prepare(input) {
+      requested.push(input);
+      return observed;
+    },
+    async observe() {
+      return observed;
+    },
+    async connect() {},
+    async stop() {},
+    close() {},
+    async request() {
+      throw new Error("No file request needed");
+    },
+  });
+  try {
+    const first = await sources.ensurePersonal(fixture.projectID, fixture.developerID);
+    await eventually(
+      () => sources.get(first.workspaceID, fixture.developerID),
+      (view) => view.state === "ready",
+      "Source did not retain the admitted node",
+    );
+    expect(requested).toHaveLength(1);
+    expect(requested[0]?.storageNode).toBe("admitted-worker");
+    const [source] = await fixture.database.client<
+      Array<{ node: string }>
+    >`SELECT storage_node AS node FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`;
+    expect(source?.node).toBe("admitted-worker");
+  } finally {
+    if (previous === undefined) delete process.env["FACTORY_FACTORYBOX_NODE"];
+    else process.env["FACTORY_FACTORYBOX_NODE"] = previous;
+    await sources.close();
+    await fixture.dispose();
+  }
+}, 30000);
 
 test("an interrupted observation worker retries the same source intent without a manual wakeup", async () => {
   const fixture = await ownedSourceFixture();

@@ -4,6 +4,7 @@ import { verificationSupervisor } from "./verification-process";
 import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
 import { runtimeVolumeClaimSpec } from "./storage";
+import { renderFactoryboxRuntime, type FactoryboxRuntimeProfile } from "./factorybox-runtime";
 
 export interface RuntimeManifestInput {
   readonly attemptID: string;
@@ -24,6 +25,7 @@ export interface RuntimeManifestInput {
   readonly childConnectorToken: string;
   readonly controlURL: string;
   readonly runtimeHostImage: string;
+  readonly factoryboxProfile?: FactoryboxRuntimeProfile;
   readonly registryCA: string;
   readonly environmentVersion?: number;
   readonly prebuild?: {
@@ -245,6 +247,17 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
       metadata: { name: "runtime-data", namespace: input.namespace, labels },
       spec: runtimeVolumeClaimSpec(),
     },
-    renderEnvboxPod({ ...input, hostname: input.attemptID, labels, mode }),
+    ...(input.factoryboxProfile
+      ? (() => {
+          const execution = renderFactoryboxRuntime({
+            ...input,
+            labels,
+            runtimeOwnerID: ownerID,
+            profile: input.factoryboxProfile,
+            sharedSource: input.preserveWorkspace ?? false,
+          });
+          return [execution.claim, execution.pod];
+        })()
+      : [renderEnvboxPod({ ...input, hostname: input.attemptID, labels, mode })]),
   ];
 }

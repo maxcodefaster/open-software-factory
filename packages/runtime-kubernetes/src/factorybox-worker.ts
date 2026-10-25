@@ -170,14 +170,23 @@ export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
 }
 
 type Run = typeof runCommand;
+export interface FactoryboxWorkerDeclaration {
+  readonly namespace: { readonly metadata: { readonly labels: Readonly<Record<string, string>> } };
+  readonly claim: {
+    readonly metadata: { readonly name: string; readonly labels: Readonly<Record<string, string>> };
+    readonly spec: object;
+  };
+  readonly pod: {
+    readonly metadata: { readonly labels: Readonly<Record<string, string>> };
+    readonly spec: object;
+  };
+}
 export const runFactoryboxKubernetes: Run = (args, input, limits) =>
   runCommand(
     kubernetesCommand([
       // The bounded subprocess owns long exec deadlines. An API request timeout
       // must not cut a valid CRIU operation off after ten seconds.
-      args[0] === "exec" && args.includes("--worker-epoch")
-        ? "--request-timeout=0"
-        : "--request-timeout=10s",
+      args[0] === "exec" ? "--request-timeout=0" : "--request-timeout=10s",
       ...args,
     ]),
     input,
@@ -212,7 +221,11 @@ function requireFields(expected: unknown, actual: unknown): boolean {
       actual !== null &&
       typeof actual === "object" &&
       Object.entries(expected).every(([key, value]) =>
-        requireFields(value, Reflect.get(actual, key)),
+        value === false &&
+        ["hostNetwork", "hostPID", "hostIPC"].includes(key) &&
+        Reflect.get(actual, key) === undefined
+          ? true
+          : requireFields(value, Reflect.get(actual, key)),
       )
     );
   return expected === actual;
@@ -222,9 +235,12 @@ export async function inspectFactoryboxWorker(
   request: FactoryboxWorkerRequest,
   previous?: FactoryboxWorkerIdentity,
   run: Run = runFactoryboxKubernetes,
+  declaration?: FactoryboxWorkerDeclaration,
 ): Promise<FactoryboxWorkerIdentity> {
   const input = factoryboxWorkerRequest.parse(request);
-  const expected = renderFactoryboxWorker(input);
+  const base = renderFactoryboxWorker(input);
+  const declared = declaration ?? { namespace: base[0], claim: base[1], pod: base[2] };
+  const expected = [declared.namespace, declared.claim, declared.pod] as const;
   const [namespaceRaw, claimRaw, podRaw, nodeRaw] = await Promise.all([
     read(run, ["namespace", input.namespace]),
     read(run, ["pvc", expected[1].metadata.name, "-n", input.namespace]),
@@ -285,6 +301,7 @@ export async function inspectFactoryboxWorker(
     pod.spec.nodeName !== input.nodeName ||
     ["initContainers", "ephemeralContainers"].some((key) => {
       const value = pod.spec[key];
+      if (key === "initContainers" && Object.hasOwn(expected[2].spec, key)) return false;
       return value !== undefined && (!Array.isArray(value) || value.length !== 0);
     }) ||
     !pod.status.conditions.some((value) => value.type === "Ready" && value.status === "True")
@@ -358,12 +375,13 @@ export async function executeFactoryboxOperation(
   identity: FactoryboxWorkerIdentity,
   operation: FactoryboxOperation,
   run: Run = runFactoryboxKubernetes,
+  declaration?: FactoryboxWorkerDeclaration,
 ) {
   const deadline = performance.now() + 420_000;
   const input = factoryboxWorkerRequest.parse(request);
   const admitted = factoryboxWorkerIdentity.parse(identity);
   const op = factoryboxOperation.parse(operation);
-  await inspectFactoryboxWorker(input, admitted, run);
+  await inspectFactoryboxWorker(input, admitted, run, declaration);
   const args = [
     binary,
     "--worker-run-root",

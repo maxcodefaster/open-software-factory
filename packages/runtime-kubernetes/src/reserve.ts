@@ -4,8 +4,23 @@ import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
 import { createKubernetesClient, readRuntimeRegistryCA } from "./client";
-import { renderEnvboxPod } from "./envbox-pod";
-import { runtimeVolumeClaimSpec } from "./storage";
+import {
+  factoryboxRuntimeProfile,
+  renderFactoryboxRuntime,
+  factoryboxRuntimeRequest,
+  factoryboxRuntimeDeclaration,
+  prepareFactoryboxRuntime,
+  releaseFactoryboxRuntime,
+  factoryboxOriginalWorkerRetired,
+  type FactoryboxRuntimeInput,
+} from "./factorybox-runtime";
+import {
+  inspectFactoryboxWorker,
+  executeFactoryboxOperation,
+  factoryboxWorkerIdentity,
+  runFactoryboxKubernetes,
+  type FactoryboxWorkerIdentity,
+} from "./factorybox-worker";
 
 export interface SlotObservation {
   readonly namespaceUID: string;
@@ -13,9 +28,11 @@ export interface SlotObservation {
   readonly claimUID: string;
   readonly ready: boolean;
   readonly failed: boolean;
+  readonly factoryboxIdentity?: unknown;
+  readonly factoryboxPreparation?: unknown;
 }
 export interface ReserveClient {
-  prepare(slot: ExecutionSlot): Promise<SlotObservation>;
+  prepare(slot: ExecutionSlot, options?: { startAllowed: boolean }): Promise<SlotObservation>;
   activate(slot: ExecutionSlot, resources: readonly unknown[]): Promise<SlotObservation>;
   retire(slot: ExecutionSlot): Promise<void>;
   removeAssigned(slot: ExecutionSlot, generation: number): Promise<boolean>;
@@ -47,6 +64,7 @@ export function renderReserveResources(slot: ExecutionSlot, registryCA: string) 
     "factory.dev/runtime-generation": "0",
     "factory.dev/execution-slot": slot.id,
   };
+  const execution = renderFactoryboxRuntime(factoryboxReserveInput(slot, labels));
   return [
     { apiVersion: "v1", kind: "Namespace" as const, metadata: { name: slot.namespace, labels } },
     {
@@ -69,22 +87,34 @@ export function renderReserveResources(slot: ExecutionSlot, registryCA: string) 
       metadata: { name: "registry-ca", namespace: slot.namespace, labels },
       stringData: { "ca.crt": registryCA },
     },
-    {
-      apiVersion: "v1",
-      kind: "PersistentVolumeClaim" as const,
-      metadata: { name: "runtime-data", namespace: slot.namespace, labels },
-      spec: runtimeVolumeClaimSpec(),
-    },
-    renderEnvboxPod({
-      namespace: slot.namespace,
-      podName: "slot",
-      hostname: slot.id,
-      labels,
-      runtimeHostImage: slot.runtimeHostImage,
-      mode: slot.role,
-      reserve: true,
-    }),
+    execution.claim,
+    execution.pod,
   ];
+}
+
+export function factoryboxReserveInput(
+  slot: ExecutionSlot,
+  labels?: Readonly<Record<string, string>>,
+): FactoryboxRuntimeInput {
+  const declared = labels ?? {
+    "app.kubernetes.io/managed-by": "open-software-factory",
+    "factory.dev/runtime-owner": slot.id,
+    "factory.dev/runtime-attempt": slot.id,
+    "factory.dev/runtime-generation": "0",
+    "factory.dev/execution-slot": slot.id,
+  };
+  return {
+    attemptID: slot.assignedAttemptID ?? slot.id,
+    workerID: slot.id,
+    reserve: true,
+    namespace: slot.namespace,
+    podName: "slot",
+    runtimeOwnerID: declared["factory.dev/runtime-owner"] ?? slot.id,
+    labels: declared,
+    runtimeHostImage: slot.runtimeHostImage,
+    profile: factoryboxRuntimeProfile.parse(slot.factoryboxProfile),
+    sharedSource: false,
+  };
 }
 
 function declaredFields(actual: unknown, expected: unknown): boolean {
@@ -140,6 +170,8 @@ function requireDeclaredResource(
   if (item.kind !== "Pod") return;
   for (const key of ["initContainers", "ephemeralContainers"]) {
     const value = item.spec?.[key];
+    if (key === "initContainers" && "spec" in expected && Object.hasOwn(expected.spec, key))
+      continue;
     if (value !== undefined && (!Array.isArray(value) || value.length !== 0))
       throw new Error("Execution slot has undeclared preparation code");
   }
@@ -171,7 +203,9 @@ export function validateReserveObservation(
     (value) => value.kind === "Namespace" && value.metadata.name === slot.namespace,
   );
   const claim = actual.find(
-    (value) => value.kind === "PersistentVolumeClaim" && value.metadata.name === "runtime-data",
+    (value) =>
+      value.kind === "PersistentVolumeClaim" &&
+      value.metadata.name === `store-${slot.id.replaceAll("-", "")}`,
   );
   if (!pod || !namespace || !claim) throw new Error("Execution slot resources are incomplete");
   for (const item of actual) {
@@ -219,7 +253,7 @@ async function command(args: string[], input?: string) {
     outputBytes: 2 * 1024 * 1024,
   });
   if (status !== 0) {
-    if (error.includes("NotFound") || error.includes("not found")) return null;
+    if (/^Error from server \(NotFound\):/.test(error.trim())) return null;
     throw new Error("Execution slot infrastructure command failed");
   }
   return output;
@@ -229,6 +263,86 @@ async function command(args: string[], input?: string) {
 // A replacement Pod with the same name fails the downward-API UID check before any write.
 export const slotActivationCommand =
   'set -eu\nIFS= read -r expected_uid\ntest "$FACTORY_POD_UID" = "$expected_uid"\ntest -d /home/coder/.factory-reserve\ntest ! -L /home/coder/.factory-reserve\nfile=$(mktemp /home/coder/.factory-reserve/.activation-XXXXXX)\ntrap \'rm -f "$file"\' EXIT\nhead -c 1048577 > "$file"\ntest "$(wc -c < "$file")" -le 1048576\nchmod 0400 "$file"\nchown 100000:100000 "$file"\nsync "$file"\nif test -f /home/coder/.factory-reserve/activation.json; then cmp -s "$file" /home/coder/.factory-reserve/activation.json; else ln "$file" /home/coder/.factory-reserve/activation.json; sync /home/coder/.factory-reserve; fi\n';
+
+const preparation = z.object({
+  version: z.literal(1),
+  bundle: z.string(),
+  configSHA256: z.string(),
+  rootfsSHA256: z.string(),
+  storeID: z.string(),
+  epoch: z.string(),
+  podUID: z.string(),
+});
+async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxWorkerIdentity) {
+  const result = await executeFactoryboxOperation(
+    factoryboxRuntimeRequest(input),
+    identity,
+    { action: "state", sandboxID: "runtime" },
+    runFactoryboxKubernetes,
+    factoryboxRuntimeDeclaration(input),
+  );
+  if (!result.confirmed) throw new Error("Execution slot native state is unconfirmed");
+  return z
+    .object({
+      record: z.object({
+        id: z.literal("runtime"),
+        runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
+        phase: z.literal("running"),
+      }),
+      runtime: z.object({ status: z.literal("running") }),
+    })
+    .parse(JSON.parse(result.stdout));
+}
+
+async function reserveGuestCommand(
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  runtimeID: string,
+  script: string,
+  body?: string,
+) {
+  await inspectFactoryboxWorker(
+    factoryboxRuntimeRequest(input),
+    identity,
+    runFactoryboxKubernetes,
+    factoryboxRuntimeDeclaration(input),
+  );
+  const program = `import json,subprocess,sys
+request=json.loads(sys.argv[1])
+status=json.loads(subprocess.check_output(['/opt/factorybox/factorybox','worker-status'],timeout=10))
+if (status['store_id']!=request['storeID'] or status['epoch']!=request['epoch'] or status['lifecycle']['root']!=request['root'] or status['supervisor_sha256']!=request['sha']):raise ValueError('Execution slot live identity changed')
+payload=sys.stdin.buffer.read(1048833)
+if len(payload)>1048832:raise ValueError('Execution slot input exceeds its bound')
+command=['/opt/factorybox/components/sysbox-runc','--root',request['root']+'/runtime','exec',request['runtimeID'],'/bin/sh','-c',request['script']]
+result=subprocess.run(command,input=payload,timeout=15)
+sys.exit(result.returncode)
+`;
+  return runFactoryboxKubernetes(
+    [
+      "exec",
+      ...(body === undefined ? [] : ["-i"]),
+      "slot",
+      "-n",
+      input.namespace,
+      "-c",
+      "worker",
+      "--",
+      "python3",
+      "-c",
+      program,
+      JSON.stringify({
+        storeID: identity.storeID,
+        epoch: identity.epoch,
+        root: identity.controllerRoot,
+        sha: identity.executableSHA256,
+        runtimeID,
+        script,
+      }),
+    ],
+    body,
+    { timeoutMS: 30_000, outputBytes: 1024 ** 2 },
+  );
+}
 
 export function createReserveClient(): ReserveClient {
   const kubernetes = createKubernetesClient();
@@ -241,8 +355,28 @@ export function createReserveClient(): ReserveClient {
       resources.push(...z.object({ items: z.array(object) }).parse(JSON.parse(listing)).items);
     return resources;
   }
+  async function cleanupNative(slot: ExecutionSlot, resources: ObservedObject[]) {
+    const pod = resources.find((value) => value.kind === "Pod");
+    if (!pod || !slot.factoryboxIdentity || !slot.factoryboxPreparation) return;
+    const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
+    if (pod.metadata.uid !== identity.podUID)
+      throw new Error("Execution slot worker UID changed before native cleanup");
+    const input = factoryboxReserveInput(slot, pod.metadata.labels);
+    if (await factoryboxOriginalWorkerRetired(input, identity)) return;
+    if (slot.factoryboxStartAttempted) {
+      const result = await executeFactoryboxOperation(
+        factoryboxRuntimeRequest(input),
+        identity,
+        { action: "delete", sandboxID: "runtime" },
+        runFactoryboxKubernetes,
+        factoryboxRuntimeDeclaration(input),
+      );
+      if (!result.confirmed) throw new Error("Execution slot native Delete is unconfirmed");
+    }
+    await releaseFactoryboxRuntime(input, identity, !slot.factoryboxStartAttempted);
+  }
   return {
-    async prepare(slot) {
+    async prepare(slot, options) {
       const resources = renderReserveResources(slot, await readRuntimeRegistryCA());
       const current = await read(slot);
       if (current.length) {
@@ -264,7 +398,50 @@ export function createReserveClient(): ReserveClient {
         resources,
         namespace ? { ownerID: slot.id, uid: namespace.metadata.uid } : undefined,
       );
-      return validateReserveObservation(slot, resources, await read(slot));
+      const observed = validateReserveObservation(slot, resources, await read(slot));
+      if (!observed.ready || !slot.namespaceUID || !slot.podUID || !slot.claimUID)
+        return { ...observed, ready: false };
+      const input = factoryboxReserveInput(slot);
+      const identity = await inspectFactoryboxWorker(
+        factoryboxRuntimeRequest(input),
+        slot.factoryboxIdentity
+          ? factoryboxWorkerIdentity.parse(slot.factoryboxIdentity)
+          : undefined,
+        runFactoryboxKubernetes,
+        factoryboxRuntimeDeclaration(input),
+      );
+      if (!slot.factoryboxIdentity)
+        return { ...observed, ready: false, factoryboxIdentity: identity };
+      if (!slot.factoryboxPreparation)
+        return {
+          ...observed,
+          ready: false,
+          factoryboxPreparation: await prepareFactoryboxRuntime(
+            input,
+            identity,
+            runFactoryboxKubernetes,
+            180_000,
+          ),
+        };
+      const prepared = preparation.parse(slot.factoryboxPreparation);
+      if (options?.startAllowed) {
+        const started = await executeFactoryboxOperation(
+          factoryboxRuntimeRequest(input),
+          identity,
+          { action: "start", sandboxID: "runtime", bundle: prepared.bundle },
+          runFactoryboxKubernetes,
+          factoryboxRuntimeDeclaration(input),
+        );
+        if (!started.confirmed) throw new Error("Execution slot Start outcome is unconfirmed");
+      }
+      const state = await reserveState(input, identity);
+      const ready = await reserveGuestCommand(
+        input,
+        identity,
+        state.record.runtime_id,
+        "test -f /home/coder/.factory-reserve/ready && cat /home/coder/.factory-reserve/ready",
+      );
+      return { ...observed, ready: ready.exitCode === 0 && ready.stdout === slot.id };
     },
     async activate(slot, resources) {
       if (
@@ -300,7 +477,12 @@ export function createReserveClient(): ReserveClient {
         slot.assignedAttemptID,
         assignment.stringData,
       );
-      const labels = { ...assignment.metadata.labels, "factory.dev/execution-slot": slot.id };
+      const labels = {
+        "factory.dev/factorybox-store": slot.id.replaceAll("-", ""),
+        "factory.dev/trust-domain": slot.id.replaceAll("-", ""),
+        ...assignment.metadata.labels,
+        "factory.dev/execution-slot": slot.id,
+      };
       for (const item of current) {
         await command([
           "patch",
@@ -348,10 +530,17 @@ export function createReserveClient(): ReserveClient {
         parentToken: assignment.stringData["parent-token"],
         childToken: assignment.stringData["child-token"],
       });
-      await command(
-        ["exec", "-i", "slot", "-n", slot.namespace, "--", "sh", "-c", slotActivationCommand],
+      const input = factoryboxReserveInput(slot, labels);
+      const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
+      const state = await reserveState(input, identity);
+      const activated = await reserveGuestCommand(
+        input,
+        identity,
+        state.record.runtime_id,
+        slotActivationCommand.replace("chown 100000:100000", "chown 0:0"),
         `${slot.podUID}\n${bundle}`,
       );
+      if (activated.exitCode !== 0) throw new Error("Execution slot activation is unconfirmed");
       return observed;
     },
     async removeAssigned(slot, generation) {
@@ -423,6 +612,7 @@ export function createReserveClient(): ReserveClient {
           ]),
         ]);
       }
+      await cleanupNative(slot, await read(slot));
       await kubernetes.deleteNamespace({
         namespace: slot.namespace,
         podName: "slot",
@@ -476,6 +666,7 @@ export function createReserveClient(): ReserveClient {
         (slot.claimUID && claim && slot.claimUID !== claim.metadata.uid)
       )
         throw new Error("Execution slot cleanup UID changed");
+      await cleanupNative(slot, current);
       await kubernetes.deleteNamespace({
         namespace: slot.namespace,
         podName: "slot",

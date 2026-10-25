@@ -9,6 +9,8 @@ export interface RuntimePodObservation {
   readonly labels: Record<string, string>;
   readonly envboxImage: string;
   readonly runtimeHostImage: string;
+  readonly factoryboxImage?: string;
+  readonly ready?: boolean;
 }
 export class KubernetesObservationUnavailableError extends Error {
   constructor(message: string) {
@@ -25,8 +27,17 @@ function observationReadFailure(message: string) {
     : new Error(`Kubernetes observation failed: ${message}`);
 }
 
-export function requireRuntimePodArtifacts(pod: RuntimePodObservation, runtimeHostImage: string) {
-  if (pod.envboxImage !== upstream.envbox.image || pod.runtimeHostImage !== runtimeHostImage)
+export function requireRuntimePodArtifacts(
+  pod: RuntimePodObservation,
+  runtimeHostImage: string,
+  factoryboxImage?: string,
+) {
+  if (
+    (factoryboxImage
+      ? pod.factoryboxImage !== factoryboxImage
+      : pod.envboxImage !== upstream.envbox.image) ||
+    pod.runtimeHostImage !== runtimeHostImage
+  )
     throw new Error("Runtime Pod artifacts differ from immutable create intent");
 }
 
@@ -120,28 +131,42 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
       }
       const pod = JSON.parse(result.stdout) as {
         metadata?: { uid?: string; labels?: Record<string, string> };
-        status?: { phase?: string };
+        status?: { phase?: string; conditions?: Array<{ type: string; status: string }> };
         spec?: {
           containers?: Array<{
             name: string;
             image: string;
             env?: Array<{ name: string; value?: string }>;
           }>;
+          initContainers?: Array<{ name: string; image: string }>;
         };
       };
       if (!pod.metadata?.uid) throw new Error("Kubernetes Pod has no UID");
       const envbox = pod.spec?.containers?.find((container) => container.name === "envbox");
+      const worker = pod.spec?.containers?.find((container) => container.name === "worker");
+      const runtimeImage = pod.spec?.initContainers?.find(
+        (container) => container.name === "runtime-image",
+      );
       const innerImage = envbox?.env?.find(
         (variable) => variable.name === "CODER_INNER_IMAGE",
       )?.value;
-      if (!envbox?.image || !innerImage)
+      if ((!envbox?.image || !innerImage) && (!worker?.image || !runtimeImage?.image))
         throw new Error("Runtime Pod has no declared Envbox artifacts");
       return {
         uid: pod.metadata.uid,
         phase: pod.status?.phase ?? "Unknown",
         labels: pod.metadata.labels ?? {},
-        envboxImage: envbox.image,
-        runtimeHostImage: innerImage,
+        envboxImage: envbox?.image ?? "",
+        runtimeHostImage: runtimeImage?.image ?? innerImage!,
+        ...(worker
+          ? {
+              factoryboxImage: worker.image,
+              ready:
+                pod.status?.conditions?.some(
+                  (condition) => condition.type === "Ready" && condition.status === "True",
+                ) ?? false,
+            }
+          : {}),
       };
     },
     async getNamespace(namespace) {
@@ -208,7 +233,7 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
         JSON.stringify({
           apiVersion: "v1",
           kind: "DeleteOptions",
-          gracePeriodSeconds: 0,
+          gracePeriodSeconds: observed.factoryboxImage ? 45 : 0,
           preconditions: { uid: input.uid },
         }),
       );

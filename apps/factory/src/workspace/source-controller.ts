@@ -215,7 +215,7 @@ export function createWorkspaceSourceController(
       // A created execution Pod may be initializing a not-yet-prepared checkout.
       // A new persisted compute intent must not deadlock its independent initializer.
       const [starting] =
-        await sql`SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} AND kubernetes_uid IS NOT NULL AND state IN ('create-intended','starting','stop-intended','stopping','cleanup-failed') LIMIT 1`;
+        await sql`SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} AND kubernetes_uid IS NOT NULL AND state IN ('create-intended','starting','pausing','paused','resuming','stop-intended','stopping','cleanup-failed') LIMIT 1`;
       if (starting && !source.podUID) return true;
       const observed = await (async () => {
         if (source.podUID) {
@@ -309,8 +309,10 @@ export function createWorkspaceSourceController(
     await database.client.begin((sql) => authority(workspaceID, userID, sql));
     const [runtime] = await database.client<
       Array<{ namespace: string; podName: string; podUID: string }>
-    >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",kubernetes_uid AS "podUID" FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} AND state='ready' ORDER BY generation DESC LIMIT 1`;
-    const storageNode = runtime ? await client.executionNode({ ...runtime, workspaceID }) : null;
+    >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",kubernetes_uid AS "podUID" FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} AND state IN ('ready','pausing','paused','resuming') ORDER BY generation DESC LIMIT 1`;
+    const storageNode = runtime
+      ? await client.executionNode({ ...runtime, workspaceID })
+      : (process.env["FACTORY_FACTORYBOX_NODE"] ?? null);
     await database.client.begin(async (sql) => {
       await authority(workspaceID, userID, sql);
       await persistIntent(workspaceID, images, storageNode, sql);

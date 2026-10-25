@@ -9,7 +9,16 @@ const images = {
   staging: `registry.invalid/base@sha256:${"1".repeat(64)}`,
   verification: `registry.invalid/check@sha256:${"2".repeat(64)}`,
 };
+const profile = {
+  image: `registry.invalid/worker@sha256:${"a".repeat(64)}`,
+  executableSHA256: "b".repeat(64),
+  nodeName: "owned-node",
+  kernel: "6.12.0",
+  boundedBytes: 8589934592 as const,
+  claimGiB: 32 as const,
+};
 const artifacts = {
+  factoryboxProfile: profile,
   hostImages: {
     staging: images.staging,
     verification: images.verification,
@@ -22,7 +31,11 @@ const artifacts = {
 test("reserve persists clean create intent, serializes claims, freezes assignment and counts every admission", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
-  const store = createReserveStore({ ...defaultReservePolicy, maxExecutionSlots: 3 }, images);
+  const store = createReserveStore(
+    { ...defaultReservePolicy, maxExecutionSlots: 3 },
+    images,
+    profile,
+  );
   try {
     const owned = await fixture(undefined, undefined, database);
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
@@ -37,6 +50,16 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
       (await database.client.begin((sql) => store.plan(sql))).map((candidate) => candidate.id),
     ).toEqual([slot.id]);
     expect(await database.client`SELECT id FROM factory.execution_slot`).toHaveLength(1);
+    await store.observe(database.client, slot.id, {
+      namespaceUID: "owned-namespace",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      ready: false,
+      factoryboxIdentity: { epoch: "owned" },
+      factoryboxPreparation: { bundle: "owned" },
+    });
+    expect(await store.intendStart(database.client, slot.id)).toBe(true);
+    expect(await store.intendStart(database.client, slot.id)).toBe(false);
     await store.observe(database.client, slot.id, {
       namespaceUID: "owned-namespace",
       podUID: "owned-pod",
@@ -94,6 +117,15 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
       namespaceUID: "second-ns",
       podUID: "second-pod",
       claimUID: "second-claim",
+      ready: false,
+      factoryboxIdentity: { epoch: "second" },
+      factoryboxPreparation: { bundle: "second" },
+    });
+    expect(await store.intendStart(database.client, verificationSlot.id)).toBe(true);
+    await store.observe(database.client, verificationSlot.id, {
+      namespaceUID: "second-ns",
+      podUID: "second-pod",
+      claimUID: "second-claim",
       ready: true,
     });
     const next = await database.client.begin((sql) => store.plan(sql));
@@ -109,12 +141,21 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
 test("expired unassigned slots retire before admission and cannot return to the reserve", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
-  const store = createReserveStore({ ...defaultReservePolicy, readyPerRole: 0 }, images);
+  const store = createReserveStore({ ...defaultReservePolicy, readyPerRole: 0 }, images, profile);
   const id = crypto.randomUUID();
   const namespace = `factory-reserve-${id.replaceAll("-", "").slice(0, 12)}`;
   try {
     await database.client`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,kubernetes_namespace,created_at,expires_at)
       VALUES(${id},'staging','creating',${images.staging},${namespace},now()-interval '16 minutes',now()-interval '1 second')`;
+    await store.observe(database.client, id, {
+      namespaceUID: "expired-ns",
+      podUID: "expired-pod",
+      claimUID: "expired-claim",
+      ready: false,
+      factoryboxIdentity: { epoch: "expired" },
+      factoryboxPreparation: { bundle: "expired" },
+    });
+    expect(await store.intendStart(database.client, id)).toBe(true);
     await store.observe(database.client, id, {
       namespaceUID: "expired-ns",
       podUID: "expired-pod",
@@ -143,7 +184,11 @@ test("expired unassigned slots retire before admission and cannot return to the 
 test("failed preparation retires within its budget without unbounded refill", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();
-  const store = createReserveStore({ ...defaultReservePolicy, preparationMS: 1_000 }, images);
+  const store = createReserveStore(
+    { ...defaultReservePolicy, preparationMS: 1_000 },
+    images,
+    profile,
+  );
   try {
     const [slot] = await database.client.begin((sql) => store.plan(sql));
     expect(slot).toBeDefined();

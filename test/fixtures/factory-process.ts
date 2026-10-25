@@ -46,6 +46,10 @@ export async function factoryProcess(
     FACTORY_BUILD_RUNTIME_HOST_IMAGE?: string;
     FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE?: string;
     FACTORY_EXECUTION_IDLE_MINUTES?: string;
+    FACTORY_FACTORYBOX_WORKER_IMAGE?: string;
+    FACTORY_FACTORYBOX_EXECUTABLE_SHA256?: string;
+    FACTORY_FACTORYBOX_NODE?: string;
+    FACTORY_FACTORYBOX_KERNEL?: string;
     FACTORY_OPENBAO_URL?: string;
     FACTORY_OPENBAO_TOKEN_FILE?: string;
     FACTORY_OPENBAO_CA_FILE?: string;
@@ -196,6 +200,14 @@ export async function factoryProcess(
       FACTORY_BUILD_RUNTIME_HOST_IMAGE: `registry.example.invalid/owned-build@sha256:${"b".repeat(64)}`,
       FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `registry.example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
       FACTORY_EXECUTION_RESERVE_TARGET: "0",
+      ...(!liveRuntime
+        ? {
+            FACTORY_FACTORYBOX_WORKER_IMAGE: `registry.example.invalid/owned-worker@sha256:${"d".repeat(64)}`,
+            FACTORY_FACTORYBOX_EXECUTABLE_SHA256: "e".repeat(64),
+            FACTORY_FACTORYBOX_NODE: "owned-test-node",
+            FACTORY_FACTORYBOX_KERNEL: "6.12.0",
+          }
+        : {}),
       FACTORY_MODEL_BASE_URL: liveRuntime
         ? process.env["FACTORY_MODEL_BASE_URL"]
         : "http://127.0.0.1:9/v1",

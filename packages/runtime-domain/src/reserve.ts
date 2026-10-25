@@ -12,6 +12,10 @@ export interface ExecutionSlot {
   readonly claimUID: string | null;
   readonly expiresAt: string;
   readonly assignedAttemptID: string | null;
+  readonly factoryboxProfile?: unknown;
+  readonly factoryboxIdentity?: unknown;
+  readonly factoryboxPreparation?: unknown;
+  readonly factoryboxStartAttempted?: boolean;
 }
 
 export interface ReservePolicy {

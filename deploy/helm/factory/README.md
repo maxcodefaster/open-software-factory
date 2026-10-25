@@ -6,7 +6,7 @@ OrbStack, Docker, a VM, an Ingress controller or a cluster.
 
 ## Prerequisites
 
-- Suitable Linux Kubernetes workers for the pinned Envbox/Sysbox images. The cluster must permit
+- An admitted Linux AMD64 node/kernel profile for the pinned Factorybox worker. The cluster must permit
   privileged outer execution Pods and the read-only `/lib/modules` host mount. Factory does not
   disable cluster security policies to obtain these permissions.
 - Dynamically provisioned RWO persistent storage with normal POSIX filesystem behavior. Set
@@ -33,6 +33,11 @@ Set a small private values file:
 
 ```yaml
 image: your-registry/factory@sha256:YOUR_BUILT_APPLICATION_DIGEST
+factorybox:
+  image: your-registry/factorybox@sha256:YOUR_VERIFIED_WORKER_DIGEST
+  executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
+  nodeName: YOUR_ADMITTED_NODE
+  kernel: YOUR_ADMITTED_KERNEL_RELEASE
 publicURL: https://factory.example.com
 forgejoPublicURL: https://git.example.com
 ingress:

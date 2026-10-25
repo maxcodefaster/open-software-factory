@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
+import { factoryboxReserveBootstrapProgram } from "./factorybox-runtime";
 import {
   renderReserveResources,
   validateReserveObservation,
@@ -17,6 +18,14 @@ const slot: ExecutionSlot = {
   claimUID: null,
   expiresAt: "2026-10-10T00:00:00Z",
   assignedAttemptID: null,
+  factoryboxProfile: {
+    image: `registry.invalid/worker@sha256:${"2".repeat(64)}`,
+    executableSHA256: "3".repeat(64),
+    nodeName: "owned-node",
+    kernel: "6.12.0",
+    boundedBytes: 8589934592,
+    claimGiB: 32,
+  },
 };
 function observations() {
   return renderReserveResources(slot, "approved-ca").map((resource) => ({
@@ -37,9 +46,9 @@ function observations() {
       : {}),
   }));
 }
-test("reserve uses the exact Envbox topology without repository, user capabilities or shared Docker graphs", () => {
+test("reserve uses the exact Factorybox topology without repository, user capabilities or shared Docker graphs", () => {
   const resources = renderReserveResources(slot, "approved-ca");
-  const payload = JSON.stringify(resources);
+  const payload = JSON.stringify(resources) + factoryboxReserveBootstrapProgram;
   expect(payload).toContain("factory-runtime-connector reserve");
   expect(payload).not.toContain("until docker info");
   expect(payload).not.toMatch(
@@ -48,9 +57,7 @@ test("reserve uses the exact Envbox topology without repository, user capabiliti
   const pod = resources.find((value) => value.kind === "Pod");
   expect(JSON.stringify(pod?.spec.volumes)).not.toContain("docker.sock");
   expect(JSON.stringify(pod?.spec.containers[0]?.volumeMounts)).not.toContain("docker.sock");
-  expect(
-    pod?.spec.containers[0]?.env.find((entry) => entry.name === "CODER_MOUNTS")?.value,
-  ).not.toContain("docker.sock");
+  expect(JSON.stringify(pod?.spec.containers[0]?.env)).not.toContain("docker.sock");
   expect(resources.find((value) => value.kind === "Pod")?.spec.automountServiceAccountToken).toBe(
     false,
   );
@@ -58,7 +65,7 @@ test("reserve uses the exact Envbox topology without repository, user capabiliti
     ready: true,
     failed: false,
     podUID: "owned-Pod-slot",
-    claimUID: "owned-PersistentVolumeClaim-runtime-data",
+    claimUID: "owned-PersistentVolumeClaim-store-ec253fc14e174a75a36dc4efef02e77e",
   });
 });
 test("reserve observation rejects changed tools, mounts, seeds, ownership and resource identities", () => {

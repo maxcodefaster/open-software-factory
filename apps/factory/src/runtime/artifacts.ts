@@ -1,6 +1,11 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { TransactionSql } from "postgres";
 import { freezeRuntimeEnvironment } from "../environments/runtime";
+import {
+  configuredFactoryboxRuntimeProfile,
+  factoryboxRuntimeProfile,
+  type FactoryboxRuntimeProfile,
+} from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 
 export type RuntimeArtifactRole = "development" | "build" | "verification" | "staging";
 export interface RuntimeArtifactIntent {
@@ -8,8 +13,10 @@ export interface RuntimeArtifactIntent {
   readonly runtimeHostImage: string;
   readonly browserToolsImage: string | null;
   readonly environmentVersion: number;
+  readonly factoryboxProfile: FactoryboxRuntimeProfile;
 }
 export interface RuntimeArtifactConfiguration {
+  readonly factoryboxProfile?: FactoryboxRuntimeProfile;
   readonly hostImages: Readonly<Record<RuntimeArtifactRole, string | undefined>>;
   readonly browserToolsImage: string | undefined;
 }
@@ -30,11 +37,15 @@ export async function freezeRuntimeArtifacts(
   const read = async () =>
     (
       await sql<RuntimeArtifactIntent[]>`
-        SELECT role,runtime_host_image AS "runtimeHostImage",browser_tools_image AS "browserToolsImage",${environment.version}::float8 AS "environmentVersion"
+        SELECT role,runtime_host_image AS "runtimeHostImage",browser_tools_image AS "browserToolsImage",${environment.version}::float8 AS "environmentVersion",
+          factorybox_profile AS "factoryboxProfile"
         FROM factory.runtime_artifact_intent WHERE runtime_attempt_id=${attemptID}`
     )[0];
   const retained = await read();
-  if (retained) return retained;
+  if (retained) {
+    factoryboxRuntimeProfile.parse(retained.factoryboxProfile);
+    return retained;
+  }
   const [attempt] = await sql<Array<{ role: RuntimeArtifactRole }>>`
     SELECT CASE WHEN isolated_kind='verification' THEN 'verification'
       WHEN isolated_kind='staging' THEN 'staging'
@@ -51,9 +62,15 @@ export async function freezeRuntimeArtifacts(
     attempt.role === "build"
       ? pinnedImage(configuration.browserToolsImage, "Build browser image")
       : null;
+  const [slot] = await sql<
+    Array<{ profile: unknown }>
+  >`SELECT factorybox_profile AS profile FROM factory.execution_slot WHERE assigned_attempt_id=${attemptID}`;
+  const profile = factoryboxRuntimeProfile.parse(
+    slot?.profile ?? configuration.factoryboxProfile ?? configuredFactoryboxRuntimeProfile(),
+  );
   await sql`
-    INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image)
-    VALUES(${attemptID},${attempt.role},${runtimeHostImage},${browserToolsImage})
+    INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image,factorybox_profile)
+    VALUES(${attemptID},${attempt.role},${runtimeHostImage},${browserToolsImage},${JSON.stringify(profile)}::text::jsonb)
     ON CONFLICT(runtime_attempt_id) DO NOTHING`;
   const intent = await read();
   if (!intent) throw new Error("Runtime artifact intent was not recorded");

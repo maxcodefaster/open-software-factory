@@ -7,6 +7,7 @@ import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
 import { serviceAccountConfiguration } from "../../packages/runtime-kubernetes/src/service-account";
 import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
+import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { runtimeArtifactsSchema } from "../factory/artifacts";
 import { ensureLocalForgeIdentity } from "../factory/forge-identity";
 import { installForgeBrowserLogout } from "../factory/forge-logout";
@@ -50,6 +51,7 @@ async function execute(args: readonly string[], input?: string) {
 }
 
 const directory = required("FACTORY_STATE_DIRECTORY");
+configuredFactoryboxRuntimeProfile();
 await mkdir(directory, { recursive: true, mode: 0o700 });
 await chmod(directory, 0o700);
 if ((await realpath(directory)) !== resolve(directory))

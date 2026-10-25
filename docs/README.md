@@ -153,23 +153,28 @@ session-reported, exact-Attempt identities, never backend-local `file://` access
 remain syntax-only. Arbitrary language plugins, shell commands, server edits, general formatting
 and refactoring are not part of the preset.
 
-The separate [Factorybox admission command](../deploy/factorybox/README.md) controls dedicated
-private-store workers for integration proofs. It does not change Workspace Start or reserve
-selection. [ADR 0021](adr/0021-factorybox-worker-admission.md) records the canonical-source boundary.
+The [Factorybox admission command](../deploy/factorybox/README.md) inspects the same pinned worker
+contract used by Workspace Start and the existing execution reserve. The consumer preparation and
+lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execution.md).
 
 Every Sandbox uses the same topology:
 
 ```text
-Kubernetes -> digest-pinned Envbox Pod
-  -> Sysbox workspace container with a private Docker daemon
+Kubernetes -> digest-pinned Factorybox worker Pod with its own bounded store
+  -> same-worker Sysbox Sandbox with a private Docker daemon
     -> Factory Runtime Connector in parent mode
     -> exact Dev Containers CLI and approved container stack
       -> primary container with Connector child mode
       -> bounded Compose dependencies
 ```
 
-Envbox, Sysbox, Docker, Compose and the Dev Containers CLI run unchanged. Project code has no node
-Docker socket. The privileged outer Envbox wrapper is trusted infrastructure; Sysbox shares the
+Factory prepares the exact consumer image before native Start. Idle execution pauses; explicit
+Start resumes the same Attempt and Connector credentials. The Source service and independent
+editor retain the canonical checkout while execution is paused. Explicit Stop deletes execution
+and its private store. Lost native command output is observed without replaying a mutation.
+
+Docker, Compose and the Dev Containers CLI run unchanged. Project code has no node
+Docker socket. The privileged outer Factorybox worker is trusted infrastructure; Sysbox shares the
 host kernel and does not establish VM-grade isolation. Factory has one concrete runtime topology
 and no Coder control plane or generic runtime provider layer.
 

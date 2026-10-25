@@ -19,8 +19,10 @@
 
 - Factory is the sole product control plane. No Coder stack, Terraform, generic runtime providers,
   compatibility layers or old migrations.
-- Every Sandbox uses pinned Envbox, Sysbox, a private Docker daemon, the exact Dev Containers CLI
-  and the Factory Runtime Connector. Run upstream components unchanged and exactly pinned.
+- Every new Sandbox uses an admitted, pinned Factorybox worker with Sysbox and CRIU, a private
+  Docker daemon, the exact Dev Containers CLI and the Factory Runtime Connector. Keep each
+  worker in one trust domain. Run upstream components exactly pinned; ordered runtime patches
+  and native qualification belong to the standalone Factorybox repository.
 - Keep vendor/framework types behind Factory adapters and out of domain modules.
 - Use Solid 2 APIs and OpenCode 2 through `@opencode/client`. No OpenCode 1 compatibility SDK.
   Zero is for planning mutations/cached reads; runtime lifecycle and decisions use authenticated commands.

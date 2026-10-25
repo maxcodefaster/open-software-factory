@@ -9,6 +9,14 @@ import { factoryProcess } from "../fixtures/factory-process";
 const image = (name: string, digest: string) =>
   `registry.invalid/${name}@sha256:${digest.repeat(64)}`;
 const configuration = {
+  factoryboxProfile: {
+    image: image("worker", "5"),
+    executableSHA256: "6".repeat(64),
+    nodeName: "owned-node",
+    kernel: "6.12.0",
+    boundedBytes: 8589934592,
+    claimGiB: 32,
+  },
   hostImages: {
     development: image("development", "1"),
     staging: image("development", "1"),
@@ -48,6 +56,7 @@ test("runtime artifact selection follows persisted role, freezes before create a
         runtimeHostImage: configuration.hostImages[role],
         browserToolsImage: role === "build" ? configuration.browserToolsImage : null,
         environmentVersion: 0,
+        factoryboxProfile: configuration.factoryboxProfile,
       });
       const changed: RuntimeArtifactConfiguration = {
         hostImages: {

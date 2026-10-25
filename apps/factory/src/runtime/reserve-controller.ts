@@ -75,7 +75,8 @@ export function createExecutionReserve(
             await store.retired(sql, planned.id);
             requested = true;
           } else {
-            const observed = await adapter.prepare(planned);
+            const startAllowed = await store.intendStart(sql, planned.id);
+            const observed = await adapter.prepare(planned, { startAllowed });
             await store.observe(sql, planned.id, observed);
             if (observed.failed) await store.retire(sql, planned.id);
             if (observed.ready || observed.failed) requested = true;

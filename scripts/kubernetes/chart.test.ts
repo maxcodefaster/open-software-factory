@@ -15,8 +15,27 @@ const localValues = [
   "developmentZeroURL=http://127.0.0.1:58002",
   "--set",
   "development=true",
+  "--set",
+  `factorybox.image=registry.invalid/worker@sha256:${"a".repeat(64)}`,
+  "--set",
+  `factorybox.executableSHA256=${"b".repeat(64)}`,
+  "--set",
+  "factorybox.nodeName=owned-node",
+  "--set",
+  "factorybox.kernel=6.12.0",
 ];
 async function helm(args: string[]) {
+  if (args[0] === "template")
+    args.push(
+      "--set",
+      `factorybox.image=registry.invalid/worker@sha256:${"a".repeat(64)}`,
+      "--set",
+      `factorybox.executableSHA256=${"b".repeat(64)}`,
+      "--set",
+      "factorybox.nodeName=owned-node",
+      "--set",
+      "factorybox.kernel=6.12.0",
+    );
   const child = Bun.spawn(["helm", ...args], { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),

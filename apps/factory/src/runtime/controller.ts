@@ -35,6 +35,7 @@ import { createComputeWait } from "../usage/compute-wait";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
 import { freezeRuntimeArtifacts } from "./artifacts";
+import { createFactoryboxExecution } from "./factorybox";
 import { runtimeFactoryURL, runtimeForgeURL } from "./endpoints";
 import {
   prepareRuntimeRepository,
@@ -168,6 +169,7 @@ export function createRuntimeController(
   let cleanupTail: Promise<void> = Promise.resolve();
   const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
   const computeWait = createComputeWait(database, reserve);
+  const factorybox = createFactoryboxExecution(database, hub);
   let drainingCompute = false;
   async function admitOrWait(
     sql: Database["client"],
@@ -346,6 +348,7 @@ export function createRuntimeController(
         createOpenCodeClient((request, path) => hub.request(attemptID, "agent", request, path)),
       );
     } else await createRecordedOpenCodeUsage(database).markUnavailable(attemptID);
+    await factorybox.deleteSandbox(attemptID);
     const removedByReserve = await reserve?.cleanup(attemptID, Number(attempt.generation));
     const observedNamespace = await kubernetes.getNamespace(attempt.namespace);
     if (observedNamespace && !removedByReserve) {
@@ -367,6 +370,7 @@ export function createRuntimeController(
             uid: attempt.uid,
           });
         }
+        await factorybox.deleteStore(attemptID);
       } else {
         await kubernetes.deleteNamespace({
           namespace: attempt.namespace,
@@ -503,6 +507,12 @@ export function createRuntimeController(
     retryCleanup(attemptID);
   }
   async function updateStatus(attemptID: string, phase: string, error?: string) {
+    if (["failed", "cleanup-failed", "stopped"].includes(phase)) {
+      const [current] = await database.client<
+        Array<{ state: string }>
+      >`SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (current && ["pausing", "paused", "resuming"].includes(current.state)) return;
+    }
     if (phase === "disconnected") {
       const [attempt] = await database.client<
         {
@@ -578,8 +588,16 @@ export function createRuntimeController(
     podName: string,
     resources: readonly unknown[],
   ) {
+    const factoryboxSelected = resources.some((resource) => {
+      const pod = resource as { kind?: string; spec?: { containers?: Array<{ name: string }> } };
+      return (
+        pod.kind === "Pod" && pod.spec?.containers?.some((container) => container.name === "worker")
+      );
+    });
+    const deadline = performance.now() + 420_000;
     for (let replacement = 0; replacement < 3; replacement += 1) {
-      for (let observation = 0; observation < 300; observation += 1) {
+      for (let observation = 0; observation < (factoryboxSelected ? 420 : 300); observation += 1) {
+        if (factoryboxSelected && performance.now() >= deadline) break;
         const attempt = await database.client<Array<{ state: string; uid: string | null }>>`
           SELECT state, kubernetes_uid AS uid FROM factory.runtime_attempt WHERE id = ${attemptID}
         `;
@@ -592,6 +610,29 @@ export function createRuntimeController(
           if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
           // An unavailable read says nothing about the owned Pod. Reobserve
           // within this startup window; do not clean up or replay its create.
+          await Bun.sleep(1_000);
+          continue;
+        }
+        if (factoryboxSelected) {
+          if (
+            !pod ||
+            !current.uid ||
+            current.uid !== pod.uid ||
+            ["Failed", "Succeeded"].includes(pod.phase)
+          ) {
+            await database.client`UPDATE factory.runtime_attempt SET failure='Original Factorybox worker is unavailable; its execution identity was retained',updated_at=now()
+              WHERE id=${attemptID} AND state='starting'`;
+            return;
+          }
+          if (pod.ready) {
+            try {
+              await factorybox.ensureStarted(attemptID, resources, deadline);
+              if (hub.connected(attemptID)) await updateStatus(attemptID, "ready");
+            } catch (cause) {
+              await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed"},updated_at=now()
+                WHERE id=${attemptID} AND state='starting'`;
+            }
+          }
           await Bun.sleep(1_000);
           continue;
         }
@@ -631,6 +672,11 @@ export function createRuntimeController(
           break;
         }
         await Bun.sleep(1_000);
+      }
+      if (factoryboxSelected) {
+        await database.client`UPDATE factory.runtime_attempt SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
+          WHERE id=${attemptID} AND state='starting'`;
+        return;
       }
       if (replacement === 2) break;
       const current = await kubernetes.getPod(namespace, podName);
@@ -718,6 +764,7 @@ export function createRuntimeController(
         childConnectorToken: input.childToken,
         controlURL,
         runtimeHostImage: artifacts.runtimeHostImage,
+        factoryboxProfile: artifacts.factoryboxProfile,
         environmentVersion: artifacts.environmentVersion,
         registryCA: await readRegistryCA(),
         mode: input.kind,
@@ -741,6 +788,7 @@ export function createRuntimeController(
           podName: input.identity.podName,
           missingPodMessage: `${input.kind} Pod was not observed after create`,
           runtimeHostImage: artifacts.runtimeHostImage,
+          factoryboxProfile: artifacts.factoryboxProfile,
         },
         {
           observe: () =>
@@ -883,6 +931,7 @@ export function createRuntimeController(
           childConnectorToken: tokens.child,
           controlURL,
           runtimeHostImage: artifacts.runtimeHostImage,
+          factoryboxProfile: artifacts.factoryboxProfile,
           environmentVersion: artifacts.environmentVersion,
           registryCA: await readRegistryCA(),
           mode: row.isolatedKind ?? "development",
@@ -986,7 +1035,11 @@ export function createRuntimeController(
           hashConnectorToken(childToken) !== attempt.childTokenHash
         )
           throw new Error("create intent resources do not match persisted credentials");
-        requireRuntimePodArtifacts(pod, artifacts.runtimeHostImage);
+        requireRuntimePodArtifacts(
+          pod,
+          artifacts.runtimeHostImage,
+          artifacts.factoryboxProfile.image,
+        );
         if (!(await recordCreated(sql, attempt.id, pod.uid, namespace.uid))) return;
         void observeStartup(
           attempt.id,
@@ -1012,6 +1065,16 @@ export function createRuntimeController(
   }
 
   return {
+    async pause(attemptID: string) {
+      try {
+        await factorybox.pause(attemptID);
+      } catch (cause) {
+        await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox Pause is unconfirmed"},updated_at=now()
+          WHERE id=${attemptID} AND state='pausing'`;
+        throw cause;
+      }
+      return this.get(attemptID);
+    },
     async drainComputeWaits() {
       if (drainingCompute) return;
       drainingCompute = true;
@@ -1165,6 +1228,7 @@ export function createRuntimeController(
           childConnectorToken: tokens.child,
           controlURL,
           runtimeHostImage: artifacts.runtimeHostImage,
+          factoryboxProfile: artifacts.factoryboxProfile,
           environmentVersion: artifacts.environmentVersion,
           registryCA: await readRegistryCA(),
           mode: "prebuild",
@@ -1182,6 +1246,7 @@ export function createRuntimeController(
             podName: attempt.podName,
             missingPodMessage: "Project image preparation compute was not observed",
             runtimeHostImage: artifacts.runtimeHostImage,
+            factoryboxProfile: artifacts.factoryboxProfile,
           },
           {
             observe: async () => {
@@ -1258,7 +1323,7 @@ export function createRuntimeController(
           parent_connector_token_hash AS "parentTokenHash",
           child_connector_token_hash AS "childTokenHash"
         FROM factory.runtime_attempt
-        WHERE state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping', 'cleanup-failed')
+        WHERE state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
           AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=factory.runtime_attempt.id)
       `;
       for (const attempt of attempts) {
@@ -1277,6 +1342,35 @@ export function createRuntimeController(
       `;
       const deferredCreates: Array<() => Promise<void>> = [];
       for (const attempt of attempts) {
+        if (["starting", "ready"].includes(attempt.state)) {
+          deferredCreates.push(async () => {
+            const resources = await factorybox.startupResources(attempt.id);
+            if (!resources) return;
+            const pod = resources[0];
+            if (!pod) return;
+            await observeStartup(
+              attempt.id,
+              Reflect.get(pod.metadata.labels, "factory.dev/runtime-owner") ?? attempt.id,
+              pod.metadata.namespace,
+              pod.metadata.name,
+              resources,
+            );
+          });
+          continue;
+        }
+        if (attempt.state === "pausing") {
+          deferredCreates.push(async () => {
+            await this.pause(attempt.id);
+          });
+          continue;
+        }
+        if (attempt.state === "resuming") {
+          deferredCreates.push(async () => {
+            await factorybox.resume(attempt.id);
+            if (hub.connected(attempt.id)) await updateStatus(attempt.id, "ready");
+          });
+          continue;
+        }
         if (attempt.state === "create-intended") {
           const [preparation] = await database.client<
             Array<{ id: string }>
@@ -1411,13 +1505,18 @@ export function createRuntimeController(
           child_connector_token_hash AS "childTokenHash"
         FROM factory.runtime_attempt
         WHERE workspace_id = ${workspace.id}
-          AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping', 'cleanup-failed')
+          AND state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
         LIMIT 1
       `;
         const existing = active[0];
         if (existing) {
           const current = await this.get(existing.id);
           const currentState = current?.state;
+          if (currentState === "paused" || currentState === "resuming") {
+            await factorybox.resume(existing.id);
+            if (hub.connected(existing.id)) await updateStatus(existing.id, "ready");
+            return this.get(existing.id);
+          }
           if (["create-intended", "starting", "ready"].includes(String(currentState))) {
             hub.allow(
               existing.id,
@@ -1486,6 +1585,7 @@ export function createRuntimeController(
             childConnectorToken: childToken,
             controlURL,
             runtimeHostImage: artifacts.runtimeHostImage,
+            factoryboxProfile: artifacts.factoryboxProfile,
             environmentVersion: artifacts.environmentVersion,
             registryCA: await readRegistryCA(),
             systemContract,
@@ -1498,6 +1598,7 @@ export function createRuntimeController(
               podName: identity.podName,
               missingPodMessage: "Runtime Pod was not observed after create",
               runtimeHostImage: artifacts.runtimeHostImage,
+              factoryboxProfile: artifacts.factoryboxProfile,
               expectedNamespace: { ownerID: workspace.id, uid: canonicalSource.namespaceUID },
             },
             {
@@ -1651,6 +1752,7 @@ export function createRuntimeController(
             childConnectorToken: tokens.child,
             controlURL,
             runtimeHostImage: artifacts.runtimeHostImage,
+            factoryboxProfile: artifacts.factoryboxProfile,
             environmentVersion: artifacts.environmentVersion,
             registryCA: await readRegistryCA(),
             mode: "staging",
@@ -1664,6 +1766,7 @@ export function createRuntimeController(
               podName: identity.podName,
               missingPodMessage: "Staging Pod was not observed after create",
               runtimeHostImage: artifacts.runtimeHostImage,
+              factoryboxProfile: artifacts.factoryboxProfile,
             },
             {
               observe: () =>
@@ -1762,11 +1865,19 @@ export function createRuntimeController(
             "create-intended",
             "starting",
             "ready",
+            "pausing",
+            "paused",
+            "resuming",
             "stop-intended",
             "stopping",
             "cleanup-failed",
           ].includes(existingAttempt.state)
         ) {
+          if (["paused", "resuming"].includes(existingAttempt.state)) {
+            await factorybox.resume(existingAttempt.id);
+            if (hub.connected(existingAttempt.id)) await updateStatus(existingAttempt.id, "ready");
+            return this.get(existingAttempt.id);
+          }
           return existingAttempt;
         }
         let workspaces = await lock<Array<{ id: string; namespace: string; revision: string }>>`
@@ -1864,6 +1975,7 @@ export function createRuntimeController(
             childConnectorToken: child,
             controlURL,
             runtimeHostImage: artifacts.runtimeHostImage,
+            factoryboxProfile: artifacts.factoryboxProfile,
             environmentVersion: artifacts.environmentVersion,
             registryCA: await readRegistryCA(),
             systemContract,
@@ -1884,6 +1996,7 @@ export function createRuntimeController(
               podName: identity.podName,
               missingPodMessage: "Change runtime Pod was not observed after create",
               runtimeHostImage: artifacts.runtimeHostImage,
+              factoryboxProfile: artifacts.factoryboxProfile,
               expectedNamespace: { ownerID: workspace.id, uid: canonicalSource.namespaceUID },
             },
             {
@@ -2330,7 +2443,7 @@ export function createRuntimeController(
           cleanup_attempts = CASE WHEN state = 'cleanup-failed' THEN 0 ELSE cleanup_attempts END,
           stop_intended_at = now(), updated_at = now()
         WHERE id = ${attemptID}
-          AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping', 'cleanup-failed')
+          AND state IN ('create-intended', 'starting', 'ready', 'pausing', 'paused', 'resuming', 'stop-intended', 'stopping', 'cleanup-failed')
         RETURNING kubernetes_namespace AS namespace,
           kubernetes_namespace_uid AS "namespaceUID", kubernetes_pod_name AS "podName",
           generation, kubernetes_uid AS uid

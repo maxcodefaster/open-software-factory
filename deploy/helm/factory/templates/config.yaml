@@ -36,7 +36,11 @@ data:
   FACTORY_FORGEJO_OWNER: "factory-mutation"
   FACTORY_FORGEJO_POD: "{{ include "factory.name" . }}-forgejo-0"
   FACTORY_HELM_RELEASE: {{ .Release.Name | quote }}
-  FACTORY_EXECUTION_RESERVE_TARGET: "0"
+  FACTORY_EXECUTION_RESERVE_TARGET: {{ .Values.executionReserveTarget | quote }}
+  FACTORY_FACTORYBOX_WORKER_IMAGE: {{ required "factorybox.image requires an admitted private worker digest" .Values.factorybox.image | quote }}
+  FACTORY_FACTORYBOX_EXECUTABLE_SHA256: {{ required "factorybox.executableSHA256 is required" .Values.factorybox.executableSHA256 | quote }}
+  FACTORY_FACTORYBOX_NODE: {{ required "factorybox.nodeName is required" .Values.factorybox.nodeName | quote }}
+  FACTORY_FACTORYBOX_KERNEL: {{ required "factorybox.kernel is required" .Values.factorybox.kernel | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap

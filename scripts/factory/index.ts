@@ -3,6 +3,7 @@ import { dirname, resolve } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
 import { projectImportOrigins } from "../../packages/project-domain/src/setup";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
+import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import upstream from "../../upstream.json";
 import { inspectRegistryArtifact, requireAvailableRuntimeArtifacts } from "./artifact-availability";
 import {
@@ -177,11 +178,8 @@ async function preflight() {
       "Set FACTORY_RUNTIME_HOST to this host's address reachable from Kubernetes Pods",
     );
   if (Bun.version !== "1.4.3") throw new Error("Factory startup requires Bun 1.4.3");
-  for (const value of [
-    upstream.envbox.image,
-    upstream.docker.image,
-    upstream.nodeDevelopment.image,
-  ])
+  configuredFactoryboxRuntimeProfile();
+  for (const value of [upstream.docker.image, upstream.nodeDevelopment.image])
     requirePinnedImage(value);
   if (
     !/^\d+\.\d+\.\d+$/.test(upstream.devcontainersCli.version) ||

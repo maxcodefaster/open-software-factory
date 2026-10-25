@@ -2,8 +2,23 @@
 
 Factorybox is a separate Linux system-container runtime. This operator command admits one
 dedicated worker for a customer or trust domain and controls administrator-prepared private OCI
-bundles through its own CLI. The ordinary Factory Workspace, Source, Connector and execution-reserve
-controllers still use Envbox. See [the integration boundary](../../docs/adr/0021-factorybox-worker-admission.md).
+bundles through its own CLI. Factory Workspace Start and the execution reserve use this same worker
+contract with Factory-owned consumer preparation. See [Workspace execution](../../docs/adr/0022-factorybox-workspace-execution.md).
+
+The Helm chart requires `factorybox.image`, `factorybox.executableSHA256`, `factorybox.nodeName` and
+`factorybox.kernel`. The local launcher uses the equivalent environment variables
+`FACTORY_FACTORYBOX_WORKER_IMAGE`, `FACTORY_FACTORYBOX_EXECUTABLE_SHA256`, `FACTORY_FACTORYBOX_NODE`
+and `FACTORY_FACTORYBOX_KERNEL`. They must identify a verified package and the actual admitted node.
+The worker image must be available in the operator's private registry or loaded on that node.
+An image built in the developer's Docker daemon is not automatically available to Kubernetes.
+
+Stop existing Envbox executions before changing the installation profile. Existing unused reserve
+slots retire when their frozen profile differs. Never adopt a used Envbox execution as Factorybox
+or overwrite its immutable runtime artifacts. The default reserve target remains zero; set
+`executionReserveTarget` only after qualifying the target node, CNI and StorageClass.
+
+Pause/Resume retains RAM on the same live worker. A worker restart or node loss retains canonical
+source but requires an explicit fresh execution; automatic cross-node RAM recovery is unsupported.
 
 The command renders ordinary Kubernetes objects and uses the installation's existing kubectl
 context or ServiceAccount. It has no cloud-specific implementation, CRD, new database or pool
@@ -69,7 +84,8 @@ The health port serves only `GET /readyz` with an empty 204/503 response; it is 
 Prepare the complete OCI bundle inside the bounded store, for example
 `/var/lib/sysbox/fixed-store/data/store/input/project/bundle`, using Factorybox's admitted overlay
 layout. This command does not pull/unpack images, prepare a Project checkout or replace the
-Factory Connector. External canonical Source mounts are deliberately not admitted.
+Factory Connector. Factory's product preparer separately declares and validates the canonical
+Source bind; this administrator command does not prepare it.
 
 Save one operation JSON before calling `run`:
 
@@ -117,8 +133,8 @@ anonymous/snapshot residency after Pause, exact RAM/file retention after Resume,
 without a second process and Delete. This is not an API-server, kubelet, CSI or Kubernetes
 qualification. A connected target cluster is still required for that acceptance.
 
-Product Workspace integration additionally requires the canonical Source contract: editing while
-execution is paused must preserve the newest files and the agreed process behavior. Factorybox
-currently refuses external binds, so mounting the existing Source PVC or returning a private copy
-to the Source service would break that contract. No Workspace or pool is switched to Factorybox
-until that native proof exists. Independent Theia remains outside worker resource accounting.
+Factory's product path binds the canonical Source directory under the admitted shared-source
+contract. Native acceptance must preserve atomic editor saves made while paused, the same app RAM
+and the original Dev Container after Resume. The actual Factory Connector and reserve activation
+are exercised by Factorybox's `tools/factory_consumer_native.py`; this still does not qualify a
+target cluster's CNI or CSI. Independent Theia remains outside worker resource accounting.

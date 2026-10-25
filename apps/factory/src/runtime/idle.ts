@@ -14,7 +14,7 @@ export function executionIdleMS(environment: Readonly<Record<string, string | un
 export function createIdleCompute(
   database: Database,
   hub: Pick<RuntimeHub, "claimIdle" | "releaseIdle">,
-  runtimes: { stop(attemptID: string): Promise<unknown> },
+  runtimes: { pause(attemptID: string): Promise<unknown> },
   idleMS = executionIdleMS(process.env),
 ) {
   let running: Promise<void> | null = null;
@@ -55,11 +55,11 @@ export function createIdleCompute(
                 AND state NOT IN ('succeeded','failed')) AS active`;
           if (work?.active || !hub.claimIdle(attempt.id, idleMS)) return false;
           claimed = true;
-          await sql`UPDATE factory.runtime_attempt SET state='stop-intended',stop_intended_at=now(),updated_at=now()
+          await sql`UPDATE factory.runtime_attempt SET state='pausing',updated_at=now()
             WHERE id=${attempt.id} AND state='ready'`;
           return true;
         });
-        if (recorded) await runtimes.stop(attempt.id);
+        if (recorded) await runtimes.pause(attempt.id);
       } finally {
         if (claimed && !recorded) hub.releaseIdle(attempt.id);
       }
