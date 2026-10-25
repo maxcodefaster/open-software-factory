@@ -3,15 +3,23 @@ import type { JSX } from "@solidjs/web";
 import { z } from "zod";
 import {
   type MCPLibraryView,
-  mcpLibraryView,
   resolveMCPChoice,
 } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
   defaultInputInstructions,
   monitoringSave,
+  type monitoringChange,
   monitoringView,
 } from "../../../../packages/conversation-domain/src/monitoring";
-import { APIRequestError, apiRequest } from "../api-client";
+import { APIRequestError } from "../api-client";
+import { serverCall } from "../server-functions/result";
+import { getMCPLibrary } from "../server-functions/mcp";
+import {
+  getProjectInputs,
+  saveProjectInput,
+  disableProjectInput,
+  rotateProjectInput,
+} from "../server-functions/inputs";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
 import { CopyButton } from "../ui/feedback";
@@ -25,12 +33,11 @@ type Draft = { projectId: string; projectName: string; input: z.infer<typeof mon
 type Operation = {
   projectId: string;
   projectName: string;
-  path: string;
-  method: "PUT" | "POST";
-  body: unknown;
   notice: string;
-};
-const result = z.object({ url: z.url().nullable() });
+} & (
+  | { action: "save"; input: z.output<typeof monitoringSave> }
+  | { action: "disable" | "rotate"; id: string; input: z.output<typeof monitoringChange> }
+);
 const stateLabel: Record<View["incidents"][number]["state"], string> = {
   queued: "Queued",
   diagnosing: "Preparing requirements",
@@ -206,7 +213,6 @@ export function MonitoringSettings(props: {
       "Unavailable source"
     );
   };
-  const endpoint = () => `/api/projects/${props.project?.id}/inputs`;
   const blocked = () => busy() || Boolean(pending());
 
   async function load(quiet = false) {
@@ -216,8 +222,8 @@ export function MonitoringSettings(props: {
     if (!quiet) setLoading(true);
     try {
       const [view, sources] = await Promise.all([
-        apiRequest(monitoringView, `/api/projects/${project.id}/inputs`),
-        apiRequest(mcpLibraryView, `/api/mcp?project=${project.id}`),
+        serverCall(getProjectInputs(project.id)),
+        serverCall(getMCPLibrary(project.id)),
       ]);
       if (sequence !== reads || project.id !== props.project?.id || !isActive()) return;
       const next = { projectId: project.id, view, sources };
@@ -337,11 +343,13 @@ export function MonitoringSettings(props: {
     setNotice("");
     setPending(operation);
     try {
-      const value = await apiRequest(result, operation.path, {
-        method: operation.method,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(operation.body),
-      });
+      const value = await serverCall(
+        operation.action === "save"
+          ? saveProjectInput(operation.projectId, operation.input)
+          : operation.action === "disable"
+            ? disableProjectInput(operation.projectId, operation.id, operation.input)
+            : rotateProjectInput(operation.projectId, operation.id, operation.input),
+      );
       setPending(undefined);
       if (operation.projectId !== props.project?.id) return;
       setDraft(undefined);
@@ -352,7 +360,7 @@ export function MonitoringSettings(props: {
           ? {
               projectId: operation.projectId,
               url: value.url,
-              rotated: operation.method === "POST",
+              rotated: operation.action === "rotate",
             }
           : undefined,
       );
@@ -379,9 +387,8 @@ export function MonitoringSettings(props: {
     void execute({
       projectId: current.projectId,
       projectName: current.projectName,
-      path: endpoint(),
-      method: "PUT",
-      body: monitoringSave.parse(current.input),
+      action: "save",
+      input: monitoringSave.parse(current.input),
       notice: "Input enabled for new requests. Earlier work is not resumed.",
     });
   }
@@ -391,9 +398,9 @@ export function MonitoringSettings(props: {
     void execute({
       projectId: project.id,
       projectName: project.name,
-      path: `${endpoint()}/${hook.id}/${action}`,
-      method: "POST",
-      body: { commandId: crypto.randomUUID(), expectedVersion: hook.version },
+      action,
+      id: hook.id,
+      input: { commandId: crypto.randomUUID(), expectedVersion: hook.version },
       notice:
         action === "rotate"
           ? "Key rotated and Input disabled. Update the sender, then review and enable this Input."
@@ -708,32 +715,34 @@ export function MonitoringSettings(props: {
       <Show when={!draft() && !secret() && view()}>
         {(current) => (
           <>
-            <WorkspaceActionBar
-              label="Input actions"
-              class="input-overview-heading"
-              leading={props.navigation}
-              status={
+            <header class="input-overview-heading workspace-heading">
+              <div class="workspace-heading-title">
+                <h2 class="input-wide-title">Inputs</h2>
+                <div class="workspace-action-leading">{props.navigation}</div>
+              </div>
+              <WorkspaceActionBar label="Input actions">
+                <Show when={current().canManage}>
+                  <button
+                    ref={(element) => {
+                      addButton = element;
+                    }}
+                    type="button"
+                    class="workspace-action"
+                    data-primary="true"
+                    disabled={blocked()}
+                    onClick={() => edit()}
+                  >
+                    Add input
+                  </button>
+                </Show>
+              </WorkspaceActionBar>
+              <div class="workspace-heading-meta">
                 <p>
                   Turn external requests into grounded Tickets. Sources and tasks stay scoped to
                   this Project.
                 </p>
-              }
-            >
-              <Show when={current().canManage}>
-                <button
-                  ref={(element) => {
-                    addButton = element;
-                  }}
-                  type="button"
-                  class="workspace-action"
-                  data-primary="true"
-                  disabled={blocked()}
-                  onClick={() => edit()}
-                >
-                  Add input
-                </button>
-              </Show>
-            </WorkspaceActionBar>
+              </div>
+            </header>
             <Show when={!current().canManage}>
               <p class="input-help">
                 Project managers configure Inputs. You can inspect received requests and prepared

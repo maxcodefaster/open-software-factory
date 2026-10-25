@@ -18,14 +18,19 @@ export function editorPopoverPosition(input: {
   height: number;
   gap: number;
   preferBelow: boolean;
-  avoid?: readonly EditorRectangle[];
+  align?: "start" | "center";
 }) {
   const { anchor, bounds, height, gap } = input;
   const width = Math.min(input.width, bounds.right - bounds.left);
   const center = (anchor.left + anchor.right) / 2;
   const left = Math.max(
     bounds.left,
-    Math.min(input.preferBelow ? anchor.left : center - width / 2, bounds.right - width),
+    Math.min(
+      (input.align ?? (input.preferBelow ? "start" : "center")) === "start"
+        ? anchor.left
+        : center - width / 2,
+      bounds.right - width,
+    ),
   );
   const above = anchor.top - gap - height;
   const below = anchor.bottom + gap;
@@ -39,34 +44,5 @@ export function editorPopoverPosition(input: {
         : fitsBelow
           ? below
           : Math.max(bounds.top, Math.min(below, bounds.bottom - height));
-  const fallback = { left, top };
-  const obstacles = input.avoid ?? [];
-  if (!obstacles.length) return fallback;
-  const candidates = [fallback];
-  const horizontal = [left, bounds.left, bounds.right - width];
-  const vertical = [
-    top,
-    bounds.top,
-    bounds.bottom - height,
-    ...obstacles.flatMap((rect) => [rect.top - height - gap, rect.bottom + gap]),
-  ];
-  for (const x of horizontal) {
-    for (const y of vertical) {
-      if (y >= bounds.top && y + height <= bounds.bottom) candidates.push({ left: x, top: y });
-    }
-  }
-  const clear = candidates.filter(
-    (candidate) =>
-      !obstacles.some(
-        (rect) =>
-          candidate.left < rect.right + gap &&
-          candidate.left + width > rect.left - gap &&
-          candidate.top < rect.bottom + gap &&
-          candidate.top + height > rect.top - gap,
-      ),
-  );
-  const distance = (candidate: typeof fallback) =>
-    (candidate.left + width / 2 - center) ** 2 + (candidate.top - top) ** 2;
-  clear.sort((a, b) => distance(a) - distance(b));
-  return clear[0];
+  return { left, top };
 }

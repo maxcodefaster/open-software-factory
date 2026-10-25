@@ -1,10 +1,14 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { z } from "zod";
+import { type SetupInspectionView } from "../../../../packages/project-domain/src/setup";
+import { APIRequestError } from "../api-client";
 import {
-  type SetupInspectionView,
-  setupInspectionView,
-} from "../../../../packages/project-domain/src/setup";
-import { APIRequestError, apiRequest } from "../api-client";
+  getSetupInspection,
+  startSetupInspection,
+  confirmSetupInspection,
+  stopSetupInspection,
+} from "../server-functions/setup";
+import { serverCall } from "../server-functions/result";
 
 const retainedCommand = z
   .object({
@@ -31,7 +35,6 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
   let disposed = false;
   let readVersion = 0;
   let questionID: string | undefined;
-  const path = () => `/api/projects/${props.projectID}/setup/inspection`;
   const blocked = () => busy() || Boolean(pending()) || readFailed();
   const commandKey = () => `${props.storageKey}:command`;
   function clearPending() {
@@ -73,7 +76,7 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
     if (timer) clearTimeout(timer);
     setReading(true);
     try {
-      const next = await apiRequest(setupInspectionView.nullable(), path());
+      const next = await serverCall(getSetupInspection(projectID));
       if (disposed || props.projectID !== projectID || version !== readVersion) return;
       receive(next);
       setReadFailed(false);
@@ -144,14 +147,12 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
       /* Retain in memory. */
     }
     try {
-      const next = await apiRequest(
-        setupInspectionView,
-        path() + (operation !== "inspect" ? `/${operation}` : ""),
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(command.body),
-        },
+      const next = await serverCall(
+        operation === "inspect"
+          ? startSetupInspection(projectID, command.body)
+          : operation === "confirm"
+            ? confirmSetupInspection(projectID, command.body.id)
+            : stopSetupInspection(projectID, command.body.id),
       );
       if (disposed || props.projectID !== projectID) return;
       ++readVersion;

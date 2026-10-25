@@ -50,9 +50,18 @@
 .input-overview-heading {
   margin-bottom: var(--space-4);
 }
-.input-overview-heading .workspace-action-status {
-  flex: 1 1 28rem;
+.input-overview-heading > .workspace-heading-title {
+  flex-basis: auto;
+}
+.input-overview-heading p {
+  margin: 0;
   max-width: 70ch;
+  color: var(--color-ink-muted);
+}
+.input-wide-title {
+  margin: 0;
+  font-size: var(--text-xl);
+  font-weight: var(--weight-medium);
 }
 .input-settings .input-message {
   margin-bottom: var(--space-4);

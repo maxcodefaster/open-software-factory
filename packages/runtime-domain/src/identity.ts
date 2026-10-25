@@ -20,6 +20,13 @@ export function hashConnectorToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
+export function runtimePublicationToken(secret: string, publicationID: string) {
+  if (!secret) throw new Error("Runtime connector secret is required");
+  return createHmac("sha256", secret)
+    .update(`factory-publication:${publicationID}`)
+    .digest("base64url");
+}
+
 export function runtimeConnectorTokens(secret: string, attemptID: string, generation: number) {
   if (!secret) throw new Error("Runtime connector secret is required");
   if (!Number.isSafeInteger(generation) || generation < 1)

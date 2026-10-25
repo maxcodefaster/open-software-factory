@@ -1,3 +1,5 @@
+import { CommandError } from "../../apps/factory/src/command-error";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
@@ -10,6 +12,191 @@ import { serveChatAssets } from "../support/chat-assets";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
+test("saved chat stays tidy across screen sizes, long Markdown and a growing draft", async ({
+  page,
+  context,
+}) => {
+  test.setTimeout(90_000);
+  const evidence = ".factory/test-results/chat-refinement";
+  await mkdir(evidence, { recursive: true });
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await serveChatAssets(page);
+  await signIn(page);
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  const { session } = await browserBootstrap(page);
+  const projectID = crypto.randomUUID();
+  const conversationID = crypto.randomUUID();
+  const slug = `chat-layout-${projectID}`;
+  const database = createDatabase(1);
+  const messages = [
+    {
+      actor: "user",
+      body: "Can we simplify the chat layout?",
+    },
+    {
+      actor: "project-agent",
+      body: "Yes. I’ll check message spacing, tool activity and the composer.\n\nNavigation and saved drafts will stay unchanged.",
+    },
+    {
+      actor: "user",
+      body: "Keep file attachments and keyboard access working on mobile too.",
+    },
+    {
+      actor: "project-agent",
+      body: "## What I’ll check\n\n- Readable messages without oversized bubbles\n- One clear Copy action per message\n- Enough room to write, attach a file and send\n\nI’ll test narrow screens as well as desktop.",
+    },
+  ];
+  let commissioned = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(?:conversation\/message|agent\/(?:start|prompt)|runtime-attempts\/[^/]+\/start)$/.test(
+        new URL(request.url()).pathname,
+      )
+    )
+      commissioned++;
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Owned chat layout has no runtime");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Owned chat layout has no runtime");
+      },
+    },
+  });
+  try {
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+        VALUES(${projectID},${slug},'Factory workspace','https://example.invalid/chat-layout.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+      await sql`INSERT INTO factory.ticket_conversation(id,project_id,mode,created_by)
+        VALUES(${conversationID},${projectID},'plan',${session.user.id})`;
+      for (const [index, message] of messages.entries())
+        await sql`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,citations,created_by)
+          VALUES(${crypto.randomUUID()},${conversationID},${index + 1},
+            ${message.actor === "user" ? "user-message" : "agent-message"},${message.actor},'plan',${message.body},'{}'::jsonb,'[]'::jsonb,${session.user.id})`;
+    });
+    await openProjectMenu(page);
+    await page.getByRole("button").filter({ hasText: slug }).click();
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+    const panel = page.locator(".agent-panel");
+    const history = panel.locator(".agent-messages");
+    const draft = panel.getByRole("textbox", { name: "Message conversation", exact: true });
+    const shell = panel.locator(".agent-input-shell");
+    await expect(history.locator(".agent-message")).toHaveCount(4);
+    await expect(draft).toBeEnabled();
+    await expect(page.getByText(/scripted test data/)).toHaveCount(0);
+    await draft.fill("Keep the current navigation.");
+    for (const width of [1440, 1024, 760, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      await expect(draft).toHaveValue("Keep the current navigation.");
+      await expect(panel.locator(".conversation-title")).toBeVisible();
+      await expect(shell).toBeInViewport();
+      await expect(history).toHaveCSS("row-gap", "12px");
+      await expect(shell).toHaveCSS("padding", "0px");
+      await expect(shell).toHaveCSS("border-radius", "6px");
+      await expect(panel.locator(".agent-composer")).toHaveCSS("padding", "8px");
+      await expect(history.locator(".agent-message.user > .markdown-body").first()).toHaveCSS(
+        "border-radius",
+        "6px",
+      );
+      await expect(history.locator("h2")).toHaveCSS("font-size", "14px");
+      await expect(history.locator("h2")).toHaveCSS("font-style", "normal");
+      await expect(history.locator(".copy-feedback .feedback-mark").first()).toBeHidden();
+      await expect(panel.getByRole("button", { name: "Send message", exact: true })).toBeVisible();
+      if (width <= 760) {
+        await expect(draft).toHaveCSS("font-size", "16px");
+        await expect(history.locator(".copy-feedback").first()).toHaveCSS("min-height", "44px");
+        const bounds = await shell.boundingBox();
+        if (!bounds) throw new Error("Chat composer is missing");
+        expect(bounds.height).toBeLessThanOrEqual(108);
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      await history.evaluate((element) => {
+        element.scrollTop = 0;
+      });
+      await page.screenshot({ path: `${evidence}/chat-${width}.png` });
+    }
+    const copy = history
+      .getByRole("button", { name: "Copy Assistant message", exact: true })
+      .last();
+    await history.locator(".agent-message").last().hover();
+    await copy.click();
+    await expect(copy).toHaveAttribute("data-feedback", "success");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(messages[3]?.body);
+    await draft.fill("First line");
+    await draft.press("End");
+    await draft.press("Shift+Enter");
+    await expect(draft).toHaveValue("First line\n");
+    await draft.fill(
+      Array.from({ length: 16 }, (_, index) => `Draft line ${index + 1}`).join("\n"),
+    );
+    await expect(draft).toBeFocused();
+    await expect
+      .poll(() => draft.evaluate((element) => element.getBoundingClientRect().height))
+      .toBeLessThanOrEqual(160);
+    await expect(shell).toBeInViewport();
+    await expect(
+      panel.getByRole("button", { name: "Add image or file", exact: true }),
+    ).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 568 });
+    await expect(shell).toBeInViewport();
+    await expect(history).toBeVisible();
+    expect(await history.evaluate((element) => element.clientHeight)).toBeGreaterThan(72);
+    await page.screenshot({ path: `${evidence}/growing-draft-390.png` });
+    expect(commissioned).toBe(0);
+
+    const longToken = `workspace_${"long_identifier_".repeat(32)}`;
+    const edgeBody = `## Long content\n\nhttps://example.invalid/${longToken}\n\n\`\`\`ts\nconst path = "${longToken}";\n\`\`\`\n\n| Field | Value |\n| --- | --- |\n| Path | \`${longToken}\` |\n\nSecond paragraph remains separate.`;
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload,citations,created_by)
+        VALUES(${crypto.randomUUID()},${conversationID},5,'agent-message','project-agent','plan',
+          ${edgeBody},'{}'::jsonb,'[]'::jsonb,${session.user.id})`;
+      await sql`UPDATE factory.ticket_conversation SET version=version+1 WHERE id=${conversationID}`;
+    });
+    await expect(history).toContainText("Second paragraph remains separate.");
+    await draft.fill("Keep the current navigation.");
+    for (const width of [1440, 760, 390, 320]) {
+      await page.setViewportSize({ width, height: 844 });
+      const last = history.locator(".agent-message").last();
+      await last.scrollIntoViewIfNeeded();
+      const overflow = await history.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      );
+      expect(overflow).toBeLessThanOrEqual(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth - innerWidth)).toBe(0);
+      await expect(last.locator("pre")).toHaveCSS("overflow-x", "auto");
+      await expect(last.locator("table")).toHaveCSS("overflow-x", "auto");
+      await expect(last.locator("th").first()).toHaveCSS("white-space", "nowrap");
+      expect(
+        await last
+          .locator("th")
+          .first()
+          .evaluate((element) => element.getBoundingClientRect().height),
+      ).toBeLessThanOrEqual(44);
+      expect(
+        await last
+          .locator("table")
+          .evaluate((element) => element.scrollWidth > element.clientWidth),
+      ).toBe(true);
+      await expect(draft).toHaveValue("Keep the current navigation.");
+      await page.screenshot({ path: `${evidence}/long-content-${width}.png` });
+    }
+    const attachmentHelp = panel.getByLabel("Attachment formats and limits", { exact: true });
+    await attachmentHelp.click();
+    await expect(
+      panel.getByText("Only you can access these files, including after sending."),
+    ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(attachmentHelp).toBeFocused();
+    expect(commissioned).toBe(0);
+  } finally {
+    await deleteFactoryProject(projectID, database);
+    await database.client.end();
+  }
+});
+
 test("planning Skill selection survives an unchanged conversation refresh without sending", async ({
   page,
 }) => {
@@ -17,7 +204,7 @@ test("planning Skill selection survives an unchanged conversation refresh withou
   await serveChatAssets(page);
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   const projectID = crypto.randomUUID();
   const slug = `skill-refresh-${projectID}`;
   const database = createDatabase(1);
@@ -41,20 +228,29 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     )
       commissioned++;
   });
-  for (const source of ["source-workspace", "developer-ide"])
-    await page.route(`**/api/projects/${projectID}/${source}/ensure`, (route) =>
-      route.fulfill({ status: 503, json: { error: "Owned Skill proof starts no runtime" } }),
-    );
-  await page.route(`**/api/projects/${projectID}/conversation{,?*}`, (route) => {
-    conversationReads++;
-    return route.fulfill({ json: conversation });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Owned Skill proof starts no runtime");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Owned Skill proof starts no runtime");
+      },
+    },
   });
-  await page.route(
-    `**/api/projects/${projectID}/skills/invocations?role=planning`,
-    async (route) => {
-      await skillsReady.promise;
-      await route.fulfill({
-        json: {
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async (_actor, factoryTargetID, factoryCommand) => {
+        conversationReads++;
+        return conversationViewSchema.nullable().parse(conversation);
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    skills: {
+      async invocations() {
+        await skillsReady.promise;
+        return {
           skills: [
             {
               id: crypto.randomUUID(),
@@ -64,10 +260,10 @@ test("planning Skill selection survives an unchanged conversation refresh withou
             },
           ],
           conflicts: [],
-        },
-      });
+        };
+      },
     },
-  );
+  });
   try {
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${slug},'Skill refresh proof','https://example.invalid/owned-skill-refresh.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
@@ -86,6 +282,13 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     await expect(suggestions).toBeVisible({ timeout: 2_000 });
     skillsReady.resolve();
     await expect(suggestions.getByRole("option", { name: /Review the reference/ })).toBeVisible();
+    await expect(suggestions.locator(":scope > p:not([role]), :scope > small")).toHaveCount(0);
+    await expect(suggestions.locator("strong")).toHaveText("Review the reference");
+    expect(
+      await suggestions
+        .getByRole("option")
+        .evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeLessThanOrEqual(48);
     await mkdir(".factory/test-results/skill-refresh", { recursive: true });
     await page.screenshot({
       path: ".factory/test-results/skill-refresh/planning-options-wide.png",
@@ -97,7 +300,9 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     await page.screenshot({ path: ".factory/test-results/skill-refresh/planning-wide.png" });
     await page.setViewportSize({ width: 390, height: 844 });
     await draft.fill("/rev");
+    await expect(draft).toBeFocused();
     await expect(suggestions.getByRole("option", { name: /Review the reference/ })).toBeVisible();
+    await expect(draft).toBeFocused();
     await page.screenshot({ path: ".factory/test-results/skill-refresh/planning-narrow.png" });
     await draft.press("Escape");
     await expect(draft).toHaveValue("/rev");
@@ -117,7 +322,7 @@ test("personal conversation history keeps drafts scoped through selection and re
   await serveChatAssets(page);
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   const projectID = crypto.randomUUID();
   const slug = `chat-conversations-${projectID}`;
   const database = createDatabase(1);
@@ -131,12 +336,20 @@ test("personal conversation history keeps drafts scoped through selection and re
     )
       commissioned++;
   });
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Owned chat proof has no source runtime" } }),
-  );
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Owned chat proof has no editor runtime" } }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Owned chat proof has no source runtime");
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Owned chat proof has no editor runtime");
+      },
+    },
+  });
   try {
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${slug},'Conversation draft proof','https://example.invalid/owned-chat.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
@@ -185,17 +398,13 @@ test("personal conversation history keeps drafts scoped through selection and re
         Math.max(...headings.map((heading) => heading.scrollWidth - heading.clientWidth)),
       );
     expect(headingOverflow).toBeLessThanOrEqual(0);
-    const headingGap = await page.locator(".lane-heading").evaluateAll((headings) =>
-      Math.min(
-        ...headings.map((heading) => {
-          const label = heading.querySelector("span");
-          const actions = heading.querySelector(".lane-heading-actions");
-          if (!label || !actions) throw new Error("Board heading is incomplete");
-          return actions.getBoundingClientRect().left - label.getBoundingClientRect().right;
-        }),
-      ),
-    );
-    expect(headingGap).toBeGreaterThanOrEqual(7.5);
+    await expect(page.locator(".lane-heading button, .lane-heading-actions")).toHaveCount(0);
+    await expect(page.locator(".lane-heading h2")).toHaveText([
+      "Ideas",
+      "Requirements",
+      "Implementation",
+      "Review",
+    ]);
     await page.screenshot({
       path: ".factory/test-results/chat-collaboration/board-with-chat-1024.png",
     });
@@ -231,7 +440,7 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
     origin: new URL(page.url()).origin,
   });
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   const projectID = crypto.randomUUID(),
     ticketID = crypto.randomUUID(),
     revisionID = crypto.randomUUID();
@@ -251,13 +460,22 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
     )
       commissioned++;
   });
-  for (const path of ["source-workspace", "developer-ide"])
-    await page.route(`**/api/projects/${projectID}/${path}/ensure`, (route) =>
-      route.fulfill({
-        status: 503,
-        json: { error: "Owned conversation proof has no source or editor compute" },
-      }),
-    );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError(
+          "unavailable",
+          "Owned conversation proof has no source or editor compute",
+        );
+      },
+      ensureEditor: async () => {
+        throw new CommandError(
+          "unavailable",
+          "Owned conversation proof has no source or editor compute",
+        );
+      },
+    },
+  });
   try {
     const canonical = canonicalRequirementContent({
       summary: "Retain conversations",

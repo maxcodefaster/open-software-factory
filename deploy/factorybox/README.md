@@ -5,10 +5,12 @@ dedicated worker for a customer or trust domain and controls administrator-prepa
 bundles through its own CLI. Factory Workspace Start and the execution reserve use this same worker
 contract with Factory-owned consumer preparation. See [Workspace execution](../../docs/adr/0022-factorybox-workspace-execution.md).
 
-The Helm chart requires `factorybox.image`, `factorybox.executableSHA256`, `factorybox.nodeName` and
-`factorybox.kernel`. The local launcher uses the equivalent environment variables
-`FACTORY_FACTORYBOX_WORKER_IMAGE`, `FACTORY_FACTORYBOX_EXECUTABLE_SHA256`, `FACTORY_FACTORYBOX_NODE`
-and `FACTORY_FACTORYBOX_KERNEL`. They must identify a verified package and the actual admitted node.
+The Helm chart requires `factorybox.image`, `factorybox.executableSHA256`,
+`factorybox.architecture`, `factorybox.nodeName` and `factorybox.kernel`. The local launcher uses
+`FACTORY_FACTORYBOX_WORKER_IMAGE`, `FACTORY_FACTORYBOX_EXECUTABLE_SHA256`,
+`FACTORY_FACTORYBOX_ARCHITECTURE`, `FACTORY_FACTORYBOX_NODE` and `FACTORY_FACTORYBOX_KERNEL`.
+They must identify a verified package and the actual admitted node. Architecture is explicitly
+`arm64` or `amd64`; Factory never infers it from the control-plane host.
 The worker image must be available in the operator's private registry or loaded on that node.
 An image built in the developer's Docker daemon is not automatically available to Kubernetes.
 
@@ -24,6 +26,42 @@ The command renders ordinary Kubernetes objects and uses the installation's exis
 context or ServiceAccount. It has no cloud-specific implementation, CRD, new database or pool
 controller. The worker receives no Kubernetes token or host Docker socket. Keep distinct stores
 and workers for distinct trust domains.
+
+## Local worker build
+
+`bun run factorybox:build REQUEST_JSON` invokes the standalone repository's pinned
+worker pipeline. It records intent and output under `.factory/test-results/`, checks
+the final image architecture and the actual executable bytes inside that image, and
+writes `profile.candidate.json` in the existing Factory runtime-profile format.
+It neither publishes an image nor changes an installed profile or retained Sandbox.
+
+The request names exact completed inputs, not a floating tag or latest artifact:
+
+```json
+{
+  "repository": "/absolute/path/to/factorybox",
+  "platform": "linux/arm64",
+  "nativeBaseBuild": "factorybox-build-native-base-REPLACE_WITH_32_HEX_CHARACTERS",
+  "builder": "REPLACE_WITH_RUNNING_BOUNDED_BUILDER",
+  "boundedBuild": true,
+  "network": "host",
+  "dockerContext": "orbstack",
+  "nodeName": "orbstack",
+  "kernel": "REPLACE_WITH_ACTUAL_KERNEL_RELEASE"
+}
+```
+
+The standalone README describes native-base and bounded builder preparation.
+Optional `sysboxBuild` and `retainedCandidate` reuse exact verified completed component
+builds. All components must match `platform`. An AMD64 build on ARM64 remains a
+cross-build; Factory runs the native `doctor` probe only on a matching Linux Docker
+host. Even a matching doctor is not a lifecycle qualification.
+
+ARM64 worker images can be assembled, but the current runtime still refuses ARM64
+execution because its timer continuation is not ported. The build receipt records
+that refusal and `installed: false`. Do not select its candidate profile until native
+Start, shared-source Pause/Resume, Connector and reserve acceptance pass. The existing
+installation stays unchanged when a build or runtime probe fails.
 
 ## Request and deployment
 
@@ -41,6 +79,7 @@ and `--worker-epoch`. The previous first-release image does not expose these opt
   "trustDomainID": "abcdef0123456789abcdef0123456789",
   "image": "registry.example/private/factorybox@sha256:REPLACE_WITH_VERIFIED_IMAGE_DIGEST",
   "executableSHA256": "REPLACE_WITH_EXECUTABLE_SHA256",
+  "architecture": "amd64",
   "nodeName": "REPLACE_WITH_NODE_NAME",
   "kernel": "7.2.8-9-omarchy",
   "boundedBytes": 8589934592,
@@ -49,8 +88,10 @@ and `--worker-epoch`. The previous first-release image does not expose these opt
 ```
 
 Replace the example store and trust-domain IDs with random 32-character hexadecimal identities.
-The native candidate currently accepts only its exact linked Linux AMD64 kernel and 4096-byte
-pages. Setting `kernel` does not broaden that qualification. Inspection checks the node's OS,
+Factory renders and validates either Linux ARM64 or AMD64 using the same worker protocol.
+The current standalone runtime candidate is qualified only on its exact Linux AMD64 kernel
+and 4096-byte pages. Its ARM64 timer reader and continuation are not implemented. Selecting
+`arm64`, building an image or changing `kernel` does not qualify that runtime. Inspection checks the node's OS,
 architecture, kernel and boot identity against the live worker. Worker startup checks its actual
 cgroups, component identities, store lease and filesystem. Another node profile needs native
 qualification before use.

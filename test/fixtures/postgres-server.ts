@@ -29,10 +29,12 @@ async function verify(identity: PostgresIdentity) {
   )
     throw new Error("Test PostgreSQL ownership mismatch");
 }
-export async function ownedPostgresServer() {
-  const owner = crypto.randomUUID();
+export async function startOwnedPostgres(owner: string, command = docker) {
   const name = `factory-test-postgres-${owner}`;
-  await docker([
+  // Keep the exact intended identity observable even if Docker accepts the
+  // create but its acknowledgement times out. Never infer cleanup ownership.
+  console.info(`Owned test PostgreSQL intended: ${name}`);
+  const args = [
     "run",
     "--detach",
     "--name",
@@ -53,7 +55,34 @@ export async function ownedPostgresServer() {
     "postgres",
     "-c",
     "wal_level=logical",
-  ]);
+  ];
+  try {
+    await command(args);
+  } catch (cause) {
+    // Docker can accept the deterministic create but lose its acknowledgement.
+    // Observe that exact owned, pinned and running resource. Never repeat run.
+    let observed: { owner?: string; image?: string; state?: string } | undefined;
+    try {
+      observed = JSON.parse(
+        await command([
+          "inspect",
+          "--format",
+          `{"owner":{{json (index .Config.Labels "${label}")}},"image":{{json .Config.Image}},"state":{{json .State.Status}}}`,
+          name,
+        ]),
+      );
+    } catch {
+      throw cause;
+    }
+    if (observed?.owner !== owner || observed.image !== image || observed.state !== "running")
+      throw cause;
+    console.info(`Owned test PostgreSQL confirmed after lost acknowledgement: ${name}`);
+  }
+}
+export async function ownedPostgresServer() {
+  const owner = crypto.randomUUID();
+  const name = `factory-test-postgres-${owner}`;
+  await startOwnedPostgres(owner);
   const port = (await docker(["port", name, "5432/tcp"])).split(":").at(-1);
   const identity = {
     owner,

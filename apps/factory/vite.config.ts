@@ -1,13 +1,28 @@
 import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vite";
 import { factoryDevelopmentProxy } from "../../scripts/factory/dev-proxy";
+import { resolve } from "node:path";
+import { factoryBuildDirectory } from "./src/build-directory";
+import {
+  factoryFunctionManifestID,
+  factoryServerFunctionManifest,
+} from "../../scripts/factory/server-function-manifest";
 
-export default defineConfig({
+export default defineConfig(({ isSsrBuild }) => ({
   root: import.meta.dirname,
-  plugins: [solid({ ssr: false }), factoryDevelopmentProxy()],
+  plugins: [
+    ...(isSsrBuild
+      ? [factoryServerFunctionManifest(import.meta.dirname, factoryBuildDirectory())]
+      : []),
+    solid({
+      ssr: false,
+      serverFunctions: { devMiddleware: false, manifest: factoryFunctionManifestID },
+    }),
+    factoryDevelopmentProxy(),
+  ],
   build: {
     target: "esnext",
-    outDir: "dist",
+    outDir: resolve(factoryBuildDirectory(), isSsrBuild ? "server" : "client"),
     emptyOutDir: true,
     rolldownOptions: {
       output: {
@@ -24,4 +39,4 @@ export default defineConfig({
     },
   },
   oxc: {},
-});
+}));

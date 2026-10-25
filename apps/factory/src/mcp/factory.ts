@@ -5,6 +5,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createPlanningTicketIn } from "../../../../packages/db/src/planning-ticket";
+import { versionSuggestions } from "../../../../packages/project-domain/src/release";
 import { type AgentTurnRecord, createAgentTurnStore } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { appendConversationEntry } from "../project-agent/conversation-store";
@@ -146,6 +147,34 @@ export async function connectFactoryMCP(input: {
       annotations: { readOnlyHint: true },
     },
     async (args) => result(await input.read(args)),
+  );
+  server.registerTool(
+    "readProjectReleases",
+    {
+      description:
+        "Read this Project's confirmed releases and version-bump suggestions to help prepare a release. Read-only: never publishes, grants access or observes consumers. A human must confirm the exact version and commit in Project Settings → Releases.",
+      inputSchema: z.strictObject({}),
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async () => {
+      await input.authorize();
+      const releases = await input.database.client<
+        { version: string; commitSHA: string; state: string; publishedAt: string | null }[]
+      >`SELECT version,commit_sha AS "commitSHA",state,published_at::text AS "publishedAt"
+        FROM factory.project_release WHERE project_id=${input.turn.command.projectId}
+        ORDER BY created_at DESC LIMIT 10`;
+      const [last] = await input.database.client<{ version: string }[]>`
+        SELECT version FROM factory.project_release WHERE project_id=${input.turn.command.projectId} AND state='published'
+        ORDER BY published_at DESC,id DESC LIMIT 1`;
+      return result({
+        projectId: input.turn.command.projectId,
+        lastPublishedVersion: last?.version ?? null,
+        suggestions: versionSuggestions(last?.version ?? null),
+        releases,
+        humanConfirmationRequired: true,
+        observedAt: new Date().toISOString(),
+      });
+    },
   );
   if (canCreateFactoryTicket(input.turn)) {
     const create = createFactoryTicketCommand(input.database);

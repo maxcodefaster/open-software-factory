@@ -1,14 +1,25 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { documentBlocks } from "../../apps/factory/src/document-model";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import { ticketDetailSchema } from "../../apps/factory/src/api-contracts";
+import {
+  repositoryDocumentsSchema,
+  knowledgeGenerationSchema,
+  knowledgeSearchSchema,
+  openRepositoryDocumentSchema,
+  ticketDetailSchema,
+} from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
-const userID = "01994a7d-0000-7000-8000-000000000001";
-const evidenceDirectory = ".factory/screenshots/document-coherence";
+let userID = "";
+const evidenceDirectory = ".factory/test-results/document-coherence";
 const commit = "a".repeat(40);
 const title =
   "A readable release summary with exact delivery context and useful repository sources";
@@ -125,17 +136,29 @@ test.beforeEach(async ({ page }) => {
   page.on("pageerror", (cause) => browserErrors.push(cause.message));
   await mkdir(evidenceDirectory, { recursive: true });
   database = createDatabase(1);
+  const [admin] = await database.client<{ id: string }[]>`
+    SELECT id FROM auth."user" WHERE email=${process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local"}`;
+  if (!admin) throw new Error("Document fixture administrator is missing");
+  userID = admin.id;
   projectID = crypto.randomUUID();
   projectSlug = `documents-${projectID.slice(0, 8)}`;
   ticketID = crypto.randomUUID();
   pageID = crypto.randomUUID();
   // This suite owns planning/editor data, not native infrastructure preparation.
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no source" } }),
-  );
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no IDE" } }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Controlled planning fixture has no source");
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Controlled planning fixture has no IDE");
+      },
+    },
+  });
   await database.client`
     INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
     VALUES (${projectID}, ${projectSlug}, 'Document coherence', 'https://example.invalid/documents.git',
@@ -170,9 +193,11 @@ test.beforeEach(async ({ page }) => {
       page_count, conflict_count, created_by, completed_at)
     VALUES (${crypto.randomUUID()}, ${projectID}, ${commit}, 'succeeded', 1, 1, ${userID}, now())
   `;
-  await page.route(`**/api/projects/${projectID}/knowledge/documents`, (route) =>
-    route.fulfill({ json: { commitSha: commit, documents: [] } }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () => repositoryDocumentsSchema.parse({ commitSha: commit, documents: [] }),
+    },
+  });
 });
 
 test.afterEach(async () => {
@@ -184,24 +209,25 @@ test.afterEach(async () => {
 });
 
 test("filters Knowledge while typing and retains the query through Enter", async ({ page }) => {
-  await page.route(`**/api/projects/${projectID}/knowledge/search?*`, (route) => {
-    const query = new URL(route.request().url()).searchParams.get("q");
-    return route.fulfill({
-      json: {
-        results:
-          query === "release"
-            ? [
-                {
-                  id: pageID,
-                  kind: "page",
-                  title,
-                  path: "release-context",
-                  snippet: "Saved human explanation",
-                },
-              ]
-            : [],
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      async search(_actor, _project, query) {
+        return knowledgeSearchSchema.parse({
+          results:
+            query === "release"
+              ? [
+                  {
+                    id: pageID,
+                    kind: "page",
+                    title,
+                    path: "release-context",
+                    snippet: "Saved human explanation",
+                  },
+                ]
+              : [],
+        });
       },
-    });
+    },
   });
   await openFixture(page);
   await openKnowledge(page);
@@ -227,35 +253,40 @@ test("searches nested repository documents with a snippet and ignores a late ear
   page,
 }) => {
   const path = "docs/operations/runbook.md";
-  await page.route(`**/api/projects/${projectID}/knowledge/documents`, (route) =>
-    route.fulfill({
-      json: { commitSha: commit, documents: [{ path, title: "runbook", sha: commit, size: 20 }] },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () =>
+        repositoryDocumentsSchema.parse({
+          commitSha: commit,
+          documents: [{ path, title: "runbook", sha: commit, size: 20 }],
+        }),
+    },
+  });
   const release = Promise.withResolvers<void>();
   const requested = Promise.withResolvers<void>();
-  await page.route(`**/api/projects/${projectID}/knowledge/search?*`, async (route) => {
-    const query = new URL(route.request().url()).searchParams.get("q");
-    if (query === "older") {
-      requested.resolve();
-      await release.promise;
-    }
-    await route.fulfill({
-      json: {
-        results:
-          query === "runbook"
-            ? [
-                {
-                  id: `document:${path}`,
-                  kind: "document",
-                  title: "runbook",
-                  path,
-                  snippet: "Restart the web service safely.",
-                },
-              ]
-            : [],
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      async search(_actor, _project, query) {
+        if (query === "older") {
+          requested.resolve();
+          await release.promise;
+        }
+        return knowledgeSearchSchema.parse({
+          results:
+            query === "runbook"
+              ? [
+                  {
+                    id: `document:${path}`,
+                    kind: "document",
+                    title: "runbook",
+                    path,
+                    snippet: "Restart the web service safely.",
+                  },
+                ]
+              : [],
+        });
       },
-    });
+    },
   });
   await openFixture(page);
   await openKnowledge(page);
@@ -309,19 +340,25 @@ test("repository documents stay read-only and their write route creates no plann
   page,
 }) => {
   const path = "docs/runbook.md";
-  await page.route(`**/api/projects/${projectID}/knowledge/documents*`, (route) =>
-    route.fulfill({
-      json: new URL(route.request().url()).searchParams.has("path")
-        ? {
-            path,
-            title: "runbook",
-            body: "## Runbook\nRestart safely.",
-            blobSha: commit,
-            commitSha: commit,
-          }
-        : { commitSha: commit, documents: [{ path, title: "runbook", sha: commit, size: 20 }] },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      async document() {
+        return openRepositoryDocumentSchema.parse({
+          path,
+          title: "runbook",
+          body: "## Runbook\nRestart safely.",
+          blobSha: commit,
+          commitSha: commit,
+        });
+      },
+      async documents() {
+        return repositoryDocumentsSchema.parse({
+          commitSha: commit,
+          documents: [{ path, title: "runbook", sha: commit, size: 20 }],
+        });
+      },
+    },
+  });
   await openFixture(page);
   await openKnowledge(page);
   await page.getByRole("button", { name: "Code docs", exact: true }).click();
@@ -334,7 +371,7 @@ test("repository documents stay read-only and their write route creates no plann
     headers: { origin: new URL(page.url()).origin },
     data: { path, expectedBlobSha: commit, body: "Overwrite" },
   });
-  expect(response.status()).toBe(405);
+  expect(response.status()).toBe(404);
   if (!database) throw new Error("Fixture database unavailable");
   const counts = await database.client<{ tickets: number; changes: number }[]>`
     SELECT (SELECT count(*)::integer FROM factory.ticket WHERE project_id=${projectID}) AS tickets,
@@ -421,7 +458,9 @@ test("Knowledge click-edit shares rich blocks, selection formatting and lossless
   await editor.press("Enter");
   await editor.pressSequentially("/");
   const menu = page.getByRole("menu", { name: "Knowledge blocks" });
-  await expect(menu.getByRole("menuitem")).toHaveCount(9);
+  await expect(menu.getByRole("menuitem")).toHaveCount(documentBlocks.length);
+  for (const block of documentBlocks)
+    await expect(menu.getByRole("menuitem", { name: block.label, exact: true })).toBeVisible();
   await menu.getByRole("menuitem", { name: "Heading", exact: true }).click();
   await editor.pressSequentially("Human note");
   for (let index = 0; index < 4; index++) await editor.press("Shift+ArrowLeft");
@@ -473,11 +512,13 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
     })
     .toContain("Local product framing.");
   await expect(editor).toBeVisible();
-  await page.route(`**/api/knowledge/pages/${pageID}`, (route) =>
-    route.request().method() === "PUT"
-      ? route.fulfill({ status: 503, json: { error: "Saving temporarily unavailable" } })
-      : route.continue(),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      async save() {
+        throw new CommandError("unavailable", "Saving temporarily unavailable");
+      },
+    },
+  });
   await editor.press("ControlOrMeta+End");
   await editor.press("Enter");
   await editor.pressSequentially("Recovered draft.");
@@ -529,13 +570,22 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
   let saved = false;
   const release = Promise.withResolvers<void>();
   let first = true;
-  await page.route(`**/api/knowledge/pages/${pageID}`, async (route) => {
-    if (route.request().method() !== "PUT" || !first) return route.continue();
-    first = false;
-    const response = await route.fetch({ timeout: 10_000 });
-    saved = true;
-    await Promise.race([release.promise, new Promise((resolve) => setTimeout(resolve, 15_000))]);
-    await route.fulfill({ response });
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      async save(_actor, id, input) {
+        const hold = first;
+        first = false;
+        const response = await serverCall(browserFunction(page, "saveKnowledgePage", [id, input]));
+        if (hold) {
+          saved = true;
+          await Promise.race([
+            release.promise,
+            new Promise((resolve) => setTimeout(resolve, 15_000)),
+          ]);
+        }
+        return response;
+      },
+    },
   });
   try {
     await editor.press("ControlOrMeta+End");
@@ -729,11 +779,11 @@ test("Wiki drag movement rejects source writes and History restores a new human 
     Array<{ body: string; version: number }>
   >`SELECT current_body AS body,version::integer AS version FROM factory.knowledge_page WHERE id=${pageID}`;
   if (!before) throw new Error("No page");
-  const saved = await page.request.put(`/api/knowledge/pages/${pageID}`, {
-    headers: { origin: new URL(page.url()).origin },
-    data: { expectedVersion: before.version, title, body: "Changed human explanation." },
-  });
-  expect(saved.ok()).toBe(true);
+  const saved = await browserFunction(page, "saveKnowledgePage", [
+    pageID,
+    { expectedVersion: before.version, title, body: "Changed human explanation." },
+  ]);
+  expect(saved.ok).toBe(true);
   await expect(page.locator(".knowledge-article")).toContainText("Changed human explanation.");
   await openPageHistory(page);
   const history = page.getByRole("complementary", { name: "Knowledge history" });
@@ -879,8 +929,8 @@ test("keeps History open beside the wide Agent during browser capture", async ({
   let refreshes = 0;
   page.on("response", (response) => {
     if (
-      response.url().endsWith(`/api/tickets/${ticketID}`) &&
-      response.request().method() === "GET"
+      response.url().includes("/_server/data/getTicketDetail-") &&
+      response.request().method() === "POST"
     )
       refreshes++;
   });
@@ -1024,7 +1074,7 @@ test("keeps selection formatting inside the visible document when the link edito
   expect(readability.inputSize).toBeGreaterThanOrEqual(13);
   for (const size of readability.buttonSizes) expect(size).toBeGreaterThanOrEqual(13);
   await toolbar.getByRole("textbox", { name: "Link URL" }).fill("https://example.com/release");
-  await toolbar.getByRole("button", { name: "Apply", exact: true }).click();
+  await toolbar.getByRole("button", { name: "Insert link", exact: true }).click();
   await expect(summary.locator("a")).toHaveAttribute("href", "https://example.com/release");
   await summary.press("ControlOrMeta+z");
   await expect(summary.locator("a")).toHaveCount(0);
@@ -1085,15 +1135,14 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
   if (!first || !second) throw new Error("Expected immutable revisions");
   expect(JSON.parse(first.canonicalContent).summary).toBe(original);
   expect(JSON.parse(second.canonicalContent).acceptanceCriteria).toContain("Review remains human.");
-  const approved = await page.request.post(
-    `/api/tickets/${ticketID}/requirements/${second.id}/approve`,
-    { headers: { origin: new URL(page.url()).origin } },
-  );
-  expect(approved.ok()).toBe(true);
-  const detail = await page.request.get(`/api/tickets/${ticketID}`);
-  expect(detail.ok()).toBe(true);
+  const approved = await requestFunction(page.request, "approveRequirementRevision", [
+    ticketID,
+    second.id,
+  ]);
+  expect(approved.ok).toBe(true);
+  const detail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
   const approvedDocument = ticketDetailSchema
-    .parse(await detail.json())
+    .parse(detail)
     .documentRevisions.find((document) => document.requirementRevisionId === second.id);
   expect(approvedDocument?.approvalId).toBeTruthy();
   await page.reload();
@@ -1201,22 +1250,7 @@ for (const width of [1440, 900]) {
       await expect
         .poll(async () => {
           const current = await toolbar.boundingBox();
-          if (!current) return { contained: false, selectionClear: false, nearbyClear: false };
-          const overlappingText = await summary.locator("p").evaluateAll(
-            (paragraphs, box) =>
-              paragraphs.some((paragraph) => {
-                const range = document.createRange();
-                range.selectNodeContents(paragraph);
-                return [...range.getClientRects()].some(
-                  (rect) =>
-                    box.x < rect.right &&
-                    box.x + box.width > rect.left &&
-                    box.y < rect.bottom &&
-                    box.y + box.height > rect.top,
-                );
-              }),
-            current,
-          );
+          if (!current) return { contained: false, selectionClear: false, anchored: false };
           return {
             contained:
               current.x >= bounds.x &&
@@ -1226,10 +1260,14 @@ for (const width of [1440, 900]) {
             selectionClear:
               current.y >= selectionBounds.bottom ||
               current.y + current.height <= selectionBounds.top,
-            nearbyClear: !overlappingText,
+            anchored:
+              Math.min(
+                Math.abs(current.y - selectionBounds.bottom),
+                Math.abs(current.y + current.height - selectionBounds.top),
+              ) <= 9,
           };
         })
-        .toEqual({ contained: true, selectionClear: true, nearbyClear: true });
+        .toEqual({ contained: true, selectionClear: true, anchored: true });
       expect(await viewport.evaluate((element) => element.scrollTop)).toBe(scrollTop);
       const popover = await toolbar.boundingBox();
       if (!popover) throw new Error("Missing expanded native selection toolbar");
@@ -1240,27 +1278,11 @@ for (const width of [1440, 900]) {
       expect(
         popover.y >= selectionBounds.bottom || popover.y + popover.height <= selectionBounds.top,
       ).toBe(true);
-      const textRectangles = await summary.locator("p").evaluateAll((paragraphs) =>
-        paragraphs.flatMap((paragraph) => {
-          const range = document.createRange();
-          range.selectNodeContents(paragraph);
-          return [...range.getClientRects()].map((rect) => rect.toJSON());
-        }),
-      );
-      expect(
-        textRectangles.some(
-          (rect) =>
-            popover.x < rect.right &&
-            popover.x + popover.width > rect.left &&
-            popover.y < rect.bottom &&
-            popover.y + popover.height > rect.top,
-        ),
-      ).toBe(false);
       await page.screenshot({
         path: `${evidenceDirectory}/spec-native-selection-${width}-${edge}.png`,
       });
       await link.fill("https://example.com/native-selection");
-      await toolbar.getByRole("button", { name: "Apply", exact: true }).click();
+      await toolbar.getByRole("button", { name: "Insert link", exact: true }).click();
       await expect(paragraph.locator("a")).toHaveAttribute(
         "href",
         "https://example.com/native-selection",
@@ -1278,7 +1300,7 @@ for (const width of [1440, 900]) {
 }
 
 for (const width of [1440, 900]) {
-  test(`keeps expanded formatting clear of dense wrapped Spec text at ${width}px`, async ({
+  test(`keeps expanded formatting at the dense wrapped Spec selection at ${width}px`, async ({
     page,
   }) => {
     const sentence =
@@ -1340,38 +1362,28 @@ for (const width of [1440, 900]) {
     await toolbar.getByRole("button", { name: "Link", exact: true }).click();
     const link = toolbar.getByRole("textbox", { name: "Link URL" });
     await expect(link).toBeFocused();
-    const overlapsText = () =>
-      summary.evaluate((element) => {
-        const control = document.querySelector('[aria-label="Text formatting"]');
-        if (!control) throw new Error("Missing dense formatting controls");
-        const box = control.getBoundingClientRect();
-        const clip = element.closest(".ticket-workspace")?.getBoundingClientRect();
-        if (!clip) throw new Error("Missing dense document clip");
-        const range = document.createRange();
-        range.selectNodeContents(element.querySelector("p")?.firstChild ?? element);
-        return [...range.getClientRects()].some(
-          (rect) =>
-            Math.max(rect.left, clip.left) < Math.min(rect.right, clip.right) &&
-            Math.max(rect.top, clip.top) < Math.min(rect.bottom, clip.bottom) &&
-            box.left < Math.min(rect.right, clip.right) &&
-            box.right > Math.max(rect.left, clip.left) &&
-            box.top < Math.min(rect.bottom, clip.bottom) &&
-            box.bottom > Math.max(rect.top, clip.top),
-        );
-      });
+    const anchored = async () => {
+      const box = await toolbar.boundingBox();
+      const word = await readSelectedWord();
+      if (!box) return false;
+      return Math.min(Math.abs(box.y - word.bottom), Math.abs(box.y + box.height - word.top)) <= 9;
+    };
     await page.screenshot({ path: `${evidenceDirectory}/spec-dense-formatting-${width}.png` });
-    await expect.poll(overlapsText, { timeout: 5_000 }).toBe(false);
-    await expect(toolbar).toHaveAttribute("data-placement", "reserved");
+    await expect.poll(anchored, { timeout: 5_000 }).toBe(true);
+    await expect(toolbar).toHaveAttribute("data-placement", "floating");
     expect(await viewport.evaluate((element) => element.scrollTop)).toBe(scrollTop);
     const formattingBounds = await toolbar.boundingBox();
     const contentBounds = await viewport.boundingBox();
     if (!formattingBounds || !contentBounds)
-      throw new Error("Missing reserved formatting geometry");
-    expect(formattingBounds.y + formattingBounds.height).toBeLessThanOrEqual(contentBounds.y);
+      throw new Error("Missing anchored formatting geometry");
+    expect(formattingBounds.y).toBeGreaterThanOrEqual(contentBounds.y);
+    expect(formattingBounds.y + formattingBounds.height).toBeLessThanOrEqual(
+      contentBounds.y + contentBounds.height,
+    );
     if (width > 900) {
       await page.setViewportSize({ width: 1280, height: 900 });
       await expect(link).toBeFocused();
-      await expect.poll(overlapsText, { timeout: 5_000 }).toBe(false);
+      await expect.poll(anchored, { timeout: 5_000 }).toBe(true);
       await page.screenshot({ path: `${evidenceDirectory}/spec-dense-formatting-1280.png` });
     }
     await link.press("Escape");
@@ -1383,8 +1395,7 @@ for (const width of [1440, 900]) {
       .toBe("Release");
     await page.keyboard.press("ArrowRight");
     await expect.poll(() => summary.evaluate(() => window.getSelection()?.isCollapsed)).toBe(true);
-    // Native selection collapses before Solid settles the toolbar's layout reservation.
-    // Measure the next drag only after the document has its restored geometry.
+    // Wait for the native selection to settle before measuring the next drag.
     await expect(toolbar).toBeHidden();
     await page.evaluate(
       () =>
@@ -1403,7 +1414,7 @@ for (const width of [1440, 900]) {
     await expect(toolbar).toBeVisible();
     await toolbar.getByRole("button", { name: "Link", exact: true }).click();
     await link.fill("https://example.com/dense-selection");
-    await toolbar.getByRole("button", { name: "Apply", exact: true }).click();
+    await toolbar.getByRole("button", { name: "Insert link", exact: true }).click();
     await expect(paragraph.locator("a")).toHaveText("Release");
     await expect(paragraph.locator("a")).toHaveAttribute(
       "href",
@@ -1421,10 +1432,13 @@ test("keeps saved Knowledge readable when History fails and allows an explicit r
 }) => {
   await openFixture(page);
   await openKnowledge(page);
-  const endpoint = `**/api/knowledge/pages/${pageID}/revisions`;
-  await page.route(endpoint, (route) =>
-    route.fulfill({ status: 503, json: { error: "Temporarily unavailable" } }),
-  );
+  const restoreHistory = await mockFactoryFunctions(page, {
+    knowledge: {
+      async history() {
+        throw new CommandError("unavailable", "Temporarily unavailable");
+      },
+    },
+  });
   await openPageHistory(page);
   const history = page.getByRole("complementary", { name: "Knowledge history" });
   await expect(page.locator(".knowledge-version-panel").getByRole("alert")).toContainText(
@@ -1432,7 +1446,7 @@ test("keeps saved Knowledge readable when History fails and allows an explicit r
   );
   await expect(page.locator(".knowledge-article")).toContainText("Saved human explanation");
   await page.keyboard.press("Escape");
-  await page.unroute(endpoint);
+  await restoreHistory();
   await openPageHistory(page);
   await expect(history).toContainText("Current version");
   await expect(history.getByRole("alert")).toHaveCount(0);
@@ -1441,18 +1455,28 @@ test("keeps saved Knowledge readable when History fails and allows an explicit r
 test("explains a failed Knowledge update while retaining saved content and secondary diagnostics", async ({
   page,
 }) => {
-  await page.route(`**/api/projects/${projectID}/knowledge/generation`, (route) =>
-    route.fulfill({
-      json: {
-        id: crypto.randomUUID(),
-        sourceCommitSha: commit,
-        state: "failed",
-        pageCount: 0,
-        conflictCount: 0,
-        failure: "Forge request failed with HTTP 404",
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      generation: async () =>
+        knowledgeGenerationSchema.nullable().parse({
+          id: crypto.randomUUID(),
+          sourceCommitSha: commit,
+          state: "failed",
+          pageCount: 0,
+          conflictCount: 0,
+          failure: "Forge request failed with HTTP 404",
+        }),
+      generate: async () =>
+        knowledgeGenerationSchema.nullable().parse({
+          id: crypto.randomUUID(),
+          sourceCommitSha: commit,
+          state: "failed",
+          pageCount: 0,
+          conflictCount: 0,
+          failure: "Forge request failed with HTTP 404",
+        }),
+    },
+  });
   await openFixture(page);
   await openKnowledge(page);
   const generation = page.locator(".knowledge-generation");

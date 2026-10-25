@@ -1,3 +1,5 @@
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -170,14 +172,30 @@ test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
       try {
         const cleanup = async () => {
           if (cookie) {
-            await command(`/api/changes/${owned.changeID}/cancel`);
+            await serverCall(
+              callFactoryFunction(
+                processFixture.base,
+                "cancelChange",
+                [owned.changeID],
+                { cookie, origin: processFixture.base, "content-type": "application/json" },
+                AbortSignal.timeout(90_000),
+              ),
+            );
             await eventually(
               async () => {
                 const attempts = await database.client<
                   Array<{ id: string }>
                 >`SELECT id FROM factory.runtime_attempt WHERE project_id=${owned.projectID} AND state<>'stopped'`;
                 for (const attempt of attempts)
-                  await command(`/api/runtime-attempts/${attempt.id}/stop`);
+                  await serverCall(
+                    callFactoryFunction(
+                      processFixture.base,
+                      "stopRuntimeAttempt",
+                      [attempt.id],
+                      { cookie, origin: processFixture.base, "content-type": "application/json" },
+                      AbortSignal.timeout(90_000),
+                    ),
+                  );
                 return attempts.length;
               },
               (count) => count === 0,

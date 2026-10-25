@@ -23,6 +23,8 @@ import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
 const administrator = "01994a7d-0000-7000-8000-000000000001";
@@ -176,13 +178,20 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       const email = `${role}-${projectID}@factory.local`;
       const password = "owned-team-delivery-password";
       const user = z.object({ id: z.uuid() }).parse(
-        await (
-          await command("/api/admin/users", adminCookie, {
-            name: `Team ${role}`,
-            email,
-            password,
-          })
-        ).json(),
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "createAccount",
+            [
+              {
+                name: `Team ${role}`,
+                email,
+                password,
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        ),
       );
       const login = await command("/api/auth/sign-in/email", "", { email, password });
       const cookie = login.headers
@@ -220,21 +229,30 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       );
       await fixture.start();
       adminCookie = await fixture.signIn();
-      await command(
-        "/api/model-settings",
-        adminCookie,
-        { version: 0, planningModelId: modelId, buildModelId: modelId },
-        "PUT",
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveModelSettings",
+          [{ version: 0, planningModelId: modelId, buildModelId: modelId }],
+          { cookie: adminCookie },
+        ),
       );
       async function publishSkill(content: SkillContent, expectedRevision = 0) {
         return skillRevisionInput.parse(
-          await (
-            await command("/api/admin/skills", adminCookie, {
-              revisionId: crypto.randomUUID(),
-              expectedRevision,
-              content,
-            })
-          ).json(),
+          await serverCall(
+            callFactoryFunction(
+              fixture.base,
+              "publishSkill",
+              [
+                {
+                  revisionId: crypto.randomUUID(),
+                  expectedRevision,
+                  content,
+                },
+              ],
+              { cookie: adminCookie },
+            ),
+          ),
         );
       }
       const planningSkill = await publishSkill(requirementsInterviewSkill);
@@ -242,18 +260,20 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       planningSkillID = planningSkill.id;
       buildSkillID = approvedBuildSkill.id;
       const systemSkills = systemSkillSettingsView.parse(
-        await (
-          await command(
-            "/api/admin/skills/settings",
-            adminCookie,
-            {
-              version: 0,
-              planning: { required: [planningSkillID], optional: [], selected: [] },
-              build: { required: [], optional: [buildSkillID], selected: [] },
-            },
-            "PUT",
-          )
-        ).json(),
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "saveSystemSkills",
+            [
+              {
+                version: 0,
+                planning: { required: [planningSkillID], optional: [], selected: [] },
+                build: { required: [], optional: [buildSkillID], selected: [] },
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        ),
       );
       baseSHA = (await forge.getDefaultBranch(repository)).headSha;
       await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
@@ -261,61 +281,88 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       const manager = await account("project-manager");
       const developer = await account("developer");
       const outsider = await account("non-member");
-      await command(`/api/projects/${projectID}/members`, adminCookie, {
-        email: manager.email,
-        role: "developer",
-        manageProject: true,
-      });
-      await command(`/api/projects/${projectID}/members`, manager.cookie, {
-        email: developer.email,
-        role: "developer",
-      });
-      const projectModels = `/api/projects/${projectID}/model-settings`;
-      const configured = inheritedModelSettingsView.parse(
-        await (
-          await command(
-            projectModels,
-            manager.cookie,
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveProjectMember",
+          [
+            projectID,
             {
-              version: 0,
-              planning: { modelId, models: [modelId], allowOverride: true },
-              build: { modelId, models: [modelId], allowOverride: true },
+              email: manager.email,
+              role: "developer",
+              manageProject: true,
             },
-            "PUT",
-          )
-        ).json(),
+          ],
+          { cookie: adminCookie },
+        ),
+      );
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveProjectMember",
+          [
+            projectID,
+            {
+              email: developer.email,
+              role: "developer",
+            },
+          ],
+          { cookie: manager.cookie },
+        ),
+      );
+      const configured = inheritedModelSettingsView.parse(
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "saveProjectModels",
+            [
+              projectID,
+              {
+                version: 0,
+                planning: { modelId, models: [modelId], allowOverride: true },
+                build: { modelId, models: [modelId], allowOverride: true },
+              },
+            ],
+            { cookie: manager.cookie },
+          ),
+        ),
       );
       expect(configured.projectEffective.planning.source).toBe("project");
       const personal = inheritedModelSettingsView.parse(
-        await (
-          await command(
-            `${projectModels}/personal`,
-            developer.cookie,
-            {
-              version: 0,
-              planningModelId: null,
-              buildModelId: modelId,
-            },
-            "PUT",
-          )
-        ).json(),
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "savePersonalModels",
+            [
+              projectID,
+              {
+                version: 0,
+                planningModelId: null,
+                buildModelId: modelId,
+              },
+            ],
+            { cookie: developer.cookie },
+          ),
+        ),
       );
       expect(personal.effective.planning.source).toBe("project");
       expect(personal.effective.build.source).toBe("personal");
-      const projectSkills = `/api/projects/${projectID}/skill-settings`;
       const assignedSkills = inheritedSkillSettingsView.parse(
-        await (
-          await command(
-            projectSkills,
-            manager.cookie,
-            {
-              version: 0,
-              planning: { required: [], optional: null, selected: null },
-              build: { required: [buildSkillID], optional: [], selected: [] },
-            },
-            "PUT",
-          )
-        ).json(),
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "saveProjectSkills",
+            [
+              projectID,
+              {
+                version: 0,
+                planning: { required: [], optional: null, selected: null },
+                build: { required: [buildSkillID], optional: [], selected: [] },
+              },
+            ],
+            { cookie: manager.cookie },
+          ),
+        ),
       );
       expect(assignedSkills.projectEffective.planning.required).toEqual([
         { revisionId: planningSkillID, source: "system" },
@@ -323,26 +370,66 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       expect(assignedSkills.projectEffective.build.required).toEqual([
         { revisionId: buildSkillID, source: "project" },
       ]);
-      expect((await request(projectSkills, outsider.cookie)).status).toBe(404);
-      expect((await request(projectModels, outsider.cookie)).status).toBe(404);
-      expect((await request("/api/model-settings", developer.cookie)).status).toBe(403);
+      expect(
+        await callFactoryFunction(fixture.base, "getInheritedSkills", [projectID], {
+          cookie: outsider.cookie,
+        }),
+      ).toMatchObject({ ok: false, status: 404 });
+      expect(
+        await callFactoryFunction(fixture.base, "getProjectModels", [projectID], {
+          cookie: outsider.cookie,
+        }),
+      ).toMatchObject({ ok: false, status: 404 });
+      expect(
+        await callFactoryFunction(fixture.base, "getModelSettings", [], {
+          cookie: developer.cookie,
+        }),
+      ).toMatchObject({ ok: false, status: 403 });
       const list = z
         .object({ projects: z.array(z.object({ id: z.uuid() })) })
-        .parse(await (await request("/api/projects", outsider.cookie)).json());
+        .parse(
+          await serverCall(
+            callFactoryFunction(fixture.base, "getProjects", [], { cookie: outsider.cookie }),
+          ),
+        );
       expect(list.projects).toEqual([]);
       console.info(
         "Team Delivery: manager configured Project; developer and non-member access checked",
       );
-      await command(`/api/projects/${projectID}/staging/ensure`, developer.cookie);
-      await command(`/api/projects/${projectID}/conversation/mode`, developer.cookie, {
-        mode: "plan",
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "ensureStaging",
+          [projectID],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "setConversationMode",
+          [
+            projectID,
+            {
+              mode: "plan",
+            },
+          ],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const planCommandID = crypto.randomUUID();
       const source = await forge.getFile(repository, "src/server.mjs", baseSHA);
-      await command(`/api/projects/${projectID}/conversation/message`, developer.cookie, {
-        commandId: planCommandID,
-        text: `All requirements are known. Propose one complete Requirement now, without an interview. The only change is to set src/version.txt to exactly ${slug} followed by a newline. Run node --check src/server.mjs. Keep the application intact. Non-goals: dependencies, runtime configuration and any other file changes. Existing src/server.mjs at ${baseSHA}:\n${source}`,
-      });
+      await conversationCommand(
+        fixture.base,
+        projectID,
+        {
+          commandId: planCommandID,
+          text: `All requirements are known. Propose one complete Requirement now, without an interview. The only change is to set src/version.txt to exactly ${slug} followed by a newline. Run node --check src/server.mjs. Keep the application intact. Non-goals: dependencies, runtime configuration and any other file changes. Existing src/server.mjs at ${baseSHA}:\n${source}`,
+        },
+        { cookie: developer.cookie },
+      );
       const [planning] = await database.client<
         Array<{ id: string; state: string; model: string; userID: string; skills: string[] }>
       >`
@@ -370,12 +457,19 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         throw new Error("Real Plan did not propose the fully specified Requirement");
       expect(requirement.createdBy).toBe(developer.id);
       console.info("Team Delivery: real Plan created the developer's Requirement Revision");
-      expect((await request(`/api/tickets/${requirement.ticketID}`, outsider.cookie)).status).toBe(
-        404,
-      );
-      await command(
-        `/api/tickets/${requirement.ticketID}/requirements/${requirement.id}/approve`,
-        developer.cookie,
+      expect(
+        await callFactoryFunction(fixture.base, "getTicketDetail", [requirement.ticketID], {
+          cookie: outsider.cookie,
+        }),
+      ).toMatchObject({ ok: false, status: 404 });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "approveRequirementRevision",
+          [requirement.ticketID, requirement.id],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
       );
       const zero = zeroDrizzle(zeroSchema, database.db);
       const ctx = { userId: developer.id, systemManager: false };
@@ -464,31 +558,45 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         ),
       ).toEqual([]);
       const nextRevision = z.object({ id: z.uuid() }).parse(
-        await (
-          await command(`/api/tickets/${nextTicketID}/requirements`, developer.cookie, {
-            summary: `Set src/version.txt to exactly ${slug}-follow-on followed by a newline. Run node --check src/server.mjs. Keep the application intact.`,
-            acceptanceCriteria: [
-              `src/version.txt contains ${slug}-follow-on with a newline`,
-              "node --check src/server.mjs passes",
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "createRequirementRevision",
+            [
+              nextTicketID,
+              {
+                summary: `Set src/version.txt to exactly ${slug}-follow-on followed by a newline. Run node --check src/server.mjs. Keep the application intact.`,
+                acceptanceCriteria: [
+                  `src/version.txt contains ${slug}-follow-on with a newline`,
+                  "node --check src/server.mjs passes",
+                ],
+                nonGoals: ["Dependencies, runtime configuration and any other file changes"],
+              },
             ],
-            nonGoals: ["Dependencies, runtime configuration and any other file changes"],
-          })
-        ).json(),
+            { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(90_000),
+          ),
+        ),
       );
-      await command(
-        `/api/tickets/${nextTicketID}/requirements/${nextRevision.id}/approve`,
-        developer.cookie,
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "approveRequirementRevision",
+          [nextTicketID, nextRevision.id],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
       );
-      const blocked = await request(
-        `/api/tickets/${nextTicketID}/change`,
-        developer.cookie,
-        "POST",
-        {},
+      const blocked = await callFactoryFunction(
+        fixture.base,
+        "startTicketChange",
+        [nextTicketID],
+        { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+        AbortSignal.timeout(90_000),
       );
-      expect(blocked.status).toBe(409);
-      expect(z.object({ error: z.string() }).parse(await blocked.json()).error).toContain(
-        "Prerequisites must be delivered",
-      );
+      expect(blocked).toMatchObject({ ok: false, status: 409 });
+      if (blocked.ok) throw new Error("Dependent Ticket was unexpectedly admitted");
+      expect(blocked.message).toContain("Prerequisites must be delivered");
       expect(
         await database.client`SELECT id FROM factory.change WHERE ticket_id = ${nextTicketID}`,
       ).toHaveLength(0);
@@ -501,10 +609,21 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       console.info(
         "Team Delivery: parent/child Epics and prerequisite recorded; second Change is blocked",
       );
-      await command(`/api/projects/${projectID}/conversation/mode`, developer.cookie, {
-        mode: "build",
-        ticketId: requirement.ticketID,
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "setConversationMode",
+          [
+            projectID,
+            {
+              mode: "build",
+              ticketId: requirement.ticketID,
+            },
+          ],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const readChange = async () => {
         const [row] = await database.client<
           Array<{
@@ -531,7 +650,15 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       if (!active) throw new Error("Owned active Change missing");
       changeID = active.id;
       branch = active.branch;
-      await command(`/api/changes/${active.id}/ticket-workspace/ensure`, developer.cookie);
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startTicketWorkspace",
+          [active.id],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(180_000),
+        ),
+      );
       const change = await eventually(
         readChange,
         (row) => row?.state === "active" && row.runtimeState === "ready",
@@ -558,15 +685,34 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         content: Buffer.from(`human-before-agent-${slug}\n`).toString("base64"),
       });
       console.info("Team Delivery: shared Ticket Workspace ready; starting the developer's Build");
-      for (const path of [
-        `/api/changes/${changeID}/agent`,
-        `/api/runtime-access?path=${encodeURIComponent(`/runtime/${change.attemptID}/ide/`)}`,
-      ])
-        expect((await request(path, outsider.cookie)).status).toBe(404);
+      expect(
+        await callFactoryFunction(fixture.base, "getAgentView", [changeID], {
+          cookie: outsider.cookie,
+        }),
+      ).toMatchObject({ ok: false, status: 404 });
+      expect(
+        (
+          await request(
+            `/api/runtime-access?path=${encodeURIComponent(`/runtime/${change.attemptID}/ide/`)}`,
+            outsider.cookie,
+          )
+        ).status,
+      ).toBe(404);
       const buildCommandID = crypto.randomUUID();
-      await command(`/api/changes/${changeID}/agent/start`, developer.cookie, {
-        commandId: buildCommandID,
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startCoding",
+          [
+            changeID,
+            {
+              commandId: buildCommandID,
+            },
+          ],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const [admitted] = await database.client<
         Array<{ id: string; model: string; userID: string; skills: string[] }>
       >`
@@ -581,26 +727,34 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         { ...buildSkill, instructions: "Replacement content must not reach this admitted Build" },
         1,
       );
-      await command(
-        "/api/admin/skills/settings",
-        adminCookie,
-        {
-          ...systemSkills.settings,
-          build: { required: [], optional: [replacement.id], selected: [] },
-        },
-        "PUT",
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveSystemSkills",
+          [
+            {
+              ...systemSkills.settings,
+              build: { required: [], optional: [replacement.id], selected: [] },
+            },
+          ],
+          { cookie: adminCookie },
+        ),
       );
-      await command(
-        `/api/admin/skills/${buildSkillID}/publication`,
-        adminCookie,
-        { published: false },
-        "PUT",
+      await serverCall(
+        callFactoryFunction(fixture.base, "setSkillPublication", [buildSkillID, false], {
+          cookie: adminCookie,
+        }),
       );
-      await command(
-        projectModels,
-        manager.cookie,
-        { ...configured.project, build: { modelId, models: [modelId], allowOverride: false } },
-        "PUT",
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveProjectModels",
+          [
+            projectID,
+            { ...configured.project, build: { modelId, models: [modelId], allowOverride: false } },
+          ],
+          { cookie: manager.cookie },
+        ),
       );
       const [stillAdmitted] = await database.client<Array<{ model: string }>>`
         SELECT authority->>'modelId' AS model FROM factory.agent_turn WHERE command_id = ${buildCommandID}
@@ -683,8 +837,14 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       expect(verification.userID).toBe(developer.id);
       expect((await forge.getBranch(repository, branch))?.headSha).toBe(verifiedSHA);
       expect(
-        (await request(`/api/tickets/${nextTicketID}/change`, developer.cookie, "POST", {})).status,
-      ).toBe(409);
+        await callFactoryFunction(
+          fixture.base,
+          "startTicketChange",
+          [nextTicketID],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      ).toMatchObject({ ok: false, status: 409 });
       const initial = await eventually(
         staging,
         (row) => row?.state === "ready",
@@ -692,7 +852,11 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         300_000,
       );
       expect(initial?.revision).toBe(baseSHA);
-      await command(`/api/changes/${changeID}/delivery/approve`, developer.cookie);
+      await serverCall(
+        callFactoryFunction(fixture.base, "approveDelivery", [changeID], {
+          cookie: developer.cookie,
+        }),
+      );
       const promoted = await eventually(
         async () => {
           const [row] = await database.client<
@@ -739,14 +903,17 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         ).status,
       ).toBe(404);
       const pull = await forge.getPullRequest(repository, "main", branch);
-      await command(
-        `/api/admin/skills/${buildSkillID}/publication`,
-        adminCookie,
-        { published: true },
-        "PUT",
+      await serverCall(
+        callFactoryFunction(fixture.base, "setSkillPublication", [buildSkillID, true], {
+          cookie: adminCookie,
+        }),
       );
       const nextSkills = inheritedSkillSettingsView.parse(
-        await (await request(projectSkills, developer.cookie)).json(),
+        await serverCall(
+          callFactoryFunction(fixture.base, "getInheritedSkills", [projectID], {
+            cookie: developer.cookie,
+          }),
+        ),
       );
       // Republishing does not restore the permission removed after the first admission.
       expect(nextSkills.effective.build).toMatchObject({
@@ -755,10 +922,21 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         available: true,
       });
       expect(nextSkills.effective.build.ignoredReason).not.toBeNull();
-      await command(`/api/projects/${projectID}/conversation/mode`, developer.cookie, {
-        mode: "build",
-        ticketId: nextTicketID,
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "setConversationMode",
+          [
+            projectID,
+            {
+              mode: "build",
+              ticketId: nextTicketID,
+            },
+          ],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const nextChange = await eventually(
         async () => {
           const [row] = await database.client<
@@ -775,7 +953,15 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       if (!nextChange) throw new Error("Owned dependent Change missing");
       expect(nextChange.baseSha).toBe(exactSHA);
       dependencyProof.nextChange = nextChange;
-      await command(`/api/changes/${nextChange.id}/ticket-workspace/ensure`, developer.cookie);
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startTicketWorkspace",
+          [nextChange.id],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(180_000),
+        ),
+      );
       await eventually(
         async () => {
           const [row] = await database.client<
@@ -791,9 +977,20 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
         300_000,
       );
       const nextBuildCommandID = crypto.randomUUID();
-      await command(`/api/changes/${nextChange.id}/agent/start`, developer.cookie, {
-        commandId: nextBuildCommandID,
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startCoding",
+          [
+            nextChange.id,
+            {
+              commandId: nextBuildCommandID,
+            },
+          ],
+          { cookie: developer.cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const nextBuild = await eventually(
         async () => {
           const [turn] = await database.client<Array<{ state: string }>>`
@@ -854,8 +1051,32 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
               SELECT id, state, branch_name AS branch, base_sha AS "baseSHA" FROM factory.change WHERE project_id = ${projectID}`;
             for (const change of changes) {
               if (change.state !== "delivered") {
-                await command(`/api/changes/${change.id}/agent/stop`, adminCookie);
-                await command(`/api/changes/${change.id}/cancel`, adminCookie);
+                await serverCall(
+                  callFactoryFunction(
+                    fixture.base,
+                    "stopCoding",
+                    [change.id],
+                    {
+                      cookie: adminCookie,
+                      origin: fixture.base,
+                      "content-type": "application/json",
+                    },
+                    AbortSignal.timeout(90_000),
+                  ),
+                );
+                await serverCall(
+                  callFactoryFunction(
+                    fixture.base,
+                    "cancelChange",
+                    [change.id],
+                    {
+                      cookie: adminCookie,
+                      origin: fixture.base,
+                      "content-type": "application/json",
+                    },
+                    AbortSignal.timeout(90_000),
+                  ),
+                );
               }
             }
             await eventually(
@@ -864,10 +1085,26 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
                   Array<{ id: string }>
                 >`SELECT id FROM factory.runtime_attempt WHERE project_id = ${projectID} AND state <> 'stopped'`;
                 for (const attempt of attempts)
-                  await command(`/api/runtime-attempts/${attempt.id}/stop`, adminCookie);
+                  await serverCall(
+                    callFactoryFunction(
+                      fixture.base,
+                      "stopRuntimeAttempt",
+                      [attempt.id],
+                      {
+                        cookie: adminCookie,
+                        origin: fixture.base,
+                        "content-type": "application/json",
+                      },
+                      AbortSignal.timeout(90_000),
+                    ),
+                  );
                 if (attempts.length) return attempts.length;
                 await removeOwnedProjectSources(database, projectID, (workspaceID) =>
-                  command(`/api/workspaces/${workspaceID}/source/stop`, adminCookie),
+                  serverCall(
+                    callFactoryFunction(fixture.base, "stopWorkspaceSource", [workspaceID], {
+                      cookie: adminCookie,
+                    }),
+                  ),
                 );
                 const kubernetes = Bun.spawn(
                   [

@@ -135,6 +135,7 @@ export async function fixture(
     }
     if (path === "/api/experimental/mcp/factory_browser" && request.method === "PUT")
       return new Response(null, { status: 204 });
+    // OpenCode's native discovery protocol, not Factory's retired UI API.
     if (path === "/api/mcp")
       return Response.json({
         data: [{ name: "factory_browser", status: { status: "connected" } }],

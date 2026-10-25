@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test("the running Factory observes an ambiguous repository create without a manual check or another create", async () => {
   let repository: unknown;
@@ -38,38 +40,50 @@ test("the running Factory observes an ambiguous repository create without a manu
   try {
     await host.start();
     const cookie = await host.signIn();
-    const api = async (path: string, method = "GET", body?: unknown) => {
-      const response = await fetch(host.base + path, {
-        method,
-        headers: { cookie, origin: host.base, "content-type": "application/json" },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-      });
-      expect(response.ok).toBe(true);
-      return response.json();
-    };
-    const draft = await api("/api/project-setup", "POST");
-    const saved = await api("/api/project-setup", "PUT", {
-      id: draft.id,
-      version: draft.version,
-      name: "Observed repository",
-      slug: `observe-${host.id.slice(0, 8)}`,
-      kind: "import",
-      sourceURL: "https://github.com/owned/fixture.git",
-    });
-    const submitted = await api("/api/project-setup/create", "POST", {
-      id: saved.id,
-      version: saved.version,
-      commandID: crypto.randomUUID(),
-    });
+    const draft = await serverCall(
+      callFactoryFunction(host.base, "beginSetupDraft", [], { cookie }),
+    );
+    if (!draft) throw new Error("Owned setup draft missing");
+    const saved = await serverCall(
+      callFactoryFunction(
+        host.base,
+        "saveSetupDraft",
+        [
+          {
+            id: draft.id,
+            version: draft.version,
+            name: "Observed repository",
+            slug: `observe-${host.id.slice(0, 8)}`,
+            kind: "import",
+            sourceURL: "https://github.com/owned/fixture.git",
+          },
+        ],
+        { cookie },
+      ),
+    );
+    const submitted = await serverCall(
+      callFactoryFunction(
+        host.base,
+        "createSetupProject",
+        [
+          {
+            id: saved.id,
+            version: saved.version,
+            commandID: crypto.randomUUID(),
+          },
+        ],
+        { cookie },
+      ),
+    );
     expect(submitted.state).toBe("checking");
     const finished = await eventually(
-      () => api("/api/project-setup"),
-      (value) => value.state === "created",
+      () => serverCall(callFactoryFunction(host.base, "getSetupDraft", [], { cookie })),
+      (value) => value?.state === "created",
       "Repository setup required a manual status check",
       20_000,
     );
-    expect(finished.id).toBe(saved.id);
-    expect(finished.projectID).toBeString();
+    expect(finished?.id).toBe(saved.id);
+    expect(finished?.projectID).toBeString();
     expect(creates).toBe(1);
   } finally {
     await host.dispose();

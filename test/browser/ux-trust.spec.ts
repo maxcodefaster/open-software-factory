@@ -1,9 +1,21 @@
+import { requestFunction, factoryFunctionRequest } from "../fixtures/server-functions";
+import { completedConversation } from "../fixtures/server-functions";
+import { agentViewSchema } from "../../apps/factory/src/api-contracts";
+import { mockAgentView } from "../fixtures/server-functions";
+import {
+  attemptsResponseSchema,
+  conversationViewSchema,
+} from "../../apps/factory/src/api-contracts";
+import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import ts from "typescript";
 import {
+  repositoryDocumentsSchema,
+  knowledgeGenerationSchema,
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
   ticketDetailSchema,
@@ -11,7 +23,8 @@ import {
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { fulfillAgentView } from "../support/agent-activity-route";
+import { mockBootstrap } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
@@ -103,6 +116,7 @@ async function mockDeveloperIDE(
   options: {
     rejectFirstAccess?: boolean;
     beforeDocument?: () => Promise<void>;
+    documentBody?: string;
   } = {},
 ) {
   const workspaceID = crypto.randomUUID();
@@ -117,7 +131,8 @@ async function mockDeveloperIDE(
     const path = new URL(request.url()).pathname;
     if (/\/(?:personal-workspace|ticket-workspace|staging)\/ensure$/.test(path))
       fixture.computeRequests.push(path);
-    if (/\/(?:developer-ide|source)\/stop$/.test(path)) fixture.stopRequests.push(path);
+    if (/\/_server\/data\/(?:stopDeveloperIDE|stopWorkspaceSource)-/.test(path))
+      fixture.stopRequests.push(path);
   });
   const source = sourceWorkspaceViewSchema.parse({
     workspaceID,
@@ -132,16 +147,28 @@ async function mockDeveloperIDE(
     state: "ready",
     failure: null,
   });
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ json: source }),
-  );
-  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) =>
-    route.fulfill({ json: source }),
-  );
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-    route.fulfill({ json: editor }),
-  );
-  await page.route("**/api/developer-ide", (route) => route.fulfill({ json: editor }));
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source),
+      }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      getSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source),
+      }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: { ensureEditor: async () => developerIDEViewSchema.parse(editor) },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: { getEditor: async () => developerIDEViewSchema.parse(editor) },
+  });
   const factoryOrigin = new URL(process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000")
     .origin;
   const editorURL = `${developerIDEOrigin(factoryOrigin, userID, 1)}/ux-trust-editor`;
@@ -163,7 +190,7 @@ async function mockDeveloperIDE(
     route.fulfill({
       contentType: "text/html",
       body: `<!doctype html><html><body>
-        <textarea aria-label="Unsaved editor draft"></textarea>
+        ${options.documentBody ?? '<textarea aria-label="Unsaved editor draft"></textarea>'}
         <script>
           const factoryOrigin = ${JSON.stringify(factoryOrigin)};
           window.addEventListener("message", event => {
@@ -189,25 +216,27 @@ test("IDE retains its document during compute reconnect without restarting compu
   let reconnecting = false;
   let reconnectReads = 0;
   let recoveredReads = 0;
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) => {
-    if (reconnecting) reconnectReads++;
-    else if (reconnectReads) recoveredReads++;
-    return route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            workspaceId: fixture.workspaceID,
-            workspaceKind: "personal",
-            runtimeKind: "personal",
-            ownerUserId: userID,
-            state: reconnecting ? "starting" : "ready",
-            failure: reconnecting ? "child connector reconnecting" : null,
-          },
-        ],
+  await mockFactoryFunctions(page, {
+    runtime: {
+      attempts: async (_actor, factoryTargetID) => {
+        if (reconnecting) reconnectReads++;
+        else if (reconnectReads) recoveredReads++;
+        return attemptsResponseSchema.parse({
+          attempts: [
+            {
+              id: attemptID,
+              projectId: projectID,
+              workspaceId: fixture.workspaceID,
+              workspaceKind: "personal",
+              runtimeKind: "personal",
+              ownerUserId: userID,
+              state: reconnecting ? "starting" : "ready",
+              failure: reconnecting ? "child connector reconnecting" : null,
+            },
+          ],
+        });
       },
-    });
+    },
   });
   await signIn(page);
   await selectProject(page);
@@ -251,23 +280,24 @@ test("Preview retains its document during reconnect without restarting compute",
     )
       creates++;
   });
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            runtimeKind: "staging",
-            currentStaging: true,
-            ownerUserId: userID,
-            state: reconnecting ? "starting" : "ready",
-            failure: reconnecting ? "child connector reconnecting" : null,
-          },
-        ],
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    runtime: {
+      attempts: async () =>
+        attemptsResponseSchema.parse({
+          attempts: [
+            {
+              id: attemptID,
+              projectId: projectID,
+              runtimeKind: "staging",
+              currentStaging: true,
+              ownerUserId: userID,
+              state: reconnecting ? "starting" : "ready",
+              failure: reconnecting ? "child connector reconnecting" : null,
+            },
+          ],
+        }),
+    },
+  });
   await page.route("**/api/runtime-access?*", (route) => {
     documents++;
     return route.fulfill({
@@ -318,19 +348,16 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   page.on("pageerror", (error) => pageErrors.push(error.stack ?? error.message));
   const mutations: string[] = [];
   let computeCreates = 0;
-  const projectMessages: Array<{ ticketId?: string; text: string }> = [];
+  const projectMessages: Array<{ ticketId?: string | undefined; text: string }> = [];
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes(`/changes/${change.id}/agent`))
-      mutations.push(new URL(request.url()).pathname);
-    if (request.method() === "POST" && request.url().endsWith("workspace/ensure")) computeCreates++;
+    const name = new URL(request.url()).pathname.match(
+      /\/_server\/data\/(startCoding|stopCoding|resumeCoding|sendCodingPrompt)-/,
+    )?.[1];
+    if (name) mutations.push(name);
+    if (/\/_server\/data\/(?:startPersonalWorkspace|startTicketWorkspace)-/.test(request.url()))
+      computeCreates++;
   });
-  await page.route("**/api/session", async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({
-      response,
-      json: { ...(await response.json()), modelRelayConfigured: true },
-    });
-  });
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
   const view = () => ({
     state,
     runtimeConnected,
@@ -350,39 +377,52 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
     stopPending: false,
     stopId: null,
   });
-  await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, { json: view() }),
-  );
-  await page.route(`**/api/changes/${change.id}/agent/start`, (route) => {
-    state = "working";
-    sessionAvailable = true;
-    return route.fulfill({ json: view() });
-  });
-  await page.route(`**/api/changes/${change.id}/agent/stop`, (route) => {
-    state = "stopped";
-    return route.fulfill({ json: view() });
-  });
-  await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
-    projectMessages.push(route.request().postDataJSON());
-    return route.fulfill({ status: 400, json: { error: "Controlled response, no model request" } });
-  });
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            changeId: change.id,
-            workspaceId: "owned-stop-workspace",
-            workspaceKind: "ticket",
-            runtimeKind: "ticket",
-            state: "ready",
-          },
-        ],
+  await mockAgentView(page, change.id, async () => view(), { activity: true });
+  await mockFactoryFunctions(page, {
+    agent: {
+      start: async (_actor, factoryTargetID, factoryCommand) => {
+        state = "working";
+        sessionAvailable = true;
+        return agentViewSchema.parse(view());
       },
-    }),
-  );
+    },
+  });
+  await mockFactoryFunctions(page, {
+    agent: {
+      stop: async (_actor, factoryTargetID) => {
+        state = "stopped";
+        return agentViewSchema.parse(view());
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        projectMessages.push(factoryCommand);
+        return (() => {
+          throw new CommandError("invalid", String("Controlled response, no model request"));
+        })();
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    runtime: {
+      attempts: async () =>
+        attemptsResponseSchema.parse({
+          attempts: [
+            {
+              id: attemptID,
+              projectId: projectID,
+              changeId: change.id,
+              workspaceId: "owned-stop-workspace",
+              workspaceKind: "ticket",
+              runtimeKind: "ticket",
+              state: "ready",
+            },
+          ],
+        }),
+    },
+  });
   await page.route("**/api/runtime-access?*", (route) =>
     route.fulfill({
       contentType: "text/html",
@@ -429,7 +469,7 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   runtimeConnected = true;
   await expect(panel.locator(".agent-state")).toHaveText("Working");
   await expect(panel.getByLabel("Message conversation")).toHaveValue("Retain next instructions");
-  expect(mutations).toEqual([`/api/changes/${change.id}/agent/start`]);
+  expect(mutations).toEqual(["startCoding"]);
   expect(computeCreates).toBe(0);
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
   await panel.getByRole("button", { name: "Remove Ticket context" }).click();
@@ -446,15 +486,13 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   await panel.getByLabel("Message conversation").press("Enter");
   await expect.poll(() => projectMessages.length).toBe(1);
   expect(projectMessages[0]).not.toHaveProperty("ticketId");
-  expect(mutations).toEqual([`/api/changes/${change.id}/agent/start`]);
+  expect(mutations).toEqual(["startCoding"]);
   await panel.getByRole("button", { name: "Attach selected Ticket" }).click();
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
   await expect(panel.locator(".agent-state")).toHaveText("Working");
   await panel.getByRole("button", { name: "Remove Ticket context" }).click();
   await panel.getByRole("button", { name: "Stop OpenCode" }).click();
-  await expect
-    .poll(() => mutations)
-    .toEqual([`/api/changes/${change.id}/agent/start`, `/api/changes/${change.id}/agent/stop`]);
+  await expect.poll(() => mutations).toEqual(["startCoding", "stopCoding"]);
   expect(computeCreates).toBe(0);
   await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
     "data-runtime-attempt-id",
@@ -505,11 +543,10 @@ test("Review keeps updating when the PR number is a PostgreSQL bigint", async ({
   `;
   await signIn(page);
   await selectProject(page);
-  const detailResponse = await page.context().request.get(`/api/tickets/${ticketID}`);
-  expect(detailResponse.ok()).toBe(true);
-  ticketDetailSchema.parse(await detailResponse.json());
+  const detail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
+  expect(ticketDetailSchema.parse(detail).ticket.id).toBe(ticketID);
   const browserDetail = page.waitForResponse(
-    (response) => response.url().endsWith(`/api/tickets/${ticketID}`),
+    (response) => response.url().includes("/_server/data/getTicketDetail-"),
     { timeout: 5_000 },
   );
   await page
@@ -519,7 +556,7 @@ test("Review keeps updating when the PR number is a PostgreSQL bigint", async ({
     .click();
   const browserResponse = await browserDetail;
   expect(browserResponse.ok()).toBe(true);
-  expect(ticketDetailSchema.parse(await browserResponse.json()).ticket.id).toBe(ticketID);
+  await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(title);
   const metadata = page.locator(".ticket-metadata");
   await expect
     .poll(
@@ -691,8 +728,26 @@ test.beforeEach(async ({ page }) => {
   await mkdir(cleanupEvidenceDirectory, { recursive: true });
   // UI fixtures must never prepare real source, editor, compute or model resources.
   // Specific controlled responses registered by a test take precedence.
+  const noWorkspace = async () => {
+    throw new CommandError(
+      "unavailable",
+      "Controlled UI fixture does not prepare native resources",
+    );
+  };
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: noWorkspace,
+      ensureChangeSource: noWorkspace,
+      ensureEditor: noWorkspace,
+      getEditor: noWorkspace,
+      getSource: noWorkspace,
+      ensureSource: noWorkspace,
+      stopSource: noWorkspace,
+      stopEditor: noWorkspace,
+    },
+  });
   await page.route(
-    /\/api\/(?:projects\/[^/]+\/(?:source-workspace|developer-ide|personal-workspace|staging)\/ensure|changes\/[^/]+\/(?:source-workspace|ticket-workspace)\/ensure|workspaces\/[^/]+\/source(?:\/(?:ensure|stop))?|developer-ide(?:\/stop)?|(?:projects|changes)\/[^/]+\/(?:conversation\/message|agent\/(?:start|message|stop)))(?:\?|$)/,
+    /\/api\/(?:projects\/[^/]+\/(?:personal-workspace|staging)\/ensure|changes\/[^/]+\/ticket-workspace\/ensure|(?:projects|changes)\/[^/]+\/(?:conversation\/message|agent\/(?:start|message|stop)))(?:\?|$)/,
     (route) =>
       route.fulfill({
         status: 503,
@@ -859,25 +914,26 @@ test("updates keyed Change activity on polling without remounting its disclosure
   `;
   if (!change) throw new Error("Missing fixture Change");
   let completed = false;
-  await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: "working",
-        messages: [
-          {
-            id: "fixture-test-run",
-            role: "tool",
-            text: "Check implementation",
-            at: 1,
-            activity: {
-              name: "Tests",
-              status: completed ? "completed" : "running",
-              detail: completed ? "All fixture tests passed" : "Running fixture tests",
-            },
+  await mockAgentView(
+    page,
+    change.id,
+    async () => ({
+      state: "working",
+      messages: [
+        {
+          id: "fixture-test-run",
+          role: "tool",
+          text: "Check implementation",
+          at: 1,
+          activity: {
+            name: "Tests",
+            status: completed ? "completed" : "running",
+            detail: completed ? "All fixture tests passed" : "Running fixture tests",
           },
-        ],
-      },
+        },
+      ],
     }),
+    { activity: true },
   );
   const panel = await openConversation(page);
   await page
@@ -950,15 +1006,13 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
     if (request.method() === "POST" && request.url().includes(`/changes/${change.id}/agent`))
       mutations++;
   });
-  await page.route("**/api/session", async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    await route.fulfill({ response, json: { ...body, modelRelayConfigured: true } });
-  });
-  await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) => {
-    reads++;
-    return fulfillAgentView(route, {
-      json: {
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
+  await mockAgentView(
+    page,
+    change.id,
+    async (factoryTargetID, factoryHistory) => {
+      reads++;
+      return agentViewSchema.parse({
         state,
         runtimeState,
         messagesAvailable,
@@ -968,9 +1022,10 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
         stopId: stopPending ? stopId : null,
         messages: [],
         turn,
-      },
-    });
-  });
+      });
+    },
+    { activity: true },
+  );
   await openConversation(page);
   const panel = page.locator(".agent-panel");
   await page
@@ -989,10 +1044,14 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
   // check must work independently, not pass through the one-second poller.
   const releaseBackground = Promise.withResolvers<void>();
   let backgroundBlocked = false;
-  await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
-    backgroundBlocked = true;
-    await releaseBackground.promise;
-    await route.continue();
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async (_actor, factoryTargetID) => {
+        backgroundBlocked = true;
+        await releaseBackground.promise;
+        return await serverCall(browserFunction(page, "getChanges", [factoryTargetID]));
+      },
+    },
   });
   try {
     await expect.poll(() => backgroundBlocked).toBe(true);
@@ -1076,23 +1135,18 @@ test("explicit Stop confirmation preserves the draft and sends only the displaye
     lastError: stopPending ? "Stop remains unconfirmed. Ordered history is incomplete." : null,
   });
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes("/api/"))
-      mutations.push(new URL(request.url()).pathname);
+    if (/\/_server\/data\/checkCodingStop-/.test(request.url())) mutations.push("checkCodingStop");
   });
-  await page.route("**/api/session", async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({
-      response,
-      json: { ...(await response.json()), modelRelayConfigured: true },
-    });
-  });
-  await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, { json: view() }),
-  );
-  await page.route(`**/api/changes/${change.id}/agent/check-stop`, (route) => {
-    confirmations.push(route.request().postDataJSON());
-    if (canConfirm) stopPending = false;
-    return route.fulfill({ json: view() });
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
+  await mockAgentView(page, change.id, async () => view(), { activity: true });
+  await mockFactoryFunctions(page, {
+    agent: {
+      checkStop: async (_actor, factoryTargetID, factoryCommand) => {
+        confirmations.push(factoryCommand);
+        if (canConfirm) stopPending = false;
+        return agentViewSchema.parse(view());
+      },
+    },
   });
   await openConversation(page);
   await page
@@ -1133,10 +1187,7 @@ test("explicit Stop confirmation preserves the draft and sends only the displaye
   await expect(panel.getByRole("button", { name: "Send message" })).toBeEnabled();
   await expect(draft).toHaveValue("Keep these instructions for my next turn");
   expect(confirmations).toEqual([{ stopId }, { stopId }]);
-  expect(mutations.slice(before)).toEqual([
-    `/api/changes/${change.id}/agent/check-stop`,
-    `/api/changes/${change.id}/agent/check-stop`,
-  ]);
+  expect(mutations.slice(before)).toEqual(["checkCodingStop", "checkCodingStop"]);
   await page.screenshot({ path: `${directory}/confirmed-narrow.png` });
 });
 
@@ -1170,23 +1221,33 @@ test("Stop confirmation endpoint authenticates and rejects missing or stale iden
       state, stop_pending, stop_dispatched, stop_id, created_by)
       VALUES (${change.id}, ${attemptId}, 'ses_endpoint_fixture', 'stopped', true, true, ${stopId}, ${userID})`;
   });
-  const endpoint = `/api/changes/${change.id}/agent/check-stop`;
-  const headers = { origin: "http://127.0.0.1:3000" };
-  expect((await request.post(endpoint, { headers, data: { stopId } })).status()).toBe(401);
+  const origin = process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000";
+  const command = await factoryFunctionRequest(origin, "checkCodingStop", [change.id, { stopId }]);
+  const headers = Object.fromEntries(command.headers);
+  expect((await request.post(command.url, { headers, data: await command.text() })).status()).toBe(
+    401,
+  );
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
   const authenticated = page.context().request;
-  expect((await authenticated.get(endpoint)).status()).toBe(405);
+  expect((await authenticated.get(command.url)).status()).toBe(405);
   for (const data of [{}, { stopId: "invalid" }, { stopId, restart: true }])
-    expect((await authenticated.post(endpoint, { headers, data })).status()).toBe(400);
+    expect(
+      await requestFunction(authenticated, "checkCodingStop", [
+        change.id,
+        data as { stopId: string },
+      ]),
+    ).toMatchObject({ ok: false, status: 400 });
   expect(
-    (
-      await authenticated.post(endpoint, { headers, data: { stopId: crypto.randomUUID() } })
-    ).status(),
-  ).toBe(409);
-  const response = await authenticated.post(endpoint, { headers, data: { stopId } });
-  expect(response.status()).toBe(200);
-  expect(await response.json()).toMatchObject({
+    await requestFunction(authenticated, "checkCodingStop", [
+      change.id,
+      { stopId: crypto.randomUUID() },
+    ]),
+  ).toMatchObject({ ok: false, status: 409 });
+  const response = await serverCall(
+    requestFunction(authenticated, "checkCodingStop", [change.id, { stopId }]),
+  );
+  expect(response).toMatchObject({
     state: "stopped",
     stopPending: true,
     stopId,
@@ -1208,12 +1269,13 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
     SELECT id FROM factory.change WHERE ticket_id = ${ticketID}
   `;
   if (!change) throw new Error("Missing fixture Change");
-  await page.route(`**/api/changes/${change.id}/source-workspace/ensure`, (route) =>
-    route.fulfill({
-      status: 503,
-      json: { error: "Controlled commit fixture has no source service" },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureChangeSource: async () => {
+        throw new CommandError("unavailable", "Controlled commit fixture has no source service");
+      },
+    },
+  });
   const operationID = crypto.randomUUID();
   type CommitPhase = "commit-intended" | "committed" | "push-intended";
   let phase: CommitPhase = "commit-intended";
@@ -1223,17 +1285,13 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
   let stopPending = false;
   const stopId = crypto.randomUUID();
   const mutations: string[] = [];
-  await page.route("**/api/session", async (route) => {
-    const response = await route.fetch();
-    await route.fulfill({
-      response,
-      json: { ...(await response.json()), modelRelayConfigured: true },
-    });
-  });
-  await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) => {
-    observedPhase = phase;
-    return fulfillAgentView(route, {
-      json: {
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
+  await mockAgentView(
+    page,
+    change.id,
+    async (factoryTargetID, factoryHistory) => {
+      observedPhase = phase;
+      return agentViewSchema.parse({
         state,
         runtimeState: "ready",
         stopPending,
@@ -1243,9 +1301,10 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
         sessionAvailable: true,
         runtimeConnected: true,
         messages: [],
-      },
-    });
-  });
+      });
+    },
+    { activity: true },
+  );
   await openConversation(page);
   await page
     .getByRole("region", { name: "implementation" })
@@ -1269,11 +1328,10 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
   await mkdir(directory, { recursive: true });
   await page.screenshot({ path: `${directory}/saving-wide.png` });
   page.on("request", (request) => {
-    if (
-      ["POST", "PUT", "PATCH", "DELETE"].includes(request.method()) &&
-      request.url().includes("/api/")
-    )
-      mutations.push(new URL(request.url()).pathname);
+    const name = new URL(request.url()).pathname.match(
+      /\/_server\/data\/(startCoding|resumeCoding|stopCoding|checkCodingStop|newCodingConversation|sendCodingPrompt|requestCodingChanges|startPersonalWorkspace|startTicketWorkspace|cancelChange|implementTicket|approveDelivery|retryCandidateReview|resumeVerification)-/,
+    )?.[1];
+    if (name) mutations.push(name);
   });
   for (const nextPhase of ["commit-intended", "committed", "push-intended"] as const) {
     phase = nextPhase;
@@ -1322,32 +1380,39 @@ test("restores an unacknowledged message and its command identity after browser 
   page,
 }) => {
   const submissions: Array<{ commandId: string; text: string }> = [];
-  await page.route(`**/api/projects/${projectID}/conversation/message`, async (route) => {
-    submissions.push(route.request().postDataJSON());
-    if (submissions.length === 1) return route.abort("connectionreset");
-    const submitted = submissions.at(-1);
-    if (!submitted) throw new Error("Missing submitted command");
-    return route.fulfill({
-      json: {
-        id: crypto.randomUUID(),
-        projectId: projectID,
-        mode: "investigate",
-        version: 1,
-        entries: [
-          {
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        submissions.push(factoryCommand);
+        if (submissions.length === 1)
+          return (() => {
+            throw new Error("Controlled lost response");
+          })();
+        const submitted = submissions.at(-1);
+        if (!submitted) throw new Error("Missing submitted command");
+        return completedConversation(
+          conversationViewSchema.parse({
             id: crypto.randomUUID(),
-            ordinal: 1,
-            kind: "user-message",
-            actor: "user",
+            projectId: projectID,
             mode: "investigate",
-            body: submitted.text,
-            payload: { commandId: submitted.commandId },
-            citations: [],
-            createdAt: new Date().toISOString(),
-          },
-        ],
+            version: 1,
+            entries: [
+              {
+                id: crypto.randomUUID(),
+                ordinal: 1,
+                kind: "user-message",
+                actor: "user",
+                mode: "investigate",
+                body: submitted.text,
+                payload: { commandId: submitted.commandId },
+                citations: [],
+                createdAt: new Date().toISOString(),
+              },
+            ],
+          }),
+        );
       },
-    });
+    },
   });
   await openConversation(page);
   const panel = page.locator(".agent-panel");
@@ -1401,22 +1466,24 @@ for (const action of ["start", "prompt"] as const) {
       stopId: null,
     };
     const submissions: Array<{ commandId: string; text?: string }> = [];
-    await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) =>
-      fulfillAgentView(route, { json: view }),
+    await mockAgentView(page, change.id, async () => view, { activity: true });
+    const captured = (input: { commandId: string; text?: string }) => {
+      submissions.push(input);
+      return agentViewSchema.parse(view);
+    };
+    await mockFactoryFunctions(
+      page,
+      {
+        agent:
+          action === "start"
+            ? { start: async (_actor, _id, input) => captured(input) }
+            : { prompt: async (_actor, _id, input) => captured(input) },
+      },
+      (name) =>
+        name === (action === "start" ? "startCoding" : "sendCodingPrompt") &&
+        submissions.length === 1,
     );
-    await page.route(`**/api/changes/${change.id}/agent/${action}`, (route) => {
-      submissions.push(route.request().postDataJSON());
-      return submissions.length === 1
-        ? route.abort("connectionreset")
-        : route.fulfill({ json: view });
-    });
-    await page.route("**/api/session", async (route) => {
-      const response = await route.fetch();
-      return route.fulfill({
-        response,
-        json: { ...(await response.json()), modelRelayConfigured: true },
-      });
-    });
+    await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
     await openConversation(page);
     const panel = page.locator(".agent-panel");
     const openTicket = () =>
@@ -1493,14 +1560,20 @@ for (const type of ["free-text", "single-select", "multi-select"] as const) {
         },
       ],
     };
-    await page.route(`**/api/projects/${projectID}/conversation`, (route) =>
-      route.fulfill({ json: view }),
-    );
-    await page.route(`**/api/projects/${projectID}/conversation/answer`, (route) => {
-      submissions.push(route.request().postDataJSON());
-      return submissions.length === 1
-        ? route.abort("connectionreset")
-        : route.fulfill({ json: view });
+    await mockFactoryFunctions(page, {
+      conversations: { get: async () => conversationViewSchema.nullable().parse(view) },
+    });
+    await mockFactoryFunctions(page, {
+      conversations: {
+        answer: async (_actor, factoryTargetID, factoryCommand) => {
+          submissions.push(factoryCommand);
+          return submissions.length === 1
+            ? (() => {
+                throw new Error("Controlled lost response");
+              })()
+            : conversationViewSchema.parse(view);
+        },
+      },
     });
     await openConversation(page);
     const panel = page.locator(".agent-panel");
@@ -1558,12 +1631,18 @@ test("only exact admitted command identity clears a recovered draft on read-only
         ]
       : [],
   });
-  await page.route(`**/api/projects/${projectID}/conversation`, (route) =>
-    route.fulfill({ json: view() }),
-  );
-  await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
-    submissions.push(route.request().postDataJSON());
-    return route.abort("connectionreset");
+  await mockFactoryFunctions(page, {
+    conversations: { get: async () => conversationViewSchema.nullable().parse(view()) },
+  });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        submissions.push(factoryCommand);
+        return (() => {
+          throw new Error("Controlled lost response");
+        })();
+      },
+    },
   });
   await openConversation(page);
   const panel = page.locator(".agent-panel");
@@ -1602,9 +1681,15 @@ test("blocked browser recovery storage prevents agent mutation", async ({ page }
       return original.call(this, key, value);
     };
   });
-  await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
-    submissions.push(route.request().postDataJSON());
-    return route.abort();
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        submissions.push(factoryCommand);
+        return (() => {
+          throw new Error("Controlled lost response");
+        })();
+      },
+    },
   });
   await openConversation(page);
   const panel = page.locator(".agent-panel");
@@ -1628,33 +1713,30 @@ test("keeps Build ready, working and stopped states compact across workspace wid
   `;
   if (!change) throw new Error("Missing fixture Change");
   let state: "idle" | "working" | "stopped" = "idle";
-  await page.route("**/api/session", async (route) => {
-    const response = await route.fetch();
-    const body = await response.json();
-    await route.fulfill({ response, json: { ...body, modelRelayConfigured: true } });
-  });
-  await page.route(`**/api/changes/${change.id}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state,
-        stopPending: false,
-        stopId: null,
-        messagesAvailable: true,
-        sessionAvailable: state !== "idle",
-        runtimeConnected: true,
-        messages:
-          state === "idle"
-            ? []
-            : [
-                {
-                  id: "visual-build-reply",
-                  role: "assistant",
-                  text: "The implementation is in the Ticket Workspace. I am checking the approved criteria.",
-                  at: 1,
-                },
-              ],
-      },
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
+  await mockAgentView(
+    page,
+    change.id,
+    async () => ({
+      state,
+      stopPending: false,
+      stopId: null,
+      messagesAvailable: true,
+      sessionAvailable: state !== "idle",
+      runtimeConnected: true,
+      messages:
+        state === "idle"
+          ? []
+          : [
+              {
+                id: "visual-build-reply",
+                role: "assistant",
+                text: "The implementation is in the Ticket Workspace. I am checking the approved criteria.",
+                at: 1,
+              },
+            ],
     }),
+    { activity: true },
   );
   await openConversation(page);
   const panel = page.locator(".agent-panel");
@@ -1730,10 +1812,14 @@ test("does not offer a partial IDE target list before scoped lifecycle data arri
   const intercepted = new Promise<void>((resolve) => {
     observed = resolve;
   });
-  await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
-    observed();
-    await gate;
-    await route.continue();
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async (_actor, factoryTargetID) => {
+        observed();
+        await gate;
+        return await serverCall(browserFunction(page, "getChanges", [factoryTargetID]));
+      },
+    },
   });
   await signIn(page);
   await selectProject(page);
@@ -1748,10 +1834,13 @@ test("does not offer a partial IDE target list before scoped lifecycle data arri
 
 test("shows a retryable refresh failure without losing the desktop", async ({ page }) => {
   let unavailable = true;
-  await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
-    if (unavailable)
-      await route.fulfill({ status: 503, json: { error: "Temporary lifecycle outage" } });
-    else await route.continue();
+  await mockFactoryFunctions(page, {
+    runtime: {
+      async changes(_actor, id) {
+        if (unavailable) throw new CommandError("unavailable", "Temporary lifecycle outage");
+        return serverCall(browserFunction(page, "getChanges", [id]));
+      },
+    },
   });
   await signIn(page);
   await selectProject(page);
@@ -1769,11 +1858,10 @@ test("shows a retryable refresh failure without losing the desktop", async ({ pa
 
 test("can retry opening Factory after bootstrap is unavailable", async ({ page }) => {
   let unavailable = true;
-  await page.route("**/api/session", (route) =>
-    unavailable
-      ? route.fulfill({ status: 503, json: { error: "Session service unavailable" } })
-      : route.continue(),
-  );
+  await mockBootstrap(page, (value) => {
+    if (unavailable) throw new CommandError("unavailable", "Session service unavailable");
+    return value;
+  });
   await page.goto("/");
   await expect(page.getByRole("alert")).toContainText("Session service unavailable");
   unavailable = false;
@@ -1792,20 +1880,22 @@ test("keeps a delayed Workspace response in its original Project", async ({ page
   const intercepted = new Promise<void>((resolve) => {
     observed = resolve;
   });
-  await page.route(`**/api/projects/${projectID}/personal-workspace/ensure`, async (route) => {
-    observed();
-    await gate;
-    await route.fulfill({
-      json: {
-        id: "delayed-attempt",
-        projectId: projectID,
-        state: "starting",
-        runtimeKind: "personal",
-        workspaceKind: "personal",
-        workspaceId: "workspace",
-        ownerUserId: userID,
+  await mockFactoryFunctions(page, {
+    runtime: {
+      startPersonal: async () => {
+        observed();
+        await gate;
+        return {
+          id: "delayed-attempt",
+          projectId: projectID,
+          state: "starting",
+          runtimeKind: "personal" as const,
+          workspaceKind: "personal" as const,
+          workspaceId: "workspace",
+          ownerUserId: userID,
+        };
       },
-    });
+    },
   });
   await signIn(page);
   await selectProject(page);
@@ -1824,7 +1914,9 @@ test("keeps a delayed Workspace response in its original Project", async ({ page
   await expect(page.getByText("The Workspace is not running. Open IDE to retry.")).toBeVisible();
 });
 
-test("contains narrow Agent focus and restores the same Ticket context", async ({ page }) => {
+test("narrow Agent keeps global navigation available and restores the same Ticket context", async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 900, height: 720 });
   await signIn(page);
   await selectProject(page);
@@ -1837,18 +1929,19 @@ test("contains narrow Agent focus and restores the same Ticket context", async (
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   const panel = page.getByRole("dialog", { name: "Agent panel" });
   await expect(panel).toBeVisible();
-  await expect(panel).toHaveAttribute("aria-modal", "true");
+  await expect(panel).toHaveAttribute("aria-modal", "false");
   await expect(page.locator(".workspace-window")).toHaveAttribute("inert", "");
-  await expect(page.locator(".factory-topbar")).toHaveAttribute("inert", "");
-  await expect(page.getByRole("region", { name: "Ticket board" })).toHaveCount(0);
-  for (const key of ["Tab", "Shift+Tab"]) {
-    for (let index = 0; index < 16; index++) {
-      await page.keyboard.press(key);
-      expect(await panel.evaluate((element) => element.contains(document.activeElement))).toBe(
-        true,
-      );
-    }
-  }
+  await expect(page.locator(".factory-topbar")).not.toHaveAttribute("inert", "");
+  await expect(page.locator(".kanban-desktop")).toHaveAttribute("inert", "");
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.focus();
+  await expect(settings).toBeFocused();
+  await settings.press("Enter");
+  await expect(page.getByRole("region", { name: "Settings", exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(settings).toBeFocused();
+  await expect(panel).toBeVisible();
+  await panel.getByRole("textbox", { name: "Message conversation", exact: true }).focus();
   await page.screenshot({ path: `${evidenceDirectory}/narrow-agent.png` });
   await page.keyboard.press("Escape");
   await expect(panel).toHaveCount(0);
@@ -1858,7 +1951,9 @@ test("contains narrow Agent focus and restores the same Ticket context", async (
     page.getByRole("tab", { name: "Needs a specification", exact: true }),
   ).toHaveAttribute("aria-selected", "true");
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
-  await page.getByRole("button", { name: "Dismiss Agent overlay" }).click();
+  await page.getByRole("button", { name: "Dismiss Agent overlay" }).click({
+    position: { x: 2, y: 2 },
+  });
   await expect(panel).toHaveCount(0);
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(panel).toBeVisible();
@@ -1877,101 +1972,70 @@ test("contains narrow Agent focus and restores the same Ticket context", async (
   await expect(title).toBeFocused();
 });
 
-for (const crossOrigin of [false, true]) {
-  test(`returns to the embedded input after dismissing the narrow Agent (${crossOrigin ? "cross-origin" : "same-origin"})`, async ({
-    page,
-  }) => {
-    await page.setViewportSize({ width: 900, height: 900 });
-    const attemptID = crypto.randomUUID();
-    await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-      route.fulfill({
-        json: {
-          attempts: [
-            {
-              id: attemptID,
-              projectId: projectID,
-              workspaceId: "focus-return-fixture",
-              workspaceKind: "personal",
-              runtimeKind: "personal",
-              ownerUserId: userID,
-              state: "ready",
-            },
-          ],
-        },
-      }),
-    );
-    const body = `<!doctype html><html><body><textarea aria-label="Embedded input"></textarea><button type="button">Other control</button><script>{const exports = {}; ${frameFocusScript}; const unbind = exports.bindFactoryFrameFocus(window); document.addEventListener("dispose-focus-fixture", unbind, {once: true});}</script></body></html>`;
-    const documentURL = `http://${attemptID.replaceAll("-", "")}.ide.runtime.localhost:3000/focus-fixture`;
-    if (crossOrigin) {
-      await page.route(documentURL, (route) => route.fulfill({ contentType: "text/html", body }));
-    }
-    await page.route("**/api/runtime-access?*", (route) =>
-      crossOrigin
-        ? route.fulfill({
-            contentType: "text/html",
-            body: `<!doctype html><script>location.replace(${JSON.stringify(documentURL)})</script>`,
-          })
-        : route.fulfill({
-            contentType: "text/html",
-            body,
-          }),
-    );
-    await signIn(page);
-    await selectProject(page);
-    await page.getByRole("button", { name: "IDE", exact: true }).click();
-    const iframe = page.locator('iframe[title="Factory IDE"]');
-    const input = page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Embedded input");
-    await input.click();
-    await expect(input).toBeFocused();
-    const agent = page.getByRole("dialog", { name: "Agent panel" });
-    for (const dismissal of ["Escape", "backdrop"]) {
-      await page.getByRole("button", { name: "Toggle Agent panel" }).click();
-      await expect(agent).toBeVisible();
-      if (dismissal === "Escape") await page.keyboard.press("Escape");
-      else await page.getByRole("button", { name: "Dismiss Agent overlay" }).click();
-      await expect(agent).toHaveCount(0);
-      await expect(iframe).toBeFocused();
-      await expect(input).toBeFocused({ timeout: 3_000 });
-    }
-    await page.keyboard.type("focus-return-input");
-    await expect(input).toHaveValue("focus-return-input");
-    const frameBody = page.frameLocator('iframe[title="Factory IDE"]').locator("body");
-    for (const unavailable of ["hidden", "disabled", "removed"]) {
-      await input.click();
-      await page.getByRole("button", { name: "Toggle Agent panel" }).click();
-      await expect(agent).toBeVisible();
-      await input.evaluate((element, reason) => {
-        if (!(element instanceof HTMLTextAreaElement))
-          throw new Error("Expected embedded textarea");
-        if (reason === "hidden") element.hidden = true;
-        else if (reason === "disabled") element.disabled = true;
-        else element.remove();
-      }, unavailable);
-      await page.keyboard.press("Escape");
-      await expect(agent).toHaveCount(0);
-      await expect(iframe).toBeFocused();
-      expect(await frameBody.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
-      await frameBody.evaluate(() => {
-        let field = document.querySelector("textarea");
-        if (!field) {
-          field = document.createElement("textarea");
-          field.setAttribute("aria-label", "Embedded input");
-          document.body.prepend(field);
-        }
-        field.hidden = false;
-        field.disabled = false;
-      });
-    }
-    await input.click();
-    await input.evaluate(() => document.dispatchEvent(new Event("dispose-focus-fixture")));
+test("returns to the embedded input after dismissing the narrow Agent on the isolated IDE origin", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  await mockDeveloperIDE(page, {
+    documentBody: `<textarea aria-label="Embedded input"></textarea><button type="button">Other control</button><script>{const exports = {}; ${frameFocusScript}; const unbind = exports.bindFactoryFrameFocus(window); document.addEventListener("dispose-focus-fixture", unbind, {once: true});}</script>`,
+  });
+  await signIn(page);
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  const iframe = page.locator('iframe[title="Factory IDE"]');
+  const input = page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Embedded input");
+  await input.click();
+  await expect(input).toBeFocused();
+  const agent = page.getByRole("dialog", { name: "Agent panel" });
+  for (const dismissal of ["Escape", "backdrop"]) {
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
     await expect(agent).toBeVisible();
+    if (dismissal === "Escape") await page.keyboard.press("Escape");
+    else
+      await page.getByRole("button", { name: "Dismiss Agent overlay" }).click({
+        position: { x: 2, y: 2 },
+      });
+    await expect(agent).toHaveCount(0);
+    await expect(iframe).toBeFocused();
+    await expect(input).toBeFocused({ timeout: 3_000 });
+  }
+  await page.keyboard.type("focus-return-input");
+  await expect(input).toHaveValue("focus-return-input");
+  const frameBody = page.frameLocator('iframe[title="Factory IDE"]').locator("body");
+  for (const unavailable of ["hidden", "disabled", "removed"]) {
+    await input.click();
+    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+    await expect(agent).toBeVisible();
+    await input.evaluate((element, reason) => {
+      if (!(element instanceof HTMLTextAreaElement)) throw new Error("Expected embedded textarea");
+      if (reason === "hidden") element.hidden = true;
+      else if (reason === "disabled") element.disabled = true;
+      else element.remove();
+    }, unavailable);
     await page.keyboard.press("Escape");
     await expect(agent).toHaveCount(0);
     await expect(iframe).toBeFocused();
-    expect(await input.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
-  });
-}
+    expect(await frameBody.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
+    await frameBody.evaluate(() => {
+      let field = document.querySelector("textarea");
+      if (!field) {
+        field = document.createElement("textarea");
+        field.setAttribute("aria-label", "Embedded input");
+        document.body.prepend(field);
+      }
+      field.hidden = false;
+      field.disabled = false;
+    });
+  }
+  await input.click();
+  await input.evaluate(() => document.dispatchEvent(new Event("dispose-focus-fixture")));
+  await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+  await expect(agent).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(agent).toHaveCount(0);
+  await expect(iframe).toBeFocused();
+  expect(await input.evaluate(() => document.activeElement?.tagName)).toBe("BODY");
+});
 
 test("dismisses Project and Settings popovers with keyboard focus returned to their opener", async ({
   page,
@@ -2085,7 +2149,7 @@ test("aligns workspace and Agent Minimize geometry and preserves the Agent contr
     expect(agent.radius).toBe(workspace.radius);
     expect(Math.abs(agent.top - workspace.top)).toBeLessThanOrEqual(1);
     expect(Math.abs(agent.right - workspace.right)).toBeLessThanOrEqual(1);
-    await expect(page.locator(".workspace-heading")).toHaveCount(0);
+    await expect(page.locator(".workspace-window > .workspace-heading")).toHaveCount(0);
   }
 });
 
@@ -2111,9 +2175,12 @@ test("opens Project registration as a focused dialog and preserves rejected inpu
   await expect(dialog.getByRole("textbox", { name: "Default branch", exact: true })).toHaveValue(
     "main",
   );
-  await page.route("**/api/projects", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
-    return route.fulfill({ status: 422, json: { error: "Repository cannot be registered" } });
+  await mockFactoryFunctions(page, {
+    projects: {
+      async register() {
+        throw new CommandError("invalid", "Repository cannot be registered");
+      },
+    },
   });
   await dialog.getByRole("button", { name: "Register Project", exact: true }).click();
   await expect(dialog.getByRole("alert")).toHaveText("Repository cannot be registered");
@@ -2148,21 +2215,34 @@ test("uses readable workspace tabs with keyboard navigation and an accessible ov
       VALUES (${crypto.randomUUID()}, ${projectID}, ${title}, 'Tab navigation fixture', 'inbox', ${userID})
     `;
   }
-  await page.route(`**/api/projects/${projectID}/knowledge/documents`, (route) =>
-    route.fulfill({ json: { commitSha: "a".repeat(40), documents: [] } }),
-  );
-  await page.route(`**/api/projects/${projectID}/knowledge/generation`, (route) =>
-    route.fulfill({
-      json: {
-        id: crypto.randomUUID(),
-        sourceCommitSha: "a".repeat(40),
-        state: "succeeded",
-        pageCount: 0,
-        conflictCount: 0,
-        failure: null,
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () =>
+        repositoryDocumentsSchema.parse({ commitSha: "a".repeat(40), documents: [] }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      generation: async () =>
+        knowledgeGenerationSchema.nullable().parse({
+          id: crypto.randomUUID(),
+          sourceCommitSha: "a".repeat(40),
+          state: "succeeded",
+          pageCount: 0,
+          conflictCount: 0,
+          failure: null,
+        }),
+      generate: async () =>
+        knowledgeGenerationSchema.nullable().parse({
+          id: crypto.randomUUID(),
+          sourceCommitSha: "a".repeat(40),
+          state: "succeeded",
+          pageCount: 0,
+          conflictCount: 0,
+          failure: null,
+        }),
+    },
+  });
   await page.setViewportSize({ width: 900, height: 720 });
   await signIn(page);
   await selectProject(page);
@@ -2226,9 +2306,12 @@ test("uses readable workspace tabs with keyboard navigation and an accessible ov
 test("keeps outer workspace geometry when switching Ticket, Inbox, and Knowledge", async ({
   page,
 }) => {
-  await page.route(`**/api/projects/${projectID}/knowledge/documents`, (route) =>
-    route.fulfill({ json: { commitSha: "a".repeat(40), documents: [] } }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () =>
+        repositoryDocumentsSchema.parse({ commitSha: "a".repeat(40), documents: [] }),
+    },
+  });
   await signIn(page);
   await selectProject(page);
   const dock = page.getByRole("navigation", { name: "Workspace dock" });
@@ -2262,23 +2345,24 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
   let attemptID = crypto.randomUUID();
   let boots = 0;
   const originalAttemptID = attemptID;
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            workspaceId: "personal-workspace",
-            workspaceKind: "personal",
-            runtimeKind: "personal",
-            ownerUserId: userID,
-            state: "ready",
-          },
-        ],
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    runtime: {
+      attempts: async () =>
+        attemptsResponseSchema.parse({
+          attempts: [
+            {
+              id: attemptID,
+              projectId: projectID,
+              workspaceId: "personal-workspace",
+              workspaceKind: "personal",
+              runtimeKind: "personal",
+              ownerUserId: userID,
+              state: "ready",
+            },
+          ],
+        }),
+    },
+  });
   await page.route("**/api/runtime-access?*", (route) => {
     boots++;
     return route.fulfill({
@@ -2382,11 +2466,14 @@ test("keeps board labels readable without repeating lane status and uses a full-
     .poll(() => header.evaluate((element) => getComputedStyle(element).textTransform))
     .toBe("none");
   const separation = await card.evaluate((element) => {
-    const heading = element.parentElement?.querySelector(".lane-heading");
+    const heading = element.closest(".lane")?.querySelector(".lane-heading");
     if (!heading) throw new Error("Missing lane heading");
-    return element.getBoundingClientRect().top - heading.getBoundingClientRect().bottom;
+    return {
+      gap: element.getBoundingClientRect().top - heading.getBoundingClientRect().bottom,
+      minimum: Number.parseFloat(getComputedStyle(element).getPropertyValue("--board-heading-gap")),
+    };
   });
-  expect(separation).toBeGreaterThanOrEqual(12);
+  expect(separation.gap).toBeGreaterThanOrEqual(separation.minimum);
   await page.screenshot({ path: `${evidenceDirectory}/board-active.png` });
   await board.getByRole("button", { name: "Completed 2", exact: true }).click();
   const archive = board.getByRole("region", { name: "history", exact: true });
@@ -2543,9 +2630,12 @@ test("keeps Knowledge drafts with their page across navigation and minimize", as
       VALUES (${crypto.randomUUID()}, ${projectID}, ${name.toLowerCase()}, ${`${name} knowledge`}, ${`${name} original body`}, ${`${name} original body`}, ${"a".repeat(40)}, ${userID})
     `;
   }
-  await page.route(`**/api/projects/${projectID}/knowledge/documents`, (route) =>
-    route.fulfill({ json: { commitSha: "a".repeat(40), documents: [] } }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () =>
+        repositoryDocumentsSchema.parse({ commitSha: "a".repeat(40), documents: [] }),
+    },
+  });
   await signIn(page);
   await selectProject(page);
   await page.getByRole("button", { name: "Knowledge", exact: true }).click();
@@ -2573,12 +2663,13 @@ test("rejects specification rewrites after approval on the server", async ({ pag
   const ticketID = await insertChangedTicket("Immutable approval fixture", "active");
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  const response = await page.request.post(`/api/tickets/${ticketID}/requirements`, {
-    headers: { origin: "http://127.0.0.1:3000" },
-    data: { summary: "Unauthorized rewrite", acceptanceCriteria: ["Should reject"], nonGoals: [] },
-  });
-  expect(response.status()).toBe(409);
-  expect(await response.json()).toMatchObject({ code: "conflict" });
+  const response = await requestFunction(page.request, "createRequirementRevision", [
+    ticketID,
+    { summary: "Unauthorized rewrite", acceptanceCriteria: ["Should reject"], nonGoals: [] },
+  ]);
+  expect(response).toMatchObject({ ok: false, status: 409 });
+  if (response.ok) throw new Error("Approved specification was unexpectedly rewritten");
+  expect(response.message).toContain("approved");
 });
 
 test("shows Knowledge proposals and saves past their immutable ordinals", async ({ page }) => {
@@ -2599,9 +2690,12 @@ test("shows Knowledge proposals and saves past their immutable ordinals", async 
     INSERT INTO factory.knowledge_generation(id, project_id, source_commit_sha, state, page_count, conflict_count, created_by, completed_at)
     VALUES (${crypto.randomUUID()}, ${projectID}, ${"a".repeat(40)}, 'succeeded', 1, 1, ${userID}, now())
   `;
-  await page.route(`**/api/projects/${projectID}/knowledge/documents`, (route) =>
-    route.fulfill({ json: { commitSha: "a".repeat(40), documents: [] } }),
-  );
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () =>
+        repositoryDocumentsSchema.parse({ commitSha: "a".repeat(40), documents: [] }),
+    },
+  });
   await signIn(page);
   await selectProject(page);
   await page.getByRole("button", { name: "Knowledge", exact: true }).click();
@@ -2708,10 +2802,16 @@ for (const existingConversation of [true, false]) {
   }) => {
     let conversationID = existingConversation ? await insertConversation() : undefined;
     const message = "Explain the delivery process";
-    await page.route(`**/api/projects/${projectID}/conversation/message`, async (route) => {
-      conversationID ??= await insertConversation();
-      await insertUserMessage(conversationID, message, route.request().postDataJSON().commandId);
-      await route.fulfill({ status: 502, json: { error: "Model response failed" } });
+    await mockFactoryFunctions(page, {
+      conversations: {
+        message: async (_actor, factoryTargetID, factoryCommand) => {
+          conversationID ??= await insertConversation();
+          await insertUserMessage(conversationID, message, factoryCommand.commandId);
+          return (() => {
+            throw new CommandError("unavailable", String("Model response failed"));
+          })();
+        },
+      },
     });
 
     const panel = await openConversation(page);
@@ -2733,9 +2833,14 @@ test("preserves a rejected draft when an older message has identical text", asyn
   const conversationID = await insertConversation();
   const message = "Explain the delivery process";
   await insertUserMessage(conversationID, message);
-  await page.route(`**/api/projects/${projectID}/conversation/message`, (route) =>
-    route.fulfill({ status: 409, json: { error: "Request was not accepted" } }),
-  );
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) =>
+        (() => {
+          throw new CommandError("conflict", String("Request was not accepted"));
+        })(),
+    },
+  });
 
   const panel = await openConversation(page);
   await expect(panel.locator(".agent-message.user p")).toHaveText(message);
@@ -2760,22 +2865,28 @@ test("preserves a new draft typed while saved-message recovery is loading", asyn
   const recoveryStarted = new Promise<void>((resolve) => {
     recoveryRequested = resolve;
   });
-  await page.route(`**/api/projects/${projectID}/conversation`, async (route) => {
-    const response = await route.fetch();
-    if (recovering) {
-      recoveryRequested();
-      await historyGate;
-    }
-    await route.fulfill({ response });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async (_actor, id, input) => {
+        const response = await serverCall(browserFunction(page, "getConversation", [id, input]));
+        if (recovering) {
+          recoveryRequested();
+          await historyGate;
+        }
+        return response;
+      },
+    },
   });
-  await page.route(`**/api/projects/${projectID}/conversation/message`, async (route) => {
-    await insertUserMessage(
-      conversationID,
-      "Accepted question",
-      route.request().postDataJSON().commandId,
-    );
-    recovering = true;
-    await route.fulfill({ status: 502, json: { error: "Model response failed" } });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        await insertUserMessage(conversationID, "Accepted question", factoryCommand.commandId);
+        recovering = true;
+        return (() => {
+          throw new CommandError("unavailable", String("Model response failed"));
+        })();
+      },
+    },
   });
 
   const panel = await openConversation(page);
@@ -2800,19 +2911,30 @@ for (const outcome of ["success", "failure"] as const) {
     const responseGate = new Promise<void>((resolve) => {
       releaseResponse = resolve;
     });
-    await page.route(`**/api/projects/${projectID}/conversation/message`, async (route) => {
-      await insertUserMessage(
-        oldConversationID,
-        "Old Project request",
-        route.request().postDataJSON().commandId,
-      );
-      await responseGate;
-      if (outcome === "failure") {
-        await route.fulfill({ status: 502, json: { error: "Old Project response failed" } });
-      } else {
-        const response = await page.request.get(`/api/projects/${projectID}/conversation`);
-        await route.fulfill({ status: 200, json: await response.json() });
-      }
+    await mockFactoryFunctions(page, {
+      conversations: {
+        message: async (_actor, factoryTargetID, factoryCommand) => {
+          await insertUserMessage(
+            oldConversationID,
+            "Old Project request",
+            factoryCommand.commandId,
+          );
+          await responseGate;
+          if (outcome === "failure") {
+            return (() => {
+              throw new CommandError("unavailable", String("Old Project response failed"));
+            })();
+          } else {
+            const response = await requestFunction(page.request, "getConversation", [
+              projectID,
+              {},
+            ]);
+            return completedConversation(
+              conversationViewSchema.parse(await serverCall(Promise.resolve(response))),
+            );
+          }
+        },
+      },
     });
 
     const panel = await openConversation(page);
@@ -2847,11 +2969,15 @@ test("ignores an older History read after a Project switch", async ({ page }) =>
   const requestStarted = new Promise<void>((resolve) => {
     historyRequested = resolve;
   });
-  await page.route(`**/api/projects/${projectID}/conversation`, async (route) => {
-    const response = await page.request.get(`/api/projects/${projectID}/conversation`);
-    historyRequested();
-    await responseGate;
-    await route.fulfill({ status: 200, json: await response.json() });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async (_actor, factoryTargetID, factoryCommand) => {
+        const response = await requestFunction(page.request, "getConversation", [projectID, {}]);
+        historyRequested();
+        await responseGate;
+        return conversationViewSchema.nullable().parse(await serverCall(Promise.resolve(response)));
+      },
+    },
   });
 
   const panel = await openConversation(page);
@@ -2873,15 +2999,19 @@ test("does not apply a delayed mode change to another Project", async ({ page })
   const responseGate = new Promise<void>((resolve) => {
     releaseResponse = resolve;
   });
-  await page.route(`**/api/projects/${projectID}/conversation/mode`, async (route) => {
-    const response = await route.fetch();
-    await responseGate;
-    await route.fulfill({ response });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      async mode(_actor, id, input) {
+        const value = await serverCall(browserFunction(page, "setConversationMode", [id, input]));
+        await responseGate;
+        return value;
+      },
+    },
   });
 
   const panel = await openConversation(page);
   const modeRequested = page.waitForRequest((request) =>
-    request.url().endsWith(`/projects/${projectID}/conversation/mode`),
+    request.url().includes("/_server/data/setConversationMode-"),
   );
   await panel.getByLabel("Message conversation").fill("Clarify this Project's requirements");
   await panel.getByRole("button", { name: "Send message", exact: true }).click();

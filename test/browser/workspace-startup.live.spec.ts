@@ -1,3 +1,7 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { browserBootstrap } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -141,7 +145,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
     await mkdir(directory, { recursive: true });
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-    const { session } = await (await page.request.get("/api/session", { timeout: 30_000 })).json();
+    const { session } = await browserBootstrap(page);
     if (!session) throw new Error("Missing authenticated fixture owner");
     const base = await forge.getDefaultBranch(repository);
     await forge.ensureBranch(repository, identity.branchName, base.headSha);
@@ -171,18 +175,16 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
       .click();
     const ide = page.locator('iframe[title="Factory IDE"]').contentFrame();
     async function start(kind: "cold" | "stopped") {
-      const ensure = page.waitForResponse(
-        (response) =>
-          response.url().endsWith(`/api/changes/${identity.changeID}/ticket-workspace/ensure`) &&
-          response.request().method() === "POST",
-        { timeout: 30_000 },
-      );
       const started = performance.now();
       await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
       await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
-      const response = await ensure;
-      expect(response.ok()).toBe(true);
-      const runtime = runtimeAttemptSchema.parse(await response.json());
+      const receipt = await startEditorCompute(page);
+      const list = await serverCall(
+        requestFunction(page.request, "getRuntimeAttempts", [projectID]),
+      );
+      const runtime = runtimeAttemptSchema.parse(
+        list.attempts.find((attempt) => attempt.id === receipt.attemptID),
+      );
       await expect
         .poll(
           async () => {
@@ -318,11 +320,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
         { timeout: 180_000, intervals: [1_000] },
       )
       .toBe(true);
-    expect(
-      (
-        await page.request.post(`/api/runtime-attempts/${cold.id}/stop`, { headers: { origin } })
-      ).ok(),
-    ).toBe(true);
+    expect((await requestFunction(page.request, "stopRuntimeAttempt", [cold.id])).ok).toBe(true);
     await expect
       .poll(
         async () =>
@@ -393,13 +391,9 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
     await writeFile(`${directory}/timings.json`, JSON.stringify(measurements, null, 2));
     try {
       if (fixtureCreated) {
-        expect(
-          (
-            await page.request.post(`/api/changes/${identity.changeID}/cancel`, {
-              headers: { origin },
-            })
-          ).ok(),
-        ).toBe(true);
+        expect((await requestFunction(page.request, "cancelChange", [identity.changeID])).ok).toBe(
+          true,
+        );
         await teardownFactoryProject(page.request, projectID);
         const { stdout: remainingNamespaces } = await execute("kubectl", [
           "--context",

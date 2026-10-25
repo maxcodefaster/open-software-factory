@@ -57,23 +57,6 @@ export function SkillGalleryDetail(props: {
         }
       }}
     >
-      <WorkspaceActionBar label="Skill actions">
-        <button type="button" class="workspace-action" onClick={props.onClose}>
-          Back to library
-        </button>
-        <Show when={canEdit()}>
-          <button
-            type="button"
-            class="workspace-action"
-            data-primary="true"
-            disabled={props.busy || props.hasDraft}
-            title={props.hasDraft ? "Resume or discard your existing draft first." : undefined}
-            onClick={() => props.onEdit(props.entry)}
-          >
-            Edit skill
-          </button>
-        </Show>
-      </WorkspaceActionBar>
       <header class="skill-detail-heading">
         <img
           class="skill-cover"
@@ -84,9 +67,30 @@ export function SkillGalleryDetail(props: {
           decoding="async"
         />
         <div class="skill-detail-introduction">
-          <h3 tabindex="-1" ref={props.onHeading}>
-            {state().revision?.content.name}
-          </h3>
+          <div class="workspace-heading">
+            <h3 class="workspace-heading-title" tabindex="-1" ref={props.onHeading}>
+              {state().revision?.content.name}
+            </h3>
+            <WorkspaceActionBar label="Skill actions">
+              <button type="button" class="workspace-action" onClick={props.onClose}>
+                Back to library
+              </button>
+              <Show when={canEdit()}>
+                <button
+                  type="button"
+                  class="workspace-action"
+                  data-primary="true"
+                  disabled={props.busy || props.hasDraft}
+                  title={
+                    props.hasDraft ? "Resume or discard your existing draft first." : undefined
+                  }
+                  onClick={() => props.onEdit(props.entry)}
+                >
+                  Edit skill
+                </button>
+              </Show>
+            </WorkspaceActionBar>
+          </div>
           <p>{state().revision?.content.description}</p>
           <p class="skill-detail-origin">
             {props.entry.scope === "personal"

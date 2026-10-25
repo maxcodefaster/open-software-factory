@@ -1,16 +1,28 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { z } from "zod";
+import type { z } from "zod";
 import {
   mcpDefinition,
-  mcpLibraryView,
   recommendedMCPs,
   resolveMCPChoice,
   type MCPDefinition,
   type MCPLibraryView,
   type MCPRole,
+  type MCPChoice,
+  type mcpSaveInput,
 } from "../../../../packages/conversation-domain/src/mcp-library";
-import { apiRequest } from "../api-client";
+import { serverCall } from "../server-functions/result";
+import {
+  getMCPLibrary,
+  saveMCPDefinition,
+  saveMCPChoice,
+  proposeMCPSharing,
+  acceptMCPSharing,
+  connectMCP,
+  disconnectMCP,
+  reviewMCPAccess,
+  grantMCPProject,
+} from "../server-functions/mcp";
 import { Icon } from "../icon";
 import { monitoringSourceAvailable } from "../monitoring/sources";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
@@ -19,7 +31,6 @@ import "./library.css";
 
 type Scope = "personal" | "project" | "system";
 type Entry = MCPLibraryView["entries"][number];
-const saved = z.object({ saved: z.boolean() });
 const cover = (provider: string) =>
   `/art/mcp/${provider === "sentry" || provider === "datadog" ? provider : "custom"}.webp`;
 const endpointHost = (endpoint: string | undefined) => (endpoint ? new URL(endpoint).host : "");
@@ -69,6 +80,7 @@ export function MCPLibrary(props: {
   const [authorization, setAuthorization] = createSignal<string>();
   const [shareTarget, setShareTarget] = createSignal<"project" | "system">("project");
   let sequence = 0;
+  let pendingSave: { basis: string; input: z.input<typeof mcpSaveInput> } | undefined;
   let heading: HTMLHeadingElement | undefined;
   let addButton: HTMLButtonElement | undefined;
   let gallery: HTMLDivElement | undefined;
@@ -94,7 +106,6 @@ export function MCPLibrary(props: {
     draft()?.scope === "project" && draft()?.projectId === props.monitoringSetup?.projectId;
   const entry = () => view()?.entries.find((item) => item.id === selected());
   const latest = () => entry()?.revisions[0];
-  const suffix = () => (props.projectId ? `?project=${props.projectId}` : "");
   const entries = () =>
     (view()?.entries ?? []).filter((item) => {
       const content = item.revisions[0]?.content;
@@ -113,7 +124,9 @@ export function MCPLibrary(props: {
     const current = ++sequence;
     if (!quiet) setLoading(true);
     try {
-      const result = await apiRequest(mcpLibraryView, `/api/mcp${suffix()}`);
+      const result = await serverCall(
+        props.projectId ? getMCPLibrary(props.projectId) : getMCPLibrary(),
+      );
       if (current !== sequence) return;
       const previousEntry = view()?.entries.find((item) => item.id === selected());
       const nextEntry = result.entries.find((item) => item.id === selected());
@@ -289,20 +302,33 @@ export function MCPLibrary(props: {
       setError(parsed.error.issues[0]?.message ?? "Check the MCP definition");
       return;
     }
-    const libraryId = current.entry?.id ?? crypto.randomUUID();
+    const basis = JSON.stringify({
+      libraryId: current.entry?.id ?? null,
+      expectedRevision: current.entry?.revisions[0]?.revision ?? 0,
+      scope: current.scope,
+      projectId: current.scope === "project" ? current.projectId : null,
+      content: parsed.data,
+    });
+    if (!pendingSave || pendingSave.basis !== basis)
+      pendingSave = {
+        basis,
+        input: {
+          libraryId: current.entry?.id ?? crypto.randomUUID(),
+          revisionId: crypto.randomUUID(),
+          expectedRevision: current.entry?.revisions[0]?.revision ?? 0,
+          scope: current.scope,
+          ...(current.scope === "project" && current.projectId
+            ? { projectId: current.projectId }
+            : {}),
+          content: parsed.data,
+        },
+      };
+    const submitted = pendingSave;
+    const libraryId = submitted.input.libraryId;
     await mutate(
       async () => {
-        await apiRequest(saved, "/api/mcp", {
-          method: "POST",
-          body: JSON.stringify({
-            libraryId,
-            revisionId: crypto.randomUUID(),
-            expectedRevision: current.entry?.revisions[0]?.revision ?? 0,
-            scope: current.scope,
-            ...(current.scope === "project" ? { projectId: current.projectId } : {}),
-            content: parsed.data,
-          }),
-        });
+        await serverCall(saveMCPDefinition(submitted.input));
+        pendingSave = undefined;
         setDraft(undefined);
         setEditor(false);
         setSelected(libraryId);
@@ -316,24 +342,23 @@ export function MCPLibrary(props: {
         : "MCP definition saved. Connect and review access before enabling it.",
     );
   }
-  async function choose(item: Entry, role: MCPRole, state: string) {
+  async function choose(item: Entry, role: MCPRole, state: MCPChoice["state"]) {
     const current = view()?.choices.find(
       (choice) => choice.libraryId === item.id && choice.role === role && choice.scope === scope(),
     );
     await mutate(
       () =>
-        apiRequest(saved, "/api/mcp/choices", {
-          method: "PUT",
-          body: JSON.stringify({
+        serverCall(
+          saveMCPChoice({
             libraryId: item.id,
             revisionId: item.revisions[0]!.id,
             scope: scope(),
             role,
             state,
             expectedVersion: current?.version ?? 0,
-            ...(scope() !== "system" ? { projectId: props.projectId } : {}),
+            ...(scope() !== "system" && props.projectId ? { projectId: props.projectId } : {}),
           }),
-        }),
+        ),
       "MCP choice saved for new work.",
     );
   }
@@ -342,18 +367,13 @@ export function MCPLibrary(props: {
     if (!item || setupBlocked()) return;
     setAuthorization(undefined);
     await mutate(async () => {
-      const result = await apiRequest(
-        z.object({ authorizationUrl: z.string().nullable() }),
-        `/api/mcp/${item.id}/connect`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            commandId: crypto.randomUUID(),
-            revisionId: item.revisions[0]!.id,
-            expectedVersion: item.connection?.version ?? 0,
-            ...(latest()?.content.authentication === "bearer" ? { token: token() } : {}),
-          }),
-        },
+      const result = await serverCall(
+        connectMCP(item.id, {
+          commandId: crypto.randomUUID(),
+          revisionId: item.revisions[0]!.id,
+          expectedVersion: item.connection?.version ?? 0,
+          ...(latest()?.content.authentication === "bearer" ? { token: token() } : {}),
+        }),
       );
       setToken("");
       setAllowed([]);
@@ -403,7 +423,13 @@ export function MCPLibrary(props: {
           </section>
         )}
       </Show>
-      <header class="skill-library-heading" hidden={Boolean(entry()) || editor()}>
+      <header class="skill-library-heading workspace-heading" hidden={Boolean(entry()) || editor()}>
+        <div class="skill-library-title workspace-heading-title">
+          <h2>{props.monitoringSetup ? "Choose a source" : "MCP connections"}</h2>
+          <span class="skill-result-count">
+            {view() ? `${entries().length} ${entries().length === 1 ? "source" : "sources"}` : ""}
+          </span>
+        </div>
         <WorkspaceActionBar
           label="MCP library actions"
           leading={props.monitoringSetup ? undefined : props.navigation}
@@ -465,13 +491,12 @@ export function MCPLibrary(props: {
             {draft() ? "Resume draft" : props.monitoringSetup ? "Other service" : "Add MCP"}
           </button>
         </WorkspaceActionBar>
-        <div class="skill-library-title">
-          <h2>{props.monitoringSetup ? "Choose a source" : "MCP connections"}</h2>
-          <span class="skill-result-count">
-            {view() ? `${entries().length} ${entries().length === 1 ? "source" : "sources"}` : ""}
-          </span>
-        </div>
-        <div class="skill-library-tools">
+        <Show when={!props.monitoringSetup}>
+          <p class="mcp-library-subtitle workspace-heading-meta">
+            Connect external tools and context to Project work.
+          </p>
+        </Show>
+        <div class="skill-library-tools workspace-heading-meta">
           <label class="skill-search">
             <Icon name="search" />
             <input
@@ -755,11 +780,7 @@ export function MCPLibrary(props: {
                         disabled={busy() || setupBlocked()}
                         onClick={() =>
                           void mutate(async () => {
-                            const result = await apiRequest(
-                              z.object({ libraryId: z.uuid() }),
-                              `/api/mcp/share/${proposal.id}/accept`,
-                              { method: "POST" },
-                            );
+                            const result = await serverCall(acceptMCPSharing(proposal.id));
                             setSelected(result.libraryId);
                           }, "Definition added to the shared library. Connect it separately.")
                         }
@@ -824,41 +845,36 @@ export function MCPLibrary(props: {
               when={
                 view() &&
                 !entries().length &&
-                (!props.monitoringSetup || query() || owner() !== "all" || workType() !== "all")
+                (query() || owner() !== "all" || workType() !== "all")
               }
             >
               <div class="skill-library-empty">
-                <h3>
-                  {query() || owner() !== "all" || workType() !== "all"
-                    ? "No matching connections"
-                    : "Connect your sources"}
-                </h3>
-                <p>
-                  Add an MCP endpoint to bring external context into Project work. Connections
-                  remain off until you review and enable them.
-                </p>
-                <Show when={query() || owner() !== "all" || workType() !== "all"}>
-                  <button
-                    type="button"
-                    class="quiet-button"
-                    onClick={() => {
-                      setQuery("");
-                      setOwner("all");
-                      setWorkType("all");
-                    }}
-                  >
-                    Clear filters
-                  </button>
-                </Show>
+                <h3>No matching connections</h3>
+                <p>Try another search or clear the filters.</p>
+                <button
+                  type="button"
+                  class="quiet-button"
+                  onClick={() => {
+                    setQuery("");
+                    setOwner("all");
+                    setWorkType("all");
+                  }}
+                >
+                  Clear filters
+                </button>
               </div>
             </Show>
             <section class="mcp-recommendations" aria-label="Recommended MCP connections">
-              <h3>{props.monitoringSetup ? "Connect a service" : "Recommended starting points"}</h3>
-              <p>
-                {props.monitoringSetup
-                  ? "Choose a service below, or use Other service for a different remote MCP endpoint."
-                  : "Provider-operated endpoints. Add your own definition, then authorize it with a read-only account."}
-              </p>
+              <Show when={props.monitoringSetup || entries().length}>
+                <h3>
+                  {props.monitoringSetup ? "Connect a service" : "Recommended starting points"}
+                </h3>
+              </Show>
+              <Show when={props.monitoringSetup}>
+                <p>
+                  Choose a service below, or use Other service for a different remote MCP endpoint.
+                </p>
+              </Show>
               <div class="skill-gallery mcp-gallery">
                 <For each={recommendedMCPs}>
                   {(suggestion) => (
@@ -905,24 +921,6 @@ export function MCPLibrary(props: {
                   }
                 }}
               >
-                <WorkspaceActionBar label="MCP actions">
-                  <button type="button" class="workspace-action" onClick={close}>
-                    Back to library
-                  </button>
-                  <Show
-                    when={item().editable && (!props.monitoringSetup || item().scope === "project")}
-                  >
-                    <button
-                      type="button"
-                      class="workspace-action"
-                      data-primary="true"
-                      disabled={busy() || setupBlocked() || Boolean(draft())}
-                      onClick={() => edit(latest()!.content, item())}
-                    >
-                      Edit definition
-                    </button>
-                  </Show>
-                </WorkspaceActionBar>
                 <header class="skill-detail-heading mcp-detail-heading">
                   <img
                     class="mcp-cover"
@@ -932,14 +930,38 @@ export function MCPLibrary(props: {
                     alt=""
                   />
                   <div class="skill-detail-introduction">
-                    <h3
-                      tabindex="-1"
-                      ref={(element) => {
-                        heading = element;
-                      }}
-                    >
-                      {latest()?.content.name}
-                    </h3>
+                    <div class="workspace-heading">
+                      <h3
+                        class="workspace-heading-title"
+                        tabindex="-1"
+                        ref={(element) => {
+                          heading = element;
+                        }}
+                      >
+                        {latest()?.content.name}
+                      </h3>
+                      <WorkspaceActionBar label="MCP actions">
+                        <button type="button" class="workspace-action" onClick={close}>
+                          Back to library
+                        </button>
+                        <Show
+                          when={
+                            item().editable &&
+                            (!props.monitoringSetup || item().scope === "project")
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="workspace-action"
+                            data-primary="true"
+                            disabled={busy() || setupBlocked() || Boolean(draft())}
+                            onClick={() => edit(latest()!.content, item())}
+                          >
+                            Edit definition
+                          </button>
+                        </Show>
+                      </WorkspaceActionBar>
+                    </div>
                     <p>{latest()?.content.description}</p>
                     <p class="skill-detail-origin">
                       {scopeLabel(item().scope)} library · Definition v{latest()?.revision}
@@ -1007,10 +1029,7 @@ export function MCPLibrary(props: {
                           disabled={busy() || setupBlocked()}
                           onClick={() =>
                             void mutate(
-                              () =>
-                                apiRequest(saved, `/api/mcp/${item().id}/disconnect`, {
-                                  method: "POST",
-                                }),
+                              () => serverCall(disconnectMCP(item().id)),
                               "Connection disconnected. Further MCP lookups are blocked.",
                             )
                           }
@@ -1101,16 +1120,15 @@ export function MCPLibrary(props: {
                       onClick={() =>
                         void mutate(
                           () =>
-                            apiRequest(saved, `/api/mcp/${item().id}/review`, {
-                              method: "PUT",
-                              body: JSON.stringify({
+                            serverCall(
+                              reviewMCPAccess(item().id, {
                                 expectedVersion: item().connection!.version,
                                 confirmReadOnlyAccess: true,
                                 tools: item()
                                   .connection!.tools.filter((tool) => allowed().includes(tool.name))
                                   .map(({ name, digest }) => ({ name, digest })),
                               }),
-                            }),
+                            ),
                           props.monitoringSetup
                             ? "Read-only access approved. Continue to the Input."
                             : "Read-only access approved. Choose where to enable this connection.",
@@ -1147,16 +1165,15 @@ export function MCPLibrary(props: {
                       onClick={() =>
                         void mutate(
                           () =>
-                            apiRequest(saved, `/api/mcp/${item().id}/grant`, {
-                              method: "PUT",
-                              body: JSON.stringify({
-                                projectId: props.projectId,
+                            serverCall(
+                              grantMCPProject(item().id, {
+                                projectId: props.projectId!,
                                 expectedVersion: item().connection!.version,
                                 enabled: !item().connection!.projectGrants.includes(
                                   props.projectId!,
                                 ),
                               }),
-                            }),
+                            ),
                           "Project connection access updated.",
                         )
                       }
@@ -1264,7 +1281,11 @@ export function MCPLibrary(props: {
                               }
                               value={own()?.state ?? "inherit"}
                               onChange={(event) =>
-                                void choose(item(), role, event.currentTarget.value)
+                                void choose(
+                                  item(),
+                                  role,
+                                  event.currentTarget.value as MCPChoice["state"],
+                                )
                               }
                             >
                               <option value="inherit">Inherit</option>
@@ -1376,9 +1397,8 @@ export function MCPLibrary(props: {
                       onClick={() =>
                         void mutate(
                           () =>
-                            apiRequest(saved, "/api/mcp/share", {
-                              method: "POST",
-                              body: JSON.stringify({
+                            serverCall(
+                              proposeMCPSharing({
                                 id: crypto.randomUUID(),
                                 revisionId: latest()!.id,
                                 target: props.projectId ? shareTarget() : "system",
@@ -1386,7 +1406,7 @@ export function MCPLibrary(props: {
                                   ? { projectId: props.projectId }
                                   : {}),
                               }),
-                            }),
+                            ),
                           "Definition proposed for manager review. No credentials were shared.",
                         )
                       }

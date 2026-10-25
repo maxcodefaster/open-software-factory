@@ -1,0 +1,51 @@
+syntax = "proto3";
+package repository;
+
+// Wire-compatible subset for the isolated Argo v3.1.9 acceptance proof.
+// Field numbers come from reposerver/repository/repository.proto and
+// pkg/apis/application/v1alpha1/{types,repository_types}.go at that tag.
+// The pinned server uses gogo descriptors, unavailable to grpcurl reflection.
+message Repository {
+  string repo = 1;
+  string username = 2;
+  string password = 3;
+  bool insecure = 7;
+  string type = 11;
+  bool enableOCI = 14;
+  bool insecureOCIForceHttp = 26;
+}
+message ApplicationSource {
+  string repoURL = 1;
+  string targetRevision = 4;
+  string chart = 12;
+}
+message ApplicationSpec { ApplicationSource source = 1; }
+message Application { ApplicationSpec spec = 2; }
+message ResolveRevisionRequest {
+  Repository repo = 1;
+  Application app = 2;
+  string ambiguousRevision = 3;
+  int64 sourceIndex = 4;
+}
+message ResolveRevisionResponse {
+  string revision = 1;
+  string ambiguousRevision = 2;
+}
+message ManifestRequest {
+  Repository repo = 1;
+  string revision = 2;
+  bool noCache = 3;
+  string appName = 5;
+  string namespace = 8;
+  ApplicationSource applicationSource = 10;
+  string kubeVersion = 14;
+  bool noRevisionCache = 18;
+}
+message ManifestResponse {
+  repeated string manifests = 1;
+  string revision = 4;
+}
+service RepoServerService {
+  rpc ResolveRevision(ResolveRevisionRequest) returns (ResolveRevisionResponse);
+  rpc GenerateManifest(ManifestRequest) returns (ManifestResponse);
+}

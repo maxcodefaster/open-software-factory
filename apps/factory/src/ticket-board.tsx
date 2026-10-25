@@ -19,7 +19,6 @@ export function TicketBoardContents(props: {
   blockers: (ticketID: string) => readonly PrerequisiteView[];
   reference: (ticketID: string) => string;
   onSelect(ticketID: string): void;
-  onCreate(stage: "inbox" | "ready"): void;
   epicID: string;
   onEpic(id: string): void;
   onSaveEpic(input: EpicEdit, current?: Epic): Promise<boolean>;
@@ -29,11 +28,16 @@ export function TicketBoardContents(props: {
   const family = () => epicFamilyIds(props.epics, props.epicID);
   const members = () =>
     props.tickets.filter((ticket) => ticket.epicId && family().has(ticket.epicId));
+  let board: HTMLDivElement | undefined;
   let dialog: HTMLDialogElement | undefined;
   let opener: HTMLElement | undefined;
+  let openerEpicID = "";
   const close = () => props.onEpic("");
   const open = (id: string, element: HTMLElement) => {
-    if (!selected()) opener = element;
+    if (!selected()) {
+      opener = element;
+      openerEpicID = id;
+    }
     props.onEpic(id);
   };
   createEffect(
@@ -41,11 +45,13 @@ export function TicketBoardContents(props: {
     (id) => {
       setEditing(false);
       if (id) {
+        openerEpicID ||= id;
         opener ??=
           document.activeElement instanceof HTMLElement ? document.activeElement : undefined;
         if (dialog && !dialog.open) dialog.showModal();
         queueMicrotask(() => {
           if (selected()?.id !== id || !dialog?.open) return;
+          dialog.scrollTop = 0;
           (
             dialog.querySelector<HTMLElement>(".epic-folder-content button") ??
             dialog.querySelector<HTMLElement>(".epic-folder-actions button:last-child")
@@ -53,12 +59,16 @@ export function TicketBoardContents(props: {
         });
       } else {
         dialog?.close();
-        if (opener?.isConnected) opener.focus({ preventScroll: true });
+        const target = opener?.isConnected
+          ? opener
+          : board?.querySelector<HTMLButtonElement>(`[data-epic-id="${CSS.escape(openerEpicID)}"]`);
+        target?.focus({ preventScroll: true });
         opener = undefined;
+        openerEpicID = "";
       }
     },
   );
-  const Card = (input: { ticket: Ticket }) => (
+  const Card = (input: { ticket: Ticket; showStatus?: boolean }) => (
     <article
       class={props.selectedTicketID === input.ticket.id ? "ticket-card selected" : "ticket-card"}
     >
@@ -74,7 +84,10 @@ export function TicketBoardContents(props: {
         <small>{props.reference(input.ticket.id)}</small>
         <strong>{input.ticket.title}</strong>
         <Show
-          when={!["Idea", "Requirements", "Implementation"].includes(props.status(input.ticket))}
+          when={
+            input.showStatus ||
+            !["Idea", "Requirements", "Implementation"].includes(props.status(input.ticket))
+          }
         >
           <span>{props.status(input.ticket)}</span>
         </Show>
@@ -106,6 +119,7 @@ export function TicketBoardContents(props: {
       <button
         type="button"
         class="epic-stack-open"
+        data-epic-id={input.epic.id}
         aria-label={`Open Epic ${input.epic.title}`}
         aria-haspopup="dialog"
         onClick={(event) => open(input.epic.id, event.currentTarget)}
@@ -156,65 +170,63 @@ export function TicketBoardContents(props: {
           </div>
         }
       >
-        <p class="board-scroll-hint">
-          Swipe through 4 stages <span aria-hidden="true">→</span>
-        </p>
-        <div class="board board-enter">
+        <div
+          ref={board}
+          class="board board-enter"
+          style={{ "--board-stage-count": boardStages.length }}
+        >
           <For each={boardStages}>
             {(stage) => {
               const tickets = () =>
                 props.tickets.filter((ticket) => props.stage(ticket) === stage.id);
               return (
-                <section class="lane" aria-label={stage.id}>
+                <section
+                  class="lane"
+                  aria-label={stage.id}
+                  aria-describedby={`lane-count-${stage.id}`}
+                >
                   <header class="lane-heading">
-                    <span>{stage.label}</span>
-                    <div class="lane-heading-actions">
-                      <span>{tickets().length}</span>
-                      <Show when={stage.id === "ideas" || stage.id === "requirements"}>
-                        <button
-                          type="button"
-                          class="bare-icon lane-create"
-                          aria-label={stage.id === "ideas" ? "New idea" : "New Ticket"}
-                          title={stage.id === "ideas" ? "New idea" : "New ticket in Requirements"}
-                          onClick={() => props.onCreate(stage.id === "ideas" ? "inbox" : "ready")}
-                        >
-                          <Icon name="plus" />
-                        </button>
-                      </Show>
-                    </div>
+                    <h2>{stage.label}</h2>
                   </header>
-                  <For
-                    each={boardGroups(tickets(), props.epics)}
-                    keyed={(group) =>
-                      group.kind === "epic" ? `epic:${group.epic.id}` : `ticket:${group.ticket.id}`
-                    }
-                  >
-                    {(group) => {
-                      const epic = () => {
-                        const value = group();
-                        return value.kind === "epic" ? value : undefined;
-                      };
-                      const ticket = () => {
-                        const value = group();
-                        return value.kind === "ticket" ? value.ticket : undefined;
-                      };
-                      return (
-                        <Show
-                          when={epic()}
-                          fallback={
-                            <Show when={ticket()}>{(value) => <Card ticket={value()} />}</Show>
-                          }
-                        >
-                          {(value) => <Folder epic={value().epic} tickets={value().tickets} />}
-                        </Show>
-                      );
-                    }}
-                  </For>
-                  <Show when={stage.id === "ideas"}>
-                    <For each={emptyRoots()} keyed={(epic) => epic.id}>
-                      {(epic) => <Folder epic={epic()} tickets={[]} />}
+                  <span class="sr-only" id={`lane-count-${stage.id}`}>
+                    {tickets().length} {tickets().length === 1 ? "ticket" : "tickets"}
+                  </span>
+                  <div class="lane-tickets">
+                    <For
+                      each={boardGroups(tickets(), props.epics)}
+                      keyed={(group) =>
+                        group.kind === "epic"
+                          ? `epic:${group.epic.id}`
+                          : `ticket:${group.ticket.id}`
+                      }
+                    >
+                      {(group) => {
+                        const epic = () => {
+                          const value = group();
+                          return value.kind === "epic" ? value : undefined;
+                        };
+                        const ticket = () => {
+                          const value = group();
+                          return value.kind === "ticket" ? value.ticket : undefined;
+                        };
+                        return (
+                          <Show
+                            when={epic()}
+                            fallback={
+                              <Show when={ticket()}>{(value) => <Card ticket={value()} />}</Show>
+                            }
+                          >
+                            {(value) => <Folder epic={value().epic} tickets={value().tickets} />}
+                          </Show>
+                        );
+                      }}
                     </For>
-                  </Show>
+                    <Show when={stage.id === "ideas"}>
+                      <For each={emptyRoots()} keyed={(epic) => epic.id}>
+                        {(epic) => <Folder epic={epic()} tickets={[]} />}
+                      </For>
+                    </Show>
+                  </div>
                 </section>
               );
             }}
@@ -246,7 +258,7 @@ export function TicketBoardContents(props: {
           {(epic) => (
             <>
               <header class="epic-folder-heading">
-                <div>
+                <div class="epic-folder-parent">
                   <Show when={props.epics.find((parent) => parent.id === epic().parentId)}>
                     {(parent) => (
                       <button
@@ -258,6 +270,8 @@ export function TicketBoardContents(props: {
                       </button>
                     )}
                   </Show>
+                </div>
+                <div class="epic-folder-title">
                   <h2 id="epic-folder-title">{epic().title}</h2>
                   <span class="epic-progress">
                     {members().filter((ticket) => ticket.state === "done").length}/
@@ -286,7 +300,7 @@ export function TicketBoardContents(props: {
               <Show when={epic().description}>
                 <p class="epic-folder-description">{epic().description}</p>
               </Show>
-              <div class="epic-folder-content">
+              <div class="epic-folder-content epic-folder-grid">
                 <For
                   each={props.epics.filter((child) => child.parentId === epic().id)}
                   keyed={(child) => child.id}
@@ -302,29 +316,15 @@ export function TicketBoardContents(props: {
                     />
                   )}
                 </For>
-                <For each={[...boardStages, { id: "history", label: "Completed & cancelled" }]}>
-                  {(stage) => (
-                    <Show
-                      when={members().some(
-                        (ticket) => ticket.epicId === epic().id && props.stage(ticket) === stage.id,
-                      )}
-                    >
-                      <section class="epic-folder-stage" aria-label={stage.label}>
-                        <h3>{stage.label}</h3>
-                        <div class="epic-folder-tickets">
-                          <For
-                            each={members().filter(
-                              (ticket) =>
-                                ticket.epicId === epic().id && props.stage(ticket) === stage.id,
-                            )}
-                            keyed={(ticket) => ticket.id}
-                          >
-                            {(ticket) => <Card ticket={ticket()} />}
-                          </For>
-                        </div>
-                      </section>
-                    </Show>
+                <For
+                  each={[...boardStages.map((stage) => stage.id), "history"].flatMap((stage) =>
+                    members().filter(
+                      (ticket) => ticket.epicId === epic().id && props.stage(ticket) === stage,
+                    ),
                   )}
+                  keyed={(ticket) => ticket.id}
+                >
+                  {(ticket) => <Card ticket={ticket()} showStatus />}
                 </For>
                 <Show
                   when={

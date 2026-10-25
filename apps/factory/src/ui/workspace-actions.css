@@ -1,3 +1,29 @@
+.workspace-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-1) var(--space-4);
+}
+.workspace-heading-title {
+  flex: 1 1 12rem;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.workspace-heading > .workspace-action-bar {
+  flex: 0 1 auto;
+  width: auto;
+  margin-inline-start: auto;
+  padding: 0;
+}
+.workspace-heading-meta {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+.workspace-heading-meta:has(> .save-feedback:only-child > span:last-child:empty),
+.workspace-heading-meta > .save-feedback:has(> span:last-child:empty) {
+  display: none;
+}
 .workspace-action-bar {
   display: flex;
   align-items: center;

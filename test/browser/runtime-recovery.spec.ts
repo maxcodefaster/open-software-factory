@@ -1,3 +1,4 @@
+import { requestFunction } from "../fixtures/server-functions";
 import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -5,6 +6,8 @@ import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { teardownFactoryProject } from "../support/factory-fixture";
+import { browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const { FACTORY_ADMIN_EMAIL, FACTORY_ADMIN_PASSWORD, FACTORY_TEST_REPOSITORY_URL } = process.env;
 const email = FACTORY_ADMIN_EMAIL ?? "admin@factory.local";
@@ -52,11 +55,7 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
   let projectID = "";
   await expect
     .poll(async () => {
-      const response = await page.context().request.get("/api/projects");
-      if (!response.ok()) return "";
-      const projects = (await response.json()) as {
-        projects: Array<{ id: string; slug: string }>;
-      };
+      const projects = await serverCall(browserFunction(page, "getProjects", []));
       projectID = projects.projects.find((value) => value.slug === slug)?.id ?? "";
       return projectID;
     })
@@ -73,9 +72,9 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
   await expect
     .poll(
       async () => {
-        const response = await page.context().request.get("/api/runtime-attempts");
-        if (!response.ok()) return {};
-        const body = (await response.json()) as {
+        const response = await requestFunction(page.context().request, "getRuntimeAttempts", []);
+        if (!response.ok) return {};
+        const body = (await serverCall(Promise.resolve(response))) as {
           attempts: Array<{
             projectId: string;
             runtimeKind?: string;
@@ -92,8 +91,8 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
     )
     .toMatchObject({ personal: "ready", staging: "ready" });
 
-  const attemptsResponse = await page.context().request.get("/api/runtime-attempts");
-  const attempts = (await attemptsResponse.json()) as {
+  const attemptsResponse = await requestFunction(page.context().request, "getRuntimeAttempts", []);
+  const attempts = (await serverCall(Promise.resolve(attemptsResponse))) as {
     attempts: Array<{
       id: string;
       projectId: string;
@@ -149,9 +148,9 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
   await expect
     .poll(
       async () => {
-        const response = await page.context().request.get("/api/runtime-attempts");
-        if (!response.ok()) return "unavailable";
-        const body = (await response.json()) as {
+        const response = await requestFunction(page.context().request, "getRuntimeAttempts", []);
+        if (!response.ok) return "unavailable";
+        const body = (await serverCall(Promise.resolve(response))) as {
           attempts: Array<{ id: string; state: string }>;
         };
         return Object.fromEntries(
@@ -214,9 +213,9 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
   await expect
     .poll(
       async () => {
-        const response = await page.context().request.get("/api/runtime-attempts");
-        if (!response.ok()) return "unavailable";
-        const body = (await response.json()) as {
+        const response = await requestFunction(page.context().request, "getRuntimeAttempts", []);
+        if (!response.ok) return "unavailable";
+        const body = (await serverCall(Promise.resolve(response))) as {
           attempts: Array<{ id: string; state: string }>;
         };
         return body.attempts.find((value) => value.id === attempt.id)?.state ?? "missing";
@@ -232,18 +231,14 @@ test("a live runtime recovers ready and ambiguous create state after Factory res
   await appPage.close();
 
   await Promise.all([
-    page.context().request.post(`/api/runtime-attempts/${attempt.id}/stop`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    }),
-    page.context().request.post(`/api/runtime-attempts/${attempt.id}/stop`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    }),
+    requestFunction(page.context().request, "stopRuntimeAttempt", [attempt.id]),
+    requestFunction(page.context().request, "stopRuntimeAttempt", [attempt.id]),
   ]);
   await expect
     .poll(
       async () => {
-        const response = await page.context().request.get("/api/runtime-attempts");
-        const body = (await response.json()) as {
+        const response = await requestFunction(page.context().request, "getRuntimeAttempts", []);
+        const body = (await serverCall(Promise.resolve(response))) as {
           attempts: Array<{ id: string; state: string }>;
         };
         return body.attempts.find((value) => value.id === attempt.id)?.state;

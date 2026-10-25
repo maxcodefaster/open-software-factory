@@ -1,14 +1,13 @@
 import { createEffect, createSignal, For, Show, createUniqueId, onCleanup } from "solid-js";
-import {
-  inheritedModelSettingsView,
-  type InheritedModelSettingsView,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
+import { type InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
 import {
   codingReasoningInput,
   type CodingReasoning,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
-import { apiRequest } from "../api-client";
+import { invoke } from "@solidjs/web/server-functions/client";
+import { getProjectModels } from "../server-functions/models";
+import { serverCall } from "../server-functions/result";
 import { reasoningLabels } from "../models/reasoning";
 
 export function BuildModelControls(props: {
@@ -38,9 +37,7 @@ export function BuildModelControls(props: {
       if (!projectID) return;
       const abort = new AbortController();
       currentRequest = abort;
-      void apiRequest(inheritedModelSettingsView, `/api/projects/${projectID}/model-settings`, {
-        signal: abort.signal,
-      })
+      void serverCall(invoke(getProjectModels, { signal: abort.signal }, projectID))
         .then((value) => {
           if (!abort.signal.aborted) setSettings(value);
         })

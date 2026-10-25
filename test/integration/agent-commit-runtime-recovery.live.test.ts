@@ -10,6 +10,8 @@ import {
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal as terminal } from "../fixtures/runtime-access";
+import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -87,16 +89,19 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
         const first = await processFixture.start();
         cookie = await processFixture.signIn();
         if (selectedModel) {
-          const settingsResponse = await fetch(`${processFixture.base}/api/model-settings`, {
-            method: "PUT",
-            headers: { cookie, origin: processFixture.base, "content-type": "application/json" },
-            body: JSON.stringify({
-              version: 0,
-              planningModelId: selectedModel,
-              buildModelId: selectedModel,
-            }),
-          });
-          expect(settingsResponse.status).toBe(200);
+          const settingsResponse = await callFactoryFunction(
+            processFixture.base,
+            "saveModelSettings",
+            [
+              {
+                version: 0,
+                planningModelId: selectedModel,
+                buildModelId: selectedModel,
+              },
+            ],
+            { cookie },
+          );
+          expect(settingsResponse.ok).toBe(true);
         }
         const base = await forge.getDefaultBranch(repository);
         baseSHA = base.headSha;
@@ -134,10 +139,15 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
         });
         if (selectedModel) {
           const commandID = crypto.randomUUID();
-          await command(`/api/projects/${projectID}/conversation/message`, {
-            commandId: commandID,
-            text: "Answer in one sentence: do you have a checkout or implementation authority? Do not propose requirements.",
-          });
+          await conversationCommand(
+            processFixture.base,
+            projectID,
+            {
+              commandId: commandID,
+              text: "Answer in one sentence: do you have a checkout or implementation authority? Do not propose requirements.",
+            },
+            { cookie },
+          );
           const [planning] = await database.client<Array<{ state: string; model: string }>>`
             SELECT state, authority->>'modelId' AS model FROM factory.agent_turn WHERE command_id = ${commandID}
           `;
@@ -155,7 +165,15 @@ for (const boundary of ["lost commit acknowledgement", "running Build"] as const
         expect(branch.headSha).toBe(baseSHA);
         await database.client`UPDATE factory.branch_create_operation SET state = 'succeeded', observed_head_sha = ${baseSHA},
         completed_at = now() WHERE id = ${identity.branchOperationID}`;
-        await command(`/api/changes/${identity.changeID}/ticket-workspace/ensure`);
+        await serverCall(
+          callFactoryFunction(
+            processFixture.base,
+            "startTicketWorkspace",
+            [identity.changeID],
+            { cookie, origin: processFixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ),
+        );
         const running = await ready();
         if (!running) throw new Error("Owned runtime missing");
         const before = await terminal(
@@ -240,8 +258,24 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
           );
         }
         const commandID = crypto.randomUUID();
-        await command(`/api/changes/${identity.changeID}/agent/start`, { commandId: commandID });
-        await command(`/api/changes/${identity.changeID}/agent/start`, { commandId: commandID });
+        await serverCall(
+          callFactoryFunction(
+            processFixture.base,
+            "startCoding",
+            [identity.changeID, { commandId: commandID }],
+            { cookie, origin: processFixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ),
+        );
+        await serverCall(
+          callFactoryFunction(
+            processFixture.base,
+            "startCoding",
+            [identity.changeID, { commandId: commandID }],
+            { cookie, origin: processFixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ),
+        );
         let inspection = before;
         if (boundary === "running Build") {
           const witnessSource =
@@ -465,7 +499,15 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
             "Owned Verification cleanup did not finish",
             180_000,
           );
-          await command(`/api/projects/${projectID}/staging/ensure`);
+          await serverCall(
+            callFactoryFunction(
+              processFixture.base,
+              "ensureStaging",
+              [projectID],
+              { cookie, origin: processFixture.base, "content-type": "application/json" },
+              AbortSignal.timeout(180_000),
+            ),
+          );
           const staging = async () => {
             const [row] = await database.client<{ id: string; revision: string; state: string }[]>`
               SELECT attempt.id, preview.revision, attempt.state FROM factory.staging_preview preview
@@ -480,7 +522,11 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
             300_000,
           );
           expect(initial?.revision).toBe(baseSHA);
-          await command(`/api/changes/${identity.changeID}/delivery/approve`);
+          await serverCall(
+            callFactoryFunction(processFixture.base, "approveDelivery", [identity.changeID], {
+              cookie: cookie,
+            }),
+          );
           await eventually(
             async () => {
               const [row] = await database.client<
@@ -555,7 +601,7 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
         for (const opened of terminals) opened.close();
         const cleanOwnedResources = async () => {
           // Preserve recovery identities if any external cleanup cannot be confirmed.
-          if (!(await fetch(`${processFixture.base}/api/session`).catch(() => null))?.ok)
+          if (!(await fetch(`${processFixture.base}/health/ready`).catch(() => null))?.ok)
             await processFixture.start();
           cookie = await processFixture.signIn();
           const owned = await database.client<
@@ -566,8 +612,24 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
           if (owned.length) {
             expect(owned.map((row) => row.slug)).toEqual([slug]);
             if (owned[0]?.state !== "delivered") {
-              await command(`/api/changes/${identity.changeID}/agent/stop`);
-              await command(`/api/changes/${identity.changeID}/cancel`);
+              await serverCall(
+                callFactoryFunction(
+                  processFixture.base,
+                  "stopCoding",
+                  [identity.changeID],
+                  { cookie, origin: processFixture.base, "content-type": "application/json" },
+                  AbortSignal.timeout(180_000),
+                ),
+              );
+              await serverCall(
+                callFactoryFunction(
+                  processFixture.base,
+                  "cancelChange",
+                  [identity.changeID],
+                  { cookie, origin: processFixture.base, "content-type": "application/json" },
+                  AbortSignal.timeout(180_000),
+                ),
+              );
             }
             // Confirm every owned runtime is stopped before removing the disposable database.
             const stoppedAttempts = new Set<string>();
@@ -579,12 +641,24 @@ fs.writeFileSync(".git/factory-owned-build-held", JSON.stringify(witness));
                 `;
                 for (const attempt of ownedAttempts) {
                   if (stoppedAttempts.has(attempt.id)) continue;
-                  await command(`/api/runtime-attempts/${attempt.id}/stop`);
+                  await serverCall(
+                    callFactoryFunction(
+                      processFixture.base,
+                      "stopRuntimeAttempt",
+                      [attempt.id],
+                      { cookie, origin: processFixture.base, "content-type": "application/json" },
+                      AbortSignal.timeout(180_000),
+                    ),
+                  );
                   stoppedAttempts.add(attempt.id);
                 }
                 if (ownedAttempts.length) return ownedAttempts.length;
                 await removeOwnedProjectSources(database, projectID, (workspaceID) =>
-                  command(`/api/workspaces/${workspaceID}/source/stop`),
+                  serverCall(
+                    callFactoryFunction(processFixture.base, "stopWorkspaceSource", [workspaceID], {
+                      cookie,
+                    }),
+                  ),
                 );
                 const child = Bun.spawn(
                   [

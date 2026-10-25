@@ -1,4 +1,9 @@
 import { expect, test } from "bun:test";
+import { callFactoryFunction, decodeBrowserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import type { ProjectSetupView } from "../../packages/project-domain/src/setup";
+import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
@@ -191,13 +196,20 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await captureFactory("01-starter-setup");
         const creation = page.waitForResponse(
           (response) =>
-            response.url().endsWith("/api/project-setup/create") &&
+            new URL(response.url()).pathname.startsWith("/_server/data/createSetupProject-") &&
             response.request().method() === "POST",
         );
         await setup.getByRole("button", { name: "Create project", exact: true }).click();
         const response = await creation;
         expect(response.ok()).toBe(true);
-        const submitted = await response.json();
+        const decoded = await decodeResponse<ServerResult<ProjectSetupView>>(
+          new Response(new Uint8Array(await response.body()).buffer, {
+            status: response.status(),
+            headers: response.headers(),
+          }),
+        );
+        if (!decoded?.ok) throw new Error("Owned Project creation outcome is unconfirmed");
+        const submitted = decoded.value;
         result["setupID"] = submitted.id;
         const created =
           submitted.state === "created"
@@ -205,7 +217,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
             : await eventually(
                 async () => {
                   await Bun.sleep(1_000);
-                  const value = await api("/api/project-setup");
+                  const value = await serverCall(
+                    callFactoryFunction(base, "getSetupDraft", [], { cookie }),
+                  );
                   if (value?.id !== submitted.id)
                     throw new Error("The admitted Project setup identity changed");
                   if (value.state === "failed")
@@ -217,13 +231,16 @@ for (const requirementsPath of ["manual", "interview"] as const)
                 remainingJourneyMS(),
               );
         expect(created.state).toBe("created");
+        if (!created.projectID) throw new Error("Created Project identity missing");
         projectID = created.projectID;
         result["projectID"] = projectID;
         await captureFactory("01-project-created");
         await eventually(
           async () => {
             await Bun.sleep(500);
-            const rows = await api(`/api/projects/${projectID}/setup`);
+            const rows = await serverCall(
+              callFactoryFunction(base, "getSetupReadiness", [projectID], { cookie }),
+            );
             const failure = rows.find(
               (row: { task: string; state: string }) =>
                 ["configuration", "protection", "development-secrets"].includes(row.task) &&
@@ -366,17 +383,22 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await captureFactory("02-requirements-ready");
         const implementation = page.waitForResponse(
           (response) =>
-            response.url().endsWith(`/api/tickets/${ticketID}/implement`) &&
+            response.url().includes("/_server/data/implementTicket-") &&
             response.request().method() === "POST",
         );
         await page.getByRole("button", { name: "Implement", exact: true }).click();
         const implementationResponse = await implementation;
         expect(implementationResponse.ok()).toBe(true);
-        commandID = (implementationResponse.request().postDataJSON() as { commandId: string })
-          .commandId;
-        result["commandID"] = commandID;
-        const change = await implementationResponse.json();
+        const change = await serverCall(
+          decodeBrowserFunction<ServerResult<{ id: string }>>(implementationResponse),
+        );
         changeID = change.id;
+        const [admitted] = await database.client<{ commandID: string }[]>`
+          SELECT command_id AS "commandID" FROM factory.agent_turn WHERE change_id=${changeID} AND input->>'kind'='change-start'
+          ORDER BY created_at LIMIT 1`;
+        if (!admitted) throw new Error("Native Implement returned without its persisted admission");
+        commandID = admitted.commandID;
+        result["commandID"] = commandID;
         result["changeID"] = changeID;
         await captureFactory("03-build-admitted");
         await page.reload();
@@ -386,7 +408,15 @@ for (const requirementsPath of ["manual", "interview"] as const)
           async () => {
             await Bun.sleep(1_000);
             const view = agentViewSchema.parse(
-              await api(`/api/changes/${changeID}/agent?history=0`),
+              await serverCall(
+                callFactoryFunction(
+                  base,
+                  "getAgentView",
+                  [changeID, false],
+                  { cookie },
+                  AbortSignal.timeout(180_000),
+                ),
+              ),
             );
             if (view.turn && ["failed", "stopped", "uncertain"].includes(view.turn.state))
               throw new Error(
@@ -402,7 +432,11 @@ for (const requirementsPath of ["manual", "interview"] as const)
         const delivery = await eventually(
           async () => {
             await Bun.sleep(1_000);
-            const view = deliveryViewSchema.parse(await api(`/api/changes/${changeID}/delivery`));
+            const view = deliveryViewSchema.parse(
+              await serverCall(
+                callFactoryFunction(base, "getDelivery", [changeID], { cookie: cookie }),
+              ),
+            );
             if (["incomplete", "failed", "stopped"].includes(view.reviewState ?? ""))
               throw new Error(`Independent review ${view.reviewState}: ${view.reviewSummary}`);
             return view;
@@ -485,7 +519,17 @@ for (const requirementsPath of ["manual", "interview"] as const)
         expect(reviews.every((review) => review.sessionID !== implementationSession?.id)).toBe(
           true,
         );
-        const agent = agentViewSchema.parse(await api(`/api/changes/${changeID}/agent`));
+        const agent = agentViewSchema.parse(
+          await serverCall(
+            callFactoryFunction(
+              base,
+              "getAgentView",
+              [changeID],
+              { cookie },
+              AbortSignal.timeout(180_000),
+            ),
+          ),
+        );
         const imageReads = agent.messages.filter(
           (message) =>
             message.activity?.status === "completed" &&
@@ -514,7 +558,9 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await inspectApp(development.id, "development");
         await eventually(
           async () => {
-            const rows = await api(`/api/projects/${projectID}/setup`);
+            const rows = await serverCall(
+              callFactoryFunction(base, "getSetupReadiness", [projectID], { cookie }),
+            );
             const preview = rows.find((row: { task: string }) => row.task === "main-preview");
             if (preview?.state === "failed")
               throw new Error(`Initial Template Preview failed: ${preview.failure}`);
@@ -530,11 +576,13 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await captureFactory("05-review-passed");
         const approval = page.waitForResponse(
           (response) =>
-            response.url().endsWith(`/api/changes/${changeID}/delivery/approve`) &&
+            response.url().includes("/_server/data/approveDelivery-") &&
             response.request().method() === "POST",
         );
         await page.getByRole("button", { name: "Deliver", exact: true }).click();
-        expect((await approval).ok()).toBe(true);
+        const approvalResponse = await approval;
+        expect(approvalResponse.ok()).toBe(true);
+        await serverCall(decodeBrowserFunction<ServerResult<unknown>>(approvalResponse));
         const staging = await eventually(
           async () => {
             const [row] = await database.client<
@@ -612,7 +660,15 @@ for (const requirementsPath of ["manual", "interview"] as const)
             WHERE workspace.project_id=${projectID}`.catch(() => ({ unavailable: true }));
         }
         if (changeID)
-          result["failureAgent"] = await api(`/api/changes/${changeID}/agent?history=0`)
+          result["failureAgent"] = await serverCall(
+            callFactoryFunction(
+              base,
+              "getAgentView",
+              [changeID, false],
+              { cookie },
+              AbortSignal.timeout(180_000),
+            ),
+          )
             .then((value) => {
               const view = agentViewSchema.parse(value);
               return {
@@ -653,11 +709,28 @@ for (const requirementsPath of ["manual", "interview"] as const)
             }
           }
           if (projectID) {
-            if (changeID) await api(`/api/changes/${changeID}/agent/stop`, "POST", {});
+            if (changeID)
+              await serverCall(
+                callFactoryFunction(
+                  base,
+                  "stopCoding",
+                  [changeID],
+                  { cookie, origin: base, "content-type": "application/json" },
+                  AbortSignal.timeout(180_000),
+                ),
+              );
             const attempts = await database.client<Array<{ id: string }>>`
             SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID} AND state <> 'stopped'`;
             for (const attempt of attempts)
-              await api(`/api/runtime-attempts/${attempt.id}/stop`, "POST", {});
+              await serverCall(
+                callFactoryFunction(
+                  base,
+                  "stopRuntimeAttempt",
+                  [attempt.id],
+                  { cookie, origin: base, "content-type": "application/json" },
+                  AbortSignal.timeout(180_000),
+                ),
+              );
             await eventually(
               async () => database.client`SELECT id FROM factory.runtime_attempt
               WHERE project_id=${projectID} AND state <> 'stopped'`,

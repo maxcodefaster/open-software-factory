@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { publishedRuntimeArtifacts, runtimeArtifactsSchema } from "../../scripts/factory/artifacts";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
 
 const enabled = process.env["FACTORY_RUN_SOURCE_LIFECYCLE_PROOF"] === "1";
 const sourceView = z.object({
@@ -33,12 +36,6 @@ async function kubectl(args: string[], input?: unknown) {
   if (status !== 0) throw new Error(`Owned source fixture ${args[0]} failed`);
   return output;
 }
-async function proofImage(name: "workspace-files") {
-  const metadata = z
-    .object({ "containerimage.digest": z.string().regex(/^sha256:[a-f0-9]{64}$/) })
-    .parse(JSON.parse(await readFile(`.factory/${name}-proof-metadata.json`, "utf8")));
-  return `registry.open-factory-envbox-smoke.svc.cluster.local:5000/open-factory/${name}@${metadata["containerimage.digest"]}`;
-}
 async function namespaceUIDs() {
   const resources = z
     .object({
@@ -64,15 +61,13 @@ function requireOwnedNamespace(
 test.skipIf(!enabled)(
   "fresh canonical source, authenticated access, crash recovery and epoch Stop need no execution",
   async () => {
-    const fixture = await factoryProcess(
-      {
-        runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
-        forgejoToken: (await readFile(".factory/forgejo-token", "utf8")).trim(),
-      },
-      {
-        FACTORY_WORKSPACE_FILES_IMAGE: await proofImage("workspace-files"),
-      },
-    );
+    const published = await publishedRuntimeArtifacts(resolve(".factory"));
+    if (!published) throw new Error("Publish the exact runtime artifacts before the source proof");
+    const images = runtimeArtifactsSchema.parse(published);
+    const fixture = await factoryProcess(undefined, {
+      FACTORY_HOST: "0.0.0.0",
+      FACTORY_WORKSPACE_FILES_IMAGE: images["workspace-files"],
+    });
     const database = fixture.connect();
     const kubernetes = createKubernetesClient();
     const projectID = crypto.randomUUID();
@@ -80,7 +75,7 @@ test.skipIf(!enabled)(
     const artifacts = resolve(".factory/test-results/source-lifecycle", proofID);
     await mkdir(artifacts, { recursive: true });
     const previousNamespaces = await namespaceUIDs();
-    let workspaceID: string | undefined;
+    let workspaceID = "";
     let namespace: string | undefined;
     let namespaceUID: string | undefined;
     let developerCookie = "";
@@ -96,20 +91,36 @@ test.skipIf(!enabled)(
     try {
       let server = await fixture.start();
       adminCookie = await fixture.signIn();
-      const userResponse = await api("/api/admin/users", adminCookie, {
-        name: "Source proof Developer",
-        email: `source-${proofID}@factory.invalid`,
-        password: "source-proof-password-not-a-secret",
-      });
-      expect(userResponse.status).toBe(201);
-      z.object({ id: z.string() }).parse(await userResponse.json());
+      const userResponse = await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "createAccount",
+          [
+            {
+              name: "Source proof Developer",
+              email: `source-${proofID}@factory.invalid`,
+              password: "source-proof-password-not-a-secret",
+            },
+          ],
+          { cookie: adminCookie },
+        ),
+      );
+      z.object({ id: z.string() }).parse(userResponse);
       await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`source-lifecycle-${proofID.slice(0, 8)}`},'Source lifecycle proof',${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json','01994a7d-0000-7000-8000-000000000001')`;
       expect(
         (
-          await api(`/api/projects/${projectID}/members`, adminCookie, {
-            email: `source-${proofID}@factory.invalid`,
-            role: "developer",
-          })
+          await callFactoryFunction(
+            fixture.base,
+            "saveProjectMember",
+            [
+              projectID,
+              {
+                email: `source-${proofID}@factory.invalid`,
+                role: "developer",
+              },
+            ],
+            { cookie: adminCookie },
+          )
         ).ok,
       ).toBe(true);
       const signIn = await api("/api/auth/sign-in/email", "", {
@@ -121,16 +132,20 @@ test.skipIf(!enabled)(
         .getSetCookie()
         .map((value) => value.split(";")[0])
         .join("; ");
-      expect((await api(`/api/projects/${projectID}/source-workspace/ensure`, "", {})).status).toBe(
-        401,
+      expect(
+        (
+          await fetch(
+            await factoryFunctionRequest(fixture.base, "ensurePersonalSource", [projectID], {
+              cookie: "",
+            }),
+          )
+        ).status,
+      ).toBe(401);
+      const admitted = await serverCall(
+        callFactoryFunction(fixture.base, "ensurePersonalSource", [projectID], {
+          cookie: developerCookie,
+        }),
       );
-      const ensure = await api(
-        `/api/projects/${projectID}/source-workspace/ensure`,
-        developerCookie,
-        {},
-      );
-      expect(ensure.ok).toBe(true);
-      const admitted = sourceView.parse(await ensure.json());
       workspaceID = admitted.workspaceID;
       const [workspace] = await database.client<
         Array<{ namespace: string }>
@@ -143,9 +158,11 @@ test.skipIf(!enabled)(
       );
       await eventually(
         async () => {
-          const response = await api(`/api/workspaces/${workspaceID}/source`, developerCookie);
-          expect(response.ok).toBe(true);
-          const view = sourceView.parse(await response.json());
+          const view = await serverCall(
+            callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+              cookie: developerCookie,
+            }),
+          );
           if (view.state === "failed") throw new Error("Fresh source initialization failed");
           return view;
         },
@@ -220,10 +237,18 @@ test.skipIf(!enabled)(
       })();
       expect(
         (
-          await api(`/api/projects/${projectID}/members`, adminCookie, {
-            email: `source-${proofID}@factory.invalid`,
-            role: "product-contributor",
-          })
+          await callFactoryFunction(
+            fixture.base,
+            "saveProjectMember",
+            [
+              projectID,
+              {
+                email: `source-${proofID}@factory.invalid`,
+                role: "product-contributor",
+              },
+            ],
+            { cookie: adminCookie },
+          )
         ).ok,
       ).toBe(true);
       await Promise.race([
@@ -235,13 +260,25 @@ test.skipIf(!enabled)(
       expect(
         (await api(`${sourcePath}/read`, developerCookie, { path: "src/version.txt" })).status,
       ).toBe(403);
-      expect((await api(`${sourcePath}/ensure`, developerCookie, {})).status).toBe(403);
+      expect(
+        await callFactoryFunction(fixture.base, "ensureWorkspaceSource", [workspaceID], {
+          cookie: developerCookie,
+        }),
+      ).toMatchObject({ ok: false, status: 403 });
       expect(
         (
-          await api(`/api/projects/${projectID}/members`, adminCookie, {
-            email: `source-${proofID}@factory.invalid`,
-            role: "developer",
-          })
+          await callFactoryFunction(
+            fixture.base,
+            "saveProjectMember",
+            [
+              projectID,
+              {
+                email: `source-${proofID}@factory.invalid`,
+                role: "developer",
+              },
+            ],
+            { cookie: adminCookie },
+          )
         ).ok,
       ).toBe(true);
       await fixture.kill(server);
@@ -264,7 +301,14 @@ test.skipIf(!enabled)(
       );
       server = await fixture.start();
       await eventually(
-        async () => sourceView.parse(await (await api(sourcePath, developerCookie)).json()),
+        async () =>
+          sourceView.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+                cookie: developerCookie,
+              }),
+            ),
+          ),
         (view) => view.state === "ready",
         "Restart did not retain source",
       );
@@ -281,20 +325,42 @@ test.skipIf(!enabled)(
           ).json(),
         ).content,
       ).toBe(changed);
-      expect((await api(`${sourcePath}/stop`, developerCookie, {})).status).toBe(202);
+      expect(
+        await callFactoryFunction(fixture.base, "stopWorkspaceSource", [workspaceID], {
+          cookie: developerCookie,
+        }),
+      ).toMatchObject({ ok: true });
       await eventually(
-        async () => sourceView.parse(await (await api(sourcePath, developerCookie)).json()),
+        async () =>
+          sourceView.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+                cookie: developerCookie,
+              }),
+            ),
+          ),
         (view) => view.state === "stopped",
         "Owned source Stop did not finish",
       );
       expect(await kubernetes.getPod(namespace, "source-1")).toBeNull();
       expect((await kubernetes.getNamespace(namespace))?.uid).toBe(namespaceUID);
       const resumed = sourceView.parse(
-        await (await api(`${sourcePath}/ensure`, developerCookie, {})).json(),
+        await serverCall(
+          callFactoryFunction(fixture.base, "ensureWorkspaceSource", [workspaceID], {
+            cookie: developerCookie,
+          }),
+        ),
       );
       expect(resumed.epoch).toBe(2);
       await eventually(
-        async () => sourceView.parse(await (await api(sourcePath, developerCookie)).json()),
+        async () =>
+          sourceView.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+                cookie: developerCookie,
+              }),
+            ),
+          ),
         (view) => view.state === "ready",
         "Source epoch 2 did not become ready",
         150_000,
@@ -347,13 +413,25 @@ test.skipIf(!enabled)(
         const ownedWorkspaceID = workspaceID;
         if (ownedWorkspaceID) {
           if (fixture.processes.at(-1)?.exitCode !== null) await fixture.start();
-          await api(`/api/projects/${projectID}/members`, adminCookie, {
-            email: `source-${proofID}@factory.invalid`,
-            role: "developer",
-          });
-          await api(`/api/workspaces/${workspaceID}/source/stop`, developerCookie, {}).catch(
-            () => null,
+          await serverCall(
+            callFactoryFunction(
+              fixture.base,
+              "saveProjectMember",
+              [
+                projectID,
+                {
+                  email: `source-${proofID}@factory.invalid`,
+                  role: "developer",
+                },
+              ],
+              { cookie: adminCookie },
+            ),
           );
+          await serverCall(
+            callFactoryFunction(fixture.base, "stopWorkspaceSource", [workspaceID], {
+              cookie: developerCookie,
+            }),
+          ).catch(() => null);
           await eventually(
             async () => {
               const [row] = await database.client<

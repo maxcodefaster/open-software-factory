@@ -1,14 +1,10 @@
 import { createSignal, Show } from "solid-js";
-import { z } from "zod";
-import {
-  type SkillContent,
-  skillContentInput,
-} from "../../../../packages/conversation-domain/src/skills";
-import { apiRequest } from "../api-client";
+import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
+import { serverCall } from "../server-functions/result";
+import { previewSkillImport, previewRepositorySkill } from "../server-functions/skills";
 
-const resultInput = z.object({ content: skillContentInput, warnings: z.array(z.string()) });
 export function SkillImportPanel(props: {
-  onPreview: (preview: z.infer<typeof resultInput>) => void;
+  onPreview: (preview: { content: SkillContent; warnings: string[] }) => void;
   onCancel: () => void;
 }) {
   const [source, setSource] = createSignal("file");
@@ -58,11 +54,7 @@ export function SkillImportPanel(props: {
         }
         files.push({ path: relative.slice(prefix.length), body, encoding });
       }
-      return apiRequest(resultInput, "/api/skills/import/preview", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ files }),
-      });
+      return serverCall(previewSkillImport({ files }));
     });
   }
   return (
@@ -118,15 +110,13 @@ export function SkillImportPanel(props: {
           onSubmit={(event) => {
             event.preventDefault();
             void preview(() =>
-              apiRequest(resultInput, "/api/skills/import/repository", {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({
+              serverCall(
+                previewRepositorySkill({
                   repository: repository(),
                   commit: commit(),
                   path: path(),
                 }),
-              }),
+              ),
             );
           }}
         >

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 test("Implement freezes developer reasoning atomically, rejects changed replays and keeps contributor defaults", async () => {
   let modelCalls = 0;
@@ -84,26 +85,28 @@ test("Implement freezes developer reasoning atomically, rejects changed replays 
     const command = {
       commandId: crypto.randomUUID(),
       revisionId: developer.revisionID,
-      codingReasoning: "high",
+      codingReasoning: "high" as const,
     };
-    const send = (ticket: typeof developer, body: unknown) =>
-      fetch(`${process.base}/api/tickets/${ticket.ticketID}/implement`, {
-        method: "POST",
-        headers: ticket.headers,
-        body: JSON.stringify(body),
-      });
-    expect((await send(developer, command)).status).toBe(202);
-    expect((await send(developer, command)).status).toBe(202);
-    expect((await send(developer, { ...command, codingReasoning: "medium" })).status).toBe(409);
+    const send = (
+      ticket: typeof developer,
+      body: Parameters<
+        typeof import("../../apps/factory/src/server-functions/tickets").implementTicket
+      >[1],
+    ) =>
+      callFactoryFunction(process.base, "implementTicket", [ticket.ticketID, body], ticket.headers);
+    expect(await send(developer, command)).toMatchObject({ ok: true });
+    expect(await send(developer, command)).toMatchObject({ ok: true });
+    expect(await send(developer, { ...command, codingReasoning: "medium" })).toMatchObject({
+      ok: false,
+      status: 409,
+    });
     expect(
-      (
-        await send(developer, {
-          ...command,
-          commandId: crypto.randomUUID(),
-          codingReasoning: "medium",
-        })
-      ).status,
-    ).toBe(409);
+      await send(developer, {
+        ...command,
+        commandId: crypto.randomUUID(),
+        codingReasoning: "medium",
+      }),
+    ).toMatchObject({ ok: false, status: 409 });
     const turns =
       await database.client`SELECT state,authority,input FROM factory.agent_turn WHERE ticket_id=${developer.ticketID}`;
     expect(turns).toHaveLength(1);
@@ -117,24 +120,25 @@ test("Implement freezes developer reasoning atomically, rejects changed replays 
     ).toHaveLength(1);
     await database.client`UPDATE factory.project_membership SET role='product-contributor'
       WHERE project_id=${developer.projectID} AND user_id=${developer.userID}`;
-    expect((await send(developer, { ...command, commandId: crypto.randomUUID() })).status).toBe(
-      403,
-    );
+    expect(await send(developer, { ...command, commandId: crypto.randomUUID() })).toMatchObject({
+      ok: false,
+      status: 403,
+    });
     const contributor = await ownedTicket("product-contributor");
     const contributorCommand = {
       commandId: crypto.randomUUID(),
       revisionId: contributor.revisionID,
     };
     expect(
-      (await send(contributor, { ...contributorCommand, codingReasoning: "high" })).status,
-    ).toBe(403);
+      await send(contributor, { ...contributorCommand, codingReasoning: "high" }),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(
       await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${contributor.ticketID}`,
     ).toHaveLength(0);
     expect(
       await database.client`SELECT id FROM factory.change WHERE ticket_id=${contributor.ticketID}`,
     ).toHaveLength(0);
-    expect((await send(contributor, contributorCommand)).status).toBe(202);
+    expect(await send(contributor, contributorCommand)).toMatchObject({ ok: true });
     const defaults =
       await database.client`SELECT authority FROM factory.agent_turn WHERE ticket_id=${contributor.ticketID}`;
     expect(defaults).toHaveLength(1);

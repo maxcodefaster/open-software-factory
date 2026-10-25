@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createIdentityConfiguration } from "../../apps/factory/src/access/identity-configuration";
 import { identityConfiguration } from "../../packages/identity-domain/src/configuration";
 import { factoryProcess } from "../fixtures/factory-process";
+import { authenticatedBootstrap } from "../fixtures/server-functions";
 import { oidcProviderFixture } from "../fixtures/oidc-provider";
 
 test("protected sign-in intent recovers response loss, replays exactly, rejects untested activation and changes session policy live", async () => {
@@ -31,8 +32,7 @@ test("protected sign-in intent recovers response loss, replays exactly, rejects 
   try {
     await fixture.start();
     const cookie = await fixture.signIn();
-    const response = await fetch(`${fixture.base}/api/session`, { headers: { cookie } });
-    const { session } = (await response.json()) as { session: { user: { id: string } } };
+    const { session } = await authenticatedBootstrap(fixture.base, { cookie });
     const admin = session.user.id;
     const control = createIdentityConfiguration(database, "controlled-hmac-secret", secrets, [
       "https://identity.example.test",

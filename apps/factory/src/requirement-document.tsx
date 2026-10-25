@@ -14,10 +14,10 @@ export function RequirementDocument(props: {
       aria-label="Selected specification revision"
     >
       <header class="ticket-document-heading">
-        <div class="ticket-status-row">
+        <h2>{props.title}</h2>
+        <div class="ticket-status-context">
           <small>Revision {props.ordinal} · Read only</small>
         </div>
-        <h2>{props.title}</h2>
       </header>
       <Show when={props.description}>
         <div class="markdown-body" innerHTML={markdownHTML(props.description ?? "")} />

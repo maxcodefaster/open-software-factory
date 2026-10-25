@@ -59,6 +59,7 @@ services:
       ZERO_CVR_DB: postgresql://factory:${FACTORY_LOCAL_DB_PASSWORD:-factory-local-only}@postgres:5432/factory
       ZERO_CHANGE_DB: postgresql://factory:${FACTORY_LOCAL_DB_PASSWORD:-factory-local-only}@postgres:5432/factory
       ZERO_REPLICA_FILE: /data/replica.db
+      ZERO_NUM_SYNC_WORKERS: ${FACTORY_LOCAL_ZERO_SYNC_WORKERS:-1}
       ZERO_ADMIN_PASSWORD: ${FACTORY_LOCAL_ZERO_PASSWORD:-factory-local-zero-password}
       ZERO_QUERY_URL: http://host.docker.internal:${FACTORY_LOCAL_PORT:-3000}/api/zero/query
       ZERO_MUTATE_URL: http://host.docker.internal:${FACTORY_LOCAL_PORT:-3000}/api/zero/mutate

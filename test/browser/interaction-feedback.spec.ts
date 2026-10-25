@@ -5,6 +5,13 @@ import { expect, type Page, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { feedbackAcknowledgementMs } from "../../apps/factory/src/ui/feedback-state";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import {
+  attachmentInput,
+  attachmentSummary,
+  type AttachmentSummary,
+} from "../../packages/conversation-domain/src/attachments";
+import { CommandError } from "../../apps/factory/src/command-error";
 
 const directory = ".factory/test-results/interaction-feedback";
 const cacheDirectory = resolve(
@@ -15,7 +22,7 @@ test.setTimeout(45_000);
 let frontend: ViteDevServer;
 let origin = "";
 let errors: string[] = [];
-const files = new Map<string, Record<string, unknown>>();
+const files = new Map<string, AttachmentSummary>();
 let creates: string[] = [];
 let uploads = 0;
 let holdUpload: ReturnType<typeof Promise.withResolvers<void>> | undefined;
@@ -35,35 +42,14 @@ test.beforeAll(async () => {
       response.writeHead(status, { "content-type": "application/json" });
       response.end(JSON.stringify(value));
     };
-    if (request.method === "GET" && path.endsWith("/attachments"))
-      return json({
-        configured: true,
-        limits: { fileBytes: 10 * 1024 * 1024, messageBytes: messageLimit },
-      });
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    if (request.method === "POST" && path.endsWith("/attachments")) {
-      const input = JSON.parse(Buffer.concat(chunks).toString());
-      creates.push(input.id);
-      const summary = files.get(input.id) ?? {
-        id: input.id,
-        name: input.name,
-        bytes: input.bytes,
-        mediaType: input.mediaType,
-        sha256: input.sha256,
-        state: "uploading",
-        failure: null,
-        pages: 0,
-      };
-      files.set(input.id, summary);
-      return json(summary, 201);
-    }
     const id = path.split("/")[3]!;
     if (request.method === "PUT" && files.has(id)) {
       uploads++;
       uploadReceived?.resolve();
       await holdUpload?.promise;
-      const summary = { ...files.get(id), state: "ready" };
+      const summary = attachmentSummary.parse({ ...files.get(id), state: "ready" });
       files.set(id, summary);
       if (loseUpload) {
         loseUpload = false;
@@ -79,8 +65,15 @@ test.beforeAll(async () => {
     root: resolve("test/fixtures"),
     cacheDir: cacheDirectory,
     publicDir: resolve("apps/factory/public"),
+    optimizeDeps: { entries: ["interaction-feedback.html"] },
     plugins: [
-      solid({ ssr: false }),
+      solid({
+        ssr: false,
+        serverFunctions: {
+          devMiddleware: false,
+          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
+        },
+      }),
       {
         name: "owned-feedback-uploads",
         configureServer(server) {
@@ -111,6 +104,43 @@ test.beforeEach(async ({ page }) => {
   messageLimit = 20 * 1024 * 1024;
   errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  await mockFactoryFunctions(page, {
+    attachments: {
+      async usage() {
+        return {
+          configured: true,
+          usedBytes: 0,
+          limits: { fileBytes: 10 * 1024 * 1024, messageBytes: messageLimit },
+        };
+      },
+      async begin(_actor, raw) {
+        const { id, name, bytes, mediaType, sha256 } = attachmentInput.parse(raw);
+        creates.push(id);
+        const summary =
+          files.get(id) ??
+          attachmentSummary.parse({
+            id,
+            name,
+            bytes,
+            mediaType,
+            sha256,
+            state: "uploading",
+            failure: null,
+            pages: 0,
+          });
+        files.set(id, summary);
+        return summary;
+      },
+      async metadata(_actor, id) {
+        const file = files.get(id);
+        if (!file) throw new CommandError("not-found", "Owned file not found");
+        return file;
+      },
+      async retainDraft() {
+        return {};
+      },
+    },
+  });
 });
 
 test.afterEach(async () => {
@@ -456,21 +486,23 @@ test("a failed send re-enables the same textarea without losing prose or file re
 });
 
 test("slash Skill insertion preserves already prepared file references", async ({ page }) => {
-  await page.route("**/skills/invocations?role=planning", (route) =>
-    route.fulfill({
-      json: {
-        skills: [
-          {
-            id: "10000000-0000-4000-8000-000000000008",
-            key: "review-reference",
-            name: "Review the reference",
-            description: "Inspect the supplied reference.",
-          },
-        ],
-        conflicts: [],
+  await mockFactoryFunctions(page, {
+    skills: {
+      async invocations() {
+        return {
+          skills: [
+            {
+              id: "10000000-0000-4000-8000-000000000008",
+              key: "review-reference",
+              name: "Review the reference",
+              description: "Inspect the supplied reference.",
+            },
+          ],
+          conflicts: [],
+        };
       },
-    }),
-  );
+    },
+  });
   let submitted = "";
   await page.route("**/fixture/message", async (route) => {
     submitted = route.request().postData() ?? "";

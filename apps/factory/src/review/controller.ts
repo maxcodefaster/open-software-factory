@@ -193,8 +193,6 @@ export function createVisualReviewController(
     async get(changeID: string, userID: string) {
       return database.client.begin(async (sql) => {
         const change = await reviewChangeIn(sql, changeID, userID);
-        const [project] = await sql<{ enabled: boolean }[]>`
-          SELECT qa_recording_enabled AS enabled FROM factory.project WHERE id=${change.projectID}`;
         const feedback = await feedbackIn(sql, changeID);
         const [recording] = await sql`
           SELECT id,state,commit_sha AS "commitSha",duration_ms AS "durationMs",reason,review_id AS "reviewId"
@@ -234,7 +232,6 @@ export function createVisualReviewController(
           canSendCorrections:
             !busy && ["active", "starting", "branch-pending"].includes(change.state),
           recordingCurrent: Boolean(recording && recording["reviewId"] === review?.id),
-          recordingEnabled: project?.enabled ?? true,
           recording: recording ?? null,
           scenarios,
         });
@@ -378,12 +375,6 @@ export function createVisualReviewController(
         const change = await reviewChangeIn(sql, changeID, userID, true);
         await freezeFeedbackAttachmentsIn(sql, turnId, change.projectID, userID, pending);
         return { turnId };
-      });
-    },
-    async recordingSetting(projectID: string, userID: string, enabled: boolean) {
-      return database.client.begin(async (sql) => {
-        await projectAuthorityIn(sql, userID, projectID, true);
-        await sql`UPDATE factory.project SET qa_recording_enabled=${z.boolean().parse(enabled)} WHERE id=${projectID}`;
       });
     },
   };

@@ -3,17 +3,21 @@ import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserFunction } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
 test("MCP library uses landscape connection covers, retains private drafts and keeps definitions separate from activation", async ({
   page,
 }) => {
   test.setTimeout(360_000);
-  const host = spawn("mise", ["exec", "--", "bun", "test/fixtures/skill-browser-host.ts"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const host = spawn(
+    "mise",
+    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
   let stderr = "";
   host.stderr.on("data", (chunk) => {
@@ -77,7 +81,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     await page.getByLabel("Password", { exact: true }).fill("owned-process-password-not-a-secret");
     await page.getByRole("button", { name: "Sign in", exact: true }).click();
     await open();
-    await expect(page.getByRole("heading", { name: "Connect your sources" })).toBeVisible();
+    await expect(page.locator(".mcp-library").getByRole("heading")).toHaveText(["MCP connections"]);
     await expect(page.getByRole("button", { name: "Set up Sentry" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Set up Datadog" })).toBeVisible();
     await expectConnectionCovers();
@@ -157,10 +161,10 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     await page.keyboard.press("Escape");
     await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toBeFocused();
     await page.screenshot({ path: `${evidence}/gallery-mobile.png`, fullPage: true });
-    const view = await (await page.request.get(`${fixture.fixtureBase}/api/mcp`)).json();
+    const view = await serverCall(browserFunction(page, "getMCPLibrary", []));
     expect(view.entries).toHaveLength(1);
     expect(view.choices).toHaveLength(0);
-    expect(view.entries[0].connection).toBeNull();
+    expect(view.entries[0]!.connection).toBeNull();
     await page.reload();
     await open();
     await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toBeVisible();
@@ -176,26 +180,23 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     const sharedId = crypto.randomUUID();
     const sharedRevision = crypto.randomUUID();
     expect(
-      (
-        await page.request.post(`${fixture.fixtureBase}/api/mcp`, {
-          headers: { origin: fixture.fixtureBase },
-          data: {
-            libraryId: sharedId,
-            revisionId: sharedRevision,
-            expectedRevision: 0,
-            scope: "system",
-            content: {
-              name: "Owned shared source",
-              description: "Synthetic read-only connection for the owned browser proof.",
-              endpoint: "https://source.example/mcp",
-              authentication: "none",
-              provider: "custom",
-              roles: ["planning", "build"],
-            },
+      await browserFunction(page, "saveMCPDefinition", [
+        {
+          libraryId: sharedId,
+          revisionId: sharedRevision,
+          expectedRevision: 0,
+          scope: "system",
+          content: {
+            name: "Owned shared source",
+            description: "Synthetic read-only connection for the owned browser proof.",
+            endpoint: "https://source.example/mcp",
+            authentication: "none",
+            provider: "custom",
+            roles: ["planning", "build"],
           },
-        })
-      ).ok(),
-    ).toBe(true);
+        },
+      ]),
+    ).toMatchObject({ ok: true });
     // This UI fixture seeds discovery only, never a provider delivery. The
     // separate SDK/controller and live lanes exercise actual connections.
     const tools = [
@@ -309,50 +310,40 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     await page.setViewportSize({ width: 390, height: 844 });
     await grant.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `${evidence}/granted-mobile.png`, fullPage: true });
-    const sharedView = await (
-      await page.request.get(`${fixture.fixtureBase}/api/mcp?project=${project}`)
-    ).json();
-    expect(
-      sharedView.entries.find((item: { id: string }) => item.id === sharedId).connection
-        .allowedTools,
-    ).toEqual(["read_issue"]);
+    const sharedView = await serverCall(browserFunction(page, "getMCPLibrary", [project]));
+    const currentEntry = sharedView.entries.find((item) => item.id === sharedId);
+    if (!currentEntry) throw new Error("Owned shared MCP definition missing");
+    expect(currentEntry.connection?.allowedTools).toEqual(["read_issue"]);
     // A reconnected definition may be ready before the replacement account is
     // granted to this Project. Version adoption must obey the same gate.
     const nextRevision = crypto.randomUUID();
-    const currentEntry = sharedView.entries.find((item: { id: string }) => item.id === sharedId);
     expect(
-      (
-        await page.request.put(`${fixture.fixtureBase}/api/mcp/choices`, {
-          headers: { origin: fixture.fixtureBase },
-          data: {
-            libraryId: sharedId,
-            revisionId: sharedRevision,
-            scope: "project",
-            projectId: project,
-            role: "build",
-            state: "inherit",
-            expectedVersion: 1,
-          },
-        })
-      ).ok(),
-    ).toBe(true);
+      await browserFunction(page, "saveMCPChoice", [
+        {
+          libraryId: sharedId,
+          revisionId: sharedRevision,
+          scope: "project",
+          projectId: project,
+          role: "build",
+          state: "inherit",
+          expectedVersion: 1,
+        },
+      ]),
+    ).toMatchObject({ ok: true });
     expect(
-      (
-        await page.request.post(`${fixture.fixtureBase}/api/mcp`, {
-          headers: { origin: fixture.fixtureBase },
-          data: {
-            libraryId: sharedId,
-            revisionId: nextRevision,
-            expectedRevision: 1,
-            scope: "system",
-            content: {
-              ...currentEntry.revisions[0].content,
-              description: "Synthetic replacement account.",
-            },
+      await browserFunction(page, "saveMCPDefinition", [
+        {
+          libraryId: sharedId,
+          revisionId: nextRevision,
+          expectedRevision: 1,
+          scope: "system",
+          content: {
+            ...currentEntry.revisions[0]!.content,
+            description: "Synthetic replacement account.",
           },
-        })
-      ).ok(),
-    ).toBe(true);
+        },
+      ]),
+    ).toMatchObject({ ok: true });
     await database.client`UPDATE factory.mcp_connection SET revision_id=${nextRevision},credential_epoch=${crypto.randomUUID()},
       version=version+1 WHERE id=${sharedId}`;
     await page.reload();

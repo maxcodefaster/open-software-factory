@@ -1,22 +1,10 @@
 import { expect, test } from "bun:test";
-import { observeAgentActivity } from "./agent-activity-stream";
+import { observeAgentStream } from "./agent-activity-stream";
+import type { AgentView } from "./api-contracts";
+import type { ActivityEvent } from "./agent/activity-stream";
 
-test("Build observation validates replacements and fences canceled connections after Stop", () => {
-  const NativeEventSource = globalThis.EventSource;
-  const sources: FakeEventSource[] = [];
-  class FakeEventSource {
-    onmessage: ((event: { data: string }) => void) | null = null;
-    onerror: (() => void) | null = null;
-    closed = false;
-    constructor(readonly url: string) {
-      sources.push(this);
-    }
-    close() {
-      this.closed = true;
-    }
-  }
-  globalThis.EventSource = FakeEventSource as unknown as typeof EventSource;
-  const snapshot = {
+test("native Build observations validate replacements and fence a canceled connection after Stop", async () => {
+  const snapshot: AgentView = {
     state: "working",
     messages: [],
     messagesAvailable: true,
@@ -25,32 +13,49 @@ test("Build observation validates replacements and fences canceled connections a
     stopPending: false,
     stopId: null,
   };
-  const views: unknown[] = [];
-  let disconnected = 0;
-  const controller = new AbortController();
+  const views: AgentView[] = [],
+    abort = new AbortController();
+  const first = Promise.withResolvers<void>(),
+    failed = Promise.withResolvers<void>();
+  let requests = 0,
+    disconnected = 0,
+    wire: AbortSignal | undefined;
+  let source: ReadableStreamDefaultController<ActivityEvent<AgentView>> | undefined;
+  const close = observeAgentStream(
+    {
+      signal: abort.signal,
+      snapshot(view) {
+        views.push(view);
+        first.resolve();
+      },
+      disconnected() {
+        disconnected++;
+        failed.resolve();
+      },
+    },
+    async (signal) => {
+      requests++;
+      wire = signal;
+      return new ReadableStream<ActivityEvent<AgentView>>({
+        start(controller) {
+          source = controller;
+          controller.enqueue({ type: "snapshot", view: snapshot });
+        },
+      });
+    },
+  );
   try {
-    observeAgentActivity({
-      changeID: "owned",
-      signal: controller.signal,
-      snapshot: (view) => views.push(view),
-      disconnected: () => disconnected++,
-    });
-    const source = sources[0];
-    if (!source) throw new Error("Activity source was not created");
-    expect(source.url).toBe("/api/changes/owned/agent/activity");
-    source.onmessage?.({ data: JSON.stringify({ type: "snapshot", view: snapshot }) });
-    source.onerror?.();
+    await first.promise;
     expect(views).toHaveLength(1);
+    source?.error(new Error("Read connection ended"));
+    await failed.promise;
     expect(disconnected).toBe(1);
-    expect(source.closed).toBe(false);
-    controller.abort();
-    source.onmessage?.({ data: JSON.stringify({ type: "snapshot", view: snapshot }) });
-    source.onerror?.();
+    abort.abort();
+    await Bun.sleep(10);
+    expect(wire?.aborted).toBe(true);
     expect(views).toHaveLength(1);
-    expect(disconnected).toBe(1);
-    expect(source.closed).toBe(true);
+    expect(requests).toBe(1);
   } finally {
-    controller.abort();
-    globalThis.EventSource = NativeEventSource;
+    close();
   }
 });

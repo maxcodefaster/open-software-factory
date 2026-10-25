@@ -1,3 +1,5 @@
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { attemptsResponseSchema, appPreviewsSchema } from "../../apps/factory/src/api-contracts";
 import { expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
@@ -105,7 +107,14 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("response", (response) => {
       const path = new URL(response.url()).pathname;
-      if (response.request().method() !== "POST" || !path.includes("/review/")) return;
+      if (
+        response.request().method() !== "POST" ||
+        (!path.includes("/review/") &&
+          !/\/_server\/data\/(?:createReviewFeedback|updateReviewFeedback|sendReviewRevision)-/.test(
+            path,
+          ))
+      )
+        return;
       void response
         .text()
         .then((text) => {
@@ -123,37 +132,39 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     });
     const runtimeOrigin = appRuntimeOrigin(owned.base, fixture.attemptID, "app");
     const runtimePath = `/runtime/${fixture.attemptID}/preview/app/`;
-    await page.route("**/api/runtime-attempts?*", (route) =>
-      route.fulfill({
-        json: {
-          attempts: [
-            {
-              id: fixture.attemptID,
-              projectId: fixture.projectID,
-              changeId: fixture.changeID,
-              state: "ready",
-              runtimeKind: "ticket",
-              workspaceKind: "ticket",
-              workspaceId: fixture.attemptID,
-            },
-          ],
-        },
-      }),
-    );
-    await page.route(`**/api/projects/${fixture.projectID}/app-previews`, (route) =>
-      route.fulfill({
-        json: {
-          previews: [
-            {
-              attemptID: fixture.attemptID,
-              projectID: fixture.projectID,
-              channel: "app",
-              label: "Draft form",
-            },
-          ],
-        },
-      }),
-    );
+    await mockFactoryFunctions(page, {
+      runtime: {
+        attempts: async () =>
+          attemptsResponseSchema.parse({
+            attempts: [
+              {
+                id: fixture.attemptID,
+                projectId: fixture.projectID,
+                changeId: fixture.changeID,
+                state: "ready",
+                runtimeKind: "ticket",
+                workspaceKind: "ticket",
+                workspaceId: fixture.attemptID,
+              },
+            ],
+          }),
+      },
+    });
+    await mockFactoryFunctions(page, {
+      runtime: {
+        previews: async () =>
+          appPreviewsSchema.parse({
+            previews: [
+              {
+                attemptID: fixture.attemptID,
+                projectID: fixture.projectID,
+                channel: "app",
+                label: "Draft form",
+              },
+            ],
+          }),
+      },
+    });
     await page.route("**/api/runtime-access?*", (route) =>
       route.fulfill({
         contentType: "text/html",

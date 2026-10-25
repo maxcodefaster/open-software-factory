@@ -1,8 +1,16 @@
 import { eventually } from "./factory-process";
 
-export async function ownedPlanningCache(databaseURL: string, base: string) {
+export async function ownedPlanningCache(
+  databaseURL: string,
+  base: string,
+  observeWhileRunning = false,
+  syncWorkers = 1,
+) {
+  if (!Number.isSafeInteger(syncWorkers) || syncWorkers < 1)
+    throw new Error("Owned planning cache requires a positive worker count");
   const owner = crypto.randomUUID();
   const name = `factory-owned-planning-cache-${owner}`;
+  console.info(`Owned planning cache intended: ${name}`);
   const database = new URL(databaseURL);
   database.hostname = "host.docker.internal";
   const server = new URL(base);
@@ -53,7 +61,7 @@ export async function ownedPlanningCache(databaseURL: string, base: string) {
     "--env",
     "ZERO_ENABLE_CRUD_MUTATIONS=false",
     "--env",
-    "ZERO_NUM_SYNC_WORKERS=1",
+    `ZERO_NUM_SYNC_WORKERS=${syncWorkers}`,
     "--env",
     "ZERO_APP_PUBLICATIONS=factory_zero_publication",
     "--env",
@@ -64,17 +72,43 @@ export async function ownedPlanningCache(databaseURL: string, base: string) {
     "DO_NOT_TRACK=1",
     "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437",
   );
+  console.info(`Owned planning cache started: ${name}`);
   try {
     const port = (await docker("port", name, "4848/tcp")).split(":").at(-1);
     if (!port || !/^\d+$/.test(port)) throw new Error("Planning cache port missing");
     const url = `http://127.0.0.1:${port}`;
-    await eventually(
-      () => fetch(`${url}/keepalive`, { signal: AbortSignal.timeout(1000) }).catch(() => null),
-      (response) => response?.ok === true,
-      "Owned planning cache not ready",
-      120_000,
-    );
-    return { url, dispose };
+    while (true) {
+      try {
+        await eventually(
+          () => fetch(`${url}/keepalive`, { signal: AbortSignal.timeout(1000) }).catch(() => null),
+          (response) => response?.ok === true,
+          "Owned planning cache not ready",
+          120_000,
+        );
+        break;
+      } catch (cause) {
+        if (!observeWhileRunning) throw cause;
+        const observed = JSON.parse(
+          await docker(
+            "inspect",
+            "--format",
+            '{"owner":{{json (index .Config.Labels "factory.owned-planning-cache")}},"image":{{json .Config.Image}},"running":{{json .State.Running}}}',
+            name,
+          ),
+        );
+        if (
+          observed.owner !== owner ||
+          observed.image !==
+            "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437" ||
+          !observed.running
+        )
+          throw cause;
+        console.info(
+          `Owned cache observation expired while ${name} is still running; observing this same resource`,
+        );
+      }
+    }
+    return { url, name, dispose };
   } catch (cause) {
     const logs = await docker("logs", "--tail", "60", name).catch(() => "");
     await dispose();

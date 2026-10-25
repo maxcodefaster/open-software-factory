@@ -21,6 +21,7 @@ const slot: ExecutionSlot = {
   factoryboxProfile: {
     image: `registry.invalid/worker@sha256:${"2".repeat(64)}`,
     executableSHA256: "3".repeat(64),
+    architecture: "amd64",
     nodeName: "owned-node",
     kernel: "6.12.0",
     boundedBytes: 8589934592,

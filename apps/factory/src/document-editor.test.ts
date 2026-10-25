@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Editor } from "@tiptap/core";
-import { documentExtensions, supportsDocumentMarkdown } from "./document-editor";
+import { documentExtensions } from "./document-editor";
+import { supportsDocumentMarkdown } from "./document-model";
 
 test("the actual editor retains headings, lists, tasks, tables, links and code through Markdown", () => {
   const editor = new Editor({

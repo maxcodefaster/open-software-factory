@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium, type Page } from "@playwright/test";
 import { z } from "zod";
@@ -7,15 +7,18 @@ import {
   developerIDEViewSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
-import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { publishedRuntimeArtifacts, runtimeArtifactsSchema } from "../../scripts/factory/artifacts";
 import {
-  editorFixtureNamespaces as namespaces,
-  removeStoppedEditorSourceNamespace,
-  recordedEditorIdentity,
   editorFixtureKubectl,
+  editorFixtureNamespaces as namespaces,
+  recordedEditorIdentity,
+  removeStoppedEditorSourceNamespace,
 } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 const enabled = process.env["FACTORY_RUN_DEVELOPER_IDE_BROWSER_PROOF"] === "1";
 const proofTimeoutMS = 420_000;
@@ -74,20 +77,15 @@ test.skipIf(!enabled)(
     const proofID = crypto.randomUUID();
     const artifacts = resolve(".factory/test-results/developer-ide-browser", proofID);
     await mkdir(artifacts, { recursive: true });
-    const fixture = await factoryProcess(
-      {
-        runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
-        forgejoToken: (await readFile(".factory/forgejo-token", "utf8")).trim(),
-      },
-      {
-        FACTORY_DEVELOPER_IDE_IMAGE:
-          process.env["FACTORY_TEST_DEVELOPER_IDE_IMAGE"] ??
-          (await readFile(".factory/developer-ide-image", "utf8")).trim(),
-        FACTORY_WORKSPACE_FILES_IMAGE: (
-          await readFile(".factory/workspace-files-image", "utf8")
-        ).trim(),
-      },
-    );
+    const published = await publishedRuntimeArtifacts(resolve(".factory"));
+    if (!published) throw new Error("Publish the exact runtime artifacts before the IDE proof");
+    const images = runtimeArtifactsSchema.parse(published);
+    const fixture = await factoryProcess(undefined, {
+      FACTORY_HOST: "0.0.0.0",
+      FACTORY_DEVELOPER_IDE_IMAGE:
+        process.env["FACTORY_TEST_DEVELOPER_IDE_IMAGE"] ?? images["developer-ide"],
+      FACTORY_WORKSPACE_FILES_IMAGE: images["workspace-files"],
+    });
     const database = fixture.connect();
     const kubernetes = createKubernetesClient();
     const beforeNamespaces = await namespaces();
@@ -105,6 +103,7 @@ test.skipIf(!enabled)(
       return `${url.origin}${url.pathname}`;
     };
     let userID = "";
+    let cleanupConfirmed = false;
     let adminCookie = "";
     let developerCookie = "";
     const email = `editor-browser-${proofID}@factory.invalid`;
@@ -119,21 +118,37 @@ test.skipIf(!enabled)(
     try {
       await fixture.start();
       adminCookie = await fixture.signIn();
-      const createdUser = await api("/api/admin/users", adminCookie, {
-        name: "Editor browser Developer",
-        email,
-        password,
-      });
-      expect(createdUser.status).toBe(201);
-      userID = z.object({ id: z.uuid() }).parse(await createdUser.json()).id;
+      const createdUser = await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "createAccount",
+          [
+            {
+              name: "Editor browser Developer",
+              email,
+              password,
+            },
+          ],
+          { cookie: adminCookie },
+        ),
+      );
+      userID = z.object({ id: z.uuid() }).parse(createdUser).id;
       for (const projectID of projects) {
         await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`editor-browser-${projectID}`},'Editor browser proof',${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${userID})`;
         expect(
           (
-            await api(`/api/projects/${projectID}/members`, adminCookie, {
-              email,
-              role: "developer",
-            })
+            await callFactoryFunction(
+              fixture.base,
+              "saveProjectMember",
+              [
+                projectID,
+                {
+                  email,
+                  role: "developer",
+                },
+              ],
+              { cookie: adminCookie },
+            )
           ).ok,
         ).toBe(true);
       }
@@ -146,20 +161,34 @@ test.skipIf(!enabled)(
       const projectID = projects[0];
       if (!projectID) throw new Error("Missing owned Project");
       expect(
-        (await api(`/api/projects/${projectID}/developer-ide/ensure`, developerCookie, {})).ok,
+        (
+          await callFactoryFunction(fixture.base, "ensureDeveloperIDE", [projectID], {
+            cookie: developerCookie,
+          })
+        ).ok,
       ).toBe(true);
       const editorIdentity = await recordedEditorIdentity(database, userID);
       if (!editorIdentity) throw new Error("Missing recorded editor intent");
       ownedNamespaces.set(editorIdentity.namespace, { ownerID: userID });
       await writeFile(
         resolve(artifacts, "intent.json"),
-        JSON.stringify({ proofID, userID, projects, sources, namespaces: [...ownedNamespaces] }),
+        JSON.stringify({
+          proofID,
+          factoryID: fixture.id,
+          factoryOrigin: fixture.base,
+          userID,
+          projects,
+          sources,
+          namespaces: [...ownedNamespaces],
+        }),
       );
       for (const projectID of projects) {
         const source = sourceWorkspaceViewSchema.parse(
-          await (
-            await api(`/api/projects/${projectID}/source-workspace/ensure`, developerCookie, {})
-          ).json(),
+          await serverCall(
+            callFactoryFunction(fixture.base, "ensurePersonalSource", [projectID], {
+              cookie: developerCookie,
+            }),
+          ),
         );
         sources.push({ projectID, workspaceID: source.workspaceID });
         const [workspace] = await database.client<
@@ -169,14 +198,26 @@ test.skipIf(!enabled)(
         ownedNamespaces.set(workspace.namespace, { ownerID: source.workspaceID });
         await writeFile(
           resolve(artifacts, "intent.json"),
-          JSON.stringify({ proofID, userID, projects, sources, namespaces: [...ownedNamespaces] }),
+          JSON.stringify({
+            proofID,
+            factoryID: fixture.id,
+            factoryOrigin: fixture.base,
+            userID,
+            projects,
+            sources,
+            namespaces: [...ownedNamespaces],
+          }),
         );
       }
       await Promise.all([
         eventually(
           async () => {
             const view = developerIDEViewSchema.parse(
-              await (await api("/api/developer-ide", developerCookie)).json(),
+              await serverCall(
+                callFactoryFunction(fixture.base, "getDeveloperIDE", [], {
+                  cookie: developerCookie,
+                }),
+              ),
             );
             if (view.state === "failed") throw new Error(`Editor failed: ${view.failure}`);
             return view;
@@ -189,9 +230,11 @@ test.skipIf(!enabled)(
           eventually(
             async () => {
               const view = sourceWorkspaceViewSchema.parse(
-                await (
-                  await api(`/api/workspaces/${source.workspaceID}/source`, developerCookie)
-                ).json(),
+                await serverCall(
+                  callFactoryFunction(fixture.base, "getWorkspaceSource", [source.workspaceID], {
+                    cookie: developerCookie,
+                  }),
+                ),
               );
               if (view.state === "failed")
                 throw new Error(`Canonical source failed: ${view.failure}`);
@@ -255,7 +298,7 @@ test.skipIf(!enabled)(
       );
       // A fulfilled synthetic navigation has no loopback address classification in Chromium.
       // Establish the real Factory origin before inserting this minimal editing fixture.
-      await page.goto(`${fixture.base}/api/session`);
+      await page.goto(`${fixture.base}/health/ready`);
       const visibleStarted = performance.now();
       const ownedEditorOrigin = developerIDEOrigin(fixture.base, userID, 1);
       // Explicit fault injection belongs only to this owned proof. The Pod and
@@ -357,10 +400,18 @@ test.skipIf(!enabled)(
       for (const projectID of projects)
         expect(
           (
-            await api(`/api/projects/${projectID}/members`, adminCookie, {
-              email,
-              role: "product-contributor",
-            })
+            await callFactoryFunction(
+              fixture.base,
+              "saveProjectMember",
+              [
+                projectID,
+                {
+                  email,
+                  role: "product-contributor",
+                },
+              ],
+              { cookie: adminCookie },
+            )
           ).ok,
         ).toBe(true);
       await browserExpect
@@ -375,9 +426,11 @@ test.skipIf(!enabled)(
           ),
         )
         .toBe(401);
-      expect((await api(`/api/workspaces/${a.workspaceID}/source`, developerCookie)).status).toBe(
-        403,
-      );
+      expect(
+        await callFactoryFunction(fixture.base, "getWorkspaceSource", [a.workspaceID], {
+          cookie: developerCookie,
+        }),
+      ).toMatchObject({ ok: false, status: 403 });
       await writeFile(
         resolve(artifacts, "result.json"),
         JSON.stringify({
@@ -463,21 +516,34 @@ test.skipIf(!enabled)(
       try {
         for (const projectID of projects)
           if (adminCookie && userID)
-            await api(`/api/projects/${projectID}/members`, adminCookie, {
-              email,
-              role: "developer",
-            });
+            await serverCall(
+              callFactoryFunction(
+                fixture.base,
+                "saveProjectMember",
+                [
+                  projectID,
+                  {
+                    email,
+                    role: "developer",
+                  },
+                ],
+                { cookie: adminCookie },
+              ),
+            );
         for (const source of sources) {
           expect(
-            (await api(`/api/workspaces/${source.workspaceID}/source/stop`, developerCookie, {}))
-              .status,
-          ).toBe(202);
+            await callFactoryFunction(fixture.base, "stopWorkspaceSource", [source.workspaceID], {
+              cookie: developerCookie,
+            }),
+          ).toMatchObject({ ok: true });
           await eventually(
             async () =>
               sourceWorkspaceViewSchema.parse(
-                await (
-                  await api(`/api/workspaces/${source.workspaceID}/source`, developerCookie)
-                ).json(),
+                await serverCall(
+                  callFactoryFunction(fixture.base, "getWorkspaceSource", [source.workspaceID], {
+                    cookie: developerCookie,
+                  }),
+                ),
               ),
             (view) => view.state === "stopped",
             "Owned source Stop incomplete",
@@ -487,11 +553,17 @@ test.skipIf(!enabled)(
         if (userID) {
           const editorIdentity = await recordedEditorIdentity(database, userID);
           if (editorIdentity) ownedNamespaces.set(editorIdentity.namespace, { ownerID: userID });
-          await api("/api/developer-ide/stop", developerCookie, {});
+          await serverCall(
+            callFactoryFunction(fixture.base, "stopDeveloperIDE", [], { cookie: developerCookie }),
+          );
           await eventually(
             async () =>
               developerIDEViewSchema.parse(
-                await (await api("/api/developer-ide", developerCookie)).json(),
+                await serverCall(
+                  callFactoryFunction(fixture.base, "getDeveloperIDE", [], {
+                    cookie: developerCookie,
+                  }),
+                ),
               ),
             (view) => view.state === "stopped",
             "Owned editor Stop incomplete",
@@ -518,9 +590,25 @@ test.skipIf(!enabled)(
             namespaces: [...ownedNamespaces],
           }),
         );
+        cleanupConfirmed = true;
       } finally {
         await database.client.end({ timeout: 2 });
-        await fixture.dispose();
+        if (cleanupConfirmed) await fixture.dispose();
+        else {
+          await writeFile(
+            resolve(artifacts, "cleanup-unconfirmed.json"),
+            JSON.stringify({
+              proofID,
+              factoryID: fixture.id,
+              factoryOrigin: fixture.base,
+              userID,
+              projects,
+              sources,
+              namespaces: [...ownedNamespaces],
+            }),
+          );
+          await fixture.pause();
+        }
       }
     }
   },

@@ -1,0 +1,18 @@
+# External operator-owned example. Factory does not apply or monitor this object.
+# Replace the source, project, destination and version constraint deliberately.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: example-product
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: forge.example/PROJECT_PACKAGE_OWNER
+    chart: app
+    targetRevision: "1.4.*"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: example-product
+  syncPolicy:
+    automated: {}

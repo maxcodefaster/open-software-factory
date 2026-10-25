@@ -1,14 +1,14 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import {
   executionPolicy,
   type ExecutionPolicy,
 } from "../../../../packages/conversation-domain/src/execution-policy";
 import {
-  usageSettingsView,
   type UsageSettingsView,
-  currentComputeView,
+  type currentComputeView,
 } from "../../../../packages/conversation-domain/src/usage-view";
-import { apiRequest, emptyResponseSchema } from "../api-client";
+import { serverCall } from "../server-functions/result";
+import { getUsage, getCurrentCompute, saveUsage } from "../server-functions/usage";
 import "./settings.css";
 import { ContractPrices } from "./contract-prices";
 
@@ -38,8 +38,18 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
   let retry:
     | { commandID: string; version: number; policy: ExecutionPolicy; timezone?: string }
     | undefined;
-  const path = () =>
-    props.projectID ? `/api/projects/${props.projectID}/usage` : "/api/admin/usage";
+  const scope = () => props.projectID ?? null;
+  const usageRead = createMemo(() => {
+    const target = scope();
+    return serverCall(getUsage(target)).then(
+      (value) => ({ target, ok: true as const, value }),
+      (cause: unknown) => ({
+        target,
+        ok: false as const,
+        message: cause instanceof Error ? cause.message : "Usage is unavailable",
+      }),
+    );
+  });
   function publish(value: UsageSettingsView) {
     setView(value);
     setPolicy(
@@ -49,7 +59,7 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
     );
     setTimezone(value.timezone);
   }
-  createEffect(path, (target) => {
+  createEffect(scope, (target) => {
     const current = ++epoch;
     let disposed = false;
     setView(undefined);
@@ -58,20 +68,12 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
     setNotice("");
     retry = undefined;
     setBusy(false);
-    void apiRequest(usageSettingsView, target)
-      .then((value) => {
-        if (!disposed && current === epoch) publish(value);
-      })
-      .catch((cause) => {
-        if (!disposed && current === epoch)
-          setError(cause instanceof Error ? cause.message : "Usage is unavailable");
-      });
     let refreshing = false;
     const refresh = async () => {
       if (refreshing) return;
       refreshing = true;
       try {
-        const value = await apiRequest(currentComputeView, `${target}/compute`);
+        const value = await serverCall(getCurrentCompute(target));
         if (!disposed && current === epoch) setCompute(value);
       } catch {
         if (!disposed && current === epoch) setCompute(undefined);
@@ -85,6 +87,11 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
       disposed = true;
       clearInterval(refreshTimer);
     };
+  });
+  createEffect(usageRead, (result) => {
+    if (result.target !== scope()) return;
+    if (result.ok) publish(result.value);
+    else setError(result.message);
   });
   async function save(event: SubmitEvent) {
     event.preventDefault();
@@ -101,12 +108,8 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
     setError("");
     setNotice("");
     try {
-      await apiRequest(emptyResponseSchema, path(), {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(retry),
-      });
-      const value = await apiRequest(usageSettingsView, path());
+      await serverCall(saveUsage(scope(), retry));
+      const value = await serverCall(getUsage(scope()));
       if (generation !== epoch) return;
       retry = undefined;
       publish(value);

@@ -15,14 +15,14 @@ import { projectModelConnection } from "../project-agent/adapter";
 import { isStructuredOutputFailure } from "../project-agent/structured-output";
 import { createMastraUsage } from "../usage/mastra";
 import type { WikiGenerationInput } from "./generation-agent";
-import { wikiLinkIssues } from "./wiki-links";
 import {
+  rejectedWikiStructuredResult,
   WikiSourceEvidenceError,
+  WikiStructuredResultError,
   WikiTopicPlanError,
   WikiTopicQualityError,
-  rejectedWikiStructuredResult,
-  WikiStructuredResultError,
 } from "./generation-failure";
+import { wikiLinkIssues } from "./wiki-links";
 
 const topicSchema = z.object({
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
@@ -137,7 +137,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       id,
       name: `Factory Wiki ${id}`,
       ...nativeAgentPolicy,
-      model: nativeModel(connection, input.modelId),
+      model: await nativeModel(connection, input.modelId),
       tools: { readSource: sources.tool },
       instructions: `${wikiInstructions}\n${task}`,
     });

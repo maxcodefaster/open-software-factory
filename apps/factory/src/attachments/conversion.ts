@@ -5,10 +5,7 @@ import TurndownService from "turndown";
 import { gfm } from "turndown-plugin-gfm";
 import { fileURLToPath } from "node:url";
 
-export type ConvertedAttachment = {
-  text: string;
-  previews: { name: string; mediaType: "image/jpeg"; data: Uint8Array }[];
-};
+import type { ConvertedAttachment } from "./conversion-result";
 const maximumDerivedBytes = 100 * 1024 * 1024;
 const maximumTextBytes = 1024 * 1024;
 
@@ -234,42 +231,4 @@ export async function convertAttachment(
   )
     throw new Error("Image processing exceeds 100 MiB. Attach a smaller document.");
   return result;
-}
-
-let activeConversions = 0;
-export async function processAttachment(
-  data: Uint8Array,
-  mediaType: string,
-): Promise<ConvertedAttachment> {
-  if (activeConversions >= 2)
-    throw new Error(
-      "File processing is busy. Retry the upload explicitly after another file finishes.",
-    );
-  activeConversions++;
-  let worker: Worker | undefined;
-  try {
-    worker = new Worker(new URL("./conversion-worker.ts", import.meta.url).href);
-    const running = worker;
-    return await new Promise<ConvertedAttachment>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("File processing timed out. Attach a smaller document.")),
-        60_000,
-      );
-      running.onmessage = (
-        event: MessageEvent<{ result?: ConvertedAttachment; error?: string }>,
-      ) => {
-        clearTimeout(timer);
-        if (event.data.result) resolve(event.data.result);
-        else reject(new Error(event.data.error ?? "File processing failed."));
-      };
-      running.onerror = () => {
-        clearTimeout(timer);
-        reject(new Error("File processing failed. Check the document and try again."));
-      };
-      running.postMessage({ data, mediaType });
-    });
-  } finally {
-    worker?.terminate();
-    activeConversions--;
-  }
 }

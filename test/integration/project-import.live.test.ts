@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,7 +139,17 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
           >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${importedProjectID}`;
           for (const attempt of attempts) {
             if (attempt.state === "stopped") continue;
-            expect((await api(`/api/runtime-attempts/${attempt.id}/stop`)).ok).toBe(true);
+            expect(
+              (
+                await callFactoryFunction(
+                  factory!.base,
+                  "stopRuntimeAttempt",
+                  [attempt.id],
+                  { cookie, origin: factory!.base, "content-type": "application/json" },
+                  AbortSignal.timeout(60_000),
+                )
+              ).ok,
+            ).toBe(true);
             await eventually(
               async () =>
                 (
@@ -150,7 +162,9 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
             );
           }
           await removeOwnedProjectSources(database, importedProjectID, (workspace) =>
-            api(`/api/workspaces/${workspace}/source/stop`),
+            serverCall(
+              callFactoryFunction(factory!.base, "stopWorkspaceSource", [workspace], { cookie }),
+            ),
           );
           succeeded = true;
           return;
@@ -384,7 +398,7 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned importer',${`${id}@import.test`})`;
       await database.client`INSERT INTO factory.administrator(user_id) VALUES(${id})`;
       const draft = runtimeProof
-        ? await api("/api/project-setup", "POST")
+        ? await serverCall(callFactoryFunction(factory.base, "beginSetupDraft", [], { cookie }))
         : await controller.begin(id);
       if (!draft) throw new Error("Owned import draft missing");
       const draftInput = {
@@ -396,17 +410,22 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
         sourceURL: `https://host.orb.internal:${proxy.port}/${repository.owner}/${name}.git`,
       };
       const saved = runtimeProof
-        ? await api("/api/project-setup", "PUT", draftInput)
+        ? await serverCall(
+            callFactoryFunction(factory.base, "saveSetupDraft", [draftInput], { cookie }),
+          )
         : await controller.save(id, draftInput);
+      if (!saved) throw new Error("Owned import setup save missing");
       const commandID = crypto.randomUUID();
       const createInput = {
         id: draft.id,
-        version: saved?.version,
+        version: saved.version,
         commandID,
         importToken: sourceToken,
       };
       const result = runtimeProof
-        ? await api("/api/project-setup/create", "POST", createInput)
+        ? await serverCall(
+            callFactoryFunction(factory.base, "createSetupProject", [createInput], { cookie }),
+          )
         : await controller.create(id, createInput);
       importedProjectID = result?.projectID ?? "";
       expect(result?.state).toBe("created");
@@ -432,11 +451,20 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
       const beforeReplay = authenticatedRequests;
       expect(
         (runtimeProof
-          ? await api("/api/project-setup/create", "POST", {
-              id: draft.id,
-              version: saved?.version,
-              commandID,
-            })
+          ? await serverCall(
+              callFactoryFunction(
+                factory.base,
+                "createSetupProject",
+                [
+                  {
+                    id: draft.id,
+                    version: saved.version,
+                    commandID,
+                  },
+                ],
+                { cookie },
+              ),
+            )
           : await controller.create(id, { id: draft.id, version: saved?.version, commandID })
         )?.projectID,
       ).toBe(result?.projectID);

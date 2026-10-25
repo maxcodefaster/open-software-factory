@@ -1,3 +1,8 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
@@ -21,15 +26,23 @@ test("managers create accounts and Project access; developers see only their Pro
   const developer = await developerContext.newPage();
   const errors: string[] = [];
   for (const current of [page, developer]) {
-    await current.route("**/api/projects/*/source-workspace/ensure", (route) =>
-      route.fulfill({
-        status: 503,
-        json: { error: "Controlled planning fixture has no source repository" },
-      }),
-    );
-    await current.route("**/api/projects/*/developer-ide/ensure", (route) =>
-      route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no IDE" } }),
-    );
+    await mockFactoryFunctions(current, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError(
+            "unavailable",
+            "Controlled planning fixture has no source repository",
+          );
+        },
+      },
+    });
+    await mockFactoryFunctions(current, {
+      workspaces: {
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "Controlled planning fixture has no IDE");
+        },
+      },
+    });
   }
   page.on("pageerror", (error) => errors.push(error.message));
   developer.on("pageerror", (error) => errors.push(error.message));
@@ -42,7 +55,7 @@ test("managers create accounts and Project access; developers see only their Pro
       .object({
         session: z.object({ user: z.object({ id: z.uuid() }), systemManager: z.literal(true) }),
       })
-      .parse(await (await page.request.get("/api/session")).json());
+      .parse(await browserBootstrap(page));
     administrator = session.session.user.id;
     for (const [id, projectName] of [
       [projectID, name],
@@ -74,7 +87,7 @@ test("managers create accounts and Project access; developers see only their Pro
     );
     await navigation
       .locator("section")
-      .filter({ has: page.getByRole("heading", { name, exact: true }) })
+      .filter({ has: page.getByRole("heading", { name: `Project · ${name}`, exact: true }) })
       .getByRole("button", { name: "People & access", exact: true })
       .click();
     await expect(
@@ -85,8 +98,8 @@ test("managers create accounts and Project access; developers see only their Pro
     await dialog.getByLabel("Member email", { exact: true }).fill(email);
     await dialog.getByRole("button", { name: "Add member", exact: true }).click();
     await expect(dialog.getByLabel("Role for Access QA developer")).toHaveValue("developer");
-    await mkdir(".factory/screenshots", { recursive: true });
-    await page.screenshot({ path: ".factory/screenshots/project-access-wide.png" });
+    await mkdir(".factory/test-results/project-access", { recursive: true });
+    await page.screenshot({ path: ".factory/test-results/project-access/wide.png" });
     await page.setViewportSize({ width: 390, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       390,
@@ -99,7 +112,7 @@ test("managers create accounts and Project access; developers see only their Pro
       expect(box.x).toBeGreaterThanOrEqual(0);
       expect(box.x + box.width).toBeLessThanOrEqual(390);
     }
-    await page.screenshot({ path: ".factory/screenshots/project-access-narrow.png" });
+    await page.screenshot({ path: ".factory/test-results/project-access/narrow.png" });
     await developer.goto("/");
     await developer.getByLabel("Email", { exact: true }).fill(email);
     await developer.getByLabel("Password", { exact: true }).fill(password);
@@ -120,11 +133,11 @@ test("managers create accounts and Project access; developers see only their Pro
     ).toBeVisible();
     await developer.getByRole("button", { name: "Open settings", exact: true }).click();
     expect(
-      (await developer.request.get(`/api/projects/${otherProjectID}/conversation`)).status(),
-    ).toBe(404);
+      await requestFunction(developer.request, "getConversation", [otherProjectID, {}]),
+    ).toMatchObject({ ok: false, status: 404 });
     const roleSaved = page.waitForResponse(
       (response) =>
-        response.url().endsWith(`/api/projects/${projectID}/members`) &&
+        new URL(response.url()).pathname.startsWith("/_server/data/saveProjectMember-") &&
         response.request().method() === "POST",
     );
     await dialog.getByLabel("Manage project for Access QA developer").check();
@@ -148,9 +161,9 @@ test("managers create accounts and Project access; developers see only their Pro
       "Access QA developer's project access was removed. Shared work is unchanged.",
     );
     await expect(dialog.getByLabel("Role for Access QA developer")).toHaveCount(0);
-    expect((await developer.request.get(`/api/projects/${projectID}/conversation`)).status()).toBe(
-      404,
-    );
+    expect(
+      await requestFunction(developer.request, "getConversation", [projectID, {}]),
+    ).toMatchObject({ ok: false, status: 404 });
     await openProjectMenu(developer);
     await expect(developer.getByRole("button", { name: new RegExp(name) })).toHaveCount(0);
     await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();

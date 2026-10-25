@@ -1,3 +1,5 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -29,9 +31,7 @@ async function command(executable: string, arguments_: string[]) {
 
 test.afterEach(async ({ context }) => {
   for (const changeID of createdChangeIDs) {
-    await context.request.post(`/api/changes/${changeID}/cancel`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    });
+    await serverCall(requestFunction(context.request, "cancelChange", [changeID]));
   }
   await teardownFactoryProject(context.request, createdProjectID);
   createdProjectID = null;
@@ -132,9 +132,9 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
   await expect
     .poll(
       async () => {
-        const response = await page.context().request.get("/api/changes");
-        if (!response.ok()) return "unavailable";
-        const changes = (await response.json()) as {
+        const response = await requestFunction(page.context().request, "getChanges", []);
+        if (!response.ok) return "unavailable";
+        const changes = (await serverCall(Promise.resolve(response))) as {
           changes: Array<{ id: string; state: string }>;
         };
         return changes.changes.find((change) => change.id === branchRecovery.changeID)?.state;
@@ -151,9 +151,9 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
     WHERE change_id = ${branchRecovery.changeID}
   `;
   expect(attempts).toEqual([]);
-  await page.context().request.post(`/api/changes/${branchRecovery.changeID}/cancel`, {
-    headers: { origin: "http://127.0.0.1:3000" },
-  });
+  await serverCall(
+    requestFunction(page.context().request, "cancelChange", [branchRecovery.changeID]),
+  );
   await expect
     .poll(
       async () => {
@@ -269,9 +269,9 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
   `;
   expect(attempts).toEqual([{ id: runtime.attemptID, namespace: workspace.kubernetesNamespace }]);
 
-  await page.context().request.post(`/api/changes/${runtimeRecovery.changeID}/cancel`, {
-    headers: { origin: "http://127.0.0.1:3000" },
-  });
+  await serverCall(
+    requestFunction(page.context().request, "cancelChange", [runtimeRecovery.changeID]),
+  );
   await expect
     .poll(
       async () => {

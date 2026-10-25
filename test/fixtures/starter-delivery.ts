@@ -6,13 +6,16 @@ import type { createDatabase } from "../../packages/db/src/client";
 import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually } from "./factory-process";
+import { callFactoryFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 export async function starterDelivery(input: {
   database: ReturnType<typeof createDatabase>;
   projectID: string;
-  api(path: string, method?: string, body?: unknown): Promise<unknown>;
+  base: string;
+  cookie: string;
 }) {
-  const { database, projectID, api } = input;
+  const { database, projectID, base, cookie } = input;
   const title = "Make the protected home welcoming";
   const description =
     "Change only the protected home heading from You're home. to Welcome home. Preserve signup, login, logout, database, runtime configuration and dependencies. Add a focused test of the new heading and run npm run check. Do not commit or push.";
@@ -44,15 +47,27 @@ export async function starterDelivery(input: {
     SELECT id FROM factory.requirement_revision WHERE ticket_id=${ticketID} ORDER BY ordinal DESC LIMIT 1`;
   const revision =
     savedRevision ??
-    ((await api(`/api/tickets/${ticketID}/requirements`, "POST", {
-      summary: description,
-      acceptanceCriteria: [
-        "Authenticated home displays Welcome home.",
-        "Signup, login, logout and database auth checks pass",
-        "npm run check passes",
-      ],
-      nonGoals: ["Runtime configuration, new dependencies, unrelated UI or authentication changes"],
-    })) as { id: string });
+    (await serverCall(
+      callFactoryFunction(
+        base,
+        "createRequirementRevision",
+        [
+          ticketID,
+          {
+            summary: description,
+            acceptanceCriteria: [
+              "Authenticated home displays Welcome home.",
+              "Signup, login, logout and database auth checks pass",
+              "npm run check passes",
+            ],
+            nonGoals: [
+              "Runtime configuration, new dependencies, unrelated UI or authentication changes",
+            ],
+          },
+        ],
+        { cookie },
+      ),
+    ));
   if (previous?.changeID && !previous.commandID)
     throw new Error("Starter proof has a Change without its admitted Build command");
   const command = {
@@ -62,9 +77,15 @@ export async function starterDelivery(input: {
   const started = performance.now();
   const change = previous?.changeID
     ? { id: previous.changeID }
-    : ((await api(`/api/tickets/${ticketID}/implement`, "POST", command)) as { id: string });
+    : await serverCall(
+        callFactoryFunction(base, "implementTicket", [ticketID, command], { cookie }),
+      );
   if (!previous?.changeID)
-    expect(await api(`/api/tickets/${ticketID}/implement`, "POST", command)).toMatchObject({
+    expect(
+      await serverCall(
+        callFactoryFunction(base, "implementTicket", [ticketID, command], { cookie }),
+      ),
+    ).toMatchObject({
       id: change.id,
     });
   const retryCommandID = process.env["FACTORY_STARTER_BUILD_RETRY_COMMAND"];
@@ -81,7 +102,11 @@ export async function starterDelivery(input: {
       if (!failed || !["failed", "stopped"].includes(failed.state))
         throw new Error("Starter retry requires a settled failed or stopped Build");
     }
-    await api(`/api/changes/${change.id}/agent/start`, "POST", { commandId: retryCommandID });
+    await serverCall(
+      callFactoryFunction(base, "startCoding", [change.id, { commandId: retryCommandID }], {
+        cookie,
+      }),
+    );
     command.commandId = retryCommandID;
     console.log(JSON.stringify({ starterBuildRetry: retryCommandID, changeID: change.id }));
   }
@@ -118,7 +143,9 @@ export async function starterDelivery(input: {
   expect(usage.every((row) => row.model === process.env["FACTORY_AGENT_MODEL_ID"])).toBe(true);
   const verified = await eventually(
     async () => {
-      const delivery = deliveryViewSchema.parse(await api(`/api/changes/${change.id}/delivery`));
+      const delivery = deliveryViewSchema.parse(
+        await serverCall(callFactoryFunction(base, "getDelivery", [change.id], { cookie: cookie })),
+      );
       if (delivery.verificationState === "failed")
         throw new Error(`Starter Verification failed: ${delivery.verificationSummary}`);
       return delivery;
@@ -138,13 +165,14 @@ export async function starterDelivery(input: {
   });
   const [approval] = await database.client<{ id: string }[]>`
     SELECT id FROM factory.delivery_approval WHERE change_id=${change.id}`;
-  if (!approval) await api(`/api/changes/${change.id}/delivery/approve`, "POST", {});
+  if (!approval)
+    await serverCall(callFactoryFunction(base, "approveDelivery", [change.id], { cookie: cookie }));
   const [completed] = await database.client<{ state: string; previewState: string }[]>`
     SELECT change.state,attempt.state AS "previewState" FROM factory.change change
     JOIN factory.staging_preview preview ON preview.project_id=change.project_id
     JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id WHERE change.id=${change.id}`;
   if (completed?.state === "delivered" && ["stopped", "failed"].includes(completed.previewState))
-    await api(`/api/projects/${projectID}/staging/ensure`, "POST", {});
+    await serverCall(callFactoryFunction(base, "ensureStaging", [projectID], { cookie }));
   const promoted = await eventually(
     async () => {
       const [row] = await database.client<

@@ -1,12 +1,13 @@
 import { expect, test } from "bun:test";
-import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
-import { createAgentController } from "../../apps/factory/src/agent/controller";
-import { candidateReviewFixture } from "../fixtures/candidate-review";
-import { observe } from "../fixtures/pinned-opencode";
-import { createReviewMedia } from "../../apps/factory/src/review/media";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import { createAgentController } from "../../apps/factory/src/agent/controller";
+import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import { createReviewMedia } from "../../apps/factory/src/review/media";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
+import { observe } from "../fixtures/pinned-opencode";
 
 test("native review settlement publishes every recording chunk before closing its browser", async () => {
   const f = await candidateReviewFixture();
@@ -324,17 +325,40 @@ test("encoder failure is distinct from successful App observations and never rep
   }
 });
 
-test("recording disabled uses the same browser without ever starting an encoder", async () => {
+test("a Project preserves earlier review evidence and automatically records its next QA browser", async () => {
   const f = await candidateReviewFixture();
+  const directory = await mkdtemp(join(tmpdir(), "factory-automatic-recording-"));
+  const media = createReviewMedia(f.database, directory);
+  const review = createVisualReviewController(f.database);
+  const previousID = crypto.randomUUID();
+  const previousVideo = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]);
   try {
-    await f.database
-      .client`UPDATE factory.project SET qa_recording_enabled=false WHERE id=${f.projectID}`;
+    await f.database.client`INSERT INTO factory.review_media(
+      id,change_id,review_id,kind,commit_sha,runtime_attempt_id,state)
+      VALUES(${previousID},${f.changeID},${f.reviewID},'recording',${f.commit},${f.attemptID},'intended')`;
+    await media.publish(previousID, previousVideo, 1000);
+    const comment = await review.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "comment",
+      body: "Keep this review discussion.",
+    });
+    expect(
+      await f.database.client`SELECT column_name FROM information_schema.columns
+        WHERE table_schema='factory' AND table_name='project' AND column_name='qa_recording_enabled'`,
+    ).toHaveLength(0);
+    const previous = await media.read(f.changeID, f.userID, previousID, null);
+    expect(previous.status).toBe(200);
+    expect(new Uint8Array(await previous.arrayBuffer())).toEqual(previousVideo);
+    expect((await review.get(f.changeID, f.userID)).feedback[0]?.id).toBe(comment.feedbackId!);
+
     const turn = await f.activeReview();
     const actions: string[] = [];
     f.hub.parentOperation = async (_attempt, operation, authorize) => {
       await authorize?.(() => {});
       actions.push(operation.action);
       const scope = JSON.parse(String(operation["data"]));
+      if (operation.action === "browser-recording-start")
+        return { data: JSON.stringify({ startedAt: new Date().toISOString() }) };
       return operation.action !== "browser-call"
         ? {}
         : {
@@ -356,7 +380,8 @@ test("recording disabled uses the same browser without ever starting an encoder"
     const browser = createBuildBrowserController(
       f.database,
       f.hub,
-      "owned-disabled-recording-secret",
+      "owned-automatic-recording-secret",
+      media,
     );
     const grant = await browser.prepare(turn.id, turn.ownerToken);
     const authorized = await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`);
@@ -367,9 +392,15 @@ test("recording disabled uses the same browser without ever starting an encoder"
       { name: "browser_open", arguments: { app: "app" } },
       1,
     );
-    expect(actions).toEqual(["browser-call"]);
+    expect(actions).toEqual(["browser-call", "browser-recording-start"]);
+    const [recording] = await f.database.client<{ state: string; commit: string }[]>`
+      SELECT state,commit_sha AS commit FROM factory.review_media WHERE id=${grant.sessionID}`;
+    expect(recording).toEqual({ state: "recording", commit: f.commit });
+    await browser.renewTurn(turn.id, turn.ownerToken);
+    expect(actions).toEqual(["browser-call", "browser-recording-start", "browser-renew"]);
     await browser.closeTurn(turn.id);
   } finally {
+    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });

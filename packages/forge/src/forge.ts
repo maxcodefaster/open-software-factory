@@ -688,6 +688,14 @@ export function createForgejoClient(options: {
     async getFile(repository: ForgeRepository, path: string, ref: string) {
       return (await getFileInfo(repository, path, ref)).content;
     },
+    async getOptionalFile(repository: ForgeRepository, path: string, ref: string) {
+      try {
+        return (await getFileInfo(repository, path, ref)).content;
+      } catch (cause) {
+        if (cause instanceof ForgeHttpError && cause.status === 404) return null;
+        throw cause;
+      }
+    },
     async listFiles(repository: ForgeRepository, commitSha: string) {
       type Entry = z.infer<typeof treeResponse>["tree"][number];
       const maximumEntries = 100_000;

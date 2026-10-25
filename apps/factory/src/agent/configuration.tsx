@@ -1,15 +1,12 @@
 import { createEffect, createSignal, Show, onCleanup } from "solid-js";
 import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
-import {
-  type InheritedModelSettingsView,
-  inheritedModelSettingsView,
-} from "../../../../packages/conversation-domain/src/model-inheritance";
-import {
-  type InheritedSkillSettings,
-  inheritedSkillSettingsView,
-} from "../../../../packages/conversation-domain/src/skill-inheritance";
+import { type InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
+import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
-import { apiRequest } from "../api-client";
+import { invoke } from "@solidjs/web/server-functions/client";
+import { getProjectModels } from "../server-functions/models";
+import { getInheritedSkills } from "../server-functions/skills";
+import { serverCall } from "../server-functions/result";
 import { projectFailureNotice } from "./failure-notice";
 
 export function AgentBlockers(props: {
@@ -41,12 +38,8 @@ export function AgentBlockers(props: {
       const abort = new AbortController();
       currentRequest = abort;
       void Promise.all([
-        apiRequest(inheritedModelSettingsView, `/api/projects/${projectID}/model-settings`, {
-          signal: abort.signal,
-        }),
-        apiRequest(inheritedSkillSettingsView, `/api/projects/${projectID}/skill-settings`, {
-          signal: abort.signal,
-        }),
+        serverCall(invoke(getProjectModels, { signal: abort.signal }, projectID)),
+        serverCall(invoke(getInheritedSkills, { signal: abort.signal }, projectID)),
       ])
         .then(([models, skills]) => {
           if (!abort.signal.aborted) setConfiguration({ models, skills });

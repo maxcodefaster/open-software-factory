@@ -1,12 +1,15 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { z } from "zod";
 import { RichDocumentSurface } from "./rich-document-surface";
-import { documentBlocks, type DocumentEditor, type DocumentFormat } from "./document-editor";
-import { documentSlash, filterDocumentBlocks } from "./document-slash";
+import { documentBlocks, type DocumentEditor, type DocumentFormat } from "./document-model";
+import { filterDocumentBlocks } from "./document-slash";
 import { editorPopoverPosition } from "./editor-popover-position";
 import { useAttachmentProject } from "./attachments/ui";
 import { attachmentIDs } from "../../../packages/conversation-domain/src/attachments";
 import { TicketActionBar } from "./ticket-action-bar";
+import { invoke } from "@solidjs/web/server-functions";
+import { retainAttachmentDraft } from "./server-functions/attachments";
+import { serverCall } from "./server-functions/result";
 
 export const personalTicketDraftSchema = z.object({
   id: z.uuid(),
@@ -112,30 +115,25 @@ export function TicketDraftWorkspace(props: {
     if (ids.join(",") !== attachmentKey) {
       attachmentKey = ids.join(",");
       const projectID = attachmentProject();
+      const storageKey = props.storageKey;
       if (projectID)
-        void fetch(`/api/projects/${projectID}/attachment-drafts/${value.id}`, {
-          method: "PUT",
-          keepalive: true,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sequence: value.attachmentSequence, ids }),
-        })
-          .then((response) => {
-            if (!response.ok) throw new Error("Draft files could not be retained.");
-          })
-          .catch(() =>
-            setError(
-              "Your text is retained locally, but file links could not be saved. Keep this draft open and create the Ticket before leaving.",
-            ),
+        void serverCall(
+          invoke(retainAttachmentDraft, { keepalive: true }, projectID, value.id, {
+            sequence: value.attachmentSequence,
+            ids,
+          }),
+        ).catch(() => {
+          if (props.storageKey !== storageKey || draft().id !== value.id) return;
+          setError(
+            "Your text is retained locally, but file links could not be saved. Keep this draft open and create the Ticket before leaving.",
           );
+        });
     }
   }
   function updateMenu(element: HTMLElement) {
     const selection = window.getSelection();
     const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : undefined;
-    const before = range?.cloneRange();
-    before?.selectNodeContents(element);
-    if (before && range) before.setEnd(range.startContainer, range.startOffset);
-    const slash = before ? documentSlash(before.toString()) : undefined;
+    const slash = element.contains(range?.startContainer ?? null) ? editor?.slash() : undefined;
     setMenu(slash && range ? { ...slash, range } : undefined);
     setIndex(0);
     queueMicrotask(() => position(popover, menu()?.range, true));
@@ -161,7 +159,15 @@ export function TicketDraftWorkspace(props: {
     <section class="ticket-workspace ticket-draft-workspace" aria-label="New ticket draft">
       <div class="ticket-editor-frame" ref={frame}>
         <div class="ticket-document">
-          <header class="ticket-document-heading">
+          <header class="ticket-document-heading workspace-heading">
+            <input
+              class="ticket-draft-title workspace-heading-title"
+              aria-label="Ticket title"
+              placeholder="What should change?"
+              maxlength={200}
+              value={draft().title}
+              onInput={(event) => retain({ title: event.currentTarget.value })}
+            />
             <TicketActionBar
               actions={[
                 {
@@ -180,15 +186,9 @@ export function TicketDraftWorkspace(props: {
                 },
               ]}
             />
-            <small class="ticket-draft-status">Personal draft · not shared yet</small>
-            <input
-              class="ticket-draft-title"
-              aria-label="Ticket title"
-              placeholder="What should change?"
-              maxlength={200}
-              value={draft().title}
-              onInput={(event) => retain({ title: event.currentTarget.value })}
-            />
+            <small class="ticket-draft-status workspace-heading-meta">
+              Personal draft · not shared yet
+            </small>
           </header>
           <RichDocumentSurface
             attachmentDraftId={draft().id}

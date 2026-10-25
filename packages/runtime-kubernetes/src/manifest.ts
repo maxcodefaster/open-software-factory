@@ -13,7 +13,7 @@ export interface RuntimeManifestInput {
   readonly podName: string;
   readonly projectID: string;
   readonly runtimeOwnerID?: string;
-  readonly mode?: "development" | "staging" | "verification" | "prebuild";
+  readonly mode?: "development" | "staging" | "verification" | "prebuild" | "publication";
   readonly repositoryURL: string;
   readonly repositoryIdentity?: string;
   readonly preserveWorkspace?: boolean;
@@ -50,19 +50,49 @@ export interface RuntimeManifestInput {
     readonly runnerUUID: string;
     readonly runnerToken: string;
     readonly runnerLabel: string;
+    readonly handle?: string;
+    readonly publication?: {
+      id: string;
+      version: string;
+      credentialURL: string;
+      credentialToken: string;
+      registryURL?: string;
+    };
   };
 }
 
 export function renderRuntimeResources(input: RuntimeManifestInput) {
   const ownerID = input.runtimeOwnerID ?? input.attemptID;
   const mode = input.mode ?? "development";
+  const publication = input.verification?.publication;
+  const publicationEnvironment = publication
+    ? {
+        FACTORY_RELEASE_ID: publication.id,
+        FACTORY_RELEASE_VERSION: publication.version,
+        FACTORY_RELEASE_SOURCE: "/workspace/project",
+        FACTORY_RELEASE_CREDENTIAL_URL: publication.credentialURL,
+        FACTORY_RELEASE_CREDENTIAL_TOKEN: publication.credentialToken,
+        FACTORY_RELEASE_REGISTRY: new URL(publication.registryURL ?? input.verification!.forgeURL)
+          .host,
+        FACTORY_RELEASE_REGISTRY_URL: new URL(
+          publication.registryURL ?? input.verification!.forgeURL,
+        ).origin,
+      }
+    : {};
   if (input.agent && !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(input.agent.browserToolsImage))
     throw new Error("Build browser image must be pinned by exact digest");
-  if (mode !== "verification" && mode !== "prebuild" && !input.systemContract) {
+  if (
+    mode !== "verification" &&
+    mode !== "prebuild" &&
+    mode !== "publication" &&
+    !input.systemContract
+  ) {
     throw new Error("A System Contract is required outside Verification");
   }
   const apps =
-    mode === "verification" || mode === "prebuild" ? [] : (input.systemContract?.apps ?? []);
+    mode === "verification" || mode === "prebuild" || mode === "publication"
+      ? []
+      : (input.systemContract?.apps ?? []);
   const primaryApp = input.systemContract?.primaryApp;
   const runtimeName = (appID: string) => (appID === primaryApp ? "app" : `app-${appID}`);
   const namespaceLabels = {
@@ -189,6 +219,10 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
                 `umask 077; mkdir -p "$HOME/.factory-runner"; printf %s "$FACTORY_RUNNER_CONFIG" > "$HOME/.factory-runner/config.yml"; exec node -e '${verificationSupervisor}'`,
               ],
               env: {
+                ...(input.verification.handle
+                  ? { FACTORY_RUNNER_HANDLE: input.verification.handle }
+                  : {}),
+                ...publicationEnvironment,
                 FACTORY_RUNNER_CONFIG: [
                   "log:",
                   "  level: info",
@@ -197,6 +231,15 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
                   "  capacity: 1",
                   "  timeout: 30m",
                   "  shutdown_timeout: 1m",
+                  // Native runner job processes use configured envs, not the supervisor's env.
+                  ...(publication
+                    ? [
+                        "  envs:",
+                        ...Object.entries(publicationEnvironment).map(
+                          ([key, value]) => `    ${key}: ${JSON.stringify(value)}`,
+                        ),
+                      ]
+                    : []),
                   "cache:",
                   "  enabled: false",
                   "host:",
@@ -210,6 +253,9 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
                   "      fetch_interval: 1s",
                   "      labels:",
                   `        - ${input.verification.runnerLabel}:host`,
+                  ...(input.verification.publication
+                    ? [`        - factory-release-${input.verification.publication.id}:host`]
+                    : []),
                   "",
                 ].join("\n"),
               },

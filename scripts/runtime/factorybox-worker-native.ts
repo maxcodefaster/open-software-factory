@@ -4,10 +4,10 @@ import assert from "node:assert/strict";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import {
   executeFactoryboxOperation,
+  type FactoryboxOperation,
   factoryboxWorkerRequest,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
-  type FactoryboxOperation,
 } from "../../packages/runtime-kubernetes/src/factorybox-worker";
 
 const file = process.argv[2];
@@ -50,7 +50,7 @@ const resources: Record<string, unknown> = {
     status: {
       nodeInfo: {
         operatingSystem: "linux",
-        architecture: "amd64",
+        architecture: request.architecture,
         kernelVersion: request.kernel,
         bootID: input.bootID,
       },

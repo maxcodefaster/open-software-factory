@@ -1,3 +1,5 @@
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { requestFunction } from "../fixtures/server-functions";
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
@@ -56,9 +58,7 @@ test.afterEach(async ({ context }, testInfo) => {
       });
     }
     if (changeID) {
-      await context.request.post(`/api/changes/${changeID}/cancel`, {
-        headers: { origin: "http://127.0.0.1:3000" },
-      });
+      await serverCall(requestFunction(context.request, "cancelChange", [changeID]));
     }
     await teardownFactoryProject(context.request, projectID);
     if (ownedBranch) {
@@ -234,9 +234,7 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
   });
 
   await signIn(page);
-  await context.request.post(`/api/projects/${projectID}/staging/ensure`, {
-    headers: { origin: "http://127.0.0.1:3000" },
-  });
+  await serverCall(requestFunction(context.request, "ensureStaging", [projectID]));
   await expect
     .poll(
       async () => {

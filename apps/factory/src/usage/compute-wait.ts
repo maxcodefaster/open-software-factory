@@ -49,7 +49,7 @@ export function createComputeWait(database: Database, reserve?: ExecutionReserve
           }>
         >`
           SELECT attempt.project_id AS "projectID",attempt.created_by AS "userID",
-            coalesce(workspace.kind='personal',false) AS personal,
+            coalesce(workspace.kind='personal' OR attempt.isolated_kind='publication',false) AS personal,
             coalesce(attempt.change_id,verification.change_id) AS "changeID",attempt.state,
             attempt.stop_intended_at IS NOT NULL AS stopped,attempt.change_id IS NOT NULL AS coding
           FROM factory.runtime_attempt attempt
@@ -113,7 +113,7 @@ export function createComputeWait(database: Database, reserve?: ExecutionReserve
           Array<{ projectID: string; userID: string; changeID: string | null; personal: boolean }>
         >`
           SELECT attempt.project_id AS "projectID",attempt.created_by AS "userID",coalesce(attempt.change_id,verification.change_id) AS "changeID",
-            coalesce(workspace.kind='personal',false) AS personal FROM factory.runtime_attempt attempt
+            coalesce(workspace.kind='personal' OR attempt.isolated_kind='publication',false) AS personal FROM factory.runtime_attempt attempt
           LEFT JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
           LEFT JOIN factory.verification verification ON verification.id=attempt.verification_id WHERE attempt.id=${attemptID}`;
         if (!target) return false;

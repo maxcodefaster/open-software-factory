@@ -1,13 +1,16 @@
 import { expect, test } from "bun:test";
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
-// Real authenticated HTTP, native Mastra streaming and an owned PostgreSQL database.
+// Real compiled functions, authenticated native streaming, Mastra and owned SQL.
 test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
   "Project answer stream: %s",
   async (outcome) => {
     const release = Promise.withResolvers<void>();
     let requests = 0;
+    const prefixSent = Promise.withResolvers<void>();
     const provider = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -41,6 +44,7 @@ test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
                   ),
                 );
               emit('{"output":{"kind":"answer","message":"**Hello**');
+              prefixSent.resolve();
               await release.promise;
               emit(
                 outcome === "invalid"
@@ -69,20 +73,22 @@ test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
     try {
       await isolated.start();
       const cookie = await isolated.signIn();
-      const session = (await fetch(`${isolated.base}/api/session`, { headers: { cookie } }).then(
-        (response) => response.json(),
-      )) as { session: { user: { id: string } } };
+      const session = await authenticatedBootstrap(isolated.base, { cookie });
       const userID = session.session.user.id;
       await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
         VALUES (${projectID},${`stream-${projectID.slice(0, 8)}`},'Owned Streaming','https://example.invalid/stream.git','main','.devcontainer/devcontainer.json',${userID})`;
       pending = streamConversation(
-        `${isolated.base}/api/projects/${projectID}/conversation/message`,
-        {
-          method: "POST",
-          signal: abort.signal,
-          headers: { cookie, origin: isolated.base, "content-type": "application/json" },
-          body: JSON.stringify({ text: "Say hello", commandId }),
-        },
+        (signal) =>
+          serverCall(
+            callFactoryFunction(
+              isolated.base,
+              "sendConversationMessage",
+              [projectID, { text: "Say hello", commandId }],
+              { cookie },
+              signal,
+            ),
+          ),
+        { signal: abort.signal },
         (event) => {
           if (event.type === "answer") firstText.resolve(event.text);
         },
@@ -91,9 +97,16 @@ test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
       expect(
         await Promise.race([
           firstText.promise,
-          Bun.sleep(5000).then(() => {
-            throw new Error("No live answer before completion");
+          pending.then(() => {
+            throw new Error("The message completed without provisional text");
           }),
+          // The proof checks delivery before provider completion, not a cold
+          // SQL/admission latency SLA. Start this clock at the actual prefix.
+          prefixSent.promise
+            .then(() => Bun.sleep(5000))
+            .then(() => {
+              throw new Error("No live answer before completion");
+            }),
         ]),
       ).toBe("**Hello**");
       const before =
@@ -132,5 +145,5 @@ test.each(["complete", "disconnect", "invalid", "revoked"] as const)(
       await provider.stop(true);
     }
   },
-  30_000,
+  60_000,
 );

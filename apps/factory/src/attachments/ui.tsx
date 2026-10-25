@@ -9,15 +9,21 @@ import {
   untrack,
   useContext,
 } from "solid-js";
-import { z } from "zod";
 import {
   type AttachmentSummary,
+  type AttachmentInput,
   attachmentIDs,
   attachmentMarkdown,
   attachmentSummary,
   attachmentURL,
 } from "../../../../packages/conversation-domain/src/attachments";
-import { apiRequest, apiUpload } from "../api-client";
+import { apiUpload } from "../api-client";
+import {
+  beginAttachment,
+  getAttachmentMetadata,
+  getAttachmentUsage,
+} from "../server-functions/attachments";
+import { serverCall, type ServerValue } from "../server-functions/result";
 import { Icon } from "../icon";
 import { Feedback } from "../ui/feedback";
 import {
@@ -130,10 +136,6 @@ export function useAttachmentProject() {
   }
 }
 const accepted = ".png,.jpg,.jpeg,.webp,.pdf,.docx,.txt,.md,.markdown";
-const uploadUsage = z.object({
-  configured: z.boolean(),
-  limits: z.object({ fileBytes: z.number(), messageBytes: z.number() }),
-});
 type Privacy = "save" | "autosave" | "send" | "personal" | "create" | "feedback";
 function fileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -160,7 +162,7 @@ export function attachmentFileType(file: File) {
       txt: "text/plain",
       md: "text/markdown",
       markdown: "text/markdown",
-    } as Record<string, string>
+    } as Record<string, AttachmentInput["mediaType"]>
   )[extension ?? ""];
 }
 export type AttachmentPickerHandle = {
@@ -202,7 +204,8 @@ export function AttachmentPicker(props: {
   const busy = () => draft().busy;
   const ids = () => attachmentIDs(props.content ?? "");
   const uploaded = () => draft().files.filter((file) => ids().includes(file.id));
-  const [limits, setLimits] = createSignal<z.infer<typeof uploadUsage>["limits"]>();
+  const [limits, setLimits] =
+    createSignal<ServerValue<ReturnType<typeof getAttachmentUsage>>["limits"]>();
   const [limitsFailed, setLimitsFailed] = createSignal(false);
   const [dragging, setDragging] = createSignal(false);
   const isMessage = () => ["send", "personal", "feedback"].includes(props.privacy ?? "save");
@@ -258,7 +261,7 @@ export function AttachmentPicker(props: {
       setLimitsFailed(false);
       let active = true;
       if (id)
-        void apiRequest(uploadUsage, `/api/projects/${id}/attachments`)
+        void serverCall(getAttachmentUsage(id))
           .then((usage) => {
             if (active) setLimits(usage.limits);
           })
@@ -299,7 +302,7 @@ export function AttachmentPicker(props: {
     const rejected: string[] = [];
     drafts.update(key, { busy: true, status: "", error: "", retryFiles: [], attempts, transfers });
     try {
-      const usage = await apiRequest(uploadUsage, `/api/projects/${projectId}/attachments`);
+      const usage = await serverCall(getAttachmentUsage(projectId));
       if (!disposed && identity() === key) setLimits(usage.limits);
       if (!usage.configured)
         throw new Error(
@@ -310,7 +313,7 @@ export function AttachmentPicker(props: {
             referenceIDs.map(
               (id) =>
                 drafts.get(key).files.find((item) => item.id === id) ??
-                apiRequest(attachmentSummary, `/api/attachments/${id}/metadata`),
+                serverCall(getAttachmentMetadata(id)),
             ),
           )
         : [];
@@ -350,22 +353,16 @@ export function AttachmentPicker(props: {
         const attemptKey = `${projectId}:${file.name}:${sha256}`;
         const id = attempts.get(attemptKey) ?? crypto.randomUUID();
         attempts.set(attemptKey, id);
-        const initial = await apiRequest(
-          attachmentSummary,
-          `/api/projects/${projectId}/attachments`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              id,
-              projectId,
-              name: file.name,
-              mediaType,
-              bytes: file.size,
-              sha256,
-              ...(draftId ? { draftId } : {}),
-            }),
-          },
+        const initial = await serverCall(
+          beginAttachment({
+            id,
+            projectId,
+            name: file.name,
+            mediaType,
+            bytes: file.size,
+            sha256,
+            ...(draftId ? { draftId } : {}),
+          }),
         );
         transfer(index, { state: "uploading" });
         drafts.update(key, { status: `Uploading ${file.name}…` });
@@ -473,7 +470,7 @@ export function AttachmentPicker(props: {
         )
           continue;
         requestedMetadata.add(request);
-        void apiRequest(attachmentSummary, `/api/attachments/${id}/metadata`)
+        void serverCall(getAttachmentMetadata(id))
           .then((file) => {
             const current = drafts.get(key);
             if (!current.files.some((item) => item.id === id))

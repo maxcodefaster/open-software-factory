@@ -795,9 +795,6 @@
 .ticket-document.has-review > .visual-review {
   margin-block: var(--space-2) 0;
 }
-.ticket-document.has-review .ticket-status-context {
-  grid-column: 1 / -1;
-}
 .ticket-document.has-review .ticket-status-context .review-thread-count {
   white-space: normal;
 }

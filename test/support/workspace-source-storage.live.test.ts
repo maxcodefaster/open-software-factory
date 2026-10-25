@@ -1,12 +1,16 @@
 import { test } from "bun:test";
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { publishedRuntimeArtifacts, runtimeArtifactsSchema } from "../../scripts/factory/artifacts";
+import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { browserBootstrap, requestFunction } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 
 const enabled = process.env["FACTORY_RUN_SOURCE_STORAGE_PROOF"] === "1";
@@ -69,28 +73,22 @@ function requireProofOwner(
 test.skipIf(!enabled)(
   "canonical RWO source is shared with Sysbox and remains accessible after compute Stop",
   async () => {
+    const published = await publishedRuntimeArtifacts(resolve(".factory"));
+    if (!published) throw new Error("Publish the exact runtime artifacts before the source proof");
+    const image = runtimeArtifactsSchema.parse(published)["workspace-files"];
     const browser = await chromium.launch({ headless: true });
-    const context = await browser.newContext({ baseURL: "http://127.0.0.1:3000" });
+    const context = await browser.newContext({
+      baseURL: process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000",
+    });
     const page = await context.newPage();
     const database = createDatabase(2);
     const kubernetes = createKubernetesClient();
     const projectID = randomUUID();
     const proofID = randomUUID();
     const slug = `source-storage-${projectID.slice(0, 8)}`;
+    const repositoryURL = `file://${resolve(".factory/runtime-fixture-repository")}`;
     const artifacts = resolve(".factory/test-results/source-storage", proofID);
     await mkdir(artifacts, { recursive: true });
-    const metadata: unknown = JSON.parse(
-      await readFile(".factory/workspace-files-proof-metadata.json", "utf8"),
-    );
-    if (
-      typeof metadata !== "object" ||
-      metadata === null ||
-      !("containerimage.digest" in metadata) ||
-      typeof metadata["containerimage.digest"] !== "string" ||
-      !/^sha256:[a-f0-9]{64}$/.test(metadata["containerimage.digest"])
-    )
-      throw new Error("Publish the exact source proof artifact first");
-    const image = `registry.open-factory-envbox-smoke.svc.cluster.local:5000/open-factory/workspace-files@${metadata["containerimage.digest"]}`;
     let created = false;
     let runtime:
       | {
@@ -106,25 +104,43 @@ test.skipIf(!enabled)(
     const sourcePod = "source-proof";
     const sourceSecret = "source-proof-assignment";
     const proofLabel = "factory.dev/source-storage-proof";
+    let admittedID = "";
     let failed = false;
     let cleanupFailure: { cause: unknown } | undefined;
     try {
       await signIn(page);
       await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-      const { session } = await (await page.request.get("/api/session")).json();
+      const { session } = await browserBootstrap(page);
       if (!session) throw new Error("Missing fixture owner");
       await writeFile(
         resolve(artifacts, "intent.json"),
-        JSON.stringify({ proofID, projectID, slug, image }),
+        JSON.stringify({ proofID, projectID, slug, image, repositoryURL }),
       );
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES (${projectID},${slug},'Source storage proof','http://127.0.0.1:33030/factory-mutation/runtime-fixture.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES (${projectID},${slug},'Source storage proof',${repositoryURL},'main','.devcontainer/devcontainer.json',${session.user.id})`;
       created = true;
-      const response = await page.request.post(
-        `/api/projects/${projectID}/personal-workspace/ensure`,
-        { headers: { origin: "http://127.0.0.1:3000" } },
+      const preparedSource = await serverCall(
+        requestFunction(page.request, "ensurePersonalSource", [projectID]),
       );
-      expect(response.ok()).toBe(true);
-      const attempt = runtimeAttemptSchema.parse(await response.json());
+      await expect
+        .poll(
+          async () => {
+            const current = await serverCall(
+              requestFunction(page.request, "getWorkspaceSource", [preparedSource.workspaceID]),
+            );
+            if (current.state === "failed") throw new Error("Owned source preparation failed");
+            return current.state;
+          },
+          { timeout: 150_000, intervals: [1000] },
+        )
+        .toBe("ready");
+      const response = await requestFunction(page.request, "startPersonalWorkspace", [projectID]);
+      expect(response.ok).toBe(true);
+      const attempt = runtimeAttemptSchema.parse(await serverCall(Promise.resolve(response)));
+      admittedID = attempt.id;
+      await writeFile(
+        resolve(artifacts, "admission.json"),
+        JSON.stringify({ proofID, projectID, runtimeAttemptID: admittedID }),
+      );
       await expect
         .poll(
           async () => {
@@ -235,15 +251,26 @@ test.skipIf(!enabled)(
           ],
         },
       });
-      await kubectl([
-        "wait",
-        "pod",
-        sourcePod,
-        "-n",
-        runtime.namespace,
-        "--for=condition=Ready",
-        "--timeout=60s",
-      ]);
+      const sourceNamespace = runtime.namespace;
+      await expect
+        .poll(
+          async () => {
+            const current = JSON.parse(
+              await kubectl(["get", "pod", sourcePod, "-n", sourceNamespace, "-o", "json"]),
+            );
+            requireProofOwner(current, proofID);
+            if (["Failed", "Succeeded"].includes(current.status?.phase))
+              throw new Error("Owned shared-source Pod terminated before readiness");
+            return (
+              current.status?.conditions?.some(
+                (condition: { type: string; status: string }) =>
+                  condition.type === "Ready" && condition.status === "True",
+              ) === true
+            );
+          },
+          { timeout: 150_000, intervals: [1000] },
+        )
+        .toBe(true);
       const source = JSON.parse(
         await kubectl(["get", "pod", sourcePod, "-n", runtime.namespace, "-o", "json"]),
       );
@@ -384,10 +411,8 @@ test.skipIf(!enabled)(
       }
       const runtimeWrite = await (await call("read", { path: "source-proof.txt" })).json();
       expect(Buffer.from(runtimeWrite.content, "base64").toString()).toBe("runtime");
-      const stop = await page.request.post(`/api/runtime-attempts/${runtime.id}/stop`, {
-        headers: { origin: "http://127.0.0.1:3000" },
-      });
-      expect(stop.ok()).toBe(true);
+      const stop = await requestFunction(page.request, "stopRuntimeAttempt", [runtime.id]);
+      expect(stop.ok).toBe(true);
       await expect
         .poll(
           async () =>
@@ -434,9 +459,30 @@ test.skipIf(!enabled)(
       );
     } catch (error) {
       failed = true;
+      if (!admittedID && created) {
+        const [admission] = await database.client<{ id: string }[]>`
+          SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID}
+          ORDER BY generation DESC LIMIT 1`;
+        admittedID = admission?.id ?? "";
+      }
+      const [observed] = admittedID
+        ? await database.client<
+            { id: string; state: string; namespace: string; pod: string }[]
+          >`SELECT id,state,kubernetes_namespace AS namespace,kubernetes_pod_name AS pod
+            FROM factory.runtime_attempt WHERE id=${admittedID}`
+        : [];
+      const pod = observed
+        ? await kubectl(["get", "pod", observed.pod, "-n", observed.namespace, "-o", "json"])
+            .then((raw) => {
+              const current = JSON.parse(raw);
+              return { uid: current.metadata.uid, status: current.status };
+            })
+            .catch(() => null)
+        : null;
       await writeFile(
         resolve(artifacts, "failure.json"),
-        JSON.stringify({ proofID, error: String(error), runtime }),
+        JSON.stringify({ proofID, error: String(error), runtime, observed, pod }),
+        { mode: 0o600 },
       );
       throw error;
     } finally {
@@ -486,23 +532,30 @@ test.skipIf(!enabled)(
           await expect
             .poll(
               async () => {
-                const pod = await kubernetes.getPod(owned.namespace, sourcePod);
-                return pod === null;
+                const pod = await kubectl([
+                  "get",
+                  "pod",
+                  sourcePod,
+                  "-n",
+                  owned.namespace,
+                  "--ignore-not-found",
+                  "-o",
+                  "name",
+                ]);
+                return pod === "";
               },
               { timeout: 60_000 },
             )
             .toBe(true);
-          await kubernetes.deleteNamespace({
-            namespace: runtime.namespace,
-            namespaceUID: runtime.namespaceUID,
-            podName: runtime.pod,
-            attemptID: runtime.id,
-            generation: runtime.generation,
-            uid: null,
-            ownerID: runtime.workspaceID,
-          });
         }
-        if (created) await deleteFactoryProject(projectID);
+        if (created) {
+          // Compute Stop deliberately retains the canonical source and PVC.
+          // Stop that source before the owned fixture removes its storage.
+          await removeOwnedProjectSources(database, projectID, (workspaceID) =>
+            serverCall(requestFunction(page.request, "stopWorkspaceSource", [workspaceID])),
+          );
+          await deleteFactoryProject(projectID, database);
+        }
         await writeFile(
           resolve(artifacts, "cleanup.json"),
           JSON.stringify({

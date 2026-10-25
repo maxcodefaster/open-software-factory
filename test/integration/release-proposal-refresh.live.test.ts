@@ -5,6 +5,12 @@ import { conversationViewSchema, ticketDetailSchema } from "../../apps/factory/s
 import { markdownHTML } from "../../apps/factory/src/markdown";
 import { requirementContentInput } from "../../packages/requirement-domain/src/content";
 import { releaseInstallation } from "../fixtures/release-installation";
+import {
+  callFactoryFunction,
+  mockFactoryFunctions,
+  completedConversation,
+} from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
 test.skipIf(!installation)(
@@ -49,31 +55,51 @@ for (const action of ["message", "answer"] as const) {
         if (!projectID || !ticketID) throw new Error("Release Project and Ticket required");
         const cookie = await fixture.login("developer");
         const detail = ticketDetailSchema.parse(
-          await fixture.command(cookie, `/api/tickets/${ticketID}`),
+          await serverCall(
+            callFactoryFunction(fixture.base, "getTicketDetail", [ticketID], { cookie }),
+          ),
         );
         const revision = detail.revisions[0];
         if (!revision) throw new Error("Existing real Plan proposal required");
         const requirement = requirementContentInput.parse(JSON.parse(revision.canonicalContent));
-        const path = `/api/projects/${projectID}/conversation`;
         const proposal = conversationViewSchema.parse(
-          await fixture.command(cookie, `${path}?ticketId=${ticketID}`),
+          await serverCall(
+            callFactoryFunction(
+              fixture.base,
+              "getConversation",
+              [projectID, { ticketId: ticketID }],
+              { cookie: cookie },
+            ),
+          ),
         );
         const question = proposal.entries.find((entry) => entry.kind === "question");
         if (!question) throw new Error("Existing real interview question required");
         const page = await fixture.page("developer");
         let ticketReads = 0;
-        await page.route(`**/api/tickets/${ticketID}`, (route) => {
-          ticketReads += 1;
-          return route.fulfill({ json: ticketReads === 1 ? { ...detail, revisions: [] } : detail });
+        await mockFactoryFunctions(page, {
+          tickets: {
+            async detail() {
+              ticketReads += 1;
+              return ticketReads === 1 ? { ...detail, revisions: [] } : detail;
+            },
+          },
         });
-        await page.route(`**/api/projects/${projectID}/conversation?*`, (route) =>
-          route.fulfill({
-            json: { ...proposal, mode: "plan", entries: action === "answer" ? [question] : [] },
-          }),
-        );
-        await page.route(`**/api/projects/${projectID}/conversation/${action}`, (route) =>
-          route.fulfill({ json: proposal }),
-        );
+        await mockFactoryFunctions(page, {
+          conversations: {
+            get: async () =>
+              conversationViewSchema.nullable().parse({
+                ...proposal,
+                mode: "plan",
+                entries: action === "answer" ? [question] : [],
+              }),
+          },
+        });
+        await mockFactoryFunctions(page, {
+          conversations:
+            action === "message"
+              ? { message: async () => completedConversation(proposal) }
+              : { answer: async () => proposal },
+        });
         await fixture.selectProject(page);
         await page
           .locator(".ticket-card-body")

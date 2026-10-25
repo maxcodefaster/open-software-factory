@@ -1,3 +1,5 @@
+import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
@@ -100,9 +102,12 @@ for (const touch of [false, true]) {
           INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at)
           VALUES(${crypto.randomUUID()},${projectId},${commit},'succeeded',${admin.id},now())
         `;
-        await page.route(`**/api/projects/${projectId}/knowledge/documents*`, (route) =>
-          route.fulfill({ json: { commitSha: commit, documents: [] } }),
-        );
+        await mockFactoryFunctions(page, {
+          knowledge: {
+            documents: async () =>
+              repositoryDocumentsSchema.parse({ commitSha: commit, documents: [] }),
+          },
+        });
         await openProjectMenu(page);
         await page.getByRole("button").filter({ hasText: slug }).click();
         await page.getByRole("button", { name: "Settings", exact: true }).click();

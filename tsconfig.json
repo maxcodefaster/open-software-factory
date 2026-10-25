@@ -5,7 +5,12 @@
     "jsxImportSource": "@solidjs/web",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "noEmit": true,
-    "types": ["bun", "vite/client", "@solidjs/vite-plugin/boundary-modules"]
+    "types": [
+      "bun",
+      "vite/client",
+      "@solidjs/vite-plugin/boundary-modules",
+      "@solidjs/vite-plugin/virtual-solid-manifest"
+    ]
   },
   "include": [
     "apps/**/*.ts",

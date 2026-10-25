@@ -1,25 +1,32 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import { z } from "zod";
 import {
-  type ReviewFeedback,
-  type VisualReview,
   feedbackCreateInput,
   feedbackDispatchInput,
   feedbackUpdateInput,
   pendingReviewThreads,
+  type ReviewFeedback,
   reviewRegion,
-  visualReviewSchema,
+  type VisualReview,
 } from "../../../../packages/conversation-domain/src/visual-review";
-import { APIRequestError, apiRequest, emptyResponseSchema } from "../api-client";
+import { APIRequestError } from "../api-client";
+import { attachmentText, readAttachmentContent } from "../attachments/composer";
+import { TextareaAttachments } from "../attachments/ui";
 import { Icon } from "../icon";
+import { markdownHTML } from "../markdown";
 import { bindPopoverKeyboard } from "../popover-keyboard";
+import { serverCall } from "../server-functions/result";
+import {
+  createReviewFeedback,
+  getVisualReview,
+  sendReviewRevision,
+  updateReviewFeedback,
+} from "../server-functions/review";
 import { TicketActionBar } from "../ticket-action-bar";
 import { ReviewComposer } from "./composer";
-import { TextareaAttachments } from "../attachments/ui";
-import { attachmentText, readAttachmentContent } from "../attachments/composer";
-import { markdownHTML } from "../markdown";
-import { ReviewPlayerControls } from "./player-controls";
+import { reviewMediaURL, uploadReviewStill } from "./media-client";
 import { reviewTime, scenarioAt } from "./playback";
+import { ReviewPlayerControls } from "./player-controls";
 import "./review.css";
 
 const pendingCommand = z.discriminatedUnion("action", [
@@ -130,12 +137,12 @@ export function ReviewPanel(props: {
   let generation = 0;
   let inFlight = false;
   let readSequence = 0;
+  let pendingRead: Promise<void> | undefined;
   let retry: z.infer<typeof pendingCommand> | undefined;
   const commandKey = () => `factory:visual-review:${props.userID}:${props.changeID}:command`;
   const viewKey = () =>
     `${props.userID}:${props.changeID}:${props.compact ? (props.viewID ?? "preview") : "ticket"}`;
-  const path = () => `/api/changes/${props.changeID}/review`;
-  const mediaURL = (id: string) => `${path()}/media/${id}`;
+  const mediaURL = (id: string) => reviewMediaURL(props.changeID, id);
   const readOnly = () => Boolean(props.readOnly || view()?.readOnly);
   createEffect(
     () => body(),
@@ -151,27 +158,40 @@ export function ReviewPanel(props: {
     const id = recordingIdentity();
     return id ? mediaURL(id) : undefined;
   });
-  async function refresh() {
+  function refresh(fresh = false): Promise<void> {
+    // A slow read must still be publishable when the next poll ticks. Commands
+    // and explicit cross-view changes supersede reads begun before their save.
+    if (pendingRead && !fresh) return pendingRead;
     const epoch = generation;
     const sequence = ++readSequence;
-    let result: VisualReview;
-    try {
-      result = await apiRequest(visualReviewSchema, path());
-    } catch (cause) {
-      if (epoch === generation && sequence === readSequence && !view()) setLoadFailed(true);
-      throw cause;
-    }
-    if (epoch !== generation || sequence !== readSequence) return;
-    setLoadFailed(false);
-    setView(result);
-    props.onThreadCount?.(
-      result.feedback.filter((item) => item.kind === "thread" && item.state !== "resolved").length,
-    );
-    props.onFeedback?.(result.feedback, Boolean(result.readOnly));
+    const request = (async () => {
+      let result: VisualReview;
+      try {
+        result = await serverCall(getVisualReview(props.changeID));
+      } catch (cause) {
+        if (epoch === generation && sequence === readSequence && !view()) setLoadFailed(true);
+        throw cause;
+      }
+      if (epoch !== generation || sequence !== readSequence) return;
+      setLoadFailed(false);
+      setView(result);
+      props.onThreadCount?.(
+        result.feedback.filter((item) => item.kind === "thread" && item.state !== "resolved")
+          .length,
+      );
+      props.onFeedback?.(result.feedback, Boolean(result.readOnly));
+    })();
+    pendingRead = request;
+    const settled = () => {
+      if (pendingRead === request) pendingRead = undefined;
+    };
+    void request.then(settled, settled);
+    return request;
   }
   createEffect(scopeIdentity, () => {
     const key = viewKey();
-    generation++;
+    const scopeGeneration = ++generation;
+    pendingRead = undefined;
     retry = undefined;
     inFlight = false;
     setBusy(false);
@@ -214,10 +234,13 @@ export function ReviewPanel(props: {
         "A saved review request could not be restored. Check the coding history before sending a new correction.",
       );
     }
-    void refresh().catch(() => setError("Review could not load. Reload review to retry."));
+    void refresh().catch(() => {
+      if (generation === scopeGeneration)
+        setError("Review could not load. Reload review to retry.");
+    });
     const changed = (event: Event) => {
       if ((event as CustomEvent<string>).detail === props.changeID && props.active !== false)
-        void refresh().catch(() => {});
+        void refresh(true).catch(() => {});
     };
     window.addEventListener("factory-review-changed", changed);
     const timer = setInterval(() => {
@@ -415,11 +438,11 @@ export function ReviewPanel(props: {
       retry ??= pendingCommand.parse({ action, input });
       sessionStorage.setItem(key, JSON.stringify(retry));
       const current = retry;
-      await apiRequest(emptyResponseSchema, `${path()}/${current.action}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(current.input),
-      });
+      if (current.action === "feedback")
+        await serverCall(createReviewFeedback(props.changeID, current.input));
+      else if (current.action === "update")
+        await serverCall(updateReviewFeedback(props.changeID, current.input));
+      else await serverCall(sendReviewRevision(props.changeID, current.input));
       sessionStorage.removeItem(key);
       if (epoch !== generation) return false;
       retry = undefined;
@@ -434,9 +457,10 @@ export function ReviewPanel(props: {
       } else if (current.action === "send") {
         setNotice("Revision requested. Threads stay open for your recheck.");
       }
-      await refresh().catch(() =>
-        setError("Saved, but the latest review could not load. Reload review to refresh it."),
-      );
+      await refresh(true).catch(() => {
+        if (epoch === generation)
+          setError("Saved, but the latest review could not load. Reload review to refresh it.");
+      });
       window.dispatchEvent(new CustomEvent("factory-review-changed", { detail: props.changeID }));
       return true;
     } catch (cause) {
@@ -446,7 +470,7 @@ export function ReviewPanel(props: {
         if (cause instanceof APIRequestError && cause.status >= 400 && cause.status < 500) {
           retry = undefined;
           sessionStorage.removeItem(key);
-          void refresh().catch(() => {});
+          void refresh(true).catch(() => {});
         }
         setError(
           cause instanceof Error ? cause.message : "Review could not save. Retry the same command.",
@@ -472,19 +496,12 @@ export function ReviewPanel(props: {
       try {
         let media: { id: string; page?: string | undefined } | undefined;
         if (frozen.frame) {
-          const form = new FormData();
-          form.set("id", frozen.id);
-          form.set("frame", frozen.frame, "frame.jpg");
-          form.set("context", JSON.stringify(frozen.context));
           try {
-            media = await apiRequest(
-              z.object({ id: z.uuid(), page: z.string().optional() }),
-              `${path()}/stills`,
-              {
-                method: "POST",
-                body: form,
-              },
-            );
+            media = await uploadReviewStill(props.changeID, {
+              id: frozen.id,
+              frame: frozen.frame,
+              context: frozen.context,
+            });
           } catch (cause) {
             if (frozen.context.source === "recording") throw cause;
             setNotice("Context image could not save. The Preview anchor is retained.");
@@ -818,13 +835,11 @@ export function ReviewPanel(props: {
                       <div class="review-video-empty">
                         <h4>QA recording</h4>
                         <p>
-                          {!view()?.recordingEnabled
-                            ? "Recording is disabled for this Project."
-                            : view()?.recording?.state === "deleted"
-                              ? "This QA video was removed. Original comment frames and feedback remain."
-                              : ["recording", "intended"].includes(view()?.recording?.state ?? "")
-                                ? "Recording the current QA flow. The video becomes available when capture finishes."
-                                : (view()?.recording?.reason ?? "No complete QA recording yet.")}
+                          {view()?.recording?.state === "deleted"
+                            ? "This QA video was removed. Original comment frames and feedback remain."
+                            : ["recording", "intended"].includes(view()?.recording?.state ?? "")
+                              ? "Recording the current QA flow. The video becomes available when capture finishes."
+                              : (view()?.recording?.reason ?? "No complete QA recording yet.")}
                         </p>
                         <p>Video availability does not change the QA result.</p>
                       </div>

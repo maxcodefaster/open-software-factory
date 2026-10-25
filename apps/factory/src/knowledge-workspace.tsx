@@ -489,19 +489,12 @@ export function KnowledgeWorkspace(props: {
                   class="knowledge-document historical-document"
                   aria-label="Selected knowledge revision"
                 >
-                  <header class="knowledge-heading">
-                    <WorkspaceActionBar
-                      label="Wiki revision actions"
-                      leading={navigationTitle()}
-                      status={
-                        <small>
-                          {revision().kind === "human"
-                            ? (revision().author ?? "Human edit")
-                            : "AI update"}{" "}
-                          · {new Date(revision().createdAt).toLocaleString()}
-                        </small>
-                      }
-                    >
+                  <header class="knowledge-heading workspace-heading">
+                    <div class="knowledge-title-row workspace-heading-title">
+                      <Icon name={props.selectedPage?.icon ?? "knowledge"} />
+                      <h2>{revision().title}</h2>
+                    </div>
+                    <WorkspaceActionBar label="Wiki revision actions" leading={navigationTitle()}>
                       <Show
                         when={
                           props.canDevelop &&
@@ -538,10 +531,12 @@ export function KnowledgeWorkspace(props: {
                         </button>
                       </Show>
                     </WorkspaceActionBar>
-                    <div class="knowledge-title-row">
-                      <Icon name={props.selectedPage?.icon ?? "knowledge"} />
-                      <h2>{revision().title}</h2>
-                    </div>
+                    <small class="workspace-heading-meta">
+                      {revision().kind === "human"
+                        ? (revision().author ?? "Human edit")
+                        : "AI update"}{" "}
+                      · {new Date(revision().createdAt).toLocaleString()}
+                    </small>
                   </header>
                   <MarkdownReader
                     class="knowledge-article markdown-body"
@@ -558,28 +553,50 @@ export function KnowledgeWorkspace(props: {
               )}
             </Show>
             <div class="knowledge-document" hidden={Boolean(historicalRevision())}>
-              <header class="knowledge-heading">
-                <WorkspaceActionBar
-                  label="Wiki actions"
-                  leading={navigationTitle()}
-                  status={
-                    <Show when={!props.openDocument}>
-                      <SaveFeedback
-                        state={
-                          saveState() === "failed" || saveError()
-                            ? "error"
-                            : saveState() === "saving"
-                              ? "saving"
-                              : dirty()
-                                ? "dirty"
-                                : saveState() === "saved"
-                                  ? "saved"
-                                  : "idle"
-                        }
+              <header class="knowledge-heading workspace-heading">
+                <div class="knowledge-title-row workspace-heading-title">
+                  <Show
+                    when={!props.openDocument && props.selectedPage}
+                    fallback={<Icon name="ticket" />}
+                  >
+                    {(page) => (
+                      <PageOrganization
+                        page={page()}
+                        pages={props.pages}
+                        onMove={props.onMove}
+                        onIcon={props.onIcon}
                       />
-                    </Show>
-                  }
-                >
+                    )}
+                  </Show>
+                  <Show
+                    when={editing() && !props.openDocument}
+                    fallback={
+                      <h2 aria-label={props.openDocument?.title ?? draftTitle()}>
+                        <Show when={!props.openDocument} fallback={props.openDocument?.title}>
+                          <button
+                            type="button"
+                            class="knowledge-title-button"
+                            aria-label="Edit Knowledge title"
+                            onClick={beginEdit}
+                          >
+                            {draftTitle()}
+                          </button>
+                        </Show>
+                      </h2>
+                    }
+                  >
+                    <textarea
+                      aria-label="Knowledge page title"
+                      rows={1}
+                      value={draftTitle()}
+                      onInput={(event) => changeDraft("title", event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") event.preventDefault();
+                      }}
+                    />
+                  </Show>
+                </div>
+                <WorkspaceActionBar label="Wiki actions" leading={navigationTitle()}>
                   <div class="knowledge-page-actions" ref={pageMenu}>
                     <Show when={props.selectedPage && !props.openDocument}>
                       <button
@@ -730,48 +747,23 @@ export function KnowledgeWorkspace(props: {
                     </button>
                   </Show>
                 </WorkspaceActionBar>
-                <div class="knowledge-title-row">
-                  <Show
-                    when={!props.openDocument && props.selectedPage}
-                    fallback={<Icon name="ticket" />}
-                  >
-                    {(page) => (
-                      <PageOrganization
-                        page={page()}
-                        pages={props.pages}
-                        onMove={props.onMove}
-                        onIcon={props.onIcon}
-                      />
-                    )}
-                  </Show>
-                  <Show
-                    when={editing() && !props.openDocument}
-                    fallback={
-                      <h2 aria-label={props.openDocument?.title ?? draftTitle()}>
-                        <Show when={!props.openDocument} fallback={props.openDocument?.title}>
-                          <button
-                            type="button"
-                            class="knowledge-title-button"
-                            aria-label="Edit Knowledge title"
-                            onClick={beginEdit}
-                          >
-                            {draftTitle()}
-                          </button>
-                        </Show>
-                      </h2>
-                    }
-                  >
-                    <textarea
-                      aria-label="Knowledge page title"
-                      rows={1}
-                      value={draftTitle()}
-                      onInput={(event) => changeDraft("title", event.currentTarget.value)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter") event.preventDefault();
-                      }}
+                <Show when={!props.openDocument}>
+                  <div class="workspace-heading-meta">
+                    <SaveFeedback
+                      state={
+                        saveState() === "failed" || saveError()
+                          ? "error"
+                          : saveState() === "saving"
+                            ? "saving"
+                            : dirty()
+                              ? "dirty"
+                              : saveState() === "saved"
+                                ? "saved"
+                                : "idle"
+                      }
                     />
-                  </Show>
-                </div>
+                  </div>
+                </Show>
               </header>
               <Show when={saveState() === "failed" || saveError()}>
                 <div class="knowledge-save-error" role="alert">

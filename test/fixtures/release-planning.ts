@@ -4,12 +4,16 @@ import { expect as visible, type Page, type Response } from "@playwright/test";
 import {
   conversationViewSchema,
   type ConversationView,
+  type ConversationStreamEvent,
   ticketDetailSchema,
 } from "../../apps/factory/src/api-contracts";
 import { markdownHTML } from "../../apps/factory/src/markdown";
 import { interviewQuestionInput } from "../../packages/conversation-domain/src/conversation";
 import { requirementContentInput } from "../../packages/requirement-domain/src/content";
 import type { releaseInstallation } from "./release-installation";
+import { callFactoryFunction, decodeBrowserFunction } from "./server-functions";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { streamConversation } from "../../apps/factory/src/conversation-stream";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 
@@ -18,6 +22,7 @@ export async function releasePlanning(fixture: Fixture) {
   const { projectID, ticketID } = state;
   if (!projectID || !ticketID || !state.completed.includes("setup"))
     throw new Error("Release setup must complete before planning");
+  const scopedProjectID = projectID;
   const cookie = await fixture.login("developer");
   const page = await fixture.page("developer");
   await fixture.selectProject(page);
@@ -27,29 +32,46 @@ export async function releasePlanning(fixture: Fixture) {
     .filter({ hasText: `TCK-${ticketID.slice(0, 6).toUpperCase()}` })
     .click();
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
-  const conversationPath = `/api/projects/${projectID}/conversation`;
   async function conversation() {
     return conversationViewSchema
       .nullable()
-      .parse(await fixture.command(cookie, `${conversationPath}?ticketId=${ticketID}`));
+      .parse(
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "getConversation",
+            [scopedProjectID, { ticketId: ticketID }],
+            { cookie: cookie },
+          ),
+        ),
+      );
   }
-  async function result(response: Response) {
-    const body: unknown = await response.json();
+  async function result(response: Response, message = false) {
+    const body = message
+      ? await streamConversation(
+          () =>
+            serverCall(
+              decodeBrowserFunction<ServerResult<ReadableStream<ConversationStreamEvent>>>(
+                response,
+              ),
+            ),
+          {},
+          () => {},
+        )
+      : await serverCall(decodeBrowserFunction<ServerResult<ConversationView>>(response));
     fixture.noSecrets(JSON.stringify(body));
-    if (!response.ok())
-      throw new Error(`Release planning UI command returned ${response.status()}`);
     return conversationViewSchema.parse(body);
   }
   async function message(text: string) {
     await page.getByRole("textbox", { name: "Message conversation", exact: true }).fill(text);
     const response = page.waitForResponse(
       (value) =>
-        new URL(value.url()).pathname === `${conversationPath}/message` &&
+        new URL(value.url()).pathname.startsWith("/_server/data/sendConversationMessage-") &&
         value.request().method() === "POST",
       { timeout: 120_000 },
     );
     await page.getByRole("button", { name: "Send message", exact: true }).click();
-    return result(await response);
+    return result(await response, true);
   }
   async function screenshot(name: string) {
     await page.mouse.move(0, 0);
@@ -100,7 +122,7 @@ export async function releasePlanning(fixture: Fixture) {
   async function answer(form: ReturnType<Page["locator"]>) {
     const response = page.waitForResponse(
       (value) =>
-        new URL(value.url()).pathname === `${conversationPath}/answer` &&
+        new URL(value.url()).pathname.startsWith("/_server/data/answerConversationQuestion-") &&
         value.request().method() === "POST",
       { timeout: 120_000 },
     );
@@ -145,7 +167,9 @@ export async function releasePlanning(fixture: Fixture) {
   if (!state.completed.includes("spec")) {
     const started = performance.now();
     const original = ticketDetailSchema.parse(
-      await fixture.command(cookie, `/api/tickets/${ticketID}`),
+      await serverCall(
+        callFactoryFunction(fixture.base, "getTicketDetail", [ticketID], { cookie }),
+      ),
     );
     const latest = original.revisions[0];
     if (!latest) throw new Error("Real Plan did not produce an immutable Requirement");
@@ -172,7 +196,9 @@ export async function releasePlanning(fixture: Fixture) {
     await page.getByRole("button", { name: "Save revision", exact: true }).click();
     await visible(page.getByRole("button", { name: "Save revision", exact: true })).toBeHidden();
     const edited = ticketDetailSchema.parse(
-      await fixture.command(cookie, `/api/tickets/${ticketID}`),
+      await serverCall(
+        callFactoryFunction(fixture.base, "getTicketDetail", [ticketID], { cookie }),
+      ),
     );
     expect(edited.revisions).toHaveLength(original.revisions.length + 1);
     for (const revision of original.revisions)
@@ -181,7 +207,9 @@ export async function releasePlanning(fixture: Fixture) {
     await page.getByRole("button", { name: "Approve", exact: true }).click();
     await visible(summary).toHaveAttribute("aria-readonly", "true");
     const approved = ticketDetailSchema.parse(
-      await fixture.command(cookie, `/api/tickets/${ticketID}`),
+      await serverCall(
+        callFactoryFunction(fixture.base, "getTicketDetail", [ticketID], { cookie }),
+      ),
     );
     expect(approved.revisions[0]?.id).toBe(state.editedRevisionID);
     expect(approved.revisions[0]?.approvalId).toBeDefined();

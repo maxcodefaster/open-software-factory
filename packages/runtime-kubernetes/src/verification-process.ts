@@ -5,7 +5,7 @@ const { spawn } = require("node:child_process");
 const { openSync } = require("node:fs");
 const directory = require("node:os").homedir() + "/.factory-runner/";
 const log = openSync(directory + "runner.log", "a", 0o600);
-const runner = spawn("/opt/factory/forgejo-runner", ["one-job", "--wait", "--config", directory + "config.yml"], {
+const runner = spawn("/opt/factory/forgejo-runner", ["one-job", "--wait", ...(process.env.FACTORY_RUNNER_HANDLE ? ["--handle", process.env.FACTORY_RUNNER_HANDLE] : []), "--config", directory + "config.yml"], {
   stdio: ["ignore", log, log],
 });
 let healthy = false;

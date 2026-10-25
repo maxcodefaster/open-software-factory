@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import type { ServerResult } from "../../apps/factory/src/server-functions/result";
+import { factoryFunctionRequest } from "../fixtures/server-functions";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -190,21 +193,20 @@ async function fixture(live = false) {
       .getSetCookie()
       .map((item) => item.split(";")[0])
       .join("; ");
-    const command = (
-      path: string,
-      method: string,
-      body?: unknown,
+    const command = async (
+      name: string,
+      args: unknown[],
       actor: "system" | "developer" = "system",
-    ) =>
-      fetch(`${processFixture.base}${path}`, {
-        method,
-        headers: {
+    ): Promise<ServerResult<unknown>> => {
+      const response = await fetch(
+        await factoryFunctionRequest(processFixture.base, name, args, {
           cookie: actor === "system" ? cookie : developerCookie,
-          origin: processFixture.base,
-          "content-type": "application/json",
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
+        }),
+      );
+      const result = await decodeResponse<ServerResult<unknown>>(response);
+      if (!result) throw new Error("Owned Skill function returned no result");
+      return result as ServerResult<unknown>;
+    };
     return {
       database,
       userID,
@@ -245,23 +247,23 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
       content: requirementsInterviewSkill,
     };
     expect(
-      (
-        await owned.command("/api/admin/skills", "POST", {
+      await owned.command("publishSkill", [
+        {
           ...publication,
           content: { ...requirementsInterviewSkill, scripts: ["run.sh"] },
-        })
-      ).status,
-    ).toBe(400);
-    expect((await owned.command("/api/admin/skills", "POST", publication)).status).toBe(201);
-    expect((await owned.command("/api/admin/skills", "POST", publication)).status).toBe(201);
+        },
+      ]),
+    ).toMatchObject({ ok: false, status: 400 });
+    expect(await owned.command("publishSkill", [publication])).toMatchObject({ ok: true });
+    expect(await owned.command("publishSkill", [publication])).toMatchObject({ ok: true });
     expect(
-      (
-        await owned.command("/api/admin/skills", "POST", {
+      await owned.command("publishSkill", [
+        {
           ...publication,
           content: { ...requirementsInterviewSkill, name: "Different input" },
-        })
-      ).status,
-    ).toBe(409);
+        },
+      ]),
+    ).toMatchObject({ ok: false, status: 409 });
     const { settings } = await owned.skills.getSystem(administrator);
     await expect(
       owned.skills.publish(
@@ -286,13 +288,13 @@ test("System publication is immutable, idempotent and role-scoped; Plan really l
       ),
     ).rejects.toMatchObject({ code: "forbidden" });
     expect(
-      (
-        await owned.command("/api/admin/skills/settings", "PUT", {
+      await owned.command("saveSystemSkills", [
+        {
           ...settings,
           planning: { required: [id], optional: [], selected: [] },
-        })
-      ).status,
-    ).toBe(200);
+        },
+      ]),
+    ).toMatchObject({ ok: true });
     const commandID = crypto.randomUUID();
     await owned.agent.setMode(owned.projectID, undefined, "plan", owned.userID);
     await owned.agent.message(
@@ -468,10 +470,7 @@ test("withdrawn content remains exact for a pending admitted Plan; fresh work bl
     );
     expect(unchanged.content.instructions).toBe(requirementsInterviewSkill.instructions);
     expect(unchanged.published).toBe(false);
-    expect(
-      (await owned.command(`/api/admin/skills/${id}/publication`, "PUT", { published: true }))
-        .status,
-    ).toBe(200);
+    expect(await owned.command("setSkillPublication", [id, true])).toMatchObject({ ok: true });
     await owned.agent.message(
       owned.projectID,
       undefined,
@@ -515,39 +514,37 @@ test("scoped Skill commands enforce required baselines, permitted optional choic
       },
       administrator,
     );
-    const url = `/api/projects/${owned.projectID}/skill-settings`;
     const view = await owned.skills.getInherited(owned.projectID, owned.userID);
     expect(view.effective.planning.required).toEqual([{ revisionId: baseline, source: "system" }]);
-    expect((await owned.command("/api/admin/skills", "GET", undefined, "developer")).status).toBe(
-      403,
-    );
-    expect((await owned.command(url, "PUT", view.project, "developer")).status).toBe(403);
+    expect(await owned.command("getSystemSkills", [], "developer")).toMatchObject({
+      ok: false,
+      status: 403,
+    });
     expect(
-      (
-        await owned.command(
-          `${url}/personal`,
-          "PUT",
-          { ...view.personal, required: [] },
-          "developer",
-        )
-      ).status,
-    ).toBe(400);
+      await owned.command("saveProjectSkills", [owned.projectID, view.project], "developer"),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(
-      (
-        await owned.command(
-          `${url}/personal`,
-          "PUT",
-          { ...view.personal, planning: [baseline] },
-          "developer",
-        )
-      ).status,
-    ).toBe(409);
+      await owned.command(
+        "savePersonalSkills",
+        [owned.projectID, { ...view.personal, required: [] }],
+        "developer",
+      ),
+    ).toMatchObject({ ok: false, status: 400 });
+    expect(
+      await owned.command(
+        "savePersonalSkills",
+        [owned.projectID, { ...view.personal, planning: [baseline] }],
+        "developer",
+      ),
+    ).toMatchObject({ ok: false, status: 409 });
     const personal = { ...view.personal, planning: [spare] };
     const concurrent = await Promise.all([
-      owned.command(`${url}/personal`, "PUT", personal, "developer"),
-      owned.command(`${url}/personal`, "PUT", personal, "developer"),
+      owned.command("savePersonalSkills", [owned.projectID, personal], "developer"),
+      owned.command("savePersonalSkills", [owned.projectID, personal], "developer"),
     ]);
-    expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
+    expect(concurrent.map((response) => (response.ok ? 200 : response.status)).sort()).toEqual([
+      200, 409,
+    ]);
     expect(
       (await owned.skills.getInherited(owned.projectID, owned.userID)).effective.planning.selected,
     ).toEqual([spare]);
@@ -560,108 +557,92 @@ test("scoped Skill commands enforce required baselines, permitted optional choic
       ...view.project,
       planning: { required: [], optional: [optional], selected: null },
     };
-    expect((await owned.command(url, "PUT", narrowed, "developer")).status).toBe(200);
-    expect((await owned.command(url, "PUT", narrowed, "developer")).status).toBe(409);
+    expect(
+      await owned.command("saveProjectSkills", [owned.projectID, narrowed], "developer"),
+    ).toMatchObject({ ok: true });
+    expect(
+      await owned.command("saveProjectSkills", [owned.projectID, narrowed], "developer"),
+    ).toMatchObject({ ok: false, status: 409 });
     const afterRestriction = await owned.skills.getInherited(owned.projectID, owned.userID);
     expect(afterRestriction.effective.planning.selected).toEqual([]);
     expect(afterRestriction.effective.planning.ignoredReason).not.toBeNull();
     expect(
-      (
-        await owned.command(
-          `${url}/personal`,
-          "PUT",
-          { ...afterRestriction.personal, planning: null },
-          "developer",
-        )
-      ).status,
-    ).toBe(200);
+      await owned.command(
+        "savePersonalSkills",
+        [owned.projectID, { ...afterRestriction.personal, planning: null }],
+        "developer",
+      ),
+    ).toMatchObject({ ok: true });
     expect(
       (await owned.skills.getInherited(owned.projectID, owned.userID)).effective.planning.selected,
     ).toEqual([optional]);
     const latest = await owned.skills.getInherited(owned.projectID, owned.userID);
     expect(
-      (
-        await owned.command(
-          url,
-          "PUT",
+      await owned.command(
+        "saveProjectSkills",
+        [
+          owned.projectID,
           { ...latest.project, planning: { required: [baseline], optional: null, selected: null } },
-          "developer",
-        )
-      ).status,
-    ).toBe(409);
+        ],
+        "developer",
+      ),
+    ).toMatchObject({ ok: false, status: 409 });
     expect(
-      (
-        await owned.command(
-          url,
-          "PUT",
+      await owned.command(
+        "saveProjectSkills",
+        [
+          owned.projectID,
           {
             ...latest.project,
             planning: { required: [optional], optional: [spare], selected: [spare] },
           },
-          "developer",
-        )
-      ).status,
-    ).toBe(200);
+        ],
+        "developer",
+      ),
+    ).toMatchObject({ ok: true });
     const promoted = await owned.skills.getInherited(owned.projectID, owned.userID);
     expect(promoted.effective.planning.required).toEqual([
       { revisionId: baseline, source: "system" },
       { revisionId: optional, source: "project" },
     ]);
     expect(
-      (
-        await owned.command(
-          `${url}/personal`,
-          "PUT",
-          { ...promoted.personal, planning: [] },
-          "developer",
-        )
-      ).status,
-    ).toBe(200);
+      await owned.command(
+        "savePersonalSkills",
+        [owned.projectID, { ...promoted.personal, planning: [] }],
+        "developer",
+      ),
+    ).toMatchObject({ ok: true });
     expect(
       (await owned.skills.getInherited(owned.projectID, owned.userID)).effective.planning.required,
     ).toHaveLength(2);
     await owned.skills.setPublication(spare, false, administrator);
     const withdrawn = await owned.skills.getInherited(owned.projectID, owned.userID);
     expect(
-      (
-        await owned.command(
-          `${url}/personal`,
-          "PUT",
-          { ...withdrawn.personal, planning: [spare] },
-          "developer",
-        )
-      ).status,
-    ).toBe(409);
+      await owned.command(
+        "savePersonalSkills",
+        [owned.projectID, { ...withdrawn.personal, planning: [spare] }],
+        "developer",
+      ),
+    ).toMatchObject({ ok: false, status: 409 });
     const otherProject = crypto.randomUUID();
     await owned.database
       .client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${otherProject}, ${`other-${otherProject.slice(0, 8)}`}, 'Other Project', 'https://example.invalid/other.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
+    expect(await owned.command("getInheritedSkills", [otherProject], "developer")).toMatchObject({
+      ok: false,
+      status: 404,
+    });
     expect(
-      (
-        await owned.command(
-          `/api/projects/${otherProject}/skill-settings`,
-          "GET",
-          undefined,
-          "developer",
-        )
-      ).status,
-    ).toBe(404);
-    expect(
-      (
-        await owned.command(
-          `/api/projects/${otherProject}/skill-settings`,
-          "PUT",
-          view.project,
-          "developer",
-        )
-      ).status,
-    ).toBe(404);
+      await owned.command("saveProjectSkills", [otherProject, view.project], "developer"),
+    ).toMatchObject({ ok: false, status: 404 });
     await owned.database
       .client`DELETE FROM factory.project_membership WHERE project_id = ${owned.projectID} AND user_id = ${owned.userID}`;
-    expect((await owned.command(url, "GET", undefined, "developer")).status).toBe(404);
+    expect(await owned.command("getInheritedSkills", [owned.projectID], "developer")).toMatchObject(
+      { ok: false, status: 404 },
+    );
     expect(
-      (await owned.command(`${url}/personal`, "PUT", withdrawn.personal, "developer")).status,
-    ).toBe(404);
+      await owned.command("savePersonalSkills", [owned.projectID, withdrawn.personal], "developer"),
+    ).toMatchObject({ ok: false, status: 404 });
   } finally {
     await owned.dispose();
   }

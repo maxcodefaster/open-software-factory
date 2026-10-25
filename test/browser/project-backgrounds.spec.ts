@@ -4,8 +4,11 @@ import { createInterface } from "node:readline";
 import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
 import { desktopBackgrounds } from "../../apps/factory/src/artworks";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { luminance } from "../support/visual-contrast";
 
 test("Project backgrounds stay shared and persistent with a compact, expandable artwork picker", async ({
@@ -13,9 +16,11 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
   browser,
 }) => {
   test.setTimeout(360_000);
-  const host = spawn("mise", ["exec", "--", "bun", "test/fixtures/skill-browser-host.ts"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const host = spawn(
+    "mise",
+    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
   let stderr = "";
   host.stderr.on("data", (chunk) => {
@@ -46,12 +51,20 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
   const observer = await observerContext.newPage();
   for (const target of [page, observer]) {
     target.on("pageerror", (error) => errors.push(error.message));
-    await target.route("**/api/projects/*/source-workspace/ensure", (route) =>
-      route.fulfill({ status: 503, json: { error: "Planning-only wallpaper fixture" } }),
-    );
-    await target.route("**/api/projects/*/developer-ide/ensure", (route) =>
-      route.fulfill({ status: 503, json: { error: "Planning-only wallpaper fixture" } }),
-    );
+    await mockFactoryFunctions(target, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError("unavailable", "Planning-only wallpaper fixture");
+        },
+      },
+    });
+    await mockFactoryFunctions(target, {
+      workspaces: {
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "Planning-only wallpaper fixture");
+        },
+      },
+    });
   }
   const desktop = (target: Page) => target.locator("main.factory-desktop");
   const picker = (target: Page) => target.getByRole("group", { name: "Project background" });
@@ -126,16 +139,16 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
           'Keep the shared background stable between visits.',${administrator.id})`;
     }
     const contributorEmail = `contributor-${fixture.id}@background.test`;
-    const memberResponse = await page.request.post(`${fixture.fixtureBase}/api/admin/users`, {
-      headers: { origin: fixture.fixtureBase },
-      data: {
-        name: "Mara Fischer",
-        email: contributorEmail,
-        password: "owned-process-password-not-a-secret",
-      },
-    });
-    expect(memberResponse.status()).toBe(201);
-    const member = z.object({ id: z.uuid() }).parse(await memberResponse.json());
+    const memberResponse = await serverCall(
+      browserFunction(page, "createAccount", [
+        {
+          name: "Mara Fischer",
+          email: contributorEmail,
+          password: "owned-process-password-not-a-secret",
+        },
+      ]),
+    );
+    const member = z.object({ id: z.uuid() }).parse(memberResponse);
     for (const id of [projectId, otherProjectId])
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
         VALUES(${id},${member.id},'product-contributor',false,${administrator.id})`;

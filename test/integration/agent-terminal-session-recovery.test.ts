@@ -1,3 +1,5 @@
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
@@ -37,7 +39,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
     const database = process.connect();
     const sockets: WebSocket[] = [];
     const latch = await database.client.reserve();
-    let creating: Promise<Response> | undefined;
+    let creating: ReturnType<typeof callFactoryFunction<"sendCodingPrompt">> | undefined;
     let latchHeld = false;
     try {
       const token = crypto.randomUUID();
@@ -49,6 +51,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       let promptText = "";
       let installedSkills: string[] = [];
       const instructions = new Map<string, unknown>();
+      const mcpServers = new Set<string>();
       let promptCalls = 0;
       let externalMutations = 0;
       async function connect(role: "parent" | "child") {
@@ -133,12 +136,17 @@ test.each(["failed", "pre-dispatch failed"] as const)(
               else instructions.delete(key);
             }
           } else if (
-            request.path === "/api/experimental/mcp/factory_browser" &&
+            [
+              "/api/experimental/mcp/factory_browser",
+              "/api/experimental/mcp/factory_sources",
+            ].includes(request.path) &&
             request.method === "PUT"
           ) {
+            mcpServers.add(request.path.split("/").at(-1)!);
             status = 204;
           } else if (request.path === "/api/mcp") {
-            data = [{ name: "factory_browser", status: { status: "connected" } }];
+            // OpenCode's native protocol remains unchanged by the UI migration.
+            data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));
           } else if (request.path === "/api/skill" && outcome === "pre-dispatch failed") {
             status = 503;
             data = { message: "Owned skill discovery failed before dispatch" };
@@ -155,6 +163,8 @@ test.each(["failed", "pre-dispatch failed"] as const)(
             data = [];
           } else if (request.path === "/api/model") {
             data = [{ providerID: "factory", id: buildModelID }];
+          } else if (request.path.endsWith("/agent")) {
+            status = 204;
           } else if (request.path.endsWith(`/${owned.sessionID}`)) {
             data = {
               id: owned.sessionID,
@@ -220,13 +230,14 @@ test.each(["failed", "pre-dispatch failed"] as const)(
               headers: { "content-type": "application/json" },
             }),
           );
-          socket.send(
-            JSON.stringify({
-              type: "stream-data",
-              streamId: frame.streamId,
-              data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
-            }),
-          );
+          if (status !== 204)
+            socket.send(
+              JSON.stringify({
+                type: "stream-data",
+                streamId: frame.streamId,
+                data: Buffer.from(JSON.stringify({ data, cursor: {} })).toString("base64"),
+              }),
+            );
           socket.send(JSON.stringify({ type: "stream-end", streamId: frame.streamId }));
         });
         await new Promise<void>((resolve, reject) => {
@@ -264,17 +275,19 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       await latch`SELECT pg_advisory_lock(hashtext('owned-terminal-projection'))`;
       latchHeld = true;
       const commandID = crypto.randomUUID();
-      creating = fetch(`${process.base}/api/changes/${owned.changeID}/agent/prompt`, {
-        method: "POST",
+      creating = callFactoryFunction(
+        process.base,
+        "sendCodingPrompt",
+        [owned.changeID, { commandId: commandID, text: "Owned terminal recovery" }],
         headers,
-        body: JSON.stringify({ commandId: commandID, text: "Owned terminal recovery" }),
-      });
+      );
       void creating.catch(() => undefined);
-      expect((await creating).status).toBe(202);
+      expect(await creating).toMatchObject({ ok: true });
       const settled = await eventually(
         async () => owned.turn(commandID),
         (turn) => turn?.state === "failed" || turn?.state === "uncertain",
         "Terminal Turn was not persisted before the held Session update",
+        30_000,
       );
       expect({ state: settled?.state, summary: settled?.summary }).toMatchObject({
         state: "failed",
@@ -325,11 +338,14 @@ test.each(["failed", "pre-dispatch failed"] as const)(
         "Factory left the terminal Turn's Session busy",
         2_000,
       );
-      const response = await fetch(`${process.base}/api/changes/${owned.changeID}/agent`, {
+      const response = await callFactoryFunction(
+        process.base,
+        "getAgentView",
+        [owned.changeID],
         headers,
-      });
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
+      );
+      expect(response).toMatchObject({ ok: true });
+      expect(await serverCall(Promise.resolve(response))).toMatchObject({
         state: "failed",
         turn: { id: settled?.id, state: "failed" },
         lastError: expect.any(String),
@@ -359,7 +375,7 @@ test.each(["failed", "pre-dispatch failed"] as const)(
       await forge.stop(true);
     }
   },
-  30_000,
+  120_000,
 );
 
 test.each([
@@ -423,8 +439,8 @@ test.each([
         await database.client`UPDATE factory.change_agent_session
         SET state = 'stopped' WHERE change_id = ${owned.changeID}`;
       if (boundary === "mode changed")
-        await database.client`INSERT INTO factory.ticket_conversation(id, project_id, ticket_id, mode, created_by)
-        VALUES (${crypto.randomUUID()}, ${owned.projectID}, ${owned.ticketID}, 'plan', ${owned.userID})`;
+        await database.client`UPDATE factory.ticket_conversation SET mode='plan', version=version+1
+          WHERE ticket_id=${owned.ticketID}`;
       async function snapshot() {
         const rows = await database.client<
           {

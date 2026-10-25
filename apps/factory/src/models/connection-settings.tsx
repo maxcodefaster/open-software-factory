@@ -1,10 +1,7 @@
 import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
-import { z } from "zod";
+import { invoke } from "@solidjs/web/server-functions/client";
 import {
-  modelConnectionView,
-  modelProbeResult,
   modelProvider,
-  modelRoleConnectionView,
   type ModelConnectionView,
   type ModelConnectionWrite,
   type ModelProvider,
@@ -15,32 +12,19 @@ import {
   type CodingReasoning,
   type ModelSettingsView,
 } from "../../../../packages/conversation-domain/src/model-settings";
-import { apiRequest, APIRequestError } from "../api-client";
+import { APIRequestError } from "../api-client";
+import {
+  getModelConnections,
+  getModelConnection,
+  saveModelConnection,
+  adoptDeploymentModelConnection,
+  selectModelRole,
+} from "../server-functions/models";
+import { serverCall } from "../server-functions/result";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import { reasoningLabels } from "./reasoning";
 
-const catalogue = z.object({
-  providers: z.array(
-    z.object({
-      provider: modelProvider,
-      label: z.string(),
-      models: z.array(z.string()),
-    }),
-  ),
-  connections: z.array(modelConnectionView),
-  roles: z.array(modelRoleConnectionView),
-  deployment: z.array(
-    z.object({
-      role: z.enum(["planning", "build"]),
-      provider: modelProvider,
-      modelId: z.string(),
-      endpoint: z.string().nullable(),
-      configured: z.boolean(),
-      connectionID: z.uuid(),
-    }),
-  ),
-});
-type Catalogue = z.output<typeof catalogue>;
+type Catalogue = Extract<Awaited<ReturnType<typeof getModelConnections>>, { ok: true }>["value"];
 type Role = "planning" | "build";
 type RoleSelection = {
   connectionID: string;
@@ -95,7 +79,7 @@ export function ModelConnectionSettings(props: {
     props.onBusy(Boolean(value));
   }
   async function load() {
-    const value = await apiRequest(catalogue, "/api/model-connections");
+    const value = await serverCall(getModelConnections());
     if (!disposed) setData(value);
   }
   createEffect(
@@ -138,15 +122,7 @@ export function ModelConnectionSettings(props: {
         endpoint: endpoint().trim() || null,
         apiKey: key(),
       };
-      const saved = await apiRequest(
-        modelConnectionView,
-        `/api/model-connections/${pendingSave.connectionID}`,
-        {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(pendingSave),
-        },
-      );
+      const saved = await serverCall(saveModelConnection(pendingSave));
       if (disposed) return;
       pendingSave = undefined;
       setKey("");
@@ -161,10 +137,7 @@ export function ModelConnectionSettings(props: {
           // Only unlock a rejected form when a read proves this command owns
           // neither a committed version nor the pending external write.
           try {
-            const saved = await apiRequest(
-              modelConnectionView,
-              `/api/model-connections/${pending.connectionID}`,
-            );
+            const saved = await serverCall(getModelConnection(pending.connectionID));
             if (saved.version === pending.version && saved.pendingCommandID !== pending.commandID)
               pendingSave = undefined;
           } catch (readError) {
@@ -209,12 +182,9 @@ export function ModelConnectionSettings(props: {
           pendingAdoption.version !== adoption.version
         )
           pendingAdoption = { commandID: crypto.randomUUID(), ...adoption };
-        selected = await apiRequest(modelConnectionView, "/api/model-connections/deployment", {
-          method: "PUT",
-          signal: abort.signal,
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(pendingAdoption),
-        });
+        selected = await serverCall(
+          invoke(adoptDeploymentModelConnection, { signal: abort.signal }, pendingAdoption),
+        );
         pendingAdoption = undefined;
         const saved = selected;
         if (!disposed)
@@ -242,14 +212,11 @@ export function ModelConnectionSettings(props: {
         ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
       };
       const { commandID: _commandID, ...previous } = pendingCheck ?? {};
-      if (JSON.stringify(previous) !== JSON.stringify(request))
+      if (!pendingCheck || JSON.stringify(previous) !== JSON.stringify(request))
         pendingCheck = { commandID: crypto.randomUUID(), ...request };
-      const result = await apiRequest(modelProbeResult, "/api/model-connections/role", {
-        method: "PUT",
-        signal: abort.signal,
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(pendingCheck),
-      });
+      const result = await serverCall(
+        invoke(selectModelRole, { signal: abort.signal }, pendingCheck),
+      );
       pendingCheck = undefined;
       if (!disposed) {
         await Promise.all([load(), props.onChange()]);

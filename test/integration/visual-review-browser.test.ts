@@ -2,18 +2,23 @@ import { expect, test } from "bun:test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
+import { createReviewService } from "../../apps/factory/src/review/service";
 import {
-  scopeRuntimeEmbedding,
   previewBridgeResponse,
   previewRendererResponse,
+  scopeRuntimeEmbedding,
 } from "../../apps/factory/src/runtime/embedding";
-import { candidateReviewFixture } from "../fixtures/candidate-review";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
+import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
+import { compiledFactoryEndpoint } from "../fixtures/server-functions";
 
 test("Ticket video, shared feedback and permission-free Preview comments work in the Factory shell", async () => {
   const f = await candidateReviewFixture();
@@ -39,7 +44,21 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
         release: ReturnType<typeof Promise.withResolvers<void>>;
       }
     | undefined;
-  let unavailable: "disabled" | "unavailable" | "deleted" | undefined;
+  let unavailable: "missing" | "unavailable" | "deleted" | undefined;
+  let functions: Awaited<ReturnType<typeof compiledFactoryEndpoint>>;
+  const service = createReviewService({
+    controller: review,
+    access: createAccessController(f.database),
+    admit: async (changeID, userID, sql, text, commandId) =>
+      (
+        await createChangeAdmission(f.database, buildModelID).admitIn(sql, changeID, userID, {
+          kind: "change-prompt",
+          commandId,
+          text,
+        })
+      ).turn.id,
+    dispatchPending: async () => {},
+  });
   const build = Bun.spawn(
     [
       "node",
@@ -61,6 +80,7 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     async fetch(request) {
       try {
         const url = new URL(request.url);
+        if (url.pathname.startsWith("/_server/")) return functions(request);
         if (url.pathname === "/api/runtime-access") {
           const path = url.searchParams.get("path");
           if (!path?.startsWith(`/runtime/${f.attemptID}/`))
@@ -102,27 +122,6 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
             `${runtimePath}__factory/review-bridge.js`,
           );
         const path = `/api/changes/${f.changeID}/review`;
-        if (url.pathname === path) {
-          if (failReview)
-            return Response.json({ error: "Owned review read unavailable" }, { status: 503 });
-          const value = await review.get(f.changeID, f.userID);
-          return Response.json(
-            !unavailable
-              ? value
-              : {
-                  ...value,
-                  recordingEnabled: unavailable !== "disabled",
-                  recording:
-                    unavailable === "disabled"
-                      ? null
-                      : {
-                          ...value.recording,
-                          state: unavailable,
-                          reason: "Owned video unavailable",
-                        },
-                },
-          );
-        }
         if (url.pathname.startsWith(`${path}/media/`)) {
           if (failVideo && url.pathname.endsWith(recordingID))
             return new Response(null, { status: 503 });
@@ -132,46 +131,6 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
             url.pathname.split("/").at(-1)!,
             request.headers.get("range"),
           );
-        }
-        if (url.pathname === `${path}/feedback`) {
-          saves++;
-          const saved = await review.create(f.changeID, f.userID, await request.json());
-          if (loseFeedbackResponse) {
-            loseFeedbackResponse = false;
-            return Response.json({ error: "Owned response loss after save" }, { status: 500 });
-          }
-          return Response.json(saved);
-        }
-        if (url.pathname === `${path}/update`) {
-          const delay = delayedReply;
-          const result = await review.update(f.changeID, f.userID, await request.json());
-          if (delay) {
-            delay.saved.resolve();
-            await delay.release.promise;
-          }
-          return Response.json(result);
-        }
-        if (url.pathname === `${path}/send`) {
-          revisionRequests++;
-          const result = await review.dispatch(
-            f.changeID,
-            f.userID,
-            await request.json(),
-            async (sql, text, commandId) =>
-              (
-                await createChangeAdmission(f.database, buildModelID).admitIn(
-                  sql,
-                  f.changeID,
-                  f.userID,
-                  { kind: "change-prompt", commandId, text },
-                )
-              ).turn.id,
-          );
-          if (loseRevisionResponse) {
-            loseRevisionResponse = false;
-            return Response.json({ error: "Owned revision response loss" }, { status: 500 });
-          }
-          return Response.json(result);
         }
         if (url.pathname === `${path}/stills`) {
           if (failStillUpload)
@@ -204,6 +163,63 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     },
   });
   base = `http://127.0.0.1:${server.port}`;
+  functions = await compiledFactoryEndpoint({
+    origin: base,
+    services: {
+      review: {
+        ...service,
+        async get(userID, changeID) {
+          if (failReview) throw new CommandError("unavailable", "Owned review read unavailable");
+          const value = await service.get(userID, changeID);
+          return visualReviewSchema.parse(
+            !unavailable
+              ? value
+              : {
+                  ...value,
+                  recording:
+                    unavailable === "missing"
+                      ? null
+                      : {
+                          ...value.recording,
+                          state: unavailable,
+                          reason: "Owned video unavailable",
+                        },
+                },
+          );
+        },
+        async create(userID, changeID, input) {
+          saves++;
+          const result = await service.create(userID, changeID, input);
+          if (loseFeedbackResponse) {
+            loseFeedbackResponse = false;
+            throw new CommandError("unavailable", "Owned response loss after save");
+          }
+          return result;
+        },
+        async update(userID, changeID, input) {
+          const delay = delayedReply;
+          const result = await service.update(userID, changeID, input);
+          if (delay) {
+            delay.saved.resolve();
+            await delay.release.promise;
+          }
+          return result;
+        },
+        async send(userID, changeID, input) {
+          revisionRequests++;
+          const result = await service.send(userID, changeID, input);
+          if (loseRevisionResponse) {
+            loseRevisionResponse = false;
+            throw new CommandError("unavailable", "Owned revision response loss");
+          }
+          return result;
+        },
+      },
+    } as FactoryServices,
+    session: async () => ({ user: { id: f.userID } }),
+    maintenance: async () => false,
+    requireFresh: async () => {},
+  });
   // No tab-capture or auto-consent launch flags.
   const browser = await chromium.launch({ headless: true });
   const errors: string[] = [];
@@ -640,7 +656,7 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     failVideo = false;
     await panel().getByRole("button", { name: "Retry video", exact: true }).click();
     await visible(panel().getByRole("button", { name: "Comment", exact: true })).toBeEnabled();
-    for (const state of ["disabled", "unavailable", "deleted"] as const) {
+    for (const state of ["missing", "unavailable", "deleted"] as const) {
       unavailable = state;
       await panel().getByRole("button", { name: "Reload review" }).click();
       await visible(panel().locator("video")).toHaveCount(0);

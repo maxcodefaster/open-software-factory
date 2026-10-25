@@ -202,7 +202,8 @@ test("accepts only the exact started process and current readiness marker", asyn
       server,
       baseURL: listener.url.origin,
       startupID: "expected",
-      timeoutMS: 100,
+      // Identity is the assertion here, not sub-100ms loopback scheduling.
+      timeoutMS: 2_000,
       intervalMS: 10,
     });
   } finally {

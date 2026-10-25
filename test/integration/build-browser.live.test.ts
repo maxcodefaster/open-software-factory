@@ -9,6 +9,8 @@ import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -276,10 +278,13 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
     try {
       await fixture.start();
       cookie = await fixture.signIn();
-      await command(
-        "/api/model-settings",
-        { version: 0, planningModelId: modelId, buildModelId: modelId },
-        "PUT",
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveModelSettings",
+          [{ version: 0, planningModelId: modelId, buildModelId: modelId }],
+          { cookie },
+        ),
       );
       baseSHA = (await forge.getDefaultBranch(repository)).headSha;
       await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
@@ -298,24 +303,49 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
         }),
       );
       const revision = z.object({ id: z.uuid() }).parse(
-        await (
-          await command(`/api/tickets/${ticketID}/requirements`, {
-            summary:
-              "Fix the Continue button overlapping Delivery dashboard in src/browser-page.html. The manual fixture template reader in src/server.mjs is intentional and must be retained.",
-            acceptanceCriteria: [
-              "Before editing, use the native Factory browser tools to open declared App app, inspect its DOM and console, capture a screenshot and inspect the returned image. Reproduce the overlap visually.",
-              "Continue is in normal document flow below Delivery dashboard, not positioned over the heading. Edit only src/browser-page.html; keep the page readable and the fixture template reader intact.",
-              "After editing, use browser_open again on App app, inspect DOM and console, capture and read a second screenshot. Describe the finding with the returned turn/App/checkout context. No scripts or arbitrary URLs in browser tools.",
-              "node --check src/server.mjs passes. Do not restart the App: the fixture reads browser-page.html on each HTTP request.",
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "createRequirementRevision",
+            [
+              ticketID,
+              {
+                summary:
+                  "Fix the Continue button overlapping Delivery dashboard in src/browser-page.html. The manual fixture template reader in src/server.mjs is intentional and must be retained.",
+                acceptanceCriteria: [
+                  "Before editing, use the native Factory browser tools to open declared App app, inspect its DOM and console, capture a screenshot and inspect the returned image. Reproduce the overlap visually.",
+                  "Continue is in normal document flow below Delivery dashboard, not positioned over the heading. Edit only src/browser-page.html; keep the page readable and the fixture template reader intact.",
+                  "After editing, use browser_open again on App app, inspect DOM and console, capture and read a second screenshot. Describe the finding with the returned turn/App/checkout context. No scripts or arbitrary URLs in browser tools.",
+                  "node --check src/server.mjs passes. Do not restart the App: the fixture reads browser-page.html on each HTTP request.",
+                ],
+                nonGoals: [
+                  "Dependencies, runtime configuration, changing version.txt, other file edits, browser scripts or host tooling",
+                ],
+              },
             ],
-            nonGoals: [
-              "Dependencies, runtime configuration, changing version.txt, other file edits, browser scripts or host tooling",
-            ],
-          })
-        ).json(),
+            { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(90_000),
+          ),
+        ),
       );
-      await command(`/api/tickets/${ticketID}/requirements/${revision.id}/approve`);
-      await command(`/api/tickets/${ticketID}/change`);
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "approveRequirementRevision",
+          [ticketID, revision.id],
+          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startTicketChange",
+          [ticketID],
+          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const change = await eventually(
         async () => {
           const [row] = await database.client<
@@ -330,7 +360,15 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       );
       if (!change) throw new Error("Owned Change missing");
       changeID = change.id;
-      await command(`/api/changes/${changeID}/ticket-workspace/ensure`);
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startTicketWorkspace",
+          [changeID],
+          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       const runtime = await eventually(
         async () => {
           const [row] = await database.client<
@@ -364,7 +402,15 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
       expect(before.overlaps).toBe(true);
       console.info("Browser Build: real App overlap reproduced; starting configured OpenCode");
       const commandID = crypto.randomUUID();
-      await command(`/api/changes/${changeID}/agent/start`, { commandId: commandID });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "startCoding",
+          [changeID, { commandId: commandID }],
+          { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+          AbortSignal.timeout(90_000),
+        ),
+      );
       if (runtimeProbe) {
         await eventually(
           async () => {
@@ -382,7 +428,15 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
           120_000,
         );
         expect(observations).toMatchObject({ snapshot: true, console: true, checkout: true });
-        await command(`/api/changes/${changeID}/agent/stop`);
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "stopCoding",
+            [changeID],
+            { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(90_000),
+          ),
+        );
         const sessions = await database.client<
           Array<{ id: string; state: string; context: unknown; confirmed: boolean }>
         >`
@@ -530,8 +584,24 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
               Array<{ id: string; branch: string; base: string }>
             >`SELECT id, branch_name AS branch, base_sha AS base FROM factory.change WHERE project_id = ${projectID}`;
             for (const change of changes) {
-              await command(`/api/changes/${change.id}/agent/stop`);
-              await command(`/api/changes/${change.id}/cancel`);
+              await serverCall(
+                callFactoryFunction(
+                  fixture.base,
+                  "stopCoding",
+                  [change.id],
+                  { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+                  AbortSignal.timeout(90_000),
+                ),
+              );
+              await serverCall(
+                callFactoryFunction(
+                  fixture.base,
+                  "cancelChange",
+                  [change.id],
+                  { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+                  AbortSignal.timeout(90_000),
+                ),
+              );
             }
             await eventually(
               async () => {
@@ -539,7 +609,15 @@ test.skipIf(process.env["FACTORY_LIVE_BROWSER_BUILD"] !== "1" && !runtimeProbe)(
                   Array<{ id: string }>
                 >`SELECT id FROM factory.runtime_attempt WHERE project_id = ${projectID} AND state <> 'stopped'`;
                 for (const attempt of attempts)
-                  await command(`/api/runtime-attempts/${attempt.id}/stop`);
+                  await serverCall(
+                    callFactoryFunction(
+                      fixture.base,
+                      "stopRuntimeAttempt",
+                      [attempt.id],
+                      { cookie: cookie, origin: fixture.base, "content-type": "application/json" },
+                      AbortSignal.timeout(90_000),
+                    ),
+                  );
                 const child = Bun.spawn(
                   [
                     "kubectl",

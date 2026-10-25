@@ -12,6 +12,7 @@ const configuration = {
   factoryboxProfile: {
     image: image("worker", "5"),
     executableSHA256: "6".repeat(64),
+    architecture: "amd64",
     nodeName: "owned-node",
     kernel: "6.12.0",
     boundedBytes: 8589934592,
@@ -42,18 +43,20 @@ test("runtime artifact selection follows persisted role, freezes before create a
     await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
       VALUES(${personalID},${owned.projectID},'personal',${owned.userID},'main',${"a".repeat(40)},${`factory-workspace-${personalID.replaceAll("-", "").slice(0, 12)}`},'never-created',${owned.userID})`;
     for (const [index, role] of (
-      ["development", "build", "verification", "staging"] as const
+      ["development", "build", "verification", "staging", "publication"] as const
     ).entries()) {
       const attemptID = crypto.randomUUID();
       const workspaceID =
         role === "build" ? build.workspaceID : role === "development" ? personalID : null;
-      const isolatedKind = role === "verification" || role === "staging" ? role : null;
+      const isolatedKind =
+        role === "verification" || role === "staging" || role === "publication" ? role : null;
       await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,verification_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
         VALUES(${attemptID},${owned.projectID},${role === "build" ? owned.changeID : null},${workspaceID},${role === "verification" ? verificationID : null},${isolatedKind},${index + 2},${"a".repeat(40)},'create-intended','owned-artifact-intent',${`runtime-${index}`},${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
       const first = await freezeRuntimeArtifacts(database.client, attemptID, configuration);
+      const artifactRole = role === "publication" ? "verification" : role;
       expect(first).toEqual({
-        role,
-        runtimeHostImage: configuration.hostImages[role],
+        role: artifactRole,
+        runtimeHostImage: configuration.hostImages[artifactRole],
         browserToolsImage: role === "build" ? configuration.browserToolsImage : null,
         environmentVersion: 0,
         factoryboxProfile: configuration.factoryboxProfile,

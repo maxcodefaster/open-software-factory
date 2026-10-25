@@ -178,7 +178,7 @@ describe("runtime Kubernetes resources", () => {
     ]);
     const process = assignment.processes[0];
     expect(process.command[2]).toContain(
-      'spawn("/opt/factory/forgejo-runner", ["one-job", "--wait", "--config"',
+      'spawn("/opt/factory/forgejo-runner", ["one-job", "--wait"',
     );
     expect(process.command[2]).not.toContain("forgejo-runner daemon");
     expect(process.env.FACTORY_RUNNER_CONFIG).toContain("factory-verification:host");

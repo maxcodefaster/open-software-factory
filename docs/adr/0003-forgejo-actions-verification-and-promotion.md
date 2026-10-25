@@ -27,3 +27,6 @@ After Forgejo confirms the merge, Factory persists Promotion intent for the exac
 
 Factory owns desired state for Development Workspaces and Project Staging. This delivery path
 ends at the healthy Staging Preview, with Forgejo Actions providing exact-commit Verification.
+
+[Independent Release publication](0023-independent-project-releases.md) is a separate explicit
+action after Delivery. It does not extend Promotion into production or require a release per Ticket.

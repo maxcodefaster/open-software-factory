@@ -2,6 +2,8 @@ import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
 
 test("an uncertain background Interview stays visible without resending inference", async ({
   page,
@@ -16,33 +18,39 @@ test("an uncertain background Interview stays visible without resending inferenc
   >`SELECT id FROM auth."user" WHERE email=${email}`;
   if (!user) throw new Error("Test administrator is unavailable");
   let inferenceRequests = 0;
+  page.on("request", (request) => {
+    if (
+      /\/_server\/data\/(?:sendConversationMessage|answerConversationQuestion)-/.test(request.url())
+    )
+      inferenceRequests++;
+  });
   try {
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES (${projectID},${slug},'Interview failure fixture','http://127.0.0.1:33030/fixture/unused.git','main','.devcontainer/devcontainer.json',${user.id})`;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
       VALUES (${ticketID},${projectID},'Interrupted interview','Retain this intent.','ready',${user.id})`;
-    await page.route(`**/api/projects/${projectID}/conversation**`, async (route) => {
-      if (route.request().method() !== "GET") inferenceRequests++;
-      await route.fulfill({
-        json: {
-          id: crypto.randomUUID(),
-          projectId: projectID,
-          ticketId: ticketID,
-          mode: "plan",
-          version: 1,
-          entries: [],
-          turn: {
+    await mockFactoryFunctions(page, {
+      conversations: {
+        get: async () =>
+          conversationViewSchema.parse({
             id: crypto.randomUUID(),
-            commandId: crypto.randomUUID(),
-            state: "uncertain",
-            engine: "mastra",
+            projectId: projectID,
+            ticketId: ticketID,
             mode: "plan",
-            modelId: "fixture-model",
-            skills: [],
-            summary: "The provider outcome could not be established.",
-          },
-        },
-      });
+            version: 1,
+            entries: [],
+            turn: {
+              id: crypto.randomUUID(),
+              commandId: crypto.randomUUID(),
+              state: "uncertain",
+              engine: "mastra",
+              mode: "plan",
+              modelId: "fixture-model",
+              skills: [],
+              summary: "The provider outcome could not be established.",
+            },
+          }),
+      },
     });
     await signIn(page);
     await openProjectMenu(page);

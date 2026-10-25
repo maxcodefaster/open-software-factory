@@ -1,6 +1,15 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import { apiRequest } from "./api-client";
-import { type WriterView, writerViewSchema } from "./api-contracts";
+import { invoke } from "@solidjs/web/server-functions/client";
+import type { WriterView } from "./api-contracts";
+import { serverCall } from "./server-functions/result";
+import { APIRequestError } from "./api-client";
+import {
+  getChangeWriterStatus,
+  requestChangeEditing,
+  releaseChangeEditing,
+  approveChangeEditing,
+  takeOverIdleEditing,
+} from "./server-functions/writer";
 
 export function writerStatusText(view: WriterView) {
   if (view.state === "human")
@@ -39,6 +48,9 @@ export function ChangeWriterStatus(props: {
   const [unavailable, setUnavailable] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
+  let generation = 0;
+  let readFence = 0;
+  let pendingRequest: { changeID: string; epoch: number; commandID: string } | undefined;
   const [confirmation, setConfirmation] = createSignal<{
     changeID: string;
     epoch: number;
@@ -49,6 +61,9 @@ export function ChangeWriterStatus(props: {
   createEffect(
     () => [props.changeID, props.active] as const,
     ([id, active]) => {
+      const scope = ++generation;
+      readFence++;
+      pendingRequest = undefined;
       setView(undefined);
       setUnavailable(false);
       setConfirmation(undefined);
@@ -59,17 +74,24 @@ export function ChangeWriterStatus(props: {
       const cancellation = new AbortController();
       let timer: ReturnType<typeof setTimeout> | undefined;
       const read = async () => {
+        const fence = readFence;
         try {
-          const current = await apiRequest(writerViewSchema, `/api/changes/${id}/writer/status`, {
-            signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(8_000)]),
-          });
-          if (!cancellation.signal.aborted) {
+          const current = await serverCall(
+            invoke(
+              getChangeWriterStatus,
+              {
+                signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(8_000)]),
+              },
+              id,
+            ),
+          );
+          if (!cancellation.signal.aborted && scope === generation && fence === readFence) {
             setView(current);
             props.onStatus?.(id, current);
             setUnavailable(false);
           }
         } catch {
-          if (!cancellation.signal.aborted) {
+          if (!cancellation.signal.aborted && scope === generation && fence === readFence) {
             setView(undefined);
             setUnavailable(true);
           }
@@ -79,41 +101,58 @@ export function ChangeWriterStatus(props: {
       };
       void read();
       return () => {
+        if (generation === scope) generation++;
         cancellation.abort();
         clearTimeout(timer);
       };
     },
   );
   async function command(
-    action: string,
+    action: "request" | "release" | "approve" | "idle-takeover",
     epoch: number,
-    commandID: string = crypto.randomUUID(),
+    commandID?: string,
     requestID?: string,
+    changeID = props.changeID,
   ) {
-    const id = props.changeID;
-    if (!id || busy()) return;
+    const id = changeID;
+    if (!id || id !== props.changeID || busy()) return;
+    const scope = generation;
+    readFence++;
+    if (action === "request" && !commandID) {
+      if (!pendingRequest || pendingRequest.changeID !== id || pendingRequest.epoch !== epoch)
+        pendingRequest = { changeID: id, epoch, commandID: crypto.randomUUID() };
+      commandID = pendingRequest.commandID;
+    }
+    commandID ??= crypto.randomUUID();
     setBusy(true);
     setError("");
     try {
-      const current = await apiRequest(writerViewSchema, `/api/changes/${id}/writer/${action}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ epoch, commandID, ...(requestID ? { requestID } : {}) }),
-      });
-      if (props.changeID === id) {
+      const input = { epoch, commandID, ...(requestID ? { requestID } : {}) };
+      let current: WriterView;
+      if (action === "request") current = await serverCall(requestChangeEditing(id, input));
+      else if (action === "release") current = await serverCall(releaseChangeEditing(id, input));
+      else if (action === "approve") current = await serverCall(approveChangeEditing(id, input));
+      else current = await serverCall(takeOverIdleEditing(id, input));
+      if (props.changeID === id && scope === generation) {
+        readFence++;
+        if (action === "request") pendingRequest = undefined;
         setView(current);
         props.onStatus?.(id, current);
         setConfirmation(undefined);
       }
     } catch (cause) {
-      if (props.changeID === id)
+      if (props.changeID === id && scope === generation) {
+        readFence++;
+        if (action === "request" && cause instanceof APIRequestError && cause.status < 500)
+          pendingRequest = undefined;
         setError(
           cause instanceof Error
             ? cause.message
             : "Editing could not be transferred. Check its status.",
         );
+      }
     } finally {
-      if (props.changeID === id) setBusy(false);
+      if (props.changeID === id && scope === generation) setBusy(false);
     }
   }
   function confirm(
@@ -199,7 +238,7 @@ export function ChangeWriterStatus(props: {
                 <button
                   type="button"
                   class="quiet-button"
-                  disabled={busy()}
+                  disabled={busy() || !current().commandID}
                   onClick={() =>
                     void command("release", current().epoch - 1, current().commandID ?? undefined)
                   }
@@ -231,6 +270,7 @@ export function ChangeWriterStatus(props: {
                     target().epoch,
                     target().commandID,
                     target().requestID,
+                    target().changeID,
                   )
                 }
               >

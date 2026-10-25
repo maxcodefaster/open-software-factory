@@ -1,103 +1,87 @@
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { ServerWebSocket } from "bun";
-import { implementationInput } from "../../../packages/change-domain/src/implementation";
-import {
-  changeAgentPromptInput,
-  changeAgentResumeInput,
-  changeAgentStartInput,
-  changeAgentStopConfirmationInput,
-} from "../../../packages/conversation-domain/src/agent-turn";
-import {
-  candidateReviewRetryInput,
-  verificationResumeInput,
-} from "../../../packages/conversation-domain/src/candidate-review";
-import {
-  conversationMessageInput,
-  conversationModeCommandInput,
-  newConversationInput,
-  interviewAnswerCommandInput,
-} from "../../../packages/conversation-domain/src/conversation";
-import { confirmEpicProposalInput } from "../../../packages/conversation-domain/src/epic-proposal";
-import { modelDefaultsInput } from "../../../packages/conversation-domain/src/model-settings";
 import { createDatabase } from "../../../packages/db/src/client";
 import { createForgejoAccess } from "../../../packages/forge/src/access";
 import { createForgejoClient } from "../../../packages/forge/src/forge";
-import { identityConfigurationWrite } from "../../../packages/identity-domain/src/configuration";
-import { knowledgeEditInput } from "../../../packages/knowledge-domain/src/knowledge";
-import {
-  projectImportOrigins,
-  setupInspectionCommand,
-  setupTask,
-} from "../../../packages/project-domain/src/setup";
-import {
-  ticketDocumentInput,
-  ticketFollowUpInput,
-} from "../../../packages/requirement-domain/src/document";
-import { requirementContentInput } from "../../../packages/requirement-domain/src/requirement";
+import { createForgejoReleases } from "../../../packages/forge/src/releases";
+import { projectImportOrigins } from "../../../packages/project-domain/src/setup";
 import { hashConnectorToken } from "../../../packages/runtime-domain/src/identity";
 import { SystemContractError } from "../../../packages/system-contract/src/system-contract";
 import { createAccountRevocation } from "./access/account-revocation";
-import { runtimeWriteAuthorityIn, workspaceWriteAuthorityIn } from "./access/change-writer";
+import { runtimeWriteAuthorityIn } from "./access/change-writer";
 import { createAccessController } from "./access/controller";
 import { createForgeAccessReconciliation } from "./access/forge";
 import { createForgeIdentityRoutes } from "./access/forge-routes";
 import { createIdentityConfiguration } from "./access/identity-configuration";
 import { createProjectAppPreviews } from "./access/previews";
 import { createAccessRevocation } from "./access/revocation";
-import { createAccessRoutes } from "./access/routes";
 import { createRuntimeAccess } from "./access/runtime";
+import { createAccessService } from "./access/service";
 import { createChangeWriterController } from "./access/writer-controller";
-import { executeEditingCommand } from "./access/writer-command";
-import { agentActivityResponse } from "./agent/activity-response";
+import { createWriterService } from "./access/writer-service";
 import { createBuildBrowserController } from "./agent/browser-controller";
 import { createBuildBrowserEndpoint } from "./agent/browser-endpoint";
+import { createCandidateReviewController } from "./agent/candidate-review";
+import { createAgentController } from "./agent/controller";
+import { createOpenCodeClient } from "./agent/opencode-client";
+import { createAgentService } from "./agent/service";
+import { createAttachmentRoutes } from "./attachments/routes";
 import { createAttachmentStore } from "./attachments/store";
 import { createAttachmentTools } from "./attachments/tools";
-import { createAttachmentRoutes } from "./attachments/routes";
-import { createCandidateReviewController } from "./agent/candidate-review";
-import { createVisualReviewController } from "./review/controller";
-import { createReviewMedia } from "./review/media";
-import { reviewRequestBody } from "./review/http";
-import { createAgentController, navigationMessages } from "./agent/controller";
-import { createOpenCodeClient } from "./agent/opencode-client";
+import { createBootstrapService } from "./bootstrap/service";
+import { factoryBuildDirectory } from "./build-directory";
 import { createChangeController } from "./change/controller";
 import { createTicketDocumentController } from "./change/document";
+import { createTicketService } from "./change/service";
 import { createTicketTrashController } from "./change/trash";
 import { CommandError } from "./command-error";
 import { createDeliveryController } from "./delivery/controller";
-import { createMonitoringController } from "./monitoring/controller";
-import { createMonitoringRoutes } from "./monitoring/routes";
-import { createMonitoringWorker } from "./monitoring/worker";
+import { createDeliveryService } from "./delivery/service";
 import { createEnvironmentController } from "./environments/controller";
 import { createOpenBaoEnvironmentSecrets } from "./environments/openbao";
-import { createEnvironmentRoutes } from "./environments/routes";
 import { createRuntimeEnvironmentEndpoint } from "./environments/runtime";
+import { createEnvironmentService } from "./environments/service";
 import { json, sameFactoryOrigin } from "./http";
-import { installationInMaintenance } from "./installation/maintenance";
-import { appRuntimeOrigin } from "./runtime-origins";
 import { serveFactory } from "./http-listener";
-import { factoryRequestURL } from "./request-origin";
+import { installationInMaintenance } from "./installation/maintenance";
 import { createKnowledgeController } from "./knowledge/controller";
 import { factoryForgeSource } from "./knowledge/forge-source";
+import { createKnowledgeService } from "./knowledge/service";
 import { createWikiSourceUpdates } from "./knowledge/source-updates";
-import { createModelConnectionRoutes } from "./models/connection-routes";
+import { createMCPConnections } from "./mcp/connections";
+import { createMCPOAuthCallback } from "./mcp/oauth-callback";
+import { createMCPSecrets } from "./mcp/secrets";
+import { createMCPService } from "./mcp/service";
+import { createMCPSourceEndpoint } from "./mcp/sources";
 import { createModelConnections } from "./models/connections";
 import { createModelSettingsController } from "./models/controller";
 import { createModelRelay } from "./models/relay";
-import { createProjectModelRoutes } from "./models/routes";
 import { createOpenBaoModelSecrets } from "./models/secrets";
+import { createModelService } from "./models/service";
+import { createMonitoringController } from "./monitoring/controller";
+import { createMonitoringRoutes } from "./monitoring/routes";
+import { createInputService } from "./monitoring/service";
+import { createMonitoringWorker } from "./monitoring/worker";
 import { createUIPreferenceController } from "./preferences/controller";
 import { projectModelConnection } from "./project-agent/adapter";
 import { createProjectAgentController } from "./project-agent/controller";
-import { projectResponseStream } from "./project-agent/stream-response";
-import { createProjectRoute } from "./routes/projects";
+import { createConversationService } from "./project-agent/service";
+import { createProjectService } from "./projects/service";
+import { createReleaseController } from "./releases/controller";
+import { createReleaseSecrets } from "./releases/secrets";
+import { factoryRequestURL } from "./request-origin";
+import { createVisualReviewController } from "./review/controller";
+import { createReviewMedia } from "./review/media";
+import { createReviewMediaRoutes } from "./review/media-routes";
+import { createReviewService } from "./review/service";
 import { appTimeoutResponse } from "./runtime/app-timeout";
 import { createRuntimeWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
 import {
-  scopeRuntimeEmbedding,
   previewBridgeResponse,
   previewRendererResponse,
+  scopeRuntimeEmbedding,
 } from "./runtime/embedding";
 import {
   runtimeSourcePath,
@@ -114,29 +98,29 @@ import {
 import { createIdleCompute } from "./runtime/idle";
 import { createProjectPreparation } from "./runtime/project-preparation";
 import { createExecutionReserve } from "./runtime/reserve-controller";
+import { createRuntimeService } from "./runtime/service";
+import { appRuntimeOrigin } from "./runtime-origins";
+import { createServerFunctionEndpoint } from "./server-functions/endpoint";
 import { createProjectSetupController } from "./setup/controller";
 import { createSetupInspection } from "./setup/inspection";
 import { createSetupReadiness } from "./setup/readiness";
-import { createProjectSetupRoutes } from "./setup/routes";
 import { createImportSecrets } from "./setup/secrets";
+import { createSetupService } from "./setup/service";
 import { createSkillController } from "./skills/controller";
-import { createSkillRoutes } from "./skills/routes";
-import { createMCPConnections } from "./mcp/connections";
-import { createMCPSecrets } from "./mcp/secrets";
-import { createMCPRoutes } from "./mcp/routes";
-import { createMCPSourceEndpoint } from "./mcp/sources";
+import { createSkillService } from "./skills/service";
+import { createStaticAssets } from "./static-assets";
 import { usageCatalogue } from "./usage/rates";
 import { createRecordedOpenCodeUsage } from "./usage/record-opencode";
-import { createUsageRoutes } from "./usage/routes";
+import { createUsageService } from "./usage/service";
 import { createDeveloperIDEController } from "./workspace/developer-ide-controller";
 import {
   createDeveloperIDEEdge,
   type DeveloperEditorSocketData,
 } from "./workspace/developer-ide-edge";
-import { createDeveloperIDERoutes } from "./workspace/developer-ide-routes";
 import { createDeveloperIDERuntime } from "./workspace/developer-ide-runtime";
+import { createWorkspaceService } from "./workspace/service";
 import { createWorkspaceSourceController } from "./workspace/source-controller";
-import { createWorkspaceSourceRoutes } from "./workspace/source-routes";
+import { createWorkspaceSourceProtocol } from "./workspace/source-protocol";
 import { handleZeroMutate, handleZeroQuery } from "./zero/http";
 
 const { FACTORY_ADMIN_PASSWORD, FACTORY_AUTH_SECRET, FACTORY_HOST, FACTORY_ZERO_CACHE_URL } =
@@ -190,7 +174,6 @@ let knowledgeController: ReturnType<typeof createKnowledgeController>;
 let projectAgentController: ReturnType<typeof createProjectAgentController>;
 const uiPreferenceController = createUIPreferenceController(database);
 const modelSettingsController = createModelSettingsController(database);
-const projectModelRoutes = createProjectModelRoutes(modelSettingsController);
 const modelConnections = createModelConnections(
   database,
   createOpenBaoModelSecrets(),
@@ -200,11 +183,12 @@ const modelConnections = createModelConnections(
     .map((origin) => origin.trim())
     .filter(Boolean) ?? [],
 );
-const modelConnectionRoutes = createModelConnectionRoutes(
-  modelConnections,
-  accessController.requireSystemManager,
-  runtimeSecret,
-);
+const modelService = createModelService({
+  settings: modelSettingsController,
+  connections: modelConnections,
+  access: accessController,
+  signingKey: runtimeSecret,
+});
 await modelConnections
   .recover()
   .catch(() => console.error("Model connection save recovery is unavailable"));
@@ -214,21 +198,20 @@ const environmentController = createEnvironmentController(
   environmentSecrets,
   runtimeSecret,
 );
-const environmentRoutes = createEnvironmentRoutes(environmentController);
 const runtimeEnvironmentEndpoint = createRuntimeEnvironmentEndpoint(database, environmentSecrets);
 await environmentController
   .recover()
   .catch(() => console.error("Environment save recovery is unavailable"));
-const skillRoutes = createSkillRoutes(createSkillController(database));
+const skillService = createSkillService(createSkillController(database), accessController);
 const mcpConnections = createMCPConnections(
   database,
   createMCPSecrets(),
   runtimeSecret,
   factoryOrigin,
 );
-const mcpRoutes = createMCPRoutes(mcpConnections);
+const mcpOAuthCallback = createMCPOAuthCallback(mcpConnections);
 await mcpConnections.recover().catch(() => console.error("MCP credential recovery is unavailable"));
-const usageRoutes = createUsageRoutes(database, factoryAuth);
+const usageService = createUsageService(database);
 const runtimeHub = new RuntimeHub(async (attemptID, phase, error) => {
   await runtimeController.status(attemptID, phase, error);
   try {
@@ -258,6 +241,7 @@ const relayModel = createModelRelay(
     ),
 );
 const reviewMedia = createReviewMedia(database);
+const reviewMediaRoutes = createReviewMediaRoutes(reviewMedia);
 const attachmentStore = createAttachmentStore(database);
 const attachmentRoutes = createAttachmentRoutes(attachmentStore);
 const visualReview = createVisualReviewController(database, reviewMedia.bytes);
@@ -290,13 +274,27 @@ runtimeController = createRuntimeController(
   undefined,
   executionReserve,
 );
-const sourceRoutes = createWorkspaceSourceRoutes(workspaceSources);
+const releaseController = createReleaseController({
+  database,
+  signingKey: runtimeSecret,
+  secrets: createReleaseSecrets(),
+  runtime: runtimeController,
+  forge: createForgejoClient({ apiURL: forgeAPIURL, token: process.env["FACTORY_FORGEJO_TOKEN"]! }),
+  publication: createForgejoReleases({
+    apiURL: forgeAPIURL,
+    token: process.env["FACTORY_FORGEJO_TOKEN"]!,
+    ...(process.env["FACTORY_FORGEJO_ADMIN_TOKEN"]
+      ? { adminToken: process.env["FACTORY_FORGEJO_ADMIN_TOKEN"] }
+      : {}),
+  }),
+  apiURL: forgeAPIURL,
+  publicURL: forgePublicOrigin,
+  owner: process.env["FACTORY_FORGEJO_OWNER"]!,
+});
+const sourceProtocol = createWorkspaceSourceProtocol(workspaceSources);
 const projectAppPreviews = createProjectAppPreviews(database, (id) => runtimeHub.appChannels(id));
 const idleCompute = createIdleCompute(database, runtimeHub, runtimeController);
 const developerEditors = createDeveloperIDEController(database);
-const developerIDERoutes = createDeveloperIDERoutes(developerEditors, (userID) =>
-  developerIDEEdge.revokeUser(userID),
-);
 const developerIDEEdge = createDeveloperIDEEdge(
   database,
   developerEditors,
@@ -332,18 +330,18 @@ const forgeIdentityRoutes = createForgeIdentityRoutes({
     `${factoryOrigin}/api/auth/.well-known/openid-configuration`,
   reconcile: accessRevocation.drain,
 });
-const accessRoutes = createAccessRoutes(
+const accessService = createAccessService({
   database,
-  factoryAuth,
-  async (projectID, userID) => {
+  identity: factoryAuth,
+  async revokeMember(projectID, userID) {
     await runtimeAccess.revokeMember(projectID, userID);
     await workspaceSources.revokeMember(projectID, userID);
     await developerEditors.revokeMember(projectID, userID);
     developerIDEEdge.revokeUser(userID);
   },
-  revokeAccountAccess,
-  forgeAccess ? forgePublicOrigin : undefined,
-);
+  revokeAccount: revokeAccountAccess,
+  forgeOrigin: forgeAccess ? forgePublicOrigin : undefined,
+});
 const observeRecoveredRuntimes = await runtimeController.recover();
 await workspaceSources.recover();
 await developerEditors.recover();
@@ -491,10 +489,9 @@ const wikiSourceUpdates = createWikiSourceUpdates({
   reconcile: (projectID) => knowledgeController.reconcile(projectID),
   prepareProject: projectPreparation.ensure,
 });
-const projects = createProjectRoute({
+const projectService = createProjectService({
   database,
   localRepositoryOrigin: new URL(process.env["FACTORY_FORGEJO_API_URL"] ?? "").origin,
-  session: requireSession,
   ensureStaging: (projectID, userID) => runtimeController.ensureStaging(projectID, userID),
   generateKnowledge: (projectID, userID) => knowledgeController.generate(projectID, userID),
   ensureKnowledgeHook: async (projectID) => {
@@ -617,7 +614,6 @@ const setupInspection = createSetupInspection({
       .catch(() => console.error("Confirmed Project preparation needs attention"));
   },
 });
-const projectSetupRoutes = createProjectSetupRoutes(projectSetup);
 await setupInspection
   .recover()
   .catch(() => console.error("Project inspection recovery is unavailable"));
@@ -626,7 +622,110 @@ await setupReadiness
   .recover()
   .catch(() => console.error("Project preparation recovery is unavailable"));
 
+const buildDirectory = factoryBuildDirectory();
+const planningCacheURL =
+  process.env["FACTORY_ZERO_CACHE_PUBLIC_URL"] ?? FACTORY_ZERO_CACHE_URL ?? "http://127.0.0.1:4948";
+const bootstrapService = createBootstrapService({
+  policy: () => factoryAuth.policy,
+  preference: uiPreferenceController.get,
+  planningCacheURL,
+  forgeOrigins: { browser: forgePublicOrigin, transport: forgeTransportOrigin },
+  async modelAvailability() {
+    return Boolean(
+      (process.env["FACTORY_MODEL_BASE_URL"] && process.env["FACTORY_MODEL_API_KEY"]) ||
+        (await database.client.begin((sql) => modelConnections.reference("build", sql))),
+    );
+  },
+});
+const serverFunctionEntry = pathToFileURL(resolve(buildDirectory, "server/entry.js")).href;
+const serverFunctions: typeof import("./server-functions/entry") = await import(
+  serverFunctionEntry
+);
+const serverFunctionEndpoint = createServerFunctionEndpoint({
+  origin: factoryOrigin,
+  session: requireSession,
+  services: {
+    releases: releaseController,
+    projects: projectService,
+    delivery: createDeliveryService({ access: accessController, controller: deliveryController }),
+    runtime: createRuntimeService({
+      database,
+      access: accessController,
+      changes: changeController,
+      runtime: runtimeController,
+      previews: projectAppPreviews,
+      closeBrowser: (id) => buildBrowserController.closeChange(id),
+      cancelDelivery: (id) => deliveryController.cancel(id),
+      revokeAttempt: (id) => runtimeAccess.revokeAttempt(id),
+      suspendAttempt: (id) => runtimeHub.suspend(id),
+    }),
+    agent: createAgentService({ access: accessController, controller: agentController }),
+    conversations: createConversationService({
+      access: accessController,
+      controller: projectAgentController,
+    }),
+    tickets: createTicketService({
+      database,
+      access: accessController,
+      documents: ticketDocuments,
+      trash: ticketTrash,
+      changes: changeController,
+      agent: agentController,
+    }),
+    usage: usageService,
+    models: modelService,
+    environments: createEnvironmentService(environmentController, projectPreparation.ensure),
+    access: accessService,
+    bootstrap: bootstrapService,
+    setup: createSetupService({
+      database,
+      drafts: projectSetup,
+      inspection: setupInspection,
+      readiness: setupReadiness,
+    }),
+    skills: skillService,
+    mcp: createMCPService(mcpConnections),
+    inputs: createInputService(monitoringController, accessController),
+    writer: createWriterService(changeWriters, accessController),
+    review: createReviewService({
+      controller: visualReview,
+      access: accessController,
+      admit: (changeID, userID, sql, text, commandID) =>
+        agentController.admitPromptIn(sql, changeID, userID, text, commandID),
+      dispatchPending: (changeID) => agentController.dispatchPending(changeID),
+    }),
+    attachments: attachmentStore,
+    workspaces: createWorkspaceService({
+      sources: workspaceSources,
+      editors: developerEditors,
+      revokeEditor: (userID) => developerIDEEdge.revokeUser(userID),
+    }),
+    knowledge: createKnowledgeService({
+      controller: knowledgeController,
+      access: accessController,
+      observeRetry: (projectID, userID, generationID) =>
+        setupReadiness.observeWikiRetry(projectID, userID, generationID),
+    }),
+  },
+  maintenance: () =>
+    process.env["FACTORY_HELM_RELEASE"]
+      ? installationInMaintenance(database)
+      : Promise.resolve(false),
+  requireFresh: (request) => factoryAuth.requireFresh(request),
+  handle: serverFunctions.handleServerFunctionRequest,
+  publicFunctionIDs: serverFunctions.publicFunctionIDs,
+});
+const staticAssets = createStaticAssets(resolve(buildDirectory, "client"));
+
 async function route(request: Request) {
+  const publicationCredentials = new URL(request.url).pathname.match(
+    /^\/internal\/releases\/([0-9a-f-]{36})\/credentials$/,
+  );
+  if (publicationCredentials) {
+    return releaseController
+      .credentials(request, publicationCredentials[1]!)
+      .catch(() => new Response(null, { status: 503, headers: { "cache-control": "no-store" } }));
+  }
   if (
     process.env["FACTORY_HELM_RELEASE"] &&
     !["GET", "HEAD", "OPTIONS"].includes(request.method) &&
@@ -645,6 +744,8 @@ async function route(request: Request) {
     );
   const url = factoryRequestURL(request, factoryOrigin);
   try {
+    if (url.pathname === "/_server" || url.pathname.startsWith("/_server/"))
+      return await serverFunctionEndpoint(request);
     const monitoringIntake = await monitoringRoutes.intake(request);
     if (monitoringIntake) return monitoringIntake;
     const runtimeEnvironment = url.pathname.match(
@@ -703,107 +804,34 @@ async function route(request: Request) {
     ) {
       return json({ error: "Factory command origin is invalid" }, 403);
     }
-    if (
-      url.pathname.startsWith("/api/attachments/") ||
-      /^\/api\/projects\/[^/]+\/(?:attachments|attachment-drafts\/[^/]+)$/.test(url.pathname)
-    ) {
+    if (url.pathname.startsWith("/api/attachments/")) {
       const session = await requireSession(request);
       if (!session) return json({ error: "Authentication required" }, 401);
       return (
         (await attachmentRoutes(request, session.user.id)) ?? new Response(null, { status: 404 })
       );
     }
-    if (url.pathname === "/api/session") {
-      const session = await factoryAuth.session(request);
-      return json(
-        {
-          session,
-          identity: factoryAuth.policy,
-          uiPreference: session
-            ? await uiPreferenceController.get(session.user.id)
-            : { desktopBackgroundKey: "river-landscape" },
-          zeroCacheURL:
-            process.env["FACTORY_ZERO_CACHE_PUBLIC_URL"] ??
-            FACTORY_ZERO_CACHE_URL ??
-            "http://127.0.0.1:4948",
-          forgeOrigins: {
-            browser: forgePublicOrigin,
-            transport: forgeTransportOrigin,
-          },
-          modelRelayConfigured: Boolean(
-            (process.env["FACTORY_MODEL_BASE_URL"] && process.env["FACTORY_MODEL_API_KEY"]) ||
-              (await database.client.begin((sql) => modelConnections.reference("build", sql))),
-          ),
-        },
-        200,
-        {
-          "x-open-factory": "ready",
-          "x-open-factory-startup": startupID,
-        },
-      );
+    if (url.pathname === "/health/ready") {
+      if (request.method !== "GET" && request.method !== "HEAD")
+        return new Response(null, { status: 405 });
+      return json({ ready: true, planningCacheURL }, 200, {
+        "x-open-factory": "ready",
+        "x-open-factory-startup": startupID,
+        "cache-control": "no-store",
+      });
     }
     if (url.pathname.startsWith("/api/")) {
       const session = await requireSession(request);
       if (!session) return json({ error: "Authentication required" }, 401);
       await accessController.authorizeAPI(request, session.user.id);
-      if (url.pathname === "/api/security/configuration") {
-        await accessController.requireSystemManager(session.user.id);
-        if (request.method === "GET") return json(await factoryAuth.view(session.user.id));
-        try {
-          await factoryAuth.requireFresh(request);
-        } catch {
-          throw new CommandError("forbidden", "Sign in again before changing security settings");
-        }
-        if (request.method === "PUT")
-          return json(
-            await factoryAuth.save(
-              session.user.id,
-              identityConfigurationWrite.parse(await request.json()),
-            ),
-          );
-        return new Response(null, { status: 405 });
-      }
-      const identityActivation = url.pathname.match(
-        /^\/api\/security\/configuration\/([0-9a-f-]{36})\/activate$/,
-      );
-      if (identityActivation?.[1] && request.method === "POST") {
-        await accessController.requireSystemManager(session.user.id);
-        try {
-          await factoryAuth.requireFresh(request);
-        } catch {
-          throw new CommandError("forbidden", "Sign in again before changing security settings");
-        }
-        return json(await factoryAuth.activate(session.user.id, identityActivation[1]));
-      }
       const forgeIdentityResponse = await forgeIdentityRoutes(request, session.user.id);
       if (forgeIdentityResponse) return forgeIdentityResponse;
-      const response = await accessRoutes(request, session.user.id);
-      if (response) return response;
-      const usageResponse = await usageRoutes(request, session.user.id);
-      if (usageResponse) return usageResponse;
-      const modelResponse = await projectModelRoutes(request, session.user.id);
-      if (modelResponse) return modelResponse;
-      const environmentResponse = await environmentRoutes(request, session.user.id);
-      if (environmentResponse) {
-        if (request.method === "PUT" && environmentResponse.ok) {
-          const projectID = url.pathname.split("/")[3];
-          if (projectID)
-            void projectPreparation
-              .ensure(projectID)
-              .catch(() => console.error("Project image preparation admission needs retry"));
-        }
-        return environmentResponse;
-      }
-      const skillResponse = await skillRoutes(request, session.user.id);
-      if (skillResponse) return skillResponse;
-      const mcpResponse = await mcpRoutes(request, session.user.id);
+      const reviewMediaResponse = await reviewMediaRoutes(request, session.user.id);
+      if (reviewMediaResponse) return reviewMediaResponse;
+      const mcpResponse = await mcpOAuthCallback(request, session.user.id);
       if (mcpResponse) return mcpResponse;
-      const monitoringResponse = await monitoringRoutes.settings(request, session.user.id);
-      if (monitoringResponse) return monitoringResponse;
-      const sourceResponse = await sourceRoutes(request, session.user.id);
+      const sourceResponse = await sourceProtocol(request, session.user.id);
       if (sourceResponse) return sourceResponse;
-      const editorResponse = await developerIDERoutes(request, session.user.id);
-      if (editorResponse) return editorResponse;
     }
     if (url.pathname === "/api/developer-ide/access" && request.method === "GET") {
       const session = await requireSession(request);
@@ -820,803 +848,6 @@ async function route(request: Request) {
         ),
         302,
       );
-    }
-    if (url.pathname === "/api/ui-preference") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      if (request.method === "GET") return json(await uiPreferenceController.get(session.user.id));
-      return new Response(null, { status: 405 });
-    }
-    if (url.pathname === "/api/projects") return projects(request);
-    if (url.pathname.startsWith("/api/project-setup")) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      return projectSetupRoutes(request, session.user.id);
-    }
-    const inspection = url.pathname.match(
-      /^\/api\/projects\/([a-f0-9-]{36})\/setup\/inspection(?:\/(confirm|stop))?$/,
-    );
-    if (inspection?.[1]) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = inspection[1];
-      if (request.method === "GET" && !inspection[2])
-        return json(await setupInspection.view(projectID, session.user.id));
-      if (request.method === "POST") {
-        const body = setupInspectionCommand.parse(await request.json());
-        return json(
-          inspection[2] === "stop"
-            ? await setupInspection.stop(projectID, session.user.id, body.id)
-            : inspection[2] === "confirm"
-              ? await setupInspection.confirm(projectID, session.user.id, body.id)
-              : await setupInspection.start(projectID, session.user.id, body.id, {
-                  ...(body.parentID ? { parentID: body.parentID } : {}),
-                  answers: body.answers,
-                }),
-        );
-      }
-      return new Response(null, { status: 405 });
-    }
-    const setupProgress = url.pathname.match(
-      /^\/api\/projects\/([a-f0-9-]{36})\/setup(?:\/(retry))?$/,
-    );
-    if (setupProgress?.[1]) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const id = setupProgress[1];
-      if (request.method === "GET") return json(await setupReadiness.status(id, session.user.id));
-      if (request.method === "POST" && setupProgress[2]) {
-        const body = z
-          .object({ task: setupTask })
-          .strict()
-          .parse(await request.json());
-        const [intent] =
-          await database.client`SELECT kind FROM factory.project_repository_intent WHERE project_id=${id}`;
-        await setupReadiness.retry(id, session.user.id, body.task, intent?.["kind"] === "starter");
-        return json(await setupReadiness.status(id, session.user.id));
-      }
-      return new Response(null, { status: 405 });
-    }
-    if (url.pathname.startsWith("/api/model-connections")) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      return (
-        (await modelConnectionRoutes(request, session.user.id)) ??
-        new Response(null, { status: 404 })
-      );
-    }
-    if (url.pathname === "/api/model-settings" || url.pathname === "/api/model-settings/check") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      if (url.pathname.endsWith("/check")) {
-        if (request.method !== "POST") return new Response(null, { status: 405 });
-        return json(await modelSettingsController.checkConnection());
-      }
-      if (request.method === "GET") return json(await modelSettingsController.get());
-      if (request.method === "PUT") {
-        const input = modelDefaultsInput.safeParse(await request.json().catch(() => null));
-        if (!input.success) return json({ error: "Model settings are invalid" }, 400);
-        return json(await modelSettingsController.set(input.data, session.user.id));
-      }
-      return new Response(null, { status: 405 });
-    }
-    const projectConversation = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/conversation(?:\/(message|mode|answer|new))?$/,
-    );
-    if (projectConversation) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = projectConversation[1];
-      const action = projectConversation[2];
-      if (!projectID) return json({ error: "Project is required" }, 400);
-      if (!action && request.method === "GET") {
-        const ticketID = url.searchParams.get("ticketId") ?? undefined;
-        if (ticketID && !/^[0-9a-f-]{36}$/.test(ticketID)) {
-          return json({ error: "Ticket is invalid" }, 400);
-        }
-        const contextID = url.searchParams.get("contextId") ?? undefined;
-        if (contextID && contextID !== "original") z.uuid().parse(contextID);
-        return json(
-          await projectAgentController.get(projectID, ticketID, session.user.id, contextID),
-        );
-      }
-      if (request.method !== "POST") return new Response(null, { status: 405 });
-      if (action === "new") {
-        const input = newConversationInput.parse(await request.json());
-        return json(
-          await projectAgentController.newConversation(
-            projectID,
-            input.ticketId,
-            session.user.id,
-            input.commandId,
-          ),
-          201,
-        );
-      }
-      if (action === "message") {
-        const parsed = conversationMessageInput.safeParse(await request.json().catch(() => null));
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        if (request.headers.get("accept")?.includes("text/event-stream"))
-          return projectResponseStream((observer) =>
-            projectAgentController.message(
-              projectID,
-              parsed.data.ticketId,
-              parsed.data.text,
-              session.user.id,
-              parsed.data.commandId,
-              parsed.data.intent,
-              observer,
-              parsed.data.contextId,
-            ),
-          );
-        return json(
-          await projectAgentController.message(
-            projectID,
-            parsed.data.ticketId,
-            parsed.data.text,
-            session.user.id,
-            parsed.data.commandId,
-            parsed.data.intent,
-            undefined,
-            parsed.data.contextId,
-          ),
-          201,
-        );
-      }
-      if (action === "mode") {
-        const parsed = conversationModeCommandInput.safeParse(
-          await request.json().catch(() => null),
-        );
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return json(
-          await projectAgentController.setMode(
-            projectID,
-            parsed.data.ticketId,
-            parsed.data.mode,
-            session.user.id,
-          ),
-        );
-      }
-      if (action === "answer") {
-        const parsed = interviewAnswerCommandInput.safeParse(
-          await request.json().catch(() => null),
-        );
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return json(
-          await projectAgentController.answer(
-            projectID,
-            parsed.data.ticketId,
-            parsed.data.questionEntryId,
-            parsed.data.answer,
-            session.user.id,
-            parsed.data.commandId,
-            parsed.data.contextId,
-          ),
-          201,
-        );
-      }
-      return new Response(null, { status: 404 });
-    }
-    const knowledgeGeneration = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/knowledge\/generation$/,
-    );
-    if (knowledgeGeneration) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = knowledgeGeneration[1];
-      if (!projectID) return json({ error: "Project is required" }, 400);
-      if (request.method === "GET") return json(await knowledgeController.generation(projectID));
-      if (request.method === "POST") {
-        const generation = await knowledgeController.generate(projectID, session.user.id);
-        if (generation)
-          await setupReadiness.observeWikiRetry(
-            projectID,
-            session.user.id,
-            z.uuid().parse(generation["id"]),
-          );
-        return json(generation, 202);
-      }
-      return new Response(null, { status: 405 });
-    }
-    const knowledgeSearch = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/knowledge\/search$/,
-    );
-    if (knowledgeSearch && request.method === "GET") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = knowledgeSearch[1];
-      if (!projectID) return json({ error: "Project is required" }, 400);
-      return json({
-        results: await knowledgeController.search(
-          projectID,
-          url.searchParams.get("q") ?? "",
-          session.user.id,
-        ),
-      });
-    }
-    const repositoryDocuments = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/knowledge\/documents$/,
-    );
-    if (repositoryDocuments) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = repositoryDocuments[1];
-      if (!projectID) return json({ error: "Project is required" }, 400);
-      if (request.method === "GET") {
-        await accessController.requireDevelopment(session.user.id, projectID);
-        const path = url.searchParams.get("path");
-        if (path) return json(await knowledgeController.document(projectID, path));
-        return json(await knowledgeController.documents(projectID));
-      }
-      return new Response(null, { status: 405 });
-    }
-    const knowledgePageRoute = url.pathname.match(
-      /^\/api\/knowledge\/pages\/([0-9a-f-]+)(?:\/(revisions|archive|restore|sources))?$/,
-    );
-    if (knowledgePageRoute) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const pageID = knowledgePageRoute[1];
-      const action = knowledgePageRoute[2];
-      if (!pageID) return json({ error: "Knowledge Page is required" }, 400);
-      if (action === "revisions" && request.method === "GET") {
-        return json({ revisions: await knowledgeController.history(pageID, session.user.id) });
-      }
-      if (action === "sources" && request.method === "GET")
-        return json(await knowledgeController.sources(pageID, session.user.id));
-      if (action === "restore" && request.method === "POST") {
-        const parsed = z
-          .object({ revisionID: z.uuid(), expectedVersion: z.number().int().positive() })
-          .safeParse(await request.json().catch(() => null));
-        if (!parsed.success)
-          return json({ error: "Revision and current page version are required" }, 400);
-        return json(
-          await knowledgeController.restore(
-            pageID,
-            parsed.data.revisionID,
-            parsed.data.expectedVersion,
-            session.user.id,
-          ),
-        );
-      }
-      if (action === "archive" && request.method === "POST") {
-        const body = (await request.json().catch(() => null)) as {
-          expectedVersion?: unknown;
-        } | null;
-        if (!body || typeof body.expectedVersion !== "number") {
-          return json({ error: "Knowledge Page version is required" }, 400);
-        }
-        return json(
-          await knowledgeController.archive(pageID, body.expectedVersion, session.user.id),
-        );
-      }
-      if (!action && request.method === "PUT") {
-        const parsed = knowledgeEditInput.safeParse(await request.json().catch(() => null));
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return json(await knowledgeController.edit(pageID, parsed.data, session.user.id));
-      }
-      return new Response(null, { status: 405 });
-    }
-    const agentRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/agent(?:\/(activity|start|resume|prompt|request-changes|stop|check-stop|new-conversation))?$/,
-    );
-    const writerRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]{36})\/writer(?:\/(status|activity|request|approve|release|idle-takeover))?$/,
-    );
-    if (writerRoute?.[1]) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      if (writerRoute[2]) {
-        if (["request", "approve", "release", "idle-takeover"].includes(writerRoute[2])) {
-          if (request.method !== "POST") return new Response(null, { status: 405 });
-          return json(
-            await executeEditingCommand(
-              changeWriters,
-              writerRoute[2],
-              writerRoute[1],
-              session.user.id,
-              await request.json(),
-            ),
-          );
-        }
-        if (writerRoute[2] === "activity") {
-          if (request.method !== "POST") return new Response(null, { status: 405 });
-          const input = z
-            .strictObject({
-              epoch: z.number().int().positive(),
-              kind: z.enum(["edit", "heartbeat"]),
-            })
-            .parse(await request.json());
-          await changeWriters.activity(writerRoute[1], session.user.id, input.epoch, input.kind);
-          return new Response(null, { status: 204 });
-        }
-        if (request.method !== "GET") return new Response(null, { status: 405 });
-        return json(await changeWriters.status(writerRoute[1], session.user.id));
-      }
-      if (request.method === "GET")
-        return json(await changeWriters.view(writerRoute[1], session.user.id));
-      if (request.method === "POST") {
-        const { commandID, epoch } = z
-          .object({
-            commandID: z.uuid(),
-            epoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-          })
-          .strict()
-          .parse(await request.json());
-        return json(
-          await changeWriters.takeOver(
-            writerRoute[1],
-            session.user.id,
-            commandID,
-            undefined,
-            undefined,
-            epoch,
-          ),
-        );
-      }
-      return new Response(null, { status: 405 });
-    }
-    if (agentRoute) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const [, changeID, action] = agentRoute;
-      if (!changeID) return json({ error: "Change is required" }, 400);
-      const agentNavigationView = async (view: Awaited<ReturnType<typeof agentController.get>>) => {
-        const [change] = await database.client<{ projectID: string }[]>`
-          SELECT project_id AS "projectID" FROM factory.change WHERE id=${changeID}`;
-        if (!change) throw new CommandError("not-found", "Change not found");
-        const developer = await accessController.canDevelop(session.user.id, change.projectID);
-        return { ...view, messages: navigationMessages(view.messages, developer) };
-      };
-      const readAgent = async (history = true) =>
-        agentNavigationView(await agentController.get(changeID, undefined, history, true));
-      const agentResponse = async (work: ReturnType<typeof agentController.get>, status = 200) =>
-        json(await agentNavigationView(await work), status);
-      if (action === "activity" && request.method === "GET")
-        return agentActivityResponse({
-          signal: request.signal,
-          authorize: async () => {
-            const current = await requireSession(request);
-            if (!current || current.user.id !== session.user.id)
-              throw new CommandError("forbidden", "Build activity access ended");
-            await accessController.authorizeAPI(request, current.user.id);
-          },
-          read: () => readAgent(),
-          subscribe: async (notify) => agentController.subscribeActivity(changeID, notify),
-        });
-      if (!action && request.method === "GET")
-        return json(await readAgent(url.searchParams.get("history") !== "0"));
-      if (request.method !== "POST") return new Response(null, { status: 405 });
-      if (action === "new-conversation") {
-        const input = z
-          .strictObject({ commandId: z.uuid(), contextId: z.uuid().nullable() })
-          .parse(await request.json());
-        return json(
-          {
-            contextId: await agentController.newConversation(
-              changeID,
-              session.user.id,
-              input.commandId,
-              input.contextId,
-            ),
-          },
-          201,
-        );
-      }
-      if (action === "start") {
-        const parsed = changeAgentStartInput.safeParse(await request.json().catch(() => null));
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return agentResponse(
-          agentController.start(
-            changeID,
-            session.user.id,
-            parsed.data.commandId,
-            parsed.data.codingReasoning,
-            parsed.data.contextId,
-          ),
-          202,
-        );
-      }
-      if (action === "stop") return agentResponse(agentController.stop(changeID), 202);
-      if (action === "resume") {
-        const parsed = changeAgentResumeInput.safeParse(await request.json().catch(() => null));
-        if (!parsed.success) return json({ error: "Resume request is invalid" }, 400);
-        return agentResponse(
-          agentController.resume(
-            changeID,
-            session.user.id,
-            parsed.data.commandId,
-            parsed.data.pausedTurnId,
-          ),
-          202,
-        );
-      }
-      if (action === "check-stop") {
-        const parsed = changeAgentStopConfirmationInput.safeParse(
-          await request.json().catch(() => null),
-        );
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return agentResponse(agentController.recheckStop(changeID, parsed.data.stopId));
-      }
-      if (action === "prompt" || action === "request-changes") {
-        const parsed = changeAgentPromptInput.safeParse(await request.json().catch(() => null));
-        if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-        return agentResponse(
-          agentController.prompt(
-            changeID,
-            parsed.data.text,
-            session.user.id,
-            parsed.data.commandId,
-            false,
-            parsed.data.contextId,
-          ),
-          202,
-        );
-      }
-      return new Response(null, { status: 404 });
-    }
-    const ticketDetail = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)$/);
-    if (ticketDetail && request.method === "GET") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = ticketDetail[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      const tickets = await database.client<Array<Record<string, unknown>>>`
-        SELECT id, project_id AS "projectId", epic_id AS "epicId", converted_to_epic_id AS "convertedToEpicId", title, description, state, version::integer AS version,
-          created_at AS "createdAt", updated_at AS "updatedAt", trashed_at AS "trashedAt",
-          trash_stop_pending AS "trashStopPending", trash_error AS "trashError"
-        FROM factory.ticket WHERE id = ${ticketID}
-      `;
-      const revisions = await database.client<Array<Record<string, unknown>>>`
-        SELECT revision.id, revision.ticket_id AS "ticketId", revision.ordinal,
-          revision.canonical_content AS "canonicalContent",
-          revision.content_digest AS "contentDigest", revision.created_at AS "createdAt",
-          approval.id AS "approvalId", approval.approved_at AS "approvedAt",
-          approval.monitoring_incident_id AS "monitoringIncidentId",author.name AS author
-        FROM factory.requirement_revision revision
-        LEFT JOIN auth."user" author ON author.id = revision.created_by
-        LEFT JOIN factory.requirement_approval approval
-          ON approval.requirement_revision_id = revision.id
-        WHERE revision.ticket_id = ${ticketID} ORDER BY revision.ordinal DESC
-      `;
-      const documentRevisions = await database.client<Array<Record<string, unknown>>>`
-        SELECT revision.id, revision.ordinal, revision.title, revision.description,
-          revision.canonical_content AS "canonicalContent", revision.content_digest AS "contentDigest",
-          revision.requirement_revision_id AS "requirementRevisionId", revision.created_at AS "createdAt", author.name AS author,
-          revision.author_kind AS "authorKind", revision.proposal_entry_id AS "proposalEntryId",
-          approval.id AS "approvalId",approval.monitoring_incident_id AS "monitoringIncidentId"
-        FROM factory.ticket_document_revision revision LEFT JOIN auth."user" author ON author.id = revision.created_by
-        LEFT JOIN factory.requirement_approval approval ON approval.requirement_revision_id = revision.requirement_revision_id
-          AND EXISTS(SELECT 1 FROM factory.requirement_revision scope WHERE scope.id=revision.requirement_revision_id AND scope.canonical_content=revision.canonical_content)
-        WHERE revision.ticket_id = ${ticketID} ORDER BY revision.ordinal DESC`;
-      const [origin] = await database.client<Array<{ id: string; title: string }>>`
-        SELECT ticket.id, ticket.title FROM factory.ticket_follow_up follow JOIN factory.ticket ticket ON ticket.id = follow.source_ticket_id WHERE follow.ticket_id = ${ticketID}`;
-      const followUps = await database.client<Array<{ id: string; title: string }>>`
-        SELECT ticket.id, ticket.title FROM factory.ticket_follow_up follow JOIN factory.ticket ticket ON ticket.id = follow.ticket_id WHERE follow.source_ticket_id = ${ticketID}`;
-      const [proposal] = await database.client<
-        Array<{ id: string; payload: Record<string, unknown> }>
-      >`
-        SELECT entry.id,entry.payload FROM factory.conversation_entry entry
-        JOIN factory.ticket_conversation conversation ON conversation.id=entry.conversation_id
-        WHERE conversation.ticket_id=${ticketID} AND entry.kind='requirement'
-          AND NOT EXISTS(SELECT 1 FROM factory.ticket_document_revision document WHERE document.proposal_entry_id=entry.id)
-          AND NOT EXISTS(SELECT 1 FROM factory.conversation_entry newer WHERE newer.conversation_id=entry.conversation_id
-            AND newer.kind='requirement' AND newer.ordinal>entry.ordinal)
-        ORDER BY entry.ordinal DESC LIMIT 1`;
-      const projectID = tickets[0]?.["projectId"];
-      const visibleProposal =
-        proposal?.payload["visibility"] !== "developer" ||
-        (typeof projectID === "string" &&
-          (await accessController.canDevelop(session.user.id, projectID)));
-      return json({
-        ticket: tickets[0] ?? null,
-        revisions,
-        documentRevisions,
-        proposal:
-          visibleProposal && proposal?.payload["base"] && proposal.payload["requirement"]
-            ? { ...proposal.payload, id: proposal.id }
-            : null,
-        origin: origin ?? null,
-        followUps,
-      });
-    }
-    const epicConfirmation = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/epic-proposals\/([0-9a-f-]+)\/confirm$/,
-    );
-    if (epicConfirmation && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const parsed = confirmEpicProposalInput.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-      return json(
-        await projectAgentController.confirmEpic(
-          epicConfirmation[1]!,
-          epicConfirmation[2]!,
-          session.user.id,
-          parsed.data,
-        ),
-        201,
-      );
-    }
-    const documentSave = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)\/document$/);
-    if (documentSave && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = documentSave[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      const parsed = ticketDocumentInput.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-      return json(await ticketDocuments.save(ticketID, session.user.id, parsed.data), 201);
-    }
-    const ticketFollowUp = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)\/follow-up$/);
-    if (ticketFollowUp && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = ticketFollowUp[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      const parsed = ticketFollowUpInput.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-      return json(await ticketDocuments.followUp(ticketID, session.user.id, parsed.data), 201);
-    }
-    const trashCommand = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)\/(trash|restore)$/);
-    if (trashCommand && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = trashCommand[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      if (trashCommand[2] === "restore") {
-        const parsed = z
-          .object({ expectedVersion: z.number().int().positive() })
-          .strict()
-          .safeParse(await request.json().catch(() => null));
-        if (!parsed.success) return json({ error: "Ticket version is required" }, 400);
-        await ticketTrash.restore(ticketID, session.user.id, parsed.data.expectedVersion);
-      } else await ticketTrash.trash(ticketID, session.user.id);
-      return json({}, 202);
-    }
-    const revisionCreate = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)\/requirements$/);
-    if (revisionCreate && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = revisionCreate[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      const parsed = requirementContentInput.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return json({ error: parsed.error.issues[0]?.message }, 400);
-      return json(
-        await changeController.createRevision(ticketID, parsed.data, session.user.id),
-        201,
-      );
-    }
-    const approvalCreate = url.pathname.match(
-      /^\/api\/tickets\/([0-9a-f-]+)\/requirements\/([0-9a-f-]+)\/approve$/,
-    );
-    if (approvalCreate && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = approvalCreate[1];
-      const revisionID = approvalCreate[2];
-      if (!ticketID || !revisionID) return json({ error: "Requirement is required" }, 400);
-      return json(await changeController.approve(ticketID, revisionID, session.user.id), 201);
-    }
-    const changeStart = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)\/change$/);
-    if (changeStart && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = changeStart[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      return json(await changeController.start(ticketID, session.user.id), 202);
-    }
-    const implementationStart = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)\/implement$/);
-    if (implementationStart && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const ticketID = implementationStart[1];
-      if (!ticketID) return json({ error: "Ticket is required" }, 400);
-      const parsed = implementationInput.safeParse(await request.json().catch(() => null));
-      if (!parsed.success) return json({ error: "Implementation request is invalid" }, 400);
-      if (parsed.data.codingReasoning) {
-        const [ticket] = await database.client<Array<{ projectID: string }>>`
-          SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
-        if (!ticket) throw new CommandError("not-found", "Ticket not found");
-        await accessController.requireDevelopment(session.user.id, ticket.projectID);
-      }
-      return json(
-        await changeController.start(ticketID, session.user.id, {
-          commandID: parsed.data.commandId,
-          revisionID: parsed.data.revisionId,
-          ...(parsed.data.codingReasoning ? { codingReasoning: parsed.data.codingReasoning } : {}),
-          admitBuild: (sql, changeID) =>
-            agentController.admitStartIn(
-              sql,
-              changeID,
-              session.user.id,
-              parsed.data.commandId,
-              parsed.data.codingReasoning,
-            ),
-        }),
-        202,
-      );
-    }
-    if (url.pathname === "/api/changes" && request.method === "GET") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = url.searchParams.get("projectId");
-      if (projectID && !/^[0-9a-f-]{36}$/i.test(projectID))
-        return json({ error: "Invalid Project identity" }, 400);
-      return json({
-        changes: await changeController.list(projectID ?? undefined, session.user.id),
-      });
-    }
-    const visualReviewRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/review(?:\/(feedback|update|send|stills|media)(?:\/([0-9a-f-]+))?)?$/,
-    );
-    if (visualReviewRoute) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const changeID = visualReviewRoute[1]!;
-      const action = visualReviewRoute[2];
-      const mediaID = visualReviewRoute[3];
-      if (!action && request.method === "GET")
-        return json(await visualReview.get(changeID, session.user.id));
-      if (action === "media" && mediaID && request.method === "GET")
-        return reviewMedia.read(changeID, session.user.id, mediaID, request.headers.get("range"));
-      if (action === "stills" && request.method === "POST") {
-        const form = await new Response(await reviewRequestBody(request, 2_162_688), {
-          headers: { "content-type": request.headers.get("content-type") ?? "" },
-        }).formData();
-        const file = form.get("frame");
-        if (!(file instanceof File) || file.size > 2_097_152)
-          throw new CommandError("conflict", "Annotation frame exceeds the 2 MiB limit");
-        return json(
-          await reviewMedia.still(
-            changeID,
-            session.user.id,
-            JSON.parse(String(form.get("context"))),
-            new Uint8Array(await file.arrayBuffer()),
-            z.uuid().parse(form.get("id")),
-          ),
-          201,
-        );
-      }
-      if (request.method === "POST" && ["feedback", "update", "send"].includes(action ?? "")) {
-        const input: unknown = JSON.parse((await reviewRequestBody(request, 32_768)).toString());
-        if (action === "feedback")
-          return json(await visualReview.create(changeID, session.user.id, input), 201);
-        if (action === "update")
-          return json(await visualReview.update(changeID, session.user.id, input));
-        const result = await visualReview.dispatch(
-          changeID,
-          session.user.id,
-          input,
-          (sql, text, commandID) =>
-            agentController.admitPromptIn(sql, changeID, session.user.id, text, commandID),
-        );
-        // Dispatch only newly persisted pending work. Reconnect and duplicate
-        // commands cannot admit a second inference.
-        void agentController.dispatchPending(changeID);
-        return json(result, 202);
-      }
-      return new Response(null, { status: 405 });
-    }
-    const recordingSettingRoute = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/qa-recording$/,
-    );
-    if (recordingSettingRoute) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = recordingSettingRoute[1]!;
-      if (request.method === "PUT") {
-        const input = z.strictObject({ enabled: z.boolean() }).parse(await request.json());
-        await visualReview.recordingSetting(projectID, session.user.id, input.enabled);
-      } else if (request.method !== "GET") return new Response(null, { status: 405 });
-      const [project] = await database.client<{ enabled: boolean }[]>`
-        SELECT qa_recording_enabled AS enabled FROM factory.project WHERE id=${projectID}`;
-      return json(project);
-    }
-    const deliveryRoute = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/delivery(?:\/(approve|retry-review|resume-checks))?$/,
-    );
-    if (deliveryRoute) {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const changeID = deliveryRoute[1];
-      const action = deliveryRoute[2];
-      if (!changeID) return json({ error: "Change is required" }, 400);
-      if (!action && request.method === "GET") return json(await deliveryController.get(changeID));
-      if (action === "approve" && request.method === "POST") {
-        return json(await deliveryController.approve(changeID, session.user.id), 202);
-      }
-      if (action === "retry-review" && request.method === "POST") {
-        const input = candidateReviewRetryInput.parse(await request.json());
-        return json(
-          await deliveryController.retryReview(
-            changeID,
-            session.user.id,
-            input.commandId,
-            input.reviewId,
-          ),
-          202,
-        );
-      }
-      if (action === "resume-checks" && request.method === "POST") {
-        const input = verificationResumeInput.parse(await request.json());
-        return json(
-          await deliveryController.resumeChecks(
-            changeID,
-            session.user.id,
-            input.commandId,
-            input.verificationId,
-            input.stopId,
-          ),
-          202,
-        );
-      }
-      return new Response(null, { status: 405 });
-    }
-    const changeCancel = url.pathname.match(/^\/api\/changes\/([0-9a-f-]+)\/cancel$/);
-    if (changeCancel && request.method === "POST") {
-      if (!(await requireSession(request))) return json({ error: "Authentication required" }, 401);
-      const changeID = changeCancel[1];
-      if (!changeID) return json({ error: "Change is required" }, 400);
-      await changeController.cancel(changeID);
-      await buildBrowserController.closeChange(changeID);
-      await deliveryController.cancel(changeID);
-      return json(await changeController.get(changeID), 202);
-    }
-    const runtimeStart = url.pathname.match(
-      /^\/api\/projects\/([0-9a-f-]+)\/(?:runtime|personal-workspace\/ensure)$/,
-    );
-    if (runtimeStart && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = runtimeStart[1];
-      if (!projectID) return json({ error: "Project is required" }, 400);
-      return json(await runtimeController.start(projectID, session.user.id), 202);
-    }
-    const stagingEnsure = url.pathname.match(/^\/api\/projects\/([0-9a-f-]+)\/staging\/ensure$/);
-    if (stagingEnsure && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = stagingEnsure[1];
-      if (!projectID) return json({ error: "Project is required" }, 400);
-      return json(await runtimeController.ensureStaging(projectID, session.user.id), 202);
-    }
-    const ticketWorkspaceEnsure = url.pathname.match(
-      /^\/api\/changes\/([0-9a-f-]+)\/ticket-workspace\/ensure$/,
-    );
-    if (ticketWorkspaceEnsure && request.method === "POST") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const changeID = ticketWorkspaceEnsure[1];
-      if (!changeID) return json({ error: "Change is required" }, 400);
-      const [workspace] = await database.client<
-        { id: string }[]
-      >`SELECT id FROM factory.development_workspace WHERE change_id=${changeID}`;
-      if (!workspace)
-        throw new CommandError(
-          "conflict",
-          "Prepare source and take over editing before starting compute",
-        );
-      await database.client.begin((sql) =>
-        workspaceWriteAuthorityIn(sql, workspace.id, session.user.id),
-      );
-      return json(await runtimeController.startPersisted(changeID, session.user.id), 202);
-    }
-    if (url.pathname === "/api/runtime-attempts" && request.method === "GET") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      const projectID = url.searchParams.get("projectId");
-      if (projectID && !/^[0-9a-f-]{36}$/i.test(projectID))
-        return json({ error: "Invalid Project identity" }, 400);
-      return json({
-        attempts: await runtimeController.list(projectID ?? undefined, session.user.id),
-      });
-    }
-    const appPreviews = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})\/app-previews$/);
-    if (appPreviews?.[1] && request.method === "GET") {
-      const session = await requireSession(request);
-      if (!session) return json({ error: "Authentication required" }, 401);
-      return json({ previews: await projectAppPreviews(appPreviews[1], session.user.id) });
     }
     if (url.pathname === "/api/runtime-access" && request.method === "GET") {
       const session = await requireSession(request);
@@ -1649,18 +880,6 @@ async function route(request: Request) {
       destination.host = new URL(appRuntimeOrigin(factoryOrigin, attemptID, channel)).host;
       destination.searchParams.set("factory-grant", token);
       return Response.redirect(destination, 302);
-    }
-    const runtimeStop = url.pathname.match(/^\/api\/runtime-attempts\/([a-z0-9-]+)\/stop$/);
-    if (runtimeStop && request.method === "POST") {
-      if (!(await requireSession(request))) return json({ error: "Authentication required" }, 401);
-      const attemptID = runtimeStop[1];
-      if (!attemptID) return json({ error: "Runtime Attempt is required" }, 400);
-      try {
-        return json(await runtimeController.stop(attemptID), 202);
-      } finally {
-        runtimeAccess.revokeAttempt(attemptID);
-        runtimeHub.suspend(attemptID);
-      }
     }
     const channelRequest = url.pathname.match(/^\/runtime\/([0-9a-f-]+)\/(app|ide)(\/.*)?$/);
     if (channelRequest) {
@@ -1826,13 +1045,7 @@ async function route(request: Request) {
       );
     }
     if (url.pathname.startsWith("/api/")) return json({ error: "Not found" }, 404);
-    const path = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-    const dist = resolve(import.meta.dir, "../dist");
-    const filePath = resolve(dist, path);
-    if (!filePath.startsWith(`${dist}/`)) return new Response("Not found", { status: 404 });
-    const file = Bun.file(filePath);
-    if (await file.exists()) return new Response(file);
-    return new Response(Bun.file(resolve(dist, "index.html")));
+    return staticAssets(request);
   } catch (cause) {
     if (cause instanceof CommandError)
       return json({ error: cause.message, code: cause.code }, cause.status);
@@ -2030,6 +1243,17 @@ observeRecoveredRuntimes();
 void executionReserve.start();
 idleCompute.start();
 console.log(`Factory listening on ${servers[0]!.url}`);
+let releasesReconciling = false;
+setInterval(() => {
+  if (releasesReconciling) return;
+  releasesReconciling = true;
+  void releaseController
+    .recover()
+    .catch(() => console.error("Release observation is unavailable"))
+    .finally(() => {
+      releasesReconciling = false;
+    });
+}, 5_000).unref();
 
 setInterval(() => {
   void runtimeAccess.sweep().catch(() => console.error("Runtime access refresh failed"));

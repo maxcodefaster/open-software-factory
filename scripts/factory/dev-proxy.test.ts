@@ -32,8 +32,8 @@ test("the actual dev config strips TypeScript, proxies authenticated commands an
     hostname: "127.0.0.1",
     port: 0,
     fetch(request) {
-      if (new URL(request.url).pathname === "/api/session")
-        return Response.json({ session: null, zeroCacheURL: zero.url.origin });
+      if (new URL(request.url).pathname === "/health/ready")
+        return Response.json({ ready: true, planningCacheURL: zero.url.origin });
       if (request.headers.get("origin") !== backendOrigin)
         return new Response(null, { status: 403 });
       return Response.json({ cookie: request.headers.get("cookie") });
@@ -54,11 +54,11 @@ test("the actual dev config strips TypeScript, proxies authenticated commands an
     const address = server.httpServer!.address();
     if (!address || typeof address === "string") throw new Error("Missing dev listener");
     const base = `http://127.0.0.1:${address.port}`;
-    const bootstrap = await fetch(`${base}/api/session`);
-    expect(bootstrap.headers.get("content-type")).toContain("application/json");
-    expect(await bootstrap.json()).toEqual({
-      session: null,
-      zeroCacheURL: `${base}/__factory_zero`,
+    const readiness = await fetch(`${base}/health/ready`);
+    expect(readiness.headers.get("content-type")).toContain("application/json");
+    expect(await readiness.json()).toEqual({
+      ready: true,
+      planningCacheURL: zero.url.origin,
     });
     const source = await (await fetch(`${base}/src/factory-entry.tsx`)).text();
     expect(source).not.toContain("createSignal<Bootstrap>");
@@ -68,6 +68,20 @@ test("the actual dev config strips TypeScript, proxies authenticated commands an
     });
     expect(allowed.status).toBe(200);
     expect(await allowed.json()).toEqual({ cookie: "owned-dev-session=fixture" });
+    const serverFunction = await fetch(`${base}/_server/data/owned-fixture`, {
+      method: "POST",
+      headers: { origin: base, cookie: "owned-dev-session=fixture" },
+    });
+    expect(serverFunction.status).toBe(200);
+    expect(await serverFunction.json()).toEqual({ cookie: "owned-dev-session=fixture" });
+    expect(
+      (
+        await fetch(`${base}/_server/data/owned-fixture`, {
+          method: "POST",
+          headers: { origin: "https://foreign.invalid" },
+        })
+      ).status,
+    ).toBe(403);
     expect(
       (
         await fetch(`${base}/api/echo`, {

@@ -1,3 +1,6 @@
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { test } from "bun:test";
 import { expect as visible } from "@playwright/test";
 import { attemptsResponseSchema } from "../../apps/factory/src/api-contracts";
@@ -14,7 +17,11 @@ test.skipIf(!installation)(
       const changeID = f.state.changeID;
       if (!changeID) throw new Error("Release Change required");
       const { attempts } = attemptsResponseSchema.parse(
-        await f.command(cookie, `/api/runtime-attempts?projectId=${f.state.projectID}`),
+        await serverCall(
+          callFactoryFunction(f.base, "getRuntimeAttempts", [f.state.projectID], {
+            cookie: cookie,
+          }),
+        ),
       );
       const current = attempts.find((a) => a.currentStaging && a.state === "ready");
       const [previous] = await f.database.client<
@@ -24,19 +31,20 @@ test.skipIf(!installation)(
       const old = { ...current, id: previous.id, state: "stopped", currentStaging: false };
       const page = await f.page("developer");
       let promoted = false;
-      await page.route("**/api/runtime-attempts?*", (route) =>
-        route.fulfill({
-          json: {
-            attempts: [old, ...attempts].map((a) =>
-              a.id === old.id
-                ? { ...a, state: promoted ? "stopped" : "ready", currentStaging: !promoted }
-                : a.id === current.id
-                  ? { ...a, state: promoted ? "ready" : "starting", currentStaging: promoted }
-                  : a,
-            ),
-          },
-        }),
-      );
+      await mockFactoryFunctions(page, {
+        runtime: {
+          attempts: async () =>
+            attemptsResponseSchema.parse({
+              attempts: [old, ...attempts].map((a) =>
+                a.id === old.id
+                  ? { ...a, state: promoted ? "stopped" : "ready", currentStaging: !promoted }
+                  : a.id === current.id
+                    ? { ...a, state: promoted ? "ready" : "starting", currentStaging: promoted }
+                    : a,
+              ),
+            }),
+        },
+      });
       await page.route("**/api/runtime-access?*", (route) =>
         route.fulfill({
           contentType: "text/html",

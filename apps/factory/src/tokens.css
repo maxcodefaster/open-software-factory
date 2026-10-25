@@ -39,9 +39,9 @@
   --line-accent: color-mix(in srgb, var(--color-river-deep) 24%, transparent);
   --line-danger: rgb(148 85 77 / 24%);
 
-  --material-chrome: rgb(250 249 245 / 66%);
-  --material-chrome-hover: rgb(255 255 252 / 78%);
   --surface-rgb: 250 250 247;
+  --material-chrome: rgb(var(--surface-rgb) / 66%);
+  --material-chrome-hover: rgb(var(--surface-rgb) / 78%);
   --material-window: rgb(var(--surface-rgb) / 68%);
   --material-document: rgb(250 250 247 / 94%);
   --material-popover: rgb(252 252 248);
@@ -49,7 +49,6 @@
   --material-panel: rgb(247 248 245 / 68%);
   --material-card: rgb(252 251 247 / 56%);
   --material-card-hover: rgb(255 255 252 / 72%);
-  --material-board-card: rgb(252 251 247 / 92%);
   --material-input: rgb(255 255 252 / 52%);
   --material-overlay: rgb(23 27 23 / 18%);
   --material-tooltip: rgb(29 33 29 / 91%);
@@ -76,7 +75,7 @@
 
   --blur-chrome: 24px;
   --blur-window: 28px;
-  --blur-card: 14px;
+  --blur-card: var(--blur-chrome);
   --blur-backdrop: 8px;
   --blur-obscured: 1px;
   --blur-menu-backdrop: 2px;
@@ -117,6 +116,10 @@
   --space-8: 32px;
   --space-10: 40px;
   --space-12: 48px;
+
+  --board-heading-height: var(--control-height);
+  --board-heading-gap: var(--space-2);
+  --board-lane-padding: var(--space-3);
 
   --text-xs: 11px;
   --text-sm: 13px;
@@ -188,7 +191,7 @@
   --history-narrow-height: 14rem;
   --history-panel-width: 13.5rem;
   --editor-format-control-height: 28px;
-  --editor-link-width: 11rem;
+  --editor-link-width: 24rem;
   --editor-command-min-width: 12rem;
   --auth-layout-gap: clamp(40px, 8vw, 140px);
   --auth-layout-padding: clamp(28px, 5vw, 72px);
@@ -262,6 +265,22 @@
   --desktop-art-position: center 46%;
   --desktop-art-filter: saturate(0.65) brightness(1.24) contrast(0.8);
   --desktop-art-scrim: linear-gradient(rgb(239 231 242 / 37%), rgb(224 216 235 / 27%));
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root,
+  [data-background] {
+    --material-chrome: rgb(var(--surface-rgb));
+    --material-chrome-hover: rgb(var(--surface-rgb));
+  }
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  :root,
+  [data-background] {
+    --material-chrome: rgb(var(--surface-rgb));
+    --material-chrome-hover: rgb(var(--surface-rgb));
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

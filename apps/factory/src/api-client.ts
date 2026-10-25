@@ -32,18 +32,31 @@ function parseResponse<TSchema extends z.ZodType>(
   return parsed.data;
 }
 
-export async function apiRequest<TSchema extends z.ZodType>(
+type JSONProtocolPath =
+  | "/api/auth/sign-out"
+  | "/api/auth/sign-in/sso"
+  | `/api/changes/${string}/review/stills`;
+
+// Better Auth owns its session protocol; still images use multipart bytes.
+// Product reads and commands must use named Server Functions instead.
+export async function protocolRequest<TSchema extends z.ZodType>(
   schema: TSchema,
-  path: string,
+  path: JSONProtocolPath,
   options?: RequestInit,
 ): Promise<z.output<TSchema>> {
+  if (
+    path !== "/api/auth/sign-out" &&
+    path !== "/api/auth/sign-in/sso" &&
+    !/^\/api\/changes\/[0-9a-f-]{36}\/review\/stills$/.test(path)
+  )
+    throw new Error("Unclassified browser HTTP operation. Use a named Server Function.");
   const response = await fetch(path, options);
   const value = await response.json().catch(() => undefined);
   return parseResponse(schema, response.status, value);
 }
 
 // XHR exposes actual transfer completion separately from the server's processing response.
-// This makes no retries and keeps the same authenticated PUT and response contract as apiRequest.
+// This makes no retries. Only raw Attachment bytes use this authenticated PUT.
 export function apiUpload<TSchema extends z.ZodType>(
   schema: TSchema,
   path: string,
@@ -54,6 +67,8 @@ export function apiUpload<TSchema extends z.ZodType>(
     onTransferred(): void;
   },
 ): Promise<z.output<TSchema>> {
+  if (!/^\/api\/attachments\/[^/?#]+$/.test(path))
+    return Promise.reject(new Error("Only raw Attachment uploads use this HTTP protocol."));
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
     request.open("PUT", path);

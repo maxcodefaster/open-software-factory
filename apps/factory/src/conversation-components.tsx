@@ -159,12 +159,14 @@ function InterviewAnswerForm(props: {
           />
         </TextareaAttachments>
       </Show>
-      <button type="submit" class="agent-control primary" disabled={props.pending || !valid()}>
-        Continue
-      </button>
-      <button type="button" class="quiet-button" onClick={props.onPause}>
-        Pause clarification
-      </button>
+      <div class="interview-answer-actions">
+        <button type="button" class="quiet-button" onClick={props.onPause}>
+          Pause clarification
+        </button>
+        <button type="submit" class="agent-control primary" disabled={props.pending || !valid()}>
+          Continue
+        </button>
+      </div>
     </form>
   );
 }
@@ -187,16 +189,11 @@ export function ChangeAgentMessage(props: {
             </p>
           </Show>
           <Show when={props.message.role !== "tool"}>
-            <div class="agent-message-actions">
-              <CopyButton
-                class="quiet-button"
-                value={props.message.text}
-                scope={props.message.id}
-                accessibleLabel={
-                  props.message.role === "user" ? "Copy user message" : "Copy Assistant message"
-                }
-              />
-            </div>
+            <MessageCopy
+              text={props.message.text}
+              scope={props.message.id}
+              user={props.message.role === "user"}
+            />
           </Show>
         </article>
       }
@@ -281,7 +278,9 @@ export function ChangeAgentActivityGroup(props: {
           onClick={() => setExpanded((value) => !value)}
         >
           <Icon name="chevron" />
-          <span>{activityGroupSummary(props.messages)}</span>
+          <span class="activity-group-summary" title={activityGroupSummary(props.messages)}>
+            {activityGroupSummary(props.messages)}
+          </span>
           <span class="activity-group-state">
             {[active() ? `${active()} active` : "", failed() ? `${failed()} failed` : ""]
               .filter(Boolean)
@@ -456,16 +455,7 @@ export function ConversationEntryCard(props: {
         }}
       />
       <Show when={entry.actor !== "system"}>
-        <div class="agent-message-actions">
-          <CopyButton
-            class="quiet-button"
-            value={entry.body}
-            scope={entry.id}
-            accessibleLabel={
-              entry.actor === "user" ? "Copy user message" : "Copy Assistant message"
-            }
-          />
-        </div>
+        <MessageCopy text={entry.body} scope={entry.id} user={entry.actor === "user"} />
       </Show>
       <Show when={entry.citations.length && !rendered().includes('class="inline-citation"')}>
         <details class="conversation-sources">

@@ -1,9 +1,5 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import {
-  monitoringChange,
-  monitoringSave,
-} from "../../../../packages/conversation-domain/src/monitoring";
 import { CommandError } from "../command-error";
 import { json } from "../http";
 import type { createMonitoringController } from "./controller";
@@ -98,48 +94,6 @@ export function createMonitoringRoutes(controller: ReturnType<typeof createMonit
           return response({ error: "Send a valid UTF-8 JSON object" }, 400);
         if (cause instanceof CommandError)
           return response({ error: cause.message }, cause.code === "not-found" ? 404 : 409);
-        throw cause;
-      }
-    },
-    async settings(request: Request, userId: string): Promise<Response | undefined> {
-      const route = new URL(request.url).pathname.match(
-        /^\/api\/projects\/([0-9a-f-]{36})\/inputs(?:\/([0-9a-f-]{36})\/(disable|rotate))?$/,
-      );
-      if (!route?.[1]) return undefined;
-      if (!z.uuid().safeParse(route[1]).success) return response({ error: "Invalid Project" }, 400);
-      try {
-        if (!route[2]) {
-          if (request.method === "GET")
-            return response(await controller.view(route[1], userId), 200);
-          if (request.method === "PUT")
-            return response(
-              await controller.save(
-                route[1],
-                userId,
-                monitoringSave.parse(
-                  JSON.parse((await boundedBody(request, 16_000)).toString("utf8")),
-                ),
-              ),
-              200,
-            );
-        } else if (request.method === "POST" && (route[3] === "disable" || route[3] === "rotate")) {
-          return response(
-            await controller.change(
-              route[1],
-              route[2],
-              userId,
-              route[3],
-              monitoringChange.parse(
-                JSON.parse((await boundedBody(request, 16_000)).toString("utf8")),
-              ),
-            ),
-            200,
-          );
-        }
-        return response({ error: "Method not allowed" }, 405);
-      } catch (cause) {
-        if (cause instanceof z.ZodError || cause instanceof SyntaxError)
-          return response({ error: "Invalid Input settings" }, 400);
         throw cause;
       }
     },

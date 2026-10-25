@@ -35,11 +35,13 @@ export function bindDialogKeyboard(
   };
   document.addEventListener("keydown", keydown);
   queueMicrotask(() => {
-    if (element.isConnected)
-      (
-        element.querySelector<HTMLElement>("input:not(:disabled), textarea:not(:disabled)") ??
-        controls()[0]
-      )?.focus({ preventScroll: true });
+    if (!element.isConnected || element.contains(document.activeElement)) return;
+    const available = controls();
+    (
+      available.find((control) =>
+        control.matches('textarea, input:not([type="file"]):not([type="hidden"])'),
+      ) ?? available[0]
+    )?.focus({ preventScroll: true });
   });
   return () => {
     document.removeEventListener("keydown", keydown);

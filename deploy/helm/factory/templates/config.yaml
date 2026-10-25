@@ -1,3 +1,6 @@
+{{- if not (has .Values.factorybox.architecture (list "arm64" "amd64")) }}
+{{- fail "factorybox.architecture must be arm64 or amd64" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -39,6 +42,7 @@ data:
   FACTORY_EXECUTION_RESERVE_TARGET: {{ .Values.executionReserveTarget | quote }}
   FACTORY_FACTORYBOX_WORKER_IMAGE: {{ required "factorybox.image requires an admitted private worker digest" .Values.factorybox.image | quote }}
   FACTORY_FACTORYBOX_EXECUTABLE_SHA256: {{ required "factorybox.executableSHA256 is required" .Values.factorybox.executableSHA256 | quote }}
+  FACTORY_FACTORYBOX_ARCHITECTURE: {{ required "factorybox.architecture must be arm64 or amd64" .Values.factorybox.architecture | quote }}
   FACTORY_FACTORYBOX_NODE: {{ required "factorybox.nodeName is required" .Values.factorybox.nodeName | quote }}
   FACTORY_FACTORYBOX_KERNEL: {{ required "factorybox.kernel is required" .Values.factorybox.kernel | quote }}
 ---

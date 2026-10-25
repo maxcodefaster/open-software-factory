@@ -1,3 +1,7 @@
+import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
@@ -28,41 +32,51 @@ test("a newer background read cannot discard the exact autosave acknowledgement"
   try {
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-    const { session } = await (await page.request.get("/api/session")).json();
+    const { session } = await browserBootstrap(page);
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${slug},'Autosave acknowledgement','https://example.invalid/autosave.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
     projectCreated = true;
     await database.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
       VALUES(${ticketID},${projectID},'Retain my requirements','A settled checklist.','ready',${session.user.id})`;
-    for (const action of ["source-workspace", "developer-ide"])
-      await page.route(`**/api/projects/${projectID}/${action}/ensure`, (route) =>
-        route.fulfill({ status: 503, json: { error: "This document fixture starts no runtime" } }),
-      );
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError("unavailable", "This document fixture starts no runtime");
+        },
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "This document fixture starts no runtime");
+        },
+      },
+    });
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.locator(".ticket-card-body").filter({ hasText: "Retain my requirements" }).click();
     const criterion = page.getByRole("textbox", { name: "Acceptance criterion 1", exact: true });
     await expect(criterion).toBeVisible();
-    await page.route(`**/api/tickets/${ticketID}/document`, async (route) => {
-      writes.push(route.request().postDataJSON());
-      const response = await route.fetch();
-      if (response.ok()) saved = true;
-      await route.fulfill({ response });
-      if (writes.length >= 2) secondWrite.resolve();
-    });
-    await page.route(`**/api/tickets/${ticketID}`, async (route) => {
-      if (!saved || reads >= 2) return route.continue();
-      const number = ++reads;
-      const response = await route.fetch();
-      if (number === 1) {
-        capturedAck.resolve();
-        await releaseAck.promise;
-      } else {
-        capturedPoll.resolve();
-        releaseAck.resolve();
-        await releasePoll.promise;
-      }
-      await route.fulfill({ response });
+    await mockFactoryFunctions(page, {
+      tickets: {
+        async save(_actor, id, input) {
+          writes.push(input);
+          const value = await serverCall(browserFunction(page, "saveTicketDocument", [id, input]));
+          saved = true;
+          if (writes.length >= 2) secondWrite.resolve();
+          return value;
+        },
+        async detail(_actor, id) {
+          const value = await serverCall(browserFunction(page, "getTicketDetail", [id]));
+          if (!saved || reads >= 2) return value;
+          const number = ++reads;
+          if (number === 1) {
+            capturedAck.resolve();
+            await releaseAck.promise;
+          } else {
+            capturedPoll.resolve();
+            releaseAck.resolve();
+            await releasePoll.promise;
+          }
+          return value;
+        },
+      },
     });
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await criterion.fill("The checklist shows the exact checked count.");

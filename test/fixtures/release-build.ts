@@ -1,3 +1,5 @@
+import { callFactoryFunction, decodeBrowserFunction } from "./server-functions";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
@@ -7,6 +9,7 @@ import {
   changesResponseSchema,
   deliveryViewSchema,
   conversationViewSchema,
+  type AgentView,
 } from "../../apps/factory/src/api-contracts";
 import type { releaseInstallation } from "./release-installation";
 
@@ -16,6 +19,7 @@ export async function releaseInspection(fixture: Fixture) {
   const { state, database } = fixture;
   if (!state.changeID || !state.buildCommandID)
     throw new Error("Completed release implementation required before inspection");
+  const inspectionChangeID = state.changeID;
   const cookie = await fixture.login("developer");
   if (!state.inspectionCommandID) {
     state.inspectionCommandID = crypto.randomUUID();
@@ -30,16 +34,26 @@ export async function releaseInspection(fixture: Fixture) {
   }
   const commandID = state.inspectionRetryCommandID ?? state.inspectionCommandID;
   const accepted = agentViewSchema.parse(
-    await fixture.command(cookie, `/api/changes/${state.changeID}/agent/prompt`, "POST", {
-      commandId: commandID,
-      text: [
-        "Complete the missing browser acceptance on the existing welcome dashboard. Do not reimplement it.",
-        "Read .factory/system.json. Its primaryApp web is browser channel app, not web.",
-        "Before editing, use browser_open app, browser_snapshot, browser_console and browser_screenshot. Read the returned JPEG with the native read tool. Stop and report an actionable failure if inspection is not confirmed.",
-        "Inspect the existing repository test setup, then add one focused dependency-free regression for the approved accessible Continue control below the heading in normal flow and preserved /health and /source behavior. Correct only a defect actually found by inspection. Preserve runtime configuration and version.",
-        "Run the regression and node --check src/server.mjs. After editing, reopen app and repeat DOM, console, screenshot and native JPEG read. Report actual observations with their returned App/checkout context. Do not commit or push.",
-      ].join("\n"),
-    }),
+    await serverCall(
+      callFactoryFunction(
+        fixture.base,
+        "sendCodingPrompt",
+        [
+          state.changeID,
+          {
+            commandId: commandID,
+            text: [
+              "Complete the missing browser acceptance on the existing welcome dashboard. Do not reimplement it.",
+              "Read .factory/system.json. Its primaryApp web is browser channel app, not web.",
+              "Before editing, use browser_open app, browser_snapshot, browser_console and browser_screenshot. Read the returned JPEG with the native read tool. Stop and report an actionable failure if inspection is not confirmed.",
+              "Inspect the existing repository test setup, then add one focused dependency-free regression for the approved accessible Continue control below the heading in normal flow and preserved /health and /source behavior. Correct only a defect actually found by inspection. Preserve runtime configuration and version.",
+              "Run the regression and node --check src/server.mjs. After editing, reopen app and repeat DOM, console, screenshot and native JPEG read. Report actual observations with their returned App/checkout context. Do not commit or push.",
+            ].join("\n"),
+          },
+        ],
+        { cookie: cookie },
+      ),
+    ),
   );
   expect(accepted.turn?.commandId).toBe(commandID);
   const started = performance.now();
@@ -56,7 +70,11 @@ export async function releaseInspection(fixture: Fixture) {
             ),
           );
         const delivery = deliveryViewSchema.parse(
-          await fixture.command(cookie, `/api/changes/${state.changeID}/delivery`),
+          await serverCall(
+            callFactoryFunction(fixture.base, "getDelivery", [inspectionChangeID], {
+              cookie: cookie,
+            }),
+          ),
         );
         const [commit] = await database.client<Array<{ sha: string | null; state: string }>>`
         SELECT commit_sha AS sha, state FROM factory.change_commit_operation WHERE id = ${accepted.turn?.id ?? ""}`;
@@ -71,7 +89,9 @@ export async function releaseInspection(fixture: Fixture) {
     )
     .toBe(true);
   const agent = agentViewSchema.parse(
-    await fixture.command(cookie, `/api/changes/${state.changeID}/agent`),
+    await serverCall(
+      callFactoryFunction(fixture.base, "getAgentView", [state.changeID], { cookie: cookie }),
+    ),
   );
   const [intent] = await database.client<Array<{ prompt: string }>>`
     SELECT prompt_id AS prompt FROM factory.change_agent_turn_intent WHERE turn_id = ${accepted.turn?.id ?? ""}`;
@@ -113,12 +133,13 @@ export async function releaseBuild(fixture: Fixture) {
     "true",
   );
   const changes = changesResponseSchema.parse(
-    await fixture.command(cookie, `/api/changes?projectId=${projectID}`),
+    await serverCall(
+      callFactoryFunction(fixture.base, "getChanges", [projectID], { cookie: cookie }),
+    ),
   );
   const change = changes.changes.find((value) => value.ticketId === ticketID);
   if (!change) throw new Error("Build mode did not create the approved Change");
   state.changeID = change.id;
-  const startPath = `/api/changes/${change.id}/agent/start`;
   if (!state.buildCommandID) {
     const started = performance.now();
     await visible(
@@ -126,19 +147,23 @@ export async function releaseBuild(fixture: Fixture) {
     ).toBeEnabled({ timeout: 120_000 });
     const pending = page.waitForResponse(
       (response) =>
-        new URL(response.url()).pathname === startPath && response.request().method() === "POST",
+        new URL(response.url()).pathname.startsWith("/_server/data/startCoding-") &&
+        response.request().method() === "POST",
       { timeout: 120_000 },
     );
     await panel.getByRole("button", { name: "Start implementation", exact: true }).click();
     const response = await pending;
-    const command = z.object({ commandId: z.uuid() }).parse(response.request().postDataJSON());
+    const body = await serverCall(decodeBrowserFunction<ServerResult<AgentView>>(response));
+    const command = z.object({ commandId: z.uuid() }).parse(body.turn);
     state.buildCommandID = command.commandId;
-    const body: unknown = await response.json();
     fixture.noSecrets(JSON.stringify(body));
-    expect(response.status()).toBe(202);
     agentViewSchema.parse(body);
     await fixture.save("build-admitted", performance.now() - started);
-    const replay = agentViewSchema.parse(await fixture.command(cookie, startPath, "POST", command));
+    const replay = agentViewSchema.parse(
+      await serverCall(
+        callFactoryFunction(fixture.base, "startCoding", [change.id, command], { cookie: cookie }),
+      ),
+    );
     expect(replay.turn?.id).toBe(agentViewSchema.parse(body).turn?.id);
     const [count] = await database.client<Array<{ count: number }>>`
       SELECT count(*)::int AS count FROM factory.agent_turn WHERE command_id = ${command.commandId}`;
@@ -160,7 +185,9 @@ export async function releaseBuild(fixture: Fixture) {
             ),
           );
         const delivery = deliveryViewSchema.parse(
-          await fixture.command(cookie, `/api/changes/${change.id}/delivery`),
+          await serverCall(
+            callFactoryFunction(fixture.base, "getDelivery", [change.id], { cookie: cookie }),
+          ),
         );
         return { turn: turn?.state, verification: delivery.verificationState };
       },
@@ -168,7 +195,9 @@ export async function releaseBuild(fixture: Fixture) {
     )
     .toEqual({ turn: "completed", verification: "succeeded" });
   const delivery = deliveryViewSchema.parse(
-    await fixture.command(cookie, `/api/changes/${change.id}/delivery`),
+    await serverCall(
+      callFactoryFunction(fixture.base, "getDelivery", [change.id], { cookie: cookie }),
+    ),
   );
   state.verifiedSHA = delivery.verificationCommitSha;
   const [verification] = await database.client<Array<{ sha: string; revision: string }>>`
@@ -216,7 +245,11 @@ export async function releaseBuild(fixture: Fixture) {
       "Kubernetes Metrics API is unavailable in this local cluster. No measured RAM/CPU claim.",
   });
   const conversation = conversationViewSchema.parse(
-    await fixture.command(cookie, `/api/projects/${projectID}/conversation?ticketId=${ticketID}`),
+    await serverCall(
+      callFactoryFunction(fixture.base, "getConversation", [projectID, { ticketId: ticketID }], {
+        cookie: cookie,
+      }),
+    ),
   );
   expect(conversation.entries.some((entry) => entry.kind === "answer")).toBe(true);
   expect(

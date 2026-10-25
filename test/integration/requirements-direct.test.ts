@@ -1,6 +1,4 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
@@ -163,7 +161,11 @@ test.each([false, true])(
       expect(turns[0]).toMatchObject({ mode: "build", kind: "change-start", revision: documentID });
       expect(turns[0]?.prompt).toContain(requirement.acceptanceCriteria[1]);
       expect(creates).toBe(1);
-      expect(await planning.get(owned.projectID, ticketID, owned.userID)).toBeNull();
+      expect(await planning.get(owned.projectID, ticketID, owned.userID)).toMatchObject({
+        mode: "build",
+        entries: [],
+        turn: undefined,
+      });
       expect(
         await database.client`SELECT id FROM factory.requirement_approval
       WHERE ticket_id=${ticketID} AND requirement_revision_id=${documentID} AND approved_by=${owned.userID}`,
@@ -181,10 +183,9 @@ test.each([false, true])(
   60_000,
 );
 
-test("retiring automatic entry preserves admitted work and history without submitting an old queue item", async () => {
+test("an unadmitted Requirements entry cannot commission work or alter an explicitly admitted turn", async () => {
   const host = await factoryProcess();
   const database = host.connect();
-  const migration = database.coordination();
   try {
     const owned = await fixture(undefined, undefined, database);
     const tickets = [crypto.randomUUID(), crypto.randomUUID()];
@@ -218,10 +219,8 @@ test("retiring automatic entry preserves admitted work and history without submi
       },
     );
     const before = await turns.get(admitted.turn.id);
-    await database.client`DELETE FROM factory.schema_migration WHERE version=7`;
-    await migration.unsafe(
-      await readFile(resolve("packages/db/migrations/0007_explicit_requirements.sql"), "utf8"),
-    );
+    await database.client`UPDATE factory.requirements_entry_intent SET admitted_at=now()
+      WHERE ticket_id=${tickets[1]!}`;
     expect(await turns.get(admitted.turn.id)).toEqual(before);
     const entries = await database.client<
       { ticketID: string; admitted: boolean; failure: string | null }[]
@@ -230,14 +229,13 @@ test("retiring automatic entry preserves admitted work and history without submi
       FROM factory.requirements_entry_intent WHERE ticket_id=ANY(${tickets}::uuid[])`;
     expect(entries.find((row) => row.ticketID === tickets[0])).toMatchObject({
       admitted: false,
-      failure: expect.stringContaining("retired"),
+      failure: null,
     });
     expect(entries.find((row) => row.ticketID === tickets[1])).toMatchObject({
       admitted: true,
       failure: null,
     });
-    // A new controller cannot convert the unadmitted entry into a conversation
-    // or model request. Do not recover the separately admitted historical turn.
+    // Reads cannot convert unadmitted intent into a conversation or model request.
     const planning = createProjectAgentController(database, { start: async () => null });
     expect(await planning.get(owned.projectID, tickets[0], owned.userID)).toBeNull();
     expect(
@@ -247,7 +245,6 @@ test("retiring automatic entry preserves admitted work and history without submi
       await database.client`SELECT id FROM factory.ticket WHERE id=ANY(${tickets}::uuid[])`,
     ).toHaveLength(2);
   } finally {
-    await migration.end({ timeout: 0 });
     await database.client.end({ timeout: 0 });
     await host.dispose();
   }

@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -94,22 +96,44 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
       cookie = await factory.signIn();
       const started = performance.now();
       if (!retained) {
-        const draft = await api("/api/project-setup", "POST");
+        const draft = await serverCall(
+          callFactoryFunction(factory.base, "beginSetupDraft", [], { cookie }),
+        );
+        if (!draft) throw new Error("Owned Starter setup draft missing");
         setupID = draft.id;
-        const saved = await api("/api/project-setup", "PUT", {
-          id: setupID,
-          version: draft.version,
-          name: "Turnkey Starter",
-          slug,
-          kind: "starter",
-          sourceURL: "",
-        });
-        const created = await api("/api/project-setup/create", "POST", {
-          id: setupID,
-          version: saved.version,
-          commandID: crypto.randomUUID(),
-        });
+        const saved = await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "saveSetupDraft",
+            [
+              {
+                id: setupID,
+                version: draft.version,
+                name: "Turnkey Starter",
+                slug,
+                kind: "starter",
+                sourceURL: "",
+              },
+            ],
+            { cookie },
+          ),
+        );
+        const created = await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "createSetupProject",
+            [
+              {
+                id: setupID,
+                version: saved.version,
+                commandID: crypto.randomUUID(),
+              },
+            ],
+            { cookie },
+          ),
+        );
         expect(created.state).toBe("created");
+        if (!created.projectID) throw new Error("Created Starter Project identity missing");
         projectID = created.projectID;
       }
       if (process.env["FACTORY_RUN_STARTER_DESKTOP_PROOF"] === "1")
@@ -125,21 +149,36 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
         expect(
           await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${projectID} AND change_id IS NOT NULL`,
         ).toHaveLength(0);
-        await api(`/api/runtime-attempts/${preview.id}/stop`, "POST", {});
+        await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "stopRuntimeAttempt",
+            [preview.id],
+            { cookie, origin: factory.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ),
+        );
         await eventually(
           async () => (await attempts()).find((row) => row.id === preview.id)?.state,
           (state) => state === "stopped",
           "Owned unavailable Preview did not Stop",
           150_000,
         );
-        await api(`/api/projects/${projectID}/setup/retry`, "POST", { task: "main-preview" });
+        await serverCall(
+          callFactoryFunction(factory.base, "retrySetupTask", [projectID, "main-preview"], {
+            cookie,
+          }),
+        );
         console.log(
           JSON.stringify({ recoveredOwnedPreview: preview.id, operation: "Stop and setup retry" }),
         );
       }
       if (process.env["FACTORY_STARTER_DELIVERY_ONLY"] === "1") {
         await eventually(
-          () => api(`/api/projects/${projectID}/setup`),
+          () =>
+            serverCall(
+              callFactoryFunction(factory.base, "getSetupReadiness", [projectID], { cookie }),
+            ),
           (rows) =>
             ["protection", "development-secrets"].every((task) =>
               rows.some(
@@ -150,7 +189,12 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
           "Starter delivery prerequisites not ready",
           60000,
         );
-        const delivered = await starterDelivery({ database, projectID, api });
+        const delivered = await starterDelivery({
+          database,
+          projectID,
+          base: factory.base,
+          cookie,
+        });
         if (!delivered.previewID) throw new Error("Delivered preview missing");
         await starterPreviewBrowser({
           browser,
@@ -164,7 +208,10 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
         return;
       }
       await eventually(
-        () => api(`/api/projects/${projectID}/setup`),
+        () =>
+          serverCall(
+            callFactoryFunction(factory.base, "getSetupReadiness", [projectID], { cookie }),
+          ),
         (rows) =>
           rows.some(
             (row: { task: string; state: string }) =>
@@ -245,16 +292,31 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
       await visible(page.getByRole("button", { name: "Sign in", exact: true })).toBeVisible();
       expect(errors).toEqual([]);
       const sourceStarted = performance.now();
-      const source = await api(`/api/projects/${projectID}/source-workspace/ensure`, "POST", {});
+      const source = await serverCall(
+        callFactoryFunction(factory.base, "ensurePersonalSource", [projectID], { cookie }),
+      );
       await eventually(
-        () => api(`/api/workspaces/${source.workspaceID}/source`),
+        () =>
+          serverCall(
+            callFactoryFunction(factory.base, "getWorkspaceSource", [source.workspaceID], {
+              cookie: cookie,
+            }),
+          ),
         (row) => row.state === "ready",
         "Starter source not ready",
         120_000,
       );
       timings["sourceMS"] = Math.round(performance.now() - sourceStarted);
       const runtimeStarted = performance.now();
-      const runtime = await api(`/api/projects/${projectID}/personal-workspace/ensure`, "POST", {});
+      const runtime = await serverCall(
+        callFactoryFunction(
+          factory.base,
+          "startPersonalWorkspace",
+          [projectID],
+          { cookie },
+          AbortSignal.timeout(180_000),
+        ),
+      );
       await ready(runtime.id);
       terminal = await ownedRuntimeTerminal(factory.base, cookie, runtime.id);
       timings["terminalMS"] = Math.round(performance.now() - runtimeStarted);
@@ -287,7 +349,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
       expect(settings?.["manifest"].variables).toHaveLength(3);
       console.log(JSON.stringify({ journey: "Starter Envbox", timings }));
       if (process.env["FACTORY_RUN_STARTER_DELIVERY_PROOF"] === "1")
-        await starterDelivery({ database, projectID, api });
+        await starterDelivery({ database, projectID, base: factory.base, cookie });
       succeeded = true;
     } finally {
       terminal?.close();
@@ -314,7 +376,15 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
           if (factory.processes.at(-1)?.exitCode !== null) await factory.start();
           for (const attempt of await attempts())
             if (attempt.state !== "stopped") {
-              await api(`/api/runtime-attempts/${attempt.id}/stop`, "POST", {});
+              await serverCall(
+                callFactoryFunction(
+                  factory.base,
+                  "stopRuntimeAttempt",
+                  [attempt.id],
+                  { cookie, origin: factory.base, "content-type": "application/json" },
+                  AbortSignal.timeout(180_000),
+                ),
+              );
               await eventually(
                 async () => (await attempts()).find((row) => row.id === attempt.id)?.state,
                 (state) => state === "stopped",

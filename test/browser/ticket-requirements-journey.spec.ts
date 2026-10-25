@@ -1,3 +1,11 @@
+import { requestFunction } from "../fixtures/server-functions";
+import {
+  mockFactoryFunctions,
+  browserFunction,
+  browserConversation,
+} from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
@@ -19,18 +27,20 @@ test.beforeEach(async ({ page }) => {
   await db.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
     VALUES (${projectID},${slug},'Requirements journey','https://example.invalid/journey.git','main','.devcontainer/devcontainer.json',${userID})`;
   // This browser journey exercises planning only, never creates compute for the fake repository.
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({
-      status: 503,
-      json: { error: "No development runtime in this planning fixture" },
-    }),
-  );
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-    route.fulfill({
-      status: 503,
-      json: { error: "No development runtime in this planning fixture" },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "No development runtime in this planning fixture");
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "No development runtime in this planning fixture");
+      },
+    },
+  });
   await signIn(page);
   await selectProject(page);
 });
@@ -183,13 +193,22 @@ test("Ticket keystrokes and undo survive delayed autosave acknowledgement and re
   let saved = false;
   const release = Promise.withResolvers<void>();
   let first = true;
-  await page.route(`**/api/tickets/${ticket.id}/document`, async (route) => {
-    if (!first) return route.continue();
-    first = false;
-    const response = await route.fetch({ timeout: 10_000 });
-    saved = true;
-    await Promise.race([release.promise, new Promise((resolve) => setTimeout(resolve, 15_000))]);
-    await route.fulfill({ response });
+  await mockFactoryFunctions(page, {
+    tickets: {
+      async save(_actor, id, input) {
+        const hold = first;
+        first = false;
+        const value = await serverCall(browserFunction(page, "saveTicketDocument", [id, input]));
+        if (hold) {
+          saved = true;
+          await Promise.race([
+            release.promise,
+            new Promise((resolve) => setTimeout(resolve, 15_000)),
+          ]);
+        }
+        return value;
+      },
+    },
   });
   try {
     await editor.press("ControlOrMeta+End");
@@ -245,26 +264,24 @@ test("a stale Assistant detail poll cannot undo completed Ticket autosave", asyn
   const submittedVersions: number[] = [];
   let capturedVersion = -1;
   let hold = true;
-  await page.route(`**/api/tickets/${ticket.id}`, async (route) => {
-    const response = await route.fetch();
-    const value = (await response.json()) as { ticket: { version: number } };
-    if (hold) {
-      hold = false;
-      capturedVersion = value.ticket.version;
-      oldRead.resolve();
-      await releaseRead.promise;
-      await route.fulfill({ response });
-      delivered.resolve();
-    } else {
-      await route.fulfill({ response });
-      if (value.ticket.version > ticket.version) freshRead.resolve();
-    }
-  });
-  await page.route(`**/api/tickets/${ticket.id}/document`, async (route) => {
-    submittedVersions.push(
-      (route.request().postDataJSON() as { expectedVersion: number }).expectedVersion,
-    );
-    await route.continue();
+  await mockFactoryFunctions(page, {
+    tickets: {
+      async detail(_actor, id) {
+        const value = await serverCall(browserFunction(page, "getTicketDetail", [id]));
+        if (hold) {
+          hold = false;
+          capturedVersion = value.ticket.version;
+          oldRead.resolve();
+          await releaseRead.promise;
+          delivered.resolve();
+        } else if (value.ticket.version > ticket.version) freshRead.resolve();
+        return value;
+      },
+      async save(_actor, id, input) {
+        submittedVersions.push(input.expectedVersion);
+        return serverCall(browserFunction(page, "saveTicketDocument", [id, input]));
+      },
+    },
   });
   try {
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
@@ -686,13 +703,10 @@ test("real Luna finds scoped Wiki and Tickets, then proposes and confirms larger
   await db.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by) VALUES(${ticketID},${projectID},'CSV invoice export','Download invoices as CSV','inbox',${userID})`;
   async function message(text: string) {
     const start = performance.now();
-    const response = await page.request.post(`/api/projects/${projectID}/conversation/message`, {
-      data: { text, commandId: crypto.randomUUID() },
-      headers: { origin: "http://127.0.0.1:3000" },
-      timeout: 90000,
+    const result = await browserConversation(page, projectID, {
+      text,
+      commandId: crypto.randomUUID(),
     });
-    const result = await response.json();
-    expect(response.ok(), JSON.stringify(result)).toBe(true);
     console.log(
       JSON.stringify({
         journey: text.slice(0, 35),
@@ -717,11 +731,11 @@ test("real Luna finds scoped Wiki and Tickets, then proposes and confirms larger
   expect(
     answer?.citations.some((citation) => citation.id === wikiID || citation.id === ticketID),
   ).toBe(true);
-  const mode = await page.request.post(`/api/projects/${projectID}/conversation/mode`, {
-    data: { mode: "plan" },
-    headers: { origin: "http://127.0.0.1:3000" },
-  });
-  expect(mode.ok()).toBe(true);
+  const mode = await requestFunction(page.request, "setConversationMode", [
+    projectID,
+    { mode: "plan" },
+  ]);
+  expect(mode.ok).toBe(true);
   const epic = await message(
     "Now plan a larger invoice workflow with two independent new outcomes: a contributor views invoice totals and a contributor filters invoices by date. CSV export already exists, do not duplicate or include it. These are all settled decisions. Propose one Epic with two new Tickets, each with observable criteria. No code architecture or new dependencies, no further questions, no implementation. Search existing work to avoid duplicates.",
   );

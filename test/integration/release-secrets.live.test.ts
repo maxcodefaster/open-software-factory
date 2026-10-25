@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { releaseInstallation } from "../fixtures/release-installation";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const installation = process.env["FACTORY_RELEASE_INSTALLATION"];
 test.skipIf(!installation)(
@@ -15,22 +17,43 @@ test.skipIf(!installation)(
       const outsider = await f.login("outsider");
       const project = f.state.projectID;
       if (!project) throw new Error("Release Project required");
-      const endpoints = [
-        "/api/session",
-        "/api/projects",
-        `/api/runtime-attempts?projectId=${project}`,
-        `/api/changes?projectId=${project}`,
-        `/api/changes/${f.state.dependentChangeID}/agent`,
-        `/api/projects/${project}/model-settings`,
-        `/api/projects/${project}/skill-settings`,
-        `/api/projects/${project}/conversation?ticketId=${f.state.ticketID}`,
-      ];
-      for (const path of endpoints) await f.command(developer, path);
-      await f.command(admin, "/api/model-settings");
-      await f.command(admin, "/api/admin/skills");
-      expect((await f.request(outsider, `/api/projects/${project}/model-settings`)).status).toBe(
-        404,
-      );
+      if (!f.state.dependentChangeID || !f.state.ticketID)
+        throw new Error("Completed dependent Change and release Ticket required");
+      for (const result of [
+        await serverCall(
+          callFactoryFunction(f.base, "getRuntimeAttempts", [project], { cookie: developer }),
+        ),
+        await serverCall(
+          callFactoryFunction(f.base, "getChanges", [project], { cookie: developer }),
+        ),
+        await serverCall(
+          callFactoryFunction(f.base, "getAgentView", [f.state.dependentChangeID], {
+            cookie: developer,
+          }),
+        ),
+        await serverCall(
+          callFactoryFunction(
+            f.base,
+            "getConversation",
+            [project, { ticketId: f.state.ticketID }],
+            { cookie: developer },
+          ),
+        ),
+        await serverCall(callFactoryFunction(f.base, "getProjects", [], { cookie: developer })),
+        await serverCall(callFactoryFunction(f.base, "getBootstrap", [], { cookie: developer })),
+        await serverCall(
+          callFactoryFunction(f.base, "getProjectModels", [project], { cookie: developer }),
+        ),
+        await serverCall(callFactoryFunction(f.base, "getModelSettings", [], { cookie: admin })),
+        await serverCall(
+          callFactoryFunction(f.base, "getInheritedSkills", [project], { cookie: developer }),
+        ),
+        await serverCall(callFactoryFunction(f.base, "getSystemSkills", [], { cookie: admin })),
+      ])
+        f.noSecrets(JSON.stringify(result));
+      expect(
+        await callFactoryFunction(f.base, "getProjectModels", [project], { cookie: outsider }),
+      ).toMatchObject({ ok: false, status: 404 });
       const runtimes = await f.database.client<
         { id: string; namespace: string; state: string }[]
       >`SELECT id, kubernetes_namespace AS namespace, state FROM factory.runtime_attempt WHERE project_id = ${project} AND state IN ('ready', 'starting')`;
@@ -90,7 +113,18 @@ test.skipIf(!installation)(
       );
       expect(() => f.noSecrets(`negative disclosure probe ${forgeToken.trim()}`)).toThrow();
       await f.record("secret-disclosure-check", {
-        endpoints,
+        functions: [
+          "getRuntimeAttempts",
+          "getChanges",
+          "getAgentView",
+          "getConversation",
+          "getProjects",
+          "getBootstrap",
+          "getProjectModels",
+          "getModelSettings",
+          "getInheritedSkills",
+          "getSystemSkills",
+        ],
         runtimeIDs: runtimes.map(({ id }) => id),
         sourceFiles: files.length,
         negativeProviderAndForgeProbes: true,

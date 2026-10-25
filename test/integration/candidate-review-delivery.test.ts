@@ -14,6 +14,12 @@ import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createDeliveryService } from "../../apps/factory/src/delivery/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
 
 async function setup(autofix = false) {
   const f = await candidateReviewFixture(undefined, undefined, autofix);
@@ -95,9 +101,29 @@ async function setup(autofix = false) {
       },
     );
   }
+  const origin = "https://owned-candidate-delivery.test";
+  const endpoint = await compiledFactoryEndpoint({
+    origin,
+    session: async (request) => ({
+      user: { id: request.headers.get("x-owned-actor") ?? f.userID },
+    }),
+    maintenance: async () => false,
+    requireFresh: async () => {},
+    services: {
+      delivery: createDeliveryService({ access: createAccessController(f.database), controller }),
+    } as unknown as FactoryServices,
+  });
+  async function native(name: string, args: unknown[], userID = f.userID) {
+    const result = await decodeResponse<ServerResult<unknown>>(
+      await endpoint(await factoryFunctionRequest(origin, name, args, { "x-owned-actor": userID })),
+    );
+    if (!result) throw new Error("Owned Delivery command returned no result");
+    return serverCall(Promise.resolve(result));
+  }
   return {
     ...f,
     controller,
+    native,
     reviews,
     corrections,
     complete,
@@ -378,11 +404,17 @@ test("a settled Stop can resume submitted checks without repeating implementatio
       stop_id=${stopID},stop_pending=false WHERE change_id=${f.changeID}`;
     await f.controller.reconcile(f.changeID);
     expect(f.reviews).toHaveLength(0);
-    expect((await f.controller.get(f.changeID))?.["checksStopId"]).toBe(stopID);
+    expect(await f.native("getDelivery", [f.changeID])).toMatchObject({ checksStopId: stopID });
     const commandID = crypto.randomUUID();
     await Promise.all([
-      f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID),
-      f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID),
+      f.native("resumeVerification", [
+        f.changeID,
+        { commandId: commandID, verificationId: f.verificationID, stopId: stopID },
+      ]),
+      f.native("resumeVerification", [
+        f.changeID,
+        { commandId: commandID, verificationId: f.verificationID, stopId: stopID },
+      ]),
     ]);
     await f.controller.reconcile(f.changeID);
     expect(f.reviews).toHaveLength(1);
@@ -394,13 +426,19 @@ test("a settled Stop can resume submitted checks without repeating implementatio
     const laterStopID = crypto.randomUUID();
     await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
       stop_id=${laterStopID},stop_pending=false WHERE change_id=${f.changeID}`;
-    await f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID);
+    await f.native("resumeVerification", [
+      f.changeID,
+      { commandId: commandID, verificationId: f.verificationID, stopId: stopID },
+    ]);
     const [session] = await f.database.client<{ state: string; stopID: string }[]>`
       SELECT state,stop_id AS "stopID" FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
     expect(session).toMatchObject({ state: "stopped", stopID: laterStopID });
     await expect(
-      f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, laterStopID),
-    ).rejects.toMatchObject({ code: "conflict" });
+      f.native("resumeVerification", [
+        f.changeID,
+        { commandId: commandID, verificationId: f.verificationID, stopId: laterStopID },
+      ]),
+    ).rejects.toMatchObject({ status: 409 });
   } finally {
     await f.dispose();
   }
@@ -480,7 +518,7 @@ test("human approval records the exact completed review and newer source cannot 
     const [before] = await f.database
       .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`;
     expect(before).toBeUndefined();
-    await f.controller.approve(f.changeID, f.userID);
+    await f.native("approveDelivery", [f.changeID]);
     const [approval] = await f.database.client<{ review: string; sha: string }[]>`
       SELECT candidate_review_id AS review,commit_sha AS sha FROM factory.delivery_approval WHERE change_id=${f.changeID}`;
     expect(approval).toEqual({ review: f.reviewID, sha: f.commit });
@@ -597,24 +635,36 @@ test("explicit incomplete-review retry gets a fresh identity and does not rewrit
       .client`UPDATE factory.project_membership SET role='product-contributor' WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
     const commandID = crypto.randomUUID();
     await Promise.all([
-      f.controller.retryReview(f.changeID, f.userID, commandID, f.reviewID),
-      f.controller.retryReview(f.changeID, f.userID, commandID, f.reviewID),
+      f.native("retryCandidateReview", [
+        f.changeID,
+        { commandId: commandID, reviewId: f.reviewID },
+      ]),
+      f.native("retryCandidateReview", [
+        f.changeID,
+        { commandId: commandID, reviewId: f.reviewID },
+      ]),
     ]);
     await expect(
-      f.controller.retryReview(f.changeID, f.userID, commandID, crypto.randomUUID()),
-    ).rejects.toMatchObject({ code: "conflict" });
+      f.native("retryCandidateReview", [
+        f.changeID,
+        { commandId: commandID, reviewId: crypto.randomUUID() },
+      ]),
+    ).rejects.toMatchObject({ status: 409 });
     await expect(
-      f.controller.retryReview(f.changeID, f.userID, crypto.randomUUID(), f.reviewID),
-    ).rejects.toMatchObject({ code: "conflict" });
+      f.native("retryCandidateReview", [
+        f.changeID,
+        { commandId: crypto.randomUUID(), reviewId: f.reviewID },
+      ]),
+    ).rejects.toMatchObject({ status: 409 });
     expect(f.reviews).toHaveLength(1);
     const sessions = await f.database.client<{ session: string }[]>`SELECT session_id AS session
       FROM factory.change_agent_turn_intent intent JOIN factory.candidate_review review ON review.turn_id=intent.turn_id
       WHERE review.change_id=${f.changeID}`;
     expect(new Set(sessions.map((item) => item.session)).size).toBe(2);
     expect(await f.review()).toEqual(old);
-    expect((await f.controller.get(f.changeID))?.["reviewState"]).toBe("pending");
-    await expect(f.controller.approve(f.changeID, f.userID)).rejects.toMatchObject({
-      code: "forbidden",
+    expect(await f.native("getDelivery", [f.changeID])).toMatchObject({ reviewState: "pending" });
+    await expect(f.native("approveDelivery", [f.changeID])).rejects.toMatchObject({
+      status: 403,
     });
   } finally {
     await f.dispose();

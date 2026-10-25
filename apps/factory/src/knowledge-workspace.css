@@ -175,7 +175,7 @@
   min-height: 0;
   flex-direction: column;
   border-right: 1px solid var(--hairline);
-  background: var(--material-document-popover);
+  background: transparent;
 }
 
 .knowledge-nav-heading,
@@ -608,8 +608,6 @@
 }
 
 .knowledge-heading {
-  display: grid;
-  gap: var(--space-2);
   margin-bottom: var(--space-4);
 }
 

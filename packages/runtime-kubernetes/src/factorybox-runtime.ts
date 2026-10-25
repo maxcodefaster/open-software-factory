@@ -1,18 +1,19 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import type { runCommand } from "./command";
 import {
+  type FactoryboxWorkerIdentity,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
   runFactoryboxKubernetes,
-  type FactoryboxWorkerIdentity,
 } from "./factorybox-worker";
-import type { runCommand } from "./command";
 import { runtimeVolumeClaimSpec } from "./storage";
 
 const exactImage = z.string().regex(/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/);
 export const factoryboxRuntimeProfile = z.strictObject({
   image: exactImage,
   executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+  architecture: z.enum(["arm64", "amd64"]),
   nodeName: z
     .string()
     .regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/)
@@ -32,6 +33,7 @@ export function configuredFactoryboxRuntimeProfile(
   return factoryboxRuntimeProfile.parse({
     image: environment["FACTORY_FACTORYBOX_WORKER_IMAGE"],
     executableSHA256: environment["FACTORY_FACTORYBOX_EXECUTABLE_SHA256"],
+    architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
     boundedBytes: 8 * 1024 ** 3,

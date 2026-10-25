@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { browserLane, integrationLane } from "./lanes";
+import { browserLane, integrationLane, controllerNeedsDatabase } from "./lanes";
 import playwright from "../../playwright.config";
 
 test("explicit lanes keep paid calls and retained-installation restarts outside defaults", () => {
@@ -20,4 +20,33 @@ test("the default browser selection excludes explicitly paid cases in mixed jour
   expect(filter).toBeInstanceOf(RegExp);
   expect((filter as RegExp).test("ticket journey real Luna @paid")).toBe(true);
   expect((filter as RegExp).test("ticket journey personal rich draft")).toBe(false);
+});
+
+test("compiled native protocol proofs do not acquire a database they never use", () => {
+  expect(controllerNeedsDatabase("test/integration/server-function-knowledge.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/server-function-workspaces.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-attachments.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-writer-review.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-library-ui.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-mcp-inputs.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-setup.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/server-function-skills.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/server-function-ui-fixtures.test.ts")).toBe(
+    false,
+  );
+  expect(controllerNeedsDatabase("test/integration/server-function-settings.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/server-function-access.test.ts")).toBe(false);
+  expect(controllerNeedsDatabase("test/integration/server-functions.test.ts")).toBe(true);
+  expect(controllerNeedsDatabase("test/integration/bootstrap.test.ts")).toBe(true);
+  expect(controllerNeedsDatabase("test/integration/project-setup-observation.test.ts")).toBe(true);
 });

@@ -8,6 +8,13 @@ import { workspaceWriteAuthorityIn } from "../../apps/factory/src/access/change-
 import { fixture } from "../fixtures/change-agent-turns";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { buildModelID } from "../fixtures/change-agent-turns";
+import { createWriterService } from "../../apps/factory/src/access/writer-service";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { writerViewSchema } from "../../apps/factory/src/api-contracts";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
 
 test("shared editing requires a decision, fences the old writer, and never transfers unsaved buffers", async () => {
   const owned = await fixture();
@@ -37,6 +44,29 @@ test("shared editing requires a decision, fences the old writer, and never trans
       effects.push(`git:${users.join(",")}`);
     },
   });
+  const origin = "https://owned-editing.test";
+  const endpoint = await compiledFactoryEndpoint({
+    origin,
+    services: {
+      writer: createWriterService(writers, createAccessController(owned.database)),
+    } as FactoryServices,
+    session: async (request) => {
+      const actor = request.headers.get("x-owned-actor");
+      return actor === owned.userID || actor === ben ? { user: { id: actor } } : null;
+    },
+    maintenance: async () => false,
+    requireFresh: async () => {},
+  });
+  async function native(userID: string, name: string, args: unknown[]) {
+    const response = await endpoint(
+      await factoryFunctionRequest(origin, name, args, { "x-owned-actor": userID }),
+    );
+    const result = await decodeResponse<ServerResult<unknown>>(response);
+    if (!result) throw new Error("Owned native editing command returned no result");
+    return serverCall(Promise.resolve(result as ServerResult<unknown>));
+  }
+  const status = async (userID: string) =>
+    writerViewSchema.parse(await native(userID, "getChangeWriterStatus", [owned.changeID]));
   try {
     await owned.database.client.begin(async (sql) => {
       await sql`INSERT INTO auth."user"(id,name,email,email_verified)
@@ -46,8 +76,11 @@ test("shared editing requires a decision, fences the old writer, and never trans
       await sql`UPDATE factory.change_writer SET state='human',user_id=${owned.userID},turn_id=NULL
         WHERE change_id=${owned.changeID}`;
     });
-    const first = await writers.status(owned.changeID, owned.userID);
-    await writers.activity(owned.changeID, owned.userID, first.epoch, "edit");
+    const first = await status(owned.userID);
+    await native(owned.userID, "recordChangeEditingActivity", [
+      owned.changeID,
+      { epoch: first.epoch, kind: "edit" },
+    ]);
     await expect(
       createChangeAdmission(owned.database, buildModelID).admit(owned.changeID, ben, {
         kind: "change-prompt",
@@ -55,29 +88,37 @@ test("shared editing requires a decision, fences the old writer, and never trans
         text: "Do not take another person's editing through the Agent",
       }),
     ).rejects.toThrow("holds editing");
-    expect((await writers.status(owned.changeID, owned.userID)).epoch).toBe(first.epoch);
+    expect((await status(owned.userID)).epoch).toBe(first.epoch);
     await expect(writers.takeOver(owned.changeID, ben, crypto.randomUUID())).rejects.toThrow(
       "Another developer",
     );
     await expect(
-      writers.takeIdle(owned.changeID, ben, crypto.randomUUID(), first.epoch),
+      native(ben, "takeOverIdleEditing", [
+        owned.changeID,
+        { commandID: crypto.randomUUID(), epoch: first.epoch },
+      ]),
     ).rejects.toThrow("active or changed");
     expect(effects).toEqual([]);
     const requestID = crypto.randomUUID();
-    await writers.request(owned.changeID, ben, requestID, first.epoch);
-    await writers.request(owned.changeID, ben, requestID, first.epoch);
-    expect((await writers.status(owned.changeID, owned.userID)).requests).toMatchObject([
+    await native(ben, "requestChangeEditing", [
+      owned.changeID,
+      { commandID: requestID, epoch: first.epoch },
+    ]);
+    await native(ben, "requestChangeEditing", [
+      owned.changeID,
+      { commandID: requestID, epoch: first.epoch },
+    ]);
+    expect((await status(owned.userID)).requests).toMatchObject([
       { id: requestID, requester: { id: ben, name: "Ben" } },
     ]);
-    const accepted = await writers.approve(
-      owned.changeID,
-      owned.userID,
-      crypto.randomUUID(),
-      requestID,
-      first.epoch,
+    const accepted = writerViewSchema.parse(
+      await native(owned.userID, "approveChangeEditing", [
+        owned.changeID,
+        { commandID: crypto.randomUUID(), requestID, epoch: first.epoch },
+      ]),
     );
     expect(accepted.canWrite).toBe(false);
-    expect((await writers.status(owned.changeID, ben)).canWrite).toBe(true);
+    expect((await status(ben)).canWrite).toBe(true);
     expect(effects).toEqual(["source:false", "git:", "stop", expect.stringContaining("git:")]);
     const [workspace] = await owned.database.client<{ id: string }[]>`
       SELECT id FROM factory.development_workspace WHERE change_id=${owned.changeID}`;
@@ -88,42 +129,75 @@ test("shared editing requires a decision, fences the old writer, and never trans
       ),
     ).rejects.toThrow("observation-only");
     await expect(
-      writers.activity(owned.changeID, owned.userID, first.epoch, "edit"),
+      native(owned.userID, "recordChangeEditingActivity", [
+        owned.changeID,
+        { epoch: first.epoch, kind: "edit" },
+      ]),
     ).rejects.toThrow("changed");
-    const current = await writers.status(owned.changeID, ben);
-    await writers.activity(owned.changeID, ben, current.epoch, "edit");
-    now += writerIdleMilliseconds;
-    await writers.activity(owned.changeID, ben, current.epoch, "heartbeat");
-    expect((await writers.status(owned.changeID, owned.userID)).presence?.idle).toBe(true);
-    expect((await writers.status(owned.changeID, ben)).canWrite).toBe(true);
-    const taken = await writers.takeIdle(
+    const current = await status(ben);
+    await native(ben, "recordChangeEditingActivity", [
       owned.changeID,
-      owned.userID,
-      crypto.randomUUID(),
-      current.epoch,
+      { epoch: current.epoch, kind: "edit" },
+    ]);
+    now += writerIdleMilliseconds;
+    await native(ben, "recordChangeEditingActivity", [
+      owned.changeID,
+      { epoch: current.epoch, kind: "heartbeat" },
+    ]);
+    expect((await status(owned.userID)).presence?.idle).toBe(true);
+    expect((await status(ben)).canWrite).toBe(true);
+    const taken = writerViewSchema.parse(
+      await native(owned.userID, "takeOverIdleEditing", [
+        owned.changeID,
+        { commandID: crypto.randomUUID(), epoch: current.epoch },
+      ]),
     );
     expect(taken.canWrite).toBe(true);
     await expect(
-      writers.takeIdle(owned.changeID, ben, crypto.randomUUID(), current.epoch),
+      native(ben, "takeOverIdleEditing", [
+        owned.changeID,
+        { commandID: crypto.randomUUID(), epoch: current.epoch },
+      ]),
     ).rejects.toThrow();
     const releaseID = crypto.randomUUID();
     stopped = false;
     await expect(
-      writers.release(owned.changeID, owned.userID, releaseID, taken.epoch),
+      native(owned.userID, "releaseChangeEditing", [
+        owned.changeID,
+        { commandID: releaseID, epoch: taken.epoch },
+      ]),
     ).rejects.toThrow("Release saved");
-    const releasing = await writers.status(owned.changeID, ben);
+    const releasing = await status(ben);
     expect(releasing).toMatchObject({ state: "handoff", handoffKind: "release", canWrite: false });
     await expect(writers.takeOver(owned.changeID, ben, crypto.randomUUID())).rejects.toThrow(
       "already in progress",
     );
     stopped = true;
     expect(
-      (await writers.release(owned.changeID, owned.userID, releaseID, taken.epoch)).state,
+      writerViewSchema.parse(
+        await native(owned.userID, "releaseChangeEditing", [
+          owned.changeID,
+          { commandID: releaseID, epoch: taken.epoch },
+        ]),
+      ).state,
     ).toBe("unassigned");
     expect(
-      (await writers.release(owned.changeID, owned.userID, releaseID, taken.epoch)).state,
+      writerViewSchema.parse(
+        await native(owned.userID, "releaseChangeEditing", [
+          owned.changeID,
+          { commandID: releaseID, epoch: taken.epoch },
+        ]),
+      ).state,
     ).toBe("unassigned");
-    expect((await writers.takeOver(owned.changeID, ben, crypto.randomUUID())).canWrite).toBe(true);
+    const available = await status(ben);
+    expect(
+      writerViewSchema.parse(
+        await native(ben, "takeOverChangeEditing", [
+          owned.changeID,
+          { commandID: crypto.randomUUID(), epoch: available.epoch },
+        ]),
+      ).canWrite,
+    ).toBe(true);
     expect(owned.requests()).toBe(0);
     const decisions = await owned.database.client<{ kind: string }[]>`
       SELECT kind FROM factory.change_editing_decision WHERE change_id=${owned.changeID} ORDER BY created_at`;
@@ -133,16 +207,19 @@ test("shared editing requires a decision, fences the old writer, and never trans
       "release",
       "takeover",
     ]);
-    const beforeAgent = await writers.status(owned.changeID, ben);
+    const beforeAgent = await status(ben);
     await createChangeAdmission(owned.database, buildModelID).admit(owned.changeID, ben, {
       kind: "change-start",
       commandId: crypto.randomUUID(),
     });
     const effectsBeforeStale = effects.length;
     now += 24 * 60 * 60_000;
-    expect((await writers.status(owned.changeID, owned.userID)).presence).toBeNull();
+    expect((await status(owned.userID)).presence).toBeNull();
     await expect(
-      writers.takeIdle(owned.changeID, owned.userID, crypto.randomUUID(), beforeAgent.epoch),
+      native(owned.userID, "takeOverIdleEditing", [
+        owned.changeID,
+        { commandID: crypto.randomUUID(), epoch: beforeAgent.epoch },
+      ]),
     ).rejects.toThrow("only");
     await expect(
       writers.takeOver(

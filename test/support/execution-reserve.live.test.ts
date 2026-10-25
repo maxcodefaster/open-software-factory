@@ -1,4 +1,7 @@
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
+import { authenticatedBootstrap } from "../fixtures/server-functions";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -129,7 +132,7 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
       cookie = await fixture.signIn();
       const session = z
         .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-        .parse(await (await api("/api/session")).json());
+        .parse(await authenticatedBootstrap(fixture.base, { cookie }));
       const projectID = crypto.randomUUID();
       await writeFile(
         resolve(artifacts, "intent.json"),
@@ -148,7 +151,13 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
       );
       await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`reserve-${proofID}`},'Owned reserve journey',${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${session.session.user.id})`;
       const startedAt = performance.now();
-      const pending = api(`/api/projects/${projectID}/staging/ensure`, {}).catch(() => null);
+      const pending = callFactoryFunction(
+        fixture.base,
+        "ensureStaging",
+        [projectID],
+        { cookie, origin: fixture.base, "content-type": "application/json" },
+        AbortSignal.timeout(180_000),
+      ).catch(() => null);
       const [assigned] = await eventually(
         async () =>
           database.client<
@@ -167,7 +176,17 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
         async () => {
           const result = z
             .object({ attempts: z.array(runtimeAttemptSchema) })
-            .parse(await (await api(`/api/runtime-attempts?projectId=${projectID}`)).json());
+            .parse(
+              await serverCall(
+                callFactoryFunction(
+                  fixture.base,
+                  "getRuntimeAttempts",
+                  [projectID],
+                  { cookie, origin: fixture.base, "content-type": "application/json" },
+                  AbortSignal.timeout(180_000),
+                ),
+              ),
+            );
           const attempt = result.attempts.find((candidate) => candidate.id === assigned.id);
           if (!attempt || ["failed", "stopped", "cleanup-failed"].includes(attempt.state))
             throw new Error(
@@ -215,7 +234,17 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
       expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
       await manager.close();
       manager = undefined;
-      expect((await api(`/api/runtime-attempts/${assigned.id}/stop`, {})).ok).toBe(true);
+      expect(
+        (
+          await callFactoryFunction(
+            fixture.base,
+            "stopRuntimeAttempt",
+            [assigned.id],
+            { cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          )
+        ).ok,
+      ).toBe(true);
       await eventually(
         async () =>
           database.client<
@@ -248,7 +277,13 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
       >`SELECT id,state,generation FROM factory.runtime_attempt`;
       for (const attempt of attempts) {
         if (!["stopped", "failed"].includes(attempt.state) && cookie)
-          await api(`/api/runtime-attempts/${attempt.id}/stop`, {}).catch(() => null);
+          await callFactoryFunction(
+            fixture.base,
+            "stopRuntimeAttempt",
+            [attempt.id],
+            { cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ).catch(() => null);
       }
       for (const slot of await slots()) {
         if (slot.assignedAttemptID) {

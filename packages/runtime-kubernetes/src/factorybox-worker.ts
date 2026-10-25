@@ -21,6 +21,7 @@ export const factoryboxWorkerRequest = z
     trustDomainID: token,
     image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
     executableSHA256: digest,
+    architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
       .string()
       .max(253)
@@ -113,7 +114,7 @@ export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
         shareProcessNamespace: false,
         nodeSelector: {
           "kubernetes.io/os": "linux",
-          "kubernetes.io/arch": "amd64",
+          "kubernetes.io/arch": input.architecture,
           "kubernetes.io/hostname": input.nodeName,
         },
         containers: [
@@ -277,7 +278,7 @@ export async function inspectFactoryboxWorker(
       status: z.object({
         nodeInfo: z.object({
           operatingSystem: z.literal("linux"),
-          architecture: z.literal("amd64"),
+          architecture: z.literal(input.architecture),
           kernelVersion: z.literal(input.kernel),
           bootID: uid,
         }),

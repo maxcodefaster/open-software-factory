@@ -5,7 +5,7 @@ try {
     resolve(process.env["FACTORY_STATE_DIRECTORY"] ?? "/var/lib/factory", "kubernetes-ready.json"),
   ).json();
   const response = await fetch(
-    `http://127.0.0.1:${process.env["FACTORY_PORT"] ?? "3000"}/api/session`,
+    `http://127.0.0.1:${process.env["FACTORY_PORT"] ?? "3000"}/health/ready`,
     { signal: AbortSignal.timeout(2000) },
   );
   const ready =

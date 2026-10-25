@@ -1,4 +1,4 @@
-import { children, For, Show } from "solid-js";
+import { children, For } from "solid-js";
 import type { JSX } from "@solidjs/web";
 import { useAttachmentPending } from "./attachments/ui";
 import { WorkspaceActionBar } from "./ui/workspace-actions";
@@ -16,7 +16,6 @@ export type TicketHeaderAction = {
 export function TicketActionBar(props: {
   actions: readonly TicketHeaderAction[];
   menu?: JSX.Element;
-  status?: string | undefined;
 }) {
   const menu = children(() => props.menu);
   const uploading = useAttachmentPending();
@@ -31,13 +30,6 @@ export function TicketActionBar(props: {
       label="Ticket actions"
       hasPrimary={Boolean(primary())}
       collapsible={Boolean(menu())}
-      status={
-        <Show when={props.status}>
-          <span class="clarification-status" role="status">
-            {props.status}
-          </span>
-        </Show>
-      }
     >
       {menu()}
       <For each={ordered()} keyed={(action) => action.id}>

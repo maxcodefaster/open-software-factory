@@ -6,6 +6,36 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { starterImagesSchema } from "../../scripts/factory/starter-images";
 import { createDatabase } from "../../packages/db/src/client";
 import { runtimeCacheObservation } from "./runtime-cache-observation";
+import { browserFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+
+export async function startEditorCompute(page: Page) {
+  const frame = page.frameLocator('iframe[title="Factory IDE"]');
+  await expect(frame.locator("#theia-app-shell")).toBeVisible({ timeout: 60_000 });
+  await frame.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
+  const start = frame.getByRole("button", { name: "Start compute", exact: true });
+  const takeOver = frame.getByRole("button", { name: "Take over editing", exact: true });
+  await expect
+    .poll(
+      async () =>
+        ((await start.count()) > 0 && (await start.isEnabled())) || (await takeOver.isVisible()),
+    )
+    .toBe(true);
+  if (await takeOver.isVisible()) await takeOver.click();
+  await expect(start).toBeEnabled();
+  // The independently granted IDE owns this native protocol. Opening source
+  // alone must not dispatch a central Factory compute command.
+  const pending = page.waitForResponse(
+    (response) =>
+      /\/__factory\/workspaces\/[0-9a-f-]{36}\/runtime\/ensure$/.test(
+        new URL(response.url()).pathname,
+      ) && response.request().method() === "POST",
+  );
+  await start.click();
+  const response = await pending;
+  expect(response.status()).toBe(202);
+  return z.object({ workspaceID: z.uuid(), attemptID: z.uuid() }).parse(await response.json());
+}
 
 export async function proveDesktopRuntime(input: {
   page: Page;
@@ -40,7 +70,7 @@ export async function proveDesktopRuntime(input: {
   const connectedMS = Math.round(performance.now() - computeStart);
   const list = z
     .object({ attempts: z.array(runtimeAttemptSchema) })
-    .parse(await (await api(`/api/runtime-attempts?projectId=${projectID}`)).json());
+    .parse(await serverCall(browserFunction(page, "getRuntimeAttempts", [projectID])));
   const attempt = list.attempts.find(
     (value) => value.workspaceId === workspaceID && value.state === "ready",
   );
@@ -165,13 +195,13 @@ export async function proveDesktopRuntime(input: {
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   await runTab.click();
   await page.screenshot({ path: resolve(artifacts, "independent-run.png") });
-  expect((await api(`/api/runtime-attempts/${attempt.id}/stop`, {})).ok).toBe(true);
+  await serverCall(browserFunction(page, "stopRuntimeAttempt", [attempt.id]));
   await expect
     .poll(
       async () => {
         const list = z
           .object({ attempts: z.array(runtimeAttemptSchema) })
-          .parse(await (await api(`/api/runtime-attempts?projectId=${projectID}`)).json());
+          .parse(await serverCall(browserFunction(page, "getRuntimeAttempts", [projectID])));
         return list.attempts.find((value) => value.id === attempt.id)?.state;
       },
       { timeout: 90_000 },
@@ -203,7 +233,7 @@ export async function proveDesktopRuntime(input: {
   );
   const secondList = z
     .object({ attempts: z.array(runtimeAttemptSchema) })
-    .parse(await (await api(`/api/runtime-attempts?projectId=${projectID}`)).json());
+    .parse(await serverCall(browserFunction(page, "getRuntimeAttempts", [projectID])));
   const second = secondList.attempts.find(
     (value) => value.workspaceId === workspaceID && value.state === "ready",
   );

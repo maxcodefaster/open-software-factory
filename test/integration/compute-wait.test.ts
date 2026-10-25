@@ -1,13 +1,14 @@
 import { expect, test } from "bun:test";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts";
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { admitComputeIn, computeAllocationIn } from "../../apps/factory/src/usage/compute";
 import { createComputeWait } from "../../apps/factory/src/usage/compute-wait";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
 
 test("an explicitly admitted new Agent turn can create compute after confirmed Stop without reviving stopped work", async () => {
   const host = await factoryProcess();
@@ -184,10 +185,11 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${work.attemptID}`;
     await setFactory(100, 256);
     const image = `registry.invalid/owned@sha256:${"1".repeat(64)}`;
-    const reserve = createReserveStore(defaultReservePolicy, {
-      staging: image,
-      verification: image,
-    });
+    const reserve = createReserveStore(
+      defaultReservePolicy,
+      { staging: image, verification: image },
+      ownedFactoryboxProfile,
+    );
     const [slot] = await database.client.begin((sql) => reserve.plan(sql));
     if (!slot) throw new Error("Owned reserve missing");
     expect(await database.client.begin((sql) => computeAllocationIn(sql, null))).toEqual({
@@ -200,6 +202,15 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
       cpuMilli: 0,
       memoryMiB: 0,
     });
+    await reserve.observe(database.client, slot.id, {
+      namespaceUID: "owned-ns",
+      podUID: "owned-pod",
+      claimUID: "owned-pvc",
+      ready: false,
+      factoryboxIdentity: { epoch: "owned" },
+      factoryboxPreparation: { bundle: "owned" },
+    });
+    expect(await reserve.intendStart(database.client, slot.id)).toBe(true);
     await reserve.observe(database.client, slot.id, {
       namespaceUID: "owned-ns",
       podUID: "owned-pod",

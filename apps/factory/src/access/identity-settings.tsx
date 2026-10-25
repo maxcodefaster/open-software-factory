@@ -1,13 +1,17 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { z } from "zod";
+import { identityConfiguration } from "../../../../packages/identity-domain/src/configuration";
+import { protocolRequest } from "../api-client";
 import {
-  identityConfiguration,
-  identityConfigurationView,
-} from "../../../../packages/identity-domain/src/configuration";
-import { apiRequest } from "../api-client";
+  getIdentityConfiguration,
+  saveIdentityConfiguration,
+  activateIdentityConfiguration,
+} from "../server-functions/access";
+import { serverCall, type ServerValue } from "../server-functions/result";
 
 export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | undefined }) {
-  const [current, setCurrent] = createSignal<z.output<typeof identityConfigurationView>>();
+  const [current, setCurrent] =
+    createSignal<ServerValue<ReturnType<typeof getIdentityConfiguration>>>();
   const [mode, setMode] = createSignal("local");
   const [issuer, setIssuer] = createSignal("");
   const [days, setDays] = createSignal(7);
@@ -17,7 +21,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
   let pendingCommandID = crypto.randomUUID();
   let lastInput = "";
   async function load() {
-    const view = await apiRequest(identityConfigurationView, "/api/security/configuration");
+    const view = await serverCall(getIdentityConfiguration());
     setCurrent(view);
     setMode(view.mode);
     setIssuer(view.issuer ?? "");
@@ -64,15 +68,13 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
       pendingCommandID = crypto.randomUUID();
       lastInput = input;
     }
-    const result = await apiRequest(identityConfigurationView, "/api/security/configuration", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
+    const result = await serverCall(
+      saveIdentityConfiguration({
         commandID: pendingCommandID,
         version: current()?.version ?? 0,
         configuration,
       }),
-    });
+    );
     setCurrent(result);
     for (const field of form.querySelectorAll<HTMLInputElement>('input[type="password"]'))
       field.value = "";
@@ -85,7 +87,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
   }
   async function check(commandID: string) {
     props.beforeCompanySignIn?.();
-    const result = await apiRequest(z.object({ url: z.url() }), "/api/auth/sign-in/sso", {
+    const result = await protocolRequest(z.object({ url: z.url() }), "/api/auth/sign-in/sso", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -97,11 +99,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
     location.assign(result.url);
   }
   async function activate(commandID: string) {
-    const result = await apiRequest(
-      identityConfigurationView,
-      `/api/security/configuration/${commandID}/activate`,
-      { method: "POST" },
-    );
+    const result = await serverCall(activateIdentityConfiguration(commandID));
     setCurrent(result);
     setNotice("Sign-in configuration activated. Background Agents continue.");
   }

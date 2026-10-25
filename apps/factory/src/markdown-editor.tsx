@@ -1,13 +1,14 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, onSettled, Show } from "solid-js";
 import {
   documentBlocks,
   supportsDocumentMarkdown,
   type DocumentEditor,
   type DocumentFormat,
-} from "./document-editor";
+} from "./document-model";
 import { RichDocumentSurface } from "./rich-document-surface";
 import { editorCommandHeight, editorPopoverPosition } from "./editor-popover-position";
 import { documentSlash, filterDocumentBlocks } from "./document-slash";
+import { DocumentLinkEditor } from "./document-link-editor";
 
 export function MarkdownEditor(props: {
   value: string;
@@ -21,8 +22,6 @@ export function MarkdownEditor(props: {
   const [control, setControl] = createSignal<HTMLDivElement>();
   const [index, setIndex] = createSignal(0);
   const [linkEditing, setLinkEditing] = createSignal(false);
-  const [linkError, setLinkError] = createSignal("");
-  let linkInput: HTMLInputElement | undefined;
   const blocks = () => filterDocumentBlocks(documentBlocks, menu()?.query ?? "");
 
   function selection(element: HTMLElement) {
@@ -41,6 +40,7 @@ export function MarkdownEditor(props: {
       range.startContainer.nodeType === Node.TEXT_NODE &&
       documentSlash((range.startContainer.textContent ?? "").slice(0, range.startOffset));
     if (!value.isCollapsed || token) {
+      setLinkEditing(false);
       setMenu({ range: range.cloneRange(), slash: !!token, query: token ? token.query : "" });
       setIndex(0);
     } else setMenu(undefined);
@@ -73,19 +73,22 @@ export function MarkdownEditor(props: {
       if (block) format(block.id);
     }
   }
-  function applyLink() {
-    const value = linkInput?.value.trim();
-    if (!value) return;
-    const href = /^https?:\/\//i.test(value) ? value : `https://${value}`;
-    try {
-      if (!["http:", "https:"].includes(new URL(href).protocol)) throw new Error("Unsupported URL");
-      editor?.link(href, menu()?.range);
-      setMenu(undefined);
-      setLinkEditing(false);
-      setLinkError("");
-    } catch {
-      setLinkError("Enter a valid web address.");
+  function closeFormatting() {
+    const range = menu()?.range;
+    setMenu(undefined);
+    setLinkEditing(false);
+    const surface = root?.querySelector<HTMLElement>('[contenteditable="true"]');
+    surface?.focus({ preventScroll: true });
+    if (range) {
+      const selected = window.getSelection();
+      selected?.removeAllRanges();
+      selected?.addRange(range);
     }
+  }
+  function applyLink(href: string) {
+    editor?.link(href, menu()?.range);
+    setMenu(undefined);
+    setLinkEditing(false);
   }
   createEffect(
     () => ({ menu: menu(), element: control(), link: linkEditing() }),
@@ -116,6 +119,8 @@ export function MarkdownEditor(props: {
           height: size.height,
           gap,
           preferBelow: current.slash,
+          align:
+            current.slash || element.classList.contains("is-link-editing") ? "start" : "center",
         });
         if (!position) return;
         const origin = root.getBoundingClientRect();
@@ -124,17 +129,25 @@ export function MarkdownEditor(props: {
         element.setAttribute("data-positioned", "true");
       };
       const viewport = root.closest(".knowledge-content");
+      const dismiss = (event: PointerEvent) => {
+        if (event.target instanceof Node && !element.contains(event.target)) {
+          setMenu(undefined);
+          setLinkEditing(false);
+        }
+      };
       const observer = new ResizeObserver(place);
       observer.observe(element);
       if (viewport) observer.observe(viewport);
       viewport?.addEventListener("scroll", place);
       window.addEventListener("resize", place);
-      queueMicrotask(place);
+      document.addEventListener("pointerdown", dismiss);
+      onSettled(place);
       return () => {
         disposed = true;
         observer.disconnect();
         viewport?.removeEventListener("scroll", place);
         window.removeEventListener("resize", place);
+        document.removeEventListener("pointerdown", dismiss);
       };
     },
   );
@@ -179,33 +192,28 @@ export function MarkdownEditor(props: {
             when={current().slash}
             fallback={
               <div
-                class="selection-toolbar document-floating-control"
+                class={`selection-toolbar document-floating-control${linkEditing() ? " is-link-editing" : ""}`}
                 role="toolbar"
                 aria-label="Knowledge selection formatting"
                 ref={setControl}
                 onMouseDown={(event) => {
-                  if (!(event.target instanceof HTMLInputElement)) event.preventDefault();
+                  if (!linkEditing()) event.preventDefault();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeFormatting();
                 }}
               >
                 <Show
                   when={!linkEditing()}
                   fallback={
-                    <>
-                      <input
-                        aria-label="Link address"
-                        placeholder="https://…"
-                        ref={linkInput}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            applyLink();
-                          }
-                        }}
-                      />
-                      <button type="button" onClick={applyLink}>
-                        Apply link
-                      </button>
-                    </>
+                    <DocumentLinkEditor
+                      inputLabel="Link address"
+                      onInsert={applyLink}
+                      onCancel={closeFormatting}
+                    />
                   }
                 >
                   <button type="button" onClick={() => format("bold")} aria-label="Bold">
@@ -226,7 +234,6 @@ export function MarkdownEditor(props: {
                     type="button"
                     onClick={() => {
                       setLinkEditing(true);
-                      queueMicrotask(() => linkInput?.focus());
                     }}
                   >
                     Link
@@ -260,9 +267,6 @@ export function MarkdownEditor(props: {
             </div>
           </Show>
         )}
-      </Show>
-      <Show when={linkError()}>
-        <p role="alert">{linkError()}</p>
       </Show>
     </div>
   );

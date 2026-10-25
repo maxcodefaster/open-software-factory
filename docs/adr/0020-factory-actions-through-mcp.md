@@ -27,3 +27,7 @@ This is planning authority only. Creation does not approve a specification, star
 commission implementation, change existing Tickets or authorize Delivery. External MCP-library
 connections retain their reviewed read-only boundary. Additional Factory actions need their own
 command and authority decision, not a generic API, SQL or shell tool.
+
+The read-only `readProjectReleases` tool reports confirmed versions and advisory bump suggestions
+without credentials or consumer state. It cannot publish or grant access. Human-confirmed
+[Release publication](0023-independent-project-releases.md) uses its own authenticated command.

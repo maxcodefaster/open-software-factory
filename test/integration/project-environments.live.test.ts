@@ -1,4 +1,6 @@
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
+import { callFactoryFunction } from "../fixtures/server-functions";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createDatabase } from "../../packages/db/src/client";
@@ -78,7 +80,17 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
         }>
       >`SELECT id,state,failure,kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",isolated_kind::text AS kind FROM factory.runtime_attempt WHERE project_id=${projectID}`;
     async function stop(id: string) {
-      expect((await api(`/api/runtime-attempts/${id}/stop`, "POST", {})).ok).toBe(true);
+      expect(
+        (
+          await callFactoryFunction(
+            factory.base,
+            "stopRuntimeAttempt",
+            [id],
+            { cookie, origin: factory.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          )
+        ).ok,
+      ).toBe(true);
       await eventually(
         async () => (await attempts()).find((a) => a.id === id)?.state,
         (state) => state === "stopped",
@@ -159,15 +171,23 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
       await factory.start();
       cookie = await factory.signIn();
       const preparationStarted = performance.now();
-      const registration = await api("/api/projects", "POST", {
-        slug: name,
-        name: "Owned environment journey",
-        repositoryUrl: `http://127.0.0.1:33030/${owner}/${name}.git`,
-        defaultBranch: "main",
-        devcontainerPath: ".devcontainer/devcontainer.json",
-      });
-      expect(registration.status).toBe(201);
-      projectID = (await registration.json()).id;
+      const registration = await serverCall(
+        callFactoryFunction(
+          factory.base,
+          "registerProject",
+          [
+            {
+              slug: name,
+              name: "Owned environment journey",
+              repositoryUrl: `http://127.0.0.1:33030/${owner}/${name}.git`,
+              defaultBranch: "main",
+              devcontainerPath: ".devcontainer/devcontainer.json",
+            },
+          ],
+          { cookie },
+        ),
+      );
+      projectID = registration.id;
       const variables = (value: string) => [
         { name: "APP_TOKEN", value, runtime: true, build: false, verification: false },
         {
@@ -185,23 +205,32 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
           verification: false,
         },
       ];
-      for (const environment of ["development", "main-preview"]) {
-        const saved = await api(`/api/projects/${projectID}/environments/${environment}`, "PUT", {
-          commandID: crypto.randomUUID(),
-          version: 0,
-          variables: variables(`owned-${environment}-sentinel`),
-          registries: [
+      for (const environment of ["development", "main-preview"] as const) {
+        const saved = await callFactoryFunction(
+          factory.base,
+          "saveEnvironment",
+          [
+            projectID,
+            environment,
             {
-              host: registry.host,
-              username: registry.username,
-              password: registry.password,
-              certificate: registry.certificate,
-              verification: false,
+              commandID: crypto.randomUUID(),
+              version: 0,
+              variables: variables(`owned-${environment}-sentinel`),
+              registries: [
+                {
+                  host: registry.host,
+                  username: registry.username,
+                  password: registry.password,
+                  certificate: registry.certificate,
+                  verification: false,
+                },
+              ],
             },
           ],
-        });
-        expect(saved.status).toBe(200);
-        expect(JSON.stringify(await saved.json())).not.toContain("sentinel");
+          { cookie },
+        );
+        expect(saved.ok).toBe(true);
+        expect(JSON.stringify(saved)).not.toContain("sentinel");
       }
       await eventually(
         async () => {
@@ -222,21 +251,33 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
         performance.now() - preparationStarted,
       );
       const sourceStarted = performance.now();
-      const source = await (
-        await api(`/api/projects/${projectID}/source-workspace/ensure`, "POST", {})
-      ).json();
+      const source = await serverCall(
+        callFactoryFunction(factory.base, "ensurePersonalSource", [projectID], { cookie: cookie }),
+      );
       await eventually(
         async () =>
-          (await (await api(`/api/workspaces/${source.workspaceID}/source`)).json()).state,
+          (
+            await serverCall(
+              callFactoryFunction(factory.base, "getWorkspaceSource", [source.workspaceID], {
+                cookie: cookie,
+              }),
+            )
+          ).state,
         (state) => state === "ready",
         "Owned source was not ready",
         150_000,
       );
       timings["sourceReadyMS"] = Math.round(performance.now() - sourceStarted);
       const runtimeStarted = performance.now();
-      const ensured = await (
-        await api(`/api/projects/${projectID}/personal-workspace/ensure`, "POST", {})
-      ).json();
+      const ensured = await serverCall(
+        callFactoryFunction(
+          factory.base,
+          "startPersonalWorkspace",
+          [projectID],
+          { cookie, origin: factory.base, "content-type": "application/json" },
+          AbortSignal.timeout(180_000),
+        ),
+      );
       const attemptID = ensured.id;
       if (typeof attemptID !== "string") throw new Error("Owned runtime admission failed");
       const current = await eventually(
@@ -323,25 +364,58 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
       >`SELECT image FROM factory.project_image_preparation WHERE project_id=${projectID} AND environment='development' AND environment_version=1 AND state='succeeded'`;
       expect(containers[0]?.Config.Image).toBe(prepared?.image);
       expect(containers[0]?.Config.Labels["factory.dev/prebuild-input"]).toMatch(/^[a-f0-9]{64}$/);
-      const modified = await api(`/api/projects/${projectID}/environments/development`, "PUT", {
-        commandID: crypto.randomUUID(),
-        version: 1,
-        variables: variables("owned-new-development"),
-        registries: [],
-      });
+      const modified = await callFactoryFunction(
+        factory.base,
+        "saveEnvironment",
+        [
+          projectID,
+          "development",
+          {
+            commandID: crypto.randomUUID(),
+            version: 1,
+            variables: variables("owned-new-development"),
+            registries: [],
+          },
+        ],
+        { cookie },
+      );
       expect(modified.ok).toBe(true);
       expect(await terminal.evaluate<string | null>("return process.env.APP_TOKEN")).toBe(
         "owned-development-sentinel",
       );
       terminal.close();
       terminal = undefined;
-      await stop(attemptID);
+      await serverCall(
+        callFactoryFunction(
+          factory.base,
+          "stopRuntimeAttempt",
+          [attemptID],
+          { cookie, origin: factory.base, "content-type": "application/json" },
+          AbortSignal.timeout(180_000),
+        ),
+      );
       const initialStaging = (await attempts()).filter((a) => a.kind === "staging");
-      for (const row of initialStaging) if (row.state !== "stopped") await stop(row.id);
+      for (const row of initialStaging)
+        if (row.state !== "stopped")
+          await serverCall(
+            callFactoryFunction(
+              factory.base,
+              "stopRuntimeAttempt",
+              [row.id],
+              { cookie, origin: factory.base, "content-type": "application/json" },
+              AbortSignal.timeout(180_000),
+            ),
+          );
       const previewStarted = performance.now();
-      const preview = await (
-        await api(`/api/projects/${projectID}/staging/ensure`, "POST", {})
-      ).json();
+      const preview = await serverCall(
+        callFactoryFunction(
+          factory.base,
+          "ensureStaging",
+          [projectID],
+          { cookie, origin: factory.base, "content-type": "application/json" },
+          AbortSignal.timeout(180_000),
+        ),
+      );
       await eventually(
         async () => (await attempts()).find((a) => a.id === preview.id)?.state,
         (state) => state === "ready",
@@ -374,9 +448,21 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
     } finally {
       terminal?.close();
       if (projectID) {
-        for (const row of await attempts()) if (row.state !== "stopped") await stop(row.id);
+        for (const row of await attempts())
+          if (row.state !== "stopped")
+            await serverCall(
+              callFactoryFunction(
+                factory.base,
+                "stopRuntimeAttempt",
+                [row.id],
+                { cookie, origin: factory.base, "content-type": "application/json" },
+                AbortSignal.timeout(180_000),
+              ),
+            );
         await removeOwnedProjectSources(database, projectID, (id) =>
-          api(`/api/workspaces/${id}/source/stop`, "POST", {}),
+          serverCall(
+            callFactoryFunction(factory.base, "stopWorkspaceSource", [id], { cookie: cookie }),
+          ),
         );
       }
       // The user's running Factory owns background producers in its own database.

@@ -9,8 +9,10 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { type ConvertedAttachment, processAttachment } from "./conversion";
+import type { ConvertedAttachment } from "./conversion-result";
+import { processAttachment } from "./process";
 import { type AttachmentObjects, attachmentDigest, createAttachmentObjects } from "./objects";
+import { retainAttachmentDraftInput } from "./commands";
 
 type Database = ReturnType<typeof createDatabase>;
 type StoredObject = { key: string; sha256: string; bytes: number; mediaType: string; name: string };
@@ -289,12 +291,7 @@ export function createAttachmentStore(
   return {
     limits,
     async retainDraft(userID: string, projectID: string, draftID: string, raw: unknown) {
-      const input = z
-        .strictObject({
-          sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-          ids: z.array(z.uuid()).max(512),
-        })
-        .parse(raw);
+      const input = retainAttachmentDraftInput.parse(raw);
       return database.client.begin(async (sql) => {
         await projectAuthorityIn(sql, userID, projectID);
         for (const id of new Set(input.ids)) {

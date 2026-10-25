@@ -133,11 +133,17 @@ export const runtimeAttemptSchema = z.object({
   changeId: optionalString,
   workspaceId: optionalString,
   workspaceKind: optionalEnum(["personal", "ticket"]),
-  runtimeKind: optionalEnum(["personal", "ticket", "staging", "verification"]),
+  runtimeKind: optionalEnum(["personal", "ticket", "staging", "verification", "publication"]),
   currentStaging: z.boolean().optional(),
   ownerUserId: optionalString,
   state: z.string(),
   failure: optionalString,
+  generation: z.string().optional(),
+  revision: z.string().optional(),
+  kubernetesNamespace: z.string().optional(),
+  kubernetesPodName: z.string().optional(),
+  createdAt: optionalString,
+  updatedAt: optionalString,
 });
 export type RuntimeAttempt = z.infer<typeof runtimeAttemptSchema>;
 export const appPreviewsSchema = z.object({
@@ -198,6 +204,7 @@ export const changeSchema = z.object({
   branchName: z.string(),
   baseSha: z.string(),
   state: z.string(),
+  version: z.coerce.number().int().positive().optional(),
   branchState: z.string(),
   branchHeadSha: optionalString,
   runtimeAttemptId: optionalString,

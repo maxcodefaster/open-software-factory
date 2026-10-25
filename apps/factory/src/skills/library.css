@@ -7,7 +7,7 @@
   min-height: 0;
   min-width: 0;
   padding: var(--space-8);
-  background: var(--material-document);
+  background: transparent;
   font-size: var(--text-sm);
   line-height: var(--leading-body);
   caret-color: var(--color-focus);
@@ -72,7 +72,6 @@
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.skill-library-heading,
 .skill-library-context,
 .skill-library-tools,
 .skill-library-title {
@@ -82,13 +81,8 @@
 }
 .skill-library-heading {
   position: relative;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-3) var(--space-5);
-  margin-bottom: var(--space-6);
-}
-.skill-library-heading > .workspace-action-bar {
-  grid-column: 1 / -1;
+  align-items: center;
+  margin-bottom: var(--space-4);
 }
 .skill-library-title {
   min-width: 0;
@@ -516,9 +510,7 @@
 }
 @container skill-library (max-width: 760px) {
   .skill-library-heading {
-    grid-template-columns: minmax(0, 1fr);
-    gap: var(--space-3);
-    margin-bottom: var(--space-6);
+    margin-bottom: var(--space-4);
   }
   .skill-library-title h2 {
     font-size: 24px;

@@ -1,3 +1,8 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
@@ -16,18 +21,26 @@ test("named prerequisites block Build and remain linked after cancellation until
   const slug = `dependency-qa-${projectId.slice(0, 8)}`;
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.route("**/api/projects/*/source-workspace/ensure", (route) =>
-    route.fulfill({ status: 503, json: { error: "Controlled planning fixture" } }),
-  );
-  await page.route("**/api/projects/*/developer-ide/ensure", (route) =>
-    route.fulfill({ status: 503, json: { error: "Controlled planning fixture" } }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Controlled planning fixture");
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Controlled planning fixture");
+      },
+    },
+  });
   try {
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const administrator = z
       .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-      .parse(await (await page.request.get("/api/session")).json()).session.user.id;
+      .parse(await browserBootstrap(page)).session.user.id;
     await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${projectId}, ${slug}, 'Dependency QA', 'https://example.invalid/dependency-qa.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
     await openProjectMenu(page);
@@ -94,23 +107,21 @@ test("named prerequisites block Build and remain linked after cancellation until
     ).toBeVisible();
     await expect(prerequisites.getByText("Awaiting delivery", { exact: true })).toBeVisible();
     await expect(page.getByRole("dialog", { name: "Add dependency", exact: true })).toBeHidden();
-    const revisionResponse = await page.request.post(`/api/tickets/${second}/requirements`, {
-      headers: { origin: new URL(page.url()).origin },
-      data: {
+    const revisionResponse = await requestFunction(page.request, "createRequirementRevision", [
+      second,
+      {
         summary: "Build onboarding on the delivered contract",
         acceptanceCriteria: ["Use the delivered sign-in contract"],
         nonGoals: [],
       },
-    });
-    expect(revisionResponse.status()).toBe(201);
-    const revision = z.object({ id: z.uuid() }).parse(await revisionResponse.json());
+    ]);
+    expect(revisionResponse).toMatchObject({ ok: true });
+    const revision = z
+      .object({ id: z.uuid() })
+      .parse(await serverCall(Promise.resolve(revisionResponse)));
     expect(
-      (
-        await page.request.post(`/api/tickets/${second}/requirements/${revision.id}/approve`, {
-          headers: { origin: new URL(page.url()).origin },
-        })
-      ).status(),
-    ).toBe(201);
+      await requestFunction(page.request, "approveRequirementRevision", [second, revision.id]),
+    ).toMatchObject({ ok: true });
     await page.reload();
     const board = page.getByRole("region", { name: "Ticket board", exact: true });
     await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
@@ -121,13 +132,10 @@ test("named prerequisites block Build and remain linked after cancellation until
       .getByRole("button", { name: /Build onboarding on the sign-in contract/ })
       .click();
     await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
-    const denied = await page.request.post(`/api/tickets/${second}/change`, {
-      headers: { origin: new URL(page.url()).origin },
-    });
-    expect(denied.status()).toBe(409);
-    expect(z.object({ error: z.string() }).parse(await denied.json()).error).toContain(
-      "Publish the sign-in contract",
-    );
+    const denied = await requestFunction(page.request, "startTicketChange", [second]);
+    expect(denied).toMatchObject({ ok: false, status: 409 });
+    if (denied.ok) throw new Error("Dependent Ticket was unexpectedly admitted");
+    expect(denied.message).toContain("Publish the sign-in contract");
     await mkdir(".factory/test-results/epic-folders", { recursive: true });
     await page.screenshot({
       path: ".factory/test-results/epic-folders/dependencies-ticket-wide.png",

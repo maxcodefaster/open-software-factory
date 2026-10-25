@@ -1,3 +1,5 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
@@ -7,6 +9,12 @@ import { requirementsInterviewSkill } from "../../apps/factory/src/skills/review
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+import {
+  browserBootstrap,
+  browserFunction,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test.use({ viewport: { width: 1440, height: 960 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(90_000);
@@ -32,15 +40,23 @@ test("admitted configuration is readable, private to Project members, and distin
   for (const current of [page, developer, outsider])
     current.on("pageerror", (error) => errors.push(error.message));
   for (const current of [page, developer, outsider]) {
-    await current.route("**/api/projects/*/source-workspace/ensure", (route) =>
-      route.fulfill({
-        status: 503,
-        json: { error: "Controlled planning fixture has no source repository" },
-      }),
-    );
-    await current.route("**/api/projects/*/developer-ide/ensure", (route) =>
-      route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no IDE" } }),
-    );
+    await mockFactoryFunctions(current, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError(
+            "unavailable",
+            "Controlled planning fixture has no source repository",
+          );
+        },
+      },
+    });
+    await mockFactoryFunctions(current, {
+      workspaces: {
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "Controlled planning fixture has no IDE");
+        },
+      },
+    });
   }
   async function login(current: Page, email: string) {
     await current.goto("/");
@@ -65,23 +81,23 @@ test("admitted configuration is readable, private to Project members, and distin
     return panel;
   }
   try {
-    await mkdir(".factory/screenshots", { recursive: true });
+    await mkdir(".factory/test-results/agent-configuration", { recursive: true });
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const administrator = z
       .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-      .parse(await (await page.request.get("/api/session")).json()).session.user.id;
+      .parse(await browserBootstrap(page)).session.user.id;
     for (const role of ["developer", "outsider"] as const) {
-      const response = await page.request.post("/api/admin/users", {
-        headers: { origin: "http://127.0.0.1:3000" },
-        data: {
+      const response = await browserFunction(page, "createAccount", [
+        {
           name: `Configuration QA ${role}`,
           email: `${role}-${projectID}@factory.local`,
           password,
         },
-      });
-      expect(response.status()).toBe(201);
-      users.push(z.object({ id: z.uuid(), email: z.email() }).parse(await response.json()));
+      ]);
+      expect(response.ok).toBe(true);
+      if (!response.ok) throw new Error(response.message);
+      users.push(z.object({ id: z.uuid(), email: z.email() }).parse(response.value));
     }
     const member = users[0];
     const nonMember = users[1];
@@ -138,16 +154,19 @@ test("admitted configuration is readable, private to Project members, and distin
     await login(developer, member.email);
     await login(outsider, nonMember.email);
     expect(
-      (
-        await outsider.request.get(`/api/projects/${projectID}/conversation?ticketId=${ticketID}`)
-      ).status(),
-    ).toBe(404);
-    expect((await outsider.request.get(`/api/projects/${projectID}/model-settings`)).status()).toBe(
-      404,
+      await requestFunction(outsider.request, "getConversation", [
+        projectID,
+        { ticketId: ticketID },
+      ]),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(await browserFunction(outsider, "getProjectModels", [projectID])).toMatchObject({
+      ok: false,
+      status: 404,
+    });
+    const observed = await serverCall(
+      requestFunction(developer.request, "getConversation", [projectID, { ticketId: ticketID }]),
     );
-    const observed = await (
-      await developer.request.get(`/api/projects/${projectID}/conversation?ticketId=${ticketID}`)
-    ).json();
+    if (!observed) throw new Error("Owned configuration conversation is missing");
     expect(observed.turn).toMatchObject({
       id: owner.id,
       engine: "mastra",
@@ -159,20 +178,24 @@ test("admitted configuration is readable, private to Project members, and distin
     const composer = panel.getByLabel("Message conversation");
     await composer.fill("Retain this draft while inspecting configuration.");
     await developer.getByRole("button", { name: "Minimize Agent panel", exact: true }).click();
-    const skillURL = `**/api/projects/${projectID}/skill-settings`;
-    const skillDefaults = await (
-      await developer.request.get(`/api/projects/${projectID}/skill-settings`)
-    ).json();
-    await developer.route(skillURL, async (route) => {
-      await route.fulfill({
-        json: {
-          ...skillDefaults,
-          effective: {
-            ...skillDefaults.effective,
-            planning: { ...skillDefaults.effective.planning, available: false },
-          },
+    const skillDefaults = await serverCall(
+      browserFunction(developer, "getInheritedSkills", [projectID]),
+    );
+    let skillUnavailable = true;
+    await mockFactoryFunctions(developer, {
+      skills: {
+        async inherited() {
+          if (!skillUnavailable)
+            return serverCall(browserFunction(developer, "getInheritedSkills", [projectID]));
+          return {
+            ...skillDefaults,
+            effective: {
+              ...skillDefaults.effective,
+              planning: { ...skillDefaults.effective.planning, available: false },
+            },
+          };
         },
-      });
+      },
     });
     await developer.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await expect(panel.getByRole("status")).toContainText(
@@ -191,31 +214,32 @@ test("admitted configuration is readable, private to Project members, and distin
       .getByRole("button", { name: "Skills", exact: true })
       .click();
     await developer.screenshot({
-      path: ".factory/screenshots/agent-configuration-developer-settings.png",
+      path: ".factory/test-results/agent-configuration/developer-settings.png",
     });
-    await developer.unroute(skillURL);
-    await developer
-      .getByRole("tab", { name: "Inspect the retained configuration", exact: true })
-      .click();
+    skillUnavailable = false;
+    const retainedTab = developer.getByRole("tab", {
+      name: "Inspect the retained configuration",
+      exact: true,
+    });
+    await retainedTab.click();
     await expect(panel.getByRole("status")).toHaveCount(0);
     await expect(composer).toHaveValue("Retain this draft while inspecting configuration.");
-    const retained = await (
-      await developer.request.get(`/api/projects/${projectID}/conversation?ticketId=${ticketID}`)
-    ).json();
+    const retained = await serverCall(
+      requestFunction(developer.request, "getConversation", [projectID, { ticketId: ticketID }]),
+    );
+    if (!retained) throw new Error("Retained configuration conversation is missing");
     expect(retained.turn).toEqual(observed.turn);
-    await developer.screenshot({ path: ".factory/screenshots/agent-configuration-wide.png" });
+    await developer.screenshot({ path: ".factory/test-results/agent-configuration/wide.png" });
     await developer.setViewportSize({ width: 430, height: 860 });
     const narrow = developer.getByRole("dialog", { name: "Agent panel", exact: true });
     await expect(narrow).toBeVisible();
     expect(await narrow.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
       true,
     );
-    await developer.screenshot({ path: ".factory/screenshots/agent-configuration-narrow.png" });
+    await developer.screenshot({ path: ".factory/test-results/agent-configuration/narrow.png" });
     await developer.keyboard.press("Escape");
     await expect(narrow).toBeHidden();
-    await expect(
-      developer.getByRole("button", { name: "Toggle Agent panel", exact: true }),
-    ).toBeFocused();
+    await expect(retainedTab).toBeFocused();
     expect(errors).toEqual([]);
   } finally {
     await developer.unrouteAll({ behavior: "ignoreErrors" });

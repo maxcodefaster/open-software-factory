@@ -1,9 +1,8 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
-import {
-  type SkillRole,
-  skillInvocationViewInput,
-} from "../../../../packages/conversation-domain/src/skills";
-import { apiRequest } from "../api-client";
+import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
+import { invoke } from "@solidjs/web/server-functions/client";
+import { serverCall, type ServerValue } from "../server-functions/result";
+import { getSkillInvocations } from "../server-functions/skills";
 import { insertSkillInvocation, skillInvocationQuery } from "./chat-invocation";
 
 export function ChatSkillPicker(props: {
@@ -14,7 +13,7 @@ export function ChatSkillPicker(props: {
   disabled?: boolean;
 }) {
   const [open, setOpen] = createSignal(false);
-  const [view, setView] = createSignal<ReturnType<typeof skillInvocationViewInput.parse>>();
+  const [view, setView] = createSignal<ServerValue<ReturnType<typeof getSkillInvocations>>>();
   const [error, setError] = createSignal("");
   const [position, setPosition] = createSignal<Record<string, string>>({});
   const [query, setQuery] = createSignal("");
@@ -36,7 +35,7 @@ export function ChatSkillPicker(props: {
       left: `${Math.max(8, Math.min(rectangle.left, innerWidth - 328))}px`,
       bottom: `${Math.max(8, innerHeight - rectangle.top + 8)}px`,
       width: `${Math.min(320, innerWidth - 16)}px`,
-      "max-height": `${Math.max(96, rectangle.top - 16)}px`,
+      "max-height": `min(20rem, ${Math.max(44, rectangle.top - 16)}px)`,
     });
   };
   const contextKey = createMemo(() =>
@@ -168,12 +167,10 @@ export function ChatSkillPicker(props: {
     setError("");
     setView(undefined);
     try {
-      const query = new URLSearchParams({ role: props.workType });
-      if (props.changeID) query.set("change", props.changeID);
-      const result = await apiRequest(
-        skillInvocationViewInput,
-        `/api/projects/${projectID}/skills/invocations?${query}`,
-        { signal: current.signal },
+      const args: Parameters<typeof getSkillInvocations> = [projectID, props.workType];
+      if (props.changeID) args.push(props.changeID);
+      const result = await serverCall(
+        invoke(getSkillInvocations, { signal: current.signal }, ...args),
       );
       if (!current.signal.aborted) setView(result);
     } catch (cause) {
@@ -232,7 +229,6 @@ export function ChatSkillPicker(props: {
           } else request?.abort();
         }}
       >
-        <p>Skills</p>
         <Show when={error()}>
           <p role="alert">{error()} Type / again to retry.</p>
         </Show>
@@ -246,7 +242,9 @@ export function ChatSkillPicker(props: {
                 <p>
                   {current().skills.length
                     ? "No matching Skills."
-                    : "No unambiguous Skills are enabled for this work."}
+                    : current().conflicts.length
+                      ? "Rename duplicate Skills in settings to use them here."
+                      : "No Skills available."}
                 </p>
               </Show>
               <ul role="presentation">
@@ -263,25 +261,13 @@ export function ChatSkillPicker(props: {
                         onPointerMove={() => setActive(index())}
                         onClick={() => choose(skill.key)}
                       >
-                        <strong>
-                          {skill.name} <span>/{skill.key}</span>
-                        </strong>
+                        <strong>{skill.name}</strong>
                         <span>{skill.description}</span>
                       </button>
                     </li>
                   )}
                 </For>
               </ul>
-              <Show when={current().conflicts.length}>
-                <p>
-                  Duplicate invocation names must be renamed in Skills settings:{" "}
-                  {current()
-                    .conflicts.map((key) => `/${key}`)
-                    .join(", ")}
-                  .
-                </p>
-              </Show>
-              <small>Enter to insert · Escape to close. Nothing is sent or enabled.</small>
             </>
           )}
         </Show>

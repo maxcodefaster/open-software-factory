@@ -1,4 +1,4 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
@@ -6,8 +6,10 @@ import { createServer } from "vite";
 import { monitoringSave, monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 
-// Real settings components with controlled API I/O. Controller/live proofs own
+// Real settings components with native compiled function I/O. Controller/live proofs own
 // authentication, durable policies, source transport and actual inference.
 test("Inputs settings work on desktop and phone without a mode selector", async ({ page }) => {
   test.setTimeout(90_000);
@@ -17,12 +19,23 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
   const revision = "10000000-0000-4000-8000-000000000004";
   const evidence = ".factory/test-results/inputs-polish/component-ui";
   const errors: string[] = [];
+  const cache = resolve(".factory/test-results/vite", `input-ui-${crypto.randomUUID()}`);
   page.on("pageerror", (error) => errors.push(error.message));
   const frontend = await createServer({
     configFile: false,
     root: resolve("test/fixtures"),
+    cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
-    plugins: [solid({ ssr: false })],
+    optimizeDeps: { entries: ["project-inputs.html"] },
+    plugins: [
+      solid({
+        ssr: false,
+        serverFunctions: {
+          devMiddleware: false,
+          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
+        },
+      }),
+    ],
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
@@ -85,40 +98,49 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
   });
   const commands: unknown[] = [];
   let loseConfirmation = true;
+  let lost = false;
   let modelCommands = 0;
+  await mockFactoryFunctions(
+    page,
+    {
+      mcp: { get: async () => sources },
+      inputs: {
+        get: async () => view,
+        async save(_actor, _project, value) {
+          const input = monitoringSave.parse(value);
+          commands.push(input);
+          if (!view.hooks.some((hook) => hook.id === input.id))
+            view.hooks.push({
+              ...input,
+              version: 1,
+              delegatedBy: user,
+              policyId: crypto.randomUUID(),
+              sourceIds: input.connectionIds,
+              delegationCurrent: true,
+            });
+          if (loseConfirmation) {
+            loseConfirmation = false;
+            lost = true;
+          }
+          return { url: `${origin}/hooks/inputs/${input.id}/owned-private-key` };
+        },
+        async rotate() {
+          view.hooks[0]!.enabled = false;
+          view.hooks[0]!.version++;
+          return { url: `${origin}/hooks/inputs/${view.hooks[0]!.id}/rotated-private-key` };
+        },
+      },
+    },
+    (name) => {
+      if (name !== "saveProjectInput" || !lost) return false;
+      lost = false;
+      return true;
+    },
+  );
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (/\/(conversation|changes|agent-turns)(\/|$)/.test(path)) modelCommands++;
-    if (path === "/api/mcp") return route.fulfill({ json: sources });
-    if (path === `/api/projects/${project}/inputs`) {
-      if (request.method() === "GET") return route.fulfill({ json: view });
-      const input = monitoringSave.parse(request.postDataJSON());
-      commands.push(input);
-      if (!view.hooks.some((hook) => hook.id === input.id))
-        view.hooks.push({
-          ...input,
-          version: 1,
-          delegatedBy: user,
-          policyId: crypto.randomUUID(),
-          sourceIds: input.connectionIds,
-          delegationCurrent: true,
-        });
-      if (loseConfirmation) {
-        loseConfirmation = false;
-        return route.abort("connectionclosed");
-      }
-      return route.fulfill({
-        json: { url: `${origin}/hooks/inputs/${input.id}/owned-private-key` },
-      });
-    }
-    if (path.endsWith("/rotate")) {
-      view.hooks[0]!.enabled = false;
-      view.hooks[0]!.version++;
-      return route.fulfill({
-        json: { url: `${origin}/hooks/inputs/${view.hooks[0]!.id}/rotated-private-key` },
-      });
-    }
     return route.fulfill({
       status: 503,
       json: { error: "Outside this isolated Inputs component proof." },
@@ -253,6 +275,7 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     expect(errors).toEqual([]);
   } finally {
     await frontend.close();
+    await rm(cache, { recursive: true, force: true });
   }
 });
 
@@ -261,11 +284,22 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
 }) => {
   test.setTimeout(120_000);
   const project = "10000000-0000-4000-8000-000000000001";
+  const cache = resolve(".factory/test-results/vite", `input-states-${crypto.randomUUID()}`);
   const frontend = await createServer({
     configFile: false,
     root: resolve("test/fixtures"),
+    cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
-    plugins: [solid({ ssr: false })],
+    optimizeDeps: { entries: ["project-inputs.html"] },
+    plugins: [
+      solid({
+        ssr: false,
+        serverFunctions: {
+          devMiddleware: false,
+          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
+        },
+      }),
+    ],
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
@@ -351,27 +385,40 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
           ],
         });
         let failRead = true;
-        await context.route("**/api/**", (route) => {
-          const request = route.request();
-          if (request.method() !== "GET") writes.push(request.url());
-          const path = new URL(request.url()).pathname;
-          if (path === "/api/mcp")
-            return route.fulfill({
-              json: mcpLibraryView.parse({
+        await mockFactoryFunctions(page, {
+          mcp: {
+            get: async () =>
+              mcpLibraryView.parse({
                 canManageSystem: true,
                 canManageProject: true,
                 choices: [],
                 proposals: [],
                 entries: [],
               }),
-            });
-          if (path === `/api/projects/${project}/inputs`)
-            return failRead
-              ? route.fulfill({
-                  status: 503,
-                  json: { error: "Inputs are temporarily unavailable." },
-                })
-              : route.fulfill({ json: view });
+          },
+          inputs: {
+            async get() {
+              if (failRead)
+                throw new CommandError("unavailable", "Inputs are temporarily unavailable.");
+              return view;
+            },
+            async save() {
+              writes.push("save");
+              throw new Error("Unexpected Input save");
+            },
+            async disable() {
+              writes.push("disable");
+              throw new Error("Unexpected Input disable");
+            },
+            async rotate() {
+              writes.push("rotate");
+              throw new Error("Unexpected Input rotation");
+            },
+          },
+        });
+        await context.route("**/api/**", (route) => {
+          const request = route.request();
+          if (request.method() !== "GET") writes.push(request.url());
           return route.fulfill({ status: 503, json: { error: "Outside this component proof." } });
         });
         await page.goto(`${origin}/project-inputs.html`);
@@ -406,10 +453,8 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         await opener.click();
         const disable = row.getByRole("button", { name: "Disable input", exact: true });
         await disable.focus();
-        await page.waitForResponse(
-          (response) =>
-            response.url().endsWith(`/api/projects/${project}/inputs`) &&
-            response.request().method() === "GET",
+        await page.waitForResponse((response) =>
+          new URL(response.url()).pathname.startsWith("/_server/data/getProjectInputs-"),
         );
         await expect(disable).toBeFocused();
         await page.keyboard.press("Escape");
@@ -494,5 +539,6 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
     }
   } finally {
     await frontend.close();
+    await rm(cache, { recursive: true, force: true });
   }
 });

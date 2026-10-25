@@ -1,0 +1,23 @@
+name: Factory release
+on:
+  workflow_dispatch:
+    inputs:
+      factory_release_id:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      package_owner:
+        required: true
+        type: string
+jobs:
+  publish:
+    runs-on: [factory-publication, "factory-release-${{ inputs.factory_release_id }}"]
+    steps:
+      - name: Build and publish the exact admitted source
+        run: |
+          set -eu
+          cd "$FACTORY_RELEASE_SOURCE"
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          node .factory/publish.mjs "${{ inputs.package_owner }}"

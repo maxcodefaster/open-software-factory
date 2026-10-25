@@ -1,9 +1,12 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
 
 // Read-only local walkthrough. Never starts compute, calls a model or approves Delivery.
 test("captures the Starter document and assistant at desktop and phone widths", async ({
@@ -88,8 +91,8 @@ test("the original Starter Ticket opens real source, PTY and its development Pre
   test.setTimeout(720_000);
   const database = createDatabase(1);
   try {
-    const [change] = await database.client<Array<{ id: string }>>`
-      SELECT change.id FROM factory.change change
+    const [change] = await database.client<Array<{ id: string; projectID: string }>>`
+      SELECT change.id,change.project_id AS "projectID" FROM factory.change change
       JOIN factory.ticket ticket ON ticket.id = change.ticket_id
       JOIN factory.project project ON project.id = change.project_id
       WHERE project.slug = 'factory-starter' AND ticket.title = 'Add a friendly empty-counter hint'`;
@@ -116,19 +119,17 @@ test("the original Starter Ticket opens real source, PTY and its development Pre
       SELECT attempt.id, attempt.state FROM factory.runtime_attempt attempt
       JOIN factory.change change ON change.runtime_attempt_id = attempt.id
       WHERE change.id = ${change.id}`;
-    const ensured =
-      existingRuntime?.state === "ready"
-        ? undefined
-        : page.waitForResponse(
-            (response) =>
-              response.url().endsWith(`/api/changes/${change.id}/ticket-workspace/ensure`) &&
-              response.request().method() === "POST",
-          );
     await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
     await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
-    const response = ensured ? await ensured : undefined;
-    if (response) expect(response.ok()).toBe(true);
-    const runtime = response ? runtimeAttemptSchema.parse(await response.json()) : existingRuntime;
+    const receipt = existingRuntime?.state === "ready" ? undefined : await startEditorCompute(page);
+    const list = receipt
+      ? await serverCall(requestFunction(page.request, "getRuntimeAttempts", [change.projectID]))
+      : undefined;
+    const runtime = receipt
+      ? runtimeAttemptSchema.parse(
+          list?.attempts.find((attempt) => attempt.id === receipt.attemptID),
+        )
+      : existingRuntime;
     if (!runtime) throw new Error("Missing Starter Runtime Attempt");
     await expect
       .poll(
@@ -230,12 +231,11 @@ test("the original Starter opens an authenticated live Preview without changing 
     await expect
       .poll(
         async () => {
-          const { attempts } = await (
-            await page.request.get(`/api/runtime-attempts?projectId=${projectID}`)
-          ).json();
+          const { attempts } = await serverCall(
+            requestFunction(page.request, "getRuntimeAttempts", [projectID]),
+          );
           return attempts.find(
-            (attempt: { projectId: string; currentStaging: boolean }) =>
-              attempt.projectId === projectID && attempt.currentStaging,
+            (attempt) => attempt.projectId === projectID && attempt.currentStaging,
           )?.state;
         },
         { timeout: 540_000 },

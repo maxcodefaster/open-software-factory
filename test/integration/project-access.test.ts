@@ -9,6 +9,8 @@ import {
   searchProjectTickets,
 } from "../../apps/factory/src/project-agent/controller";
 import { factoryProcess } from "../fixtures/factory-process";
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 
@@ -29,21 +31,23 @@ test("managed developers sign in, see only member Projects and cannot manage glo
     }
     const email = `developer-${crypto.randomUUID()}@factory.local`;
     const password = "owned-developer-password-not-a-secret";
-    const created = await fetch(`${process.base}/api/admin/users`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ name: "Managed developer", email, password }),
-    });
-    expect(created.status).toBe(201);
-    const userBody = await created.json();
+    const userBody = await serverCall(
+      callFactoryFunction(
+        process.base,
+        "createAccount",
+        [{ name: "Managed developer", email, password }],
+        headers,
+      ),
+    );
     const user = z.object({ id: z.uuid() }).parse(userBody);
     expect(JSON.stringify(userBody)).not.toContain(password);
-    const membership = await fetch(`${process.base}/api/projects/${projectID}/members`, {
-      method: "POST",
+    const membership = await callFactoryFunction(
+      process.base,
+      "saveProjectMember",
+      [projectID, { email, role: "developer" }],
       headers,
-      body: JSON.stringify({ email, role: "developer" }),
-    });
-    expect(membership.status).toBe(200);
+    );
+    expect(membership.ok).toBe(true);
     const login = await fetch(`${process.base}/api/auth/sign-in/email`, {
       method: "POST",
       headers: { origin: process.base, "content-type": "application/json" },
@@ -63,87 +67,102 @@ test("managed developers sign in, see only member Projects and cannot manage glo
           .object({ user: z.object({ id: z.uuid() }), systemManager: z.boolean() })
           .nullable(),
       })
-      .parse(await (await fetch(`${process.base}/api/session`, { headers: memberHeaders })).json());
+      .parse(await authenticatedBootstrap(process.base, memberHeaders));
     expect(session.session?.user.id).toBe(user.id);
     expect(session.session?.systemManager).toBe(false);
     const list = z
       .object({ projects: z.array(z.object({ id: z.uuid() })) })
-      .parse(
-        await (await fetch(`${process.base}/api/projects`, { headers: memberHeaders })).json(),
-      );
+      .parse(await serverCall(callFactoryFunction(process.base, "getProjects", [], memberHeaders)));
     expect(list.projects.map((project) => project.id)).toEqual([projectID]);
-    for (const path of ["/api/admin/users", "/api/model-settings"]) {
-      expect((await fetch(`${process.base}${path}`, { headers: memberHeaders })).status).toBe(403);
-    }
+    expect(await callFactoryFunction(process.base, "getAccounts", [], memberHeaders)).toMatchObject(
+      { ok: false, status: 403 },
+    );
     expect(
-      (
-        await fetch(`${process.base}/api/projects`, {
-          method: "POST",
-          headers: memberHeaders,
-          body: JSON.stringify({}),
-        })
-      ).status,
-    ).toBe(403);
+      await callFactoryFunction(process.base, "getModelSettings", [], memberHeaders),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(
-      (
-        await fetch(`${process.base}/api/projects/${projectID}/members`, {
-          method: "POST",
-          headers: memberHeaders,
-          body: JSON.stringify({ email, role: "developer", manageProject: true }),
-        })
-      ).status,
-    ).toBe(403);
+      await callFactoryFunction(
+        process.base,
+        "registerProject",
+        [
+          {
+            name: "Denied Project",
+            slug: "denied-project",
+            repositoryUrl: "https://example.invalid/denied.git",
+            defaultBranch: "main",
+            devcontainerPath: ".devcontainer/devcontainer.json",
+          },
+        ],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(
-      (
-        await fetch(`${process.base}/api/projects/${projectID}/members`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({ email, role: "developer", manageProject: true }),
-        })
-      ).status,
-    ).toBe(200);
+      await callFactoryFunction(
+        process.base,
+        "saveProjectMember",
+        [projectID, { email, role: "developer", manageProject: true }],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(
-      (await fetch(`${process.base}/api/projects/${projectID}/members`, { headers: memberHeaders }))
-        .status,
-    ).toBe(200);
+      await callFactoryFunction(
+        process.base,
+        "saveProjectMember",
+        [projectID, { email, role: "developer", manageProject: true }],
+        headers,
+      ),
+    ).toMatchObject({ ok: true });
     expect(
-      (
-        await fetch(`${process.base}/api/projects/${projectID}/members`, {
-          method: "POST",
-          headers: memberHeaders,
-          body: JSON.stringify({ email, role: "developer", manageProject: false }),
-        })
-      ).status,
-    ).toBe(409);
+      await callFactoryFunction(process.base, "getProjectMembers", [projectID], memberHeaders),
+    ).toMatchObject({ ok: true });
     expect(
-      (await fetch(`${process.base}/api/projects/${projectID}/members`, { headers: memberHeaders }))
-        .status,
-    ).toBe(200);
-    for (const path of [
-      `/api/projects/${otherProjectID}/conversation`,
-      `/api/projects/${otherProjectID}/knowledge/documents`,
-      `/api/changes?projectId=${otherProjectID}`,
-      `/api/runtime-attempts?projectId=${otherProjectID}`,
-    ]) {
-      expect((await fetch(`${process.base}${path}`, { headers: memberHeaders })).status).toBe(404);
-    }
+      await callFactoryFunction(
+        process.base,
+        "saveProjectMember",
+        [projectID, { email, role: "developer", manageProject: false }],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 409 });
+    expect(
+      await callFactoryFunction(process.base, "getProjectMembers", [projectID], memberHeaders),
+    ).toMatchObject({ ok: true });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "getRepositoryDocuments",
+        [otherProjectID],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "getConversation", [otherProjectID], memberHeaders),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "getChanges", [otherProjectID], memberHeaders),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "getRuntimeAttempts",
+        [otherProjectID],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 404 });
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${projectID},${administrator},'developer',true,${administrator})`;
-    const revoked = await fetch(`${process.base}/api/projects/${projectID}/members/${user.id}`, {
-      method: "DELETE",
+    const revoked = await callFactoryFunction(
+      process.base,
+      "removeProjectMember",
+      [projectID, user.id],
       headers,
-    });
-    expect(revoked.status).toBe(204);
+    );
+    expect(revoked.ok).toBe(true);
+    expect(await callFactoryFunction(process.base, "getProjects", [], memberHeaders)).toMatchObject(
+      { ok: true, value: { projects: [] } },
+    );
     expect(
-      await (await fetch(`${process.base}/api/projects`, { headers: memberHeaders })).json(),
-    ).toEqual({ projects: [] });
-    expect(
-      (
-        await fetch(`${process.base}/api/projects/${projectID}/conversation`, {
-          headers: memberHeaders,
-        })
-      ).status,
-    ).toBe(404);
+      await callFactoryFunction(process.base, "getConversation", [projectID], memberHeaders),
+    ).toMatchObject({ ok: false, status: 404 });
     expect(
       (
         await fetch(`${process.base}/api/auth/sign-up/email`, {
@@ -182,47 +201,107 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     const email = `manager-${crypto.randomUUID()}@factory.local`;
     const password = "owned-manager-password-not-a-secret";
     const user = z.object({ id: z.uuid() }).parse(
-      await (
-        await command("/api/admin/users", adminCookie, "POST", {
-          name: "Project manager",
-          email,
-          password,
-        })
-      ).json(),
+      await serverCall(
+        callFactoryFunction(
+          process.base,
+          "createAccount",
+          [
+            {
+              name: "Project manager",
+              email,
+              password,
+            },
+          ],
+          { cookie: adminCookie },
+        ),
+      ),
     );
     expect(
-      (
-        await command(`/api/projects/${first.projectID}/members`, adminCookie, "POST", {
-          email,
-          role: "developer",
-          manageProject: true,
-        })
-      ).status,
-    ).toBe(200);
+      await callFactoryFunction(
+        process.base,
+        "saveProjectMember",
+        [
+          first.projectID,
+          {
+            email,
+            role: "developer",
+            manageProject: true,
+          },
+        ],
+        { cookie: adminCookie },
+      ),
+    ).toMatchObject({ ok: true });
     const login = await command("/api/auth/sign-in/email", "", "POST", { email, password });
     expect(login.status).toBe(200);
     const cookie = login.headers
       .getSetCookie()
       .map((item) => item.split(";")[0])
       .join("; ");
-    expect((await command(`/api/projects/${first.projectID}/members`, cookie)).status).toBe(200);
-    expect((await command(`/api/projects/${second.projectID}/members`, cookie)).status).toBe(404);
-    for (const path of [
-      `/api/tickets/${second.ticketID}`,
-      `/api/tickets/${second.ticketID.replaceAll("-", "")}`,
-      `/api/changes/${second.changeID}/agent`,
-      `/api/changes/${second.changeID}/delivery`,
-    ])
-      expect((await command(path, cookie)).status).toBe(404);
-    for (const path of [
-      `/api/tickets/${second.ticketID}/requirements`,
-      `/api/tickets/${second.ticketID}/change`,
-      `/api/changes/${second.changeID}/cancel`,
-      `/api/changes/${second.changeID}/agent/start`,
-      `/api/changes/${second.changeID}/delivery/approve`,
-      `/api/runtime-attempts/${second.attemptID}/stop`,
-    ])
-      expect((await command(path, cookie, "POST", {})).status).toBe(404);
+    expect(
+      await callFactoryFunction(process.base, "getProjectMembers", [first.projectID], { cookie }),
+    ).toMatchObject({ ok: true });
+    expect(
+      await callFactoryFunction(process.base, "getProjectMembers", [second.projectID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "getTicketDetail", [second.ticketID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "getTicketDetail",
+        [second.ticketID.replaceAll("-", "")],
+        { cookie },
+      ),
+    ).toMatchObject({ ok: false, status: 400 });
+    expect(
+      await callFactoryFunction(process.base, "getDelivery", [second.changeID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "approveDelivery", [second.changeID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "getAgentView", [second.changeID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "createRequirementRevision",
+        [
+          second.ticketID,
+          {
+            summary: "Denied requirements",
+            acceptanceCriteria: ["Keep Project isolation"],
+          },
+        ],
+        { cookie },
+      ),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "approveRequirementRevision",
+        [second.ticketID, second.revisionID],
+        { cookie },
+      ),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "startTicketChange", [second.ticketID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "cancelChange", [second.changeID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "startCoding",
+        [second.changeID, { commandId: crypto.randomUUID() }],
+        { cookie },
+      ),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await callFactoryFunction(process.base, "stopRuntimeAttempt", [second.attemptID], { cookie }),
+    ).toMatchObject({ ok: false, status: 404 });
     expect(
       (await command(`/api/runtime-access?path=/runtime/${second.attemptID}/ide/`, cookie)).status,
     ).toBe(404);
@@ -360,16 +439,19 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     const attempts = z
       .object({ attempts: z.array(z.object({ id: z.string() })) })
       .parse(
-        await (await command(`/api/runtime-attempts?projectId=${first.projectID}`, cookie)).json(),
+        await serverCall(
+          callFactoryFunction(process.base, "getRuntimeAttempts", [first.projectID], { cookie }),
+        ),
       );
     expect(attempts.attempts.map((attempt) => attempt.id)).toContain(first.attemptID);
     expect(attempts.attempts.map((attempt) => attempt.id)).not.toContain(personalAttemptID);
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
       VALUES(${first.projectID},${administrator},'developer',true,${administrator})`;
     expect(
-      (await command(`/api/projects/${first.projectID}/members/${user.id}`, adminCookie, "DELETE"))
-        .status,
-    ).toBe(204);
+      await callFactoryFunction(process.base, "removeProjectMember", [first.projectID, user.id], {
+        cookie: adminCookie,
+      }),
+    ).toMatchObject({ ok: true });
     expect((await command(`/runtime/${first.attemptID}/ide/`, runtimeCookie)).status).toBe(401);
     for (const path of [
       `/runtime/${first.attemptID}/ide/socket`,

@@ -1,4 +1,7 @@
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
+import { authenticatedBootstrap } from "../fixtures/server-functions";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -79,7 +82,17 @@ test.skipIf(!enabled)(
     const getAttempt = async (attemptID: string) => {
       const { attempts } = z
         .object({ attempts: z.array(runtimeAttemptSchema) })
-        .parse(await (await api(`/api/runtime-attempts?projectId=${projectID}`)).json());
+        .parse(
+          await serverCall(
+            callFactoryFunction(
+              fixture.base,
+              "getRuntimeAttempts",
+              [projectID],
+              { cookie, origin: fixture.base, "content-type": "application/json" },
+              AbortSignal.timeout(180_000),
+            ),
+          ),
+        );
       const current = attempts.find((attempt) => attempt.id === attemptID);
       if (!current) throw new Error("Owned Runtime Attempt is missing");
       return current;
@@ -99,7 +112,17 @@ test.skipIf(!enabled)(
         300_000,
       );
     const stopCompute = async (attemptID: string) => {
-      expect((await api(`/api/runtime-attempts/${attemptID}/stop`, {})).ok).toBe(true);
+      expect(
+        (
+          await callFactoryFunction(
+            fixture.base,
+            "stopRuntimeAttempt",
+            [attemptID],
+            { cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          )
+        ).ok,
+      ).toBe(true);
       await eventually(
         () => getAttempt(attemptID),
         (current) => current.state === "stopped",
@@ -112,17 +135,25 @@ test.skipIf(!enabled)(
       cookie = await fixture.signIn();
       const { session } = z
         .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-        .parse(await (await api("/api/session")).json());
+        .parse(await authenticatedBootstrap(fixture.base, { cookie }));
       await writeFile(resolve(artifacts, "intent.json"), JSON.stringify({ projectID, proofID }));
       await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`source-compute-${proofID}`},'Canonical compute proof',${`file://${repository}`},'main','.devcontainer/devcontainer.json',${session.user.id})`;
       const source = sourceWorkspaceViewSchema.parse(
-        await (await api(`/api/projects/${projectID}/source-workspace/ensure`, {})).json(),
+        await serverCall(
+          callFactoryFunction(fixture.base, "ensurePersonalSource", [projectID], {
+            cookie: cookie,
+          }),
+        ),
       );
       workspaceID = source.workspaceID;
       await eventually(
         async () =>
           sourceWorkspaceViewSchema.parse(
-            await (await api(`/api/workspaces/${workspaceID}/source`)).json(),
+            await serverCall(
+              callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+                cookie: cookie,
+              }),
+            ),
           ),
         (current) => current.state === "ready",
         "Canonical source was not ready",
@@ -161,7 +192,15 @@ test.skipIf(!enabled)(
       const started = performance.now();
       const initialStartedAt = new Date().toISOString();
       const attempt = runtimeAttemptSchema.parse(
-        await (await api(`/api/projects/${projectID}/personal-workspace/ensure`, {})).json(),
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "startPersonalWorkspace",
+            [projectID],
+            { cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ),
+        ),
       );
       await ready(attempt.id);
       const readyMS = Math.round(performance.now() - started);
@@ -374,7 +413,13 @@ test.skipIf(!enabled)(
       terminal.close();
       terminal = undefined;
       await stopCompute(attempt.id);
-      expect((await api(`/api/workspaces/${workspaceID}/source`)).ok).toBe(true);
+      expect(
+        (
+          await callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+            cookie: cookie,
+          })
+        ).ok,
+      ).toBe(true);
       const afterStop = await readSource("src/version.txt");
       const editedStopped = `human-while-stopped-${proofID}\n`;
       expect(
@@ -389,7 +434,15 @@ test.skipIf(!enabled)(
       const restarted = performance.now();
       const retainedStartedAt = new Date().toISOString();
       const second = runtimeAttemptSchema.parse(
-        await (await api(`/api/projects/${projectID}/personal-workspace/ensure`, {})).json(),
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "startPersonalWorkspace",
+            [projectID],
+            { cookie, origin: fixture.base, "content-type": "application/json" },
+            AbortSignal.timeout(180_000),
+          ),
+        ),
       );
       expect(second.id).not.toBe(attempt.id);
       await ready(second.id);
@@ -554,11 +607,19 @@ test.skipIf(!enabled)(
         for (const attempt of attempts)
           if (attempt.state !== "stopped") await stopCompute(attempt.id);
         if (workspaceID) {
-          expect((await api(`/api/workspaces/${workspaceID}/source/stop`, {})).status).toBe(202);
+          expect(
+            await callFactoryFunction(fixture.base, "stopWorkspaceSource", [workspaceID], {
+              cookie: cookie,
+            }),
+          ).toMatchObject({ ok: true });
           await eventually(
             async () =>
               sourceWorkspaceViewSchema.parse(
-                await (await api(`/api/workspaces/${workspaceID}/source`)).json(),
+                await serverCall(
+                  callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+                    cookie: cookie,
+                  }),
+                ),
               ),
             (current) => current.state === "stopped",
             "Source Stop incomplete",

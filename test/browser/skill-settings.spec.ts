@@ -4,9 +4,12 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { z } from "zod";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { skillLibraryView } from "../../packages/conversation-domain/src/skill-library";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
 test("skill gallery preserves discovery, private drafts, scoped choices, imports and reviewed sharing", async ({
@@ -14,9 +17,11 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
   browser,
 }) => {
   test.setTimeout(240_000);
-  const host = spawn("mise", ["exec", "--", "bun", "test/fixtures/skill-browser-host.ts"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const host = spawn(
+    "mise",
+    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
   let stderr = "";
   host.stderr.on("data", (chunk) => {
@@ -51,11 +56,29 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
   const directory = resolve(evidence, `import-${projectId}`);
   const errors: string[] = [];
   const choiceRequests: unknown[] = [];
+  let rejectChoice = false;
   for (const current of [page, author, manager])
     current.on("pageerror", (error) => errors.push(error.message));
-  author.on("request", (request) => {
-    if (request.url().endsWith("/api/skills/choices") && request.method() === "PUT")
-      choiceRequests.push(request.postDataJSON());
+  await mockFactoryFunctions(author, {
+    skills: {
+      async choose(_actor, input) {
+        choiceRequests.push(input);
+        if (rejectChoice) {
+          rejectChoice = false;
+          throw new CommandError(
+            "conflict",
+            "Skill choices changed elsewhere. Reload before saving.",
+          );
+        }
+        return serverCall(browserFunction(author, "saveSkillChoice", [input]));
+      },
+      async previewRepository() {
+        throw new CommandError(
+          "unavailable",
+          "Repository is unavailable. Check the source and try again.",
+        );
+      },
+    },
   });
   async function login(current: Page, email: string, password: string) {
     await current.goto(fixture.fixtureBase);
@@ -156,9 +179,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
   }
   async function readView(current: Page) {
     return skillLibraryView.parse(
-      await (
-        await current.request.get(`${fixture.fixtureBase}/api/skills?project=${projectId}`)
-      ).json(),
+      await serverCall(browserFunction(current, "getSkillLibrary", [projectId])),
     );
   }
   async function noOverflow(current: Page) {
@@ -201,23 +222,19 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     const authorEmail = `product-${projectId}@factory.local`;
     const managerEmail = `manager-${projectId}@factory.local`;
     for (const email of [authorEmail, managerEmail]) {
-      const user = await page.request.post(`${fixture.fixtureBase}/api/admin/users`, {
-        headers: { origin: fixture.fixtureBase },
-        data: {
+      const user = await browserFunction(page, "createAccount", [
+        {
           name: email === authorEmail ? "Product author" : "Project manager",
           email,
           password,
         },
-      });
-      expect(user.status()).toBe(201);
-      const member = await page.request.post(
-        `${fixture.fixtureBase}/api/projects/${projectId}/members`,
-        {
-          headers: { origin: fixture.fixtureBase },
-          data: { email, role: "product-contributor", manageProject: email === managerEmail },
-        },
-      );
-      expect(member.ok()).toBe(true);
+      ]);
+      expect(user.ok).toBe(true);
+      const member = await browserFunction(page, "saveProjectMember", [
+        projectId,
+        { email, role: "product-contributor", manageProject: email === managerEmail },
+      ]);
+      expect(member.ok).toBe(true);
     }
     await login(author, authorEmail, password);
     await selectProject(author);
@@ -430,15 +447,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     const planningChoice = detail(author).getByRole("combobox", {
       name: "Corporate design Investigate & Plan choice",
     });
-    await author.route(
-      "**/api/skills/choices",
-      (route) =>
-        route.fulfill({
-          status: 409,
-          json: { error: "Skill choices changed elsewhere. Reload before saving." },
-        }),
-      { times: 1 },
-    );
+    rejectChoice = true;
     await planningChoice.selectOption("enable");
     await expect(library.getByRole("alert")).toContainText("changed elsewhere");
     await library.getByRole("button", { name: "Reload library", exact: true }).click();
@@ -456,12 +465,11 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
       managed.getByRole("article", { name: "Corporate design", exact: true }),
     ).toHaveCount(0);
     expect(
-      (
-        await manager.request.get(
-          `${fixture.fixtureBase}/api/skills/revisions/${privateEntry.revisions[0]?.id}?project=${projectId}`,
-        )
-      ).status(),
-    ).toBe(404);
+      await browserFunction(manager, "getSkillRevision", [
+        privateEntry.revisions[0]!.id,
+        projectId,
+      ]),
+    ).toMatchObject({ ok: false, status: 404 });
     await detail(author).locator("summary").filter({ hasText: "Share this skill" }).click();
     await detail(author).getByRole("button", { name: "Propose sharing", exact: true }).click();
     await expect(library.locator(".skill-library-status")).toHaveText(
@@ -700,15 +708,6 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
         .evaluate((input: HTMLInputElement) => input.validity.valid),
     ).toBe(false);
     await importer.getByLabel("Exact commit").fill("a".repeat(40));
-    await author.route(
-      "**/api/skills/import/repository",
-      (route) =>
-        route.fulfill({
-          status: 503,
-          json: { error: "Repository is unavailable. Check the source and try again." },
-        }),
-      { times: 1 },
-    );
     await importer.getByRole("button", { name: "Preview import", exact: true }).click();
     await expect(importer.getByRole("alert")).toContainText("Repository is unavailable");
     await expect(library.locator(".skill-library-status")).not.toContainText("saved");

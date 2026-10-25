@@ -3,16 +3,17 @@ import { SecuritySettings } from "./access/security-settings";
 import { AccessSettings } from "./access/settings";
 import { rememberSettingsReturn } from "./access/settings-return";
 import { EnvironmentSettings } from "./environments/settings";
-import { ModelSettings } from "./models/settings";
 import { MCPLibrary } from "./mcp/library";
+import { ModelSettings } from "./models/settings";
 import { MonitoringSettings } from "./monitoring/settings";
-import { RecordingSettings } from "./review/settings";
-import { UsageSettings } from "./usage/settings";
+import { ReleaseSettings } from "./releases/settings";
 import { createWorkspaceNavigation, WorkspaceNavigationToggle } from "./ui/workspace-navigation";
+import { UsageSettings } from "./usage/settings";
 import "./settings-workspace.css";
 
 type Scope = "personal" | "project" | "system";
 type Category =
+  | "releases"
   | "models"
   | "skills"
   | "mcp"
@@ -95,6 +96,7 @@ export function SettingsWorkspace(props: {
               ...(props.developer ? (["models"] as Category[]) : []),
               ...(props.developer || canManage() ? (["environment"] as Category[]) : []),
               "monitoring",
+              "releases",
               "usage",
               ...(canManage() ? ["people" as const] : []),
             ] as Category[],
@@ -126,6 +128,7 @@ export function SettingsWorkspace(props: {
       skills: "Skills",
       mcp: "MCP connections",
       monitoring: "Inputs",
+      releases: "Releases",
       people: "People & access",
       environment: "Environments",
       usage: "Usage & limits",
@@ -192,20 +195,22 @@ export function SettingsWorkspace(props: {
           class="settings-content"
           data-skills={category() === "skills" || category() === "mcp" ? "true" : "false"}
         >
-          <header
-            class="settings-content-heading"
-            data-library={category() === "skills" || category() === "mcp" ? "true" : undefined}
-          >
-            <small>
-              {selection().scope === "system"
-                ? "Factory"
-                : selection().scope === "personal"
-                  ? "Personal choices"
-                  : props.project?.name}
-            </small>
-            <h2 class="settings-wide-title">{label(category())}</h2>
-            {navigationTitle()}
-          </header>
+          <Show when={category() !== "environment"}>
+            <header
+              class="settings-content-heading"
+              data-library={category() === "skills" || category() === "mcp" ? "true" : undefined}
+            >
+              <h2 class="settings-wide-title">{label(category())}</h2>
+              {navigationTitle()}
+              <small>
+                {selection().scope === "system"
+                  ? "Factory"
+                  : selection().scope === "personal"
+                    ? "Personal choices"
+                    : props.project?.name}
+              </small>
+            </header>
+          </Show>
           <div
             class="settings-configuration-host"
             hidden={
@@ -214,6 +219,7 @@ export function SettingsWorkspace(props: {
               category() === "environment" ||
               category() === "mcp" ||
               category() === "monitoring" ||
+              category() === "releases" ||
               (category() === "people" && canManage())
             }
           >
@@ -230,6 +236,9 @@ export function SettingsWorkspace(props: {
               onModelsChanged={props.onModelsChanged}
             />
           </div>
+          <Show when={props.project && category() === "releases"}>
+            <ReleaseSettings projectID={props.project!.id} active={props.active !== false} />
+          </Show>
           <div class="settings-configuration-host" hidden={category() !== "mcp"}>
             <MCPLibrary
               navigation={navigationTitle()}
@@ -283,10 +292,7 @@ export function SettingsWorkspace(props: {
             when={category() === "environment" && (props.developer || canManage()) && props.project}
           >
             {(project) => (
-              <>
-                <EnvironmentSettings projectID={project().id} />
-                <RecordingSettings projectID={project().id} canManage={canManage()} />
-              </>
+              <EnvironmentSettings projectID={project().id} navigation={navigationTitle()} />
             )}
           </Show>
           <Show when={category() === "people" && canManage()}>

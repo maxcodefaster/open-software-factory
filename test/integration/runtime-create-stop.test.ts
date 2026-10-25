@@ -10,35 +10,23 @@ import {
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import {
   createKubernetesClient,
-  KubernetesObservationUnavailableError,
   type KubernetesClient,
+  KubernetesObservationUnavailableError,
 } from "../../packages/runtime-kubernetes/src/client";
 import upstream from "../../upstream.json";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import {
+  ownedRuntimeConfiguration as configuration,
+  installOwnedRuntimeConfiguration,
+} from "../fixtures/runtime-configuration";
 
-// These controller tests inject Kubernetes and never launch these artifacts.
-const configuration = {
-  FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
-  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
-  FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
-  FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
-  FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
-  FACTORY_FORGEJO_OWNER: "owned-runtime-fixture",
-};
-const previous = new Map<string, string | undefined>();
+let restoreConfiguration: () => void;
 beforeAll(() => {
-  for (const [key, value] of Object.entries(configuration)) {
-    previous.set(key, process.env[key]);
-    process.env[key] = value;
-  }
+  restoreConfiguration = installOwnedRuntimeConfiguration();
 });
 afterAll(() => {
-  for (const [key, value] of previous) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
+  restoreConfiguration();
 });
 
 test.each(["reconnect", "Stop"] as const)(
@@ -96,6 +84,7 @@ test.each(["reconnect", "Stop"] as const)(
                   labels:
                     manifest.find((resource) => resource.kind === "Pod")?.metadata.labels ?? {},
                   envboxImage: upstream.envbox.image,
+                  factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
                   runtimeHostImage: configuration.FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE,
                 }
               : null;
@@ -612,7 +601,7 @@ test.each(["stop", "cancel", "failure"] as const)(
 test.each([
   "create",
   "recovered create",
-  "observer replacement",
+  "terminal worker observation",
   "before create",
   "reserved before activation",
   "reserved recovered create",
@@ -629,7 +618,8 @@ test.each([
     let exists = false;
     let deleted = false;
     let applies = 0;
-    let podUID = "owned-pod-uid";
+    let podReads = 0;
+    const podUID = "owned-pod-uid";
     let secretReads = 0;
     let activations = 0;
     const reserved = boundary.startsWith("reserved");
@@ -647,28 +637,30 @@ test.each([
       apply: async (resources) => {
         applies += 1;
         manifest = resources as typeof manifest;
-        if (boundary === "observer replacement" && applies === 1) {
+        if (boundary === "terminal worker observation") {
           exists = true;
           return { namespaceUID: "owned-namespace-uid" };
         }
         entered.resolve();
         await release.promise;
         exists = true;
-        if (boundary === "observer replacement") podUID = "owned-replacement-pod-uid";
         return { namespaceUID: "owned-namespace-uid" };
       },
-      getPod: async () =>
-        exists
+      getPod: async () => {
+        if (boundary === "terminal worker observation" && ++podReads >= 2) entered.resolve();
+        return exists
           ? {
               uid: podUID,
-              phase: boundary === "observer replacement" && applies === 1 ? "Failed" : "Pending",
+              phase: boundary === "terminal worker observation" ? "Failed" : "Pending",
               labels: manifest.find((resource) => resource.kind === "Pod")?.metadata.labels ?? {},
               envboxImage: upstream.envbox.image,
+              factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
               runtimeHostImage:
                 globalThis.process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"] ??
                 "missing-test-image",
             }
-          : null,
+          : null;
+      },
       getNamespace: async () => {
         cleanupObserved.resolve();
         return exists
@@ -689,8 +681,7 @@ test.each([
         return value;
       },
       deletePod: async () => {
-        if (boundary !== "observer replacement") throw new Error("Unexpected Pod replacement");
-        exists = false;
+        throw new Error("Factorybox must never replace the original worker");
       },
       deleteNamespace: async (input) => {
         expect(input.namespaceUID).toBe("owned-namespace-uid");
@@ -779,6 +770,15 @@ test.each([
           namespaceUID: "owned-namespace-uid",
           podUID,
           claimUID: "owned-claim",
+          ready: false,
+          factoryboxIdentity: { epoch: "owned" },
+          factoryboxPreparation: { bundle: "owned" },
+        });
+        expect(await store.intendStart(database.client, slot.id)).toBe(true);
+        await store.observe(database.client, slot.id, {
+          namespaceUID: "owned-namespace-uid",
+          podUID,
+          claimUID: "owned-claim",
           ready: true,
         });
         exists = true;
@@ -834,9 +834,9 @@ test.each([
       await Promise.race([
         beforeCreate || recoveredCreate ? preparing.promise : entered.promise,
         creating.then(() => {
-          // Initial create returns before its background observer reaches a
-          // replacement. Success here is not failure to reach that boundary.
-          if (boundary === "observer replacement") return entered.promise;
+          // Initial create returns before the background observer sees the
+          // terminal original worker. No replacement is authorized.
+          if (boundary === "terminal worker observation") return entered.promise;
           throw new Error("Owned runtime create finished without reaching its test boundary");
         }),
       ]);
@@ -877,9 +877,7 @@ test.each([
       await controller().status(attemptID, "ready");
       expect((await read())?.state).toBe("stopped");
       expect(canConnect()).toBe(false);
-      expect(applies).toBe(
-        reserved || beforeCreate ? 0 : boundary === "observer replacement" ? 2 : 1,
-      );
+      expect(applies).toBe(reserved || beforeCreate ? 0 : 1);
       expect(secretReads).toBe(boundary === "recovered create" ? 3 : 0);
       if (reserved) {
         expect(activations).toBe(beforeCreate ? 0 : 1);

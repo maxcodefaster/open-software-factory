@@ -1,20 +1,20 @@
 import { expect, test } from "bun:test";
-import { nativeModel, nativeEndpoints, providerCatalogue, validateModelEndpoint } from "./native";
-import { modelProbeFailure, reportedModelLimits } from "./probe";
 import { Agent } from "@mastra/core/agent";
+import { nativeEndpoints, nativeModel, providerCatalogue, validateModelEndpoint } from "./native";
+import { modelProbeFailure, reportedModelLimits } from "./probe";
 
-test("native catalogue comes from pinned Mastra and contains only Factory-supported providers", () => {
-  const catalogue = providerCatalogue();
+test("native catalogue comes from pinned Mastra and contains only Factory-supported providers", async () => {
+  const catalogue = await providerCatalogue();
   expect(catalogue.map((entry) => entry.provider)).toEqual(["openai", "anthropic", "deepseek"]);
   expect(catalogue.every((entry) => entry.models.length > 0)).toBe(true);
-  expect(nativeModel({ provider: "anthropic", apiKey: "test" }, "claude-haiku-4-5")).toEqual({
+  expect(await nativeModel({ provider: "anthropic", apiKey: "test" }, "claude-haiku-4-5")).toEqual({
     id: "anthropic/claude-haiku-4-5",
     apiKey: "test",
   });
 });
 
-test("conversation model choices omit known non-conversation OpenAI model families", () => {
-  const models = providerCatalogue().find((entry) => entry.provider === "openai")?.models;
+test("conversation model choices omit known non-conversation OpenAI model families", async () => {
+  const models = (await providerCatalogue()).find((entry) => entry.provider === "openai")?.models;
   expect(models).toContain("gpt-4.1");
   for (const id of [
     "chatgpt-image-latest",
@@ -108,7 +108,7 @@ test("enterprise Anthropic endpoint uses native Messages SDK and x-api-key, not 
     },
   });
   try {
-    const model = nativeModel(
+    const model = await nativeModel(
       {
         provider: "anthropic",
         baseURL: `http://127.0.0.1:${server.port}/v1`,

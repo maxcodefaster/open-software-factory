@@ -1,3 +1,5 @@
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -242,9 +244,10 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     await wikiHost.getByLabel("Choose attachments").setInputFiles([reference, documentFile]);
     // Each real conversion has a 60-second worker deadline. Do not confuse
     // Playwright's five-second assertion default with attachment readiness.
-    await visible(wikiHost.getByRole("button", { name: "Add image or file" })).toBeEnabled({
+    await visible(wikiHost.getByLabel("Choose attachments")).toBeEnabled({
       timeout: 2 * 60_000,
     });
+    await visible(wikiHost.getByRole("button", { name: "Add image or file" })).toHaveCount(0);
     await visible(wikiHost.getByRole("status")).toContainText("is ready");
     await visible(wiki.locator("img")).toBeVisible();
     await capture("wiki");
@@ -456,19 +459,23 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
       .locator(".attachment-file-open")
       .evaluateAll((links) => links.map((link) => link.getAttribute("href")!));
     const attempts: { text: string; commandId: string }[] = [];
-    await page.route(
-      `${owned.base}/api/projects/${f.projectID}/conversation/message`,
-      async (route) => {
-        attempts.push(route.request().postDataJSON());
-        await route.fulfill({
-          status: 503,
-          contentType: "application/json",
-          body: JSON.stringify({
-            error: "Owned fixture: send is unconfirmed. Retry the same request.",
-          }),
-        });
+    await mockFactoryFunctions(page, {
+      conversations: {
+        message: async (_actor, factoryTargetID, factoryCommand) => {
+          attempts.push(factoryCommand);
+          return (() => {
+            throw new CommandError(
+              "unavailable",
+              String(
+                JSON.stringify({
+                  error: "Owned fixture: send is unconfirmed. Retry the same request.",
+                }),
+              ),
+            );
+          })();
+        },
       },
-    );
+    });
     for (let attempt = 1; attempt <= 2; attempt++) {
       await composer.getByRole("button", { name: "Send message", exact: true }).click();
       await visible.poll(() => attempts.length).toBe(attempt);

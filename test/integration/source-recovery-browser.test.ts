@@ -1,3 +1,8 @@
+import {
+  sourceWorkspaceViewSchema,
+  developerIDEViewSchema,
+} from "../../apps/factory/src/api-contracts";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
@@ -94,20 +99,38 @@ test("failed file access can be explicitly restarted without discarding the edit
       failure:
         state === "failed" ? "Source preparation failed. Stop and retry source access." : null,
     });
-    await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-      route.fulfill({ json: source() }),
-    );
-    await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
-      editorEnsures++;
-      return route.fulfill({
-        json: { serviceID: "owned-editor", epoch: 1, state: "ready", failure: null },
-      });
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        ensurePersonalSource: async () => ({
+          label: "Owned source",
+          ...sourceWorkspaceViewSchema.parse(source()),
+        }),
+      },
     });
-    await page.route("**/api/developer-ide", (route) =>
-      route.fulfill({
-        json: { serviceID: "owned-editor", epoch: 1, state: "ready", failure: null },
-      }),
-    );
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        async ensureEditor() {
+          editorEnsures++;
+          return developerIDEViewSchema.parse({
+            serviceID: "owned-editor",
+            epoch: 1,
+            state: "ready",
+            failure: null,
+          });
+        },
+      },
+    });
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        getEditor: async () =>
+          developerIDEViewSchema.parse({
+            serviceID: "owned-editor",
+            epoch: 1,
+            state: "ready",
+            failure: null,
+          }),
+      },
+    });
     const editorOrigin = developerIDEOrigin(fixture.base, userID, 1);
     const editorURL = `${editorOrigin}/owned-source-editor`;
     await page.route("**/api/developer-ide/access?*", (route) =>
@@ -126,29 +149,31 @@ test("failed file access can be explicitly restarted without discarding the edit
           </script>`,
       });
     });
-    await page.route(`**/api/workspaces/${workspaceID}/source{,/**}`, async (route) => {
-      const path = new URL(route.request().url()).pathname;
-      const operation = path.split("/").at(-1);
-      if (operation === "stop") {
-        calls.push("stop");
-        state = "stop-intended";
-        stopReads = 0;
-        return route.fulfill({ status: 202, body: "" });
-      }
-      if (operation === "ensure") {
-        calls.push(`ensure:${state}`);
-        if (state === "failed") return route.fulfill({ json: source() });
-        if (state !== "stopped") throw Error("Restart must first confirm Stop");
-        state = "ready";
-        epoch++;
-        return route.fulfill({ json: source() });
-      }
-      if (state === "stop-intended") {
-        stopReads++;
-        if (stopReads > 1) state = "stopped";
-      }
-      calls.push(`read:${state}`);
-      return route.fulfill({ json: source() });
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        async stopSource() {
+          calls.push("stop");
+          state = "stop-intended";
+          stopReads = 0;
+        },
+        async ensureSource() {
+          calls.push(`ensure:${state}`);
+          if (state !== "failed") {
+            if (state !== "stopped") throw Error("Restart must first confirm Stop");
+            state = "ready";
+            epoch++;
+          }
+          return { label: "Owned source", ...sourceWorkspaceViewSchema.parse(source()) };
+        },
+        async getSource() {
+          if (state === "stop-intended") {
+            stopReads++;
+            if (stopReads > 1) state = "stopped";
+          }
+          calls.push(`read:${state}`);
+          return { label: "Owned source", ...sourceWorkspaceViewSchema.parse(source()) };
+        },
+      },
     });
     await page.goto(fixture.base);
     await openProjectMenu(page);

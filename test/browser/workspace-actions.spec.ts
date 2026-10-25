@@ -1,5 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import {
+  repositoryDocumentsSchema,
+  openRepositoryDocumentSchema,
+} from "../../apps/factory/src/api-contracts";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
@@ -134,22 +139,25 @@ test("Wiki page and revision actions share text controls and keep history keyboa
       INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at)
       VALUES(${crypto.randomUUID()},${projectId},${commit},'succeeded',${admin.id},now())
     `;
-    await page.route(`**/api/projects/${projectId}/knowledge/documents*`, (route) =>
-      route.fulfill({
-        json: new URL(route.request().url()).searchParams.has("path")
-          ? {
-              path: "README.md",
-              title: "Source guide",
-              body: "Read-only source guidance.",
-              blobSha: commit,
-              commitSha: commit,
-            }
-          : {
-              commitSha: commit,
-              documents: [{ path: "README.md", title: "Source guide", sha: commit, size: 26 }],
-            },
-      }),
-    );
+    await mockFactoryFunctions(page, {
+      knowledge: {
+        async document() {
+          return openRepositoryDocumentSchema.parse({
+            path: "README.md",
+            title: "Source guide",
+            body: "Read-only source guidance.",
+            blobSha: commit,
+            commitSha: commit,
+          });
+        },
+        async documents() {
+          return repositoryDocumentsSchema.parse({
+            commitSha: commit,
+            documents: [{ path: "README.md", title: "Source guide", sha: commit, size: 26 }],
+          });
+        },
+      },
+    });
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.getByRole("button", { name: "Knowledge", exact: true }).click();
@@ -294,9 +302,9 @@ test("Settings connection and Input headers use the same actions without changin
   const slug = `settings-actions-${projectId.slice(0, 8)}`;
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.route("**/api/model-connections", (route) =>
-    route.fulfill({
-      json: {
+  await mockFactoryFunctions(page, {
+    models: {
+      catalogue: async () => ({
         providers: [{ provider: "openai", label: "OpenAI", models: ["example-model"] }],
         connections: [],
         roles: [
@@ -304,9 +312,9 @@ test("Settings connection and Input headers use the same actions without changin
           { role: "build", active: null, check: null },
         ],
         deployment: [],
-      },
-    }),
-  );
+      }),
+    },
+  });
   try {
     await mkdir(evidence, { recursive: true });
     await signIn(page);

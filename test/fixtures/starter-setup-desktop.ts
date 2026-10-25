@@ -1,4 +1,6 @@
 import { expect } from "bun:test";
+import { callFactoryFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { type Browser, expect as visible } from "@playwright/test";
 import type { createDatabase } from "../../packages/db/src/client";
 import {
@@ -21,25 +23,17 @@ export async function starterSetupDesktop(input: {
   let ideUserID = "";
   async function stopOwnedEditor() {
     if (!ideCookie || !ideUserID) return;
-    const current = await fetch(`${base}/api/developer-ide`, { headers: { cookie: ideCookie } });
-    const editor = await current.json();
+    const editor = await serverCall(
+      callFactoryFunction(base, "getDeveloperIDE", [], { cookie: ideCookie }),
+    );
     if (!editor) return;
     const identity = await recordedEditorIdentity(input.database, ideUserID);
     if (!identity) return;
-    const stopped = await fetch(`${base}/api/developer-ide/stop`, {
-      method: "POST",
-      headers: { cookie: ideCookie, origin: base },
-    });
-    if (!stopped.ok) throw new Error("Owned Starter editor Stop failed");
+    await serverCall(callFactoryFunction(base, "stopDeveloperIDE", [], { cookie: ideCookie }));
     await eventually(
       async () =>
-        (
-          await (
-            await fetch(`${base}/api/developer-ide`, {
-              headers: { cookie: ideCookie },
-            })
-          ).json()
-        ).state,
+        (await serverCall(callFactoryFunction(base, "getDeveloperIDE", [], { cookie: ideCookie })))
+          .state,
       (state) => state === "stopped",
       "Owned Starter editor did not Stop",
       60_000,
@@ -97,13 +91,22 @@ export async function starterSetupDesktop(input: {
       if (!response.ok) throw new Error(`Starter desktop ${path} failed: ${response.status}`);
       return response;
     }
-    const accounts = await (await fetch(`${base}/api/admin/users`, { headers: { cookie } })).json();
+    const accounts = await serverCall(callFactoryFunction(base, "getAccounts", [], { cookie }));
     const user =
       accounts.users.find((value: { email: string }) => value.email === email) ??
-      (await (
-        await command("/api/admin/users", { name: "Starter developer", email, password })
-      ).json());
-    await command(`/api/projects/${projectID}/members`, { email, role: "developer" });
+      (await serverCall(
+        callFactoryFunction(
+          base,
+          "createAccount",
+          [{ name: "Starter developer", email, password }],
+          { cookie },
+        ),
+      ));
+    await serverCall(
+      callFactoryFunction(base, "saveProjectMember", [projectID, { email, role: "developer" }], {
+        cookie,
+      }),
+    );
     const signIn = await command("/api/auth/sign-in/email", { email, password });
     ideUserID = user.id;
     ideCookie = signIn.headers

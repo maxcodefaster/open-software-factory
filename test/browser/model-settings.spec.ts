@@ -1,9 +1,35 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
+import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
+import type { ModelConnectionView } from "../../packages/conversation-domain/src/model-connection";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { signIn } from "../support/factory-fixture";
+
+test.beforeEach(async ({ page }) => {
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Settings fixture owns no editor compute");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Settings fixture owns no editor compute");
+      },
+    },
+  });
+});
 
 async function openFactoryModels(page: Page) {
   await signIn(page);
+  await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
+  // This case tests model administration after initial Project selection, not
+  // opening a Factory-scope workspace while the planning projection connects.
+  const projects = await serverCall(browserFunction(page, "getProjects", []));
+  if (projects.projects.length)
+    await expect(
+      page.getByRole("button", { name: "Open project menu", exact: true }),
+    ).not.toContainText("Choose project");
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });
@@ -23,25 +49,22 @@ test("first-run model setup has no placeholder defaults and keeps its primary ac
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 720 });
   const models = ["factory-planning-model", "factory-coding-model"];
-  await page.route("**/api/model-settings", (route) =>
-    route.fulfill({
-      json: {
-        version: 0,
-        source: "environment",
-        planningModelId: models[0],
-        buildModelId: models[1],
-        models,
-        rules: {
-          planning: { models, allowOverride: true },
-          build: { models, allowOverride: true },
-        },
-        connection: { configured: false, host: null },
-      },
-    }),
-  );
-  await page.route("**/api/model-connections", (route) =>
-    route.fulfill({
-      json: {
+  await mockFactoryFunctions(page, {
+    models: {
+      get: async () =>
+        modelSettingsView.parse({
+          version: 0,
+          source: "environment",
+          planningModelId: models[0],
+          buildModelId: models[1],
+          models,
+          rules: {
+            planning: { models, allowOverride: true },
+            build: { models, allowOverride: true },
+          },
+          connection: { configured: false, host: null },
+        }),
+      catalogue: async () => ({
         providers: [{ provider: "openai", label: "OpenAI", models: ["example-model"] }],
         connections: [],
         roles: [
@@ -49,9 +72,9 @@ test("first-run model setup has no placeholder defaults and keeps its primary ac
           { role: "build", active: null, check: null },
         ],
         deployment: [],
-      },
-    }),
-  );
+      }),
+    },
+  });
   const settings = await openFactoryModels(page);
   await expect(settings.getByRole("region", { name: "Coding", exact: true })).toContainText(
     "Not configured",
@@ -85,7 +108,7 @@ test("a newly adopted connection stays selected while its check runs and after t
 }) => {
   const original = {
     connectionID: crypto.randomUUID(),
-    provider: "openai",
+    provider: "openai" as const,
     endpoint: "https://old-model.example/v1",
     version: 1,
     configured: true,
@@ -99,9 +122,9 @@ test("a newly adopted connection stays selected while its check runs and after t
   let adopted = false;
   const probing = Promise.withResolvers<void>();
   const finish = Promise.withResolvers<void>();
-  await page.route("**/api/model-connections", (route) =>
-    route.fulfill({
-      json: {
+  await mockFactoryFunctions(page, {
+    models: {
+      catalogue: async () => ({
         providers: [{ provider: "openai", label: "OpenAI", models: ["example-model"] }],
         connections: adopted ? [original, selected] : [original],
         roles: [{ role: "planning", active: null, check: null }],
@@ -115,30 +138,28 @@ test("a newly adopted connection stays selected while its check runs and after t
             connectionID: selected.connectionID,
           },
         ],
+      }),
+      adoptDeployment: async () => {
+        adopted = true;
+        return selected;
       },
-    }),
-  );
-  await page.route("**/api/model-connections/deployment", (route) => {
-    adopted = true;
-    return route.fulfill({ json: selected });
-  });
-  await page.route("**/api/model-connections/role", async (route) => {
-    probing.resolve();
-    await finish.promise;
-    await route.fulfill({
-      json: {
-        status: "ready",
-        modelId: "example-model",
-        toolCall: true,
-        structuredOutput: true,
-        limits: {
-          requests: null,
-          tokens: null,
-          remainingRequests: null,
-          remainingTokens: null,
-        },
+      selectRole: async () => {
+        probing.resolve();
+        await finish.promise;
+        return {
+          status: "ready",
+          modelId: "example-model",
+          toolCall: true,
+          structuredOutput: true,
+          limits: {
+            requests: null,
+            tokens: null,
+            remainingRequests: null,
+            remainingTokens: null,
+          },
+        };
       },
-    });
+    },
   });
   const settings = await openFactoryModels(page);
   const planning = settings.getByRole("region", { name: "Planning & knowledge", exact: true });
@@ -175,9 +196,7 @@ test("model administration is readable and keyboard accessible at desktop and na
   await mkdir(".factory/test-results/model-settings", { recursive: true });
   await page.setViewportSize({ width: 1440, height: 960 });
   const settings = await openFactoryModels(page);
-  const initial = await page.request.get("/api/model-connections");
-  expect(initial.ok()).toBe(true);
-  const connections = await initial.json();
+  const connections = await serverCall(browserFunction(page, "getModelConnections", []));
   await expect
     .poll(() =>
       settings.locator(".settings-scope-description").evaluate((element) => {
@@ -245,33 +264,36 @@ test("model permissions save with exact version and retain the draft on conflict
     allowOverride = true;
   const writes: unknown[] = [];
   const modelIDs = ["approved-planning", "approved-build", "approved-alternative"];
-  await page.route("**/api/model-settings", async (route) => {
-    if (route.request().method() === "PUT") {
-      const body = route.request().postDataJSON();
-      writes.push(body);
-      if (conflict)
-        return route.fulfill({
-          status: 409,
-          json: { error: "Model settings changed elsewhere. Reload before saving." },
-        });
-      expect(body.version).toBe(version);
-      allowOverride = body.rules.planning.allowOverride;
-      version++;
-    }
-    return route.fulfill({
-      json: {
-        version,
-        source: "administrator",
-        planningModelId: "approved-planning",
-        buildModelId: "approved-build",
-        models: modelIDs,
-        rules: {
-          planning: { models: modelIDs, allowOverride },
-          build: { models: modelIDs, allowOverride: true },
-        },
-        connection: { configured: true, host: "provider.example" },
+  const view = () =>
+    modelSettingsView.parse({
+      version,
+      source: "administrator",
+      planningModelId: "approved-planning",
+      buildModelId: "approved-build",
+      models: modelIDs,
+      rules: {
+        planning: { models: modelIDs, allowOverride },
+        build: { models: modelIDs, allowOverride: true },
       },
+      connection: { configured: true, host: "provider.example" },
     });
+  await mockFactoryFunctions(page, {
+    models: {
+      get: async () => view(),
+      set: async (_actor, body) => {
+        writes.push(body);
+        if (conflict)
+          throw new CommandError(
+            "conflict",
+            "Model settings changed elsewhere. Reload before saving.",
+          );
+        expect(body.version).toBe(version);
+        if (!body.rules) throw new Error("Permissions save must carry the edited rules");
+        allowOverride = body.rules.planning.allowOverride;
+        version++;
+        return view();
+      },
+    },
   });
   const settings = await openFactoryModels(page);
   await settings.getByText("Model override permissions", { exact: true }).click();
@@ -315,13 +337,13 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
   page,
 }) => {
   let version = 4;
-  let reasoningEffort = "medium";
+  let reasoningEffort: "medium" | "high" | "xhigh" | "max" = "medium";
   let conflict = false;
   const connectionID = crypto.randomUUID();
   const writes: unknown[] = [];
-  await page.route("**/api/model-connections", (route) =>
-    route.fulfill({
-      json: {
+  await mockFactoryFunctions(page, {
+    models: {
+      catalogue: async () => ({
         providers: [{ provider: "openai", label: "OpenAI", models: ["plan", "gpt-6.1-sol"] }],
         connections: [
           {
@@ -342,46 +364,40 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
           },
         ],
         deployment: [],
+      }),
+      selectRole: async (_actor, value) => {
+        writes.push(value);
+        if (conflict) throw new CommandError("conflict", "Settings changed elsewhere");
+        expect(value.settingsVersion).toBe(version);
+        expect(value.role).toBe("build");
+        expect(value.connectionID).toBe(connectionID);
+        expect(value.modelId).toBe("gpt-6.1-sol");
+        if (!value.reasoningEffort)
+          throw new Error("Coding check must carry the selected reasoning");
+        reasoningEffort = value.reasoningEffort;
+        version++;
+        return {
+          status: "ready",
+          modelId: value.modelId,
+          toolCall: true,
+          structuredOutput: false,
+          limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
+        };
       },
-    }),
-  );
-  await page.route("**/api/model-connections/role", (route) => {
-    const value = route.request().postDataJSON();
-    writes.push(value);
-    if (conflict)
-      return route.fulfill({ status: 409, json: { error: "Settings changed elsewhere" } });
-    expect(value.settingsVersion).toBe(version);
-    expect(value.role).toBe("build");
-    expect(value.connectionID).toBe(connectionID);
-    expect(value.modelId).toBe("gpt-6.1-sol");
-    reasoningEffort = value.reasoningEffort;
-    version++;
-    return route.fulfill({
-      json: {
-        status: "ready",
-        modelId: value.modelId,
-        toolCall: true,
-        structuredOutput: false,
-        limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
-      },
-    });
-  });
-  await page.route("**/api/model-settings", async (route) => {
-    expect(route.request().method()).toBe("GET");
-    return route.fulfill({
-      json: {
-        version,
-        source: "administrator",
-        planningModelId: "plan",
-        buildModelId: "gpt-6.1-sol",
-        models: ["plan", "gpt-6.1-sol"],
-        rules: {
-          planning: { models: ["plan"], allowOverride: true },
-          build: { models: ["gpt-6.1-sol"], allowOverride: true, reasoningEffort },
-        },
-        connection: { configured: true, host: "owned.openai.azure.com" },
-      },
-    });
+      get: async () =>
+        modelSettingsView.parse({
+          version,
+          source: "administrator",
+          planningModelId: "plan",
+          buildModelId: "gpt-6.1-sol",
+          models: ["plan", "gpt-6.1-sol"],
+          rules: {
+            planning: { models: ["plan"], allowOverride: true },
+            build: { models: ["gpt-6.1-sol"], allowOverride: true, reasoningEffort },
+          },
+          connection: { configured: true, host: "owned.openai.azure.com" },
+        }),
+    },
   });
   const settings = await openFactoryModels(page);
   const coding = settings.getByRole("region", { name: "Coding", exact: true });
@@ -418,39 +434,39 @@ test("Coding reasoning is adjustable without permitting low or disabled reasonin
 test("connection setup is separate from model calls, recovers a rejected endpoint and never repopulates a saved key", async ({
   page,
 }) => {
-  let saved: Record<string, unknown> | undefined;
+  let saved: ModelConnectionView | undefined;
   const writes: Array<{ commandID: string }> = [];
   let roleCalls = 0;
-  await page.route("**/api/model-connections", (route) =>
-    route.fulfill({
-      json: {
+  await mockFactoryFunctions(page, {
+    models: {
+      catalogue: async () => ({
         providers: [{ provider: "openai", label: "OpenAI", models: ["example-model"] }],
         connections: saved ? [saved] : [],
         roles: [],
         deployment: [],
+      }),
+      selectRole: async () => {
+        roleCalls++;
+        throw new Error("This connection-only test must never probe");
       },
-    }),
-  );
-  await page.route("**/api/model-connections/role", (route) => {
-    roleCalls++;
-    return route.abort("failed");
-  });
-  await page.route(/\/api\/model-connections\/[0-9a-f-]{36}$/, (route) => {
-    if (route.request().method() === "GET")
-      return route.fulfill({ status: 404, json: { error: "No connection write was admitted" } });
-    const value = route.request().postDataJSON();
-    writes.push(value);
-    if (writes.length === 1)
-      return route.fulfill({ status: 409, json: { error: "Model endpoint must use HTTPS" } });
-    saved = {
-      connectionID: value.connectionID,
-      version: 1,
-      provider: value.provider,
-      endpoint: value.endpoint,
-      configured: true,
-      pendingCommandID: null,
-    };
-    return route.fulfill({ json: saved });
+      connection: async () => {
+        throw new CommandError("not-found", "No connection write was admitted");
+      },
+      saveConnection: async (_actor, value) => {
+        writes.push(value);
+        if (writes.length === 1)
+          throw new CommandError("conflict", "Model endpoint must use HTTPS");
+        saved = {
+          connectionID: value.connectionID,
+          version: 1,
+          provider: value.provider,
+          endpoint: value.endpoint,
+          configured: true,
+          pendingCommandID: null,
+        };
+        return saved;
+      },
+    },
   });
   const settings = await openFactoryModels(page);
   await settings.getByRole("button", { name: "Add connection", exact: true }).click();

@@ -1,9 +1,16 @@
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import {
+  browserBootstrap,
+  mockBootstrap,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
+import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
 
 test("saving a first managed Coding model enables Implement without reloading the workspace", async ({
   page,
@@ -17,30 +24,23 @@ test("saving a first managed Coding model enables Implement without reloading th
   let configured = false;
   let checks = 0;
   let created = false;
-  await page.route("**/api/session", async (route) => {
-    const response = await route.fetch();
-    const value = await response.json();
-    await route.fulfill({ response, json: { ...value, modelRelayConfigured: configured } });
-  });
-  await page.route("**/api/model-settings", (route) =>
-    route.fulfill({
-      json: {
-        version: configured ? 1 : 0,
-        source: "administrator",
-        planningModelId: "example-model",
-        buildModelId: "example-model",
-        models: ["example-model"],
-        rules: {
-          planning: { models: ["example-model"], allowOverride: true },
-          build: { models: ["example-model"], allowOverride: true, reasoningEffort: "medium" },
-        },
-        connection: { configured, host: "models.example" },
-      },
-    }),
-  );
-  await page.route("**/api/model-connections", (route) =>
-    route.fulfill({
-      json: {
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: configured }));
+  await mockFactoryFunctions(page, {
+    models: {
+      get: async () =>
+        modelSettingsView.parse({
+          version: configured ? 1 : 0,
+          source: "administrator",
+          planningModelId: "example-model",
+          buildModelId: "example-model",
+          models: ["example-model"],
+          rules: {
+            planning: { models: ["example-model"], allowOverride: true },
+            build: { models: ["example-model"], allowOverride: true, reasoningEffort: "medium" },
+          },
+          connection: { configured, host: "models.example" },
+        }),
+      catalogue: async () => ({
         providers: [{ provider: "openai", label: "OpenAI", models: ["example-model"] }],
         connections: [
           {
@@ -61,31 +61,29 @@ test("saving a first managed Coding model enables Implement without reloading th
           },
         ],
         deployment: [],
+      }),
+      selectRole: async (_actor, input) => {
+        expect(input).toMatchObject({
+          role: "build",
+          modelId: "example-model",
+          reasoningEffort: "medium",
+        });
+        configured = true;
+        checks++;
+        return {
+          status: "ready",
+          modelId: "example-model",
+          toolCall: true,
+          structuredOutput: true,
+          limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
+        };
       },
-    }),
-  );
-  await page.route("**/api/model-connections/role", async (route) => {
-    expect(route.request().postDataJSON()).toMatchObject({
-      role: "build",
-      modelId: "example-model",
-      reasoningEffort: "medium",
-    });
-    configured = true;
-    checks++;
-    await route.fulfill({
-      json: {
-        status: "ready",
-        modelId: "example-model",
-        toolCall: true,
-        structuredOutput: true,
-        limits: { requests: null, tokens: null, remainingRequests: null, remainingTokens: null },
-      },
-    });
+    },
   });
   try {
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-    const { session } = await (await page.request.get("/api/session")).json();
+    const { session } = await browserBootstrap(page);
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${slug},'Managed model readiness','https://example.invalid/managed-model.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
     created = true;
@@ -104,13 +102,16 @@ test("saving a first managed Coding model enables Implement without reloading th
         nonGoals: [],
       },
     });
-    for (const action of ["source-workspace", "developer-ide"])
-      await page.route(`**/api/projects/${projectID}/${action}/ensure`, (route) =>
-        route.fulfill({
-          status: 503,
-          json: { error: "No runtime in this model settings fixture" },
-        }),
-      );
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError("unavailable", "No runtime in this model settings fixture");
+        },
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "No runtime in this model settings fixture");
+        },
+      },
+    });
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     await page.locator(".ticket-card-body").filter({ hasText: "Ready after model setup" }).click();

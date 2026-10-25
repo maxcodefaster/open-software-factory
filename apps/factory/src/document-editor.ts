@@ -12,21 +12,12 @@ import { preserveDocumentSelection } from "./document-selection";
 import { Image } from "@tiptap/extension-image";
 import type { SelectionBookmark } from "@tiptap/pm/state";
 
-export const documentBlocks = [
-  { id: "paragraph", label: "Text" },
-  { id: "heading", label: "Heading" },
-  { id: "bullet-list", label: "Bullet list" },
-  { id: "numbered-list", label: "Numbered list" },
-  { id: "checklist", label: "Checklist" },
-  { id: "quote", label: "Quote" },
-  { id: "code-block", label: "Code block" },
-  { id: "table", label: "Table" },
-  { id: "divider", label: "Divider" },
-  { id: "image", label: "Image" },
-  { id: "file", label: "File" },
-] as const;
-export type DocumentBlock = (typeof documentBlocks)[number]["id"];
-export type DocumentFormat = DocumentBlock | "bold" | "italic" | "code";
+import type {
+  DocumentEditor,
+  DocumentFormat,
+  DocumentBlockState,
+  TableCommand,
+} from "./document-model";
 
 export function documentExtensions() {
   return [
@@ -82,41 +73,6 @@ export function documentExtensions() {
     TaskItem.configure({ nested: true }),
   ];
 }
-
-// Unsupported authored constructs remain available in source rather than being dropped on save.
-export function supportsDocumentMarkdown(value: string) {
-  return !/(!\[|^\s*\[[^\]]+\]:|<\/?[a-z][^>]*>|^---\s*\n[\s\S]+?\n---\s*$)/im.test(
-    value
-      .replace(/<br\s*\/?>/gi, "")
-      .replace(/!\[[^\]]*\]\(\/api\/attachments\/[a-f0-9-]{36}\)/gi, ""),
-  );
-}
-
-export type DocumentEditor = {
-  element: HTMLElement;
-  focused(): boolean;
-  value(value: string): void;
-  editable(value: boolean): void;
-  format(command: DocumentFormat, selection?: Range): void;
-  link(url: string, selection?: Range): void;
-  removeSlash(): void;
-  prepareAttachment(): (markdown: string) => void;
-  table(command: TableCommand): void;
-  language(value: string): void;
-  destroy(): void;
-};
-export type TableCommand =
-  | "addColumnBefore"
-  | "addColumnAfter"
-  | "deleteColumn"
-  | "addRowBefore"
-  | "addRowAfter"
-  | "deleteRow"
-  | "toggleHeaderRow"
-  | "deleteTable";
-export type DocumentBlockState =
-  | { kind: "table"; element: HTMLElement }
-  | { kind: "code"; element: HTMLElement; text: string; language: string };
 
 export function createDocumentEditor(input: {
   host: HTMLElement;
@@ -295,6 +251,12 @@ export function createDocumentEditor(input: {
         break;
     }
   }
+  function slash() {
+    const { from, to } = editor.state.selection;
+    return from === to
+      ? documentSlash(editor.state.doc.textBetween(Math.max(0, from - 42), from, "\n"))
+      : undefined;
+  }
   return {
     element: editor.view.dom,
     focused: () => editor.isFocused,
@@ -379,15 +341,16 @@ export function createDocumentEditor(input: {
       selectedChain(selection)?.setLink({ href }).run();
     },
     removeSlash: () => {
-      const { from, to } = editor.state.selection;
-      const token = documentSlash(editor.state.doc.textBetween(Math.max(0, from - 42), from, "\n"));
-      if (from === to && token)
+      const { from } = editor.state.selection;
+      const token = slash();
+      if (token)
         editor
           .chain()
           .focus()
           .deleteRange({ from: from - token.length, to: from })
           .run();
     },
+    slash,
     destroy: () => {
       disposed = true;
       document.removeEventListener("mouseup", finishPointerSelection);

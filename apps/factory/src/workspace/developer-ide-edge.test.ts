@@ -1,6 +1,74 @@
 import { expect, test } from "bun:test";
-import { createDeveloperIDEEdge } from "./developer-ide-edge";
 import { CommandError } from "../command-error";
+import { createDeveloperIDEEdge } from "./developer-ide-edge";
+
+test("streamed native file POSTs survive execution-route inspection and reach source exactly once", async () => {
+  const userID = "abdabd34-6496-40f1-afbf-86187708037c";
+  const workspaceID = "11111111-1111-4111-8111-111111111111";
+  const calls: string[] = [];
+  const edge = createDeveloperIDEEdge(
+    { client: async () => [{ id: "fixture-session" }] } as unknown as Parameters<
+      typeof createDeveloperIDEEdge
+    >[0],
+    { get: async () => ({ epoch: 1, state: "ready" }) } as unknown as Parameters<
+      typeof createDeveloperIDEEdge
+    >[1],
+    {
+      async forward(id: string, actor: string, operation: string, request: Request) {
+        expect([id, actor]).toEqual([workspaceID, userID]);
+        expect(await request.json()).toEqual({ path: "" });
+        calls.push(operation);
+        return Response.json({ operation });
+      },
+    } as unknown as Parameters<typeof createDeveloperIDEEdge>[2],
+    "http://127.0.0.1:3000",
+    {
+      revokeEditor() {},
+      async route() {
+        return undefined;
+      },
+    } as unknown as Parameters<typeof createDeveloperIDEEdge>[4],
+  );
+  const redeemed = await edge.route(
+    new Request(await edge.issue(userID, "fixture-session", false)),
+  );
+  const location = redeemed.headers.get("location");
+  const cookie = redeemed.headers.get("set-cookie")?.split(";")[0];
+  if (!location || !cookie) throw new Error("Owned editor grant was not redeemed");
+  const root = new URL(location);
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname;
+      return edge.route(new Request(new URL(path, root.origin), request));
+    },
+  });
+  try {
+    for (const operation of ["stat", "list"]) {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"path":'));
+          controller.enqueue(new TextEncoder().encode('""}'));
+          controller.close();
+        },
+      });
+      const path = new URL(`__factory/workspaces/${workspaceID}/source/${operation}`, root)
+        .pathname;
+      const response = await fetch(new URL(path, server.url), {
+        method: "POST",
+        headers: { cookie, origin: root.origin, "content-type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(2_000),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ operation });
+    }
+    expect(calls).toEqual(["stat", "list"]);
+  } finally {
+    await server.stop(true);
+  }
+});
 
 test("the authenticated Editor edge admits native Theia Socket.IO and keeps origin/path fences", async () => {
   const userID = "abdabd34-6496-40f1-afbf-86187708037c";

@@ -1,3 +1,5 @@
+import { callFactoryFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
@@ -12,9 +14,10 @@ export async function releaseWorkspace(fixture: Fixture) {
   if (!ticketID || !state.changeID)
     throw new Error("Release Build must verify before the Workspace proof");
   const delivery = deliveryViewSchema.parse(
-    await fixture.command(
-      await fixture.login("developer"),
-      `/api/changes/${state.changeID}/delivery`,
+    await serverCall(
+      callFactoryFunction(fixture.base, "getDelivery", [state.changeID], {
+        cookie: await fixture.login("developer"),
+      }),
     ),
   );
   expect(delivery.verificationState).toBe("succeeded");

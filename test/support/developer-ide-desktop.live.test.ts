@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { callFactoryFunction, authenticatedBootstrap } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium, type Page, type Request } from "@playwright/test";
@@ -76,14 +78,22 @@ test.skipIf(!enabled)(
         .join("; ");
       const admin = z
         .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-        .parse(await (await api("/api/session", adminCookie)).json()).session.user.id;
-      const user = await api("/api/admin/users", adminCookie, {
-        name: "Desktop editor proof",
-        email,
-        password,
-      });
-      expect(user.status).toBe(201);
-      userID = z.object({ id: z.uuid() }).parse(await user.json()).id;
+        .parse(await authenticatedBootstrap(base, { cookie: adminCookie })).session.user.id;
+      const user = await serverCall(
+        callFactoryFunction(
+          base,
+          "createAccount",
+          [
+            {
+              name: "Desktop editor proof",
+              email,
+              password,
+            },
+          ],
+          { cookie: adminCookie },
+        ),
+      );
+      userID = z.object({ id: z.uuid() }).parse(user).id;
       await writeFile(
         resolve(artifacts, "intent.json"),
         JSON.stringify({ proofID, userID, projects }),
@@ -92,10 +102,18 @@ test.skipIf(!enabled)(
         await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`desktop-editor-${proofID}-${index}`},${`Editor proof ${index + 1}`},${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${admin})`;
         expect(
           (
-            await api(`/api/projects/${projectID}/members`, adminCookie, {
-              email,
-              role: "developer",
-            })
+            await callFactoryFunction(
+              base,
+              "saveProjectMember",
+              [
+                projectID,
+                {
+                  email,
+                  role: "developer",
+                },
+              ],
+              { cookie: adminCookie },
+            )
           ).ok,
         ).toBe(true);
       }
@@ -221,13 +239,14 @@ test.skipIf(!enabled)(
       const prepared = await eventually(
         async () => {
           // Reading only: the selected-Project effect must admit preparation itself.
-          const response = await api(
-            `/api/workspaces/${preparedWorkspaceID}/source`,
-            developerCookie,
+          const response = await callFactoryFunction(
+            base,
+            "getWorkspaceSource",
+            [preparedWorkspaceID],
+            { cookie: developerCookie },
           );
-          if (response.status === 404) return null;
-          expect(response.ok).toBe(true);
-          return sourceWorkspaceViewSchema.parse(await response.json());
+          if (!response.ok && response.status === 404) return null;
+          return serverCall(Promise.resolve(response));
         },
         (view) => view?.state === "ready",
         "Prepared Project source not ready",
@@ -349,7 +368,15 @@ test.skipIf(!enabled)(
           >`SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspace.id} AND state NOT IN ('stopped','failed')`;
           for (const attempt of running) {
             expect(
-              (await api(`/api/runtime-attempts/${attempt.id}/stop`, developerCookie, {})).ok,
+              (
+                await callFactoryFunction(
+                  base,
+                  "stopRuntimeAttempt",
+                  [attempt.id],
+                  { cookie: developerCookie, origin: base, "content-type": "application/json" },
+                  AbortSignal.timeout(15_000),
+                )
+              ).ok,
             ).toBe(true);
             await eventually(
               async () =>
@@ -364,12 +391,18 @@ test.skipIf(!enabled)(
             );
           }
           expect(
-            (await api(`/api/workspaces/${workspace.id}/source/stop`, developerCookie, {})).status,
-          ).toBe(202);
+            await callFactoryFunction(base, "stopWorkspaceSource", [workspace.id], {
+              cookie: developerCookie,
+            }),
+          ).toMatchObject({ ok: true });
           await eventually(
             async () =>
               sourceWorkspaceViewSchema.parse(
-                await (await api(`/api/workspaces/${workspace.id}/source`, developerCookie)).json(),
+                await serverCall(
+                  callFactoryFunction(base, "getWorkspaceSource", [workspace.id], {
+                    cookie: developerCookie,
+                  }),
+                ),
               ),
             (view) => view.state === "stopped",
             "Owned source Stop incomplete",
@@ -387,11 +420,15 @@ test.skipIf(!enabled)(
               ...(editorOwnership.uid ? { uid: editorOwnership.uid } : {}),
             });
           if (editorOwnership) {
-            await api("/api/developer-ide/stop", developerCookie, {});
+            await serverCall(
+              callFactoryFunction(base, "stopDeveloperIDE", [], { cookie: developerCookie }),
+            );
             await eventually(
               async () =>
                 developerIDEViewSchema.parse(
-                  await (await api("/api/developer-ide", developerCookie)).json(),
+                  await serverCall(
+                    callFactoryFunction(base, "getDeveloperIDE", [], { cookie: developerCookie }),
+                  ),
                 ),
               (view) => view.state === "stopped",
               "Owned editor Stop incomplete",

@@ -3,6 +3,8 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import {
   composeProject,
   installationDirectory,
@@ -59,10 +61,10 @@ test.skipIf(!name)(
         .sort();
     }
     const beforeInventory = await runtimeInventory();
-    const beforeMain = await fetch("http://127.0.0.1:3000/api/session");
+    const beforeMain = await fetch("http://127.0.0.1:3000/health/ready");
     const mainMarker = beforeMain.headers.get("x-open-factory-startup");
     expect(beforeMain.ok).toBe(true);
-    const initial = await fetch(`${base}/api/session`);
+    const initial = await fetch(`${base}/health/ready`);
     expect(initial.headers.get("x-open-factory")).toBe("ready");
     const initialMarker = initial.headers.get("x-open-factory-startup");
     const password = (await readFile(resolve(directory, "admin-password"), "utf8")).trim();
@@ -95,25 +97,56 @@ test.skipIf(!name)(
     }
     const model = process.env["FACTORY_AGENT_MODEL_ID"];
     if (!model) throw new Error("Configured model required");
-    const defaults = z.object({ version: z.number() }).parse(await command("/api/model-settings"));
-    const settings = await command("/api/model-settings", "PUT", {
-      version: defaults.version,
-      planningModelId: model,
-      buildModelId: model,
-    });
+    const defaults = await serverCall(
+      callFactoryFunction(base, "getModelSettings", [], { cookie }),
+    );
+    const settings = await serverCall(
+      callFactoryFunction(
+        base,
+        "saveModelSettings",
+        [
+          {
+            version: defaults.version,
+            planningModelId: model,
+            buildModelId: model,
+          },
+        ],
+        { cookie },
+      ),
+    );
     const skillID = crypto.randomUUID();
-    const skill = await command("/api/admin/skills", "POST", {
-      revisionId: skillID,
-      expectedRevision: 0,
-      content: requirementsInterviewSkill,
-    });
-    const user = await command("/api/admin/users", "POST", {
-      name: "Release proof developer",
-      email: `developer-${name}@factory.local`,
-      password: "disposable-release-developer-password",
-    });
-    const usersBefore = await command("/api/admin/users");
-    const skillBefore = await command("/api/admin/skills");
+    const skill = await serverCall(
+      callFactoryFunction(
+        base,
+        "publishSkill",
+        [
+          {
+            revisionId: skillID,
+            expectedRevision: 0,
+            content: requirementsInterviewSkill,
+          },
+        ],
+        { cookie },
+      ),
+    );
+    const user = await serverCall(
+      callFactoryFunction(
+        base,
+        "createAccount",
+        [
+          {
+            name: "Release proof developer",
+            email: `developer-${name}@factory.local`,
+            password: "disposable-release-developer-password",
+          },
+        ],
+        { cookie },
+      ),
+    );
+    const usersBefore = await serverCall(callFactoryFunction(base, "getAccounts", [], { cookie }));
+    const skillBefore = await serverCall(
+      callFactoryFunction(base, "getSystemSkills", [], { cookie }),
+    );
     const extraVolume = `${composeProject(installation)}_unknown-guard`;
     await writeFile(
       resolve(resultDirectory, "guard-intent.json"),
@@ -146,10 +179,12 @@ test.skipIf(!name)(
       expect(rejected.error.includes("Reset refused unexpected")).toBe(true);
       for (const secret of secrets)
         expect((rejected.output + rejected.error).includes(secret)).toBe(false);
-      const stillReady = await fetch(`${base}/api/session`);
+      const stillReady = await fetch(`${base}/health/ready`);
       expect(stillReady.headers.get("x-open-factory-startup")).toBe(initialMarker);
       expect(await loadInstallation(root, name)).toEqual(installation);
-      expect(await command("/api/admin/users")).toEqual(usersBefore);
+      expect(await serverCall(callFactoryFunction(base, "getAccounts", [], { cookie }))).toEqual(
+        usersBefore,
+      );
     } finally {
       const volumes = JSON.parse(await docker(["volume", "inspect", extraVolume])) as Array<{
         Labels: Record<string, string>;
@@ -172,12 +207,18 @@ test.skipIf(!name)(
     expect(restarted.code).toBe(0);
     for (const secret of secrets)
       expect((restarted.output + restarted.error).includes(secret)).toBe(false);
-    const current = await fetch(`${base}/api/session`);
+    const current = await fetch(`${base}/health/ready`);
     expect(current.headers.get("x-open-factory-startup")).not.toBe(initialMarker);
-    expect(await command("/api/model-settings")).toEqual(settings);
-    expect(await command("/api/admin/skills")).toEqual(skillBefore);
-    expect(await command("/api/admin/users")).toEqual(usersBefore);
-    const main = await fetch("http://127.0.0.1:3000/api/session");
+    expect(await serverCall(callFactoryFunction(base, "getModelSettings", [], { cookie }))).toEqual(
+      settings,
+    );
+    expect(await serverCall(callFactoryFunction(base, "getSystemSkills", [], { cookie }))).toEqual(
+      skillBefore,
+    );
+    expect(await serverCall(callFactoryFunction(base, "getAccounts", [], { cookie }))).toEqual(
+      usersBefore,
+    );
+    const main = await fetch("http://127.0.0.1:3000/health/ready");
     expect(main.ok).toBe(true);
     expect(main.headers.get("x-open-factory-startup")).toBe(mainMarker);
     expect(await runtimeInventory()).toEqual(beforeInventory);
@@ -198,7 +239,7 @@ test.skipIf(!resetName)(
         "Reset proof needs its own explicit disposable installation, separate from the customer journey",
       );
     const root = resolve(import.meta.dir, "../..");
-    const before = await fetch("http://127.0.0.1:3000/api/session");
+    const before = await fetch("http://127.0.0.1:3000/health/ready");
     const marker = before.headers.get("x-open-factory-startup");
     const resetID = resetName;
     async function run(action: "up" | "reset") {
@@ -231,7 +272,7 @@ test.skipIf(!resetName)(
     expect(again.code).toBe(0);
     expect(again.output.includes("no deletion was repeated")).toBe(true);
     expect(
-      (await fetch("http://127.0.0.1:3000/api/session")).headers.get("x-open-factory-startup"),
+      (await fetch("http://127.0.0.1:3000/health/ready")).headers.get("x-open-factory-startup"),
     ).toBe(marker);
     const resultDirectory = resolve(root, ".factory/test-results/installations", resetName);
     await mkdir(resultDirectory, { recursive: true });

@@ -77,7 +77,7 @@ test.skipIf(process.env["FACTORY_WIKI_QUALITY_LIVE"] !== "1")(
           id: "checker",
           name: "Factory Wiki checker",
           ...nativeAgentPolicy,
-          model: nativeModel(connection, modelId),
+          model: await nativeModel(connection, modelId),
           tools: { readSource },
           instructions: `${wikiInstructions}\n${wikiReviewTask}`,
         });

@@ -53,18 +53,32 @@ controls and illustrated print style, but uses landscape connection covers. Sour
 identify services. Definitions, account authorization, Project grants and activation are separate
 decisions.
 
-Project switching is a secondary action in the desktop Settings menu. Chat composers keep file
-previews above the draft and attachment controls beside Send. Skills use slash suggestions rather
-than a separate composer button.
+Desktop navigation puts the Project selector beside the Assistant toggle and a compact
+New ticket action on the right, with matching control heights. Phones keep the single dock row,
+Project switching in Settings and one New ticket action above the Board. The narrow Assistant leaves
+that navigation available rather than making it part of a modal backdrop. Chat composers keep file
+previews above the draft and attachment controls beside Send. Skills use a compact slash list with
+names and single-line descriptions rather than a separate composer button or explanatory panel.
+Document and library headers put the title before right-aligned text actions in the same row when
+space permits. Narrow headers wrap actions after the title; status and document metadata sit below.
+Search/filter controls and form-specific save actions remain with their content.
 The current chat title opens conversation history, with New chat inside that menu rather than in
 the header. History identifies private Project chats, shared Ticket chats and active Coding. Tool
 activity uses compact command rows, with running calls and failures visible outside the collapsed
-completed history.
+completed history. Message Copy actions appear on hover or keyboard focus, and stay available on
+touch devices without hover.
 
 The Board has no separate Epic filter. Epic stacks open a focused folder with child Epics and
-Tickets across their stages; editing is available inside the folder. Empty root Epics remain
-reachable in Ideas. Plus actions in Ideas and Requirements open the retained personal draft with
-that destination emphasized, without an additional navigation row.
+Tickets in a centered, responsive grid directly over the blurred Board, without an enclosing
+panel. Each Ticket keeps its stage or status visible; editing is available inside the folder.
+Empty root Epics remain reachable in Ideas. Lanes use subtle separators and compact, aligned titles
+that stay visible while tickets scroll, without a continuous heading bar. Tickets, Epic stacks
+and stage labels use the same Project-tinted glass and blur tokens as the dock and navigation
+actions. Content interaction states reuse the navigation hover material. Materials and Board
+spacing use shared tokens; reduced transparency keeps
+the content surfaces opaque. Lane headings have no creation buttons or visible
+counters; collapsed Epics and History retain their useful totals. New ticket opens the retained
+personal draft with Requirements emphasized; creating an Idea remains a choice inside that draft.
 
 Personal Project Chat can create planning Tickets on an explicit human request through Factory MCP,
 defaulting to Requirements. The same creation command serves the UI. A saved chat receipt links to
@@ -82,7 +96,16 @@ managers can change it in the desktop Settings menu; other members see the same 
 
 ## Capabilities and constraints
 
+- Project Settings → Releases publishes a human-confirmed version of a delivered commit.
+  The last published version and editable Patch/Minor/Major suggestions support the decision;
+  they never publish automatically. History distinguishes published, failed and unconfirmed
+  outcomes and links to native Forgejo. External access manages read credentials, not deployment
+  targets or consumer status. Factory never waits for a consumer or claims production success.
+  Project Chat can read confirmed versions and suggest a bump, but cannot publish or grant access.
+  See [independent Releases](../../docs/adr/0023-independent-project-releases.md).
+
 - Human images and documents can accompany Wiki, Tickets, chats and feedback discussions.
+  Document editors use `/image`, `/file`, paste and drop instead of standalone Add file buttons.
   Pending uploads and uncreated drafts stay private. Saving or sending determines sharing.
   Agent work uses exact file references; navigation and later replacements do not change them.
   See [attachment ownership and retention](../../docs/adr/0017-private-revision-bound-attachments.md).
@@ -94,6 +117,9 @@ managers can change it in the desktop Settings menu; other members see the same 
   See [conversation contexts and shared editing](../../docs/adr/0019-conversation-contexts-and-shared-editing.md).
 - Chats expose existing Skills, message Copy actions and grouped tool activity. File and recorded
   diff navigation is deliberate. A recorded diff is read-only and is not the current working diff.
+- Independent QA browser runs record automatically, without a Settings switch. The Ticket owns
+  the video, scenario chapters and frame comments. Capture failure remains separate from the QA
+  result and never replays an App action.
 - Investigate and Plan use Mastra; Build uses OpenCode 2. Engine assignment is fixed.
   Skills and model settings do not grant extra permissions.
 - Skill authors can create private guidance and preview supported package imports. Authorized

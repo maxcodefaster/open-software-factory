@@ -4,6 +4,8 @@ import { expect, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { writerViewSchema } from "../../apps/factory/src/api-contracts";
 
 const evidence = ".factory/test-results/chat-collaboration";
 const cacheDirectory = resolve(
@@ -19,7 +21,16 @@ test.beforeAll(async () => {
     root: resolve("test/fixtures"),
     cacheDir: cacheDirectory,
     publicDir: resolve("apps/factory/public"),
-    plugins: [solid({ ssr: false })],
+    optimizeDeps: { entries: ["chat-collaboration.html"] },
+    plugins: [
+      solid({
+        ssr: false,
+        serverFunctions: {
+          devMiddleware: false,
+          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
+        },
+      }),
+    ],
     server: { host: "127.0.0.1", port: 0 },
   });
   await server.listen();
@@ -31,24 +42,25 @@ test.afterAll(async () => {
   await rm(cacheDirectory, { recursive: true, force: true });
 });
 test.beforeEach(async ({ page }) => {
-  await page.route("**/writer/status", (route) =>
-    route.fulfill({
-      json: {
-        state: "agent",
-        epoch: 1,
-        canWrite: false,
-        yours: false,
-        commandID: null,
-        actor: {
-          kind: "agent",
-          user: { id: "10000000-0000-4000-8000-000000000004", name: "Anna" },
-          delegated: false,
-          workState: "running",
-        },
-        requester: null,
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          state: "agent",
+          epoch: 1,
+          canWrite: false,
+          yours: false,
+          commandID: null,
+          actor: {
+            kind: "agent",
+            user: { id: "10000000-0000-4000-8000-000000000004", name: "Anna" },
+            delegated: false,
+            workState: "running",
+          },
+          requester: null,
+        }),
+    },
+  });
 });
 
 test("chat creation lives in history; the compact header and long menu stay keyboard-accessible", async ({
@@ -62,18 +74,20 @@ test("chat creation lives in history; the compact header and long menu stay keyb
     });
     const page = await context.newPage();
     try {
-      await page.route("**/writer/status", (route) =>
-        route.fulfill({
-          json: {
-            state: "human",
-            epoch: 1,
-            canWrite: true,
-            yours: true,
-            actor: null,
-            requester: null,
-          },
-        }),
-      );
+      await mockFactoryFunctions(page, {
+        writer: {
+          status: async () =>
+            writerViewSchema.parse({
+              state: "human",
+              epoch: 1,
+              canWrite: true,
+              yours: true,
+              actor: null,
+              requester: null,
+              commandID: null,
+            }),
+        },
+      });
       await page.goto(`${origin}/chat-collaboration.html?long`);
       const header = page.getByRole("region", { name: "Ticket conversations", exact: true });
       const title = header.getByRole("button", { name: "Conversation", exact: true });
@@ -153,21 +167,23 @@ test("Skill selection is keyboard accessible and edits a draft without sending o
   page,
 }) => {
   let reads = 0;
-  await page.route("**/skills/invocations?role=build", (route) => {
-    reads++;
-    return route.fulfill({
-      json: {
-        skills: [
-          {
-            id: "10000000-0000-4000-8000-000000000002",
-            key: "review-ui",
-            name: "Review the interface",
-            description: "Inspect the current interface and its accessibility.",
-          },
-        ],
-        conflicts: [],
+  await mockFactoryFunctions(page, {
+    skills: {
+      async invocations() {
+        reads++;
+        return {
+          skills: [
+            {
+              id: "10000000-0000-4000-8000-000000000002",
+              key: "review-ui",
+              name: "Review the interface",
+              description: "Inspect the current interface and its accessibility.",
+            },
+          ],
+          conflicts: [],
+        };
       },
-    });
+    },
   });
   await page.goto(`${origin}/chat-collaboration.html`);
   await expect(page.getByText("Agent working · requested by Anna", { exact: true })).toBeVisible();
@@ -201,27 +217,29 @@ test("Skill selection is keyboard accessible and edits a draft without sending o
 test("slash suggestions filter at the caret and an unknown command does not send", async ({
   page,
 }) => {
-  await page.route("**/skills/invocations?role=build", (route) =>
-    route.fulfill({
-      json: {
-        skills: [
-          {
-            id: "10000000-0000-4000-8000-000000000002",
-            key: "review-ui",
-            name: "Review the interface",
-            description: "Inspect the interface.",
-          },
-          {
-            id: "10000000-0000-4000-8000-000000000005",
-            key: "write-tests",
-            name: "Write regression tests",
-            description: "Cover the current behavior.",
-          },
-        ],
-        conflicts: [],
+  await mockFactoryFunctions(page, {
+    skills: {
+      async invocations() {
+        return {
+          skills: [
+            {
+              id: "10000000-0000-4000-8000-000000000002",
+              key: "review-ui",
+              name: "Review the interface",
+              description: "Inspect the interface.",
+            },
+            {
+              id: "10000000-0000-4000-8000-000000000005",
+              key: "write-tests",
+              name: "Write regression tests",
+              description: "Cover the current behavior.",
+            },
+          ],
+          conflicts: [],
+        };
       },
-    }),
-  );
+    },
+  });
   await page.goto(`${origin}/chat-collaboration.html`);
   const draft = page.getByRole("textbox", { name: "Message draft", exact: true });
   const suggestions = page.getByRole("listbox", { name: "Available Skills" });
@@ -271,12 +289,165 @@ test("human and Assistant messages copy their Markdown; tool calls have no copy 
     "Keep the **current layout**.",
   );
   const assistant = page.getByRole("button", { name: "Copy Assistant message", exact: true });
+  await page.locator(".agent-message.assistant").hover();
   await assistant.click();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     "I will keep the layout and inspect the affected files.",
   );
   await expect(page.locator(".agent-activity .copy-feedback")).toHaveCount(0);
   await expect(page.locator(".copy-feedback")).toHaveCount(2);
+  for (const button of [human, assistant]) {
+    await expect(button.locator(".feedback-mark")).toBeHidden();
+    await expect(button.locator(".copy-feedback-reserve")).toBeHidden();
+    await expect(button.locator(".copy-feedback-label")).toBeVisible();
+  }
+});
+
+test("Copy appears for the hovered or keyboard-focused message and stays available without hover on touch", async ({
+  page,
+  context,
+  browser,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto(`${origin}/chat-collaboration.html`);
+  const humanMessage = page.locator(".agent-message.user");
+  const human = humanMessage.getByRole("button", { name: "Copy user message", exact: true });
+  const assistant = page.getByRole("button", { name: "Copy Assistant message", exact: true });
+  await page.mouse.move(700, 40);
+  await expect(human).toHaveCSS("opacity", "0");
+  await expect(assistant).toHaveCSS("opacity", "0");
+  await humanMessage.hover();
+  await expect(human).toHaveCSS("opacity", "1");
+  await expect(assistant).toHaveCSS("opacity", "0");
+  await page.mouse.move(700, 40);
+  await human.focus();
+  await expect(human).toHaveCSS("opacity", "1");
+  await human.press("Enter");
+  await expect(human).toHaveAttribute("data-feedback", "success");
+  await page.getByRole("textbox", { name: "Message draft", exact: true }).focus();
+  await expect(human).toHaveCSS("opacity", "1");
+  await expect(human).toHaveAttribute("data-feedback", "idle");
+  await expect(human).toHaveCSS("opacity", "0");
+  await assistant.focus();
+  await expect(assistant).toHaveCSS("opacity", "1");
+
+  const touch = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    reducedMotion: "reduce",
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  try {
+    const phone = await touch.newPage();
+    await mockFactoryFunctions(phone, {
+      writer: {
+        status: async () =>
+          writerViewSchema.parse({
+            state: "unassigned",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
+            actor: null,
+            requester: null,
+          }),
+      },
+    });
+    await phone.goto(`${origin}/chat-collaboration.html`);
+    const copy = phone.getByRole("button", { name: "Copy user message", exact: true });
+    await expect(copy).toHaveCSS("opacity", "1");
+    await expect(copy).toHaveCSS("min-height", "44px");
+    await copy.tap();
+    await expect(copy).toHaveAttribute("data-feedback", "success");
+    expect(await phone.evaluate(() => navigator.clipboard.readText())).toBe(
+      "Keep the **current layout**.",
+    );
+  } finally {
+    await touch.close();
+  }
+});
+
+test("chat copy failure keeps an actionable explanation without restoring duplicate chrome", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/chat-collaboration.html`);
+  await page.evaluate(() =>
+    Object.defineProperty(navigator.clipboard, "writeText", {
+      configurable: true,
+      value: async () => {
+        throw new Error("Clipboard unavailable");
+      },
+    }),
+  );
+  const copy = page.getByRole("button", { name: "Copy user message", exact: true });
+  await page.locator(".agent-message.user").hover();
+  await copy.click();
+  await expect(copy).toHaveAttribute("data-feedback", "error");
+  await expect(copy).toHaveText("Copy failed", { useInnerText: true });
+  await expect(copy.locator(".feedback-mark")).toBeHidden();
+  await expect(
+    page.getByRole("alert").filter({ hasText: "Select the text to copy manually" }),
+  ).toBeVisible();
+  await expect(page.getByText("Messages sent: 0", { exact: true })).toBeAttached();
+});
+
+test("Skill slash choices stay a compact scrolling list without explanatory chrome", async ({
+  page,
+}) => {
+  const skills = Array.from({ length: 16 }, (_, index) => ({
+    id: crypto.randomUUID(),
+    key: `review-${index}`,
+    name: `Review ${index + 1}`,
+    description:
+      "Inspect the current interface and explain the relevant edge cases without changing unrelated source or starting implementation.",
+  }));
+  await mockFactoryFunctions(page, {
+    skills: { invocations: async () => ({ skills, conflicts: ["duplicate-key"] }) },
+  });
+  await page.goto(`${origin}/chat-collaboration.html`);
+  const draft = page.getByRole("textbox", { name: "Message draft", exact: true });
+  const suggestions = page.getByRole("listbox", { name: "Available Skills", exact: true });
+  for (const width of [1440, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    await draft.fill("/");
+    await expect(suggestions.getByRole("option")).toHaveCount(16);
+    await expect(suggestions.locator(":scope > p, :scope > small")).toHaveCount(0);
+    const layout = await suggestions.evaluate((element) => {
+      const options = Array.from(element.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+      return {
+        padding: getComputedStyle(element).padding,
+        heights: options.map((option) => option.getBoundingClientRect().height),
+        descriptions: options.map((option) => {
+          const description = option.querySelector("span");
+          if (!description) throw new Error("Missing Skill description");
+          return {
+            nowrap: getComputedStyle(description).whiteSpace,
+            overflow: getComputedStyle(description).textOverflow,
+          };
+        }),
+        scrolling: element.scrollHeight > element.clientHeight,
+        height: element.getBoundingClientRect().height,
+        right: element.getBoundingClientRect().right,
+      };
+    });
+    expect(layout.padding).toBe("4px");
+    for (const height of layout.heights) expect(height).toBe(44);
+    for (const description of layout.descriptions)
+      expect(description).toEqual({ nowrap: "nowrap", overflow: "ellipsis" });
+    expect(layout.scrolling).toBe(true);
+    expect(layout.height).toBeLessThanOrEqual(320);
+    expect(layout.right).toBeLessThanOrEqual(width);
+    await page.screenshot({ path: `${evidence}/slash-compact-${width}.png`, fullPage: true });
+    await draft.press("End");
+    await draft.press("ArrowUp");
+    await expect(suggestions.getByRole("option").last()).toHaveAttribute("aria-selected", "true");
+    await expect(suggestions.getByRole("option").last()).toBeInViewport();
+    await draft.press("Tab");
+    await expect(draft).toHaveValue("/review-15 ");
+    await expect(draft).toBeFocused();
+    await expect(suggestions).toBeHidden();
+    await expect(page.getByText("Messages sent: 0", { exact: true })).toBeAttached();
+  }
 });
 
 test("structured Assistant questions and proposals also copy without answering or starting work", async ({
@@ -286,6 +457,7 @@ test("structured Assistant questions and proposals also copy without answering o
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   await page.goto(`${origin}/chat-collaboration.html`);
   await page.getByRole("button", { name: "Show structured messages", exact: true }).click();
+  await page.locator(".conversation-question").hover();
   await page
     .locator(".conversation-question")
     .getByRole("button", { name: "Copy Assistant message", exact: true })
@@ -293,6 +465,7 @@ test("structured Assistant questions and proposals also copy without answering o
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
     "A clarification\n\nWhich scope should change?",
   );
+  await page.locator(".conversation-requirement").hover();
   await page
     .locator(".conversation-requirement")
     .getByRole("button", { name: "Copy Assistant message", exact: true })
@@ -408,17 +581,25 @@ test("a human editing request is explicit and releasing editing warns about unsa
           ]
         : [],
   });
-  await page.route("**/writer/status", (route) => route.fulfill({ json: current() }));
-  await page.route("**/writer/request", async (route) => {
-    expect(route.request().postDataJSON().epoch).toBe(3);
-    requests++;
-    await route.fulfill({ json: current() });
-  });
-  await page.route("**/writer/release", async (route) => {
-    expect(route.request().postDataJSON().epoch).toBe(3);
-    await route.fulfill({
-      json: { ...current(), state: "unassigned", canWrite: false, yours: false, actor: null },
-    });
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () => writerViewSchema.parse(current()),
+      async request(_actor, _change, input) {
+        expect(input.epoch).toBe(3);
+        requests++;
+        return writerViewSchema.parse(current());
+      },
+      async release(_actor, _change, input) {
+        expect(input.epoch).toBe(3);
+        return writerViewSchema.parse({
+          ...current(),
+          state: "unassigned",
+          canWrite: false,
+          yours: false,
+          actor: null,
+        });
+      },
+    },
   });
   await page.goto(`${origin}/chat-collaboration.html`);
   const writerActions = page.locator(".agent-writer-actions");

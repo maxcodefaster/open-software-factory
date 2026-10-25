@@ -1,7 +1,7 @@
 import { createEffect, createSignal, Loading, lazy, Match, Show, Switch } from "solid-js";
 import { defaultDesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
-import { apiRequest } from "./api-client";
-import { type Bootstrap, bootstrapSchema } from "./api-contracts";
+import type { Bootstrap } from "./api-contracts";
+import { loadBootstrap } from "./bootstrap/client";
 import { SignIn } from "./sign-in";
 
 const AuthenticatedFactory = lazy(async () => ({
@@ -13,7 +13,7 @@ export function Factory() {
   const [error, setError] = createSignal("");
   function load() {
     setError("");
-    void apiRequest(bootstrapSchema, "/api/session")
+    void loadBootstrap()
       .then(setBootstrap)
       .catch((cause) =>
         setError(cause instanceof Error ? cause.message : "Factory failed to load"),

@@ -3,6 +3,12 @@ import { createDatabase } from "../../packages/db/src/client";
 import { ownedPlanningCache } from "./planning-cache";
 import { ownedTestDatabase } from "./postgres-server";
 
+export function factoryProcessCommand(entrypoint: string, args: string[] = []) {
+  // Owned proofs pass their complete environment explicitly. Loading the
+  // repository's .env here would reintroduce live models and credentials.
+  return [process.execPath, "--no-env-file", entrypoint, ...args];
+}
+
 async function docker(...args: string[]) {
   const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
   const [output, error, status] = await Promise.all([
@@ -48,12 +54,14 @@ export async function factoryProcess(
     FACTORY_EXECUTION_IDLE_MINUTES?: string;
     FACTORY_FACTORYBOX_WORKER_IMAGE?: string;
     FACTORY_FACTORYBOX_EXECUTABLE_SHA256?: string;
+    FACTORY_FACTORYBOX_ARCHITECTURE?: string;
     FACTORY_FACTORYBOX_NODE?: string;
     FACTORY_FACTORYBOX_KERNEL?: string;
     FACTORY_OPENBAO_URL?: string;
     FACTORY_OPENBAO_TOKEN_FILE?: string;
     FACTORY_OPENBAO_CA_FILE?: string;
     FACTORY_FORGEJO_API_URL?: string;
+    FACTORY_FORGEJO_PUBLIC_URL?: string;
     FACTORY_FORGEJO_OWNER?: string;
     FACTORY_FORGEJO_ADMIN_TOKEN?: string;
     FACTORY_FORGE_ISSUER_URL?: string;
@@ -204,6 +212,7 @@ export async function factoryProcess(
         ? {
             FACTORY_FACTORYBOX_WORKER_IMAGE: `registry.example.invalid/owned-worker@sha256:${"d".repeat(64)}`,
             FACTORY_FACTORYBOX_EXECUTABLE_SHA256: "e".repeat(64),
+            FACTORY_FACTORYBOX_ARCHITECTURE: "amd64",
             FACTORY_FACTORYBOX_NODE: "owned-test-node",
             FACTORY_FACTORYBOX_KERNEL: "6.12.0",
           }
@@ -250,12 +259,18 @@ export async function factoryProcess(
           else process.env["DATABASE_URL"] = previousURL;
         }
       },
-      async startPlanningCache() {
-        planningCache ??= await ownedPlanningCache(databaseURL, base);
+      async startPlanningCache(observeWhileRunning = false, syncWorkers = 1) {
+        planningCache ??= await ownedPlanningCache(
+          databaseURL,
+          base,
+          observeWhileRunning,
+          syncWorkers,
+        );
         environment.FACTORY_ZERO_CACHE_URL = planningCache.url;
+        return planningCache;
       },
       async start(entrypoint = "apps/factory/src/server.ts", args: string[] = []) {
-        const child = Bun.spawn([process.execPath, entrypoint, ...args], {
+        const child = Bun.spawn(factoryProcessCommand(entrypoint, args), {
           env: environment,
           stdout: "pipe",
           stderr: "pipe",
@@ -267,12 +282,15 @@ export async function factoryProcess(
         await eventually(
           async () => {
             if (child.exitCode !== null) throw new Error(`Owned Factory exited: ${child.exitCode}`);
-            return fetch(`${base}/api/session`, { signal: AbortSignal.timeout(1_000) }).catch(
+            return fetch(`${base}/health/ready`, { signal: AbortSignal.timeout(1_000) }).catch(
               () => null,
             );
           },
           (response) => response?.ok === true,
           "Owned Factory did not start",
+          // Cold TypeScript/module preparation can exceed ten seconds under
+          // concurrent proof load. Observe this same process, never replace it.
+          30_000,
         );
         return child;
       },

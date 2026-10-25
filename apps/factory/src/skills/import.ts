@@ -1,25 +1,8 @@
 import { parse } from "yaml";
 import { z } from "zod";
 import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
+import { skillImportInput, repositorySkillImportInput } from "./commands";
 
-export const skillImportInput = z
-  .object({
-    files: z
-      .array(
-        z
-          .object({
-            path: z.string(),
-            body: z.string(),
-            encoding: z.enum(["utf8", "base64"]),
-            executable: z.boolean().optional(),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(65),
-    origin: skillContentInput.shape.origin.optional(),
-  })
-  .strict();
 export function previewSkillImport(value: unknown) {
   const input = skillImportInput.parse(value);
   const original = input.files.find((file) => file.path === "SKILL.md");
@@ -70,16 +53,6 @@ export function previewSkillImport(value: unknown) {
   return { content, warnings };
 }
 
-export const repositorySkillImportInput = z
-  .object({
-    repository: z.string().regex(/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/?$/),
-    commit: z.string().regex(/^[a-f0-9]{40}$/),
-    path: z
-      .string()
-      .regex(/^[A-Za-z0-9_-]+(?:\/[A-Za-z0-9_.-]+)*\/SKILL\.md$/)
-      .refine((path) => !path.split("/").some((part) => part === "." || part === "..")),
-  })
-  .strict();
 export async function previewRepositorySkill(value: unknown) {
   const input = repositorySkillImportInput.parse(value);
   const repository = input.repository.replace(/\/$/, "").slice("https://github.com/".length);

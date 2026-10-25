@@ -1,31 +1,21 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import { z } from "zod";
-import { apiRequest, emptyResponseSchema } from "../api-client";
+import {
+  getProjectMembers,
+  getAccounts,
+  getSecurityPolicy,
+  createAccount,
+  saveProjectMember,
+  removeProjectMember,
+  setAccountAccess,
+  endAccountSessions,
+} from "../server-functions/access";
+import { serverCall, type ServerValue } from "../server-functions/result";
+import { memberInput } from "./commands";
 import { AccountActions } from "./account-actions";
 import { FreshAuthentication } from "./fresh-authentication";
 import "./settings.css";
 
-const memberSchema = z.object({
-  userId: z.uuid(),
-  name: z.string(),
-  email: z.email(),
-  role: z.enum(["developer", "product-contributor"]),
-  manageProject: z.boolean(),
-});
-const membersSchema = z.object({ members: z.array(memberSchema) });
-const usersSchema = z.object({
-  users: z.array(
-    z.object({
-      id: z.uuid(),
-      name: z.string(),
-      email: z.email(),
-      systemManager: z.boolean(),
-      disabled: z.boolean(),
-      directoryDisabled: z.boolean(),
-    }),
-  ),
-});
-type Member = z.infer<typeof memberSchema>;
+type Member = ServerValue<ReturnType<typeof getProjectMembers>>["members"][number];
 
 export function AccessSettings(props: {
   systemManager: boolean;
@@ -34,7 +24,7 @@ export function AccessSettings(props: {
 }) {
   const [members, setMembers] = createSignal<Member[]>([]);
   const [pendingManagement, setPendingManagement] = createSignal<Record<string, boolean>>({});
-  const [users, setUsers] = createSignal<z.infer<typeof usersSchema>["users"]>([]);
+  const [users, setUsers] = createSignal<ServerValue<ReturnType<typeof getAccounts>>["users"]>([]);
   const [companySignIn, setCompanySignIn] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
@@ -46,18 +36,15 @@ export function AccessSettings(props: {
   }>();
   let disposed = false;
   let loadVersion = 0;
-  const projectPath = () =>
-    props.project ? `/api/projects/${props.project.id}/members` : undefined;
-
   async function load() {
     const version = ++loadVersion;
-    const path = projectPath();
+    const projectID = props.project?.id;
     const [memberResult, userResult, policy] = await Promise.all([
-      path ? apiRequest(membersSchema, path) : Promise.resolve({ members: [] }),
+      projectID ? serverCall(getProjectMembers(projectID)) : Promise.resolve({ members: [] }),
       props.systemManager && !props.project
-        ? apiRequest(usersSchema, "/api/admin/users")
+        ? serverCall(getAccounts())
         : Promise.resolve({ users: [] }),
-      apiRequest(z.object({ companySignIn: z.boolean() }), "/api/security/session"),
+      serverCall(getSecurityPolicy()),
     ]);
     if (!disposed && version === loadVersion) {
       setMembers(memberResult.members);
@@ -80,15 +67,13 @@ export function AccessSettings(props: {
   }
   async function addAccount(form: HTMLFormElement) {
     const data = new FormData(form);
-    await apiRequest(z.object({ id: z.uuid() }), "/api/admin/users", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        name: data.get("name"),
-        email: data.get("email"),
-        password: data.get("password"),
+    await serverCall(
+      createAccount({
+        name: String(data.get("name") ?? ""),
+        email: String(data.get("email") ?? ""),
+        password: String(data.get("password") ?? ""),
       }),
-    });
+    );
     if (disposed) return;
     form.reset();
     form.closest("details")?.removeAttribute("open");
@@ -97,20 +82,16 @@ export function AccessSettings(props: {
       setNotice("Account created. Add access in the project's People & access settings.");
   }
   async function setMember(email: string, role: Member["role"], manageProject = false) {
-    const path = projectPath();
-    if (!path) return;
-    await apiRequest(z.object({ userId: z.uuid(), role: memberSchema.shape.role }), path, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email, role, manageProject }),
-    });
+    const projectID = props.project?.id;
+    if (!projectID) return;
+    await serverCall(saveProjectMember(projectID, { email, role, manageProject }));
     await load();
     if (!disposed) setNotice("Project access saved.");
   }
   async function removeMember(member: Member) {
-    const path = projectPath();
-    if (!path) return;
-    await apiRequest(emptyResponseSchema, `${path}/${member.userId}`, { method: "DELETE" });
+    const projectID = props.project?.id;
+    if (!projectID) return;
+    await serverCall(removeProjectMember(projectID, member.userId));
     if (disposed) return;
     setRemoving(undefined);
     await load();
@@ -118,11 +99,9 @@ export function AccessSettings(props: {
       setNotice(`${member.name}'s project access was removed. Shared work is unchanged.`);
   }
   async function changeAccount(userID: string, kind: "access" | "sessions", disabled = true) {
-    await apiRequest(emptyResponseSchema, `/api/admin/users/${userID}/${kind}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      ...(kind === "access" ? { body: JSON.stringify({ disabled }) } : {}),
-    });
+    await serverCall(
+      kind === "access" ? setAccountAccess(userID, disabled) : endAccountSessions(userID),
+    );
     setAccountAction(undefined);
     await load();
     setNotice(
@@ -310,7 +289,7 @@ export function AccessSettings(props: {
                               value={member.role}
                               disabled={busy()}
                               onChange={(event) => {
-                                const role = memberSchema.shape.role.parse(
+                                const role = memberInput.shape.role.parse(
                                   event.currentTarget.value,
                                 );
                                 void act(() => setMember(member.email, role, member.manageProject));
@@ -393,8 +372,8 @@ export function AccessSettings(props: {
                   const data = new FormData(form);
                   void act(async () => {
                     await setMember(
-                      z.email().parse(data.get("email")),
-                      memberSchema.shape.role.parse(data.get("role")),
+                      memberInput.shape.email.parse(data.get("email")),
+                      memberInput.shape.role.parse(data.get("role")),
                       data.get("manageProject") === "on",
                     );
                     if (!disposed) form.reset();

@@ -112,8 +112,18 @@ test("actual MCP discovery and calls create one retained Ticket with atomic, ide
     expect(mcp.tools.map((tool) => tool.name)).toEqual([
       "searchProject",
       "readProject",
+      "readProjectReleases",
       "createTicket",
     ]);
+    const releases = toolOf(mcp, "readProjectReleases");
+    expect(JSON.parse((await releases.run({})).content)).toMatchObject({
+      projectId: f.projectID,
+      lastPublishedVersion: null,
+      suggestions: { patch: "0.0.1", minor: "0.1.0", major: "1.0.0" },
+      releases: [],
+      humanConfirmationRequired: true,
+    });
+    expect((await releases.run({ projectId: crypto.randomUUID() })).isError).toBe(true);
     const create = toolOf(mcp, "createTicket");
     const input = {
       key: "keyboard-navigation",
@@ -158,6 +168,7 @@ test("actual MCP discovery and calls create one retained Ticket with atomic, ide
         .client`SELECT id FROM factory.conversation_entry WHERE payload ? 'factoryAction'`,
     ).toHaveLength(1);
     await expect(create.run({ ...input, key: "after-finish" })).rejects.toThrow("Revoked");
+    await expect(releases.run({})).rejects.toThrow("Revoked");
   } finally {
     await mcp?.close();
     await f.dispose();
@@ -174,7 +185,11 @@ test("read-only conversations do not advertise creation, and stale or revoked au
         mode === "research" ? "project-research" : undefined,
       );
       mcp = await f.connect(turn);
-      expect(mcp.tools.map((tool) => tool.name)).toEqual(["searchProject", "readProject"]);
+      expect(mcp.tools.map((tool) => tool.name)).toEqual([
+        "searchProject",
+        "readProject",
+        "readProjectReleases",
+      ]);
       await expect(
         createFactoryTicketCommand(f.database)(
           turn.id,

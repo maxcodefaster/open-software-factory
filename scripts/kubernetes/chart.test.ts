@@ -23,6 +23,8 @@ const localValues = [
   "factorybox.nodeName=owned-node",
   "--set",
   "factorybox.kernel=6.12.0",
+  "--set",
+  "factorybox.architecture=amd64",
 ];
 async function helm(args: string[]) {
   if (args[0] === "template")
@@ -36,6 +38,8 @@ async function helm(args: string[]) {
       "--set",
       "factorybox.kernel=6.12.0",
     );
+  if (args[0] === "template" && !args.some((value) => value.startsWith("factorybox.architecture=")))
+    args.push("--set", "factorybox.architecture=amd64");
   const child = Bun.spawn(["helm", ...args], { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
@@ -99,6 +103,41 @@ function resources() {
   return rendered;
 }
 
+test.each(["arm64", "amd64"] as const)(
+  "the chart preserves an explicit %s worker profile independently of application placement",
+  async (architecture) => {
+    const rendered = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set",
+      `factorybox.architecture=${architecture}`,
+    ]);
+    expect(rendered.exitCode).toBe(0);
+    const config = parseAllDocuments(rendered.stdout)
+      .map((document) => document.toJSON() as Resource)
+      .find(
+        (resource) =>
+          resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
+      );
+    expect(config?.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]).toBe(architecture);
+  },
+);
+
+test("the chart rejects an unsupported worker architecture before installing resources", async () => {
+  const rendered = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "factorybox.architecture=riscv64",
+  ]);
+  expect(rendered.exitCode).not.toBe(0);
+  expect(rendered.stderr).toContain("factorybox.architecture must be arm64 or amd64");
+});
+
 test("the repository chart is a Kubernetes installation, not a host Docker launcher", async () => {
   const all = await resources();
   const application = all.find((resource) => resource.kind === "Deployment");
@@ -130,6 +169,51 @@ test("the repository chart is a Kubernetes installation, not a host Docker launc
   expect(dependencies).toHaveLength(4);
   for (const dependency of dependencies)
     expect(dependency.spec?.template?.spec.automountServiceAccountToken).toBe(false);
+});
+
+test("the planning cache uses an explicit small worker count rather than host CPU count", async () => {
+  const all = await resources();
+  const zero = all.find(
+    (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-zero",
+  );
+  expect(zero?.spec?.template?.spec.containers[0]?.env).toContainEqual({
+    name: "ZERO_NUM_SYNC_WORKERS",
+    value: "1",
+  });
+  const local = parse(await readFile("deploy/local/compose.yaml", "utf8"));
+  expect(local.services["zero-cache"].environment.ZERO_NUM_SYNC_WORKERS).toBe(
+    "$" + "{FACTORY_LOCAL_ZERO_SYNC_WORKERS:-1}",
+  );
+  const override = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "zeroSyncWorkers=2",
+  ]);
+  expect(override.exitCode).toBe(0);
+  const overridden = parseAllDocuments(override.stdout)
+    .map((document) => document.toJSON() as Resource)
+    .find(
+      (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-zero",
+    );
+  expect(overridden?.spec?.template?.spec.containers[0]?.env).toContainEqual({
+    name: "ZERO_NUM_SYNC_WORKERS",
+    value: "2",
+  });
+  for (const value of ["0", "-1", "1.5", "invalid"]) {
+    const invalid = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set",
+      `zeroSyncWorkers=${value}`,
+    ]);
+    expect(invalid.exitCode).not.toBe(0);
+    expect(invalid.stderr).toContain("zeroSyncWorkers");
+  }
 });
 
 test("all standard service images retain the maintained exact upstream pins", async () => {

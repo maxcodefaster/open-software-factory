@@ -3,9 +3,17 @@ import {
   type ProjectSetupFields,
   type ProjectSetupView,
   projectSetupFields,
-  projectSetupView,
 } from "../../../../packages/project-domain/src/setup";
-import { apiRequest } from "../api-client";
+import { invoke } from "@solidjs/web/server-functions/client";
+import {
+  getSetupDraft,
+  beginSetupDraft,
+  saveSetupDraft,
+  createSetupProject,
+  checkSetupProject,
+  retrySetupProject,
+} from "../server-functions/setup";
+import { serverCall } from "../server-functions/result";
 import { Icon } from "../icon";
 import "./setup.css";
 import { SetupInspection } from "./inspection-panel";
@@ -47,7 +55,7 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     () => undefined,
     () => {
       const loadedNavigation = navigation;
-      void apiRequest(projectSetupView.nullable(), "/api/project-setup")
+      void serverCall(getSetupDraft())
         .then((value) => {
           if (loadedNavigation !== navigation) return;
           if (value) setDraft(value);
@@ -72,9 +80,7 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
       let timer: ReturnType<typeof setTimeout>;
       const observe = async () => {
         try {
-          const value = await apiRequest(projectSetupView.nullable(), "/api/project-setup", {
-            signal: abort.signal,
-          });
+          const value = await serverCall(invoke(getSetupDraft, { signal: abort.signal }));
           if (
             !disposed &&
             navigation === admittedNavigation &&
@@ -101,51 +107,40 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     if (pending()) return;
     navigation++;
     commandID = undefined;
-    await action(() =>
-      apiRequest(projectSetupView.nullable(), "/api/project-setup", { method: "POST" }),
-    );
+    await action(() => serverCall(beginSetupDraft()));
   }
   async function save(fields: ProjectSetupFields, setupID: string) {
     const value = draft();
     if (!value || value.id !== setupID || value.state !== "draft")
       throw new Error("This setup has changed. Your draft is retained locally.");
-    const next = await apiRequest(projectSetupView, "/api/project-setup", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ id: value.id, version: value.version, ...fields }),
-    });
+    const next = await serverCall(
+      saveSetupDraft({ id: value.id, version: value.version, ...fields }),
+    );
     if (draft()?.id === next.id) setDraft(next);
   }
   let commandID: string | undefined;
   async function create(token: string | undefined) {
     const value = draft();
     if (!value) return;
-    commandID = value.commandID ?? commandID ?? crypto.randomUUID();
+    const submittedCommandID = value.commandID ?? commandID ?? crypto.randomUUID();
+    commandID = submittedCommandID;
     await action(() =>
-      apiRequest(projectSetupView, "/api/project-setup/create", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+      serverCall(
+        createSetupProject({
           id: value.id,
           version: value.version,
-          commandID,
+          commandID: submittedCommandID,
           ...(token ? { importToken: token } : {}),
         }),
-      }),
+      ),
     );
   }
   async function check() {
     const value = draft();
     if (value)
       await action(() =>
-        apiRequest(
-          projectSetupView,
-          value.state === "failed" ? "/api/project-setup/retry" : "/api/project-setup/check",
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ id: value.id }),
-          },
+        serverCall(
+          value.state === "failed" ? retrySetupProject(value.id) : checkSetupProject(value.id),
         ),
       );
   }

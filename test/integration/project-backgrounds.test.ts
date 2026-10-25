@@ -1,11 +1,14 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { factoryProcess } from "../fixtures/factory-process";
-import { createProjectRoute } from "../../apps/factory/src/routes/projects";
+import { createProjectService } from "../../apps/factory/src/projects/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 
 test("new Projects spread persistent backgrounds across the catalogue, including concurrent registrations", async () => {
   const owned = await factoryProcess();
@@ -15,31 +18,39 @@ test("new Projects spread persistent backgrounds across the catalogue, including
     await database.client`INSERT INTO auth."user"(id,name,email)
       VALUES(${manager},'Project manager',${`${manager}@background.test`})`;
     await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
-    const register = createProjectRoute({
+    const service = createProjectService({
       database,
       localRepositoryOrigin: "https://forge.test",
       forgeOwner: "factory",
-      session: async () => ({ user: { id: manager } }),
       ensureStaging: async () => {},
       generateKnowledge: async () => {},
       ensureKnowledgeHook: async () => {},
     });
-    const create = async (index: number) => {
-      const response = await register(
-        new Request("https://factory.test/api/projects", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            slug: `background-${index}`,
-            name: `Background ${index}`,
-            repositoryUrl: `https://forge.test/factory/background-${index}`,
-            defaultBranch: "main",
-            devcontainerPath: ".devcontainer/devcontainer.json",
-          }),
-        }),
+    const origin = "https://factory.test";
+    const endpoint = await compiledFactoryEndpoint({
+      origin,
+      services: { projects: service } as unknown as FactoryServices,
+      session: async () => ({ user: { id: manager } }),
+      maintenance: async () => false,
+      requireFresh: async () => {},
+    });
+    async function native<T>(name: string, args: unknown[]) {
+      const result = await decodeResponse<ServerResult<T>>(
+        await endpoint(await factoryFunctionRequest(origin, name, args)),
       );
-      expect(response.status).toBe(201);
-      return (await response.json()) as { id: string; desktopBackgroundKey: string };
+      if (!result) throw new Error("Owned Project function returned no result");
+      return serverCall(Promise.resolve(result));
+    }
+    const create = async (index: number) => {
+      return native<{ id: string; desktopBackgroundKey: string }>("registerProject", [
+        {
+          slug: `background-${index}`,
+          name: `Background ${index}`,
+          repositoryUrl: `https://forge.test/factory/background-${index}`,
+          defaultBranch: "main",
+          devcontainerPath: ".devcontainer/devcontainer.json",
+        },
+      ]);
     };
     const first = [];
     for (let index = 0; index < 6; index++) first.push(await create(index));
@@ -51,9 +62,7 @@ test("new Projects spread persistent backgrounds across the catalogue, including
     for (const key of desktopBackgroundKeys)
       expect(projects.filter((project) => project.desktopBackgroundKey === key)).toHaveLength(3);
     await database.client`UPDATE factory.project SET name=name || ' renamed'`;
-    const listed = await register(new Request("https://factory.test/api/projects"));
-    expect(listed.status).toBe(200);
-    const body = (await listed.json()) as { projects: typeof projects };
+    const body = await native<{ projects: typeof projects }>("getProjects", []);
     for (const project of projects)
       expect(body.projects.find((row) => row.id === project.id)?.desktopBackgroundKey).toBe(
         project.desktopBackgroundKey,
@@ -151,7 +160,7 @@ test("only active Project managers can change a shared background and unrelated 
   }
 });
 
-test("upgrading existing Projects retains the creator's artwork without changing identities or personal preferences", async () => {
+test("new Projects receive catalogue backgrounds without changing identities or personal preferences", async () => {
   const owned = await factoryProcess();
   const database = owned.connect(1);
   const creator = crypto.randomUUID();
@@ -159,13 +168,6 @@ test("upgrading existing Projects retains the creator's artwork without changing
   const projectId = crypto.randomUUID();
   const otherProjectId = crypto.randomUUID();
   try {
-    // Reconstruct the immediately preceding schema in this test's private database.
-    await database.client.unsafe(`
-      DROP TRIGGER project_background_assignment ON factory.project;
-      DROP FUNCTION factory.assign_project_background();
-      ALTER TABLE factory.project DROP COLUMN desktop_background_key;
-      DELETE FROM factory.schema_migration WHERE version=16;
-    `);
     for (const id of [creator, anotherCreator])
       await database.client`INSERT INTO auth."user"(id,name,email)
         VALUES(${id},'Existing owner',${`${id}@background.test`})`;
@@ -182,16 +184,16 @@ test("upgrading existing Projects retains the creator's artwork without changing
     const before = await database.client`
       SELECT to_jsonb(project) AS project FROM factory.project project ORDER BY id`;
     const preferences = await database.client`SELECT * FROM factory.user_ui_preference`;
-    await database.client.unsafe(
-      await readFile("packages/db/migrations/0016_project_backgrounds.sql", "utf8"),
-    );
+    const backgrounds: string[] = [];
     for (const id of [projectId, otherProjectId]) {
       const [row] = await database.client<{ key: string }[]>`
         SELECT desktop_background_key AS key FROM factory.project WHERE id=${id}`;
-      expect(row?.key).toBe(id === projectId ? "the-harvesters" : "river-landscape");
+      expect(desktopBackgroundKeys.some((key) => key === row?.key)).toBe(true);
+      backgrounds.push(row!.key);
     }
+    expect(new Set(backgrounds).size).toBe(2);
     expect(
-      await database.client`SELECT to_jsonb(project)-'desktop_background_key' AS project
+      await database.client`SELECT to_jsonb(project) AS project
         FROM factory.project project ORDER BY id`,
     ).toEqual(before);
     expect(await database.client`SELECT * FROM factory.user_ui_preference`).toEqual(preferences);

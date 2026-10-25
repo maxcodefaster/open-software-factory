@@ -108,7 +108,10 @@ export function createExecutionReserve(
       sql: SQL,
       attemptID: string,
       role?: ReserveRole,
-      owner?: { projectID: string; kind: "development" | "staging" | "verification" | "prebuild" },
+      owner?: {
+        projectID: string;
+        kind: "development" | "staging" | "verification" | "prebuild" | "publication";
+      },
     ) => store.admit(sql, attemptID, role, owner),
     assigned: (sql: SQL, attemptID: string) => store.assigned(sql, attemptID),
     async activate(attemptID: string, resources: readonly unknown[]) {

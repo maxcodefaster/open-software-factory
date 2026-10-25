@@ -1,3 +1,6 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { browserBootstrap } from "../fixtures/server-functions";
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
@@ -58,7 +61,7 @@ test("an unsafe System Contract fails before Kubernetes create", async ({ page }
     await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
 
-    const { session } = await (await page.request.get("/api/session")).json();
+    const { session } = await browserBootstrap(page);
     // Only planning fixture state is seeded. The authenticated runtime command
     // must inspect the real exact-commit Forgejo file before creating anything.
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
@@ -66,18 +69,21 @@ test("an unsafe System Contract fails before Kubernetes create", async ({ page }
     const project = { id: projectID };
     testedProjectID = projectID;
 
-    const startResponse = await page
-      .context()
-      .request.post(`/api/projects/${project.id}/personal-workspace/ensure`, {
-        headers: { origin: "http://127.0.0.1:3000" },
-      });
-    expect(startResponse.status()).toBe(422);
-    await expect(startResponse.json()).resolves.toMatchObject({
-      error: expect.stringContaining("cannot use a shell command string"),
+    const startResponse = await requestFunction(page.request, "startPersonalWorkspace", [
+      project.id,
+    ]);
+    expect(startResponse).toMatchObject({
+      ok: false,
+      status: 422,
+      message: expect.stringContaining("cannot use a shell command string"),
     });
 
-    const attemptsResponse = await page.context().request.get("/api/runtime-attempts");
-    const attempts = (await attemptsResponse.json()) as {
+    const attemptsResponse = await requestFunction(
+      page.context().request,
+      "getRuntimeAttempts",
+      [],
+    );
+    const attempts = (await serverCall(Promise.resolve(attemptsResponse))) as {
       attempts: Array<{ projectId: string }>;
     };
     expect(attempts.attempts.filter((attempt) => attempt.projectId === project.id)).toEqual([]);

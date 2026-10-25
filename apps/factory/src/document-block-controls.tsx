@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { codeLanguages } from "./code-highlighting";
-import type { DocumentBlockState, DocumentEditor, TableCommand } from "./document-editor";
+import type { DocumentBlockState, DocumentEditor, TableCommand } from "./document-model";
 import { CopyButton } from "./ui/feedback";
 
 const tableActions = [

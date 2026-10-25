@@ -1,3 +1,6 @@
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
@@ -15,19 +18,22 @@ test.beforeEach(async ({ page }) => {
   test.skip(!observer, "Requires an isolated Factory and its controlled planning-model observer");
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   database = createDatabase(2);
   projectID = crypto.randomUUID();
   slug = `explicit-requirements-${projectID.slice(0, 8)}`;
   await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
     VALUES(${projectID},${slug},'Explicit Requirements','https://example.invalid/owned/requirements.git','main','.devcontainer/devcontainer.json',${session.user.id})`;
-  for (const action of ["source-workspace", "developer-ide"])
-    await page.route(`**/api/projects/${projectID}/${action}/ensure`, (route) =>
-      route.fulfill({
-        status: 503,
-        json: { error: "This planning fixture starts no runtime" },
-      }),
-    );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "This planning fixture starts no runtime");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "This planning fixture starts no runtime");
+      },
+    },
+  });
   await mkdir(captures, { recursive: true });
   await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
@@ -120,9 +126,13 @@ for (const idea of [false, true])
     ).toHaveLength(0);
     expect(await calls(page)).toBe(baseline);
     let input: { commandId: string; revisionId: string } | undefined;
-    await page.route(`**/api/tickets/${ticketID}/implement`, async (route) => {
-      input = route.request().postDataJSON();
-      await route.fulfill({ status: 202, json: {} });
+    await mockFactoryFunctions(page, {
+      tickets: {
+        async implement(_actor, _id, value) {
+          input = value;
+          return { id: crypto.randomUUID() };
+        },
+      },
     });
     await page.getByRole("button", { name: "Implement", exact: true }).click();
     await expect.poll(() => input?.revisionId).toBeTruthy();

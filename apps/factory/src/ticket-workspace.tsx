@@ -14,10 +14,10 @@ import {
   type DocumentEditor,
   documentBlocks,
   supportsDocumentMarkdown,
-} from "./document-editor";
+} from "./document-model";
 import { documentSlash, filterDocumentBlocks } from "./document-slash";
+import { DocumentLinkEditor } from "./document-link-editor";
 import { editorCommandHeight, editorPopoverPosition } from "./editor-popover-position";
-import { editorTextRectangles } from "./editor-text-rectangles";
 import { markdownHTML } from "./markdown";
 import { RequirementDocument } from "./requirement-document";
 import { type ReviewActions, ReviewPanel, ReviewThreadStatus } from "./review/panel";
@@ -371,11 +371,8 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
   }
   let documentElement: HTMLElement | undefined;
   let requestDetailsElement: HTMLDetailsElement | undefined;
-  let linkInput: HTMLInputElement | undefined;
   const [formattingElement, setFormattingElement] = createSignal<HTMLDivElement>();
   const [commandElement, setCommandElement] = createSignal<HTMLDivElement>();
-  const [popoverShelfHeight, setPopoverShelfHeight] = createSignal(0);
-  let shelfElement: HTMLElement | undefined;
   const acceptanceElements = new Map<number, HTMLElement>();
   const nonGoalElements = new Map<number, HTMLElement>();
   const editors = new WeakMap<HTMLElement, DocumentEditor>();
@@ -617,24 +614,11 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       height: size.height,
       gap,
       preferBelow,
-      // Slash commands stay at the insertion point. Selection formatting still
-      // protects adjacent text instead of covering the passage being edited.
-      avoid: preferBelow ? [] : editorTextRectangles(documentRoot, viewport),
+      align: preferBelow || element.classList.contains("is-link-editing") ? "start" : "center",
     });
-    if (!position || shelfElement === element) {
-      // Reserve real layout space until this control closes. Re-evaluating the reduced
-      // viewport must not alternate between floating and reserved placement.
-      shelfElement = element;
-      setPopoverShelfHeight(size.height + 2 * gap);
-      const left = Math.max(bounds.left, Math.min(anchorBounds.left, bounds.right - size.width));
-      element.style.left = `${left - root.left}px`;
-      element.style.top = `${gap}px`;
-      element.setAttribute("data-placement", "reserved");
-    } else {
-      element.style.left = `${position.left - root.left}px`;
-      element.style.top = `${position.top - root.top}px`;
-      element.setAttribute("data-placement", "floating");
-    }
+    element.style.left = `${position.left - root.left}px`;
+    element.style.top = `${position.top - root.top}px`;
+    element.setAttribute("data-placement", "floating");
     element.setAttribute("data-positioned", "true");
   }
 
@@ -647,17 +631,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       command: commandElement(),
     }),
     (state) => {
-      if (!state.toolbar && !state.menu) {
-        shelfElement = undefined;
-        setPopoverShelfHeight(0);
-        return;
-      }
-      const activeFormatting = state.toolbar ? state.formatting : undefined;
-      const activeCommand = state.menu ? state.command : undefined;
-      if (shelfElement && shelfElement !== activeFormatting && shelfElement !== activeCommand) {
-        shelfElement = undefined;
-        setPopoverShelfHeight(0);
-      }
+      if (!state.toolbar && !state.menu) return;
       let disposed = false;
       const position = () => {
         if (disposed) return;
@@ -665,18 +639,30 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
         if (state.menu) placePopover(state.command, state.menu.range, true);
       };
       const viewport = documentElement?.closest(".ticket-workspace");
+      const dismiss = (event: PointerEvent) => {
+        if (
+          state.toolbar &&
+          event.target instanceof Node &&
+          !state.formatting?.contains(event.target)
+        ) {
+          setSelectionToolbar(undefined);
+          setLinkEditing(false);
+        }
+      };
       const observer = new ResizeObserver(position);
       if (state.toolbar && state.formatting) observer.observe(state.formatting);
       if (state.menu && state.command) observer.observe(state.command);
       if (viewport) observer.observe(viewport);
       viewport?.addEventListener("scroll", position);
       window.addEventListener("resize", position);
-      queueMicrotask(position);
+      document.addEventListener("pointerdown", dismiss);
+      onSettled(position);
       return () => {
         disposed = true;
         observer.disconnect();
         viewport?.removeEventListener("scroll", position);
         window.removeEventListener("resize", position);
+        document.removeEventListener("pointerdown", dismiss);
       };
     },
   );
@@ -697,6 +683,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
       return;
     }
     const range = selection.getRangeAt(0).cloneRange();
+    setLinkEditing(false);
     setSelectionToolbar({ element, range });
     setSlashMenu(undefined);
   }
@@ -720,22 +707,22 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
 
   function startLinkEditing() {
     setLinkEditing(true);
-    queueMicrotask(() => linkInput?.focus({ preventScroll: true }));
   }
 
-  function applyLink() {
+  function closeFormatting() {
     const toolbar = selectionToolbar();
-    const value = linkInput?.value.trim();
-    if (!toolbar || !value) return;
-    const url = /^https?:\/\//i.test(value) ? value : `https://${value}`;
-    try {
-      const parsed = new URL(url);
-      if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("Unsupported protocol");
-    } catch {
-      setEditorError("Enter a valid web address.");
-      return;
+    setSelectionToolbar(undefined);
+    setLinkEditing(false);
+    if (toolbar) {
+      toolbar.element.focus({ preventScroll: true });
+      restoreSelection(toolbar.range);
     }
-    editors.get(toolbar.element)?.link(url, toolbar.range);
+  }
+
+  function applyLink(href: string) {
+    const toolbar = selectionToolbar();
+    if (!toolbar) return;
+    editors.get(toolbar.element)?.link(href, toolbar.range);
     setLinkEditing(false);
     setSelectionToolbar(undefined);
   }
@@ -1137,15 +1124,6 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
   return (
     <div class={`ticket-layout${historyOpen() ? " has-inspector" : ""}`}>
       <div class="ticket-editor-frame">
-        <Show when={popoverShelfHeight()}>
-          {(height) => (
-            <div
-              class="editor-popover-shelf"
-              style={{ height: `${height()}px` }}
-              aria-hidden="true"
-            />
-          )}
-        </Show>
         <div class="ticket-workspace">
           <Show when={historicalRevision()}>
             {(revision) => (
@@ -1165,7 +1143,7 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
             tabindex="-1"
           >
             <header class="ticket-document-heading">
-              <div class="ticket-status-row">
+              <div class="ticket-status-row workspace-heading">
                 <RichTextSurface
                   value={draftTitle()}
                   label="Ticket title"
@@ -1173,63 +1151,11 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                   editable={canEditSpecification()}
                   plain={true}
                   placeholder="Untitled ticket"
-                  class="ticket-inline-title"
+                  class="ticket-inline-title workspace-heading-title"
                   {...richTextHandlers({ field: "title", update: setDraftTitle })}
                 />
-                <Show when={props.current.proposal && !proposal()}>
-                  <span class="ticket-document-notice" role="status">
-                    The Ticket changed. Your current text is kept; clarify again for a new proposal.
-                  </span>
-                </Show>
-                <div class="ticket-status-context">
-                  <span>{props.ticketReference}</span>
-                  <Show when={props.change} fallback={<span>{effectiveStatus()}</span>}>
-                    <TicketChecks
-                      details={props.delivery}
-                      fallback={effectiveStatus()}
-                      building={implementationBusy() && !props.computeWait && !props.codingPause}
-                      preparing={implementationPreparing()}
-                      unsubmitted={
-                        props.change?.state === "active" &&
-                        ((props.change.implementationState !== undefined &&
-                          props.change.implementationState !== "committed") ||
-                          ["failed", "stopped", "uncertain"].includes(
-                            props.change.buildTurnState ?? "",
-                          ))
-                      }
-                    />
-                  </Show>
-                  <Show
-                    when={
-                      props.change &&
-                      (openReviewThreads() ?? props.delivery?.openReviewThreads) !== undefined
-                    }
-                  >
-                    <ReviewThreadStatus
-                      count={openReviewThreads() ?? props.delivery?.openReviewThreads ?? 0}
-                    />
-                  </Show>
-                  <Show
-                    when={
-                      !props.change &&
-                      props.current.ticket.state === "ready" &&
-                      props.latestRevision
-                    }
-                  >
-                    {(revision) => (
-                      <span>
-                        {revision().approvalId ? "Implementation scope" : "Ready to implement"}
-                      </span>
-                    )}
-                  </Show>
-                </div>
                 <TicketActionBar
                   actions={headerActions()}
-                  status={
-                    canInterview() && props.clarificationAction.status
-                      ? props.clarificationAction.label
-                      : undefined
-                  }
                   menu={
                     <Show
                       when={
@@ -1284,6 +1210,71 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                     </Show>
                   }
                 />
+                <div class="ticket-status-context workspace-heading-meta">
+                  <span>{props.ticketReference}</span>
+                  <Show when={props.change} fallback={<span>{effectiveStatus()}</span>}>
+                    <TicketChecks
+                      details={props.delivery}
+                      fallback={effectiveStatus()}
+                      building={implementationBusy() && !props.computeWait && !props.codingPause}
+                      preparing={implementationPreparing()}
+                      unsubmitted={
+                        props.change?.state === "active" &&
+                        ((props.change.implementationState !== undefined &&
+                          props.change.implementationState !== "committed") ||
+                          ["failed", "stopped", "uncertain"].includes(
+                            props.change.buildTurnState ?? "",
+                          ))
+                      }
+                    />
+                  </Show>
+                  <Show
+                    when={
+                      props.change &&
+                      (openReviewThreads() ?? props.delivery?.openReviewThreads) !== undefined
+                    }
+                  >
+                    <ReviewThreadStatus
+                      count={openReviewThreads() ?? props.delivery?.openReviewThreads ?? 0}
+                    />
+                  </Show>
+                  <Show
+                    when={
+                      !props.change &&
+                      props.current.ticket.state === "ready" &&
+                      props.latestRevision
+                    }
+                  >
+                    {(revision) => (
+                      <span>
+                        {revision().approvalId ? "Implementation scope" : "Ready to implement"}
+                      </span>
+                    )}
+                  </Show>
+                  <Show when={canInterview() && props.clarificationAction.status}>
+                    <span class="clarification-status" role="status">
+                      {props.clarificationAction.label}
+                    </span>
+                  </Show>
+                  <SaveFeedback
+                    state={
+                      saving()
+                        ? "saving"
+                        : editorError()
+                          ? "error"
+                          : editing() && hasChanges()
+                            ? "dirty"
+                            : savedDocument()
+                              ? "saved"
+                              : "idle"
+                    }
+                  />
+                </div>
+                <Show when={props.current.proposal && !proposal()}>
+                  <span class="ticket-document-notice workspace-heading-meta" role="status">
+                    The Ticket changed. Your current text is kept; clarify again for a new proposal.
+                  </span>
+                </Show>
               </div>
               <Show when={props.computeWait && !props.codingPause}>
                 <p class="agent-activity-notice" role="status">
@@ -1481,21 +1472,6 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
               </Show>
             </section>
 
-            <div class="ticket-save-status">
-              <SaveFeedback
-                state={
-                  saving()
-                    ? "saving"
-                    : editorError()
-                      ? "error"
-                      : editing() && hasChanges()
-                        ? "dirty"
-                        : savedDocument()
-                          ? "saved"
-                          : "idle"
-                }
-              />
-            </div>
             <Show when={editorError()}>
               <p class="inline-error" role="alert">
                 {editorError()}
@@ -1508,20 +1484,14 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
           {(_toolbar) => (
             <div
               ref={setFormattingElement}
-              class="selection-toolbar"
+              class={`selection-toolbar${linkEditing() ? " is-link-editing" : ""}`}
               role="toolbar"
               aria-label="Text formatting"
               onKeyDown={(event) => {
                 if (event.key !== "Escape") return;
                 event.preventDefault();
                 event.stopPropagation();
-                const toolbar = selectionToolbar();
-                setSelectionToolbar(undefined);
-                setLinkEditing(false);
-                if (toolbar) {
-                  toolbar.element.focus({ preventScroll: true });
-                  restoreSelection(toolbar.range);
-                }
+                closeFormatting();
               }}
             >
               <Show
@@ -1551,10 +1521,11 @@ export function TicketWorkspace(props: TicketWorkspaceProps) {
                   </>
                 }
               >
-                <input ref={linkInput} aria-label="Link URL" placeholder="https://" />
-                <button type="button" onClick={applyLink}>
-                  Apply
-                </button>
+                <DocumentLinkEditor
+                  inputLabel="Link URL"
+                  onInsert={applyLink}
+                  onCancel={closeFormatting}
+                />
               </Show>
             </div>
           )}

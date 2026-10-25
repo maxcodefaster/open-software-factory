@@ -1,3 +1,5 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -69,9 +71,7 @@ test.afterAll(async () => {
 
 test.afterEach(async ({ context }) => {
   if (createdChangeID) {
-    await context.request.post(`/api/changes/${createdChangeID}/cancel`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    });
+    await serverCall(requestFunction(context.request, "cancelChange", [createdChangeID]));
   }
   await teardownFactoryProject(context.request, createdProjectID);
   createdChangeID = null;
@@ -185,8 +185,8 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
     .toBeGreaterThan(0);
   await expect(page.locator(".agent-state")).toHaveText("working");
 
-  const attemptsBeforeStop = await context.request.get("/api/runtime-attempts");
-  const firstAttempts = (await attemptsBeforeStop.json()) as {
+  const attemptsBeforeStop = await requestFunction(context.request, "getRuntimeAttempts", []);
+  const firstAttempts = (await serverCall(Promise.resolve(attemptsBeforeStop))) as {
     attempts: Array<{ id: string; projectId: string; state: string }>;
   };
   const firstAttempt = firstAttempts.attempts.find(
@@ -218,14 +218,12 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(page.locator(".agent-state")).toHaveText("stopped");
 
-  await context.request.post(`/api/runtime-attempts/${firstAttempt.id}/stop`, {
-    headers: { origin: "http://127.0.0.1:3000" },
-  });
+  await serverCall(requestFunction(context.request, "stopRuntimeAttempt", [firstAttempt.id]));
   await expect
     .poll(
       async () => {
-        const response = await context.request.get("/api/runtime-attempts");
-        const body = (await response.json()) as {
+        const response = await requestFunction(context.request, "getRuntimeAttempts", []);
+        const body = (await serverCall(Promise.resolve(response))) as {
           attempts: Array<{ id: string; state: string }>;
         };
         return body.attempts.find((attempt) => attempt.id === firstAttempt.id)?.state;
@@ -249,8 +247,8 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
   await expect(page.getByText(/local syntax check passed/i)).toBeVisible();
   await expect(page.getByText("Workspace ready", { exact: true })).toBeVisible();
 
-  const attemptsAfterResume = await context.request.get("/api/runtime-attempts");
-  const resumedAttempts = (await attemptsAfterResume.json()) as {
+  const attemptsAfterResume = await requestFunction(context.request, "getRuntimeAttempts", []);
+  const resumedAttempts = (await serverCall(Promise.resolve(attemptsAfterResume))) as {
     attempts: Array<{ id: string; projectId: string; state: string }>;
   };
   const resumedAttempt = resumedAttempts.attempts.find(
@@ -269,9 +267,9 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
   const branch = await forge.getBranch(repository, identity.branchName);
   expect(branch?.headSha).toMatch(/^[0-9a-f]{40}$/);
   expect(branch?.headSha).not.toBe(base.headSha);
-  const agentView = (await (
-    await context.request.get(`/api/changes/${identity.changeID}/agent`)
-  ).json()) as { commitSHA: string };
+  const agentView = (await serverCall(
+    requestFunction(context.request, "getAgentView", [identity.changeID]),
+  )) as { commitSHA: string };
   expect(agentView.commitSHA).toBe(branch?.headSha);
   const contentResponse = await fetch(
     `http://127.0.0.1:33030/api/v1/repos/${repository.owner}/${repository.name}/contents/src/version.txt?ref=${encodeURIComponent(identity.branchName)}`,
@@ -287,8 +285,8 @@ test("OpenCode stops, resumes the retained Ticket Workspace, checks, and pushes"
     await expect
       .poll(
         async () => {
-          const response = await context.request.get("/api/runtime-attempts");
-          const body = (await response.json()) as {
+          const response = await requestFunction(context.request, "getRuntimeAttempts", []);
+          const body = (await serverCall(Promise.resolve(response))) as {
             attempts: Array<{ id: string; state: string }>;
           };
           return body.attempts.find((runtime) => runtime.id === resumedAttempt.id)?.state;

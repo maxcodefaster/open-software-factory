@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 
-/** Project switching is a secondary action in the desktop Settings menu. */
+/** Desktop has a direct selector; phones keep Project switching in Settings. */
 export async function openProjectMenu(page: Page) {
   const switcher = page.getByRole("button", { name: "Open project menu", exact: true });
   if (!(await switcher.isVisible()))

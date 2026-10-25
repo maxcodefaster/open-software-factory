@@ -1,5 +1,6 @@
 import { render } from "@solidjs/web";
 import { SettingsWorkspace } from "../../apps/factory/src/settings-workspace";
+import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
@@ -8,18 +9,33 @@ import "@fontsource/sansita/400-italic.css";
 const manager = new URLSearchParams(location.search).get("role") !== "viewer";
 render(
   () => (
-    <main style="height:100dvh;display:grid;grid-template-rows:auto minmax(0,1fr);background:var(--material-panel)">
-      <header style="padding:12px 24px;border-bottom:1px solid var(--line-subtle);font:var(--text-xs) var(--font-interface)">
-        Factory settings · Isolated component proof with synthetic requests
+    <main class="factory-desktop" aria-label="Isolated settings proof with synthetic requests">
+      <header class="factory-topbar">
+        <div class="topbar-start">
+          <span class="context-button">Invoice workspace</span>
+        </div>
       </header>
-      <SettingsWorkspace
-        active
-        userID="10000000-0000-4000-8000-000000000002"
-        project={{ id: "10000000-0000-4000-8000-000000000001", name: "Invoice workspace" }}
-        systemManager={manager}
-        projectManager={manager}
-        developer={manager}
-      />
+      <section class="workspace-window" aria-label="Settings window">
+        <WorkspaceTabbar
+          tabs={[{ id: "settings", view: "settings", label: "Settings" }]}
+          activeTabID="settings"
+          onActivate={() => {}}
+          onClose={() => {}}
+          onMinimize={() => {}}
+        />
+        <div class="workspace-view-body">
+          <div class="settings-tab-panel">
+            <SettingsWorkspace
+              active
+              userID="10000000-0000-4000-8000-000000000002"
+              project={{ id: "10000000-0000-4000-8000-000000000001", name: "Invoice workspace" }}
+              systemManager={manager}
+              projectManager={manager}
+              developer={manager}
+            />
+          </div>
+        </div>
+      </section>
     </main>
   ),
   document.getElementById("root")!,

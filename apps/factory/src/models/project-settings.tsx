@@ -1,13 +1,17 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import {
-  inheritedModelSettingsView,
   type InheritedModelSettingsView,
   type ModelRole,
   modelRoles,
   type ProjectModelSettings as ProjectSettings,
   type PersonalModelSettings,
 } from "../../../../packages/conversation-domain/src/model-inheritance";
-import { apiRequest } from "../api-client";
+import {
+  getProjectModels,
+  saveProjectModels,
+  savePersonalModels,
+} from "../server-functions/models";
+import { serverCall } from "../server-functions/result";
 
 export function ProjectModelSettings(props: {
   projectID: string;
@@ -21,7 +25,6 @@ export function ProjectModelSettings(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   const [saved, setSaved] = createSignal(false);
-  const url = () => `/api/projects/${props.projectID}/model-settings`;
   let disposed = false;
   const dirty = (manage = management()) =>
     JSON.stringify(manage ? project() : personal()) !==
@@ -35,10 +38,7 @@ export function ProjectModelSettings(props: {
     setBusy(true);
     setError("");
     try {
-      const value = await apiRequest(
-        inheritedModelSettingsView,
-        `/api/projects/${projectID}/model-settings`,
-      );
+      const value = await serverCall(getProjectModels(projectID));
       if (!disposed && projectID === props.projectID) publish(value);
     } catch (cause) {
       if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
@@ -53,14 +53,13 @@ export function ProjectModelSettings(props: {
     setError("");
     setSaved(false);
     try {
-      const value = await apiRequest(
-        inheritedModelSettingsView,
-        `${url()}${management() ? "" : "/personal"}`,
-        {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(management() ? project() : personal()),
-        },
+      const projectInput = project();
+      const personalInput = personal();
+      if (!projectInput || !personalInput) return;
+      const value = await serverCall(
+        management()
+          ? saveProjectModels(props.projectID, projectInput)
+          : savePersonalModels(props.projectID, personalInput),
       );
       if (!disposed) {
         publish(value);

@@ -1,3 +1,12 @@
+import {
+  attemptsResponseSchema,
+  appPreviewsSchema,
+  changesResponseSchema,
+  conversationViewSchema,
+} from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
+import { projectSetupView, type ProjectSetupView } from "../../packages/project-domain/src/setup";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
@@ -23,13 +32,18 @@ test.beforeEach(async ({ page }) => {
   await mkdir(evidence, { recursive: true });
   await signIn(page);
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   projectID = crypto.randomUUID();
-  for (const endpoint of ["source-workspace", "developer-ide"]) {
-    await page.route(`**/api/projects/${projectID}/${endpoint}/ensure`, (route) =>
-      route.fulfill({ status: 503, json: { error: "Planning-only visual fixture" } }),
-    );
-  }
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Planning-only visual fixture");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Planning-only visual fixture");
+      },
+    },
+  });
   const db = createDatabase(1);
   ticketID = crypto.randomUUID();
   const content = canonicalRequirementContent({
@@ -170,30 +184,31 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
 test("visual sweep keeps citation markers on their claim's last line", async ({ page }) => {
   const body =
     "Staging Preview shows the app from the default branch; it is not the Ticket workspace, which is where you work with a specific Ticket. The Wiki does not describe the Ticket workspace’s contents or behavior, so I can’t make a more detailed comparison from it.[^1]";
-  await page.route(new RegExp(`/api/projects/${projectID}/conversation(?:\\?.*)?$`), (route) =>
-    route.fulfill({
-      json: {
-        id: crypto.randomUUID(),
-        projectId: projectID,
-        ticketId: ticketID,
-        mode: "plan",
-        version: 1,
-        entries: [
-          {
-            id: crypto.randomUUID(),
-            ordinal: 1,
-            kind: "agent-message",
-            actor: "project-agent",
-            mode: "plan",
-            body,
-            payload: {},
-            citations: [{ source: "ticket", id: ticketID, label: title, reference: 1 }],
-            createdAt: new Date().toISOString(),
-          },
-        ],
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async () =>
+        conversationViewSchema.parse({
+          id: crypto.randomUUID(),
+          projectId: projectID,
+          ticketId: ticketID,
+          mode: "plan",
+          version: 1,
+          entries: [
+            {
+              id: crypto.randomUUID(),
+              ordinal: 1,
+              kind: "agent-message",
+              actor: "project-agent",
+              mode: "plan",
+              body,
+              payload: {},
+              citations: [{ source: "ticket", id: ticketID, label: title, reference: 1 }],
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        }),
+    },
+  });
   await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   const citation = page.getByRole("button", { name: `Source 1: ${title}`, exact: true });
   await expect(citation).toBeVisible();
@@ -458,30 +473,37 @@ test("silent Preview attachment offers a bounded reload of the same instance", a
     )
       computeStarts++;
   });
-  await page.route(`**/api/runtime-attempts?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        attempts: [
-          {
-            id: attemptID,
-            projectId: projectID,
-            runtimeKind: "staging",
-            currentStaging: true,
-            state: "ready",
-          },
-        ],
-      },
-    }),
-  );
-  await page.route(`**/api/projects/${projectID}/app-previews`, (route) =>
-    route.fulfill({
-      json: {
-        previews: [
-          { attemptID: developmentAttemptID, projectID, channel: "web", label: "Development app" },
-        ],
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    runtime: {
+      attempts: async () =>
+        attemptsResponseSchema.parse({
+          attempts: [
+            {
+              id: attemptID,
+              projectId: projectID,
+              runtimeKind: "staging",
+              currentStaging: true,
+              state: "ready",
+            },
+          ],
+        }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    runtime: {
+      previews: async () =>
+        appPreviewsSchema.parse({
+          previews: [
+            {
+              attemptID: developmentAttemptID,
+              projectID,
+              channel: "web",
+              label: "Development app",
+            },
+          ],
+        }),
+    },
+  });
   await page.route("**/api/runtime-access?embed=1&path=*", async (route) => {
     documents++;
     if (documents === 1) await stalled;
@@ -529,25 +551,26 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
     )
       starts++;
   });
-  await page.route("**/api/changes?*", (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/visual-only",
-            baseSha: "a".repeat(40),
-            state: "active",
-            branchState: "succeeded",
-            implementationState: "committed",
-            buildTurnState: "completed",
-          },
-        ],
-      },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/visual-only",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              implementationState: "committed",
+              buildTurnState: "completed",
+            },
+          ],
+        }),
+    },
+  });
   const chooser = page.getByRole("button", { name: "Choose IDE instance", exact: true });
   await expect(chooser).toBeVisible({ timeout: 10_000 });
   const group = page.locator(".dock-app.has-instances");
@@ -572,7 +595,7 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
   await expect(items.nth(1)).toBeFocused();
   const focused = await items.nth(1).elementHandle();
   const refreshed = await page.waitForResponse((response) =>
-    response.url().endsWith(`/api/changes?projectId=${projectID}`),
+    new URL(response.url()).pathname.startsWith("/_server/data/getChanges-"),
   );
   await refreshed.finished();
   await page.evaluate(
@@ -682,7 +705,7 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
   }
 
   // UI-only setup responses do not begin or overwrite the administrator's retained setup.
-  let setup = {
+  let setup: ProjectSetupView = {
     id: crypto.randomUUID(),
     version: 1,
     state: "draft",
@@ -694,19 +717,23 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
     kind: "starter",
     sourceURL: "",
   };
-  await page.route("**/api/project-setup", async (route) => {
-    if (route.request().method() === "PUT") {
-      setup = { ...setup, ...route.request().postDataJSON(), version: setup.version + 1 };
-    }
-    await route.fulfill({ json: setup });
-  });
-  await page.route("**/api/project-setup/create", async (route) => {
-    setup = {
-      ...setup,
-      state: "failed",
-      failure: "Repository host is unavailable. Your setup is retained.",
-    };
-    await route.fulfill({ json: setup });
+  await mockFactoryFunctions(page, {
+    setup: {
+      draft: async () => projectSetupView.parse(setup),
+      begin: async () => projectSetupView.parse(setup),
+      save: async (_actor, input) => {
+        setup = { ...setup, ...input, version: setup.version + 1 };
+        return projectSetupView.parse(setup);
+      },
+      create: async () => {
+        setup = {
+          ...setup,
+          state: "failed",
+          failure: "Repository host is unavailable. Your setup is retained.",
+        };
+        return projectSetupView.parse(setup);
+      },
+    },
   });
   await openProjectMenu(page);
   await page

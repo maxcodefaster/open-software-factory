@@ -16,6 +16,11 @@ import { attachmentMarkdown } from "../../packages/conversation-domain/src/attac
 import { ownedBrowserJPEG } from "../fixtures/browser-image";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { createAttachmentRoutes } from "../../apps/factory/src/attachments/routes";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
 
 function memoryObjects() {
   const blobs = new Map<string, Uint8Array>();
@@ -34,6 +39,96 @@ function memoryObjects() {
   };
   return { blobs, objects };
 }
+
+test("native Attachment functions preserve private upload identity, draft sequence, publication and current SQL authority", async () => {
+  const f = await fixture();
+  const other = crypto.randomUUID(),
+    draft = crypto.randomUUID(),
+    id = crypto.randomUUID();
+  const bytes = new TextEncoder().encode("Native private reference");
+  const memory = memoryObjects();
+  const store = createAttachmentStore(f.database, memory.objects, async (data) => ({
+    text: new TextDecoder().decode(data),
+    previews: [],
+  }));
+  const origin = "https://owned-attachments.test";
+  const endpoint = await compiledFactoryEndpoint({
+    origin,
+    services: { attachments: store } as unknown as FactoryServices,
+    session: async (request) => {
+      const actor = request.headers.get("x-owned-actor");
+      return actor === other || actor === f.userID ? { user: { id: actor } } : null;
+    },
+    maintenance: async () => false,
+    requireFresh: async () => {},
+  });
+  async function native(name: string, args: unknown[], actor = f.userID) {
+    const response = await endpoint(
+      await factoryFunctionRequest(origin, name, args, { "x-owned-actor": actor }),
+    );
+    const result = await decodeResponse<ServerResult<unknown>>(response);
+    if (!result) throw new Error("Owned Attachment function returned no result");
+    return serverCall(Promise.resolve(result));
+  }
+  try {
+    await f.database.client`INSERT INTO auth."user"(id,name,email,email_verified)
+      VALUES(${other},'Other attachment reader',${`${other}@owned-attachment.test`},true)`;
+    await f.database
+      .client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
+      VALUES(${f.projectID},${other},'product-contributor',${f.userID})`;
+    const input = {
+      id,
+      projectId: f.projectID,
+      draftId: draft,
+      name: "native.txt",
+      mediaType: "text/plain",
+      bytes: bytes.byteLength,
+      sha256: attachmentDigest(bytes),
+    };
+    expect(await native("beginAttachment", [input])).toMatchObject({ id, state: "uploading" });
+    expect(await native("beginAttachment", [input])).toMatchObject({ id, sha256: input.sha256 });
+    await expect(
+      native("beginAttachment", [{ ...input, name: "changed.txt" }]),
+    ).rejects.toMatchObject({ status: 409 });
+    await expect(native("getAttachmentMetadata", [id], other)).rejects.toMatchObject({
+      status: 404,
+    });
+    const upload = await createAttachmentRoutes(store)(
+      new Request(`${origin}/api/attachments/${id}`, {
+        method: "PUT",
+        body: bytes,
+      }),
+      f.userID,
+    );
+    expect(await upload!.json()).toMatchObject({ id, state: "ready" });
+    await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 3, ids: [id] }]);
+    await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 2, ids: [] }]);
+    const [retained] = await f.database.client<{ sequence: number; ids: string[] }[]>`
+      SELECT sequence::float8 AS sequence,attachment_ids AS ids FROM factory.attachment_draft
+      WHERE id=${draft} AND owner_id=${f.userID}`;
+    expect(retained).toEqual({ sequence: 3, ids: [id] });
+    expect(await native("getAttachmentUsage", [f.projectID])).toMatchObject({
+      usedBytes: bytes.byteLength * 2,
+    });
+    await f.database.client`SELECT factory.bind_attachment_references(
+      ${f.projectID},${f.userID},'ticket',${f.ticketID},${attachmentMarkdown(input)},true)`;
+    expect(await native("getAttachmentMetadata", [id], other)).toMatchObject({
+      id,
+      state: "ready",
+    });
+    await f.database
+      .client`DELETE FROM factory.project_membership WHERE project_id=${f.projectID} AND user_id=${other}`;
+    await expect(native("getAttachmentMetadata", [id], other)).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(native("getAttachmentUsage", [f.projectID], other)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(await native("getAttachmentMetadata", [id])).toMatchObject({ id, sha256: input.sha256 });
+  } finally {
+    await f.dispose();
+  }
+});
 
 test("private uploads, publication, exact Build snapshots and retained history use real PostgreSQL", async () => {
   const owned = await fixture();

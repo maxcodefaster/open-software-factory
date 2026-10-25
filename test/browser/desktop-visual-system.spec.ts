@@ -1,3 +1,5 @@
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
@@ -76,11 +78,16 @@ test.beforeEach(async ({ page }) => {
   database = createDatabase(1);
   projectID = crypto.randomUUID();
   projectSlug = `visual-${projectID.slice(0, 8)}`;
-  for (const endpoint of ["source-workspace", "developer-ide"]) {
-    await page.route(`**/api/projects/${projectID}/${endpoint}/ensure`, (route) =>
-      route.fulfill({ status: 503, json: { error: "Planning-only visual fixture" } }),
-    );
-  }
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Planning-only visual fixture");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Planning-only visual fixture");
+      },
+    },
+  });
   await database.client`
     INSERT INTO factory.project(
       id, slug, name, repository_url, default_branch, devcontainer_path, created_by, desktop_background_key
@@ -226,7 +233,7 @@ test("persists curated backgrounds and centers the active app around the Agent p
     headers: { origin: new URL(page.url()).origin },
     data: { desktopBackgroundKey: "https://example.invalid/painting.jpg" },
   });
-  expect(retiredPreferenceWrite.status()).toBe(405);
+  expect(retiredPreferenceWrite.status()).toBe(404);
 
   await page.getByRole("button", { name: "Inbox" }).click();
   await expect(page.locator(".inbox-workspace")).toBeVisible();
@@ -511,7 +518,7 @@ test("keeps the desktop and active app usable at a narrow viewport", async ({ pa
   });
   expect(mobileBoard.snap).toContain("mandatory");
   expect(mobileBoard.revealsNextLane).toBe(true);
-  await expect(page.getByText(/Swipe through 4 stages/)).toBeVisible();
+  await expect(page.getByText(/Swipe through 4 stages/)).toHaveCount(0);
   const reviewLane = page.getByRole("region", { name: "review" });
   await page.locator(".board").evaluate((element) => {
     element.scrollLeft = element.scrollWidth;
@@ -527,7 +534,7 @@ test("keeps the desktop and active app usable at a narrow viewport", async ({ pa
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   const mountainousTitleOverflows = await page
-    .locator(".background-mountainous-landscape strong")
+    .locator(".background-mountainous-landscape:visible strong")
     .evaluate((element) => element.scrollWidth > element.clientWidth);
   expect(mountainousTitleOverflows).toBe(false);
   const settingsOverlap = await page.locator(".settings-menu").evaluate((element) => {

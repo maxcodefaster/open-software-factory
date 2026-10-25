@@ -22,4 +22,9 @@ export type WikiGenerationInput = {
   signal: AbortSignal;
 };
 
-export { generateWiki } from "./generation-workflow";
+export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {
+  input.signal.throwIfAborted();
+  const { generateWiki: generate } = await import("./generation-workflow");
+  input.signal.throwIfAborted();
+  return generate(input);
+}

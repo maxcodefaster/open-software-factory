@@ -33,13 +33,15 @@ export async function freezeRuntimeEnvironment(
   const retained = await read();
   if (retained) return retained;
   const [attempt] = await sql<
-    Array<{ projectID: string; environment: ProjectEnvironment }>
-  >`SELECT project_id AS "projectID", COALESCE((SELECT environment FROM factory.project_image_preparation WHERE runtime_attempt_id=attempt.id),CASE WHEN isolated_kind='staging' THEN 'main-preview' ELSE 'development' END) AS environment FROM factory.runtime_attempt attempt WHERE id=${attemptID} AND state='create-intended' AND stop_intended_at IS NULL`;
+    Array<{ projectID: string; environment: ProjectEnvironment; publication: boolean }>
+  >`SELECT project_id AS "projectID",isolated_kind='publication' AS publication, COALESCE((SELECT environment FROM factory.project_image_preparation WHERE runtime_attempt_id=attempt.id),CASE WHEN isolated_kind='staging' THEN 'main-preview' ELSE 'development' END) AS environment FROM factory.runtime_attempt attempt WHERE id=${attemptID} AND state='create-intended' AND stop_intended_at IS NULL`;
   if (!attempt) throw new Error("Runtime Environment selection requires active create intent");
   await sql`SELECT pg_advisory_xact_lock(hashtext(${`project-environment:${attempt.projectID}:${attempt.environment}`}))`;
-  const [current] = await sql<
-    Array<{ version: number; secretKey: string | null }>
-  >`SELECT version::float8 AS version,secret_key AS "secretKey" FROM factory.project_environment WHERE project_id=${attempt.projectID} AND environment=${attempt.environment}`;
+  const [current] = attempt.publication
+    ? []
+    : await sql<
+        Array<{ version: number; secretKey: string | null }>
+      >`SELECT version::float8 AS version,secret_key AS "secretKey" FROM factory.project_environment WHERE project_id=${attempt.projectID} AND environment=${attempt.environment}`;
   await sql`INSERT INTO factory.runtime_environment_intent(runtime_attempt_id,environment,version,secret_key) VALUES(${attemptID},${attempt.environment},${current?.version ?? 0},${current?.secretKey ?? null}) ON CONFLICT(runtime_attempt_id) DO NOTHING`;
   const intent = await read();
   if (!intent) throw new Error("Runtime Environment intent was not recorded");

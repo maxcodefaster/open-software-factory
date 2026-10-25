@@ -1,10 +1,15 @@
 import { z } from "zod";
 import type { createChangeWriterController } from "./writer-controller";
 
-const editingCommand = z.strictObject({
+export const editingCommand = z.strictObject({
   commandID: z.uuid(),
   epoch: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   requestID: z.uuid().optional(),
+});
+export const writerTakeoverCommand = editingCommand.omit({ requestID: true });
+export const writerActivityCommand = z.strictObject({
+  epoch: z.number().int().positive(),
+  kind: z.enum(["edit", "heartbeat"]),
 });
 
 export async function executeEditingCommand(

@@ -1,8 +1,11 @@
+import { callFactoryFunction, conversationCommand } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
 import { createDatabase } from "../../packages/db/src/client";
+import { factoryProcessCommand } from "../fixtures/factory-process";
 
 const postgresImage =
   "docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8";
@@ -130,7 +133,7 @@ test("actual Factory startup recovers Project input and never replays dispatched
     if (!databasePort || !/^\d+$/.test(databasePort))
       throw new Error("Owned database port missing");
     const databaseURL = `postgresql://factory:owned-process-not-a-secret@127.0.0.1:${databasePort}/factory`;
-    const migration = Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
+    const migration = Bun.spawn(factoryProcessCommand("packages/db/src/migrate.ts"), {
       env: { ...process.env, DATABASE_URL: databaseURL },
       stdout: "pipe",
       stderr: "pipe",
@@ -178,7 +181,7 @@ test("actual Factory startup recovers Project input and never replays dispatched
       FACTORY_PROJECT_AGENT_MODEL: "changed-process-default",
     };
     async function start() {
-      const child = Bun.spawn([process.execPath, "apps/factory/src/server.ts"], {
+      const child = Bun.spawn(factoryProcessCommand("apps/factory/src/server.ts"), {
         env: environment,
         stdout: "ignore",
         stderr: "pipe",
@@ -197,7 +200,7 @@ test("actual Factory startup recovers Project input and never replays dispatched
             }
             throw new Error(`Owned Factory exited: ${child.exitCode}\n${output.slice(-4000)}`);
           }
-          return fetch(`${base}/api/session`, { signal: AbortSignal.timeout(1_000) });
+          return fetch(`${base}/health/ready`, { signal: AbortSignal.timeout(1_000) });
         },
         (response) => response.ok,
       );
@@ -279,23 +282,31 @@ test("actual Factory startup recovers Project input and never replays dispatched
     );
     expect(requests).toEqual(["admitted-process-model"]);
     const headers = { "content-type": "application/json", origin: base, cookie };
-    const replay = await fetch(`${base}/api/projects/${projectID}/conversation/message`, {
-      method: "POST",
+    const replay = await conversationCommand(
+      base,
+      projectID,
+      {
+        commandId: command.commandId,
+        text: command.text,
+      },
       headers,
-      body: JSON.stringify({ commandId: command.commandId, text: command.text }),
-    });
-    expect(replay.status).toBe(201);
+    );
+    expect(replay.id).toBe(conversation.id);
     expect(requests).toHaveLength(1);
 
-    // Here the real authenticated HTTP path dispatches before actual SIGKILL.
+    // The real compiled native message stream dispatches before actual SIGKILL.
     holdNext = true;
     const lostCommand = crypto.randomUUID();
-    const lostResponse = fetch(`${base}/api/projects/${projectID}/conversation/message`, {
-      method: "POST",
+    const lostResponse = conversationCommand(
+      base,
+      projectID,
+      {
+        commandId: lostCommand,
+        text: "Held process input",
+      },
       headers,
-      body: JSON.stringify({ commandId: lostCommand, text: "Held process input" }),
-      signal: AbortSignal.timeout(45_000),
-    }).then(
+      AbortSignal.timeout(45_000),
+    ).then(
       () => "returned",
       () => "lost",
     );
@@ -320,21 +331,28 @@ test("actual Factory startup recovers Project input and never replays dispatched
     expect(Date.now()).toBeGreaterThanOrEqual(expiry);
     release.resolve();
     expect(requests).toHaveLength(2);
-    const historyResponse = await fetch(`${base}/api/projects/${projectID}/conversation`, {
+    const historyResponse = await callFactoryFunction(
+      base,
+      "getConversation",
+      [projectID],
       headers,
-    });
-    expect(historyResponse.status).toBe(200);
-    const history = (await historyResponse.json()) as {
+    );
+    expect(historyResponse).toMatchObject({ ok: true });
+    const history = (await serverCall(Promise.resolve(historyResponse))) as {
       entries: Array<{ kind: string; body: string }>;
     };
     expect(history.entries.filter((entry) => entry.kind === "user-message")).toHaveLength(2);
     expect(history.entries.filter((entry) => entry.kind === "agent-message")).toHaveLength(1);
-    const retry = await fetch(`${base}/api/projects/${projectID}/conversation/message`, {
-      method: "POST",
+    const retry = await conversationCommand(
+      base,
+      projectID,
+      {
+        commandId: crypto.randomUUID(),
+        text: "Explicit process retry",
+      },
       headers,
-      body: JSON.stringify({ commandId: crypto.randomUUID(), text: "Explicit process retry" }),
-    });
-    expect(retry.status).toBe(201);
+    );
+    expect(retry.id).toBe(conversation.id);
     expect(requests).toEqual([
       "admitted-process-model",
       "changed-process-default",

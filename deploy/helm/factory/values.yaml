@@ -14,6 +14,7 @@ adminEmail: admin@factory.local
 factorybox:
   image: ""
   executableSHA256: ""
+  architecture: ""
   nodeName: ""
   kernel: ""
 executionReserveTarget: 0
@@ -25,6 +26,8 @@ databaseSize: 8Gi
 forgejoSize: 8Gi
 openbaoSize: 1Gi
 zeroSize: 2Gi
+# Explicit rather than scaling Node processes to every CPU on the Kubernetes node.
+zeroSyncWorkers: 1
 
 # Operator-owned, private S3-compatible storage. Factory does not provision a bucket.
 attachments:

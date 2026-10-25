@@ -43,3 +43,12 @@ export function runtimeRepositoryCloneURL(repositoryURL: string) {
 export function runtimeForgeURL() {
   return runtimeHostURL(new URL("/", process.env["FACTORY_FORGEJO_API_URL"]));
 }
+
+export function runtimeReleaseRegistryURL() {
+  const configured = process.env["FACTORY_FORGEJO_PUBLIC_URL"];
+  if (configured) {
+    const url = new URL(configured);
+    if (url.protocol === "https:") return url.origin;
+  }
+  return runtimeForgeURL();
+}

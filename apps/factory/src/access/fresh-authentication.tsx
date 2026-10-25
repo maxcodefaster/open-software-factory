@@ -1,11 +1,10 @@
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import { z } from "zod";
-import { apiRequest } from "../api-client";
+import { createEffect, createSignal, Show } from "solid-js";
+import { getAuthenticationState } from "../server-functions/access";
+import { serverCall, type ServerValue } from "../server-functions/result";
 import { factoryIdentityClient } from "../auth-client";
 
-const stateSchema = z.object({ fresh: z.boolean(), email: z.string(), companySignIn: z.boolean() });
 export function FreshAuthentication(props: { beforeCompanySignIn?: (() => void) | undefined }) {
-  const [state, setState] = createSignal<z.output<typeof stateSchema>>();
+  const [state, setState] = createSignal<ServerValue<ReturnType<typeof getAuthenticationState>>>();
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   createEffect(
@@ -22,7 +21,7 @@ export function FreshAuthentication(props: { beforeCompanySignIn?: (() => void) 
         }
         pending = true;
         try {
-          const current = await apiRequest(stateSchema, "/api/security/authentication");
+          const current = await serverCall(getAuthenticationState());
           if (!disposed) setState(current);
         } catch {
           if (!disposed)
@@ -42,11 +41,11 @@ export function FreshAuthentication(props: { beforeCompanySignIn?: (() => void) 
         if (!document.hidden) void refresh();
       }, 30_000);
       window.addEventListener("focus", refresh);
-      onCleanup(() => {
+      return () => {
         disposed = true;
         clearInterval(timer);
         window.removeEventListener("focus", refresh);
-      });
+      };
     },
   );
   async function signIn(password?: string) {
@@ -67,7 +66,7 @@ export function FreshAuthentication(props: { beforeCompanySignIn?: (() => void) 
           });
       if (result.error) throw new Error(result.error.message ?? "Sign-in failed");
       if (current.companySignIn && result.data?.url) location.assign(result.data.url);
-      else setState(await apiRequest(stateSchema, "/api/security/authentication"));
+      else setState(await serverCall(getAuthenticationState()));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Sign-in failed");
     } finally {

@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
+import { z } from "zod";
 import {
   type BuildBrowserCall,
   type BuildBrowserResult,
@@ -10,11 +11,10 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import { runtimeBuildBrowserToken } from "../../../../packages/runtime-domain/src/identity";
 import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
+import { createReviewMedia, maximumRecordingBytes } from "../review/media";
 import { runtimeFactoryURL } from "../runtime/endpoints";
 import { type RuntimeHub, RuntimeParentOperationError } from "../runtime/hub";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
-import { createReviewMedia, maximumRecordingBytes } from "../review/media";
-import { z } from "zod";
 
 type BrowserSession = {
   id: string;
@@ -385,12 +385,10 @@ export function createBuildBrowserController(
       const allowed = await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
         await currentIn(sql, session, ownerToken);
         const [intent] = await sql<{ id: string; state: string }[]>`
-          INSERT INTO factory.review_media(id,change_id,review_id,browser_session_id,kind,commit_sha,runtime_attempt_id,state,reason)
+          INSERT INTO factory.review_media(id,change_id,review_id,browser_session_id,kind,commit_sha,runtime_attempt_id,state)
           SELECT ${session.id},review.change_id,review.id,${session.id},'recording',review.commit_sha,
-            ${session.attemptID},CASE WHEN project.qa_recording_enabled THEN 'intended' ELSE 'unavailable' END,
-            CASE WHEN NOT project.qa_recording_enabled THEN 'Recording is disabled for this Project' END
-          FROM factory.candidate_review review JOIN factory.change change ON change.id=review.change_id
-          JOIN factory.project project ON project.id=change.project_id WHERE review.turn_id=${session.turnID}
+            ${session.attemptID},'intended'
+          FROM factory.candidate_review review WHERE review.turn_id=${session.turnID}
           ON CONFLICT DO NOTHING RETURNING id,state`;
         if (intent?.state === "intended") id = intent.id;
       });
@@ -656,10 +654,6 @@ export function createBuildBrowserController(
         signal?.throwIfAborted();
         await turns.validateExecution(session.turnID, ownerToken, async (sql) => {
           await currentIn(sql, session, ownerToken);
-          const [enabled] = await sql`SELECT project.id FROM factory.project project
-            JOIN factory.change change ON change.project_id=project.id
-            WHERE change.id=${session.changeID} AND project.qa_recording_enabled FOR SHARE OF project`;
-          if (!enabled) throw new Error("Recording disabled");
           await media.complete(proof, manifest.durationMs, sql);
           await currentIn(sql, session, ownerToken);
         });
@@ -695,23 +689,6 @@ export function createBuildBrowserController(
         if (!current) return;
         try {
           await dispatch(current, ownerToken, "browser-renew");
-          try {
-            const [disabled] = await database.client`SELECT media.id FROM factory.review_media media
-            JOIN factory.change change ON change.id=media.change_id
-            JOIN factory.project project ON project.id=change.project_id
-            WHERE media.browser_session_id=${current.id} AND media.state='recording'
-              AND NOT project.qa_recording_enabled`;
-            if (disabled) {
-              try {
-                await dispatch(current, ownerToken, "browser-recording-finish");
-              } catch {
-                /* Never replay browser work. */
-              }
-              await recordingFailure(current.id);
-            }
-          } catch {
-            /* Recording diagnostics cannot revoke an otherwise valid QA browser. */
-          }
         } catch (cause) {
           if (
             cause instanceof Error &&

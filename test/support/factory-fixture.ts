@@ -3,6 +3,8 @@ import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
 import { createDatabase } from "../../packages/db/src/client";
 import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 export async function createPlanningEpic(input: {
   database: ReturnType<typeof createDatabase>;
@@ -28,7 +30,6 @@ export async function createPlanningEpic(input: {
   return id;
 }
 
-const factoryOrigin = process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000";
 const terminalRuntimeStates = new Set(["failed", "stopped"]);
 
 export async function signIn(page: Page) {
@@ -40,19 +41,9 @@ export async function signIn(page: Page) {
   await page.getByRole("button", { name: "Sign in" }).click();
 }
 
-type RuntimeAttempt = {
-  id: string;
-  projectId: string;
-  state: string;
-};
-
 async function projectAttempts(request: APIRequestContext, projectID: string) {
-  const response = await request.get("/api/runtime-attempts");
-  if (!response.ok()) {
-    throw new Error(`Cannot establish fixture runtime state: HTTP ${response.status()}`);
-  }
-  const body = (await response.json()) as { attempts: RuntimeAttempt[] };
-  return body.attempts.filter((attempt) => attempt.projectId === projectID);
+  const body = await serverCall(requestFunction(request, "getRuntimeAttempts", [projectID]));
+  return body.attempts;
 }
 
 export async function stopProjectRuntimes(request: APIRequestContext, projectID: string) {
@@ -61,12 +52,7 @@ export async function stopProjectRuntimes(request: APIRequestContext, projectID:
     attempts
       .filter((attempt) => !terminalRuntimeStates.has(attempt.state))
       .map(async (attempt) => {
-        const response = await request.post(`/api/runtime-attempts/${attempt.id}/stop`, {
-          headers: { origin: factoryOrigin },
-        });
-        if (!response.ok()) {
-          throw new Error(`Cannot stop fixture runtime ${attempt.id}: HTTP ${response.status()}`);
-        }
+        await serverCall(requestFunction(request, "stopRuntimeAttempt", [attempt.id]));
       }),
   );
   if (!attempts.length) return;

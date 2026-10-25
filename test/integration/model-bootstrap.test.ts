@@ -3,6 +3,7 @@ import { createModelConnections } from "../../apps/factory/src/models/connection
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import type { StoredModelConnection } from "../../apps/factory/src/models/secrets";
 import { factoryProcess } from "../fixtures/factory-process";
+import { authenticatedBootstrap } from "../fixtures/server-functions";
 
 test("bootstrap recognizes a managed Coding connection without deployment credentials or another probe", async () => {
   const host = await factoryProcess(undefined, {
@@ -43,11 +44,7 @@ test("bootstrap recognizes a managed Coding connection without deployment creden
   try {
     await host.start();
     const cookie = await host.signIn();
-    const bootstrap = async () => {
-      const response = await fetch(`${host.base}/api/session`, { headers: { cookie } });
-      expect(response.ok).toBe(true);
-      return response.json();
-    };
+    const bootstrap = () => authenticatedBootstrap(host.base, { cookie });
     const initial = await bootstrap();
     const userID = initial.session.user.id as string;
     expect(initial.modelRelayConfigured).toBe(false);

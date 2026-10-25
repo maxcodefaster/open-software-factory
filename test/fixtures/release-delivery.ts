@@ -1,3 +1,5 @@
+import { callFactoryFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
@@ -45,7 +47,9 @@ export async function releaseDelivery(fixture: Fixture) {
   if (!alreadyDelivered) expect(initial[0]?.revision).not.toBe(verifiedSHA);
   await page.getByRole("tab", { name: /Create centered welcome/ }).click();
   const delivery = deliveryViewSchema.parse(
-    await fixture.command(cookie, `/api/changes/${changeID}/delivery`),
+    await serverCall(
+      callFactoryFunction(fixture.base, "getDelivery", [changeID], { cookie: cookie }),
+    ),
   );
   expect(delivery.verificationState).toBe("succeeded");
   expect(delivery.verificationCommitSha).toBe(verifiedSHA);
@@ -58,36 +62,42 @@ export async function releaseDelivery(fixture: Fixture) {
     const revision =
       existing ??
       z.object({ id: z.uuid() }).parse(
-        await fixture.command(
-          cookie,
-          `/api/tickets/${state.dependentTicketID}/requirements`,
-          "POST",
-          {
-            summary: `Set src/version.txt to exactly ${fixture.slug}-follow-on followed by a newline. Run node --check src/server.mjs. Preserve the welcome dashboard.`,
-            acceptanceCriteria: [
-              `src/version.txt contains exactly ${fixture.slug}-follow-on followed by a newline`,
-              "node --check src/server.mjs passes",
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "createRequirementRevision",
+            [
+              state.dependentTicketID,
+              {
+                summary: `Set src/version.txt to exactly ${fixture.slug}-follow-on followed by a newline. Run node --check src/server.mjs. Preserve the welcome dashboard.`,
+                acceptanceCriteria: [
+                  `src/version.txt contains exactly ${fixture.slug}-follow-on followed by a newline`,
+                  "node --check src/server.mjs passes",
+                ],
+                nonGoals: ["Dependencies, runtime configuration and other file changes"],
+              },
             ],
-            nonGoals: ["Dependencies, runtime configuration and other file changes"],
-          },
+            { cookie: cookie },
+          ),
         ),
       );
-    await fixture.command(
-      cookie,
-      `/api/tickets/${state.dependentTicketID}/requirements/${revision.id}/approve`,
-      "POST",
-      {},
+    await serverCall(
+      callFactoryFunction(
+        fixture.base,
+        "approveRequirementRevision",
+        [state.dependentTicketID, revision.id],
+        { cookie: cookie },
+      ),
     );
-    const blocked = await fixture.request(
-      cookie,
-      `/api/tickets/${state.dependentTicketID}/change`,
-      "POST",
-      {},
+    const blocked = await callFactoryFunction(
+      fixture.base,
+      "startTicketChange",
+      [state.dependentTicketID],
+      { cookie },
     );
-    expect(blocked.status).toBe(409);
-    expect(z.object({ error: z.string() }).parse(blocked.body).error).toContain(
-      "Prerequisites must be delivered",
-    );
+    expect(blocked).toMatchObject({ ok: false, status: 409 });
+    if (blocked.ok) throw new Error("Dependent Ticket was unexpectedly admitted");
+    expect(blocked.message).toContain("Prerequisites must be delivered");
     expect(
       await database.client`SELECT id FROM factory.change WHERE ticket_id = ${state.dependentTicketID}`,
     ).toHaveLength(0);
@@ -129,7 +139,9 @@ export async function releaseDelivery(fixture: Fixture) {
     JOIN auth."user" human ON human.id = approval.approved_by WHERE approval.change_id = ${changeID}`;
   expect(approval).toEqual({ email: fixture.credentials("developer").email, sha: verifiedSHA });
   const exact = deliveryViewSchema.parse(
-    await fixture.command(cookie, `/api/changes/${changeID}/delivery`),
+    await serverCall(
+      callFactoryFunction(fixture.base, "getDelivery", [changeID], { cookie: cookie }),
+    ),
   );
   expect(exact.mergedCommitSha).toBe(verifiedSHA);
   await page.getByRole("tab", { name: "Preview · Staging", exact: true }).click();

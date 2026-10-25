@@ -1077,7 +1077,7 @@ async function restart() {
 }
 
 async function status() {
-  const response = await fetch(`${factoryBaseURL}/api/session`, {
+  const response = await fetch(`${factoryBaseURL}/health/ready`, {
     signal: AbortSignal.timeout(1_000),
   }).catch(() => null);
   const runtimeImage =

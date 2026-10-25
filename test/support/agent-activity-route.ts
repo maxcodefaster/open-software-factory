@@ -1,66 +1,57 @@
-import type { Route } from "@playwright/test";
-import { createServer, type ServerResponse } from "node:http";
 import type { AgentView } from "../../apps/factory/src/api-contracts";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { agentActivityStream } from "../../apps/factory/src/agent/activity-stream";
 
-// Controlled browser fixtures serve the same view through either the status
-// read or the new read-only SSE endpoint. Commands still return ordinary JSON.
-export function fulfillAgentView(route: Route, options: { json: unknown }) {
-  if (!new URL(route.request().url()).pathname.endsWith("/agent/activity"))
-    return route.fulfill(options);
-  return route.fulfill({
-    contentType: "text/event-stream",
-    headers: { "cache-control": "no-store" },
-    body: `retry: 250\ndata: ${JSON.stringify({ type: "snapshot", view: options.json })}\n\n`,
-  });
-}
-
-export async function streamedAgentView(initial: AgentView, origin: string) {
-  let view = initial;
-  let requests = 0;
-  const readers = new Set<ServerResponse>();
-  const frame = () => `data: ${JSON.stringify({ type: "snapshot", view })}\n\n`;
-  const server = createServer((request, response) => {
-    const cors = {
-      "access-control-allow-origin": origin,
-      "access-control-allow-credentials": "true",
-      "access-control-allow-private-network": "true",
-      "access-control-allow-methods": "GET, OPTIONS",
-      "access-control-allow-headers": "cache-control, last-event-id",
-    };
-    if (request.method === "OPTIONS") {
-      response.writeHead(204, cors);
-      response.end();
-      return;
-    }
+// A controlled native observation source. The browser still goes through the
+// real compiled function, its wire codec and an actual HTTP stream.
+export async function streamedAgentView(initial: AgentView) {
+  let view = initial,
+    requests = 0,
+    epoch = 0;
+  const readers = new Set<() => void>(),
+    connections = new Set<AbortController>();
+  const activity: FactoryServices["agent"]["activity"] = async (
+    _actor,
+    _changeID,
+    signal,
+    session,
+  ) => {
     requests++;
-    response.writeHead(200, {
-      ...cors,
-      "content-type": "text/event-stream",
-      "cache-control": "no-store",
+    const version = epoch,
+      own = new AbortController();
+    connections.add(own);
+    return agentActivityStream({
+      signal: AbortSignal.any([signal, own.signal]),
+      authorize: async () => {
+        await session();
+        if (version !== epoch) throw new Error("Controlled observation disconnect");
+      },
+      read: async () => view,
+      subscribe: async (notify) => {
+        readers.add(notify);
+        return () => {
+          readers.delete(notify);
+          connections.delete(own);
+        };
+      },
+      reconcileMS: 60_000,
+      coalesceMS: 0,
     });
-    readers.add(response);
-    response.write(frame());
-    response.on("close", () => readers.delete(response));
-  });
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Owned stream listener missing");
+  };
   return {
-    url: `http://127.0.0.1:${address.port}/activity`,
+    activity,
     requests: () => requests,
     readers: () => readers.size,
     publish(next: AgentView) {
       view = next;
-      for (const response of readers) response.write(frame());
+      for (const notify of readers) notify();
     },
     disconnect() {
-      for (const response of readers) response.destroy();
+      epoch++;
+      for (const notify of readers) notify();
     },
     async dispose() {
-      for (const response of readers) response.destroy();
-      await new Promise<void>((resolve, reject) =>
-        server.close((cause) => (cause ? reject(cause) : resolve())),
-      );
+      for (const connection of connections) connection.abort();
     },
   };
 }

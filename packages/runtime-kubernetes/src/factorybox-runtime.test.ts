@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
 import {
+  configuredFactoryboxRuntimeProfile,
   deleteFactoryboxStore,
-  factoryboxPreparationRequest,
-  factoryboxOriginalWorkerRetired,
-  renderFactoryboxRuntime,
   type FactoryboxRuntimeInput,
+  factoryboxOriginalWorkerRetired,
+  factoryboxPreparationRequest,
+  renderFactoryboxRuntime,
 } from "./factorybox-runtime";
 import type { runFactoryboxKubernetes } from "./factorybox-worker";
 
@@ -19,12 +20,30 @@ const input: FactoryboxRuntimeInput = {
   profile: {
     image: `registry.example/worker@sha256:${"b".repeat(64)}`,
     executableSHA256: "c".repeat(64),
+    architecture: "amd64",
     nodeName: "source-node",
     kernel: "6.12.0",
     boundedBytes: 8589934592,
     claimGiB: 32,
   },
 };
+
+test.each(["arm64", "amd64"] as const)(
+  "%s runtime preparation uses its admitted profile rather than the control-plane architecture",
+  (architecture) => {
+    const profile = configuredFactoryboxRuntimeProfile({
+      FACTORY_FACTORYBOX_WORKER_IMAGE: input.profile.image,
+      FACTORY_FACTORYBOX_EXECUTABLE_SHA256: input.profile.executableSHA256,
+      FACTORY_FACTORYBOX_ARCHITECTURE: architecture,
+      FACTORY_FACTORYBOX_NODE: input.profile.nodeName,
+      FACTORY_FACTORYBOX_KERNEL: input.profile.kernel,
+    });
+    const rendered = renderFactoryboxRuntime({ ...input, profile });
+    expect(rendered.pod.spec.nodeSelector["kubernetes.io/arch"]).toBe(architecture);
+    expect(rendered.pod.spec.initContainers[0]!.image).toBe(input.runtimeHostImage);
+    expect(profile.architecture).toBe(architecture);
+  },
+);
 
 for (const scenario of [
   "running",

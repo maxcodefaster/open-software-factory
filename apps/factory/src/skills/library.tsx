@@ -1,19 +1,23 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { z } from "zod";
 import {
   type SkillLibraryEntry,
   type SkillLibraryView,
   type SkillScope,
-  skillLibraryView,
 } from "../../../../packages/conversation-domain/src/skill-library";
 import {
   type SkillContent,
   type SkillRevision,
-  skillContentInput,
-  skillRevisionInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import { apiRequest } from "../api-client";
+import { serverCall } from "../server-functions/result";
+import {
+  getSkillLibrary,
+  saveSkillChoice,
+  checkSkillSourceUpdate,
+  proposeSkillSharing,
+  getSkillRevision,
+  acceptSkillSharing,
+} from "../server-functions/skills";
 import { Icon } from "../icon";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import type { ChooseSkill } from "./choice-controls";
@@ -25,7 +29,6 @@ import { SkillRevisionDetails } from "./revision-details";
 import { SkillRevisionEditor } from "./revision-editor";
 import "./library.css";
 
-const resultInput = z.object({ content: skillContentInput, warnings: z.array(z.string()) });
 export function SkillLibrary(props: {
   projectId?: string | undefined;
   projectName?: string | undefined;
@@ -61,7 +64,6 @@ export function SkillLibrary(props: {
         : "project"
       : "system";
   const scope = (): SkillScope => (managing() && canManage() ? managementScope() : "personal");
-  const suffix = () => (props.projectId ? `?project=${props.projectId}` : "");
   let sequence = 0;
   let detailHeading: HTMLHeadingElement | undefined;
   let newButton: HTMLButtonElement | undefined;
@@ -90,7 +92,9 @@ export function SkillLibrary(props: {
     const request = ++sequence;
     setLoading(true);
     try {
-      const next = await apiRequest(skillLibraryView, `/api/skills${suffix()}`);
+      const next = await serverCall(
+        props.projectId ? getSkillLibrary(props.projectId) : getSkillLibrary(),
+      );
       if (request !== sequence) return;
       setView(next);
       if (!next.canManageProject && !next.canManageSystem) setManaging(false);
@@ -193,21 +197,20 @@ export function SkillLibrary(props: {
   }
   const choose: ChooseSkill = (entry, target, selectedRole, state, revisionId) => {
     const current = skillAvailability(entry, view()?.choices ?? [], target, selectedRole);
+    const selectedRevision = revisionId ?? current.revision?.id;
     void mutate(
       () =>
-        apiRequest(z.object({ saved: z.boolean() }), "/api/skills/choices", {
-          method: "PUT",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
+        serverCall(
+          saveSkillChoice({
             libraryId: entry.id,
             scope: target,
             ...(props.projectId ? { projectId: props.projectId } : {}),
             role: selectedRole,
             state,
-            revisionId: revisionId ?? current.revision?.id,
+            ...(selectedRevision ? { revisionId: selectedRevision } : {}),
             expectedVersion: current.own?.version ?? 0,
           }),
-        }),
+        ),
       target === "personal"
         ? "Choice saved for your new work in this Project"
         : `Default saved for new ${target === "system" ? "Factory" : "Project"} work`,
@@ -235,12 +238,10 @@ export function SkillLibrary(props: {
     void mutate(async () => {
       const revision = entry.revisions[0];
       if (!revision) return;
-      const result = await apiRequest(
-        z.discriminatedUnion("current", [
-          z.object({ current: z.literal(true) }),
-          resultInput.extend({ current: z.literal(false) }),
-        ]),
-        `/api/skills/revisions/${revision.id}/source-update${suffix()}`,
+      const result = await serverCall(
+        props.projectId
+          ? checkSkillSourceUpdate(revision.id, props.projectId)
+          : checkSkillSourceUpdate(revision.id),
       );
       if (result.current) return "The pinned source is current";
       setEditing({
@@ -256,18 +257,18 @@ export function SkillLibrary(props: {
     }, "Source check complete");
   }
   function share(entry: SkillLibraryEntry, target: "project" | "system") {
+    const revision = entry.revisions[0];
+    if (!revision) return;
     void mutate(
       () =>
-        apiRequest(z.object({ id: z.uuid() }), "/api/skills/share", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
+        serverCall(
+          proposeSkillSharing({
             id: crypto.randomUUID(),
-            revisionId: entry.revisions[0]?.id,
+            revisionId: revision.id,
             target,
             ...(target === "project" ? { projectId: props.projectId } : {}),
           }),
-        }),
+        ),
       "Exact version proposed for sharing",
     );
   }
@@ -288,9 +289,17 @@ export function SkillLibrary(props: {
       }}
     >
       <header
-        class="skill-library-heading"
+        class="skill-library-heading workspace-heading"
         hidden={Boolean(selectedEntry()) && !editorOpen() && !importing()}
       >
+        <div class="skill-library-title workspace-heading-title">
+          <h2>Skills library</h2>
+          <Show when={!editorOpen() && !importing()}>
+            <span class="skill-result-count" aria-live="polite">
+              {view() ? `${entries().length} ${entries().length === 1 ? "skill" : "skills"}` : ""}
+            </span>
+          </Show>
+        </div>
         <WorkspaceActionBar label="Skills library actions" leading={props.navigation}>
           <details
             class="skill-action-menu"
@@ -361,15 +370,7 @@ export function SkillLibrary(props: {
             {editing() ? "Resume draft" : "Add skill"}
           </button>
         </WorkspaceActionBar>
-        <div class="skill-library-title">
-          <h2>Skills library</h2>
-          <Show when={!editorOpen() && !importing()}>
-            <span class="skill-result-count" aria-live="polite">
-              {view() ? `${entries().length} ${entries().length === 1 ? "skill" : "skills"}` : ""}
-            </span>
-          </Show>
-        </div>
-        <div class="skill-library-tools">
+        <div class="skill-library-tools workspace-heading-meta">
           <Show when={!editorOpen() && !importing()}>
             <label class="skill-search">
               <Icon name="search" />
@@ -581,9 +582,10 @@ export function SkillLibrary(props: {
                         disabled={busy()}
                         onClick={() =>
                           void mutate(async () => {
-                            const revision = await apiRequest(
-                              skillRevisionInput,
-                              `/api/skills/revisions/${proposal.revisionId}${suffix()}`,
+                            const revision = await serverCall(
+                              props.projectId
+                                ? getSkillRevision(proposal.revisionId, props.projectId)
+                                : getSkillRevision(proposal.revisionId),
                             );
                             setInspected({ proposalId: proposal.id, revision });
                           }, "Proposed version opened")
@@ -602,11 +604,7 @@ export function SkillLibrary(props: {
                         disabled={busy() || inspected()?.proposalId !== proposal.id}
                         onClick={() =>
                           void mutate(async () => {
-                            const result = await apiRequest(
-                              z.object({ libraryId: z.uuid() }),
-                              `/api/skills/share/${proposal.id}/accept`,
-                              { method: "POST" },
-                            );
+                            const result = await serverCall(acceptSkillSharing(proposal.id));
                             setSelected(result.libraryId);
                             setInspected(undefined);
                           }, "Version added to the shared library. Enable it for new work.")

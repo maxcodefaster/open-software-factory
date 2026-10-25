@@ -2,10 +2,12 @@ import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
-import { createDeveloperIDEClient } from "../../packages/runtime-kubernetes/src/developer-ide";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { createDeveloperIDEClient } from "../../packages/runtime-kubernetes/src/developer-ide";
+import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
 
 const enabled = process.env["FACTORY_RUN_DEVELOPER_IDE_PROOF"] === "1";
 const viewSchema = z.object({ state: z.string(), serviceID: z.string(), epoch: z.number() });
@@ -84,17 +86,32 @@ test.skipIf(!enabled)(
     try {
       let server = await fixture.start();
       adminCookie = await fixture.signIn();
-      const userResponse = await api("/api/admin/users", adminCookie, {
-        name: "Independent editor Developer",
-        email,
-        password,
-      });
-      expect(userResponse.status).toBe(201);
-      userID = z.object({ id: z.uuid() }).parse(await userResponse.json()).id;
+      const userResponse = await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "createAccount",
+          [
+            {
+              name: "Independent editor Developer",
+              email,
+              password,
+            },
+          ],
+          { cookie: adminCookie },
+        ),
+      );
+      userID = z.object({ id: z.uuid() }).parse(userResponse).id;
       for (const id of [projectID, secondProjectID]) {
         await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${id},${`editor-${id}`},'Independent editor proof','https://forge.invalid/editor.git','main','.devcontainer/devcontainer.json',${userID})`;
         expect(
-          (await api(`/api/projects/${id}/members`, adminCookie, { email, role: "developer" })).ok,
+          (
+            await callFactoryFunction(
+              fixture.base,
+              "saveProjectMember",
+              [id, { email, role: "developer" }],
+              { cookie: adminCookie },
+            )
+          ).ok,
         ).toBe(true);
       }
       const signIn = await api("/api/auth/sign-in/email", "", { email, password });
@@ -103,14 +120,22 @@ test.skipIf(!enabled)(
         .getSetCookie()
         .map((value) => value.split(";")[0])
         .join("; ");
-      expect((await api(`/api/projects/${projectID}/developer-ide/ensure`, "", {})).status).toBe(
-        401,
-      );
+      expect(
+        (
+          await fetch(
+            await factoryFunctionRequest(fixture.base, "ensureDeveloperIDE", [projectID], {
+              cookie: "",
+            }),
+          )
+        ).status,
+      ).toBe(401);
       const started = performance.now();
       const first = viewSchema.parse(
-        await (
-          await api(`/api/projects/${projectID}/developer-ide/ensure`, developerCookie, {})
-        ).json(),
+        await serverCall(
+          callFactoryFunction(fixture.base, "ensureDeveloperIDE", [projectID], {
+            cookie: developerCookie,
+          }),
+        ),
       );
       const identity = await recordedEditorIdentity(database, userID);
       if (!identity) throw new Error("Missing recorded editor identity");
@@ -129,7 +154,11 @@ test.skipIf(!enabled)(
       );
       await eventually(
         async () =>
-          viewSchema.parse(await (await api("/api/developer-ide", developerCookie)).json()),
+          viewSchema.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getDeveloperIDE", [], { cookie: developerCookie }),
+            ),
+          ),
         (view) => view.state === "ready",
         "Real editor Pod did not become ready",
         120_000,
@@ -146,61 +175,102 @@ test.skipIf(!enabled)(
       expect(await native.text()).toContain("theia");
       const backendReadyMS = performance.now() - started;
       const second = viewSchema.parse(
-        await (
-          await api(`/api/projects/${secondProjectID}/developer-ide/ensure`, developerCookie, {})
-        ).json(),
+        await serverCall(
+          callFactoryFunction(fixture.base, "ensureDeveloperIDE", [secondProjectID], {
+            cookie: developerCookie,
+          }),
+        ),
       );
       expect(second.serviceID).toBe(first.serviceID);
-      expect((await kubernetes.getPod(namespace, "editor-1"))?.uid).toBe(outcome.podUID);
+      expect((await client.observe(resources))?.podUID).toBe(outcome.podUID);
       for (const relation of ["runtime_attempt", "change", "agent_turn", "development_workspace"])
         expect(await database.client.unsafe(`SELECT 1 FROM factory.${relation}`)).toHaveLength(0);
       await fixture.kill(server);
       server = await fixture.start();
       await eventually(
         async () =>
-          viewSchema.parse(await (await api("/api/developer-ide", developerCookie)).json()),
+          viewSchema.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getDeveloperIDE", [], { cookie: developerCookie }),
+            ),
+          ),
         (view) => view.state === "ready",
         "Editor did not recover after Factory crash",
       );
-      expect((await kubernetes.getPod(namespace, "editor-1"))?.uid).toBe(outcome.podUID);
+      expect((await client.observe(resources))?.podUID).toBe(outcome.podUID);
       expect((await client.observe(resources))?.ready).toBe(true);
-      expect((await api("/api/developer-ide/stop", developerCookie, {})).status).toBe(202);
+      expect(
+        await callFactoryFunction(fixture.base, "stopDeveloperIDE", [], {
+          cookie: developerCookie,
+        }),
+      ).toMatchObject({ ok: true });
       await eventually(
         async () =>
-          viewSchema.parse(await (await api("/api/developer-ide", developerCookie)).json()),
+          viewSchema.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getDeveloperIDE", [], { cookie: developerCookie }),
+            ),
+          ),
         (view) => view.state === "stopped",
         "Editor Stop did not complete",
         40_000,
       );
-      expect(await kubernetes.getPod(namespace, "editor-1")).toBeNull();
+      expect(await client.observe(resources)).toBeNull();
       expect((await kubernetes.getNamespace(namespace))?.uid).toBe(namespaceUID);
       const restarted = viewSchema.parse(
-        await (
-          await api(`/api/projects/${projectID}/developer-ide/ensure`, developerCookie, {})
-        ).json(),
+        await serverCall(
+          callFactoryFunction(fixture.base, "ensureDeveloperIDE", [projectID], {
+            cookie: developerCookie,
+          }),
+        ),
       );
       expect(restarted.epoch).toBe(2);
       await eventually(
         async () =>
-          viewSchema.parse(await (await api("/api/developer-ide", developerCookie)).json()),
+          viewSchema.parse(
+            await serverCall(
+              callFactoryFunction(fixture.base, "getDeveloperIDE", [], { cookie: developerCookie }),
+            ),
+          ),
         (view) => view.state === "ready",
         "Editor epoch 2 did not start",
         120_000,
       );
-      expect((await kubernetes.getPod(namespace, "editor-2"))?.uid).not.toBe(outcome.podUID);
+      const restartedIdentity = await recordedEditorIdentity(database, userID);
+      if (!restartedIdentity) throw new Error("Missing restarted editor identity");
+      const restartedPod = await client.observe({
+        identity: restartedIdentity,
+        image,
+        namespaceUID,
+        podUID: null,
+      });
+      expect(restartedPod?.ready).toBe(true);
+      expect(restartedPod?.podUID).not.toBe(outcome.podUID);
       for (const id of [projectID, secondProjectID])
         expect(
           (
-            await api(`/api/projects/${id}/members`, adminCookie, {
-              email,
-              role: "product-contributor",
-            })
+            await callFactoryFunction(
+              fixture.base,
+              "saveProjectMember",
+              [
+                id,
+                {
+                  email,
+                  role: "product-contributor",
+                },
+              ],
+              { cookie: adminCookie },
+            )
           ).ok,
         ).toBe(true);
-      expect((await api("/api/developer-ide", developerCookie)).status).toBe(403);
       expect(
-        (await api(`/api/projects/${projectID}/developer-ide/ensure`, developerCookie, {})).status,
-      ).toBe(403);
+        await callFactoryFunction(fixture.base, "getDeveloperIDE", [], { cookie: developerCookie }),
+      ).toMatchObject({ ok: false, status: 403 });
+      expect(
+        await callFactoryFunction(fixture.base, "ensureDeveloperIDE", [projectID], {
+          cookie: developerCookie,
+        }),
+      ).toMatchObject({ ok: false, status: 403 });
       const ownedUserID = userID;
       await eventually(
         async () =>
@@ -239,7 +309,9 @@ test.skipIf(!enabled)(
         if (userID) {
           namespace ??= (await recordedEditorIdentity(database, userID))?.namespace;
           if (fixture.processes.at(-1)?.exitCode !== null) await fixture.start();
-          await api("/api/developer-ide/stop", developerCookie, {}).catch(() => null);
+          await serverCall(
+            callFactoryFunction(fixture.base, "stopDeveloperIDE", [], { cookie: developerCookie }),
+          ).catch(() => null);
           const ownedUserID = userID;
           await eventually(
             async () =>

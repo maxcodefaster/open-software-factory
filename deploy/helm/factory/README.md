@@ -36,6 +36,7 @@ image: your-registry/factory@sha256:YOUR_BUILT_APPLICATION_DIGEST
 factorybox:
   image: your-registry/factorybox@sha256:YOUR_VERIFIED_WORKER_DIGEST
   executableSHA256: YOUR_VERIFIED_FACTORYBOX_EXECUTABLE_SHA256
+  architecture: amd64 # or arm64, matching the independently qualified worker package
   nodeName: YOUR_ADMITTED_NODE
   kernel: YOUR_ADMITTED_KERNEL_RELEASE
 publicURL: https://factory.example.com
@@ -92,6 +93,12 @@ Authentication cookies are scoped by installation, so local releases on differen
 overwrite each other's Factory login.
 The unseal material and AppRole login are retained in the private Factory state claim, separate
 from OpenBao's encrypted data claim. Protect and back up these installation resources together.
+
+The planning cache starts with one sync worker, independent of the Kubernetes node's CPU count.
+Set `zeroSyncWorkers` to a larger positive integer when measured concurrent sync traffic requires
+it. This changes only Zero's native worker configuration, not its retained data or authorization.
+Source development uses the same default; `FACTORY_LOCAL_ZERO_SYNC_WORKERS` overrides it in the
+local Compose service. Worker-count changes require the normal service update.
 
 ## Local development acceptance
 

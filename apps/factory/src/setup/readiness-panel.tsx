@@ -1,10 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import {
-  type SetupTask,
-  type SetupTaskView,
-  setupReadiness,
-} from "../../../../packages/project-domain/src/setup";
-import { apiRequest } from "../api-client";
+import { type SetupTask, type SetupTaskView } from "../../../../packages/project-domain/src/setup";
+import { getSetupReadiness, retrySetupTask } from "../server-functions/setup";
+import { serverCall } from "../server-functions/result";
 
 const labels = {
   configuration: "Project configuration",
@@ -30,7 +27,7 @@ export function SetupReadiness(props: { projectID: string }) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       async function load() {
         try {
-          const value = await apiRequest(setupReadiness, `/api/projects/${projectID}/setup`);
+          const value = await serverCall(getSetupReadiness(projectID));
           if (disposed) return;
           setRows(value);
           setError("");
@@ -55,11 +52,7 @@ export function SetupReadiness(props: { projectID: string }) {
     const projectID = props.projectID;
     setRetrying(task);
     try {
-      const value = await apiRequest(setupReadiness, `/api/projects/${projectID}/setup/retry`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ task }),
-      });
+      const value = await serverCall(retrySetupTask(projectID, task));
       if (props.projectID === projectID) {
         setRows(value);
         setRefresh((value) => value + 1);

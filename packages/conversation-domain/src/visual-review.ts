@@ -91,7 +91,6 @@ export const visualReviewSchema = z.object({
   currentCommitSha: z.string().optional(),
   canSendCorrections: z.boolean().optional(),
   recordingCurrent: z.boolean().optional(),
-  recordingEnabled: z.boolean(),
   recording: z
     .object({
       id: z.uuid(),

@@ -4,6 +4,8 @@ import { sourceWorkspaceViewSchema } from "../../apps/factory/src/api-contracts"
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 
 const projectID = process.env["FACTORY_STABILIZATION_PROJECT_ID"];
 test.use({ trace: "off" });
@@ -54,14 +56,22 @@ test("current Starter IDE reopens with usable source without starting compute", 
     `;
     await signIn(page);
     const sourceResponse = page.waitForResponse((response) =>
-      response.url().endsWith(`/api/projects/${projectID}/source-workspace/ensure`),
+      new URL(response.url()).pathname.startsWith("/_server/data/ensurePersonalSource-"),
     );
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: project.slug }).click();
     await mkdir(".factory/screenshots/stabilization", { recursive: true });
     for (const phase of ["open", "reopen"] as const) {
       await openPersonalIDE(page);
-      const source = sourceWorkspaceViewSchema.parse(await (await sourceResponse).json());
+      const response = await sourceResponse;
+      const result = await decodeResponse<ServerResult<unknown>>(
+        new Response(new Uint8Array(await response.body()).buffer, {
+          status: response.status(),
+          headers: response.headers(),
+        }),
+      );
+      if (!result) throw new Error("Native source preparation returned no result");
+      const source = sourceWorkspaceViewSchema.parse(await serverCall(Promise.resolve(result)));
       const ide = page.frameLocator('iframe[title="Factory IDE"]');
       await expect(ide.locator("#theia-app-shell")).toBeVisible({ timeout: 15_000 });
       const file = ide.getByText("server.mjs", { exact: true }).first();

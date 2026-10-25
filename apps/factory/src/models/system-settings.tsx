@@ -3,11 +3,9 @@ import {
   type ModelRole,
   modelRoles,
 } from "../../../../packages/conversation-domain/src/model-inheritance";
-import {
-  type ModelSettingsView,
-  modelSettingsView,
-} from "../../../../packages/conversation-domain/src/model-settings";
-import { apiRequest } from "../api-client";
+import type { ModelSettingsView } from "../../../../packages/conversation-domain/src/model-settings";
+import { getModelSettings, saveModelSettings } from "../server-functions/models";
+import { serverCall } from "../server-functions/result";
 import { ModelConnectionSettings } from "./connection-settings";
 
 export function SystemModelSettings(props: {
@@ -38,7 +36,7 @@ export function SystemModelSettings(props: {
     setBusy(true);
     setError("");
     try {
-      const value = await apiRequest(modelSettingsView, "/api/model-settings");
+      const value = await serverCall(getModelSettings());
       if (!disposed) publish(value);
     } catch (cause) {
       if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
@@ -54,16 +52,14 @@ export function SystemModelSettings(props: {
     setError("");
     setSaved(false);
     try {
-      const value = await apiRequest(modelSettingsView, "/api/model-settings", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
+      const value = await serverCall(
+        saveModelSettings({
           version: current.version,
           planningModelId: planning(),
           buildModelId: build(),
           rules: rules(),
         }),
-      });
+      );
       if (!disposed) {
         publish(value);
         setSaved(true);

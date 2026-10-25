@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -145,8 +147,16 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       return { status: response.status, body: await response.json() };
     }
     const webhookFile = resolve(directory, "webhook-url");
-    const current = async () =>
-      monitoringView.parse(await api(`/api/projects/${state.projectId}/inputs`));
+    const current = async () => {
+      if (!state.projectId) throw new Error("Owned monitoring Project is missing");
+      return monitoringView.parse(
+        await serverCall(
+          callFactoryFunction(factory.base, "getProjectInputs", [state.projectId], {
+            cookie: adminCookie,
+          }),
+        ),
+      );
+    };
     try {
       if (!continuation) {
         await forgeHost.api("user/repos", "POST", {
@@ -259,28 +269,56 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       expect(initialBranch.name).toBe("release");
       if (!state.incidentId) expect(initialBranch.headSha).toBe(recordedBase.sha);
       if (!state.projectId) {
-        const project = await api("/api/projects", "POST", {
-          slug: repository.name,
-          name: "Owned monitoring Autofix",
-          repositoryUrl: `${forgeHost.origin}/${repository.owner}/${repository.name}.git`,
-          defaultBranch: "release",
-          devcontainerPath: ".devcontainer/devcontainer.json",
-        });
+        const project = await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "registerProject",
+            [
+              {
+                slug: repository.name,
+                name: "Owned monitoring Autofix",
+                repositoryUrl: `${forgeHost.origin}/${repository.owner}/${repository.name}.git`,
+                defaultBranch: "release",
+                devcontainerPath: ".devcontainer/devcontainer.json",
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
         state.projectId = z.uuid().parse(project.id);
         await save();
       }
       if (!state.managerId) {
-        const manager = await api("/api/admin/users", "POST", {
-          name: "Owned monitoring manager-developer",
-          email: managerEmail,
-          password: managerPassword,
-        });
+        const manager = await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "createAccount",
+            [
+              {
+                name: "Owned monitoring manager-developer",
+                email: managerEmail,
+                password: managerPassword,
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
         state.managerId = z.uuid().parse(manager.id);
-        await api(`/api/projects/${state.projectId}/members`, "POST", {
-          email: managerEmail,
-          role: "developer",
-          manageProject: true,
-        });
+        await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "saveProjectMember",
+            [
+              state.projectId,
+              {
+                email: managerEmail,
+                role: "developer",
+                manageProject: true,
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
         await save();
       }
       const login = await request(
@@ -294,48 +332,95 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         .getSetCookie()
         .map((cookie) => cookie.split(";")[0])
         .join("; ");
-      const library = () =>
-        api(`/api/mcp?project=${state.projectId}`).then((value) => mcpLibraryView.parse(value));
+      const projectID = state.projectId;
+      if (!projectID) throw new Error("Owned monitoring Project is missing");
+      const library = async () =>
+        mcpLibraryView.parse(
+          await serverCall(
+            callFactoryFunction(factory.base, "getMCPLibrary", [projectID], {
+              cookie: adminCookie,
+            }),
+          ),
+        );
       let entry = (await library()).entries.find((entry) => entry.id === state.sourceId);
       if (!entry) {
-        await api("/api/mcp", "POST", {
-          libraryId: state.sourceId,
-          revisionId: state.sourceRevisionId,
-          expectedRevision: 0,
-          scope: "system",
-          content: {
-            name: "Owned authenticated monitoring source",
-            description: "Synthetic incidents for the native Autofix proof.",
-            endpoint: source.endpoint,
-            authentication: "bearer",
-            provider: "custom",
-            roles: ["planning", "build"],
-          },
-        });
-        await api(`/api/mcp/${state.sourceId}/connect`, "POST", {
-          commandId: state.connectCommandId,
-          revisionId: state.sourceRevisionId,
-          expectedVersion: 0,
-          token: source.bearer,
-        });
+        await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "saveMCPDefinition",
+            [
+              {
+                libraryId: state.sourceId,
+                revisionId: state.sourceRevisionId,
+                expectedRevision: 0,
+                scope: "system",
+                content: {
+                  name: "Owned authenticated monitoring source",
+                  description: "Synthetic incidents for the native Autofix proof.",
+                  endpoint: source.endpoint,
+                  authentication: "bearer",
+                  provider: "custom",
+                  roles: ["planning", "build"],
+                },
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
+        await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "connectMCP",
+            [
+              state.sourceId,
+              {
+                commandId: state.connectCommandId,
+                revisionId: state.sourceRevisionId,
+                expectedVersion: 0,
+                token: source.bearer,
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
         entry = (await library()).entries.find((entry) => entry.id === state.sourceId);
       }
       if (entry?.connection?.state === "review") {
-        await api(`/api/mcp/${state.sourceId}/review`, "PUT", {
-          expectedVersion: entry.connection.version,
-          confirmReadOnlyAccess: true,
-          tools: entry.connection.tools.map(({ name, digest }) => ({ name, digest })),
-        });
+        await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "reviewMCPAccess",
+            [
+              state.sourceId,
+              {
+                expectedVersion: entry.connection.version,
+                confirmReadOnlyAccess: true,
+                tools: entry.connection.tools.map(({ name, digest }) => ({ name, digest })),
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
         entry = (await library()).entries.find((entry) => entry.id === state.sourceId);
       }
       if (!entry?.connection || entry.connection.state !== "ready")
         throw new Error("The exact owned MCP connection is not ready; no reconnect is automatic");
       if (!entry.connection.projectGrants.includes(state.projectId!))
-        await api(`/api/mcp/${state.sourceId}/grant`, "PUT", {
-          projectId: state.projectId,
-          enabled: true,
-          expectedVersion: entry.connection.version,
-        });
+        await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "grantMCPProject",
+            [
+              state.sourceId,
+              {
+                projectId: projectID,
+                enabled: true,
+                expectedVersion: entry.connection.version,
+              },
+            ],
+            { cookie: adminCookie },
+          ),
+        );
       const secretWrites = await database.client<{ key: string }[]>`
         SELECT secret_key AS key FROM factory.mcp_secret_write WHERE connection_id=${state.sourceId} AND state='committed'`;
       expect(secretWrites.length).toBeGreaterThan(0);
@@ -351,19 +436,24 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       );
       let webhook = await readFile(webhookFile, "utf8").catch(() => undefined);
       if (!webhook) {
-        const saved = await api(
-          `/api/projects/${state.projectId}/inputs`,
-          "PUT",
-          {
-            id: state.hookId,
-            commandId: state.hookCommandId,
-            expectedVersion: 0,
-            name: "Owned invoice alerts",
-            connectionIds: [state.sourceId],
-            enabled: true,
-            delegation: "application-fix-and-delivery",
-          },
-          managerCookie,
+        const saved = await serverCall(
+          callFactoryFunction(
+            factory.base,
+            "saveProjectInput",
+            [
+              projectID,
+              {
+                id: state.hookId,
+                commandId: state.hookCommandId,
+                expectedVersion: 0,
+                name: "Owned invoice alerts",
+                connectionIds: [state.sourceId],
+                enabled: true,
+                delegation: "application-fix-and-delivery",
+              },
+            ],
+            { cookie: managerCookie },
+          ),
         );
         webhook = z.url().parse(saved.url);
         await writeFile(webhookFile, webhook, { mode: 0o600, flag: "wx" });
@@ -437,7 +527,11 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         { id: string }[]
       >`SELECT id FROM factory.change WHERE ticket_id=${delivered!.ticketId}`;
       if (!change) throw new Error("The delivered Change is missing");
-      const delivery = deliveryViewSchema.parse(await api(`/api/changes/${change.id}/delivery`));
+      const delivery = deliveryViewSchema.parse(
+        await serverCall(
+          callFactoryFunction(factory.base, "getDelivery", [change.id], { cookie: adminCookie }),
+        ),
+      );
       expect(delivery.verificationState).toBe("succeeded");
       expect(delivery.reviewState).toBe("passed");
       if (!delivery.verificationCommitSha || !delivery.reviewId)
@@ -536,7 +630,15 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
           { id: string; state: string }[]
         >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${state.projectId!}`) {
           if (attempt.state === "stopped") continue;
-          await api(`/api/runtime-attempts/${attempt.id}/stop`, "POST", {});
+          await serverCall(
+            callFactoryFunction(
+              factory.base,
+              "stopRuntimeAttempt",
+              [attempt.id],
+              { cookie: adminCookie, origin: factory.base, "content-type": "application/json" },
+              AbortSignal.timeout(180_000),
+            ),
+          );
           await eventually(
             async () =>
               (

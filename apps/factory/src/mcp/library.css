@@ -1,3 +1,6 @@
+.mcp-library-subtitle {
+  color: var(--color-ink-muted);
+}
 .mcp-library .mcp-gallery {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -85,8 +88,11 @@
   align-items: center;
   gap: var(--space-3);
 }
-.mcp-recommendations {
+.mcp-recommendations:has(> h3) {
   margin-top: var(--space-8);
+}
+.mcp-recommendations > h3 + .skill-gallery {
+  margin-top: var(--space-5);
 }
 .mcp-recommendations > p {
   margin-block: var(--space-2) var(--space-5);

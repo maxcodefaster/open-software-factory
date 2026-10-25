@@ -2,28 +2,67 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { z } from "zod";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createReviewService } from "../../apps/factory/src/review/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
+import {
+  pendingReviewThreads,
+  visualReviewSchema,
+} from "../../packages/conversation-domain/src/visual-review";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
-import { pendingReviewThreads } from "../../packages/conversation-domain/src/visual-review";
+import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
 
 test("human feedback is idempotent, scoped, versioned and admits corrections only explicitly", async () => {
   const f = await candidateReviewFixture();
   const controller = createVisualReviewController(f.database);
+  const origin = "https://owned-review.test";
+  const endpoint = await compiledFactoryEndpoint({
+    origin,
+    services: {
+      review: createReviewService({
+        controller,
+        access: createAccessController(f.database),
+        admit: async (changeID, userID, sql, text, commandId) =>
+          (
+            await createChangeAdmission(f.database, buildModelID).admitIn(sql, changeID, userID, {
+              kind: "change-prompt",
+              commandId,
+              text,
+            })
+          ).turn.id,
+        dispatchPending: async () => {},
+      }),
+    } as FactoryServices,
+    session: async () => ({ user: { id: f.userID } }),
+    maintenance: async () => false,
+    requireFresh: async () => {},
+  });
+  async function native(name: string, args: unknown[]) {
+    const response = await endpoint(await factoryFunctionRequest(origin, name, args));
+    const result = await decodeResponse<ServerResult<unknown>>(response);
+    if (!result) throw new Error("Owned native Review command returned no result");
+    return serverCall(Promise.resolve(result as ServerResult<unknown>));
+  }
+  const outcome = z.object({ feedbackId: z.string().nullish(), turnId: z.string().nullish() });
   try {
     const input = {
       commandId: crypto.randomUUID(),
       kind: "thread",
       body: "The empty state loses the form.",
     };
-    const first = await controller.create(f.changeID, f.userID, input);
-    expect(await controller.create(f.changeID, f.userID, input)).toMatchObject(first);
+    const first = outcome.parse(await native("createReviewFeedback", [f.changeID, input]));
+    expect(await native("createReviewFeedback", [f.changeID, input])).toMatchObject(first);
     await expect(
-      controller.create(f.changeID, f.userID, { ...input, body: "Changed" }),
+      native("createReviewFeedback", [f.changeID, { ...input, body: "Changed" }]),
     ).rejects.toThrow("changed input");
-    const view = await controller.get(f.changeID, f.userID);
+    const view = visualReviewSchema.parse(await native("getVisualReview", [f.changeID]));
     expect(view.feedback).toHaveLength(1);
     expect(view.feedback[0]?.messages[0]?.body).toBe(input.body);
     const [before] = await f.database.client<{ count: number }[]>`SELECT count(*)::int AS count
@@ -31,49 +70,41 @@ test("human feedback is idempotent, scoped, versioned and admits corrections onl
     expect(before?.count).toBe(1);
     const commandId = crypto.randomUUID();
     const selected = { commandId, feedback: [{ id: first.feedbackId!, version: 1 }] };
-    const admit = async (
-      sql: Parameters<ReturnType<typeof createChangeAdmission>["admitIn"]>[0],
-      text: string,
-      id: string,
-    ) =>
-      (
-        await createChangeAdmission(f.database, buildModelID).admitIn(sql, f.changeID, f.userID, {
-          kind: "change-prompt",
-          commandId: id,
-          text,
-        })
-      ).turn.id;
-    const correction = await controller.dispatch(f.changeID, f.userID, selected, admit);
-    expect(await controller.dispatch(f.changeID, f.userID, selected, admit)).toMatchObject(
-      correction,
-    );
+    const correction = outcome.parse(await native("sendReviewRevision", [f.changeID, selected]));
+    expect(await native("sendReviewRevision", [f.changeID, selected])).toMatchObject(correction);
     const [intent] = await f.database.client<{ session: string; text: string }[]>`
       SELECT session_id AS session,prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id=${correction.turnId!}`;
     expect(intent?.session).toBe(f.sessionID);
     expect(intent?.text).toContain(input.body);
     expect(intent?.text).toContain("Do not resolve Threads");
-    await controller.update(f.changeID, f.userID, {
-      commandId: crypto.randomUUID(),
-      feedbackId: first.feedbackId,
-      expectedVersion: 1,
-      action: "reply",
-      body: "Also after reload.",
-    });
-    await expect(
-      controller.update(f.changeID, f.userID, {
+    await native("updateReviewFeedback", [
+      f.changeID,
+      {
         commandId: crypto.randomUUID(),
         feedbackId: first.feedbackId,
         expectedVersion: 1,
-        action: "resolve",
-      }),
+        action: "reply",
+        body: "Also after reload.",
+      },
+    ]);
+    await expect(
+      native("updateReviewFeedback", [
+        f.changeID,
+        {
+          commandId: crypto.randomUUID(),
+          feedbackId: first.feedbackId,
+          expectedVersion: 1,
+          action: "resolve",
+        },
+      ]),
     ).rejects.toThrow("changed");
-    expect((await controller.get(f.changeID, f.userID)).feedback[0]?.state).toBe("open");
+    expect(
+      visualReviewSchema.parse(await native("getVisualReview", [f.changeID])).feedback[0]?.state,
+    ).toBe("open");
     await f.database
       .client`DELETE FROM factory.project_membership WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
-    await expect(controller.get(f.changeID, f.userID)).rejects.toThrow("not found");
-    await expect(controller.dispatch(f.changeID, f.userID, selected, admit)).rejects.toThrow(
-      "not found",
-    );
+    await expect(native("getVisualReview", [f.changeID])).rejects.toThrow("not found");
+    await expect(native("sendReviewRevision", [f.changeID, selected])).rejects.toThrow("not found");
   } finally {
     await f.dispose();
   }
@@ -516,17 +547,14 @@ test("DOM images are labelled reconstructions and cannot replace a recording's o
   }
 });
 
-test("only existing Project management may disable recording", async () => {
+test("review exposes recording availability without a Project recording preference", async () => {
   const f = await candidateReviewFixture();
   try {
     const controller = createVisualReviewController(f.database);
-    await expect(controller.recordingSetting(f.projectID, f.userID, false)).rejects.toThrow(
-      "Manager",
-    );
-    await f.database
-      .client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
-    await controller.recordingSetting(f.projectID, f.userID, false);
-    expect((await controller.get(f.changeID, f.userID)).recordingEnabled).toBe(false);
+    const view = await controller.get(f.changeID, f.userID);
+    expect(view.recording).toBeNull();
+    expect(view).not.toHaveProperty("recordingEnabled");
+    expect(controller).not.toHaveProperty("recordingSetting");
   } finally {
     await f.dispose();
   }

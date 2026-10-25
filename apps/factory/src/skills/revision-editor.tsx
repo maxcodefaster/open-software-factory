@@ -1,6 +1,5 @@
 import { createPatch } from "diff";
 import { createSignal, For, Show } from "solid-js";
-import { z } from "zod";
 import type {
   SkillLibraryEntry,
   SkillScope,
@@ -9,7 +8,8 @@ import {
   type SkillContent,
   skillContentInput,
 } from "../../../../packages/conversation-domain/src/skills";
-import { apiRequest } from "../api-client";
+import { serverCall } from "../server-functions/result";
+import { saveSkill } from "../server-functions/skills";
 
 export function SkillRevisionEditor(props: {
   content: SkillContent;
@@ -99,15 +99,7 @@ export function SkillRevisionEditor(props: {
     setBusy(true);
     setError("");
     try {
-      const saved = await apiRequest(
-        z.object({ libraryId: z.uuid(), revisionId: z.uuid() }),
-        "/api/skills",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(pending),
-        },
-      );
+      const saved = await serverCall(saveSkill(pending));
       props.onSaved({ ...saved, scope: scope() });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save skill");

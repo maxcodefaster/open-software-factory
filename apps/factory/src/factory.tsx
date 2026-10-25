@@ -72,46 +72,82 @@ import {
   createAgentReadFence,
   retainAgentActivity,
 } from "./agent-view-state";
-import { apiRequest, emptyResponseSchema } from "./api-client";
+import { getModelAvailability } from "./server-functions/bootstrap";
+import { ensureChangeSource, ensurePersonalSource } from "./server-functions/workspaces";
+import { serverCall } from "./server-functions/result";
+import { registerProject } from "./server-functions/projects";
+import {
+  getChanges,
+  getRuntimeAttempts,
+  getProjectPreviews,
+  ensureStaging,
+} from "./server-functions/runtime";
+import {
+  getAgentView,
+  startCoding,
+  resumeCoding as requestCodingResume,
+  stopCoding,
+  checkCodingStop,
+  newCodingConversation,
+  sendCodingPrompt,
+  requestCodingChanges,
+} from "./server-functions/agent";
+import {
+  getConversation,
+  newProjectConversation,
+  sendConversationMessage as commissionConversationMessage,
+  setConversationMode,
+  answerConversationQuestion,
+  confirmEpicProposal,
+} from "./server-functions/conversations";
+import {
+  getDelivery,
+  approveDelivery as requestDeliveryApproval,
+  retryCandidateReview,
+  resumeVerification,
+} from "./server-functions/delivery";
+import {
+  getTicketDetail,
+  saveTicketDocument as saveTicket,
+  createTicketFollowUp,
+  trashTicket,
+  restoreTicket,
+  implementTicket as requestImplementation,
+} from "./server-functions/tickets";
+import { invoke } from "@solidjs/web/server-functions";
+import {
+  archiveKnowledgePage as archiveSavedKnowledgePage,
+  generateKnowledge as requestKnowledgeGeneration,
+  getKnowledgeGeneration,
+  getKnowledgeHistory,
+  getKnowledgeSources,
+  getRepositoryDocument,
+  getRepositoryDocuments,
+  restoreKnowledgePage,
+  saveKnowledgePage,
+  searchKnowledge,
+} from "./server-functions/knowledge";
 import type { Epic } from "./api-contracts";
 import {
   type AgentMessage,
   type WriterView,
   type AgentView,
   type AppPreview,
-  agentViewSchema,
-  appPreviewsSchema,
-  attemptsResponseSchema,
   type Bootstrap,
-  bootstrapSchema,
   type Change,
   type ConversationView,
-  changesResponseSchema,
-  conversationViewSchema,
   type DeliveryView,
-  deliveryViewSchema,
   type KnowledgeGeneration,
   type KnowledgeRevision,
-  knowledgeGenerationSchema,
-  knowledgeHistorySchema,
-  knowledgeSaveSchema,
-  knowledgeSearchSchema,
-  knowledgeSourcesSchema,
+  type KnowledgeSearchResult,
   type OpenRepositoryDocument,
-  openRepositoryDocumentSchema,
-  projectSchema,
   type RepositoryDocument,
   type RequirementRevision,
   type RuntimeAttempt,
   type RuntimeDockTarget,
-  repositoryDocumentsSchema,
-  runtimeAttemptSchema,
   type Session,
-  sourceWorkspaceViewSchema,
   type Ticket,
   type TicketDocumentRevision,
-  ticketDetailSchema,
-  ticketDocumentSaveSchema,
   type UIPreference,
 } from "./api-contracts";
 import { orderedDesktopBackgrounds } from "./artworks";
@@ -129,7 +165,6 @@ import { streamConversation } from "./conversation-stream";
 import { ConversationSwitcher } from "./conversation-switcher";
 import { CopyButton } from "./ui/feedback";
 import { conversationTimeline } from "./conversation-timeline";
-import { bindDialogKeyboard } from "./dialog-keyboard";
 import { DockAppButton, DockButton } from "./dock";
 import type { EpicEdit } from "./epic-controls";
 import { EpicProposalWorkspace } from "./epic-proposal-workspace";
@@ -466,10 +501,7 @@ function FactoryWorkspace(props: {
   let modelAvailabilityReadGeneration = 0;
   async function refreshModelAvailability() {
     const generation = ++modelAvailabilityReadGeneration;
-    const value = await apiRequest(
-      bootstrapSchema.pick({ modelRelayConfigured: true }),
-      "/api/session",
-    );
+    const value = await serverCall(getModelAvailability());
     if (!workspaceDisposed && generation === modelAvailabilityReadGeneration)
       setModelRelayConfigured(value.modelRelayConfigured);
   }
@@ -665,9 +697,7 @@ function FactoryWorkspace(props: {
     createSignal<OpenRepositoryDocument>();
   const [knowledgeGeneration, setKnowledgeGeneration] = createSignal<KnowledgeGeneration>();
   const [knowledgeHistory, setKnowledgeHistory] = createSignal<KnowledgeRevision[]>([]);
-  const [knowledgeSearch, setKnowledgeSearch] = createSignal<
-    typeof knowledgeSearchSchema._output.results
-  >([]);
+  const [knowledgeSearch, setKnowledgeSearch] = createSignal<KnowledgeSearchResult[]>([]);
   const [knowledgeSearchQuery, setKnowledgeSearchQuery] = createSignal("");
   let projectControlElement: HTMLDivElement | undefined;
   let settingsControlElement: HTMLDivElement | undefined;
@@ -683,12 +713,27 @@ function FactoryWorkspace(props: {
         ? active
         : agentToggleElement;
   };
+  const dismissAgent = () => {
+    const opener = agentOverlayOpener ?? agentToggleElement;
+    setAgentOpen(false);
+    requestAnimationFrame(() => {
+      if (!agentOpen() && opener?.isConnected) opener.focus({ preventScroll: true });
+    });
+  };
+  const projectMenuOpener = (): HTMLButtonElement | undefined => {
+    const button = projectControlElement?.querySelector<HTMLButtonElement>(".project-selector");
+    return button?.getClientRects().length
+      ? button
+      : (settingsControlElement?.querySelector<HTMLButtonElement>("button") ?? undefined);
+  };
   createEffect(
     () => true,
     () => {
       const query = window.matchMedia("(max-width: 900px)");
       const update = () => {
-        if (query.matches && agentOpen()) agentOverlayOpener = agentToggleElement;
+        if (query.matches && agentOpen()) rememberAgentOpener();
+        setProjectMenuOpen(false);
+        setSettingsOpen(false);
         setNarrowViewport(query.matches);
       };
       update();
@@ -703,20 +748,35 @@ function FactoryWorkspace(props: {
       setProjectMenuOpen(false);
       setSettingsOpen(false);
       let cancelled = false;
-      let cleanup: (() => void) | undefined;
+      let element: HTMLElement | undefined;
+      const keydown = (event: KeyboardEvent) => {
+        if (
+          event.defaultPrevented ||
+          event.key !== "Escape" ||
+          !(event.target instanceof Node) ||
+          !element?.contains(event.target)
+        )
+          return;
+        event.preventDefault();
+        dismissAgent();
+      };
       queueMicrotask(() => {
-        if (!cancelled && agentPanelElement) {
-          cleanup = bindDialogKeyboard(
-            agentPanelElement,
-            () => setAgentOpen(false),
-            agentOverlayOpener,
-            () => !agentOpen(),
-          );
-        }
+        if (cancelled) return;
+        element = agentPanelElement;
+        // Let Solid's delegated help/menu handlers consume Escape before dismissing the panel.
+        document.addEventListener("keydown", keydown);
+        if (!element || element.contains(document.activeElement)) return;
+        const inputs = element.querySelectorAll<HTMLElement>(
+          'textarea:not(:disabled), input:not(:disabled):not([type="file"]):not([type="hidden"])',
+        );
+        (
+          [...inputs].find((input) => input.getClientRects().length) ??
+          element.querySelector<HTMLElement>("button:not(:disabled)")
+        )?.focus({ preventScroll: true });
       });
       return () => {
         cancelled = true;
-        cleanup?.();
+        document.removeEventListener("keydown", keydown);
       };
     },
   );
@@ -759,7 +819,7 @@ function FactoryWorkspace(props: {
       const closeOnEscape = (event: KeyboardEvent) => {
         if (event.key !== "Escape") return;
         const opener = projectMenuOpen()
-          ? projectControlElement?.querySelector<HTMLButtonElement>("button")
+          ? projectMenuOpener()
           : settingsOpen()
             ? settingsControlElement?.querySelector<HTMLButtonElement>("button")
             : undefined;
@@ -790,11 +850,12 @@ function FactoryWorkspace(props: {
           : settingsVisible
             ? settingsPopover
             : undefined;
-        const container = projectOpen ? projectControlElement : settingsControlElement;
         if (element)
           cleanup = bindPopoverKeyboard(
             element,
-            container?.querySelector<HTMLButtonElement>("button") ?? undefined,
+            projectOpen
+              ? projectMenuOpener()
+              : (settingsControlElement?.querySelector<HTMLButtonElement>("button") ?? undefined),
             () => {
               setProjectMenuOpen(false);
               setSettingsOpen(false);
@@ -951,11 +1012,10 @@ function FactoryWorkspace(props: {
   async function readLifecycleState(signal: AbortSignal) {
     const projectID = selectedProjectID();
     if (!projectID) return;
-    const query = `?projectId=${encodeURIComponent(projectID)}`;
     const [changeBody, attemptBody, previewBody] = await Promise.all([
-      apiRequest(changesResponseSchema, `/api/changes${query}`, { signal }),
-      apiRequest(attemptsResponseSchema, `/api/runtime-attempts${query}`, { signal }),
-      apiRequest(appPreviewsSchema, `/api/projects/${projectID}/app-previews`, { signal }),
+      serverCall(invoke(getChanges, { signal }, projectID)),
+      serverCall(invoke(getRuntimeAttempts, { signal }, projectID)),
+      serverCall(invoke(getProjectPreviews, { signal }, projectID)),
     ]);
     if (selectedProjectID() !== projectID) return;
     setChanges(changeBody.changes);
@@ -984,9 +1044,9 @@ function FactoryWorkspace(props: {
       const read = observeStatus ? agentReadFence.beginRead() : undefined;
       const [agentView, deliveryView] = await Promise.all([
         observeStatus
-          ? apiRequest(agentViewSchema, `/api/changes/${changeID}/agent?history=0`, { signal })
+          ? serverCall(invoke(getAgentView, { signal }, changeID, false))
           : Promise.resolve(undefined),
-        apiRequest(deliveryViewSchema, `/api/changes/${changeID}/delivery`, { signal }),
+        serverCall(invoke(getDelivery, { signal }, changeID)),
       ]);
       if (selectedChange()?.id !== changeID) return;
       if (agentView && read && agentReadFence.current(read)) {
@@ -1051,7 +1111,7 @@ function FactoryWorkspace(props: {
     const generation = ++ticketReadGeneration;
     const projectID = selectedProjectID();
     if (ticketID) {
-      const body = await apiRequest(ticketDetailSchema, `/api/tickets/${ticketID}`);
+      const body = await serverCall(getTicketDetail(ticketID));
       if (
         workspaceDisposed ||
         generation !== ticketReadGeneration ||
@@ -1073,13 +1133,11 @@ function FactoryWorkspace(props: {
       setConversation(undefined);
       return;
     }
-    const params = new URLSearchParams();
-    if (ticketID) params.set("ticketId", ticketID);
-    if (selection) params.set("contextId", selection);
-    const query = params.size ? `?${params}` : "";
-    const value = await apiRequest(
-      conversationViewSchema.nullable(),
-      `/api/projects/${projectID}/conversation${query}`,
+    const value = await serverCall(
+      getConversation(projectID, {
+        ...(ticketID ? { ticketId: ticketID } : {}),
+        ...(selection ? { contextId: selection } : {}),
+      }),
     );
     if (
       workspaceDisposed ||
@@ -1289,17 +1347,15 @@ function FactoryWorkspace(props: {
     const form = event.currentTarget as HTMLFormElement;
     const data = new FormData(form);
     await mutate(async () => {
-      const project = await apiRequest(projectSchema, "/api/projects", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          name: data.get("name"),
-          slug: data.get("slug"),
-          repositoryUrl: data.get("repositoryUrl"),
-          defaultBranch: data.get("defaultBranch"),
-          devcontainerPath: data.get("devcontainerPath"),
+      const project = await serverCall(
+        registerProject({
+          name: String(data.get("name") ?? ""),
+          slug: String(data.get("slug") ?? ""),
+          repositoryUrl: String(data.get("repositoryUrl") ?? ""),
+          defaultBranch: String(data.get("defaultBranch") ?? ""),
+          devcontainerPath: String(data.get("devcontainerPath") ?? ""),
         }),
-      });
+      );
       setSelectedProjectID(project.id);
       setProjectMenuOpen(false);
       setRegistrationOpen(false);
@@ -1468,15 +1524,7 @@ function FactoryWorkspace(props: {
     };
     const result = await mutate(async () => {
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(payload));
-      const saved = await apiRequest(
-        ticketDocumentSaveSchema,
-        `/api/tickets/${current.ticket.id}/document`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ commandId, ...payload }),
-        },
-      );
+      const saved = await serverCall(saveTicket(current.ticket.id, { commandId, ...payload }));
       acknowledgeCommand(scope, commandId);
       // A competing read may supersede this refresh. The write's exact base
       // comes from its acknowledgement, never whichever projection arrives first.
@@ -1502,15 +1550,7 @@ function FactoryWorkspace(props: {
       };
       const scope = `confirm:${current.ticket.id}`;
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(payload));
-      const saved = await apiRequest(
-        ticketDocumentSaveSchema,
-        `/api/tickets/${current.ticket.id}/document`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ commandId, ...payload }),
-        },
-      );
+      const saved = await serverCall(saveTicket(current.ticket.id, { commandId, ...payload }));
       acknowledgeCommand(scope, commandId);
       await refreshTicketDetail(current.ticket.id).catch(() => undefined);
       return saved;
@@ -1524,14 +1564,8 @@ function FactoryWorkspace(props: {
     const result = await mutate(async () => {
       const scope = `epic-confirm:${entryID}`;
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(proposal));
-      const value = await apiRequest(
-        z.object({ epicId: z.uuid(), ticketIds: z.array(z.uuid()) }),
-        `/api/projects/${projectID}/epic-proposals/${entryID}/confirm`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ commandId, proposal }),
-        },
+      const value = await serverCall(
+        confirmEpicProposal(projectID, entryID, { commandId, proposal }),
       );
       acknowledgeCommand(scope, commandId);
       if (selectedProjectID() !== projectID) return;
@@ -1559,19 +1593,13 @@ function FactoryWorkspace(props: {
     };
     await mutate(async () => {
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(input));
-      const result = await apiRequest(
-        z.object({ ticketId: z.uuid() }),
-        `/api/tickets/${current.ticket.id}/follow-up`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ commandId, ...input }),
-        },
+      const result = await serverCall(
+        createTicketFollowUp(current.ticket.id, { commandId, ...input }),
       );
       acknowledgeCommand(scope, commandId);
       if (!stillSelected()) return;
       await refreshTicketDetail(current.ticket.id);
-      const next = await apiRequest(ticketDetailSchema, `/api/tickets/${result.ticketId}`);
+      const next = await serverCall(getTicketDetail(result.ticketId));
       if (!stillSelected()) return;
       setSelectedTicketID(result.ticketId);
       setDetail(next);
@@ -1591,15 +1619,8 @@ function FactoryWorkspace(props: {
         : ticketList().find((item) => item.id === ticketID);
     if (action === "restore" && !ticket) return;
     await mutate(async () => {
-      await apiRequest(emptyResponseSchema, `/api/tickets/${ticketID}/${action}`, {
-        method: "POST",
-        ...(action === "restore"
-          ? {
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ expectedVersion: ticket?.version }),
-            }
-          : {}),
-      });
+      if (action === "restore" && ticket) await serverCall(restoreTicket(ticketID, ticket.version));
+      else await serverCall(trashTicket(ticketID));
       await refreshServerState();
     });
   }
@@ -1654,11 +1675,9 @@ function FactoryWorkspace(props: {
         JSON.stringify({ ticketID: ticket.id, revisionID, ...options }),
       );
       try {
-        await apiRequest(emptyResponseSchema, `/api/tickets/${ticket.id}/implement`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ commandId, revisionId: revisionID, ...options }),
-        });
+        await serverCall(
+          requestImplementation(ticket.id, { commandId, revisionId: revisionID, ...options }),
+        );
       } catch (cause) {
         if (!prepared) throw cause;
         setImplementationPreparation((current) =>
@@ -1692,13 +1711,7 @@ function FactoryWorkspace(props: {
 
   async function approveDelivery(changeID: string) {
     await mutate(async () => {
-      const value = await apiRequest(
-        deliveryViewSchema,
-        `/api/changes/${changeID}/delivery/approve`,
-        {
-          method: "POST",
-        },
-      );
+      const value = await serverCall(requestDeliveryApproval(changeID));
       if (selectedChange()?.id === changeID) setDelivery(value);
       await refreshLifecycleState();
     });
@@ -1710,14 +1723,7 @@ function FactoryWorkspace(props: {
     const scope = agentCommandScope("retry-review", changeID);
     await mutate(async () => {
       const commandId = agentCommandIds.forInput(scope, JSON.stringify({ changeID, reviewId }));
-      const value = await apiRequest(
-        deliveryViewSchema,
-        `/api/changes/${changeID}/delivery/retry-review`,
-        {
-          method: "POST",
-          body: JSON.stringify({ commandId, reviewId }),
-        },
-      );
+      const value = await serverCall(retryCandidateReview(changeID, { commandId, reviewId }));
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === changeID) setDelivery(value);
       await refreshLifecycleState();
@@ -1733,11 +1739,7 @@ function FactoryWorkspace(props: {
     await mutate(async () => {
       const input = { verificationId, stopId };
       const commandId = agentCommandIds.forInput(scope, JSON.stringify(input));
-      const value = await apiRequest(
-        deliveryViewSchema,
-        `/api/changes/${changeID}/delivery/resume-checks`,
-        { method: "POST", body: JSON.stringify({ commandId, ...input }) },
-      );
+      const value = await serverCall(resumeVerification(changeID, { commandId, ...input }));
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === changeID) setDelivery(value);
       await refreshLifecycleState();
@@ -1771,16 +1773,8 @@ function FactoryWorkspace(props: {
       const commandId =
         previous?.commandId ??
         agentCommandIds.forInput(scope, JSON.stringify({ projectID, ticketID, contextId }));
-      if (coding) {
-        const result = await apiRequest(
-          z.object({ contextId: z.uuid() }),
-          `/api/changes/${changeID}/agent/new-conversation`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ commandId, contextId }),
-          },
-        );
+      if (coding && changeID) {
+        const result = await serverCall(newCodingConversation(changeID, { commandId, contextId }));
         acknowledgeCommand(scope, commandId);
         if (assistantKey() !== key) return;
         setConversationSelections((previous) => ({
@@ -1789,14 +1783,11 @@ function FactoryWorkspace(props: {
         }));
         await refreshServerState();
       } else {
-        const result = await apiRequest(
-          conversationViewSchema,
-          `/api/projects/${projectID}/conversation/new`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ commandId, ...(ticketID ? { ticketId: ticketID } : {}) }),
-          },
+        const result = await serverCall(
+          newProjectConversation(projectID, {
+            commandId,
+            ...(ticketID ? { ticketId: ticketID } : {}),
+          }),
         );
         acknowledgeCommand(scope, commandId);
         if (assistantKey() !== key) return;
@@ -1823,19 +1814,16 @@ function FactoryWorkspace(props: {
     await mutate(async () => {
       if (!(await prepareBuildConversation(change.id))) return;
       const codingReasoning = agent().turn ? undefined : chosenCodingReasoning();
+      const contextId = conversation()?.contextId;
       const input = {
         ...(codingReasoning ? { codingReasoning } : {}),
-        ...(conversation()?.contextId ? { contextId: conversation()!.contextId } : {}),
+        ...(contextId ? { contextId } : {}),
       };
       const commandId = agentCommandIds.forInput(
         scope,
         codingReasoning ? JSON.stringify({ changeID: change.id, ...input }) : change.id,
       );
-      const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent/start`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, ...input }),
-      });
+      const value = await serverCall(startCoding(change.id, { commandId, ...input }));
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
       await refreshLifecycleState();
@@ -1855,11 +1843,9 @@ function FactoryWorkspace(props: {
     const scope = `coding-resume:${change.id}:${pause.turnID}`;
     await mutate(async () => {
       const commandId = agentCommandIds.forInput(scope, pause.turnID);
-      const result = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent/resume`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, pausedTurnId: pause.turnID }),
-      });
+      const result = await serverCall(
+        requestCodingResume(change.id, { commandId, pausedTurnId: pause.turnID }),
+      );
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === change.id) publishAgentView(change.id, result);
       await refreshLifecycleState();
@@ -1878,14 +1864,8 @@ function FactoryWorkspace(props: {
       conversationMode() === "build";
     if (!projectID || !ticketID || !current()) return false;
     if (conversation()?.mode !== "build") {
-      const value = await apiRequest(
-        conversationViewSchema,
-        `/api/projects/${projectID}/conversation/mode`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ ticketId: ticketID, mode: "build" }),
-        },
+      const value = await serverCall(
+        setConversationMode(projectID, { ticketId: ticketID, mode: "build" }),
       );
       if (!current()) return false;
       setConversation(value);
@@ -1897,9 +1877,7 @@ function FactoryWorkspace(props: {
     const change = selectedChange();
     if (!change) return;
     await mutate(async () => {
-      const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent/stop`, {
-        method: "POST",
-      });
+      const value = await serverCall(stopCoding(change.id));
       if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
     });
   }
@@ -1909,7 +1887,7 @@ function FactoryWorkspace(props: {
     if (!change) return;
     const read = agentReadFence.beginRead();
     await mutate(async () => {
-      const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent`);
+      const value = await serverCall(getAgentView(change.id));
       if (selectedChange()?.id === change.id) publishAgentView(change.id, value, read);
     });
   }
@@ -1919,15 +1897,7 @@ function FactoryWorkspace(props: {
     const stopId = agent().stopId;
     if (!change || !stopId) return;
     await mutate(async () => {
-      const value = await apiRequest(
-        agentViewSchema,
-        `/api/changes/${change.id}/agent/check-stop`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ stopId }),
-        },
-      );
+      const value = await serverCall(checkCodingStop(change.id, { stopId }));
       if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
     });
   }
@@ -1959,11 +1929,13 @@ function FactoryWorkspace(props: {
         text,
       );
       const action = correctionTarget() === change.id ? "request-changes" : "prompt";
-      const value = await apiRequest(agentViewSchema, `/api/changes/${change.id}/agent/${action}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ commandId, text, ...(contextId ? { contextId } : {}) }),
-      });
+      const value = await serverCall(
+        (action === "request-changes" ? requestCodingChanges : sendCodingPrompt)(change.id, {
+          commandId,
+          text,
+          ...(contextId ? { contextId } : {}),
+        }),
+      );
       acknowledgeCommand(scope, commandId);
       if (selectedChange()?.id === change.id && assistantKey() === targetKey) {
         publishAgentView(change.id, value);
@@ -2024,10 +1996,6 @@ function FactoryWorkspace(props: {
     const contextID = conversation()?.contextId ?? undefined;
     if (!intent && clarificationPaused() && unansweredClarification(conversation()?.entries ?? []))
       intent = "project-research";
-    const query = `?${new URLSearchParams({
-      ...(ticketID ? { ticketId: ticketID } : {}),
-      ...(contextID ? { contextId: contextID } : {}),
-    })}`;
     const scope = agentCommandScope("project-message");
     const streamKey = assistantKey();
     let streamTurnId: string | undefined;
@@ -2061,14 +2029,8 @@ function FactoryWorkspace(props: {
         if (!contextIsCurrent()) return;
         const mode = ticketID && selectedChange() ? "investigate" : "plan";
         if (!contextID && conversation()?.mode !== mode) {
-          const contextualConversation = await apiRequest(
-            conversationViewSchema,
-            `/api/projects/${projectID}/conversation/mode`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ ...(ticketID ? { ticketId: ticketID } : {}), mode }),
-            },
+          const contextualConversation = await serverCall(
+            setConversationMode(projectID, { ...(ticketID ? { ticketId: ticketID } : {}), mode }),
           );
           if (!contextIsCurrent()) return;
           publishConversation(contextualConversation);
@@ -2080,20 +2042,17 @@ function FactoryWorkspace(props: {
         );
         const streamController = new AbortController();
         projectStreams.add(streamController);
+        const message = {
+          ...(ticketID ? { ticketId: ticketID } : {}),
+          text,
+          commandId,
+          ...(intent ? { intent } : {}),
+          ...(contextID ? { contextId: contextID } : {}),
+        };
         const value = await streamConversation(
-          `/api/projects/${projectID}/conversation/message`,
-          {
-            method: "POST",
-            signal: streamController.signal,
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              ...(ticketID ? { ticketId: ticketID } : {}),
-              text,
-              commandId,
-              ...(intent ? { intent } : {}),
-              ...(contextID ? { contextId: contextID } : {}),
-            }),
-          },
+          (signal) =>
+            serverCall(invoke(commissionConversationMessage, { signal }, projectID, message)),
+          { signal: streamController.signal },
           (event) => {
             if (workspaceDisposed) return;
             if (event.type === "admitted") {
@@ -2124,9 +2083,11 @@ function FactoryWorkspace(props: {
     clearStreamedAnswer();
     if (result.ok || !contextIsCurrent()) return;
 
-    const refreshed = await apiRequest(
-      conversationViewSchema.nullable(),
-      `/api/projects/${projectID}/conversation${query}`,
+    const refreshed = await serverCall(
+      getConversation(projectID, {
+        ...(ticketID ? { ticketId: ticketID } : {}),
+        ...(contextID ? { contextId: contextID } : {}),
+      }),
     ).catch(() => null);
     if (!refreshed || !contextIsCurrent()) return;
     publishConversation(refreshed);
@@ -2184,20 +2145,14 @@ function FactoryWorkspace(props: {
             scope,
             JSON.stringify({ projectID, ticketID, questionEntryID, answer }),
           );
-          const value = await apiRequest(
-            conversationViewSchema,
-            `/api/projects/${projectID}/conversation/answer`,
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                ...(ticketID ? { ticketId: ticketID } : {}),
-                questionEntryId: questionEntryID,
-                commandId,
-                answer,
-                ...(contextID ? { contextId: contextID } : {}),
-              }),
-            },
+          const value = await serverCall(
+            answerConversationQuestion(projectID, {
+              ...(ticketID ? { ticketId: ticketID } : {}),
+              questionEntryId: questionEntryID,
+              commandId,
+              answer,
+              ...(contextID ? { contextId: contextID } : {}),
+            }),
           );
           acknowledgeCommand(scope, commandId);
           if (!contextIsCurrent()) return;
@@ -2544,12 +2499,8 @@ function FactoryWorkspace(props: {
       ...(change ? { ticketID: change.ticketId } : {}),
     });
     await mutate(async () => {
-      const source = await apiRequest(
-        sourceWorkspaceViewSchema,
-        target.changeId
-          ? `/api/changes/${target.changeId}/source-workspace/ensure`
-          : `/api/projects/${projectID}/source-workspace/ensure`,
-        { method: "POST" },
+      const source = await serverCall(
+        target.changeId ? ensureChangeSource(target.changeId) : ensurePersonalSource(projectID),
       );
       updateWorkspaceTab(
         {
@@ -2617,13 +2568,10 @@ function FactoryWorkspace(props: {
     if (target.attemptId) {
       return;
     }
-    if (!target.projectId) return;
+    const stagingProjectID = target.projectId;
+    if (!stagingProjectID) return;
     await mutate(async () => {
-      const attempt = await apiRequest(
-        runtimeAttemptSchema,
-        `/api/projects/${target.projectId}/staging/ensure`,
-        { method: "POST" },
-      );
+      const attempt = await serverCall(ensureStaging(stagingProjectID));
       updateWorkspaceTab(
         {
           id: tabID,
@@ -2673,21 +2621,15 @@ function FactoryWorkspace(props: {
   async function refreshKnowledge(signal?: AbortSignal) {
     const project = selectedProject();
     if (!project) return;
-    const generation = await apiRequest(
-      knowledgeGenerationSchema.nullable(),
-      `/api/projects/${project.id}/knowledge/generation`,
-      signal ? { signal } : {},
+    const generation = await serverCall(
+      invoke(getKnowledgeGeneration, signal ? { signal } : {}, project.id),
     );
     if (selectedProjectID() !== project.id) return;
     setKnowledgeGeneration(generation ?? undefined);
     const inventory = `${project.id}:${canDevelopProject()}:${generation?.id ?? ""}:${generation?.state ?? ""}`;
     if (inventory === repositoryInventory) return;
     const documents = canDevelopProject()
-      ? await apiRequest(
-          repositoryDocumentsSchema,
-          `/api/projects/${project.id}/knowledge/documents`,
-          signal ? { signal } : {},
-        )
+      ? await serverCall(invoke(getRepositoryDocuments, signal ? { signal } : {}, project.id))
       : { documents: [] };
     if (selectedProjectID() !== project.id) return;
     setRepositoryDocuments(canDevelopProject() ? documents.documents : []);
@@ -2712,12 +2654,8 @@ function FactoryWorkspace(props: {
   async function generateKnowledge() {
     const project = selectedProject();
     if (!project) return;
-    const generation = await apiRequest(
-      knowledgeGenerationSchema,
-      `/api/projects/${project.id}/knowledge/generation`,
-      { method: "POST" },
-    );
-    if (selectedProjectID() === project.id) setKnowledgeGeneration(generation);
+    const generation = await serverCall(requestKnowledgeGeneration(project.id));
+    if (selectedProjectID() === project.id) setKnowledgeGeneration(generation ?? undefined);
   }
   async function editKnowledgePage(
     pageId: string,
@@ -2725,11 +2663,7 @@ function FactoryWorkspace(props: {
     title: string,
     body: string,
   ) {
-    const saved = await apiRequest(knowledgeSaveSchema, `/api/knowledge/pages/${pageId}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expectedVersion, title, body }),
-    });
+    const saved = await serverCall(saveKnowledgePage(pageId, { expectedVersion, title, body }));
     if (selectedKnowledgePageID() === pageId) setKnowledgeHistory([]);
     return saved;
   }
@@ -2737,11 +2671,7 @@ function FactoryWorkspace(props: {
     const page = selectedKnowledgePage();
     if (!page) return;
     await mutate(async () => {
-      await apiRequest(emptyResponseSchema, `/api/knowledge/pages/${page.id}/archive`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ expectedVersion: page.version }),
-      });
+      await serverCall(archiveSavedKnowledgePage(page.id, page.version));
       if (selectedKnowledgePageID() === page.id) {
         setSelectedKnowledgePageID(undefined);
         setKnowledgeHistory([]);
@@ -2750,10 +2680,7 @@ function FactoryWorkspace(props: {
   }
   async function loadKnowledgeHistory(pageID: string) {
     const epoch = knowledgeAccessEpoch;
-    const body = await apiRequest(
-      knowledgeHistorySchema,
-      `/api/knowledge/pages/${pageID}/revisions`,
-    );
+    const body = await serverCall(getKnowledgeHistory(pageID));
     if (selectedKnowledgePageID() === pageID && epoch === knowledgeAccessEpoch)
       setKnowledgeHistory(body.revisions);
   }
@@ -2761,10 +2688,7 @@ function FactoryWorkspace(props: {
     const requestID = ++documentRequest;
     const project = selectedProject();
     if (!project || !canDevelopProject()) return;
-    const value = await apiRequest(
-      openRepositoryDocumentSchema,
-      `/api/projects/${project.id}/knowledge/documents?path=${encodeURIComponent(path)}`,
-    );
+    const value = await serverCall(getRepositoryDocument(project.id, path));
     if (selectedProjectID() !== project.id || documentRequest !== requestID || !canDevelopProject())
       return;
     setOpenRepositoryDocument(value);
@@ -2781,10 +2705,7 @@ function FactoryWorkspace(props: {
       return;
     }
     try {
-      const body = await apiRequest(
-        knowledgeSearchSchema,
-        `/api/projects/${project.id}/knowledge/search?q=${encodeURIComponent(text)}`,
-      );
+      const body = await serverCall(searchKnowledge(project.id, text));
       if (requestID === knowledgeSearchRequest && selectedProjectID() === project.id)
         setKnowledgeSearch(body.results);
     } catch (cause) {
@@ -2870,7 +2791,7 @@ function FactoryWorkspace(props: {
           />
         </Show>
 
-        <header class="factory-topbar" inert={agentOverlay() || registrationOpen()}>
+        <header class="factory-topbar" inert={registrationOpen()}>
           <div class="topbar-start">
             <button
               type="button"
@@ -2890,9 +2811,107 @@ function FactoryWorkspace(props: {
             >
               <Icon name={agentOpen() ? "agent-panel" : "agent"} />
             </button>
+            <div class="context-control" ref={projectControlElement}>
+              <Show when={!narrowViewport()}>
+                <button
+                  type="button"
+                  class="context-button project-selector"
+                  aria-label="Open project menu"
+                  aria-expanded={projectMenuOpen() ? "true" : "false"}
+                  aria-controls="project-popover"
+                  title={selectedProject()?.name ?? "Choose project"}
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    setProjectMenuOpen((open) => !open);
+                  }}
+                >
+                  <span>{selectedProject()?.name ?? "Choose project"}</span>
+                  <Icon name="chevron" />
+                </button>
+              </Show>
+              <Show when={projectMenuOpen()}>
+                <section
+                  class="floating-menu project-menu"
+                  id="project-popover"
+                  aria-label="Projects"
+                  ref={projectPopover}
+                >
+                  <div class="menu-heading">
+                    <strong>Projects</strong>
+                    <Show when={props.session.systemManager}>
+                      <button
+                        type="button"
+                        class="quiet-button"
+                        onClick={() => {
+                          setProjectMenuOpen(false);
+                          setError("");
+                          setWorkspaceVisible(false);
+                          void projectSetup?.open();
+                        }}
+                      >
+                        {projectSetup?.draft() && projectSetup.draft()?.state !== "created"
+                          ? "Continue setup"
+                          : "Create project"}
+                      </button>
+                    </Show>
+                  </div>
+                  <Show when={(projects.data() ?? []).length > 6}>
+                    <div class="project-search">
+                      <input
+                        type="search"
+                        aria-label="Search projects"
+                        placeholder="Find a project"
+                        value={projectSearchQuery()}
+                        onInput={(event) => setProjectSearchQuery(event.currentTarget.value)}
+                      />
+                    </div>
+                  </Show>
+                  <div class="project-list">
+                    <For each={filteredProjects()}>
+                      {(project) => (
+                        <article
+                          class={
+                            selectedProjectID() === project.id
+                              ? "project-row selected"
+                              : "project-row"
+                          }
+                        >
+                          <button
+                            type="button"
+                            class="project-choice"
+                            aria-current={selectedProjectID() === project.id ? "true" : undefined}
+                            onClick={() => selectProject(project.id)}
+                          >
+                            <span>
+                              <strong>{project.name}</strong>
+                              <small>{project.slug}</small>
+                            </span>
+                            <Show when={selectedProjectID() === project.id}>
+                              <span class="selection-dot" />
+                            </Show>
+                          </button>
+                        </article>
+                      )}
+                    </For>
+                  </div>
+                </section>
+              </Show>
+            </div>
           </div>
 
-          <nav class="workspace-dock" aria-label="Workspace dock">
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: Native dock buttons also delegate keyboard-generated clicks to this navigation handler. */}
+          <nav
+            class="workspace-dock"
+            aria-label="Workspace dock"
+            onClick={(event) => {
+              if (
+                narrowViewport() &&
+                event.target instanceof Element &&
+                event.target.closest("button")
+              )
+                setAgentOpen(false);
+            }}
+          >
             <DockButton
               label="Desktop"
               icon="home"
@@ -2975,222 +2994,166 @@ function FactoryWorkspace(props: {
             />
           </nav>
 
-          <div
-            class="topbar-end settings-control"
-            ref={(element) => {
-              settingsControlElement = element;
-              projectControlElement = element;
-            }}
-          >
-            <button
-              type="button"
-              class="icon-button"
-              aria-label="Settings"
-              aria-expanded={settingsOpen() ? "true" : "false"}
-              aria-controls="settings-popover"
-              data-tooltip="Settings"
-              onClick={() => {
-                setSettingsOpen((open) => !open);
-                setProjectMenuOpen(false);
-              }}
-            >
-              <Icon name="settings" />
-            </button>
-            <Show when={settingsOpen()}>
-              <section
-                class="floating-menu settings-menu"
-                id="settings-popover"
-                aria-label="Settings"
-                ref={settingsPopover}
+          <div class="topbar-end">
+            <Show when={!narrowViewport() && !setupVisible() && selectedProject()}>
+              <button
+                type="button"
+                class="new-ticket-button topbar-new-ticket"
+                aria-label="New Ticket"
+                onClick={() => openTicketDraft(undefined, "ready")}
               >
-                <div class="settings-identity">
-                  <small>Signed in as</small>
-                  <strong>{props.session.user.name}</strong>
-                  <span>{props.session.user.email}</span>
-                </div>
-                <button
-                  type="button"
-                  class="settings-model-link settings-project-link"
-                  aria-label="Open project menu"
-                  aria-controls="project-popover"
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    setProjectMenuOpen(true);
-                  }}
+                New ticket
+              </button>
+            </Show>
+            <div class="settings-control" ref={settingsControlElement}>
+              <button
+                type="button"
+                class="icon-button"
+                aria-label="Settings"
+                aria-expanded={settingsOpen() ? "true" : "false"}
+                aria-controls="settings-popover"
+                data-tooltip="Settings"
+                onClick={() => {
+                  setSettingsOpen((open) => !open);
+                  setProjectMenuOpen(false);
+                }}
+              >
+                <Icon name="settings" />
+              </button>
+              <Show when={settingsOpen()}>
+                <section
+                  class="floating-menu settings-menu"
+                  id="settings-popover"
+                  aria-label="Settings"
+                  ref={settingsPopover}
                 >
-                  <Icon name="home" />
-                  <span>{selectedProject()?.name ?? "Choose project"}</span>
-                  <small>Switch project</small>
-                </button>
-                <button
-                  type="button"
-                  class="settings-model-link"
-                  aria-label="Open settings"
-                  onClick={openSettings}
-                >
-                  <Icon name="settings" />
-                  <span>Open settings</span>
-                  <small>
-                    Account{selectedProject() ? ", Project" : ""}
-                    {props.session.systemManager ? ", Factory" : ""}
-                  </small>
-                </button>
-                <Show when={selectedProject()}>
+                  <div class="settings-identity">
+                    <small>Signed in as</small>
+                    <strong>{props.session.user.name}</strong>
+                    <span>{props.session.user.email}</span>
+                  </div>
+                  <Show when={narrowViewport()}>
+                    <button
+                      type="button"
+                      class="settings-model-link settings-project-link"
+                      aria-label="Open project menu"
+                      aria-controls="project-popover"
+                      onClick={() => {
+                        setSettingsOpen(false);
+                        setProjectMenuOpen(true);
+                      }}
+                    >
+                      <Icon name="home" />
+                      <span>{selectedProject()?.name ?? "Choose project"}</span>
+                      <small>Switch project</small>
+                    </button>
+                  </Show>
                   <button
                     type="button"
                     class="settings-model-link"
-                    onClick={() => {
-                      setSettingsOpen(false);
-                      openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
-                    }}
+                    aria-label="Open settings"
+                    onClick={openSettings}
                   >
-                    <Icon name="inbox" />
-                    <span>Trash</span>
+                    <Icon name="settings" />
+                    <span>Open settings</span>
+                    <small>
+                      Account{selectedProject() ? ", Project" : ""}
+                      {props.session.systemManager ? ", Factory" : ""}
+                    </small>
                   </button>
-                </Show>
-                <Show when={!setupVisible() && selectedProject()}>
-                  <fieldset
-                    class="background-picker"
-                    aria-busy={backgroundSaves()[selectedProjectID() ?? ""] ? "true" : "false"}
-                  >
-                    <legend>Project background</legend>
-                    <p class="background-hint">
-                      Shared with everyone in {selectedProject()?.name}.
-                      <Show when={!canManageProject()}> Only project managers can change it.</Show>
-                    </p>
-                    <div class="background-options" id="background-options">
-                      <For each={backgroundChoices()}>
-                        {(background, index) => (
-                          <button
-                            type="button"
-                            class={`background-option background-${background.key}`}
-                            hidden={!backgroundPickerExpanded() && index() >= 2}
-                            aria-pressed={
-                              desktopBackgroundKey() === background.key ? "true" : "false"
-                            }
-                            disabled={!canManageProject()}
-                            aria-disabled={
-                              backgroundSaves()[selectedProjectID() ?? ""] ? "true" : undefined
-                            }
-                            onClick={() => void chooseDesktopBackground(background.key)}
-                          >
-                            <span class="background-preview" aria-hidden="true" />
-                            <span class="background-copy">
-                              <strong>{background.title}</strong>
-                              <small>
-                                {background.artist}, {background.date}
-                              </small>
-                            </span>
-                            <span class="background-selection" aria-hidden="true" />
-                          </button>
-                        )}
-                      </For>
-                    </div>
+                  <Show when={selectedProject()}>
                     <button
                       type="button"
-                      class="background-expand"
-                      aria-expanded={backgroundPickerExpanded() ? "true" : "false"}
-                      aria-controls="background-options"
-                      onClick={() => setBackgroundPickerExpanded((expanded) => !expanded)}
-                    >
-                      <Show when={!backgroundPickerExpanded()}>
-                        <span class="background-peek" aria-hidden="true">
-                          <span
-                            class={`background-option background-${backgroundChoices()[2]?.key}`}
-                          >
-                            <span class="background-preview" />
-                            <span class="background-copy">
-                              <strong>{backgroundChoices()[2]?.title}</strong>
-                              <small>
-                                {backgroundChoices()[2]?.artist}, {backgroundChoices()[2]?.date}
-                              </small>
-                            </span>
-                          </span>
-                        </span>
-                      </Show>
-                      <span class="background-expand-label">
-                        {backgroundPickerExpanded()
-                          ? "Show fewer backgrounds"
-                          : `Show all ${backgroundChoices().length} backgrounds`}
-                        <Icon name="chevron" />
-                      </span>
-                    </button>
-                    <Show when={backgroundSaves()[selectedProjectID() ?? ""]}>
-                      <p class="background-hint" role="status">
-                        Saving project background…
-                      </p>
-                    </Show>
-                  </fieldset>
-                </Show>
-              </section>
-            </Show>
-            <Show when={projectMenuOpen()}>
-              <section
-                class="floating-menu project-menu"
-                id="project-popover"
-                aria-label="Projects"
-                ref={projectPopover}
-              >
-                <div class="menu-heading">
-                  <strong>Projects</strong>
-                  <Show when={props.session.systemManager}>
-                    <button
-                      type="button"
-                      class="quiet-button"
+                      class="settings-model-link"
                       onClick={() => {
-                        setProjectMenuOpen(false);
-                        setError("");
-                        setWorkspaceVisible(false);
-                        void projectSetup?.open();
+                        setSettingsOpen(false);
+                        openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
                       }}
                     >
-                      {projectSetup?.draft() && projectSetup.draft()?.state !== "created"
-                        ? "Continue setup"
-                        : "Create project"}
+                      <Icon name="inbox" />
+                      <span>Trash</span>
                     </button>
                   </Show>
-                </div>
-                <Show when={(projects.data() ?? []).length > 6}>
-                  <div class="project-search">
-                    <input
-                      type="search"
-                      aria-label="Search projects"
-                      placeholder="Find a project"
-                      value={projectSearchQuery()}
-                      onInput={(event) => setProjectSearchQuery(event.currentTarget.value)}
-                    />
-                  </div>
-                </Show>
-                <div class="project-list">
-                  <For each={filteredProjects()}>
-                    {(project) => (
-                      <article
-                        class={
-                          selectedProjectID() === project.id
-                            ? "project-row selected"
-                            : "project-row"
-                        }
+                  <Show when={!setupVisible() && selectedProject()}>
+                    <fieldset
+                      class="background-picker"
+                      aria-busy={backgroundSaves()[selectedProjectID() ?? ""] ? "true" : "false"}
+                    >
+                      <legend>Project background</legend>
+                      <p class="background-hint">
+                        Shared with everyone in {selectedProject()?.name}.
+                        <Show when={!canManageProject()}>
+                          {" "}
+                          Only project managers can change it.
+                        </Show>
+                      </p>
+                      <div class="background-options" id="background-options">
+                        <For each={backgroundChoices()}>
+                          {(background, index) => (
+                            <button
+                              type="button"
+                              class={`background-option background-${background.key}`}
+                              hidden={!backgroundPickerExpanded() && index() >= 2}
+                              aria-pressed={
+                                desktopBackgroundKey() === background.key ? "true" : "false"
+                              }
+                              disabled={!canManageProject()}
+                              aria-disabled={
+                                backgroundSaves()[selectedProjectID() ?? ""] ? "true" : undefined
+                              }
+                              onClick={() => void chooseDesktopBackground(background.key)}
+                            >
+                              <span class="background-preview" aria-hidden="true" />
+                              <span class="background-copy">
+                                <strong>{background.title}</strong>
+                                <small>
+                                  {background.artist}, {background.date}
+                                </small>
+                              </span>
+                              <span class="background-selection" aria-hidden="true" />
+                            </button>
+                          )}
+                        </For>
+                      </div>
+                      <button
+                        type="button"
+                        class="background-expand"
+                        aria-expanded={backgroundPickerExpanded() ? "true" : "false"}
+                        aria-controls="background-options"
+                        onClick={() => setBackgroundPickerExpanded((expanded) => !expanded)}
                       >
-                        <button
-                          type="button"
-                          class="project-choice"
-                          aria-current={selectedProjectID() === project.id ? "true" : undefined}
-                          onClick={() => selectProject(project.id)}
-                        >
-                          <span>
-                            <strong>{project.name}</strong>
-                            <small>{project.slug}</small>
+                        <Show when={!backgroundPickerExpanded()}>
+                          <span class="background-peek" aria-hidden="true">
+                            <span
+                              class={`background-option background-${backgroundChoices()[2]?.key}`}
+                            >
+                              <span class="background-preview" />
+                              <span class="background-copy">
+                                <strong>{backgroundChoices()[2]?.title}</strong>
+                                <small>
+                                  {backgroundChoices()[2]?.artist}, {backgroundChoices()[2]?.date}
+                                </small>
+                              </span>
+                            </span>
                           </span>
-                          <Show when={selectedProjectID() === project.id}>
-                            <span class="selection-dot" />
-                          </Show>
-                        </button>
-                      </article>
-                    )}
-                  </For>
-                </div>
-              </section>
-            </Show>
+                        </Show>
+                        <span class="background-expand-label">
+                          {backgroundPickerExpanded()
+                            ? "Show fewer backgrounds"
+                            : `Show all ${backgroundChoices().length} backgrounds`}
+                          <Icon name="chevron" />
+                        </span>
+                      </button>
+                      <Show when={backgroundSaves()[selectedProjectID() ?? ""]}>
+                        <p class="background-hint" role="status">
+                          Saving project background…
+                        </p>
+                      </Show>
+                    </fieldset>
+                  </Show>
+                </section>
+              </Show>
+            </div>
           </div>
         </header>
 
@@ -3229,9 +3192,8 @@ function FactoryWorkspace(props: {
               )
             }
           >
-            <div class="board-toolbar">
-              <span class="board-project-name">{selectedProject()?.name}</span>
-              <div class="board-toolbar-actions">
+            <Show when={narrowViewport() || historyTickets().length > 0}>
+              <div class="board-toolbar">
                 <Show when={historyTickets().length > 0}>
                   <button
                     type="button"
@@ -3245,8 +3207,18 @@ function FactoryWorkspace(props: {
                     </Show>
                   </button>
                 </Show>
+                <Show when={narrowViewport()}>
+                  <button
+                    type="button"
+                    class="new-ticket-button board-new-ticket"
+                    aria-label="New Ticket"
+                    onClick={() => openTicketDraft(undefined, "ready")}
+                  >
+                    New ticket
+                  </button>
+                </Show>
               </div>
-            </div>
+            </Show>
             <TicketBoardContents
               tickets={scopedTickets()}
               epics={epicList()}
@@ -3259,7 +3231,6 @@ function FactoryWorkspace(props: {
               blockers={blockersFor}
               reference={ticketReference}
               onSelect={selectTicket}
-              onCreate={(stage) => openTicketDraft(undefined, stage)}
               epicID={selectedEpicID()}
               onEpic={setSelectedEpicID}
               onSaveEpic={saveEpic}
@@ -3271,7 +3242,7 @@ function FactoryWorkspace(props: {
           <ProjectRegistration
             pending={pending()}
             error={error()}
-            opener={projectControlElement?.querySelector<HTMLButtonElement>("button") ?? undefined}
+            opener={projectMenuOpener()}
             onSubmit={register}
             onClose={() => setRegistrationOpen(false)}
           />
@@ -3282,7 +3253,7 @@ function FactoryWorkspace(props: {
             class="agent-overlay-backdrop"
             aria-label="Dismiss Agent overlay"
             tabindex={-1}
-            onClick={() => setAgentOpen(false)}
+            onClick={dismissAgent}
           />
         </Show>
         <Show when={agentPresence.present()}>
@@ -3295,7 +3266,7 @@ function FactoryWorkspace(props: {
             }}
             aria-hidden={agentOpen() ? "false" : "true"}
             {...(agentOverlay()
-              ? { role: "dialog" as const, "aria-modal": "true" as const }
+              ? { role: "dialog" as const, "aria-modal": "false" as const }
               : { role: "complementary" as const })}
             aria-label="Agent panel"
             inert={!agentOpen() || registrationOpen()}
@@ -3315,7 +3286,7 @@ function FactoryWorkspace(props: {
                   type="button"
                   class="bare-icon window-minimize-control"
                   aria-label="Minimize Agent panel"
-                  onClick={() => setAgentOpen(false)}
+                  onClick={dismissAgent}
                 >
                   <Icon name="minimize" />
                 </button>
@@ -3339,7 +3310,7 @@ function FactoryWorkspace(props: {
                       "Ticket chat")
                     : (selectedProject()?.name ?? "Project chat")
                 }
-                onMinimize={preparingImplementation() ? undefined : () => setAgentOpen(false)}
+                onMinimize={preparingImplementation() ? undefined : dismissAgent}
                 conversation={conversation()}
                 ticket={Boolean(assistantTicketID())}
                 coding={Boolean(
@@ -4266,11 +4237,7 @@ function FactoryWorkspace(props: {
                       if (target) void openIDETarget(target);
                     }}
                     onRestore={(pageID, revisionID, expectedVersion) =>
-                      apiRequest(knowledgeSaveSchema, `/api/knowledge/pages/${pageID}/restore`, {
-                        method: "POST",
-                        headers: { "content-type": "application/json" },
-                        body: JSON.stringify({ revisionID, expectedVersion }),
-                      })
+                      serverCall(restoreKnowledgePage(pageID, revisionID, expectedVersion))
                     }
                     drafts={knowledgeDrafts}
                     pages={knowledgePageList()}
@@ -4293,12 +4260,7 @@ function FactoryWorkspace(props: {
                     onSavePage={editKnowledgePage}
                     onHistory={loadKnowledgeHistory}
                     onSources={async (pageID) =>
-                      (
-                        await apiRequest(
-                          knowledgeSourcesSchema,
-                          `/api/knowledge/pages/${pageID}/sources`,
-                        )
-                      ).citations
+                      (await serverCall(getKnowledgeSources(pageID))).citations
                     }
                     onArchive={() => void archiveKnowledgePage()}
                     onMove={async ({ pageId, parentId, beforeId }) => {

@@ -86,7 +86,10 @@ export function createReserveStore(
       sql: SQL,
       attemptID: string,
       role?: ReserveRole,
-      owner?: { projectID: string; kind: "development" | "staging" | "verification" | "prebuild" },
+      owner?: {
+        projectID: string;
+        kind: "development" | "staging" | "verification" | "prebuild" | "publication";
+      },
     ) {
       await lock(sql);
       const slot = role

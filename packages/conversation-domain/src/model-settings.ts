@@ -44,10 +44,6 @@ export const modelSettingsView = modelDefaultsInput.extend({
 });
 export type ModelSettingsView = z.infer<typeof modelSettingsView>;
 
-export const modelConnectionResult = z.object({
-  status: z.enum(["reachable", "unavailable", "unconfigured"]),
-});
-
 export function approvedModelCatalogue(input: {
   planningModelId: string;
   buildModelId: string;

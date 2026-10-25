@@ -32,7 +32,7 @@ export async function waitForFactory(input: {
     if (input.server.exitCode !== null) throw new Error("Factory server exited before readiness");
     const response = await Promise.race([
       exited,
-      fetch(`${input.baseURL}/api/session`, {
+      fetch(`${input.baseURL}/health/ready`, {
         signal: AbortSignal.timeout(
           Math.max(1, Math.min(input.requestTimeoutMS ?? 1_000, deadline - Date.now())),
         ),

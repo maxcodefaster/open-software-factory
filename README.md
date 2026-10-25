@@ -75,7 +75,8 @@ See [the collaboration decision](docs/adr/0019-conversation-contexts-and-shared-
 
 ## Human attachments
 
-Wiki and Ticket editors accept `/image`, `/file`, file selection, image paste and file drops.
+Wiki and Ticket editors open file selection through `/image` and `/file`, without a separate
+Add file button. They also accept pasted images/files and file drops.
 Chats and review comments, Threads and replies have Add file and support paste/drop.
 PNG, JPEG, WebP, PDF, DOCX, UTF-8 TXT and Markdown are supported. Pending uploads stay private.
 Saving a Wiki/Ticket document or sending a shared Ticket message or feedback publishes its exact
@@ -121,7 +122,27 @@ and an oversized-file error against its own authenticated installation and priva
 Admission freezes file identities, hashes and human context; replacing a reference never
 reconfigures already admitted work. Independent review retains the implementation's references.
 
+## Project Releases
+
+Project Settings → Releases publishes a deliberately named version of the current delivered,
+healthy Staging commit. The last published version and Patch/Minor/Major suggestions help choose
+the next version; a human confirms the exact version and commit. Source-only Projects need no
+image or workflow. For image-and-chart publication, adopt the Project-owned
+[release recipe](templates/release/README.md) through normal review and Delivery.
+
+Factory runs one isolated native Forgejo publication job, confirms its results and retains
+versioned source and artifact identities. An unconfirmed result is reconciled without blindly
+starting another run. External access issues project-bound read credentials with explicit
+rotation and revocation. It does not register consumers, store their production credentials
+or test their availability. Production deployment and operation stay outside Factory.
+See [the Release boundary](docs/adr/0023-independent-project-releases.md).
+
 ## Source development
+
+The Greenfield database starts from one [complete baseline](packages/db/migrations/0001_baseline.sql).
+It contains the current schema, constraints, Zero publication and installation singleton rows.
+Repeated initialization leaves that baseline unchanged. Historical migration journals and partial
+schemas are refused without modifying their data; this development baseline requires a fresh database.
 
 The source-development environment uses macOS with OrbStack's Linux Docker daemon and Kubernetes
 context `orbstack`. Install [mise](https://mise.jdx.dev/), enable that environment, then run:
@@ -226,8 +247,8 @@ replace normal and adverse App coverage for user-facing changes, and are labelle
 without an invented video position.
 The QA & review panel shows expected versus observed scenario outcomes even without a recording.
 When available, selectable chapters navigate each case in one real browser QA video, not duplicate
-clips. Recording failure or Project-level disable does not turn a successful App observation into
-a QA failure or replay any action.
+clips. Recording failure does not turn a successful App observation into a QA failure or replay
+any action.
 
 Human feedback can be an ordinary comment or a resolvable Thread. Open Threads block Delivery,
 including Threads marked "Implemented, please recheck" by the agent. The author or an existing
@@ -253,8 +274,8 @@ The App keeps its script policy; when that blocks selection, general feedback re
 Preview anchors retain their Runtime Attempt basis and view identity and are not blindly projected
 onto another page or edited state. Only the independent QA recording claims an exact clean candidate.
 
-Project Managers can disable recording under Settings → Environments. Media uses protected
-installation state, with authenticated, non-cached reads. A newer complete recording removes the
+Independent QA browser runs always record automatically, without a Project-level switch. Media
+uses protected installation state, with authenticated, non-cached reads. A newer complete recording removes the
 previous video even when it has comments. Comments and their saved frames remain. The final video
 expires thirty days after the Change is delivered or cancelled. Unattached frame uploads are
 removed after one day.
@@ -418,6 +439,10 @@ them. Editor adapter tests install the Theia composition without dependency life
 compile the Factory extension. The scoped Starter authentication proof prepares the template's
 locked dependencies. Unchanged inputs reuse the local test cache; focused checks that do not use
 these components skip preparation. This first-run setup performs no model inference.
+Integration lanes also build the client and Server Function handler before starting owned
+Factory processes. Each lane uses its own build directory and removes it during cleanup;
+parallel proofs do not replace each other's assets or the source-development `dist`.
+Those handlers use the same application services as the installed Bun host.
 
 Start the backend with `factory:up`, then use `factory:dev` and open the Vite URL it prints.
 Development proxies authenticated API and planning-cache traffic to that backend without
@@ -427,8 +452,9 @@ for an isolated installation. It does not start or reset that installation.
 | Command | Purpose |
 | --- | --- |
 | `bun run factory:dev` | Vite frontend development against the local Factory server |
-| `bun run factory:build` | Build the frontend |
+| `bun run factory:build` | Build the SPA, Server Function handler and precompressed public assets |
 | `bun run factory:image` | Build the local application image with the currently published runtime pins |
+| `bun run factorybox:build REQUEST_JSON` | Build a local ARM64 or AMD64 worker candidate, check its image/executable and retain an unselected Factory profile |
 | `bun run factory:connect` | Connect the browser to a local Helm installation and restore interrupted forwards |
 | `bun run check:docs` | Validate documentation names, local links and anchors |
 | `bun run typecheck` | Check all TypeScript projects and tests |
@@ -582,7 +608,8 @@ their owned runtime storage, services and credentials.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
 Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live
-model flags and provider credentials, and do not load `.env` in the test runner. Native runtime
+model flags and provider credentials, and do not load `.env` in the test runner or owned Factory
+children. Native runtime
 conformance and Forgejo checks remain explicit commands, not hidden steps in the default integration gate.
 Runtime conformance owns unique Pods/claims in the shared registry namespace. `runtime:smoke:down`
 removes only labeled conformance resources with UID preconditions; it never deletes the namespace

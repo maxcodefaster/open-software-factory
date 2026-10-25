@@ -3,6 +3,8 @@ import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { setupReadiness } from "../../packages/project-domain/src/setup";
 
 test("setup side panel retains its draft through minimize, refresh and Factory Settings", async () => {
   const process = await factoryProcess(undefined, {
@@ -55,24 +57,28 @@ test("setup side panel retains its draft through minimize, refresh and Factory S
         .getByRole("navigation", { name: "Settings navigation" })
         .getByRole("button", { name: "Models", exact: true }),
     ).toHaveAttribute("aria-current", "page");
-    await visible(page.getByLabel(/Use deployment connection/)).toBeVisible();
+    const planning = page.getByRole("region", { name: "Planning & knowledge", exact: true });
+    await visible(planning.getByRole("combobox", { name: "Model", exact: true })).toHaveValue(
+      "gpt-6-luna",
+    );
+    await visible(planning.getByText(/Via models\.example/)).toBeVisible();
+    await mkdir(".factory/test-results/project-setup", { recursive: true });
     await page.screenshot({
-      path: ".factory/screenshots/project-setup/models-desktop.png",
+      path: ".factory/test-results/project-setup/models-desktop.png",
       animations: "disabled",
     });
     await page.getByRole("button", { name: "Minimize workspace" }).click();
     await visible(setup.getByLabel("Project name", { exact: true })).toHaveValue(
       "Retained immediately",
     );
-    await mkdir(".factory/screenshots/project-setup", { recursive: true });
     await page.screenshot({
-      path: ".factory/screenshots/project-setup/retained-desktop.png",
+      path: ".factory/test-results/project-setup/retained-desktop.png",
       animations: "disabled",
     });
     await page.setViewportSize({ width: 430, height: 900 });
     await visible(setup.getByLabel("Project name", { exact: true })).toBeVisible();
     await page.screenshot({
-      path: ".factory/screenshots/project-setup/retained-narrow.png",
+      path: ".factory/test-results/project-setup/retained-narrow.png",
       animations: "disabled",
     });
     expect(errors).toEqual([]);
@@ -127,17 +133,19 @@ test("setup questions retain answers across refresh and minimize; readiness resu
     };
     let observations = 0;
     let retry = false;
-    await page.route(`**/api/projects/${projectID}/setup`, async (route) => {
-      observations++;
-      await route.fulfill({
-        json: [
-          { ...task, state: retry ? "ready" : "failed", failure: retry ? null : task.failure },
-        ],
-      });
-    });
-    await page.route(`**/api/projects/${projectID}/setup/retry`, async (route) => {
-      retry = true;
-      await route.fulfill({ json: [{ ...task, state: "running", failure: null }] });
+    await mockFactoryFunctions(page, {
+      setup: {
+        readiness: async () => {
+          observations++;
+          return setupReadiness.parse([
+            { ...task, state: retry ? "ready" : "failed", failure: retry ? null : task.failure },
+          ]);
+        },
+        retryTask: async () => {
+          retry = true;
+          return setupReadiness.parse([{ ...task, state: "running", failure: null }]);
+        },
+      },
     });
     await page.reload();
     const question = setup.getByLabel("Which existing command starts the application?");
@@ -154,13 +162,13 @@ test("setup questions retain answers across refresh and minimize; readiness resu
     await visible(readiness.getByRole("img", { name: "ready" })).toBeVisible();
     expect(observations).toBeGreaterThan(beforeRetry);
     await page.screenshot({
-      path: ".factory/screenshots/project-setup/inspection-desktop.png",
+      path: ".factory/test-results/project-setup/inspection-desktop.png",
       animations: "disabled",
     });
     await page.setViewportSize({ width: 430, height: 900 });
     await visible(question).toBeVisible();
     await page.screenshot({
-      path: ".factory/screenshots/project-setup/inspection-narrow.png",
+      path: ".factory/test-results/project-setup/inspection-narrow.png",
       animations: "disabled",
     });
     await setup.getByRole("button", { name: "Discard proposal" }).click();

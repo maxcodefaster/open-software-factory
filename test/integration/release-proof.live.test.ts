@@ -18,6 +18,8 @@ import { releaseInstallation } from "../fixtures/release-installation";
 import { releasePlanning } from "../fixtures/release-planning";
 import { releaseProductVisuals, releaseVisuals } from "../fixtures/release-visuals";
 import { releaseWorkspace } from "../fixtures/release-workspace";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const installationName = process.env["FACTORY_RELEASE_INSTALLATION"];
 const phase = process.env["FACTORY_RELEASE_PHASE"] ?? "setup";
@@ -114,7 +116,9 @@ test.skipIf(!installationName)(
             z.object({ id: z.uuid(), slug: z.string(), repositoryUrl: z.string() }),
           ),
         })
-        .parse(await fixture.command(admin, "/api/projects"));
+        .parse(
+          await serverCall(callFactoryFunction(fixture.base, "getProjects", [], { cookie: admin })),
+        );
       let project = projects.projects.find((value) => value.slug === fixture.slug);
       if (!project) {
         await openProjectMenu(adminPage);
@@ -131,7 +135,11 @@ test.skipIf(!installationName)(
                   z.object({ id: z.uuid(), slug: z.string(), repositoryUrl: z.string() }),
                 ),
               })
-              .parse(await fixture.command(admin, "/api/projects"))
+              .parse(
+                await serverCall(
+                  callFactoryFunction(fixture.base, "getProjects", [], { cookie: admin }),
+                ),
+              )
               .projects.find((value) => value.slug === fixture.slug),
           (value) => !!value,
           "Project was not registered through the UI",
@@ -143,65 +151,142 @@ test.skipIf(!installationName)(
       const projectID = project.id;
       const users = z
         .object({ users: z.array(z.object({ id: z.uuid(), email: z.string() })) })
-        .parse(await fixture.command(admin, "/api/admin/users"));
+        .parse(
+          await serverCall(callFactoryFunction(fixture.base, "getAccounts", [], { cookie: admin })),
+        );
       for (const role of ["manager", "developer", "outsider"] as const) {
         if (!users.users.some((user) => user.email === fixture.credentials(role).email))
-          await fixture.command(admin, "/api/admin/users", "POST", {
-            name: `Release ${role}`,
-            ...fixture.credentials(role),
-          });
+          await serverCall(
+            callFactoryFunction(
+              fixture.base,
+              "createAccount",
+              [
+                {
+                  name: `Release ${role}`,
+                  ...fixture.credentials(role),
+                },
+              ],
+              { cookie: admin },
+            ),
+          );
       }
-      await fixture.command(admin, `/api/projects/${project.id}/members`, "POST", {
-        email: fixture.credentials("manager").email,
-        role: "developer",
-        manageProject: true,
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveProjectMember",
+          [
+            project.id,
+            {
+              email: fixture.credentials("manager").email,
+              role: "developer",
+              manageProject: true,
+            },
+          ],
+          { cookie: admin },
+        ),
+      );
       const manager = await fixture.login("manager");
-      await fixture.command(manager, `/api/projects/${project.id}/members`, "POST", {
-        email: fixture.credentials("developer").email,
-        role: "developer",
-      });
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveProjectMember",
+          [
+            project.id,
+            {
+              email: fixture.credentials("developer").email,
+              role: "developer",
+            },
+          ],
+          { cookie: manager },
+        ),
+      );
       const developer = await fixture.login("developer");
       const outsider = await fixture.login("outsider");
-      const modelsPath = `/api/projects/${project.id}/model-settings`;
-      const defaults = inheritedModelSettingsView.parse(await fixture.command(manager, modelsPath));
-      await fixture.command(manager, modelsPath, "PUT", {
-        version: defaults.project.version,
-        planning: { modelId, models: [modelId], allowOverride: true },
-        build: { modelId, models: [modelId], allowOverride: true },
+      const defaults = inheritedModelSettingsView.parse(
+        await serverCall(
+          callFactoryFunction(fixture.base, "getProjectModels", [project.id], { cookie: manager }),
+        ),
+      );
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveProjectModels",
+          [
+            project.id,
+            {
+              version: defaults.project.version,
+              planning: { modelId, models: [modelId], allowOverride: true },
+              build: { modelId, models: [modelId], allowOverride: true },
+            },
+          ],
+          { cookie: manager },
+        ),
+      );
+      const deniedModel = await callFactoryFunction(
+        fixture.base,
+        "savePersonalModels",
+        [
+          project.id,
+          {
+            version: 0,
+            planningModelId: "unapproved-release-model",
+            buildModelId: null,
+          },
+        ],
+        { cookie: developer },
+      );
+      expect(deniedModel).toMatchObject({
+        ok: false,
+        status: 409,
+        message: "Personal selection is locked or not approved by the current rules",
       });
-      const deniedModel = await fixture.request(developer, `${modelsPath}/personal`, "PUT", {
-        version: 0,
-        planningModelId: "unapproved-release-model",
-        buildModelId: null,
-      });
-      expect(deniedModel.status).toBe(409);
-      expect(deniedModel.body).toMatchObject({
-        error: "Personal selection is locked or not approved by the current rules",
-      });
-      expect((await fixture.request(outsider, modelsPath)).status).toBe(404);
-      expect((await fixture.request(developer, "/api/model-settings")).status).toBe(403);
+      expect(
+        await callFactoryFunction(fixture.base, "getProjectModels", [project.id], {
+          cookie: outsider,
+        }),
+      ).toMatchObject({ ok: false, status: 404 });
+      expect(
+        await callFactoryFunction(fixture.base, "getModelSettings", [], { cookie: developer }),
+      ).toMatchObject({ ok: false, status: 403 });
       const skills = systemSkillSettingsView.parse(
-        await fixture.command(admin, "/api/admin/skills"),
+        await serverCall(
+          callFactoryFunction(fixture.base, "getSystemSkills", [], { cookie: admin }),
+        ),
       );
       const planning = skills.revisions.find(
         (value) => value.content.key === requirementsInterviewSkill.key && value.published,
       );
       if (!planning) throw new Error("Installation's published interview Skill is missing");
       state.planningSkillID = planning.id;
-      await fixture.command(admin, "/api/admin/skills/settings", "PUT", {
-        version: skills.settings.version,
-        planning: { required: [planning.id], optional: [], selected: [] },
-        build: { required: [], optional: [], selected: [] },
-      });
-      const projectSkillsPath = `/api/projects/${project.id}/skill-settings`;
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "saveSystemSkills",
+          [
+            {
+              version: skills.settings.version,
+              planning: { required: [planning.id], optional: [], selected: [] },
+              build: { required: [], optional: [], selected: [] },
+            },
+          ],
+          { cookie: admin },
+        ),
+      );
       const projectSkills = inheritedSkillSettingsView.parse(
-        await fixture.command(manager, projectSkillsPath),
+        await serverCall(
+          callFactoryFunction(fixture.base, "getInheritedSkills", [project.id], {
+            cookie: manager,
+          }),
+        ),
       );
       expect(projectSkills.effective.planning.required.map((value) => value.revisionId)).toEqual([
         planning.id,
       ]);
-      expect((await fixture.request(outsider, projectSkillsPath)).status).toBe(404);
+      expect(
+        await callFactoryFunction(fixture.base, "getInheritedSkills", [project.id], {
+          cookie: outsider,
+        }),
+      ).toMatchObject({ ok: false, status: 404 });
       const page = await fixture.page("developer");
       await fixture.selectProject(page);
       const epics = await database.client<

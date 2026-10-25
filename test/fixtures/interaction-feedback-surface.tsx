@@ -1,6 +1,6 @@
 import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
-import { apiRequest } from "../../apps/factory/src/api-client";
+import { APIRequestError } from "../../apps/factory/src/api-client";
 import {
   type KnowledgePage,
   knowledgeSaveSchema,
@@ -69,10 +69,23 @@ function Wiki() {
       onGenerate={noAction}
       onSearch={noAction}
       onSavePage={async (id, expectedVersion, title, body) => {
-        const saved = await apiRequest(knowledgeSaveSchema, "/fixture/wiki-save", {
+        // Synthetic component callback, not a Factory command transport.
+        const response = await fetch("/fixture/wiki-save", {
           method: "POST",
           body: JSON.stringify({ id, expectedVersion, title, body }),
         });
+        const value: unknown = await response.json();
+        if (!response.ok)
+          throw new APIRequestError(
+            response.status,
+            value &&
+              typeof value === "object" &&
+              "error" in value &&
+              typeof value.error === "string"
+              ? value.error
+              : "Fixture save failed",
+          );
+        const saved = knowledgeSaveSchema.parse(value);
         setPages((previous) =>
           previous.map((page) =>
             page.id === id
@@ -109,10 +122,14 @@ function Ticket() {
   const drafts = new Map<string, TicketDraft>();
   const save: TicketWorkspaceProps["onSaveDocument"] = async (input) => {
     const ticketID = tickets()[selected()]!.id;
-    const saved = await apiRequest(ticketDocumentSaveSchema, "/fixture/ticket-save", {
+    const saved = await fetch("/fixture/ticket-save", {
       method: "POST",
       body: JSON.stringify({ ...input, ticketID }),
-    }).catch(() => undefined);
+    })
+      .then(async (response) =>
+        response.ok ? ticketDocumentSaveSchema.parse(await response.json()) : undefined,
+      )
+      .catch(() => undefined);
     if (saved)
       setTickets((previous) =>
         previous.map((ticket) =>

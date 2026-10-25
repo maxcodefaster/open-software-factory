@@ -1,23 +1,24 @@
 import { createEffect, createSignal, Show } from "solid-js";
-import { z } from "zod";
-import { apiRequest, emptyResponseSchema } from "../api-client";
+import { protocolRequest, emptyResponseSchema } from "../api-client";
+import {
+  getSecurityPolicy,
+  getSignOutDestination,
+  endOwnSessions,
+} from "../server-functions/access";
+import { serverCall, type ServerValue } from "../server-functions/result";
 import "./settings.css";
 import { IdentitySettings } from "./identity-settings";
 import { FreshAuthentication } from "./fresh-authentication";
 
-const policySchema = z.object({
-  sessionDays: z.number().int().min(1).max(30),
-  companySignIn: z.boolean(),
-});
 export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?: () => void }) {
-  const [policy, setPolicy] = createSignal<z.output<typeof policySchema>>();
+  const [policy, setPolicy] = createSignal<ServerValue<ReturnType<typeof getSecurityPolicy>>>();
   const [error, setError] = createSignal("");
   const [busy, setBusy] = createSignal(false);
   const [confirm, setConfirm] = createSignal(false);
   createEffect(
     () => undefined,
     () => {
-      void apiRequest(policySchema, "/api/security/session")
+      void serverCall(getSecurityPolicy())
         .then(setPolicy)
         .catch((cause) =>
           setError(cause instanceof Error ? cause.message : "Could not load security settings"),
@@ -28,7 +29,7 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
     setBusy(true);
     setError("");
     try {
-      await apiRequest(emptyResponseSchema, "/api/security/sessions/end", { method: "POST" });
+      await serverCall(endOwnSessions());
       location.reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not end sessions");
@@ -39,12 +40,8 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
     setBusy(true);
     setError("");
     try {
-      const destination = await apiRequest(
-        z.object({ forgeLogoutURL: z.url().nullable() }),
-        "/api/security/sign-out",
-        { method: "POST" },
-      );
-      await apiRequest(emptyResponseSchema, "/api/auth/sign-out", { method: "POST" });
+      const destination = await serverCall(getSignOutDestination());
+      await protocolRequest(emptyResponseSchema, "/api/auth/sign-out", { method: "POST" });
       if (destination.forgeLogoutURL) location.assign(destination.forgeLogoutURL);
       else location.reload();
     } catch (cause) {

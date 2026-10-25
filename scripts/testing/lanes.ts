@@ -1,6 +1,8 @@
 import { resolve } from "node:path";
+import { rm } from "node:fs/promises";
 
 const nativeNames = new Set([
+  "native-project-releases",
   "attachment-s3",
   "attachment-browser",
   "attachment-factory-browser",
@@ -14,6 +16,27 @@ const nativeNames = new Set([
   "native-forge-issuer",
   "openbao",
 ]);
+const compiledProtocolTests = new Set([
+  "server-function-runtime.test.ts",
+  "server-function-tickets.test.ts",
+  "server-function-delivery.test.ts",
+  "server-function-streams.test.ts",
+  "server-function-knowledge.test.ts",
+  "server-function-workspaces.test.ts",
+  "server-function-attachments.test.ts",
+  "server-function-access.test.ts",
+  "server-function-settings.test.ts",
+  "server-function-setup.test.ts",
+  "server-function-skills.test.ts",
+  "server-function-ui-fixtures.test.ts",
+  "server-function-mcp-inputs.test.ts",
+  "server-function-library-ui.test.ts",
+  "server-function-writer-review.test.ts",
+]);
+
+export function controllerNeedsDatabase(path: string) {
+  return !compiledProtocolTests.has(path.split("/").at(-1) ?? "");
+}
 export function integrationLane(path: string) {
   const name = path
     .split("/")
@@ -80,13 +103,31 @@ if (import.meta.main) {
     const env =
       lane === "live" ? { ...process.env } : prerequisites.verificationEnvironment(process.env);
     if (lane !== "live") await prerequisites.prepareTestPrerequisites(selected, env);
-    // All fixtures retain separate databases. Only daemon startup and the empty
-    // migrated baseline are shared by this invocation, never product state.
-    const owned =
-      lane === "unit" || lane === "live"
+    const buildDirectory =
+      lane === "unit"
         ? undefined
-        : await (await import("../../test/fixtures/postgres-server")).ownedPostgresServer();
+        : resolve(".factory/test-results/application-builds", crypto.randomUUID());
+    let owned:
+      | Awaited<
+          ReturnType<typeof import("../../test/fixtures/postgres-server").ownedPostgresServer>
+        >
+      | undefined;
     try {
+      // Client, handler and manifest belong to this invocation. Never rebuild
+      // the artifacts a retained Factory or another proof is currently serving.
+      if (buildDirectory) {
+        env["FACTORY_BUILD_DIRECTORY"] = buildDirectory;
+        const build = Bun.spawn([process.execPath, "run", "factory:build"], {
+          env,
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        if ((await build.exited) !== 0) throw new Error("Factory test application build failed");
+      }
+      // All fixtures retain separate databases. Only daemon startup and the empty
+      // migrated baseline are shared by this invocation, never product state.
+      if (lane !== "unit" && lane !== "live" && selected.some(controllerNeedsDatabase))
+        owned = await (await import("../../test/fixtures/postgres-server")).ownedPostgresServer();
       if (owned) env["FACTORY_TEST_POSTGRES"] = JSON.stringify(owned.identity);
       else delete env["FACTORY_TEST_POSTGRES"];
       const child = Bun.spawn(
@@ -102,7 +143,11 @@ if (import.meta.main) {
       );
       process.exitCode = await child.exited;
     } finally {
-      await owned?.dispose();
+      try {
+        await owned?.dispose();
+      } finally {
+        if (buildDirectory) await rm(buildDirectory, { recursive: true, force: true });
+      }
     }
   }
 }

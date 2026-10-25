@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { factoryProcess } from "../fixtures/factory-process";
 import { fixture } from "../fixtures/change-agent-turns";
 import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test("Contributor permissions and role downgrade cover commands and existing IDE grants", async () => {
   const process = await factoryProcess();
@@ -13,20 +15,22 @@ test("Contributor permissions and role downgrade cover commands and existing IDE
     const adminHeaders = { cookie, origin: process.base, "content-type": "application/json" };
     const email = `contributor-${crypto.randomUUID()}@factory.local`;
     const password = "owned-contributor-password-not-a-secret";
-    const account = await fetch(`${process.base}/api/admin/users`, {
-      method: "POST",
-      headers: adminHeaders,
-      body: JSON.stringify({ name: "Product contributor", email, password }),
-    });
-    expect(account.status).toBe(201);
-    const { id: userID } = (await account.json()) as { id: string };
-    const setRole = async (role: string) => {
-      const response = await fetch(`${process.base}/api/projects/${owned.projectID}/members`, {
-        method: "POST",
-        headers: adminHeaders,
-        body: JSON.stringify({ email, role }),
-      });
-      expect(response.status).toBe(200);
+    const { id: userID } = await serverCall(
+      callFactoryFunction(
+        process.base,
+        "createAccount",
+        [{ name: "Product contributor", email, password }],
+        adminHeaders,
+      ),
+    );
+    const setRole = async (role: "developer" | "product-contributor") => {
+      const response = await callFactoryFunction(
+        process.base,
+        "saveProjectMember",
+        [owned.projectID, { email, role }],
+        adminHeaders,
+      );
+      expect(response.ok).toBe(true);
     };
     await setRole("developer");
     const login = await fetch(`${process.base}/api/auth/sign-in/email`, {
@@ -65,23 +69,75 @@ test("Contributor permissions and role downgrade cover commands and existing IDE
         headers: memberHeaders,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       });
-    for (const path of [
-      `/api/tickets/${owned.ticketID}`,
-      `/api/projects/${owned.projectID}/conversation`,
-      `/api/changes?projectId=${owned.projectID}`,
-      `/api/runtime-attempts?projectId=${owned.projectID}`,
-    ])
-      expect((await command(path)).status).toBe(200);
-    for (const path of [
-      `/api/projects/${owned.projectID}/personal-workspace/ensure`,
-      `/api/changes/${owned.changeID}/ticket-workspace/ensure`,
-      `/api/changes/${owned.changeID}/agent/start`,
-      `/api/changes/${owned.changeID}/agent/prompt`,
-      `/api/changes/${owned.changeID}/delivery/approve`,
-      `/api/changes/${owned.changeID}/cancel`,
-      `/api/runtime-attempts/${owned.attemptID}/stop`,
-    ])
-      expect((await command(path, "POST", {})).status).toBe(403);
+    expect(
+      await callFactoryFunction(process.base, "getTicketDetail", [owned.ticketID], memberHeaders),
+    ).toMatchObject({ ok: true });
+    expect(
+      await callFactoryFunction(process.base, "getConversation", [owned.projectID], memberHeaders),
+    ).toMatchObject({ ok: true });
+    expect(
+      await callFactoryFunction(process.base, "getChanges", [owned.projectID], memberHeaders),
+    ).toMatchObject({ ok: true });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "getRuntimeAttempts",
+        [owned.projectID],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: true });
+    expect(
+      await callFactoryFunction(process.base, "approveDelivery", [owned.changeID], memberHeaders),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "startPersonalWorkspace",
+        [owned.projectID],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "startTicketWorkspace",
+        [owned.changeID],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "startCoding",
+        [owned.changeID, { commandId: crypto.randomUUID() }],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "sendCodingPrompt",
+        [
+          owned.changeID,
+          {
+            commandId: crypto.randomUUID(),
+            text: "Denied direct Coding prompt",
+          },
+        ],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      await callFactoryFunction(process.base, "cancelChange", [owned.changeID], memberHeaders),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(
+      await callFactoryFunction(
+        process.base,
+        "stopRuntimeAttempt",
+        [owned.attemptID],
+        memberHeaders,
+      ),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(
       (
         await command(
@@ -97,15 +153,19 @@ test("Contributor permissions and role downgrade cover commands and existing IDE
     );
     await expect(grants.issue({ ...grant, channel: "app" })).resolves.toBeString();
     const correctionID = crypto.randomUUID();
-    const correction = await command(
-      `/api/changes/${owned.changeID}/agent/request-changes`,
-      "POST",
-      {
-        commandId: correctionID,
-        text: "Correct the bounded check within the approved specification",
-      },
+    const correction = await callFactoryFunction(
+      process.base,
+      "requestCodingChanges",
+      [
+        owned.changeID,
+        {
+          commandId: correctionID,
+          text: "Correct the bounded check within the approved specification",
+        },
+      ],
+      memberHeaders,
     );
-    expect(correction.status).toBe(202);
+    expect(correction).toMatchObject({ ok: true });
     const [admitted] = await database.client<
       Array<{ kind: string; revisionID: string; sessionID: string }>
     >`
@@ -115,7 +175,9 @@ test("Contributor permissions and role downgrade cover commands and existing IDE
     expect(admitted?.kind).toBe("change-prompt");
     expect(admitted?.revisionID).toBe(owned.revisionID);
     expect(admitted?.sessionID).toBe(owned.sessionID);
-    expect((await command(`/api/changes/${owned.changeID}/agent/stop`, "POST")).status).toBe(202);
+    expect(
+      await callFactoryFunction(process.base, "stopCoding", [owned.changeID], memberHeaders),
+    ).toMatchObject({ ok: true });
     await setRole("developer");
     await expect(grants.issue({ ...grant, channel: "ide" })).resolves.toBeString();
   } finally {

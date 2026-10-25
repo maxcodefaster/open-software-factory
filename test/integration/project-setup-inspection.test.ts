@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
+import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 
 test("setup inference does not retain the application's only pooled database connection", async () => {
   const isolated = await factoryProcess();
@@ -111,18 +113,25 @@ test("setup inference does not retain the application's only pooled database con
 }, 30_000);
 
 test("actual Forgejo atomically applies only confirmed missing setup files and recovers lost commit response", async () => {
-  const process = await factoryProcess();
+  const id = crypto.randomUUID();
+  const directory = resolve(".factory/test-results/setup-inspection", id);
+  await mkdir(directory, { recursive: true });
+  const forgeHost = await ownedMonitoringForge(directory, id);
+  const process = await factoryProcess().catch(async (cause) => {
+    await forgeHost.dispose();
+    throw cause;
+  });
   const database = process.connect();
   const manager = crypto.randomUUID();
   const contributor = crypto.randomUUID();
   const projectID = crypto.randomUUID();
   const setupID = crypto.randomUUID();
   const repository = {
-    owner: "factory-mutation",
+    owner: forgeHost.owner,
     name: `owned-inspection-${projectID.slice(0, 8)}`,
   };
-  const token = (await readFile(".factory/forgejo-token", "utf8")).trim();
-  const apiURL = "http://127.0.0.1:33030/api/v1/";
+  const token = forgeHost.token;
+  const apiURL = `${forgeHost.origin}/api/v1/`;
   let loseResponse = false;
   const forge = createForgejoClient({
     apiURL,
@@ -142,7 +151,6 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
       return response;
     },
   });
-  let created = false;
   let generations = 0;
   let ready = 0;
   let waitForStop = false;
@@ -150,7 +158,6 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
     for (const userID of [manager, contributor])
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${userID},'Owned inspection',${`${userID}@inspection.test`})`;
     await forge.createSetupRepository({ repository, setupID });
-    created = true;
     await forge.createSetupFiles({
       repository,
       branch: "main",
@@ -164,7 +171,7 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
       ],
     });
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
-      VALUES(${projectID},${repository.name},'Owned application',${`http://127.0.0.1:33030/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${manager})`;
+      VALUES(${projectID},${repository.name},'Owned application',${`${forgeHost.origin}/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${manager})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${projectID},${manager},'developer',true,${manager}),(${projectID},${contributor},'product-contributor',false,${manager})`;
     await database.client`INSERT INTO factory.project_repository_intent(command_id,setup_id,user_id,project_id,name,slug,kind,source_url,fingerprint,state)
       VALUES(${crypto.randomUUID()},${setupID},${manager},${projectID},'Owned import',${repository.name},'import','https://github.com/owned/import',${"a".repeat(64)},'committed')`;
@@ -327,14 +334,11 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
     expect((await controller.view(projectID, manager))?.state).toBe("complete");
     expect(generations).toBe(4);
   } finally {
-    if (created && (await forge.setupRepository(repository, setupID))) {
-      const response = await fetch(`${apiURL}repos/${repository.owner}/${repository.name}`, {
-        method: "DELETE",
-        headers: { authorization: `Bearer ${token}` },
-      });
-      expect(response.ok).toBe(true);
+    try {
+      await database.client.end({ timeout: 2 });
+      await process.dispose();
+    } finally {
+      await forgeHost.dispose();
     }
-    await database.client.end({ timeout: 2 });
-    await process.dispose();
   }
-}, 45_000);
+}, 90_000);

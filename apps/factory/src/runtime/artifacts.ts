@@ -47,7 +47,7 @@ export async function freezeRuntimeArtifacts(
     return retained;
   }
   const [attempt] = await sql<Array<{ role: RuntimeArtifactRole }>>`
-    SELECT CASE WHEN isolated_kind='verification' THEN 'verification'
+    SELECT CASE WHEN isolated_kind IN ('verification','publication') THEN 'verification'
       WHEN isolated_kind='staging' THEN 'staging'
       WHEN change_id IS NOT NULL AND workspace_id IS NOT NULL THEN 'build'
       ELSE 'development' END AS role

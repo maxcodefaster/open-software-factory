@@ -111,55 +111,31 @@ export function createAccessController(database: Database) {
     await requireProject(userID, rows[0].projectID);
     return rows[0].projectID;
   }
-  async function requirePage(userID: string, pageID: string) {
-    const rows = await sql<Array<{ projectID: string }>>`
-      SELECT project_id AS "projectID" FROM factory.knowledge_page WHERE id = ${pageID}
-    `;
-    if (!rows[0]) throw new CommandError("not-found", "Knowledge Page not found");
-    await requireProject(userID, rows[0].projectID);
-  }
   async function authorizeAPI(request: Request, userID: string) {
     const url = new URL(request.url);
-    if (
-      url.pathname.startsWith("/api/admin/") ||
-      url.pathname.startsWith("/api/model-settings") ||
-      (url.pathname === "/api/projects" && request.method === "POST")
-    ) {
+    if (url.pathname.startsWith("/api/admin/")) {
       await requireSystemManager(userID);
     }
     const projectID = url.pathname.match(/^\/api\/projects\/([0-9a-f-]+)(?:\/|$)/)?.[1];
     if (projectID) {
-      await requireProject(userID, projectID, url.pathname.includes("/members"));
-      if (request.method !== "GET" && /\/(runtime|personal-workspace\/ensure)$/.test(url.pathname))
-        await requireDevelopment(userID, projectID);
+      await requireProject(userID, projectID);
     }
     const ticketID = url.pathname.match(/^\/api\/tickets\/([0-9a-f-]+)(?:\/|$)/)?.[1];
     if (ticketID) await requireTicket(userID, ticketID);
     const changeID = url.pathname.match(/^\/api\/changes\/([0-9a-f-]+)(?:\/|$)/)?.[1];
     if (changeID) {
-      const project = await requireChange(userID, changeID);
-      if (
-        request.method !== "GET" &&
-        /\/(delivery\/approve|ticket-workspace\/ensure|agent\/start|agent\/prompt|cancel)$/.test(
-          url.pathname,
-        )
-      )
-        await requireDevelopment(userID, project);
+      await requireChange(userID, changeID);
     }
-    const pageID = url.pathname.match(/^\/api\/knowledge\/pages\/([0-9a-f-]+)(?:\/|$)/)?.[1];
-    if (pageID) await requirePage(userID, pageID);
     const attemptID = url.pathname.match(/^\/api\/runtime-attempts\/([a-z0-9-]+)(?:\/|$)/)?.[1];
     if (attemptID)
       await requireRuntime(userID, attemptID, request.method === "GET" ? undefined : "ide");
-    if (url.pathname === "/api/changes" || url.pathname === "/api/runtime-attempts") {
-      const filter = url.searchParams.get("projectId");
-      if (filter && /^[0-9a-f-]{36}$/i.test(filter)) await requireProject(userID, filter);
-    }
   }
   return {
     isSystemManager,
     requireSystemManager,
     requireProject,
+    requireTicket,
+    requireChange,
     requireDevelopment,
     canDevelop,
     requireRuntime,

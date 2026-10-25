@@ -1,6 +1,6 @@
 export class CommandError extends Error {
   constructor(
-    readonly code: "conflict" | "not-found" | "unavailable" | "forbidden",
+    readonly code: "invalid" | "conflict" | "not-found" | "unavailable" | "forbidden",
     message: string,
   ) {
     super(message);
@@ -8,6 +8,8 @@ export class CommandError extends Error {
   }
 
   get status() {
-    return { conflict: 409, "not-found": 404, unavailable: 503, forbidden: 403 }[this.code];
+    return { invalid: 400, conflict: 409, "not-found": 404, unavailable: 503, forbidden: 403 }[
+      this.code
+    ];
   }
 }

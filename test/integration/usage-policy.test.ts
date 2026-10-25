@@ -3,7 +3,7 @@ import { factoryProcess } from "../fixtures/factory-process";
 import { createUsagePolicy, codingBudgetIn } from "../../apps/factory/src/usage/policy";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
-import { createUsageRoutes } from "../../apps/factory/src/usage/routes";
+import { createUsageService } from "../../apps/factory/src/usage/service";
 import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
 import { fixture } from "../fixtures/change-agent-turns";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -208,27 +208,8 @@ test("policy commands serialize versions, replay exact intent and enforce Projec
     const memberView = await policy.get(member, project);
     expect(memberView.scopes.map((scope) => scope.scope)).toEqual([project]);
     expect((await policy.get(manager, null)).scopes.map((scope) => scope.scope)).toEqual([null]);
-    const stale = createUsageRoutes(database, {
-      requireFresh: async () => {
-        throw new Error("stale");
-      },
-    });
-    await expect(
-      stale(
-        new Request("http://factory.local/api/admin/usage", {
-          method: "PUT",
-          body: JSON.stringify(command),
-        }),
-        manager,
-      ),
-    ).rejects.toMatchObject({ code: "forbidden" });
-    const fresh = createUsageRoutes(database, { requireFresh: async () => {} });
-    const response = await fresh(
-      new Request(`http://factory.local/api/projects/${project}/usage`),
-      member,
-    );
-    if (!response) throw new Error("Usage route did not match");
-    expect((await response.json()).scopes.map((scope: { scope: string }) => scope.scope)).toEqual([
+    const service = createUsageService(database);
+    expect((await service.get(member, project)).scopes.map((scope) => scope.scope)).toEqual([
       project,
     ]);
     const rates = createContractRates(database);

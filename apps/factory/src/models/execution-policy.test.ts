@@ -69,7 +69,7 @@ test("shared native policy removes processor retries and counts every tool-loop 
       id: "owned-policy",
       name: "Owned policy",
       ...nativeAgentPolicy,
-      model: nativeModel(
+      model: await nativeModel(
         { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned-policy" },
         "owned-policy",
       ),

@@ -1,11 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
 import { z } from "zod";
-import { apiRequest, apiUpload } from "./api-client";
+import { protocolRequest, apiUpload } from "./api-client";
 
 test("shows a readable recovery error for an invalid successful response", async () => {
   const fetch = spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));
   try {
-    await expect(apiRequest(z.object({ id: z.string() }), "/fixture")).rejects.toThrow(
+    await expect(
+      protocolRequest(z.object({ id: z.string() }), "/api/auth/sign-in/sso"),
+    ).rejects.toThrow(
       "Factory returned an unexpected response. Retry, or reload Factory if this continues.",
     );
   } finally {
@@ -19,11 +21,39 @@ test("retains the server's command error and returns validated successful data",
     .mockResolvedValueOnce(Response.json({ id: "revision" }));
   try {
     const schema = z.object({ id: z.string() });
-    await expect(apiRequest(schema, "/fixture")).rejects.toMatchObject({
+    await expect(protocolRequest(schema, "/api/auth/sign-in/sso")).rejects.toMatchObject({
       message: "Revision is immutable",
       status: 409,
     });
-    await expect(apiRequest(schema, "/fixture")).resolves.toEqual({ id: "revision" });
+    await expect(protocolRequest(schema, "/api/auth/sign-in/sso")).resolves.toEqual({
+      id: "revision",
+    });
+  } finally {
+    fetch.mockRestore();
+  }
+});
+
+test("protocol helpers refuse logical Factory APIs and foreign URLs before sending anything", async () => {
+  const fetch = spyOn(globalThis, "fetch").mockRejectedValue(new Error("Must not reach network"));
+  try {
+    for (const path of [
+      "/api/projects",
+      "/api/changes/owned/agent/start",
+      "https://foreign.test/api/auth/sign-out",
+    ]) {
+      await expect(
+        protocolRequest(z.unknown(), path as Parameters<typeof protocolRequest>[1]),
+      ).rejects.toThrow("Unclassified browser HTTP operation");
+      await expect(
+        apiUpload(z.unknown(), path, {
+          body: new ArrayBuffer(0),
+          mediaType: "text/plain",
+          onProgress() {},
+          onTransferred() {},
+        }),
+      ).rejects.toThrow("Only raw Attachment uploads");
+    }
+    expect(fetch).not.toHaveBeenCalled();
   } finally {
     fetch.mockRestore();
   }

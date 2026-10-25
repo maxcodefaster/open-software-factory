@@ -1,7 +1,4 @@
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createDeepSeek } from "@ai-sdk/deepseek";
-import { createOpenAI } from "@ai-sdk/openai";
-import { getProviderConfig, type MastraModelConfig } from "@mastra/core/llm";
+import type { MastraModelConfig } from "@mastra/core/llm";
 import {
   type ModelConnectionMetadata,
   type ModelProvider,
@@ -22,7 +19,8 @@ export const nativeEndpoints = {
   deepseek: "https://api.deepseek.com",
 } as const satisfies Record<ModelProvider, string>;
 
-export function providerCatalogue() {
+export async function providerCatalogue() {
+  const { getProviderConfig } = await import("@mastra/core/llm");
   return modelProvider.options.map((provider) => {
     const upstream = getProviderConfig(provider);
     if (!upstream) throw new Error(`Pinned Mastra provider unavailable: ${provider}`);
@@ -77,10 +75,10 @@ export function validateModelEndpoint(
   return url.toString().replace(/\/$/, "");
 }
 
-export function nativeModel(
+export async function nativeModel(
   connection: ResolvedModelConnection,
   modelId: string,
-): MastraModelConfig {
+): Promise<MastraModelConfig> {
   const provider = connection.provider ?? "openai";
   const id = modelIdInput.parse(modelId);
   if (id.startsWith(`${provider}/`))
@@ -91,11 +89,16 @@ export function nativeModel(
   if (baseURL || (provider === "openai" && id === "gpt-6-luna")) {
     const options = { apiKey: connection.apiKey, ...(baseURL ? { baseURL } : {}) };
     switch (provider) {
-      case "anthropic":
+      case "anthropic": {
+        const { createAnthropic } = await import("@ai-sdk/anthropic");
         return createAnthropic(options)(id);
-      case "deepseek":
+      }
+      case "deepseek": {
+        const { createDeepSeek } = await import("@ai-sdk/deepseek");
         return createDeepSeek(options)(id);
+      }
       case "openai": {
+        const { createOpenAI } = await import("@ai-sdk/openai");
         const sdk = createOpenAI(options);
         return id === "gpt-6-luna" ? sdk.responses(id) : sdk.chat(id);
       }

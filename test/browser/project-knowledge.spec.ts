@@ -2,6 +2,8 @@ import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const origin = "http://127.0.0.1:3000";
@@ -52,7 +54,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     await mkdir(".factory/screenshots/wiki-slice19", { recursive: true });
     await signIn(page);
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-    const session = await (await page.request.get("/api/session")).json();
+    const session = await browserBootstrap(page);
     const adminId = session.session.user.id as string;
     await forge("user/repos", "POST", {
       name,
@@ -81,19 +83,17 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     await db.client`INSERT INTO factory.knowledge_revision(id,page_id,ordinal,kind,title,body,generated_body,source_commit_sha,citations,created_by) VALUES(${revision},${pageId},1,'generated','Support guide',${body},${body},${commit},${citations}::jsonb,${adminId})`;
     await db.client`UPDATE factory.knowledge_page SET current_revision_id=${revision} WHERE id=${pageId}`;
     await db.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,state,created_by,completed_at) VALUES(${crypto.randomUUID()},${project},${commit},'succeeded',${adminId},now())`;
-    const created = await page.request.post("/api/admin/users", {
-      headers: { origin },
-      data: { name: "Wiki Contributor", email, password },
-    });
-    expect(created.status()).toBe(201);
-    userId = (await created.json()).id;
+    const created = await serverCall(
+      browserFunction(page, "createAccount", [{ name: "Wiki Contributor", email, password }]),
+    );
+    userId = created.id;
     expect(
       (
-        await page.request.post(`/api/projects/${project}/members`, {
-          headers: { origin },
-          data: { email, role: "product-contributor" },
-        })
-      ).ok(),
+        await browserFunction(page, "saveProjectMember", [
+          project,
+          { email, role: "product-contributor" },
+        ])
+      ).ok,
     ).toBe(true);
     await contributor.goto("/");
     await contributor.getByLabel("Email").fill(email);
@@ -107,24 +107,27 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
       contributor.getByRole("button", { name: "docs/product/support.md", exact: true }),
     ).toHaveCount(0);
     await expect(contributor.locator(".wiki-search-results")).toContainText("Support guide");
-    const searchResponse = await contributor.request.get(
-      `/api/projects/${project}/knowledge/search?q=escalation`,
+    const searchResponse = await serverCall(
+      browserFunction(contributor, "searchKnowledge", [project, "escalation"]),
     );
-    expect(
-      (await searchResponse.json()).results.every(
-        (result: { kind: string }) => result.kind === "page",
-      ),
-    ).toBe(true);
+    expect(searchResponse.results.every((result: { kind: string }) => result.kind === "page")).toBe(
+      true,
+    );
     await contributor.getByRole("button", { name: "Close search" }).click();
     await expect(contributor.getByRole("button", { name: "Code docs", exact: true })).toHaveCount(
       0,
     );
-    for (const route of [
-      `/api/projects/${project}/knowledge/documents`,
-      `/api/projects/${project}/knowledge/documents?path=${path}`,
-      `/api/knowledge/pages/${pageId}/sources`,
-    ])
-      expect((await contributor.request.get(route)).status()).toBe(403);
+    expect(await browserFunction(contributor, "getRepositoryDocuments", [project])).toMatchObject({
+      ok: false,
+      status: 403,
+    });
+    expect(
+      await browserFunction(contributor, "getRepositoryDocument", [project, path]),
+    ).toMatchObject({ ok: false, status: 403 });
+    expect(await browserFunction(contributor, "getKnowledgeSources", [pageId])).toMatchObject({
+      ok: false,
+      status: 403,
+    });
     await expect(
       contributor.getByRole("button", { name: "Open Project IDE", exact: true }),
     ).toHaveCount(0);
@@ -136,7 +139,7 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
           data: { path, body: "Overwrite" },
         })
       ).status(),
-    ).toBe(405);
+    ).toBe(404);
     await contributor.getByRole("button", { name: "Support guide", exact: true }).click();
     await contributor.getByLabel("Edit Knowledge body", { exact: true }).click();
     const editor = contributor.getByRole("textbox", { name: "Knowledge body", exact: true });
@@ -163,10 +166,10 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     await expect(
       contributor.getByRole("link", { name: "View source change", exact: true }),
     ).toHaveCount(0);
-    const historyResponse = await contributor.request.get(
-      `/api/knowledge/pages/${pageId}/revisions`,
+    const historyResponse = await serverCall(
+      browserFunction(contributor, "getKnowledgeHistory", [pageId]),
     );
-    for (const item of (await historyResponse.json()).revisions) {
+    for (const item of historyResponse.revisions) {
       expect(item).not.toHaveProperty("sourceCommitSha");
       expect(item).not.toHaveProperty("citations");
       expect(item).not.toHaveProperty("generatedBody");
@@ -195,12 +198,16 @@ test("Contributor searches only Wiki, edits, restores and loses access on revoca
     >`SELECT (SELECT count(*)::integer FROM factory.knowledge_revision WHERE page_id=${pageId}) AS revisions,(SELECT count(*)::integer FROM factory.runtime_attempt WHERE project_id=${project}) AS runtimes,(SELECT count(*)::integer FROM factory.ticket WHERE project_id=${project}) AS tickets`;
     expect(counts).toEqual({ revisions: 3, runtimes: 0, tickets: 0 });
     await db.client`DELETE FROM factory.project_membership WHERE project_id=${project} AND user_id=${userId}`;
-    for (const route of [
-      `/api/projects/${project}/knowledge/search?q=escalation`,
-      `/api/projects/${project}/knowledge/documents?path=${path}`,
-      `/api/knowledge/pages/${pageId}/revisions`,
-    ])
-      expect((await contributor.request.get(route)).status()).toBe(404);
+    expect(
+      await browserFunction(contributor, "searchKnowledge", [project, "escalation"]),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      await browserFunction(contributor, "getRepositoryDocument", [project, path]),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(await browserFunction(contributor, "getKnowledgeHistory", [pageId])).toMatchObject({
+      ok: false,
+      status: 404,
+    });
   } finally {
     await context.close();
     if (projectCreated) await deleteFactoryProject(project);

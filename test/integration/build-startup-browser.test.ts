@@ -1,3 +1,10 @@
+import { changesResponseSchema, agentViewSchema } from "../../apps/factory/src/api-contracts";
+import { mockAgentView } from "../fixtures/server-functions";
+import { browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
@@ -6,6 +13,7 @@ import type { AgentView } from "../../apps/factory/src/api-contracts";
 import { turnObservationInput } from "../../packages/conversation-domain/src/turn-observation";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { mockBootstrap } from "../fixtures/server-functions";
 
 test("Build preparation distinguishes lost history and retains correction routing after compute stops", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -77,57 +85,78 @@ test("Build preparation distinguishes lost history and retains correction routin
       })),
     );
     page = await context.newPage();
-    await page.route("**/api/session", async (route) => {
-      const response = await route.fetch();
-      const body = await response.json();
-      await route.fulfill({ response, json: { ...body, modelRelayConfigured: true } });
-    });
+    await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
     page.on("request", (request) => {
       if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
         mutations++;
     });
-    await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-      route.fulfill({ status: 503, json: { error: "No source in controlled fixture" } }),
-    );
-    await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-      route.fulfill({ status: 503, json: { error: "No IDE in controlled fixture" } }),
-    );
-    await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-      route.fulfill({ json: view() }),
-    );
-    await page.route("**/api/changes?*", async (route) => {
-      const response = await route.fetch();
-      const body = await response.json();
-      await route.fulfill({
-        response,
-        json: {
-          ...body,
-          changes: body.changes.map((change: { id: string }) =>
-            change.id === changeID
-              ? { ...change, implementationState: state, buildTurnState: turn?.state }
-              : change,
-          ),
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError("unavailable", "No source in controlled fixture");
         },
-      });
+      },
     });
-    await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
-      route.fulfill({
-        json: {
-          verificationState: "succeeded",
-          verificationCommitSha: "b".repeat(40),
-          verificationSummary: "The earlier submitted commit passed its exact checks.",
+    await mockFactoryFunctions(page, {
+      workspaces: {
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "No IDE in controlled fixture");
         },
-      }),
-    );
-    await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
-      researchRequests++;
-      return route.fulfill({ status: 409, json: { error: "Build must not become research" } });
+      },
     });
-    await page.route(`**/api/changes/${changeID}/agent/prompt`, async (route) => {
-      prompts.push(route.request().postDataJSON());
-      state = "starting";
-      turn = { ...turn!, state: "pending" };
-      await route.fulfill({ status: 202, json: view() });
+    await mockAgentView(page, changeID, async () => view(), { activity: false });
+    const lifecyclePage = page;
+    await mockFactoryFunctions(lifecyclePage, {
+      runtime: {
+        changes: async (_actor, factoryTargetID) => {
+          const response = await serverCall(
+            browserFunction(lifecyclePage, "getChanges", [factoryTargetID]),
+          );
+          const body = await response;
+          return changesResponseSchema.parse({
+            ...body,
+            changes: body.changes.map((change: { id: string }) =>
+              change.id === changeID
+                ? { ...change, implementationState: state, buildTurnState: turn?.state }
+                : change,
+            ),
+          });
+        },
+      },
+    });
+    const deliveryPage = page;
+    await mockFactoryFunctions(deliveryPage, {
+      delivery: {
+        async get(_actor, id) {
+          if (id !== changeID)
+            return serverCall(browserFunction(deliveryPage, "getDelivery", [id]));
+          return deliveryViewSchema.parse({
+            verificationState: "succeeded",
+            verificationCommitSha: "b".repeat(40),
+            verificationSummary: "The earlier submitted commit passed its exact checks.",
+          });
+        },
+      },
+    });
+    await mockFactoryFunctions(page, {
+      conversations: {
+        message: async (_actor, factoryTargetID, factoryCommand) => {
+          researchRequests++;
+          return (() => {
+            throw new CommandError("conflict", String("Build must not become research"));
+          })();
+        },
+      },
+    });
+    await mockFactoryFunctions(page, {
+      agent: {
+        prompt: async (_actor, factoryTargetID, factoryCommand) => {
+          prompts.push(factoryCommand);
+          state = "starting";
+          turn = { ...turn!, state: "pending" };
+          return agentViewSchema.parse(view());
+        },
+      },
     });
     await page.goto(fixture.base);
     await openProjectMenu(page);

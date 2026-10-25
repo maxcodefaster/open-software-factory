@@ -3,6 +3,13 @@ import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  callFactoryFunction,
+  browserFunction,
+  authenticatedBootstrap,
+} from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
 test("security Settings is a keyboard-accessible tab, reauthenticates in place, and fits narrow screens", async () => {
   const owned = await factoryProcess();
@@ -12,8 +19,7 @@ test("security Settings is a keyboard-accessible tab, reauthenticates in place, 
     await owned.startPlanningCache();
     await owned.start();
     const cookie = await owned.signIn();
-    const sessionResponse = await fetch(`${owned.base}/api/session`, { headers: { cookie } });
-    const { session } = (await sessionResponse.json()) as { session: { user: { id: string } } };
+    const { session } = await authenticatedBootstrap(owned.base, { cookie });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     await context.addCookies(
       cookie.split("; ").map((part) => ({
@@ -42,9 +48,9 @@ test("security Settings is a keyboard-accessible tab, reauthenticates in place, 
     await page.getByRole("button", { name: "Confirm identity", exact: true }).click();
     await visible(page.getByRole("region", { name: "Confirm your identity" })).toHaveCount(0);
     await visible(navigation).toBeVisible();
-    await mkdir(".factory/screenshots/enterprise-access", { recursive: true });
+    await mkdir(".factory/test-results/enterprise-access", { recursive: true });
     await page.screenshot({
-      path: ".factory/screenshots/enterprise-access/security-desktop.png",
+      path: ".factory/test-results/enterprise-access/security-desktop.png",
       animations: "disabled",
     });
     await page.setViewportSize({ width: 430, height: 900 });
@@ -53,13 +59,13 @@ test("security Settings is a keyboard-accessible tab, reauthenticates in place, 
       true,
     );
     await page.screenshot({
-      path: ".factory/screenshots/enterprise-access/security-narrow.png",
+      path: ".factory/test-results/enterprise-access/security-narrow.png",
       animations: "disabled",
     });
-    await navigation.getByRole("button", { name: "Company sign-in", exact: true }).click();
+    await chooseSettingsPage(page, "Company sign-in");
     await visible(page.getByLabel("Browser session duration")).toHaveValue("7");
     await page.screenshot({
-      path: ".factory/screenshots/enterprise-access/company-narrow.png",
+      path: ".factory/test-results/enterprise-access/company-narrow.png",
       animations: "disabled",
     });
     await page.evaluate(
@@ -75,16 +81,10 @@ test("security Settings is a keyboard-accessible tab, reauthenticates in place, 
     expect(await page.evaluate(() => sessionStorage.getItem("factory:security-return"))).toBeNull();
     const email = `no-project-${owned.id}@factory.invalid`;
     const password = "owned-personal-password-not-a-secret";
-    const account = await fetch(`${owned.base}/api/admin/users`, {
-      method: "POST",
-      headers: {
-        cookie: (await context.cookies()).map((value) => `${value.name}=${value.value}`).join("; "),
-        origin: owned.base,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ name: "New company member", email, password }),
-    });
-    expect(account.status).toBe(201);
+    const account = await browserFunction(page, "createAccount", [
+      { name: "New company member", email, password },
+    ]);
+    expect(account.ok).toBe(true);
     const login = await fetch(`${owned.base}/api/auth/sign-in/email`, {
       method: "POST",
       headers: { origin: owned.base, "content-type": "application/json" },
@@ -109,7 +109,7 @@ test("security Settings is a keyboard-accessible tab, reauthenticates in place, 
       personal.getByRole("button", { name: "Company sign-in", exact: true }),
     ).toHaveCount(0);
     await personal.screenshot({
-      path: ".factory/screenshots/enterprise-access/no-project-security-narrow.png",
+      path: ".factory/test-results/enterprise-access/no-project-security-narrow.png",
       animations: "disabled",
     });
     expect(errors).toEqual([]);
@@ -136,16 +136,28 @@ test("a Product Contributor manages members without receiving code authority", a
       });
     const email = `product-lead-${owned.id}@factory.invalid`;
     const password = "owned-product-password-not-a-secret";
-    const account = await command("/api/admin/users", { name: "Product lead", email, password });
-    expect(account.status).toBe(201);
-    const { id: userID } = (await account.json()) as { id: string };
+    const { id: userID } = await serverCall(
+      callFactoryFunction(
+        owned.base,
+        "createAccount",
+        [{ name: "Product lead", email, password }],
+        { cookie },
+      ),
+    );
     const teammateEmail = `teammate-${owned.id}@factory.invalid`;
-    const teammate = await command("/api/admin/users", {
-      name: "Team developer",
-      email: teammateEmail,
-      password,
-    });
-    expect(teammate.status).toBe(201);
+    const teammate = await callFactoryFunction(
+      owned.base,
+      "createAccount",
+      [
+        {
+          name: "Team developer",
+          email: teammateEmail,
+          password,
+        },
+      ],
+      { cookie },
+    );
+    expect(teammate.ok).toBe(true);
     const projectID = crypto.randomUUID();
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
       VALUES(${projectID},${`members-${projectID}`},'Team workspace','https://example.invalid/members.git','main','.devcontainer/devcontainer.json',${userID})`;
@@ -185,7 +197,7 @@ test("a Product Contributor manages members without receiving code authority", a
     const permission = members.locator('.access-add-member input[name="manageProject"]');
     expect((await permission.boundingBox())?.width).toBeLessThanOrEqual(24);
     await page.screenshot({
-      path: ".factory/screenshots/enterprise-access/members-desktop.png",
+      path: ".factory/test-results/enterprise-access/members-desktop.png",
       animations: "disabled",
     });
     await page.setViewportSize({ width: 430, height: 900 });
@@ -193,7 +205,7 @@ test("a Product Contributor manages members without receiving code authority", a
       true,
     );
     await page.screenshot({
-      path: ".factory/screenshots/enterprise-access/members-narrow.png",
+      path: ".factory/test-results/enterprise-access/members-narrow.png",
       animations: "disabled",
     });
     await members.getByLabel("Role for Product lead").selectOption("developer");
@@ -207,12 +219,8 @@ test("a Product Contributor manages members without receiving code authority", a
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
     await visible(members.getByLabel("Role for Product lead")).toHaveValue("product-contributor");
     expect(
-      (
-        await fetch(`${owned.base}/api/projects/${projectID}/knowledge/documents`, {
-          headers: { cookie },
-        })
-      ).status,
-    ).toBe(403);
+      await callFactoryFunction(owned.base, "getRepositoryDocuments", [projectID], { cookie }),
+    ).toMatchObject({ ok: false, status: 403 });
     expect(errors).toEqual([]);
   } finally {
     await browser.close();

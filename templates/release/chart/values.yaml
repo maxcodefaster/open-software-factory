@@ -1,0 +1,9 @@
+{
+  "replicas": 2,
+  "port": 8080,
+  "image": {
+    "repository": "configure-in-publication",
+    "digest": "configure-in-publication"
+  },
+  "imagePullSecrets": []
+}

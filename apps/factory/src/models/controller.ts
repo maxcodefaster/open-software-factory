@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
 import {
   type InheritedModelSettingsView,
   type ModelRole,
@@ -11,17 +12,16 @@ import {
 } from "../../../../packages/conversation-domain/src/model-inheritance";
 import {
   approvedModelCatalogue,
+  codingReasoningInput,
   type ModelSettingsView,
   type modelDefaultsInput,
   modelRulesInput,
-  codingReasoningInput,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { providerCatalogue } from "./native";
-import { modelProvider } from "../../../../packages/conversation-domain/src/model-connection";
 
 export async function codingReasoningIn(sql: AgentTurnTransaction) {
   await sql`SELECT pg_advisory_xact_lock_shared(hashtext('factory-model-settings'))`;
@@ -73,7 +73,7 @@ export function createModelSettingsController(
     >`
       SELECT binding.role, version.provider, binding.model_id AS "modelId", version.endpoint FROM factory.model_role_connection binding
       JOIN factory.model_connection_version version ON version.connection_id=binding.connection_id AND version.version=binding.connection_version`;
-    const catalogue = providerCatalogue();
+    const catalogue = await providerCatalogue();
     const models = [
       ...new Set([
         ...environment.models,
@@ -322,20 +322,6 @@ export function createModelSettingsController(
           );
         return get(sql);
       });
-    },
-    async checkConnection() {
-      if (!baseURL || !apiKey) return { status: "unconfigured" as const };
-      try {
-        const response = await fetch(`${baseURL.replace(/\/$/, "")}/models`, {
-          headers: { authorization: `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(8_000),
-          redirect: "error",
-        });
-        await response.body?.cancel();
-        return { status: response.ok ? ("reachable" as const) : ("unavailable" as const) };
-      } catch {
-        return { status: "unavailable" as const };
-      }
     },
   };
 }

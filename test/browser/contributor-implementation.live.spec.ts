@@ -1,15 +1,25 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { recordedEditorIdentity } from "../fixtures/editor-source-resources";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 import { fixtureNamespace, removeFixtureNamespace } from "../support/owned-namespace";
 import { luminance, rgb } from "../support/visual-contrast";
 
 const origin = "http://127.0.0.1:3000";
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
+
+function cleanupActor(page: Page | undefined, resource: string): Page {
+  if (!page) throw new Error(`Owned ${resource} cleanup actor is missing`);
+  return page;
+}
 
 for (const restore of [false, true])
   test(
@@ -44,21 +54,23 @@ for (const restore of [false, true])
       try {
         await mkdir(evidence, { recursive: true });
         // This admin only provisions/cleans fixtures; source editing belongs to the owned Developer.
-        await page.route("**/api/projects/*/source-workspace/ensure", (route) =>
-          route.fulfill({
-            status: 503,
-            json: { error: "Fixture administrator does not open source" },
-          }),
-        );
-        await page.route("**/api/projects/*/developer-ide/ensure", (route) =>
-          route.fulfill({
-            status: 503,
-            json: { error: "Fixture administrator does not open IDE" },
-          }),
-        );
+        await mockFactoryFunctions(page, {
+          workspaces: {
+            ensurePersonalSource: async () => {
+              throw new CommandError("unavailable", "Fixture administrator does not open source");
+            },
+          },
+        });
+        await mockFactoryFunctions(page, {
+          workspaces: {
+            ensureEditor: async () => {
+              throw new CommandError("unavailable", "Fixture administrator does not open IDE");
+            },
+          },
+        });
         await signIn(page);
         await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-        const { session } = await (await page.request.get("/api/session")).json();
+        const { session } = await browserBootstrap(page);
         // Isolate the Ticket journey from registration's concurrent Staging and Knowledge startup.
         projectID = crypto.randomUUID();
         await db.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
@@ -66,19 +78,13 @@ for (const restore of [false, true])
         'http://127.0.0.1:33030/factory-mutation/runtime-fixture.git', 'main', '.devcontainer/devcontainer.json', ${session.user.id})`;
         for (const role of ["product-contributor", "developer"] as const) {
           const email = `${role}-${slug}@factory.local`;
-          const created = await page.request.post("/api/admin/users", {
-            headers: { origin },
-            data: { name: role, email, password },
-          });
-          expect(created.status()).toBe(201);
-          users.push(await created.json());
+          users.push(
+            await serverCall(
+              browserFunction(page, "createAccount", [{ name: role, email, password }]),
+            ),
+          );
           expect(
-            (
-              await page.request.post(`/api/projects/${projectID}/members`, {
-                headers: { origin },
-                data: { email, role },
-              })
-            ).ok(),
+            (await browserFunction(page, "saveProjectMember", [projectID, { email, role }])).ok,
           ).toBe(true);
         }
         const contributor = await contexts[0]!.newPage();
@@ -311,19 +317,15 @@ for (const restore of [false, true])
             const namespace = await fixtureNamespace(source.namespace, source.id);
             if (namespace) namespaces.push(namespace);
           }
-          if (changeID)
-            await page.request.post(`/api/changes/${changeID}/cancel`, { headers: { origin } });
+          if (changeID) await serverCall(requestFunction(page.request, "cancelChange", [changeID]));
           await stopProjectRuntimes(page.request, projectID);
           for (const source of sources) {
             const ownerIndex = users.findIndex((user) => user.id === source.ownerID);
-            const request = ownerIndex < 0 ? page.request : contexts[ownerIndex]!.request;
-            const stopped = await request.post(
-              `${origin}/api/workspaces/${source.id}/source/stop`,
-              {
-                headers: { origin },
-              },
+            const actorPage = cleanupActor(
+              ownerIndex < 0 ? page : contexts[ownerIndex]!.pages()[0],
+              "source",
             );
-            expect(stopped.status()).toBe(202);
+            await serverCall(browserFunction(actorPage, "stopWorkspaceSource", [source.id]));
           }
           await expect
             .poll(
@@ -345,13 +347,8 @@ for (const restore of [false, true])
             expect(identity).toBeDefined();
             if (!identity) continue;
             const namespace = await fixtureNamespace(identity.namespace, user.id);
-            expect(
-              (
-                await contexts[index]!.request.post(`${origin}/api/developer-ide/stop`, {
-                  headers: { origin },
-                })
-              ).status(),
-            ).toBe(202);
+            const actorPage = cleanupActor(contexts[index]!.pages()[0], "editor");
+            await serverCall(browserFunction(actorPage, "stopDeveloperIDE", []));
             await expect
               .poll(
                 async () =>

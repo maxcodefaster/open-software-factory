@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { is } from "drizzle-orm";
 import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 import postgres from "postgres";
@@ -62,20 +62,17 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     expect(publications).toHaveLength(6);
     await database.client.unsafe(`CREATE DATABASE ${probeName}`);
     created = true;
-    const sql = await readFile(
-      process.env["FACTORY_BASELINE_CANDIDATE"] ?? "packages/db/migrations/0000_baseline.sql",
-      "utf8",
-    );
+    const sql = await readFile("packages/db/migrations/0001_baseline.sql", "utf8");
     await candidate.unsafe(sql);
     expect(digest(await dump(container, probeName))).toBe(
-      "1ea24d98676787c858b7ae3c93123ce90b96bbf74ddb2fb8810f54f4decbac86",
+      "030a65c22782d7d32bf82bf600d7870096c908a1f755d16e5d131aac959fb79e",
     );
     const freshPublication = await candidate<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables
       WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
     expect([...freshPublication]).toEqual([...publications]);
     expect([...(await candidate`SELECT version FROM factory.schema_migration`)]).toEqual([
-      { version: 0 },
+      { version: 1 },
     ]);
     for (const table of Object.values(schema)) {
       if (!is(table, PgTable)) continue;
@@ -86,11 +83,14 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     }
     let migratedDigest = "";
     for (let run = 0; run < 2; run++) {
-      const migration = Bun.spawn([process.execPath, "packages/db/src/migrate.ts"], {
-        env: { ...process.env, DATABASE_URL: candidateURL.toString() },
-        stdout: "ignore",
-        stderr: "pipe",
-      });
+      const migration = Bun.spawn(
+        [process.execPath, "--no-env-file", "packages/db/src/migrate.ts"],
+        {
+          env: { ...process.env, DATABASE_URL: candidateURL.toString() },
+          stdout: "ignore",
+          stderr: "pipe",
+        },
+      );
       const [error, status] = await Promise.all([
         new Response(migration.stderr).text(),
         migration.exited,
@@ -111,11 +111,14 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     ]).toEqual(versions);
     await candidate`INSERT INTO auth."user"(id,name,email,email_verified)
       VALUES ('01994a7d-0000-7000-8000-000000000001','Owned baseline invariant probe','baseline@test.invalid',true)`;
-    const invariants = Bun.spawn([process.execPath, "scripts/integration/postgres.ts"], {
-      env: { ...process.env, DATABASE_URL: candidateURL.toString() },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
+    const invariants = Bun.spawn(
+      [process.execPath, "--no-env-file", "scripts/integration/postgres.ts"],
+      {
+        env: { ...process.env, DATABASE_URL: candidateURL.toString() },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
     const [output, error, status] = await Promise.all([
       new Response(invariants.stdout).text(),
       new Response(invariants.stderr).text(),
@@ -123,6 +126,8 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     ]);
     if (status !== 0) throw new Error(`Fresh owned baseline invariants failed: ${error}`);
     expect(output).toContain("clean baseline invariants passed");
+    expect(await candidate`SELECT singleton FROM factory.installation_maintenance`).toHaveLength(1);
+    expect(await candidate`SELECT id FROM factory.attachment_storage`).toHaveLength(1);
     console.log(
       JSON.stringify({
         schemaBaselineDigest: digest(original),
@@ -137,3 +142,43 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     await factory.dispose();
   }
 }, 60000);
+
+test.each(["historical versions", "partial schema"] as const)(
+  "Greenfield install refuses %s without deleting or rewriting existing data",
+  async (state) => {
+    const factory = await factoryProcess();
+    const database = factory.connect(1);
+    const userID = crypto.randomUUID();
+    try {
+      await database.client`INSERT INTO auth."user"(id,name,email)
+        VALUES(${userID},'Retained owner',${`${userID}@baseline.test`})`;
+      if (state === "historical versions")
+        await database.client`UPDATE factory.schema_migration SET version=0 WHERE version=1`;
+      else await database.client`DROP TABLE factory.schema_migration`;
+      const child = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {
+        env: { ...process.env, DATABASE_URL: factory.databaseURL },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      const [status, error] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+      expect(status).not.toBe(0);
+      expect(error).toContain("Greenfield baseline");
+      expect([...(await database.client`SELECT name FROM auth."user" WHERE id=${userID}`)]).toEqual(
+        [{ name: "Retained owner" }],
+      );
+      if (state === "historical versions")
+        expect([...(await database.client`SELECT version FROM factory.schema_migration`)]).toEqual([
+          { version: 0 },
+        ]);
+      else {
+        const [schema] = await database.client<{ relation: string | null }[]>`
+          SELECT to_regclass('factory.schema_migration')::text AS relation`;
+        expect(schema?.relation).toBeNull();
+      }
+    } finally {
+      await database.client.end({ timeout: 2 });
+      await factory.dispose();
+    }
+  },
+  60_000,
+);

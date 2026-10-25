@@ -1,18 +1,12 @@
 import { createSignal, For, Show, onSettled } from "solid-js";
-import { z } from "zod";
 import { usageRate, type UsageRate } from "../../../../packages/conversation-domain/src/usage";
-import { apiRequest, emptyResponseSchema } from "../api-client";
+import { serverCall } from "../server-functions/result";
+import { getContractPrices, saveContractPrices } from "../server-functions/usage";
 
-const ratesView = z.object({
-  rates: z.array(
-    z.object({
-      provider: z.string(),
-      model: z.string(),
-      version: z.number(),
-      rate: usageRate.nullable(),
-    }),
-  ),
-});
+type ContractPriceRows = Extract<
+  Awaited<ReturnType<typeof getContractPrices>>,
+  { ok: true }
+>["value"]["rates"];
 type Tier = UsageRate["tiers"][number];
 const emptyTier = (): Tier => ({
   above: 0,
@@ -29,7 +23,7 @@ const buckets = [
 ] as const;
 
 export function ContractPrices() {
-  const [rates, setRates] = createSignal<z.output<typeof ratesView>["rates"]>([]);
+  const [rates, setRates] = createSignal<ContractPriceRows>([]);
   const [provider, setProvider] = createSignal("openai"),
     [model, setModel] = createSignal("");
   const [tiers, setTiers] = createSignal<Tier[]>([emptyTier()]);
@@ -41,7 +35,7 @@ export function ContractPrices() {
     | { commandID: string; version: number; provider: string; model: string; tiers: Tier[] | null }
     | undefined;
   onSettled(() => {
-    void apiRequest(ratesView, "/api/admin/usage/rates")
+    void serverCall(getContractPrices())
       .then((value) => {
         if (!disposed) setRates(value.rates);
       })
@@ -87,12 +81,8 @@ export function ContractPrices() {
       }
       setBusy(true);
       setError("");
-      await apiRequest(emptyResponseSchema, "/api/admin/usage/rates", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(retry),
-      });
-      const value = await apiRequest(ratesView, "/api/admin/usage/rates");
+      await serverCall(saveContractPrices(retry));
+      const value = await serverCall(getContractPrices());
       if (disposed) return;
       setRates(value.rates);
       retry = undefined;

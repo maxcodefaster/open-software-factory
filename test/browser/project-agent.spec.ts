@@ -1,3 +1,5 @@
+import { requestFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
@@ -69,15 +71,13 @@ test.beforeEach(async () => {
 
 test.afterEach(async ({ context }) => {
   if (buildChangeID) {
-    await context.request.post(`/api/changes/${buildChangeID}/cancel`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    });
+    await serverCall(requestFunction(context.request, "cancelChange", [buildChangeID]));
     await expect
       .poll(
         async () => {
-          const response = await context.request.get("/api/runtime-attempts");
-          if (!response.ok()) return false;
-          const body = (await response.json()) as {
+          const response = await requestFunction(context.request, "getRuntimeAttempts", []);
+          if (!response.ok) return false;
+          const body = (await serverCall(Promise.resolve(response))) as {
             attempts: Array<{ changeId: string | null; state: string }>;
           };
           return body.attempts

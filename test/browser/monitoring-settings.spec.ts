@@ -3,8 +3,17 @@ import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import type {
+  MCPLibraryView,
+  MCPRole,
+  mcpSaveInput,
+} from "../../packages/conversation-domain/src/mcp-library";
+import type { monitoringSave } from "../../packages/conversation-domain/src/monitoring";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
 test("Project Inputs separate automatic preparation, source access, explicit Autofix and one-time keys", async ({
@@ -12,9 +21,11 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
   browser,
 }) => {
   test.setTimeout(360_000);
-  const host = spawn("mise", ["exec", "--", "bun", "test/fixtures/skill-browser-host.ts"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const host = spawn(
+    "mise",
+    ["exec", "--", "bun", "--no-env-file", "test/fixtures/skill-browser-host.ts"],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   const ready = z.object({ fixtureBase: z.url(), id: z.uuid(), databaseURL: z.string() });
   let stderr = "";
   host.stderr.on("data", (chunk) => {
@@ -47,8 +58,16 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
   const mcpUI = page.locator(".mcp-library");
   const consent = editor.getByRole("checkbox", { name: /^I authorize Factory/ });
   const save = editor.getByRole("button", { name: /^(Create input|Save & enable)$/ });
-  const path = `/api/projects/${projectId}/inputs`;
-  const headers = { origin: fixture.fixtureBase };
+  const definitionCreated = Promise.withResolvers<z.input<typeof mcpSaveInput>>();
+  await mockFactoryFunctions(page, {
+    mcp: {
+      async save(_actor, input) {
+        const result = await serverCall(browserFunction(page, "saveMCPDefinition", [input]));
+        definitionCreated.resolve(input);
+        return result;
+      },
+    },
+  });
   const peer = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   const peerPage = await peer.newPage();
   peerPage.on("pageerror", (cause) => errors.push(cause.message));
@@ -161,17 +180,14 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await expect(page.getByRole("combobox", { name: "Authentication", exact: true })).toHaveValue(
       "oauth",
     );
-    const created = page.waitForResponse(
-      (response) => response.url().endsWith("/api/mcp") && response.request().method() === "POST",
-    );
     await page.getByRole("button", { name: "Save connection", exact: true }).click();
-    const savedDefinition = (await created).request().postDataJSON();
+    const savedDefinition = await definitionCreated.promise;
     expect(savedDefinition).toMatchObject({
       scope: "project",
       projectId,
       content: { name: "Project Sentry", provider: "sentry", roles: ["planning", "build"] },
     });
-    const contextualSourceId = savedDefinition.libraryId as string;
+    const contextualSourceId = savedDefinition.libraryId;
     const detail = page.getByRole("region", { name: "MCP details", exact: true });
     const useSource = detail.getByRole("button", { name: "Use for Input", exact: true });
     await expect(useSource).toBeDisabled();
@@ -194,24 +210,24 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
         readOnlyHint: false,
       },
     ];
-    const connectPath = `**/api/mcp/${contextualSourceId}/connect`;
-    await page.route(connectPath, async (route) => {
-      expect(route.request().postDataJSON().revisionId).toBe(savedDefinition.revisionId);
-      await database.client`INSERT INTO factory.mcp_connection(id,revision_id,state,version,credential_epoch,tools,authorized_by)
+    const stopConnectMock = await mockFactoryFunctions(page, {
+      mcp: {
+        async connect(_actor, id, input) {
+          expect(id).toBe(contextualSourceId);
+          expect(input.revisionId).toBe(savedDefinition.revisionId);
+          await database.client`INSERT INTO factory.mcp_connection(id,revision_id,state,version,credential_epoch,tools,authorized_by)
         VALUES(${contextualSourceId},${savedDefinition.revisionId},'authorizing',1,${crypto.randomUUID()},${JSON.stringify(discovered)}::jsonb,${admin.id})`;
-      await route.fulfill({
-        json: { authorizationUrl: "https://authorization.example/owned-ui-proof" },
-      });
+          return { authorizationUrl: "https://authorization.example/owned-ui-proof" };
+        },
+      },
     });
     await detail.getByRole("button", { name: "Connect", exact: true }).click();
     const signInLink = detail.getByRole("link", { name: "Continue sign-in" });
     await expect(signInLink).toBeVisible();
     await expect(page.getByRole("status")).not.toContainText("Loading connections");
     await signInLink.focus();
-    const observed = page.waitForResponse(
-      (response) =>
-        response.url().includes(`/api/mcp?project=${projectId}`) &&
-        response.request().method() === "GET",
+    const observed = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.startsWith("/_server/data/getMCPLibrary-"),
     );
     await observed;
     await expect(signInLink).toBeFocused();
@@ -248,14 +264,11 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await expect(page.getByRole("button", { name: "Manage", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
     await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
-    await page.unroute(connectPath);
-    const sourceView = await (
-      await page.request.get(`${fixture.fixtureBase}/api/mcp?project=${projectId}`)
-    ).json();
+    await stopConnectMock();
+    const sourceView = await serverCall(browserFunction(page, "getMCPLibrary", [projectId]));
     expect(sourceView.choices).toHaveLength(0);
     expect(
-      sourceView.entries.find((entry: { id: string }) => entry.id === contextualSourceId).connection
-        .allowedTools,
+      sourceView.entries.find((entry) => entry.id === contextualSourceId)?.connection?.allowedTools,
     ).toEqual(["read_issue"]);
     // Remove synthetic discovery from the later eligibility matrix, not the definition.
     await database.client`UPDATE factory.mcp_connection SET state='revoked',version=4 WHERE id=${contextualSourceId}`;
@@ -300,30 +313,32 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
         roles: ["planning"],
         name: "Planning-only source",
       },
-    ]) {
+    ] satisfies Array<{
+      id: string;
+      scope: MCPLibraryView["entries"][number]["scope"];
+      roles: MCPRole[];
+      name: string;
+    }>) {
       const revisionId = crypto.randomUUID();
       expect(
-        (
-          await page.request.post(`${fixture.fixtureBase}/api/mcp`, {
-            headers,
-            data: {
-              libraryId: source.id,
-              revisionId,
-              expectedRevision: 0,
-              scope: source.scope,
-              ...(source.scope === "project" ? { projectId } : {}),
-              content: {
-                name: source.name,
-                description: "Synthetic source for UI permission checks.",
-                endpoint: "https://source.example/mcp",
-                provider: "custom",
-                authentication: "none",
-                roles: source.roles,
-              },
+        await browserFunction(page, "saveMCPDefinition", [
+          {
+            libraryId: source.id,
+            revisionId,
+            expectedRevision: 0,
+            scope: source.scope,
+            ...(source.scope === "project" ? { projectId } : {}),
+            content: {
+              name: source.name,
+              description: "Synthetic source for UI permission checks.",
+              endpoint: "https://source.example/mcp",
+              provider: "custom",
+              authentication: "none",
+              roles: source.roles,
             },
-          })
-        ).ok(),
-      ).toBe(true);
+          },
+        ]),
+      ).toMatchObject({ ok: true });
       await database.client`INSERT INTO factory.mcp_connection(id,revision_id,state,version,credential_epoch,tools,allowed_tools,authorized_by)
         VALUES(${source.id},${revisionId},'ready',1,${crypto.randomUUID()},${JSON.stringify([tool])}::jsonb,${JSON.stringify(allowed)}::jsonb,${admin.id})`;
     }
@@ -370,16 +385,24 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await page.screenshot({ path: `${evidence}/delegation-mobile.png`, fullPage: true });
     await page.setViewportSize({ width: 1440, height: 960 });
 
-    const commands: unknown[] = [];
+    const commands: z.input<typeof monitoringSave>[] = [];
     let loseAcknowledgement = true;
-    await page.route(`**${path}`, async (route) => {
-      if (route.request().method() !== "PUT") return route.continue();
-      commands.push(route.request().postDataJSON());
-      if (!loseAcknowledgement) return route.continue();
-      loseAcknowledgement = false;
-      expect((await route.fetch()).ok()).toBe(true);
-      return route.abort("connectionclosed");
-    });
+    const stopSaveMock = await mockFactoryFunctions(
+      page,
+      {
+        inputs: {
+          async save(_actor, project, input) {
+            commands.push(input);
+            return serverCall(browserFunction(page, "saveProjectInput", [project, input]));
+          },
+        },
+      },
+      (name) => {
+        if (name !== "saveProjectInput" || !loseAcknowledgement) return false;
+        loseAcknowledgement = false;
+        return true;
+      },
+    );
     await save.click();
     await expect(monitoring.getByRole("button", { name: "Retry same command" })).toBeVisible();
     await expect(save).toBeDisabled();
@@ -428,8 +451,8 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await openActions();
     await hook.getByRole("button", { name: "Disable input", exact: true }).focus();
     // Unchanged polling must not replace a focused control.
-    const read = page.waitForResponse(
-      (response) => response.url().endsWith(path) && response.request().method() === "GET",
+    const read = page.waitForResponse((response) =>
+      new URL(response.url()).pathname.startsWith("/_server/data/getProjectInputs-"),
     );
     await read;
     await expect(hook.getByRole("button", { name: "Disable input", exact: true })).toBeFocused();
@@ -497,19 +520,18 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     const password = "owned-monitoring-manager-password";
     expect(
       (
-        await page.request.post(`${fixture.fixtureBase}/api/admin/users`, {
-          headers,
-          data: { name: "Monitoring manager", email: peerEmail, password },
-        })
-      ).status(),
-    ).toBe(201);
+        await browserFunction(page, "createAccount", [
+          { name: "Monitoring manager", email: peerEmail, password },
+        ])
+      ).ok,
+    ).toBe(true);
     expect(
       (
-        await page.request.post(`${fixture.fixtureBase}/api/projects/${projectId}/members`, {
-          headers,
-          data: { email: peerEmail, role: "product-contributor", manageProject: true },
-        })
-      ).ok(),
+        await browserFunction(page, "saveProjectMember", [
+          projectId,
+          { email: peerEmail, role: "product-contributor", manageProject: true },
+        ])
+      ).ok,
     ).toBe(true);
     await signIn(peerPage, peerEmail, password);
     await open(peerPage);
@@ -521,27 +543,25 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
       peerMonitoring.getByRole("button", { name: "Add input", exact: true }),
     ).toBeVisible();
     await expect(peerPage.getByText("Factory administration", { exact: true })).toHaveCount(0);
-    const denied = await peerPage.request.put(`${fixture.fixtureBase}${path}`, {
-      headers,
-      data: commands[0],
-    });
-    expect(denied.status()).toBe(403);
+    const denied = await browserFunction(peerPage, "saveProjectInput", [projectId, commands[0]!]);
+    expect(denied).toMatchObject({ ok: false, status: 403 });
     await database.client`UPDATE factory.project_membership SET manage_project=false WHERE project_id=${projectId}`;
     await expect(
       peerMonitoring.getByRole("button", { name: "Add input", exact: true }),
     ).toHaveCount(0);
     await peerPage.screenshot({ path: `${evidence}/read-only-desktop.png`, fullPage: true });
 
-    await page.unroute(`**${path}`);
+    await stopSaveMock();
     let failReads = true;
-    await page.route(`**${path}`, (route) =>
-      failReads && route.request().method() === "GET"
-        ? route.fulfill({
-            status: 503,
-            json: { error: "Owned temporary monitoring read failure." },
-          })
-        : route.continue(),
-    );
+    await mockFactoryFunctions(page, {
+      inputs: {
+        async get(_actor, project) {
+          if (failReads)
+            throw new CommandError("unavailable", "Owned temporary monitoring read failure.");
+          return serverCall(browserFunction(page, "getProjectInputs", [project]));
+        },
+      },
+    });
     await page.reload();
     await open(page);
     await expect(monitoring.getByRole("alert")).toContainText(

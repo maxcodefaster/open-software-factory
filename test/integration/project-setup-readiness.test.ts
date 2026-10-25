@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createEnvironmentController } from "../../apps/factory/src/environments/controller";
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
 import { createSetupReadiness } from "../../apps/factory/src/setup/readiness";
@@ -244,13 +246,21 @@ test.each(["failed", "running"] as const)(
     try {
       await fixture.start();
       const admin = await fixture.signIn();
-      const create = await request("/api/admin/users", admin, {
-        name: "Wiki retry Developer",
-        email,
-        password,
-      });
-      expect(create.status).toBe(201);
-      const { id: userID } = await create.json();
+      const create = await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "createAccount",
+          [
+            {
+              name: "Wiki retry Developer",
+              email,
+              password,
+            },
+          ],
+          { cookie: admin },
+        ),
+      );
+      const { id: userID } = create;
       const signIn = await request("/api/auth/sign-in/email", "", { email, password });
       expect(signIn.ok).toBe(true);
       const cookie = signIn.headers
@@ -270,9 +280,12 @@ test.each(["failed", "running"] as const)(
       await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state)
       VALUES(${retried},${projectID},${"a".repeat(40)},${userID},'running')`;
       const status = async () => {
-        const response = await request(`/api/projects/${projectID}/setup`, cookie);
-        expect(response.ok).toBe(true);
-        return (await response.json()).find((task: { task: string }) => task.task === "wiki");
+        const response = await serverCall(
+          callFactoryFunction(fixture.base, "getSetupReadiness", [projectID], { cookie }),
+        );
+        const row = response.find((task) => task.task === "wiki");
+        if (!row) throw new Error("Owned Wiki preparation status missing");
+        return row;
       };
       if (setupState === "failed") expect((await status()).operationID).toBe(original);
       else {
@@ -282,9 +295,10 @@ test.each(["failed", "running"] as const)(
         WHERE project_id=${projectID} AND task='wiki'`;
         expect(unobserved?.state).toBe("running");
       }
-      const retry = await request(`/api/projects/${projectID}/knowledge/generation`, cookie, {});
-      expect(retry.status).toBe(202);
-      expect((await retry.json()).id).toBe(retried);
+      const retry = await serverCall(
+        callFactoryFunction(fixture.base, "generateKnowledge", [projectID], { cookie }),
+      );
+      expect(retry?.id).toBe(retried);
       const linked = await status();
       expect(linked.operationID).toBe(retried);
       expect(linked.state).toBe("running");

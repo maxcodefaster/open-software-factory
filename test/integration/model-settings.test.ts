@@ -8,6 +8,9 @@ import { modelSettingsView } from "../../packages/conversation-domain/src/model-
 import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
 
 const planning = "planning-original";
 const build = "build-original";
@@ -32,8 +35,9 @@ test("administrator commands enforce auth, origin, catalogue and CAS and survive
     const first = await process.start();
     const cookie = await process.signIn();
     const headers = { cookie, origin: process.base, "content-type": "application/json" };
-    const url = `${process.base}/api/model-settings`;
-    expect((await fetch(url)).status).toBe(401);
+    expect(
+      (await fetch(await factoryFunctionRequest(process.base, "getModelSettings", []))).status,
+    ).toBe(401);
     const database = process.connect();
     const outsider = crypto.randomUUID();
     const outsiderEmail = `nonadmin-${outsider}@factory.local`;
@@ -56,11 +60,15 @@ test("administrator commands enforce auth, origin, catalogue and CAS and survive
         .getSetCookie()
         .map((item) => item.split(";")[0])
         .join("; ");
-      expect((await fetch(url, { headers: { cookie: outsiderCookie } })).status).toBe(403);
+      expect(
+        await callFactoryFunction(process.base, "getModelSettings", [], { cookie: outsiderCookie }),
+      ).toMatchObject({ ok: false, status: 403 });
     } finally {
       await database.client.end();
     }
-    const initial = modelSettingsView.parse(await (await fetch(url, { headers })).json());
+    const initial = modelSettingsView.parse(
+      await serverCall(callFactoryFunction(process.base, "getModelSettings", [], headers)),
+    );
     expect(initial.version).toBe(0);
     expect(initial.source).toBe("environment");
     expect(initial.planningModelId).toBe(planning);
@@ -73,62 +81,80 @@ test("administrator commands enforce auth, origin, catalogue and CAS and survive
       buildModelId: alternative,
       rules: {
         ...initial.rules,
-        build: { ...initial.rules.build, reasoningEffort: "high" },
+        build: { ...initial.rules.build, reasoningEffort: "high" as const },
       },
     };
     expect(
-      (
-        await fetch(url, {
-          method: "PUT",
-          headers,
-          body: JSON.stringify({
-            ...body,
-            rules: { ...body.rules, build: { ...body.rules.build, reasoningEffort: "none" } },
-          }),
-        })
-      ).status,
-    ).toBe(400);
+      await decodeResponse(
+        await fetch(
+          await factoryFunctionRequest(
+            process.base,
+            "saveModelSettings",
+            [
+              {
+                ...body,
+                rules: { ...body.rules, build: { ...body.rules.build, reasoningEffort: "none" } },
+              },
+            ],
+            headers,
+          ),
+        ),
+      ),
+    ).toMatchObject({ ok: false, status: 400 });
     expect(
       (
-        await fetch(url, {
-          method: "PUT",
-          headers: { ...headers, origin: "https://other.invalid" },
-          body: JSON.stringify(body),
-        })
+        await fetch(
+          await factoryFunctionRequest(process.base, "saveModelSettings", [body], {
+            ...headers,
+            origin: "https://other.invalid",
+          }),
+        )
       ).status,
     ).toBe(403);
     expect(
-      (
-        await fetch(url, {
-          method: "PUT",
-          headers,
-          body: JSON.stringify({ ...body, buildModelId: "unapproved" }),
-        })
-      ).status,
-    ).toBe(409);
+      await callFactoryFunction(
+        process.base,
+        "saveModelSettings",
+        [{ ...body, buildModelId: "unapproved" }],
+        headers,
+      ),
+    ).toMatchObject({ ok: false, status: 409 });
     expect(
-      (
-        await fetch(url, {
-          method: "PUT",
-          headers,
-          body: JSON.stringify({ ...body, apiKey: "not-allowed" }),
-        })
-      ).status,
-    ).toBe(400);
+      await decodeResponse(
+        await fetch(
+          await factoryFunctionRequest(
+            process.base,
+            "saveModelSettings",
+            [{ ...body, apiKey: "not-allowed" }],
+            headers,
+          ),
+        ),
+      ),
+    ).toMatchObject({ ok: false, status: 400 });
     const concurrent = await Promise.all(
-      [1, 2].map(() => fetch(url, { method: "PUT", headers, body: JSON.stringify(body) })),
+      [1, 2].map(() => callFactoryFunction(process.base, "saveModelSettings", [body], headers)),
     );
-    expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
-    const saved = modelSettingsView.parse(await (await fetch(url, { headers })).json());
+    expect(concurrent.map((result) => (result.ok ? 200 : result.status)).sort()).toEqual([
+      200, 409,
+    ]);
+    const saved = modelSettingsView.parse(
+      await serverCall(callFactoryFunction(process.base, "getModelSettings", [], headers)),
+    );
     expect(saved.version).toBe(1);
     expect(saved.source).toBe("administrator");
     expect(saved.rules.build.reasoningEffort).toBe("high");
     await process.kill(first);
     await process.start();
-    expect(modelSettingsView.parse(await (await fetch(url, { headers })).json())).toEqual(saved);
-    expect(await (await fetch(`${url}/check`, { method: "POST", headers })).json()).toEqual({
-      status: "unavailable",
-    });
+    expect(
+      await serverCall(callFactoryFunction(process.base, "getModelSettings", [], headers)),
+    ).toEqual(saved);
+    for (const path of [
+      "/api/model-settings",
+      "/api/model-settings/check",
+      "/api/model-connections",
+    ]) {
+      expect((await fetch(`${process.base}${path}`, { headers })).status).toBe(404);
+    }
   } finally {
     await process.dispose();
   }

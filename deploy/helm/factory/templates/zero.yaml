@@ -1,3 +1,6 @@
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.zeroSyncWorkers)) -}}
+{{- fail "zeroSyncWorkers must be a positive integer" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -55,6 +58,7 @@ spec:
               value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" $ }}-postgres.{{ $.Release.Namespace }}.svc:5432/factory"
             {{- end }}
             - {name: ZERO_REPLICA_FILE, value: /data/replica.db}
+            - {name: ZERO_NUM_SYNC_WORKERS, value: {{ .Values.zeroSyncWorkers | quote }}}
             - {name: ZERO_QUERY_URL, value: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000/api/zero/query"}
             - {name: ZERO_MUTATE_URL, value: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000/api/zero/mutate"}
             - {name: ZERO_ENABLE_CRUD_MUTATIONS, value: "false"}

@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
+import {
+  projectSetupView,
+  setupInspectionView,
+  setupReadiness,
+} from "../../packages/project-domain/src/setup";
 
 test.setTimeout(30_000);
 
@@ -18,11 +25,15 @@ async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
     commandID: crypto.randomUUID(),
     failure: null,
   };
-  await page.route("**/api/project-setup", (route) => route.fulfill({ json: draft }));
-  await page.route(`**/api/projects/${projectID}/setup`, (route) => route.fulfill({ json: [] }));
+  await mockFactoryFunctions(page, {
+    setup: {
+      draft: async () => projectSetupView.parse(draft),
+      begin: async () => projectSetupView.parse(draft),
+      readiness: async () => [],
+    },
+  });
   return {
     projectID,
-    path: `**/api/projects/${projectID}/setup/inspection`,
     async open() {
       await signIn(page);
       await openProjectMenu(page);
@@ -37,27 +48,28 @@ test("successful preparation hides technical fallback notes but retains actionab
   page,
 }) => {
   const fixture = await openImportedSetup(page);
-  await page.route(`**/api/projects/${fixture.projectID}/setup`, (route) =>
-    route.fulfill({
-      json: [
-        {
-          task: "development",
-          state: "ready",
-          commandID: crypto.randomUUID(),
-          operationID: null,
-          failure: "This configuration uses normal startup instead of a prebuilt image.",
-        },
-        {
-          task: "main-preview",
-          state: "failed",
-          commandID: crypto.randomUUID(),
-          operationID: null,
-          failure: "The application did not become ready.",
-        },
-      ],
-    }),
-  );
-  await page.route(fixture.path, (route) => route.fulfill({ json: null }));
+  await mockFactoryFunctions(page, {
+    setup: {
+      readiness: async () =>
+        setupReadiness.parse([
+          {
+            task: "development",
+            state: "ready",
+            commandID: crypto.randomUUID(),
+            operationID: null,
+            failure: "This configuration uses normal startup instead of a prebuilt image.",
+          },
+          {
+            task: "main-preview",
+            state: "failed",
+            commandID: crypto.randomUUID(),
+            operationID: null,
+            failure: "The application did not become ready.",
+          },
+        ]),
+      inspection: async () => null,
+    },
+  });
   await fixture.open();
   const preparation = page.getByRole("region", { name: "Project preparation", exact: true });
   await expect(preparation.getByText("Development image", { exact: true })).toBeVisible();
@@ -73,14 +85,17 @@ test("an initial inspection read failure offers a read-only retry without starti
   const fixture = await openImportedSetup(page);
   let reads = 0,
     writes = 0;
-  await page.route(fixture.path, (route) => {
-    if (route.request().method() !== "GET") {
-      writes++;
-      return route.abort();
-    }
-    return ++reads === 1
-      ? route.fulfill({ status: 503, json: { error: "Controlled read failure" } })
-      : route.fulfill({ json: null });
+  await mockFactoryFunctions(page, {
+    setup: {
+      inspection: async () => {
+        if (++reads === 1) throw new CommandError("unavailable", "Controlled read failure");
+        return null;
+      },
+      inspect: async () => {
+        writes++;
+        throw new Error("Read-only retry must never start inspection");
+      },
+    },
   });
   const panel = await fixture.open();
   await expect(panel.getByRole("alert")).toContainText("Project inspection is unavailable");
@@ -114,18 +129,26 @@ test("an unconfirmed setup submission keeps its answers immutable and retries th
   };
   const submissions: unknown[] = [];
   const childID = crypto.randomUUID();
-  await page.route(fixture.path, (route) => {
-    if (route.request().method() === "GET")
-      return route.fulfill({
-        json:
+  await mockFactoryFunctions(page, {
+    setup: {
+      inspection: async () =>
+        setupInspectionView.parse(
           submissions.length > 1
             ? { ...inspection, id: childID, state: "inspecting", output: null }
             : inspection,
-      });
-    submissions.push(route.request().postDataJSON());
-    return submissions.length === 1
-      ? route.fulfill({ status: 503, json: { error: "Response could not be confirmed" } })
-      : route.fulfill({ json: { ...inspection, id: childID, state: "inspecting", output: null } });
+        ),
+      inspect: async (_actor, _project, id, continuation) => {
+        submissions.push({ id, ...continuation });
+        if (submissions.length === 1)
+          throw new CommandError("unavailable", "Response could not be confirmed");
+        return setupInspectionView.parse({
+          ...inspection,
+          id: childID,
+          state: "inspecting",
+          output: null,
+        });
+      },
+    },
   });
   const panel = await fixture.open();
   const answer = panel.getByRole("textbox", {
@@ -176,12 +199,16 @@ test("a definite setup rejection refreshes state and allows an explicitly correc
     },
   };
   const submissions: Array<{ id: string; answers: { port: string } }> = [];
-  await page.route(fixture.path, (route) => {
-    if (route.request().method() === "GET") return route.fulfill({ json: inspection });
-    submissions.push(route.request().postDataJSON());
-    return submissions.length === 1
-      ? route.fulfill({ status: 409, json: { error: "Review the current setup answers" } })
-      : route.fulfill({ json: { ...inspection, state: "superseded" } });
+  await mockFactoryFunctions(page, {
+    setup: {
+      inspection: async () => setupInspectionView.parse(inspection),
+      inspect: async (_actor, _project, id, continuation) => {
+        submissions.push({ id, answers: { port: continuation?.answers?.["port"] ?? "" } });
+        if (submissions.length === 1)
+          throw new CommandError("conflict", "Review the current setup answers");
+        return setupInspectionView.parse({ ...inspection, state: "superseded" });
+      },
+    },
   });
   const panel = await fixture.open();
   const answer = panel.getByRole("textbox", {
@@ -217,10 +244,13 @@ test("opening a created Project leaves setup without reading its disposed condit
     commandID: "6daa4e4a-9f20-4327-b76a-f1e7f403ba36",
     failure: null,
   };
-  await page.route("**/api/project-setup", (route) => route.fulfill({ json: draft }));
-  await page.route(`**/api/projects/${draft.projectID}/setup`, (route) =>
-    route.fulfill({ json: [] }),
-  );
+  await mockFactoryFunctions(page, {
+    setup: {
+      draft: async () => projectSetupView.parse(draft),
+      begin: async () => projectSetupView.parse(draft),
+      readiness: async () => [],
+    },
+  });
   await signIn(page);
   await openProjectMenu(page);
   await page.getByRole("button", { name: "Create project", exact: true }).click();

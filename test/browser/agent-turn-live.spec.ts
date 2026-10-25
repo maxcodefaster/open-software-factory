@@ -1,3 +1,4 @@
+import { requestFunction } from "../fixtures/server-functions";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -117,14 +118,10 @@ test.afterEach(async ({ context, page }, testInfo) => {
     SELECT id, branch_name AS branch FROM factory.change WHERE project_id = ${projectID}
   `;
   for (const change of changes) {
-    const stopped = await context.request.post(`/api/changes/${change.id}/agent/stop`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    });
-    expect(stopped.ok()).toBe(true);
-    const cancelled = await context.request.post(`/api/changes/${change.id}/cancel`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    });
-    expect(cancelled.ok()).toBe(true);
+    const stopped = await requestFunction(context.request, "stopCoding", [change.id]);
+    expect(stopped.ok).toBe(true);
+    const cancelled = await requestFunction(context.request, "cancelChange", [change.id]);
+    expect(cancelled.ok).toBe(true);
   }
   await stopProjectRuntimes(context.request, projectID);
   // Cancellation must remove owned compute/storage before its recovery identities are deleted.

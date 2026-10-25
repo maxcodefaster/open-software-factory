@@ -2,11 +2,11 @@ import { expect, test } from "bun:test";
 import type { runCommand } from "./command";
 import {
   executeFactoryboxOperation,
+  type FactoryboxWorkerRequest,
   factoryboxOperation,
   factoryboxWorkerRequest,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
-  type FactoryboxWorkerRequest,
 } from "./factorybox-worker";
 
 const request: FactoryboxWorkerRequest = {
@@ -17,6 +17,7 @@ const request: FactoryboxWorkerRequest = {
   trustDomainID: "b".repeat(32),
   image: `registry.invalid/factorybox@sha256:${"c".repeat(64)}`,
   executableSHA256: "d".repeat(64),
+  architecture: "amd64",
   nodeName: "owned-linux-node",
   kernel: "7.2.8-9-omarchy",
   boundedBytes: 4 * 1024 ** 3,
@@ -24,8 +25,8 @@ const request: FactoryboxWorkerRequest = {
 };
 const epoch = "e".repeat(32);
 const root = `/var/lib/sysbox/fixed-store/data/store/epochs/${epoch}/controller`;
-function fixture() {
-  const resources = renderFactoryboxWorker(request);
+function fixture(input: FactoryboxWorkerRequest = request) {
+  const resources = renderFactoryboxWorker(input);
   const namespace = {
     ...resources[0],
     metadata: { ...resources[0].metadata, uid: "namespace-uid" },
@@ -38,7 +39,7 @@ function fixture() {
   const pod = {
     ...resources[2],
     metadata: { ...resources[2].metadata, uid: "pod-uid" },
-    spec: { ...resources[2].spec, nodeName: request.nodeName },
+    spec: { ...resources[2].spec, nodeName: input.nodeName },
     status: {
       phase: "Running",
       conditions: [{ type: "Ready", status: "True" }],
@@ -46,23 +47,23 @@ function fixture() {
     },
   };
   const node = {
-    metadata: { name: request.nodeName },
+    metadata: { name: input.nodeName },
     status: {
       nodeInfo: {
         operatingSystem: "linux",
-        architecture: "amd64",
-        kernelVersion: request.kernel,
+        architecture: input.architecture,
+        kernelVersion: input.kernel,
         bootID: "boot-id",
       },
     },
   };
   const status = {
     schema: 1,
-    store_id: request.storeID,
+    store_id: input.storeID,
     store: "/var/lib/sysbox/fixed-store/data/store",
     epoch,
     boot_id: "boot-id",
-    supervisor_sha256: request.executableSHA256,
+    supervisor_sha256: input.executableSHA256,
     supervisor: { pid: 1 },
     ready_at: "2026-10-25T10:00:00Z",
     lifecycle: {
@@ -71,7 +72,7 @@ function fixture() {
       bounded_store: {
         target: "/var/lib/sysbox/fixed-store/data",
         direct_io: true,
-        image: { owner: request.storeID, bytes: request.boundedBytes },
+        image: { owner: input.storeID, bytes: input.boundedBytes },
       },
     },
   };
@@ -136,6 +137,25 @@ test("no exec is admitted until exact Kubernetes resources and HTTP readiness ag
   f.pod.status.conditions = [{ type: "Ready", status: "False" }];
   await expect(inspectFactoryboxWorker(request, undefined, f.run)).rejects.toThrow("not ready");
   expect(f.calls.every((args) => args[0] === "get")).toBe(true);
+});
+
+test.each(["arm64", "amd64"] as const)(
+  "%s admission pins the requested architecture and refuses a different node before exec",
+  async (architecture) => {
+    const input = { ...request, architecture };
+    const f = fixture(input);
+    expect(f.pod.spec.nodeSelector["kubernetes.io/arch"]).toBe(architecture);
+    await inspectFactoryboxWorker(input, undefined, f.run);
+    f.calls.length = 0;
+    f.node.status.nodeInfo.architecture = architecture === "arm64" ? "amd64" : "arm64";
+    await expect(inspectFactoryboxWorker(input, undefined, f.run)).rejects.toThrow();
+    expect(f.calls.every((args) => args[0] === "get")).toBe(true);
+  },
+);
+
+test("worker architecture is explicit and rejects unsupported or inferred targets", () => {
+  expect(() => factoryboxWorkerRequest.parse({ ...request, architecture: undefined })).toThrow();
+  expect(() => factoryboxWorkerRequest.parse({ ...request, architecture: "riscv64" })).toThrow();
 });
 
 test("real status must bind the supervisor, bounded filesystem, boot and epoch", async () => {

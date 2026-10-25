@@ -1,15 +1,56 @@
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { CommandError } from "../../apps/factory/src/command-error";
+import type { FactoryFunctionContext } from "../../apps/factory/src/server-functions/context";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
+import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { signIn } from "../support/factory-fixture";
+import { mockFactoryFunctions, mockUsageFunctions } from "../fixtures/server-functions";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ trace: "off" });
+
+let projectID = "";
+let projectSlug = "";
+let database: ReturnType<typeof createDatabase> | undefined;
+test.beforeEach(async () => {
+  database = createDatabase(1);
+  const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
+  const [actor] = await database.client<{ id: string }[]>`
+    SELECT id FROM auth."user" WHERE email=${email}`;
+  if (!actor) throw new Error("Owned Usage fixture administrator is unavailable");
+  projectID = crypto.randomUUID();
+  projectSlug = `usage-proof-${projectID.slice(0, 8)}`;
+  await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+    VALUES(${projectID},${projectSlug},'Usage transport proof','https://example.invalid/owned-usage.git',
+      'main','.devcontainer/devcontainer.json',${actor.id})`;
+});
+test.afterEach(async ({ page }) => {
+  await page.close();
+  try {
+    if (projectID) await deleteFactoryProject(projectID, database);
+  } finally {
+    await database?.client.end();
+    database = undefined;
+    projectID = "";
+    projectSlug = "";
+  }
+});
 
 test("Usage settings retain exact saves and show truthful totals, prices and measurements at desktop and narrow widths", async ({
   page,
 }) => {
   test.setTimeout(60_000);
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Compute is outside this UI fixture.");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Compute is outside this UI fixture.");
+      },
+    },
+  });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const policy = defaultExecutionPolicy();
@@ -17,16 +58,53 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
     saved = policy,
     attempt = 0;
   const writes: unknown[] = [];
-  await page.route("**/api/admin/usage", async (route) => {
-    if (route.request().method() === "PUT") {
-      writes.push(route.request().postDataJSON());
-      if (++attempt === 1) return route.abort("failed");
-      saved = route.request().postDataJSON().policy;
+  let loseResponse = false;
+  const rates: Awaited<ReturnType<FactoryFunctionContext["usage"]["rates"]>>["rates"] = [];
+  const rateWrites: unknown[] = [];
+  const fixtureUsage: FactoryFunctionContext["usage"] = {
+    async set(_actor, _project, raw) {
+      const input = raw as { policy: typeof policy };
+      writes.push(raw);
+      if (++attempt === 1) {
+        loseResponse = true;
+        return;
+      }
+      saved = input.policy;
       version++;
-      return route.fulfill({ json: {} });
-    }
-    return route.fulfill({
-      json: {
+    },
+    async get(_actor, scopeID) {
+      if (scopeID) {
+        expect(scopeID).toBe(projectID);
+        return {
+          factory: { ...policy, codingUSD: 5 },
+          project: null,
+          effective: { ...policy, codingUSD: 5 },
+          version: 0,
+          timezone: "UTC",
+          canEdit: false,
+          allowed: true,
+          reason: null,
+          detailScope: "own",
+          scopes: [],
+          allocation: { sandboxes: 0, cpuMilli: 0, memoryMiB: 0 },
+          projectAgentTotal: { knownNanoUSD: "10000000", incomplete: false },
+          summary: [
+            {
+              provider: "openai",
+              model: "your-exact-model",
+              purpose: "research",
+              knownNanoUSD: "10000000",
+              incomplete: false,
+              steps: 1,
+              input: "100",
+              output: "20",
+              cacheRead: "0",
+              cacheWrite: "0",
+            },
+          ],
+        };
+      }
+      return {
         factory: saved,
         project: null,
         effective: saved,
@@ -63,32 +141,32 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
             cacheWrite: "0",
           },
         ],
-      },
-    });
-  });
-  await page.route("**/api/admin/usage/compute", (route) =>
-    route.fulfill({
-      json: {
+      };
+    },
+    async compute(_actor, scopeID) {
+      return {
         hasMore: false,
-        observations: [
-          {
-            id: crypto.randomUUID(),
-            kind: "development",
-            startedAt: new Date().toISOString(),
-            timestamp: new Date().toISOString(),
-            status: "stale",
-            cpuMilli: 150,
-            memoryMiB: 384,
-          },
-        ],
-      },
-    }),
-  );
-  const rates: unknown[] = [];
-  const rateWrites: unknown[] = [];
-  await page.route("**/api/admin/usage/rates", (route) => {
-    if (route.request().method() === "PUT") {
-      const input = route.request().postDataJSON();
+        observations: scopeID
+          ? []
+          : [
+              {
+                id: crypto.randomUUID(),
+                kind: "development",
+                startedAt: new Date().toISOString(),
+                timestamp: new Date().toISOString(),
+                status: "stale",
+                cpuMilli: 150,
+                memoryMiB: 384,
+              },
+            ],
+      };
+    },
+    async setRate(_actor, raw) {
+      const input = raw as {
+        provider: string;
+        model: string;
+        tiers: NonNullable<(typeof rates)[number]["rate"]>["tiers"];
+      };
       rateWrites.push(input);
       rates.push({
         ...input,
@@ -101,9 +179,16 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
           tiers: input.tiers,
         },
       });
-      return route.fulfill({ json: {} });
-    }
-    return route.fulfill({ json: { rates } });
+      return rates.at(-1)!;
+    },
+    async rates() {
+      return { rates };
+    },
+  };
+  await mockUsageFunctions(page, fixtureUsage, () => {
+    const lost = loseResponse;
+    loseResponse = false;
+    return lost;
   });
   await page.setViewportSize({ width: 1440, height: 960 });
   await signIn(page);
@@ -135,8 +220,8 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   await usage.getByText("Model usage", { exact: true }).click();
   await expect(usage.getByRole("cell").filter({ hasText: "exact-coding" })).toBeVisible();
   expect(navigations).toEqual([]);
-  await mkdir(".factory/screenshots/usage-limits", { recursive: true });
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/desktop.png" });
+  await mkdir(".factory/test-results/usage-limits", { recursive: true });
+  await page.screenshot({ path: ".factory/test-results/usage-limits/desktop.png" });
   await usage.getByText("Contract prices", { exact: true }).click();
   await usage.getByLabel("Model", { exact: true }).fill("exact-coding");
   await usage.getByLabel("Input", { exact: true }).fill("2");
@@ -165,65 +250,24 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   await usage
     .getByRole("button", { name: "Save contract prices", exact: true })
     .scrollIntoViewIfNeeded();
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/narrow.png" });
-  await page.route("**/api/projects/*/usage", (route) =>
-    route.fulfill({
-      json: {
-        factory: { ...policy, codingUSD: 5 },
-        project: null,
-        effective: { ...policy, codingUSD: 5 },
-        version: 0,
-        timezone: "UTC",
-        canEdit: false,
-        allowed: true,
-        reason: null,
-        detailScope: "own",
-        scopes: [],
-        allocation: { sandboxes: 0, cpuMilli: 0, memoryMiB: 0 },
-        projectAgentTotal: { knownNanoUSD: "10000000", incomplete: false },
-        summary: [
-          {
-            provider: "openai",
-            model: "your-exact-model",
-            purpose: "research",
-            knownNanoUSD: "10000000",
-            incomplete: false,
-            steps: 1,
-            input: "100",
-            output: "20",
-            cacheRead: "0",
-            cacheWrite: "0",
-          },
-        ],
-      },
-    }),
-  );
-  await page.route("**/api/projects/*/usage/compute", (route) =>
-    route.fulfill({
-      json: { hasMore: false, observations: [] },
-    }),
-  );
-  if (
-    !(await settings
-      .getByRole("navigation", { name: "Settings navigation" })
-      .locator("section")
-      .filter({ hasNot: page.getByRole("heading", { name: /^(Factory|Personal)$/ }) })
-      .count())
-  ) {
-    await openProjectMenu(page);
-    await page
-      .getByRole("region", { name: "Projects", exact: true })
-      .getByRole("button")
-      .filter({ hasText: "factory-starter" })
-      .first()
-      .click();
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByRole("button", { name: "Open settings", exact: true }).click();
-  }
+  await page.screenshot({ path: ".factory/test-results/usage-limits/narrow.png" });
+  await openProjectMenu(page);
+  await page
+    .getByRole("region", { name: "Projects", exact: true })
+    .getByRole("button")
+    .filter({ hasText: projectSlug })
+    .click();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Open settings", exact: true }).click();
+  const chooseSettings = settings.getByRole("button", {
+    name: "Choose settings page",
+    exact: true,
+  });
+  if (await chooseSettings.isVisible()) await chooseSettings.click();
   const projectNavigation = settings
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
-    .filter({ hasNot: page.getByRole("heading", { name: /^(Factory|Personal)$/ }) });
+    .filter({ has: page.getByRole("heading", { name: /^Project · / }) });
   await projectNavigation.getByRole("button", { name: "Usage & limits", exact: true }).click();
   await expect(usage.getByLabel("Monthly Coding allowance")).toBeDisabled();
   await expect(usage.getByText("Effective: 5 USD")).toBeVisible();
@@ -232,8 +276,10 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   await expect(usage.getByText("Contract prices", { exact: true })).toHaveCount(0);
   await usage.getByText("Your model usage", { exact: true }).click();
   await expect(usage.getByRole("cell", { name: "your-exact-model openai" })).toBeVisible();
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/project-readonly-narrow.png" });
+  await page.screenshot({ path: ".factory/test-results/usage-limits/project-readonly-narrow.png" });
   await page.setViewportSize({ width: 1440, height: 960 });
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/project-readonly.png" });
+  await page.screenshot({ path: ".factory/test-results/usage-limits/project-readonly.png" });
+  expect(writes).toHaveLength(2);
+  expect(rateWrites).toHaveLength(1);
   expect(errors).toEqual([]);
 });

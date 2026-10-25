@@ -1,3 +1,5 @@
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { requestFunction } from "../fixtures/server-functions";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { changeIdentity } from "../../packages/change-domain/src/change";
@@ -30,9 +32,7 @@ test.beforeAll(async () => {
 
 test.afterEach(async ({ context }) => {
   if (changeID) {
-    await context.request.post(`/api/changes/${changeID}/cancel`, {
-      headers: { origin: "http://127.0.0.1:3000" },
-    });
+    await serverCall(requestFunction(context.request, "cancelChange", [changeID]));
   }
   await teardownFactoryProject(context.request, projectID);
   if (branchName) {

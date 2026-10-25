@@ -18,6 +18,7 @@ test("operator CLI persists exact intent before execution and never overwrites a
     trustDomainID: "b".repeat(32),
     image: `registry.invalid/worker@sha256:${"c".repeat(64)}`,
     executableSHA256: "d".repeat(64),
+    architecture: "amd64",
     nodeName: "owned-node",
     kernel: "7.2.8-9-omarchy",
     boundedBytes: 4 * 1024 ** 3,

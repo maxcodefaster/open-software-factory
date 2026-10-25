@@ -5,6 +5,8 @@ import { skillRevisionInput } from "../../packages/conversation-domain/src/skill
 import { systemSkillSettingsView } from "../../packages/conversation-domain/src/skill-inheritance";
 import { eventually } from "./factory-process";
 import type { releaseInstallation } from "./release-installation";
+import { callFactoryFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 
@@ -23,61 +25,95 @@ export async function releaseDependent(fixture: Fixture) {
   const started = performance.now();
   if (!state.buildSkillID) {
     const catalogue = systemSkillSettingsView.parse(
-      await fixture.command(admin, "/api/admin/skills"),
+      await serverCall(callFactoryFunction(fixture.base, "getSystemSkills", [], { cookie: admin })),
     );
     const key = "release-exact-implementation";
     const revision =
       catalogue.revisions.find((value) => value.content.key === key) ??
       skillRevisionInput.parse(
-        await fixture.command(admin, "/api/admin/skills", "POST", {
-          revisionId: crypto.randomUUID(),
-          expectedRevision: 0,
-          content: {
-            ...requirementsInterviewSkill,
-            key,
-            name: "Release exact implementation",
-            description: "Check the exact approved version without widening implementation scope.",
-            roles: ["build"],
-            instructions:
-              "Implement only the approved Requirement. Read references/release-checklist.md, check the exact version and preserve the delivered dashboard. Skills grant no additional authority.",
-            references: [
+        await serverCall(
+          callFactoryFunction(
+            fixture.base,
+            "publishSkill",
+            [
               {
-                path: "references/release-checklist.md",
-                body: "Set only src/version.txt to the approved exact value followed by one newline. Run node --check src/server.mjs. Do not change runtime configuration, dependencies or the welcome dashboard.",
+                revisionId: crypto.randomUUID(),
+                expectedRevision: 0,
+                content: {
+                  ...requirementsInterviewSkill,
+                  key,
+                  name: "Release exact implementation",
+                  description:
+                    "Check the exact approved version without widening implementation scope.",
+                  roles: ["build"],
+                  instructions:
+                    "Implement only the approved Requirement. Read references/release-checklist.md, check the exact version and preserve the delivered dashboard. Skills grant no additional authority.",
+                  references: [
+                    {
+                      path: "references/release-checklist.md",
+                      body: "Set only src/version.txt to the approved exact value followed by one newline. Run node --check src/server.mjs. Do not change runtime configuration, dependencies or the welcome dashboard.",
+                    },
+                  ],
+                  review: {
+                    trigger: "Required for the release follow-on Build.",
+                    adaptations:
+                      "Factory-authored adaptation of the reviewed observable-acceptance principles. No executable imports or additional tools.",
+                  },
+                },
               },
             ],
-            review: {
-              trigger: "Required for the release follow-on Build.",
-              adaptations:
-                "Factory-authored adaptation of the reviewed observable-acceptance principles. No executable imports or additional tools.",
-            },
-          },
-        }),
+            { cookie: admin },
+          ),
+        ),
       );
     state.buildSkillID = revision.id;
     await fixture.save("dependent-skill-published", 0);
   }
   if (!state.dependentCommandID) {
-    const skills = systemSkillSettingsView.parse(await fixture.command(admin, "/api/admin/skills"));
-    await fixture.command(admin, "/api/admin/skills/settings", "PUT", {
-      ...skills.settings,
-      build: { required: [state.buildSkillID], optional: [], selected: [] },
-    });
-    const denied = await fixture.request(
-      developer,
-      `/api/projects/${projectID}/skill-settings/personal`,
-      "PUT",
-      {
-        version: 0,
-        planning: [],
-        build: [crypto.randomUUID()],
-      },
+    const skills = await serverCall(
+      callFactoryFunction(fixture.base, "getSystemSkills", [], { cookie: admin }),
     );
-    expect(denied.status).toBe(409);
-    await fixture.command(developer, `/api/projects/${projectID}/conversation/mode`, "POST", {
-      mode: "build",
-      ticketId: dependentTicketID,
-    });
+    await serverCall(
+      callFactoryFunction(
+        fixture.base,
+        "saveSystemSkills",
+        [
+          {
+            ...skills.settings,
+            build: { required: [state.buildSkillID], optional: [], selected: [] },
+          },
+        ],
+        { cookie: admin },
+      ),
+    );
+    const denied = await callFactoryFunction(
+      fixture.base,
+      "savePersonalSkills",
+      [
+        projectID,
+        {
+          version: 0,
+          planning: [],
+          build: [crypto.randomUUID()],
+        },
+      ],
+      { cookie: developer },
+    );
+    expect(denied).toMatchObject({ ok: false, status: 409 });
+    await serverCall(
+      callFactoryFunction(
+        fixture.base,
+        "setConversationMode",
+        [
+          projectID,
+          {
+            mode: "build",
+            ticketId: dependentTicketID,
+          },
+        ],
+        { cookie: developer },
+      ),
+    );
     const change = await eventually(
       async () => {
         const [row] = await database.client<Array<{ id: string; state: string; base: string }>>`
@@ -92,11 +128,8 @@ export async function releaseDependent(fixture: Fixture) {
     if (!change) throw new Error("Dependent Change not found");
     expect(change.base).toBe(deliveredSHA);
     state.dependentChangeID = change.id;
-    await fixture.command(
-      developer,
-      `/api/changes/${change.id}/ticket-workspace/ensure`,
-      "POST",
-      {},
+    await serverCall(
+      callFactoryFunction(fixture.base, "startTicketWorkspace", [change.id], { cookie: developer }),
     );
     await eventually(
       async () => {
@@ -114,11 +147,13 @@ export async function releaseDependent(fixture: Fixture) {
   }
   if (!state.dependentChangeID) throw new Error("Dependent Change identity missing");
   const admitted = agentViewSchema.parse(
-    await fixture.command(
-      developer,
-      `/api/changes/${state.dependentChangeID}/agent/start`,
-      "POST",
-      { commandId: state.dependentCommandID },
+    await serverCall(
+      callFactoryFunction(
+        fixture.base,
+        "startCoding",
+        [state.dependentChangeID, { commandId: state.dependentCommandID }],
+        { cookie: developer },
+      ),
     ),
   );
   expect(admitted.turn?.commandId).toBe(state.dependentCommandID);
@@ -210,17 +245,22 @@ export async function releaseDependent(fixture: Fixture) {
       await fixture.save("dependent-retry-intended", performance.now() - started);
     }
     const retry = agentViewSchema.parse(
-      await fixture.command(
-        developer,
-        `/api/changes/${state.dependentChangeID}/agent/prompt`,
-        "POST",
-        {
-          commandId: state.dependentRetryCommandID,
-          text:
-            "The previous turn's inference connection was interrupted by Factory restart. Inspect the retained checkout and finish only the approved Requirement: set src/version.txt to exactly " +
-            fixture.slug +
-            "-follow-on followed by one newline. Preserve all other files, run node --check src/server.mjs, and finish without committing or pushing. Factory owns the commit.",
-        },
+      await serverCall(
+        callFactoryFunction(
+          fixture.base,
+          "sendCodingPrompt",
+          [
+            state.dependentChangeID,
+            {
+              commandId: state.dependentRetryCommandID,
+              text:
+                "The previous turn's inference connection was interrupted by Factory restart. Inspect the retained checkout and finish only the approved Requirement: set src/version.txt to exactly " +
+                fixture.slug +
+                "-follow-on followed by one newline. Preserve all other files, run node --check src/server.mjs, and finish without committing or pushing. Factory owns the commit.",
+            },
+          ],
+          { cookie: developer },
+        ),
       ),
     );
     expect(retry.turn?.commandId).toBe(state.dependentRetryCommandID);
@@ -230,10 +270,16 @@ export async function releaseDependent(fixture: Fixture) {
     >`SELECT count(*)::int AS count FROM factory.agent_turn WHERE command_id = ${state.dependentCommandID}`;
     expect(count?.count).toBe(1);
   }
+  const deliveryChangeID = state.dependentChangeID;
+  if (!deliveryChangeID) throw new Error("Dependent Delivery requires its retained Change");
   const result = await eventually(
     async () => {
       const agent = agentViewSchema.parse(
-        await fixture.command(developer, `/api/changes/${state.dependentChangeID}/agent`),
+        await serverCall(
+          callFactoryFunction(fixture.base, "getAgentView", [deliveryChangeID], {
+            cookie: developer,
+          }),
+        ),
       );
       if (agent.turn && ["failed", "uncertain", "stopped"].includes(agent.turn.state))
         throw new Error(
@@ -242,7 +288,11 @@ export async function releaseDependent(fixture: Fixture) {
           ),
         );
       const delivery = deliveryViewSchema.parse(
-        await fixture.command(developer, `/api/changes/${state.dependentChangeID}/delivery`),
+        await serverCall(
+          callFactoryFunction(fixture.base, "getDelivery", [deliveryChangeID], {
+            cookie: developer,
+          }),
+        ),
       );
       return { agent, delivery };
     },

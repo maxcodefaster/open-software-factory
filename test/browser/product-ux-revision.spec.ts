@@ -1,6 +1,12 @@
+import { completedConversation } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
+import { browserBootstrap } from "../fixtures/server-functions";
+import { documentBlocks } from "../../apps/factory/src/document-model";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
@@ -15,8 +21,7 @@ const title = "Clarify the starter experience";
 test.beforeEach(async ({ page }) => {
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  const response = await page.request.get("/api/session");
-  const { session } = await response.json();
+  const { session } = await browserBootstrap(page);
   userID = session.user.id;
   const database = createDatabase(1);
   projectID = crypto.randomUUID();
@@ -112,10 +117,16 @@ test("Enter sends, Shift+Enter preserves a line and navigation selects context a
   const singleLine = await input.boundingBox();
   if (!singleLine) throw new Error("Missing message composer");
   expect(singleLine.height).toBeLessThanOrEqual(32);
-  const captured: { body?: { text: string; ticketId?: string } } = {};
-  await page.route(`**/api/projects/${projectID}/conversation/message`, async (route) => {
-    captured.body = route.request().postDataJSON();
-    await route.fulfill({ status: 400, json: { error: "Controlled response, no model request" } });
+  const captured: { body?: { text: string; ticketId?: string | undefined } } = {};
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        captured.body = factoryCommand;
+        return (() => {
+          throw new CommandError("invalid", String("Controlled response, no model request"));
+        })();
+      },
+    },
   });
   await input.fill("First line");
   await input.press("Shift+Enter");
@@ -166,7 +177,11 @@ test("rich slash and selection formatting save a new immutable Spec", async ({ p
     await summary.pressSequentially("/");
     await expect(
       page.getByRole("menu", { name: "Specification blocks" }).getByRole("menuitem"),
-    ).toHaveCount(11);
+    ).toHaveText([
+      ...documentBlocks.map((block) => block.label),
+      "Acceptance criterion",
+      "Non-goal",
+    ]);
     const caret = await summary.evaluate(() => {
       const range = window.getSelection()?.getRangeAt(0);
       if (!range) throw new Error("Caret missing");
@@ -209,15 +224,15 @@ test("rich slash and selection formatting save a new immutable Spec", async ({ p
     if (!saved) throw new Error("Immutable document revision missing");
     expect(JSON.parse(saved.canonicalContent).summary).toContain("## A clear first **step**");
     expect(await page.locator("body").innerText()).not.toContain("biome-ignore");
-    await mkdir(".factory/screenshots", { recursive: true });
-    await page.screenshot({ path: ".factory/screenshots/ux-revision-spec-wide.png" });
+    await mkdir(".factory/test-results/workspace-headings", { recursive: true });
+    await page.screenshot({ path: ".factory/test-results/workspace-headings/spec-wide.png" });
     await page.setViewportSize({ width: 430, height: 860 });
     await expect
       .poll(async () => {
         const metadata = await page.locator(".ticket-status-context").boundingBox();
         const actions = await page.locator(".ticket-header-actions").boundingBox();
         if (!metadata || !actions) throw new Error("Narrow Ticket header missing");
-        return metadata.y + metadata.height <= actions.y;
+        return actions.y + actions.height <= metadata.y;
       })
       .toBe(true);
     expect(
@@ -226,7 +241,7 @@ test("rich slash and selection formatting save a new immutable Spec", async ({ p
         .first()
         .evaluate((element) => element.getBoundingClientRect().height),
     ).toBeLessThan(24);
-    await page.screenshot({ path: ".factory/screenshots/ux-revision-spec-narrow.png" });
+    await page.screenshot({ path: ".factory/test-results/workspace-headings/spec-narrow.png" });
   } finally {
     await database.client.end();
   }
@@ -300,31 +315,35 @@ test("new answers respect a reader's scroll position and pending feedback is imm
     version: 1,
     entries,
   };
-  await page.route(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}*`, (route) =>
-    route.fulfill({ json: view }),
-  );
+  await mockFactoryFunctions(page, {
+    conversations: { get: async () => conversationViewSchema.nullable().parse(view) },
+  });
   let release: (() => void) | undefined;
   const ready = new Promise<void>((resolve) => {
     release = resolve;
   });
-  await page.route(`**/api/projects/${projectID}/conversation/message`, async (route) => {
-    await ready;
-    await route.fulfill({
-      json: {
-        ...view,
-        version: 2,
-        entries: [
-          ...entries,
-          {
-            ...entries[0],
-            id: crypto.randomUUID(),
-            ordinal: 29,
-            body: "## A fresh reply\n\nStill respects reading position.",
-            createdAt: "2026-10-09T08:01:00Z",
-          },
-        ],
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        await ready;
+        return completedConversation(
+          conversationViewSchema.parse({
+            ...view,
+            version: 2,
+            entries: [
+              ...entries,
+              {
+                ...entries[0],
+                id: crypto.randomUUID(),
+                ordinal: 29,
+                body: "## A fresh reply\n\nStill respects reading position.",
+                createdAt: "2026-10-09T08:01:00Z",
+              },
+            ],
+          }),
+        );
       },
-    });
+    },
   });
   await page
     .getByRole("region", { name: "requirements", exact: true })

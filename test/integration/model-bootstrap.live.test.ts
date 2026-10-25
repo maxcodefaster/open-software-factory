@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import { factoryProcess } from "../fixtures/factory-process";
 import { createModelConnections } from "../../apps/factory/src/models/connections";
-import { createModelConnectionRoutes } from "../../apps/factory/src/models/connection-routes";
+import { createModelService } from "../../apps/factory/src/models/service";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createOpenBaoModelSecrets } from "../../apps/factory/src/models/secrets";
 import { deploymentModelConnections } from "../../apps/factory/src/models/deployment";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
@@ -30,38 +31,25 @@ test.skipIf(process.env["FACTORY_RUN_MODEL_BOOTSTRAP_PROOF"] !== "1")(
       caFile: configuration.FACTORY_OPENBAO_CA_FILE,
     });
     const connections = createModelConnections(database, secrets, signingKey);
-    const routes = createModelConnectionRoutes(
+    const service = createModelService({
       connections,
-      async (userID) => {
-        if (userID !== manager) throw new Error("System Manager required");
-      },
+      settings: createModelSettingsController(database),
+      access: createAccessController(database),
       signingKey,
-    );
+    });
     try {
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${manager},'Owned model bootstrap',${`${manager}@models.test`})`;
       await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
-      const catalogue = await routes(
-        new Request("https://factory.test/api/model-connections"),
-        manager,
-      );
-      const metadata = await catalogue?.json();
+      const metadata = await service.catalogue(manager);
       expect(metadata.deployment).toHaveLength(2);
       for (const connection of deploymentModelConnections(signingKey)) {
         expect(connection.configured).toBe(true);
         if (!connection.apiKey) throw new Error("Live credential required");
         expect(JSON.stringify(metadata)).not.toContain(connection.apiKey);
         const command = { role: connection.role, commandID: crypto.randomUUID(), version: 0 };
-        const request = () =>
-          new Request("https://factory.test/api/model-connections/deployment", {
-            method: "PUT",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(command),
-          });
-        const response = await routes(request(), manager);
-        expect(response?.status).toBe(200);
-        const saved = modelConnectionView.parse(await response?.json());
-        const replay = await routes(request(), manager);
-        expect(modelConnectionView.parse(await replay?.json()).version).toBe(1);
+        const saved = modelConnectionView.parse(await service.adoptDeployment(manager, command));
+        const replay = await service.adoptDeployment(manager, command);
+        expect(modelConnectionView.parse(replay).version).toBe(1);
         const settings = await createModelSettingsController(database).get();
         const probe = {
           commandID: crypto.randomUUID(),

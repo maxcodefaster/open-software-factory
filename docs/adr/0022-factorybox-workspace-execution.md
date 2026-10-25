@@ -9,6 +9,12 @@ control plane. Keep the existing Runtime Attempt, Connector credentials and Post
 ownership. One worker initially belongs to one Workspace or isolated execution slot; it must
 never pool live customer processes across trust domains.
 
+The immutable worker profile pins `arm64` or `amd64` explicitly, independent of the Factory server's
+architecture. The same command and admission protocol serves both. Image, executable, node and
+kernel qualification remain architecture-specific; the adapter accepting a profile does not qualify
+a runtime build. RAM restore never crosses architectures. The current standalone release admits
+AMD64 only, and its ARM64 kernel-timer reader and continuation remain unimplemented.
+
 The Source service and Sandbox bind the same canonical Project directory, following
 [ADR 0009](0009-independent-workspace-file-access.md). Private runtime files and Docker storage
 belong to the worker's bounded filesystem. Source stays available during Pause and is excluded

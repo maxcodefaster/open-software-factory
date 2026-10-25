@@ -12,6 +12,7 @@ const images = {
 const profile = {
   image: `registry.invalid/worker@sha256:${"a".repeat(64)}`,
   executableSHA256: "b".repeat(64),
+  architecture: "amd64" as const,
   nodeName: "owned-node",
   kernel: "6.12.0",
   boundedBytes: 8589934592 as const,

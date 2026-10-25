@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createOpenCodeClient } from "../../apps/factory/src/agent/opencode-client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -8,6 +8,15 @@ import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/cl
 import upstream from "../../upstream.json";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+
+let restoreConfiguration: () => void;
+beforeAll(() => {
+  restoreConfiguration = installOwnedRuntimeConfiguration();
+});
+afterAll(() => {
+  restoreConfiguration();
+});
 
 test("retained cleanup recovery leaves database capacity for startup and usage", async () => {
   const processFixture = await factoryProcess();

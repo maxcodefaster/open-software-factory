@@ -1,3 +1,5 @@
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
@@ -19,6 +21,7 @@ test("Ticket detail hides unconfirmed code-derived proposals from Contributors a
       entryID = crypto.randomUUID();
     const payload = {
       visibility: "developer",
+      ticket: { title: "Private code-derived proposal", description: "Code-derived finding" },
       base: { id: owned.ticketID, version: 1, documentId: null, revisionId: owned.revisionID },
       requirement: {
         summary: "Code-derived private finding",
@@ -30,17 +33,14 @@ test("Ticket detail hides unconfirmed code-derived proposals from Contributors a
     await db.client`INSERT INTO factory.conversation_entry(id,conversation_id,ordinal,kind,actor,mode,body,payload) VALUES(${entryID},${conversationID},1,'requirement','project-agent','plan','Proposal',${JSON.stringify(payload)}::jsonb)`;
     await process.start();
     const cookie = await process.signIn();
-    const session = (await (
-      await fetch(`${process.base}/api/session`, { headers: { cookie } })
-    ).json()) as { session: { user: { id: string } } };
-    const actor = session.session.user.id;
-    const read = async () => {
-      const response = await fetch(`${process.base}/api/tickets/${owned.ticketID}`, {
-        headers: { cookie },
-      });
-      expect(response.status).toBe(200);
-      return (await response.json()) as { proposal: unknown };
+    const session = (await authenticatedBootstrap(process.base, { cookie })) as {
+      session: { user: { id: string } };
     };
+    const actor = session.session.user.id;
+    const read = () =>
+      serverCall(
+        callFactoryFunction(process.base, "getTicketDetail", [owned.ticketID], { cookie }),
+      );
     expect((await read()).proposal).toMatchObject({ id: entryID });
     await db.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${owned.projectID},${actor},'product-contributor',${actor})`;
     await db.client`DELETE FROM factory.administrator WHERE user_id=${actor}`;

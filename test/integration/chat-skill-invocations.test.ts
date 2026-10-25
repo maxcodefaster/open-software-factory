@@ -1,13 +1,33 @@
 import { expect, test } from "bun:test";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
-import { createSkillRoutes } from "../../apps/factory/src/skills/routes";
+import { createSkillService } from "../../apps/factory/src/skills/service";
+import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { factoryFunctionRequest } from "../fixtures/server-functions";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
 test("chat Skill discovery follows eligible guidance and freezes an existing Change's exact revisions", async () => {
   const owned = await fixture();
   const skills = createSkillController(owned.database);
-  const routes = createSkillRoutes(skills);
+  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
+    pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
+  );
+  const endpoint = createServerFunctionEndpoint({
+    origin: "http://factory.test",
+    services: {
+      skills: createSkillService(skills, createAccessController(owned.database)),
+    } as FactoryServices,
+    session: async () => ({ user: { id: owned.userID } }),
+    maintenance: async () => false,
+    requireFresh: async () => {},
+    handle: entry.handleServerFunctionRequest,
+  });
   const revisionID = crypto.randomUUID();
   const [administrator] = await owned.database.client<{ id: string }[]>`
     SELECT user_id AS id FROM factory.administrator LIMIT 1`;
@@ -73,21 +93,21 @@ test("chat Skill discovery follows eligible guidance and freezes an existing Cha
     await expect(
       skills.invocations(owned.projectID, owned.userID, "build", crypto.randomUUID()),
     ).rejects.toThrow("Change not found");
-    const invalid = await routes(
-      new Request(
-        `http://factory.test/api/projects/${owned.projectID}/skills/invocations?role=unknown`,
-      ),
-      owned.userID,
+    const invalid = await endpoint(
+      await factoryFunctionRequest("http://factory.test", "getSkillInvocations", [
+        owned.projectID,
+        "unknown",
+      ]),
     );
-    expect(invalid?.status).toBe(400);
-    const response = await routes(
-      new Request(
-        `http://factory.test/api/projects/${owned.projectID}/skills/invocations?role=build&change=${owned.changeID}`,
-      ),
-      owned.userID,
+    expect(await decodeResponse(invalid)).toMatchObject({ ok: false, status: 400 });
+    const response = await endpoint(
+      await factoryFunctionRequest("http://factory.test", "getSkillInvocations", [
+        owned.projectID,
+        "build",
+        owned.changeID,
+      ]),
     );
-    expect(response?.status).toBe(200);
-    expect((await response!.json()).skills).toEqual(planned.skills);
+    expect(await decodeResponse(response)).toEqual({ ok: true, value: planned });
   } finally {
     await owned.dispose();
   }

@@ -40,35 +40,25 @@ test("prefers slash commands below the caret but flips at the bottom edge", () =
   ).toEqual({ left: 430, top: 732 });
 });
 
-test("uses nearby empty space instead of covering adjacent document text", () => {
-  const position = editorPopoverPosition({
-    ...input,
-    bounds: { ...bounds, right: 1400 },
-    avoid: [
-      { left: 430, right: 1060, top: 190, bottom: 214 },
-      { left: 430, right: 1060, top: 220, bottom: 244 },
-      anchor,
-      { left: 430, right: 1060, top: 280, bottom: 304 },
-    ],
-  });
-  expect(position).toEqual({ left: 400, top: 142 });
-});
-
-test("uses the side gutter when text occupies the available vertical space", () => {
+test("keeps expanded link controls at the selection instead of a separate header", () => {
   expect(
     editorPopoverPosition({
       ...input,
-      bounds: { ...bounds, right: 1400 },
-      avoid: [{ left: 430, right: 1100, top: 120, bottom: 820 }],
+      width: 384,
+      height: 100,
+      align: "start",
     }),
-  ).toEqual({ left: 1160, top: 202 });
+  ).toEqual({ left: 430, top: 142 });
 });
 
-test("declines floating placement when dense text leaves no clear space", () => {
+test("clamps expanded controls to a narrow viewport and flips below the selection", () => {
   expect(
     editorPopoverPosition({
       ...input,
-      avoid: [{ left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom }],
+      bounds: { left: 20, top: 120, right: 370, bottom: 820 },
+      anchor: { left: 270, right: 320, top: 155, bottom: 178 },
+      width: 384,
+      height: 100,
     }),
-  ).toBeUndefined();
+  ).toEqual({ left: 20, top: 186 });
 });

@@ -1,15 +1,24 @@
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { projectSetupView } from "../../packages/project-domain/src/setup";
 
 test("an unconfirmed project creation becomes ready without a second button click", async ({
   page,
 }) => {
-  for (const action of ["source-workspace", "developer-ide"])
-    await page.route(`**/api/projects/*/${action}/ensure`, (route) =>
-      route.fulfill({ status: 503, json: { error: "No runtime in this setup UI fixture" } }),
-    );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "No runtime in this setup UI fixture");
+      },
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "No runtime in this setup UI fixture");
+      },
+    },
+  });
   const setupID = crypto.randomUUID();
   const projectID = crypto.randomUUID();
   let created = false;
@@ -18,38 +27,42 @@ test("an unconfirmed project creation becomes ready without a second button clic
   let submitted = false;
   let version = 1;
   let fields = { name: "", slug: "", kind: "starter", sourceURL: "" };
-  const view = () => ({
-    id: setupID,
-    version,
-    ...fields,
-    state: created ? "created" : submitted ? "checking" : "draft",
-    projectID: created ? projectID : null,
-    commandID: submitted ? setupID : null,
-    failure: submitted && !created ? "Repository setup needs a status check." : null,
+  const view = () =>
+    projectSetupView.parse({
+      id: setupID,
+      version,
+      ...fields,
+      state: created ? "created" : submitted ? "checking" : "draft",
+      projectID: created ? projectID : null,
+      commandID: submitted ? setupID : null,
+      failure: submitted && !created ? "Repository setup needs a status check." : null,
+    });
+  await mockFactoryFunctions(page, {
+    setup: {
+      draft: async () => view(),
+      begin: async () => view(),
+      save: async (_actor, input) => {
+        fields = {
+          name: input.name,
+          slug: input.slug,
+          kind: input.kind,
+          sourceURL: input.sourceURL,
+        };
+        version++;
+        return view();
+      },
+      create: async () => {
+        creates++;
+        submitted = true;
+        return view();
+      },
+      check: async () => {
+        statusChecks++;
+        return view();
+      },
+      readiness: async () => [],
+    },
   });
-  await page.route("**/api/project-setup", async (route) => {
-    if (route.request().method() === "PUT") {
-      const input = route.request().postDataJSON();
-      fields = {
-        name: input.name,
-        slug: input.slug,
-        kind: input.kind,
-        sourceURL: input.sourceURL,
-      };
-      version++;
-    }
-    await route.fulfill({ json: view() });
-  });
-  await page.route("**/api/project-setup/create", async (route) => {
-    creates++;
-    submitted = true;
-    await route.fulfill({ json: view() });
-  });
-  await page.route("**/api/project-setup/check", async (route) => {
-    statusChecks++;
-    await route.fulfill({ json: view() });
-  });
-  await page.route(`**/api/projects/${projectID}/setup`, (route) => route.fulfill({ json: [] }));
   await signIn(page);
   await openProjectMenu(page);
   await page.getByRole("button", { name: "Continue setup", exact: true }).click();

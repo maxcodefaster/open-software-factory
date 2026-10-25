@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createDatabase } from "./client";
 
@@ -16,23 +16,26 @@ try {
   const current = await client<{ relation: string }[]>`
     SELECT COALESCE(to_regclass('factory.schema_migration')::text, '') AS relation
   `;
-  const migrationDirectory = resolve(import.meta.dir, "../migrations");
   if (!current[0]?.relation) {
-    const baseline = await readFile(resolve(migrationDirectory, "0000_baseline.sql"), "utf8");
+    const [existing] = await client<{ present: boolean }[]>`
+      SELECT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname IN ('auth','factory')) AS present`;
+    if (existing?.present)
+      throw new Error(
+        "Factory requires an empty database for its Greenfield baseline; existing schemas were not changed",
+      );
+    const baseline = await readFile(
+      resolve(import.meta.dir, "../migrations/0001_baseline.sql"),
+      "utf8",
+    );
     await client.unsafe(baseline);
   }
   const versions = await client<{ version: number }[]>`
-    SELECT version FROM factory.schema_migration
+    SELECT version FROM factory.schema_migration ORDER BY version
   `;
-  const applied = new Set(versions.map((row) => row.version));
-  const files = (await readdir(migrationDirectory))
-    .filter((file) => /^\d{4}_.+\.sql$/.test(file))
-    .sort();
-  for (const file of files) {
-    const version = Number(file.slice(0, 4));
-    if (version === 0 || applied.has(version)) continue;
-    await client.unsafe(await readFile(resolve(migrationDirectory, file), "utf8"));
-  }
+  if (versions.length !== 1 || versions[0]?.version !== 1)
+    throw new Error(
+      "Factory requires its Greenfield baseline in a fresh database; historical migration state was not changed",
+    );
 } finally {
   await client.end();
 }

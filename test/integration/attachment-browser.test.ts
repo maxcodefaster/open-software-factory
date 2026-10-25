@@ -2,16 +2,24 @@ import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { createCanvas } from "@napi-rs/canvas";
-import { chromium, expect as visible } from "@playwright/test";
+import { expect as browserExpect, chromium } from "@playwright/test";
+import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createAttachmentRoutes } from "../../apps/factory/src/attachments/routes";
 import { createAttachmentStore } from "../../apps/factory/src/attachments/store";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import { createReviewService } from "../../apps/factory/src/review/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { attachmentIDs } from "../../packages/conversation-domain/src/attachments";
 import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { fixture } from "../fixtures/change-agent-turns";
+import { callFactoryFunction, compiledFactoryEndpoint } from "../fixtures/server-functions";
+
+// Bun does not load playwright.config.ts. Match the ordinary browser lane's
+// observation window, including real conversion and storage acknowledgement.
+const visible = browserExpect.configure({ timeout: 30_000 });
 
 test("Wiki, private drafts, personal/Ticket chat and feedback replies upload through native S3 without starting agents", async () => {
   const f = await fixture();
@@ -22,11 +30,16 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
   let server: ReturnType<typeof Bun.serve> | undefined;
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
   let loseNextUpload = false;
+  let functions: Awaited<ReturnType<typeof compiledFactoryEndpoint>>;
   let holdNextUpload = false;
   const uploadStarted = Promise.withResolvers<void>();
   const releaseUpload = Promise.withResolvers<void>();
+  const pendingUploads = new Set<Promise<Response | undefined>>();
   try {
-    s3 = await ownedAttachmentS3();
+    const parentOwner = process.env["FACTORY_ATTACHMENT_S3_PROOF_OWNER"];
+    // A prestarted proof service belongs to the outer runner. It cleans that
+    // exact container after this test's DB/stream teardown, outside Bun's timer.
+    s3 = await ownedAttachmentS3(parentOwner, Boolean(parentOwner));
     const store = createAttachmentStore(f.database);
     const routes = createAttachmentRoutes(store);
     const forgeEnvironment = [
@@ -79,16 +92,21 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
+      idleTimeout: 180,
       async fetch(request) {
         const url = new URL(request.url);
         const user = request.headers.get("x-fixture-user") === otherID ? otherID : f.userID;
         try {
-          if (
-            url.pathname.startsWith("/api/attachments/") ||
-            url.pathname.endsWith("/attachments") ||
-            url.pathname.includes("/attachment-drafts/")
-          ) {
-            const result = (await routes(request, user)) ?? new Response(null, { status: 404 });
+          if (url.pathname.startsWith("/_server/")) return functions(request);
+          if (url.pathname.startsWith("/api/attachments/")) {
+            const pending = routes(request, user);
+            if (request.method === "PUT") pendingUploads.add(pending);
+            let result: Response;
+            try {
+              result = (await pending) ?? new Response(null, { status: 404 });
+            } finally {
+              pendingUploads.delete(pending);
+            }
             if (holdNextUpload && request.method === "PUT" && result.ok) {
               holdNextUpload = false;
               uploadStarted.resolve();
@@ -154,17 +172,6 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
             );
             return Response.json({});
           }
-          const feedback = /^\/api\/changes\/[^/]+\/review(?:\/(feedback|update))?$/.exec(
-            url.pathname,
-          );
-          if (feedback)
-            return Response.json(
-              request.method === "GET"
-                ? await review.get(f.changeID, f.userID)
-                : feedback[1] === "feedback"
-                  ? await review.create(f.changeID, f.userID, await request.json())
-                  : await review.update(f.changeID, f.userID, await request.json()),
-            );
           const path = resolve(
             frontend,
             url.pathname === "/" ? "attachments.html" : `.${url.pathname}`,
@@ -179,6 +186,27 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
           );
         }
       },
+    });
+    functions = await compiledFactoryEndpoint({
+      origin: server.url.origin,
+      services: {
+        attachments: store,
+        review: createReviewService({
+          controller: review,
+          access: createAccessController(f.database),
+          admit: async () => {
+            throw new Error("Attachment proof does not commission Coding");
+          },
+          dispatchPending: async () => {},
+        }),
+      } as unknown as FactoryServices,
+      session: async (request) => ({
+        user: {
+          id: request.headers.get("x-fixture-user") === otherID ? otherID : f.userID,
+        },
+      }),
+      maintenance: async () => false,
+      requireFresh: async () => {},
     });
     browser = await chromium.launch(
       process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
@@ -215,6 +243,15 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     };
     const wiki = page.getByRole("region", { name: "Wiki attachment editor" });
     const editor = wiki.getByRole("textbox", { name: "Knowledge body" });
+    await visible(editor).toBeVisible();
+    await visible(wiki.getByRole("button", { name: "Add image or file", exact: true })).toHaveCount(
+      0,
+    );
+    expect(
+      await wiki
+        .locator(".attachment-insert-compact")
+        .evaluate((element) => element.getBoundingClientRect().height),
+    ).toBe(0);
     await editor.click();
     await page.keyboard.press("ControlOrMeta+End");
     await page.keyboard.type("\n/image");
@@ -236,8 +273,21 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
       await original.locator("img").evaluate((img) => (img as HTMLImageElement).naturalWidth),
     ).toBe(180);
     await original.close();
-    await wiki.getByLabel("Choose attachments").setInputFiles(textFile);
-    await visible(wiki.getByRole("status")).toContainText("requirements.txt is ready");
+    await editor.click();
+    await page.keyboard.press("ControlOrMeta+End");
+    await page.keyboard.type("\n/file");
+    await visible(page.getByRole("menuitem", { name: "File", exact: true })).toBeVisible();
+    await page.screenshot({
+      path: resolve(directory, "wiki-file-slash-desktop.png"),
+      animations: "disabled",
+    });
+    const choosingDocument = page.waitForEvent("filechooser");
+    await page.keyboard.press("Enter");
+    await (await choosingDocument).setFiles(textFile);
+    await visible(editor.getByRole("link", { name: /^requirements\.txt/ })).toBeVisible();
+    await visible(wiki.getByRole("button", { name: "Add image or file", exact: true })).toHaveCount(
+      0,
+    );
     await wiki.getByRole("button", { name: "Save Wiki", exact: true }).click();
     await visible(
       page
@@ -251,8 +301,41 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
 
     await page.getByRole("button", { name: "Ticket draft", exact: true }).click();
     await page.getByRole("textbox", { name: "Ticket title" }).fill("Attachment draft");
-    await page.getByLabel("Choose attachments").setInputFiles(image);
+    const draftEditor = page.getByRole("textbox", { name: "Ticket description", exact: true });
+    await visible(draftEditor).toBeVisible();
+    await visible(page.locator(".rich-editor-host .attachment-add")).toHaveCount(0);
+    await draftEditor.fill("Use the pasted references.");
+    expect(
+      await draftEditor.evaluate(
+        (element, payloads) => {
+          const clipboard = new DataTransfer();
+          for (const payload of payloads)
+            clipboard.items.add(
+              new File(
+                [Uint8Array.from(atob(payload.base64), (character) => character.charCodeAt(0))],
+                payload.name,
+                { type: payload.mimeType },
+              ),
+            );
+          return !element.dispatchEvent(
+            new ClipboardEvent("paste", {
+              bubbles: true,
+              cancelable: true,
+              clipboardData: clipboard,
+            }),
+          );
+        },
+        [image, textFile].map((file) => ({
+          name: file.name,
+          mimeType: file.mimeType,
+          base64: file.buffer.toString("base64"),
+        })),
+      ),
+    ).toBe(true);
     await visible(page.locator("img.document-attachment-image")).toBeVisible();
+    await visible(draftEditor.getByRole("link", { name: /^requirements\.txt/ })).toBeVisible();
+    await visible(draftEditor).toContainText("Use the pasted references.");
+    await visible(page.locator(".rich-editor-host .attachment-add")).toHaveCount(0);
     const draftBody = await page.getByRole("textbox", { name: "Ticket description" }).textContent();
     const [draftAsset] = await f.database.client<
       { id: string }[]
@@ -261,21 +344,17 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await page.screenshot({ path: resolve(directory, "draft-desktop.png"), fullPage: true });
     await captureNarrow("draft");
     expect(
-      (
-        await page.request.get(`${server.url}api/attachments/${draftAsset!.id}/metadata`, {
-          headers: { "x-fixture-user": otherID },
-        })
-      ).status(),
-    ).toBe(404);
+      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [draftAsset!.id], {
+        "x-fixture-user": otherID,
+      }),
+    ).toMatchObject({ ok: false, status: 404 });
     await page.getByRole("button", { name: "Create as idea" }).click();
     await visible(page.getByRole("status").filter({ hasText: "Created Ticket" })).toBeVisible();
     expect(
-      (
-        await page.request.get(`${server.url}api/attachments/${draftAsset!.id}/metadata`, {
-          headers: { "x-fixture-user": otherID },
-        })
-      ).status(),
-    ).toBe(200);
+      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [draftAsset!.id], {
+        "x-fixture-user": otherID,
+      }),
+    ).toMatchObject({ ok: true });
     expect(draftBody).not.toContain("/image");
 
     await page.getByRole("button", { name: "Chat", exact: true }).click();
@@ -375,12 +454,10 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await visible(page.getByRole("textbox", { name: "Chat message" })).toHaveValue("");
     await visible(page.getByRole("list", { name: "Prepared attachments" })).toHaveCount(0);
     expect(
-      (
-        await page.request.get(`${server.url}api/attachments/${privateID}/metadata`, {
-          headers: { "x-fixture-user": otherID },
-        })
-      ).status(),
-    ).toBe(404);
+      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [privateID], {
+        "x-fixture-user": otherID,
+      }),
+    ).toMatchObject({ ok: false, status: 404 });
     await page.getByLabel("Share in Ticket chat").check();
     await page
       .getByRole("textbox", { name: "Chat message" })
@@ -408,12 +485,10 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await page.getByRole("button", { name: "Send message" }).click();
     await visible(page.getByRole("textbox", { name: "Chat message" })).toHaveValue("");
     expect(
-      (
-        await page.request.get(`${server.url}api/attachments/${ticketID}/metadata`, {
-          headers: { "x-fixture-user": otherID },
-        })
-      ).status(),
-    ).toBe(200);
+      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [ticketID], {
+        "x-fixture-user": otherID,
+      }),
+    ).toMatchObject({ ok: true });
 
     await page.getByRole("button", { name: "Interview", exact: true }).click();
     const interview = page.getByRole("region", { name: "Interview attachments" });
@@ -441,21 +516,17 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
       interview.getByRole("link", { name: "Download requirements.txt", exact: true }),
     ).toBeVisible();
     expect(
-      (
-        await page.request.get(`${server.url}api/attachments/${interviewID}/metadata`, {
-          headers: { "x-fixture-user": otherID },
-        })
-      ).status(),
-    ).toBe(404);
+      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [interviewID], {
+        "x-fixture-user": otherID,
+      }),
+    ).toMatchObject({ ok: false, status: 404 });
     await interview.getByRole("button", { name: "Continue", exact: true }).click();
     await visible(interview.locator(".answered-question")).toBeVisible();
     expect(
-      (
-        await page.request.get(`${server.url}api/attachments/${interviewID}/metadata`, {
-          headers: { "x-fixture-user": otherID },
-        })
-      ).status(),
-    ).toBe(200);
+      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [interviewID], {
+        "x-fixture-user": otherID,
+      }),
+    ).toMatchObject({ ok: true });
 
     await page.getByRole("button", { name: "Feedback", exact: true }).click();
     await page.getByRole("button", { name: "New feedback", exact: true }).click();
@@ -507,6 +578,9 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
   } finally {
     releaseUpload.resolve();
     await browser?.close();
+    // A detached browser does not cancel admitted processing. Keep its owned
+    // database and bucket until that exact work has settled.
+    await Promise.allSettled([...pendingUploads]);
     await server?.stop(true);
     await s3?.dispose();
     await f.database.client.begin(async (sql) => {

@@ -111,7 +111,7 @@ export function createOpenBaoKV(input: OpenBaoOptions = openBaoEnvironment()) {
   }
   function path(key: string) {
     if (
-      !/^(projects\/[0-9a-f-]{36}\/(development|main-preview)\/[0-9a-f-]{36}|(?:models|mcp)\/[0-9a-f-]{36}\/[0-9a-f-]{36}|imports\/[0-9a-f-]{36}\/[0-9a-f-]{36}|identity\/[0-9a-f-]{36})$/.test(
+      !/^(projects\/[0-9a-f-]{36}\/(development|main-preview)\/[0-9a-f-]{36}|(?:models|mcp|release-access|release-publish)\/[0-9a-f-]{36}\/[0-9a-f-]{36}|imports\/[0-9a-f-]{36}\/[0-9a-f-]{36}|identity\/[0-9a-f-]{36})$/.test(
         key,
       )
     )

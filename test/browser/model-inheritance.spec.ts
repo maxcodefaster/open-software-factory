@@ -1,3 +1,5 @@
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { z } from "zod";
@@ -5,6 +7,8 @@ import { inheritedModelSettingsView } from "../../packages/conversation-domain/s
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
+import { browserBootstrap, browserFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test("Project managers set model defaults and locks; developers select and Reset their own models", async ({
   page,
@@ -23,13 +27,21 @@ test("Project managers set model defaults and locks; developers select and Reset
   for (const current of [page, manager, developer])
     current.on("pageerror", (error) => errors.push(error.message));
   for (const current of [page, manager, developer])
-    await current.route("**/api/projects/*/source-workspace/ensure", (route) =>
-      route.fulfill({ status: 503, json: { error: "Source is outside this Settings fixture" } }),
-    );
+    await mockFactoryFunctions(current, {
+      workspaces: {
+        ensurePersonalSource: async () => {
+          throw new CommandError("unavailable", "Source is outside this Settings fixture");
+        },
+      },
+    });
   for (const current of [page, manager, developer])
-    await current.route("**/api/projects/*/developer-ide/ensure", (route) =>
-      route.fulfill({ status: 503, json: { error: "IDE is outside this Settings fixture" } }),
-    );
+    await mockFactoryFunctions(current, {
+      workspaces: {
+        ensureEditor: async () => {
+          throw new CommandError("unavailable", "IDE is outside this Settings fixture");
+        },
+      },
+    });
   async function login(current: Page, email: string) {
     await current.goto("/");
     await current.getByLabel("Email", { exact: true }).fill(email);
@@ -45,8 +57,16 @@ test("Project managers set model defaults and locks; developers select and Reset
     await dialog
       .getByRole("navigation", { name: "Settings navigation" })
       .locator("section")
-      .filter({ has: current.getByRole("heading", { name: group, exact: true }) })
-      .getByRole("button", { name: "Models", exact: true })
+      .filter({
+        has: current.getByRole("heading", {
+          name: group === "Personal" ? group : `Project · ${group}`,
+          exact: true,
+        }),
+      })
+      .getByRole("button", {
+        name: group === "Personal" ? "Model overrides" : "Models",
+        exact: true,
+      })
       .click();
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("combobox", { name: /^Build/ })).toHaveCount(1);
@@ -58,32 +78,29 @@ test("Project managers set model defaults and locks; developers select and Reset
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
     const session = z
       .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-      .parse(await (await page.request.get("/api/session")).json());
+      .parse(await browserBootstrap(page));
     administrator = session.session.user.id;
     await database.client`INSERT INTO factory.project(id, slug, name, repository_url, default_branch, devcontainer_path, created_by)
       VALUES (${projectID}, ${`models-qa-${projectID}`}, ${name}, 'https://example.invalid/models-qa.git', 'main', '.devcontainer/devcontainer.json', ${administrator})`;
     for (const role of ["project-manager", "developer"] as const) {
       const email = `${role}-${projectID}@factory.local`;
-      const response = await page.request.post("/api/admin/users", {
-        headers: { origin: "http://127.0.0.1:3000" },
-        data: { name: `Models QA ${role}`, email, password },
-      });
-      expect(response.status()).toBe(201);
-      users.push(z.object({ id: z.uuid(), email: z.email() }).parse(await response.json()));
-      const membership = await page.request.post(`/api/projects/${projectID}/members`, {
-        headers: { origin: "http://127.0.0.1:3000" },
-        data: { email, role: "developer", manageProject: role === "project-manager" },
-      });
-      expect(membership.ok()).toBe(true);
+      const created = await serverCall(
+        browserFunction(page, "createAccount", [{ name: `Models QA ${role}`, email, password }]),
+      );
+      users.push(z.object({ id: z.uuid(), email: z.email() }).parse(created));
+      const membership = await browserFunction(page, "saveProjectMember", [
+        projectID,
+        { email, role: "developer", manageProject: role === "project-manager" },
+      ]);
+      expect(membership.ok).toBe(true);
     }
     const managerUser = users[0];
     const developerUser = users[1];
     if (!managerUser || !developerUser) throw new Error("Owned model accounts missing");
     await login(manager, managerUser.email);
     await login(developer, developerUser.email);
-    const projectURL = `/api/projects/${projectID}/model-settings`;
     const initial = inheritedModelSettingsView.parse(
-      await (await manager.request.get(projectURL)).json(),
+      await serverCall(browserFunction(manager, "getProjectModels", [projectID])),
     );
     const modelId = initial.effective.build.modelId;
     expect(initial.effective.build.allowOverride).toBe(true);
@@ -108,13 +125,8 @@ test("Project managers set model defaults and locks; developers select and Reset
     await expect(developerDialog.getByRole("status")).toHaveText("Model settings saved");
     await expect(build.getByText("My selection", { exact: true })).toBeVisible();
     expect(
-      (
-        await developer.request.put(projectURL, {
-          headers: { origin: "http://127.0.0.1:3000" },
-          data: initial.project,
-        })
-      ).status(),
-    ).toBe(403);
+      await browserFunction(developer, "saveProjectModels", [projectID, initial.project]),
+    ).toMatchObject({ ok: false, status: 403 });
     await build.getByRole("button", { name: "Reset Build", exact: true }).click();
     await developerDialog.getByRole("button", { name: "Save models", exact: true }).click();
     await expect(build.getByText("Inherited from Project", { exact: true })).toBeVisible();

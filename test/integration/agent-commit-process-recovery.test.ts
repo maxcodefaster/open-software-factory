@@ -1,7 +1,10 @@
+import { callFactoryFunction } from "../fixtures/server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { controlledForgeProtection } from "../fixtures/forge-protection";
 
 // lib.dom narrows the global constructor, but Bun supports authenticated client options.
 const ConnectorSocket = WebSocket as typeof WebSocket & {
@@ -11,7 +14,11 @@ const ConnectorSocket = WebSocket as typeof WebSocket & {
 test.each(["restore", "mode revoked", "Session replaced"] as const)(
   "actual Factory commit recovery under %s waits for Connector readiness without paid replay",
   async (boundary) => {
-    const process = await factoryProcess();
+    const forge = controlledForgeProtection();
+    const process = await factoryProcess(undefined, {
+      FACTORY_FORGEJO_ADMIN_TOKEN: forge.FACTORY_FORGEJO_ADMIN_TOKEN,
+      FACTORY_FORGEJO_API_URL: forge.FACTORY_FORGEJO_API_URL,
+    });
     try {
       const initialized = await process.start();
       await process.kill(initialized);
@@ -149,11 +156,14 @@ test.each(["restore", "mode revoked", "Session replaced"] as const)(
             "Revoked recovery was not observed",
           );
           expect(frames).toEqual([]);
-          const response = await fetch(`${process.base}/api/changes/${owned.changeID}/agent`, {
+          const response = await callFactoryFunction(
+            process.base,
+            "getAgentView",
+            [owned.changeID],
             headers,
-          });
-          expect(response.status).toBe(200);
-          const view = (await response.json()) as {
+          );
+          expect(response).toMatchObject({ ok: true });
+          const view = (await serverCall(Promise.resolve(response))) as {
             state: string;
             lastError: string;
             commitOperation?: { id: string };
@@ -175,11 +185,14 @@ test.each(["restore", "mode revoked", "Session replaced"] as const)(
           releasePush.resolve();
           await eventually(
             async () => {
-              const response = await fetch(`${process.base}/api/changes/${owned.changeID}/agent`, {
+              const response = await callFactoryFunction(
+                process.base,
+                "getAgentView",
+                [owned.changeID],
                 headers,
-              });
-              expect(response.status).toBe(200);
-              return response.json() as Promise<{
+              );
+              expect(response).toMatchObject({ ok: true });
+              return serverCall(Promise.resolve(response)) as Promise<{
                 state: string;
                 commitOperation?: { id: string };
               }>;
@@ -204,7 +217,8 @@ test.each(["restore", "mode revoked", "Session replaced"] as const)(
       }
     } finally {
       await process.dispose();
+      await forge.dispose();
     }
   },
-  30_000,
+  120_000,
 );

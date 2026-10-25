@@ -8,6 +8,7 @@ import {
   runtimeConnectorTokens,
   runtimeIdentity,
   runtimeModelToken,
+  runtimePublicationToken,
 } from "../../../../packages/runtime-domain/src/identity";
 import {
   createKubernetesClient,
@@ -36,7 +37,7 @@ import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
 import { freezeRuntimeArtifacts } from "./artifacts";
 import { createFactoryboxExecution } from "./factorybox";
-import { runtimeFactoryURL, runtimeForgeURL } from "./endpoints";
+import { runtimeFactoryURL, runtimeForgeURL, runtimeReleaseRegistryURL } from "./endpoints";
 import {
   prepareRuntimeRepository,
   readRepositoryFileAtRevision,
@@ -729,12 +730,15 @@ export function createRuntimeController(
       repositoryURL: string;
       revision: string;
       devcontainerPath: string;
-      kind: "staging" | "verification";
+      kind: "staging" | "verification" | "publication";
       parentToken: string;
       childToken: string;
       verification?: {
         runnerUUID: string;
         runnerToken: string;
+        jobHandle?: string;
+        publicationID?: string;
+        version?: string;
       };
     },
     connection: Database["client"],
@@ -749,7 +753,7 @@ export function createRuntimeController(
         );
       }
       const systemContract =
-        input.kind === "verification"
+        input.kind === "verification" || input.kind === "publication"
           ? undefined
           : await resolveSystemContract(input.repositoryURL, input.revision);
       const artifacts = await artifactsFor(input.identity.attemptID, connection);
@@ -775,7 +779,25 @@ export function createRuntimeController(
                 forgeURL: runtimeForgeURL(),
                 runnerUUID: input.verification.runnerUUID,
                 runnerToken: input.verification.runnerToken,
-                runnerLabel: "factory-verification",
+                runnerLabel:
+                  input.kind === "publication" ? "factory-publication" : "factory-verification",
+                ...(input.verification.jobHandle ? { handle: input.verification.jobHandle } : {}),
+                ...(input.verification.publicationID
+                  ? {
+                      publication: {
+                        id: input.verification.publicationID,
+                        version: input.verification.version!,
+                        credentialURL: runtimeFactoryURL(
+                          `/internal/releases/${input.verification.publicationID}/credentials`,
+                        ),
+                        registryURL: runtimeReleaseRegistryURL(),
+                        credentialToken: runtimePublicationToken(
+                          connectorSecret,
+                          input.verification.publicationID,
+                        ),
+                      },
+                    }
+                  : {}),
               },
             }
           : {}),
@@ -849,7 +871,10 @@ export function createRuntimeController(
             projectID: string;
             changeID: string | null;
             workspaceID: string | null;
-            isolatedKind: "staging" | "verification" | null;
+            isolatedKind: "staging" | "verification" | "publication" | null;
+            publicationID: string | null;
+            publicationVersion: string | null;
+            publicationHandle: string | null;
             verificationID: string | null;
             runnerUUID: string | null;
             runnerToken: string | null;
@@ -864,14 +889,18 @@ export function createRuntimeController(
       attempt.workspace_id AS "workspaceID",
       attempt.isolated_kind AS "isolatedKind",
       attempt.verification_id AS "verificationID",
-      verification.runner_uuid AS "runnerUUID",
-      verification.runner_token AS "runnerToken",
+      COALESCE(verification.runner_uuid::text,publication.runner_uuid) AS "runnerUUID",
+      COALESCE(verification.runner_token,publication.runner_token) AS "runnerToken",
+      publication.id AS "publicationID",publication.job_handle AS "publicationHandle",
+      release.version AS "publicationVersion",
       project.repository_url AS "repositoryURL",
       attempt.revision, project.devcontainer_path AS "devcontainerPath",
       attempt.kubernetes_namespace_uid AS "namespaceUID"
     FROM factory.runtime_attempt attempt
     JOIN factory.project project ON project.id = attempt.project_id
     LEFT JOIN factory.verification verification ON verification.id = attempt.verification_id
+    LEFT JOIN factory.release_attempt publication ON publication.runtime_attempt_id=attempt.id
+    LEFT JOIN factory.project_release release ON release.id=publication.release_id
     WHERE attempt.id = ${attempt.id}
   `;
         const row = rows[0];
@@ -886,7 +915,7 @@ export function createRuntimeController(
             row.changeID ??
             (row.isolatedKind === "staging"
               ? `staging:${row.projectID}`
-              : (row.verificationID ?? row.projectID)),
+              : (row.verificationID ?? row.publicationID ?? row.projectID)),
           generation,
         );
         const identity = {
@@ -909,7 +938,7 @@ export function createRuntimeController(
         }
         const expectedRepositoryURL = runtimeRepositoryURL(row.repositoryURL, attempt.id);
         const systemContract =
-          row.isolatedKind === "verification"
+          row.isolatedKind === "verification" || row.isolatedKind === "publication"
             ? undefined
             : await resolveSystemContract(row.repositoryURL, row.revision);
         const canonicalSource = row.workspaceID
@@ -948,13 +977,35 @@ export function createRuntimeController(
                 ),
               }
             : {}),
-          ...(row.isolatedKind === "verification" && row.runnerUUID && row.runnerToken
+          ...((row.isolatedKind === "verification" || row.isolatedKind === "publication") &&
+          row.runnerUUID &&
+          row.runnerToken
             ? {
                 verification: {
                   forgeURL: runtimeForgeURL(),
                   runnerUUID: row.runnerUUID,
                   runnerToken: row.runnerToken,
-                  runnerLabel: "factory-verification",
+                  runnerLabel:
+                    row.isolatedKind === "publication"
+                      ? "factory-publication"
+                      : "factory-verification",
+                  ...(row.publicationID && row.publicationHandle
+                    ? {
+                        handle: row.publicationHandle,
+                        publication: {
+                          id: row.publicationID,
+                          version: row.publicationVersion!,
+                          credentialURL: runtimeFactoryURL(
+                            `/internal/releases/${row.publicationID}/credentials`,
+                          ),
+                          registryURL: runtimeReleaseRegistryURL(),
+                          credentialToken: runtimePublicationToken(
+                            connectorSecret,
+                            row.publicationID,
+                          ),
+                        },
+                      }
+                    : {}),
                 },
               }
             : {}),
@@ -2183,6 +2234,97 @@ export function createRuntimeController(
       } finally {
         try {
           await lock`SELECT pg_advisory_unlock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
+        } finally {
+          await lock.end({ timeout: 1 });
+        }
+      }
+    },
+    async startPublication(publicationID: string, userID: string) {
+      const lock = database.coordination();
+      let projectLock: string | undefined;
+      try {
+        await lock`SELECT pg_advisory_lock(hashtextextended(${`publication-runtime:${publicationID}`},0))`;
+        const [row] = await lock<
+          {
+            projectID: string;
+            revision: string;
+            version: string;
+            runnerUUID: string;
+            runnerToken: string;
+            jobHandle: string;
+            attemptID: string | null;
+            repositoryURL: string;
+            devcontainerPath: string;
+          }[]
+        >`SELECT release.project_id AS "projectID",release.commit_sha AS revision,release.version,
+          publication.runner_uuid AS "runnerUUID",publication.runner_token AS "runnerToken",
+          publication.job_handle AS "jobHandle",publication.runtime_attempt_id AS "attemptID",
+          project.repository_url AS "repositoryURL",project.devcontainer_path AS "devcontainerPath"
+          FROM factory.release_attempt publication JOIN factory.project_release release ON release.id=publication.release_id
+          JOIN factory.project project ON project.id=release.project_id
+          WHERE publication.id=${publicationID} AND publication.state='running' AND release.state='running'
+            AND publication.id=(SELECT id FROM factory.release_attempt WHERE release_id=release.id ORDER BY ordinal DESC LIMIT 1)`;
+        if (!row) throw new Error("Active publication intent is required");
+        if (row.attemptID) return this.get(row.attemptID);
+        if (!row.runnerUUID || !row.runnerToken || !row.jobHandle)
+          throw new Error("Bound publication runner is required");
+        await createAccessController(database).requireDevelopment(userID, row.projectID);
+        projectLock = `runtime:isolated:${row.projectID}`;
+        await lock`SELECT pg_advisory_lock(hashtext(${projectLock}))`;
+        const [sequence] = await lock<{ generation: number }[]>`
+          SELECT (COALESCE(MAX(generation),0)+1)::float8 AS generation FROM factory.runtime_attempt
+          WHERE project_id=${row.projectID} AND isolated_kind IS NOT NULL`;
+        const generation = sequence!.generation;
+        const identity = runtimeIdentity(publicationID, generation);
+        const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
+        await lock.begin(async (tx) => {
+          await tx`SELECT pg_advisory_xact_lock(hashtext(${`runtime:isolated:${row.projectID}`}))`;
+          await admitOrWait(
+            tx as unknown as Database["client"],
+            identity.attemptID,
+            row.projectID,
+            "publication",
+          );
+          await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,
+            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+            VALUES(${identity.attemptID},${row.projectID},'publication',${generation},${row.revision},'create-intended',${identity.namespace},${identity.podName},
+            ${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID})`;
+          await tx`UPDATE factory.release_attempt SET runtime_attempt_id=${identity.attemptID} WHERE id=${publicationID}`;
+          await artifactsFor(identity.attemptID, tx as unknown as Database["client"]);
+        });
+        if (await waiting(identity.attemptID)) return this.get(identity.attemptID);
+        hub.allow(
+          identity.attemptID,
+          generation,
+          hashConnectorToken(tokens.parent),
+          hashConnectorToken(tokens.child),
+        );
+        await launchIsolated(
+          {
+            identity,
+            generation,
+            projectID: row.projectID,
+            repositoryURL: row.repositoryURL,
+            revision: row.revision,
+            devcontainerPath: row.devcontainerPath,
+            kind: "publication",
+            parentToken: tokens.parent,
+            childToken: tokens.child,
+            verification: {
+              runnerUUID: row.runnerUUID,
+              runnerToken: row.runnerToken,
+              jobHandle: row.jobHandle,
+              publicationID,
+              version: row.version,
+            },
+          },
+          lock,
+        );
+        return this.get(identity.attemptID);
+      } finally {
+        try {
+          if (projectLock) await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
+          await lock`SELECT pg_advisory_unlock(hashtextextended(${`publication-runtime:${publicationID}`},0))`;
         } finally {
           await lock.end({ timeout: 1 });
         }

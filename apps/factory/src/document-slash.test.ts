@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { documentSlash, filterDocumentBlocks } from "./document-slash";
-import { documentBlocks } from "./document-editor";
+import { documentBlocks } from "./document-model";
 
 test("keeps slash query open while typing and removes the entire command token", () => {
   expect(documentSlash("/t")).toEqual({ query: "t", length: 2 });

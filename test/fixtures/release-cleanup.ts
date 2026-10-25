@@ -1,3 +1,5 @@
+import { callFactoryFunction } from "./server-functions";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
 import { attemptsResponseSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
 import type { releaseInstallation } from "./release-installation";
@@ -42,11 +44,13 @@ export async function releaseCleanup(f: Fixture) {
     before.filter((value) => value.projectID === projectID).every((value) => names.has(value.name)),
   ).toBe(true);
   const delivered = deliveryViewSchema.parse(
-    await f.command(cookie, `/api/changes/${changeID}/delivery`),
+    await serverCall(callFactoryFunction(f.base, "getDelivery", [changeID], { cookie: cookie })),
   );
   expect(delivered.mergedCommitSha).toBe(state.deliveredSHA);
   const dependent = deliveryViewSchema.parse(
-    await f.command(cookie, `/api/changes/${dependentChangeID}/delivery`),
+    await serverCall(
+      callFactoryFunction(f.base, "getDelivery", [dependentChangeID], { cookie: cookie }),
+    ),
   );
   expect(dependent.verificationState).toBe("succeeded");
   const turns = await database.client`
@@ -57,7 +61,9 @@ export async function releaseCleanup(f: Fixture) {
     FROM factory.requirement_approval approval JOIN factory.ticket ticket ON ticket.id = approval.ticket_id
     WHERE ticket.project_id = ${projectID}`;
   const runtimes = attemptsResponseSchema.parse(
-    await f.command(cookie, `/api/runtime-attempts?projectId=${projectID}`),
+    await serverCall(
+      callFactoryFunction(f.base, "getRuntimeAttempts", [projectID], { cookie: cookie }),
+    ),
   ).attempts;
   await f.record("final-customer-state", {
     projectID,
@@ -71,11 +77,15 @@ export async function releaseCleanup(f: Fixture) {
       runtimeKind,
     })),
   });
-  await f.command(cookie, `/api/changes/${dependentChangeID}/cancel`, "POST", {});
+  await serverCall(
+    callFactoryFunction(f.base, "cancelChange", [dependentChangeID], { cookie: cookie }),
+  );
   for (const runtime of runtimes.filter(
     (value) => value.runtimeKind === "staging" && !["stopped", "failed"].includes(value.state),
   ))
-    await f.command(cookie, `/api/runtime-attempts/${runtime.id}/stop`, "POST", {});
+    await serverCall(
+      callFactoryFunction(f.base, "stopRuntimeAttempt", [runtime.id], { cookie: cookie }),
+    );
   await eventually(
     async () => {
       const [change] = await database.client<

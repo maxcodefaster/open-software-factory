@@ -1,6 +1,15 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import { apiRequest } from "./api-client";
-import { developerIDEViewSchema, sourceWorkspaceViewSchema } from "./api-contracts";
+import { invoke } from "@solidjs/web/server-functions";
+import { serverCall } from "./server-functions/result";
+import {
+  ensureDeveloperIDE,
+  ensurePersonalSource,
+  ensureWorkspaceSource,
+  getDeveloperIDE,
+  getWorkspaceSource,
+  stopDeveloperIDE,
+  stopWorkspaceSource,
+} from "./server-functions/workspaces";
 import { developmentPreviewMessage, type DevelopmentPreviewMessage } from "./ide-messages";
 import type { ActivityNavigationRequest } from "./ide-messages";
 import { selectedSourcePreparation } from "./selected-source-preparation";
@@ -8,7 +17,6 @@ import { recoverWorkspaceSource } from "./source-recovery";
 import { confirmAccessStopped } from "./access-stop";
 import { developerIDEOrigin } from "./developer-ide-origin";
 import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
-import { z } from "zod";
 
 export function DeveloperIDEWorkspace(props: {
   userID: string;
@@ -38,13 +46,8 @@ export function DeveloperIDEWorkspace(props: {
   let sourceRecovery: AbortController | undefined;
   let editorRecovery: AbortController | undefined;
   const preparation = selectedSourcePreparation(async (projectID) => {
-    await apiRequest(
-      sourceWorkspaceViewSchema,
-      `/api/projects/${projectID}/source-workspace/ensure`,
-      {
-        method: "POST",
-        signal: AbortSignal.timeout(15_000),
-      },
+    await serverCall(
+      invoke(ensurePersonalSource, { signal: AbortSignal.timeout(15_000) }, projectID),
     );
   });
   createEffect(
@@ -84,18 +87,9 @@ export function DeveloperIDEWorkspace(props: {
     setAvailableSource(undefined);
     try {
       await recoverWorkspaceSource(workspaceID, restart, signal, {
-        stop: (id, signal) =>
-          apiRequest(z.undefined(), `/api/workspaces/${id}/source/stop`, {
-            method: "POST",
-            signal,
-          }),
-        read: (id, signal) =>
-          apiRequest(sourceWorkspaceViewSchema, `/api/workspaces/${id}/source`, { signal }),
-        ensure: (id, signal) =>
-          apiRequest(sourceWorkspaceViewSchema, `/api/workspaces/${id}/source/ensure`, {
-            method: "POST",
-            signal,
-          }),
+        stop: (id, signal) => serverCall(invoke(stopWorkspaceSource, { signal }, id)),
+        read: (id, signal) => serverCall(invoke(getWorkspaceSource, { signal }, id)),
+        ensure: (id, signal) => serverCall(invoke(ensureWorkspaceSource, { signal }, id)),
         wait: pause,
       });
       if (!cancel.signal.aborted) setSourceRetry((value) => value + 1);
@@ -135,9 +129,8 @@ export function DeveloperIDEWorkspace(props: {
       await confirmAccessStopped(
         signal,
         {
-          stop: (signal) =>
-            apiRequest(z.undefined(), "/api/developer-ide/stop", { method: "POST", signal }),
-          read: (signal) => apiRequest(developerIDEViewSchema, "/api/developer-ide", { signal }),
+          stop: (signal) => serverCall(invoke(stopDeveloperIDE, { signal })),
+          read: (signal) => serverCall(invoke(getDeveloperIDE, { signal })),
           wait: pause,
         },
         "Editor Stop was not confirmed. Nothing was restarted.",
@@ -178,13 +171,8 @@ export function DeveloperIDEWorkspace(props: {
       const cancel = new AbortController();
       setEditorError("");
       void (async () => {
-        let current = await apiRequest(
-          developerIDEViewSchema,
-          `/api/projects/${projectID}/developer-ide/ensure`,
-          {
-            method: "POST",
-            signal: cancel.signal,
-          },
+        let current = await serverCall(
+          invoke(ensureDeveloperIDE, { signal: cancel.signal }, projectID),
         );
         while (!cancel.signal.aborted) {
           setEditorState(current.state);
@@ -202,9 +190,7 @@ export function DeveloperIDEWorkspace(props: {
           if (["failed", "stopped", "stop-intended"].includes(current.state))
             throw new Error(current.failure ?? "Editor is stopped. Retry to prepare it.");
           await pause(cancel.signal);
-          current = await apiRequest(developerIDEViewSchema, "/api/developer-ide", {
-            signal: cancel.signal,
-          });
+          current = await serverCall(invoke(getDeveloperIDE, { signal: cancel.signal }));
         }
       })().catch((cause: unknown) => {
         if (!cancel.signal.aborted)
@@ -223,10 +209,8 @@ export function DeveloperIDEWorkspace(props: {
       setSourceError("");
       void (async () => {
         while (!cancel.signal.aborted) {
-          const source = await apiRequest(
-            sourceWorkspaceViewSchema,
-            `/api/workspaces/${workspaceID}/source`,
-            { signal: cancel.signal },
+          const source = await serverCall(
+            invoke(getWorkspaceSource, { signal: cancel.signal }, workspaceID),
           );
           if (!cancel.signal.aborted) setSourceState(source.state);
           if (source.state === "ready") {

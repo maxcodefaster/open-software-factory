@@ -3,6 +3,59 @@
 This reference describes the implemented product boundaries. ADRs explain why those boundaries
 were chosen. Exact dependency versions live in manifests, lockfiles, `mise.toml` and `upstream.json`.
 
+## Client and application server
+
+Factory has one application backend, written in TypeScript and running on Bun. Its
+[composition root](../apps/factory/src/server.ts) creates the authenticated HTTP routes,
+application services, controllers and background reconciliation in that process. The HTTP
+listener uses native `Bun.serve`, not another web framework. Vite provides client development
+and builds; it is not a second production application backend.
+
+The Solid 2 SPA renders in the browser. Zero synchronizes authorized planning mutations and cached
+read projections. Solid Server Functions replace hand-written UI transport, not Factory's
+application services. The SPA's Bootstrap, settings, planning command adapters, lifecycle commands,
+Review, Writer, IDE admission and conversation observations use named compiled functions. Agent
+activity and Project answers use native typed streams rather than a second JSON/SSE API.
+PostgreSQL retains product state, intent and outcomes. The Go Runtime Connector is a separate
+execution component, not a second implementation of Factory's application services.
+
+Server Functions run on the existing Bun host with the authenticated request actor and the same
+application-service instances. Inputs and current authority are checked server-side. Protected
+saves retain fresh-authentication and installation-maintenance gates, command identities and
+explicit exact retries. A disconnected client, stale deployment or lost response never authorizes
+automatic replay. The compiled adapter delegates error classification to the host so bundling
+cannot change the identity of Factory command errors. The Usage read uses Solid's native async
+memo without making the editable form state or writes reactive.
+
+The production build emits separate client assets and a server-function handler. The server build
+does not enable page SSR. Source development proxies function calls to the same backend instead
+of creating application services inside Vite. Connector protocols, webhooks, authentication,
+uploads, protected media and WebSockets retain their HTTP boundaries. Backend-language migration
+is not part of this decision. Solid's browser reactivity does not make server commands reactive:
+reading, reopening a panel and reconnecting an observer cannot commission work.
+
+The browser protocol exceptions have specific owners and authorization:
+
+| Browser use | Retained protocol and reason |
+| --- | --- |
+| Sign-in, SSO and sign-out | Better Auth owns session cookies and OIDC redirects. Factory security settings and fresh-authentication observations use named functions. |
+| Planning cache | Zero owns authenticated query/mutation synchronization. It does not admit runtime lifecycle work. |
+| Attachment transfer and display | Authenticated raw PUT with measured byte progress, protected original downloads and derived image URLs. Admission, metadata and usage use named functions. |
+| Review stills and recordings | Multipart JPEG upload and authenticated range-capable media URLs for HTML image/video elements. Review decisions, feedback and metadata use named functions. |
+| IDE and App navigation | One-use access grants redeem into separately scoped editor/runtime cookies. The embedded Theia client uses its grant-bound source/file-watch, Writer, runtime, Terminal and language-tool protocols. It cannot substitute its scoped cookie for a central Factory session or invoke unscoped UI commands. |
+| External and execution traffic | Connector WebSockets, native OpenCode streams, callbacks, webhooks, Git and OAuth discovery are integration protocols, not alternate SPA command APIs. |
+
+The SPA import-graph guard rejects unclassified raw network calls, including aliased helpers.
+The remaining JSON helper accepts only the exact authentication and multipart-still paths.
+The compiled-handler and real-host tests check authority, native stream cancellation and retired
+logical routes. These checks do not replace owned runtime, editor and physical recovery proofs.
+
+Hashed public assets use build-time Brotli/gzip variants and immutable caching. HTML stays
+non-cached; private media, commands and Server Function responses do not enter that asset cache.
+The rich document engine loads when its surface opens rather than with the Board. Attachment
+conversion engines load only in bounded, terminated workers, not in the Factory store's import
+graph. The concurrency limit remains two conversions per Factory process.
+
 ## Ownership and execution
 
 ```text
@@ -157,6 +210,13 @@ The [Factorybox admission command](../deploy/factorybox/README.md) inspects the 
 contract used by Workspace Start and the existing execution reserve. The consumer preparation and
 lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execution.md).
 
+Each immutable worker profile includes its explicit `arm64` or `amd64` architecture, exact image
+and executable, node and kernel. The same Factory commands render and check either architecture;
+the control-plane host does not select the worker's CPU. Node mismatch fails before the first
+worker exec. This adapter contract is not native runtime qualification. The current standalone
+Factorybox release remains AMD64-only; its ARM64 timer reader and continuation are not implemented.
+RAM snapshots do not move between CPU architectures.
+
 Every Sandbox uses the same topology:
 
 ```text
@@ -238,7 +298,8 @@ Factory persists compact findings, source-read evidence and screenshot digests/p
 New reviews begin concrete scenarios before observation, cover every criterion and include the
 normal flow and a relevant adverse case before passing. Scenario outcomes bind the intervening source
 or exact-candidate browser observations. UI cases need actual browser observations.
-The existing browser records one protected WebM with scenario chapters. The pinned MCP and
+The existing independent review browser always records one protected WebM with scenario chapters.
+There is no Project-level recording preference. The pinned MCP and
 Chromium remain unchanged; a fixed adapter invokes the pinned FFmpeg with bounded worker threads.
 Recording availability is separate from QA outcome and cannot replay inference or App mutations.
 The video is published through bounded internal chunks, never included in model context.
@@ -302,7 +363,13 @@ required. Closed-panel lifecycle reads omit native history, and command-result f
 streams or reads. Native tool identities survive history updates without deduplicating legitimate
 repeated text. Wiki bodies subscribe only while a Wiki
 tab exists, including minimized tabs with retained drafts. Repository inventory refreshes on the
-generation identity/state rather than every status tick. The signed-out entry loads no document editor.
+generation identity/state rather than every status tick. The signed-out entry and authenticated
+Board load no document editor. The document engine loads when an editor opens; retained drafts
+survive that first load. Versioned public assets use immutable caching and negotiated precompressed
+Brotli/Gzip; the application shell is not cached. Factory loads inference engines and provider SDKs
+on demand rather than when the host starts. Those adapters retain the same admission, cancellation
+and usage rules. Attachment conversion engines run in bounded, short-lived workers rather than
+loading into the host's ordinary imports.
 Infrastructure commands have bounded combined output and deadlines; timeout leaves the external
 outcome unconfirmed, never authorization to replace an immutable resource identity. Idle sweeps
 advance through ID-ordered batches so busy early rows cannot indefinitely hide later Workspaces.
@@ -359,6 +426,9 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Runtime Connector | Factory process connecting the approved container stack to its authority |
 | Project Environment | Independent Development or Main-Preview variables and registry access |
 | Development Image Prebuild | Exact prepared development image, not a released application artifact |
+| Release | Human-confirmed named version of a delivered commit and its optional verified publication artifacts |
+| Publication Attempt | Retained execution and native Forgejo outcome for one Release, independent of any consumer |
+| External access | Project-bound machine read permission, not a registered deployment target |
 | Project Agent | Checkout-free investigation, Requirements and Knowledge work |
 | Factory MCP | Turn-bound Project research and explicit Ticket creation through existing Factory commands |
 | Change Agent | Implementation in one approved Ticket Workspace |
@@ -406,28 +476,18 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 
 ## Architecture decisions
 
-| ADR | Decision |
+Read the current boundaries above first. The records below retain decision rationale and stable
+identities, grouped by concern rather than presented as twenty independent subsystems.
+
+| Concern | Decisions |
 | --- | --- |
-| [0001](adr/0001-development-workspaces-and-staging.md) | Independent editing, durable Workspaces and prepared compute |
-| [0002](adr/0002-opencode-change-agent.md) | OpenCode in the Ticket Workspace without forge authority |
-| [0003](adr/0003-forgejo-actions-verification-and-promotion.md) | Forgejo Verification and Factory promotion |
-| [0004](adr/0004-generated-project-knowledge.md) | Generated revisioned Knowledge separate from source documents |
-| [0005](adr/0005-curated-desktop-visual-system.md) | Curated desktop and shared visual system |
-| [0006](adr/0006-project-agent-and-ticket-conversation.md) | Project Agent and unified Ticket conversation |
-| [0007](adr/0007-durable-agent-admission-and-uncertain-outcomes.md) | Durable admission and uncertain external outcomes |
-| [0008](adr/0008-fixed-role-agent-engines.md) | Fixed concrete engines with configurable models and Skills |
-| [0009](adr/0009-independent-workspace-file-access.md) | Canonical file access independent of execution |
-| [0010](adr/0010-factory-identity-and-change-writers.md) | Factory identity and exclusive Change editing |
-| [0011](adr/0011-delivered-branch-retention.md) | Delivered branches retain source behind a closed write fence |
-| [0012](adr/0012-independent-candidate-review.md) | Independent review uses a fresh, read-only OpenCode Session |
-| [0013](adr/0013-kubernetes-native-installation.md) | One Helm installation on existing Kubernetes, independent of the workstation |
-| [0014](adr/0014-qa-recordings-and-human-review.md) | Protected QA recordings, retained annotation stills and explicit human review decisions |
-| [0015](adr/0015-managed-mcp-library.md) | Shared MCP selection with separate credentials, Project grants and reviewed remote reads |
-| [0016](adr/0016-delegated-monitoring-autofix.md) | Project-bound monitoring delegates eligible application fixes and exact reviewed Delivery |
-| [0017](adr/0017-private-revision-bound-attachments.md) | Private object storage, immutable human file references and reference-safe retention |
-| [0018](adr/0018-project-inputs.md) | Generic Project Inputs automatically prepare requirements, without implicit implementation authority |
-| [0019](adr/0019-conversation-contexts-and-shared-editing.md) | Retained conversations, checkout-free parallel research and explicit shared editing decisions |
-| [0020](adr/0020-factory-actions-through-mcp.md) | Factory MCP for turn-bound Project Chat research and Ticket creation |
+| Workspaces, runtime and installation | [0001 Workspaces and prepared compute](adr/0001-development-workspaces-and-staging.md), [0009 independent file access](adr/0009-independent-workspace-file-access.md), [0013 Kubernetes installation](adr/0013-kubernetes-native-installation.md) |
+| Identity and execution authority | [0007 durable admission and uncertain outcomes](adr/0007-durable-agent-admission-and-uncertain-outcomes.md), [0010 identity and exclusive writers](adr/0010-factory-identity-and-change-writers.md) |
+| Agents, conversations and planning actions | [0002 OpenCode](adr/0002-opencode-change-agent.md), [0006 Project Agent](adr/0006-project-agent-and-ticket-conversation.md), [0008 fixed engines and Skills](adr/0008-fixed-role-agent-engines.md), [0019 retained conversations and editing](adr/0019-conversation-contexts-and-shared-editing.md), [0020 Factory MCP](adr/0020-factory-actions-through-mcp.md) |
+| Verification, review and Delivery | [0003 Forgejo Verification and promotion](adr/0003-forgejo-actions-verification-and-promotion.md), [0011 protected delivered branches](adr/0011-delivered-branch-retention.md), [0012 independent review](adr/0012-independent-candidate-review.md), [0014 QA media and human feedback](adr/0014-qa-recordings-and-human-review.md) |
+| Knowledge and retained content | [0004 revisioned Knowledge](adr/0004-generated-project-knowledge.md), [0017 private attachments](adr/0017-private-revision-bound-attachments.md) |
+| External context and delegated Inputs | [0015 MCP library](adr/0015-managed-mcp-library.md), [0016 bounded monitoring Autofix](adr/0016-delegated-monitoring-autofix.md), [0018 Project Inputs](adr/0018-project-inputs.md) |
+| Visual system | [0005 desktop and shared UI](adr/0005-curated-desktop-visual-system.md) |
 
 ## Verification and operating limits
 

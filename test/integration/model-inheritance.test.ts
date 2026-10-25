@@ -6,6 +6,9 @@ import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
+import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { decodeResponse } from "@solidjs/web/server-functions/client";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 const systemModel = "system-model";
@@ -47,23 +50,38 @@ test("scoped model commands enforce hierarchy, roles, Reset and CAS across resta
       .map((item) => item.split(";")[0])
       .join("; ");
     const headers = { cookie, origin: process.base, "content-type": "application/json" };
-    const url = `${process.base}/api/projects/${owned.projectID}/model-settings`;
+    const projectID = owned.projectID;
     const read = async () =>
-      inheritedModelSettingsView.parse(await (await fetch(url, { headers })).json());
-    const write = (suffix: string, body: unknown) =>
-      fetch(`${url}${suffix}`, { method: "PUT", headers, body: JSON.stringify(body) });
+      inheritedModelSettingsView.parse(
+        await serverCall(
+          callFactoryFunction(process.base, "getProjectModels", [projectID], headers),
+        ),
+      );
+    const write = async (scope: "project" | "personal", body: unknown) => {
+      const result = await decodeResponse<ServerResult<unknown>>(
+        await fetch(
+          await factoryFunctionRequest(
+            process.base,
+            scope === "personal" ? "savePersonalModels" : "saveProjectModels",
+            [projectID, body],
+            headers,
+          ),
+        ),
+      );
+      if (!result) throw new Error("Scoped model command returned no result");
+      return { status: result.ok ? 200 : result.status };
+    };
     const initial = await read();
     expect(initial.canManageProject).toBe(false);
     expect(initial.effective.build.source).toBe("system");
-    expect((await write("", initial.project)).status).toBe(403);
-    expect((await fetch(`${process.base}/api/model-settings`, { headers })).status).toBe(403);
+    expect((await write("project", initial.project)).status).toBe(403);
+    expect(await callFactoryFunction(process.base, "getModelSettings", [], headers)).toMatchObject({
+      ok: false,
+      status: 403,
+    });
     expect(
-      (
-        await fetch(`${process.base}/api/projects/${crypto.randomUUID()}/model-settings`, {
-          headers,
-        })
-      ).status,
-    ).toBe(404);
+      await callFactoryFunction(process.base, "getProjectModels", [crypto.randomUUID()], headers),
+    ).toMatchObject({ ok: false, status: 404 });
     await database.client`UPDATE factory.project_membership SET manage_project = true WHERE project_id = ${owned.projectID} AND user_id = ${owned.userID}`;
     const project = {
       ...initial.project,
@@ -78,21 +96,21 @@ test("scoped model commands enforce hierarchy, roles, Reset and CAS across resta
         allowOverride: true,
       },
     };
-    expect((await write("", project)).status).toBe(200);
-    expect((await write("", project)).status).toBe(409);
+    expect((await write("project", project)).status).toBe(200);
+    expect((await write("project", project)).status).toBe(409);
     expect((await read()).effective.build.source).toBe("project");
     const personal = {
       version: 0,
       planningModelId: "personal-model",
       buildModelId: "personal-model",
     };
-    expect((await write("/personal", { ...personal, userId: administrator })).status).toBe(400);
-    expect((await write("/personal", { ...personal, buildModelId: "system-model" })).status).toBe(
+    expect((await write("personal", { ...personal, userId: administrator })).status).toBe(400);
+    expect((await write("personal", { ...personal, buildModelId: "system-model" })).status).toBe(
       409,
     );
     const concurrent = await Promise.all([
-      write("/personal", personal),
-      write("/personal", personal),
+      write("personal", personal),
+      write("personal", personal),
     ]);
     expect(concurrent.map((response) => response.status).sort()).toEqual([200, 409]);
     const selected = await read();
@@ -106,7 +124,7 @@ test("scoped model commands enforce hierarchy, roles, Reset and CAS across resta
     expect(await read()).toEqual(selected);
     expect(
       (
-        await write("/personal", {
+        await write("personal", {
           ...selected.personal,
           planningModelId: null,
           buildModelId: null,
@@ -118,34 +136,37 @@ test("scoped model commands enforce hierarchy, roles, Reset and CAS across resta
       ...(await read()).project,
       build: { ...project.build, allowOverride: false },
     };
-    expect((await write("", projectLocked)).status).toBe(200);
+    expect((await write("project", projectLocked)).status).toBe(200);
     expect(
-      (await write("/personal", { ...(await read()).personal, buildModelId: "personal-model" }))
+      (await write("personal", { ...(await read()).personal, buildModelId: "personal-model" }))
         .status,
     ).toBe(409);
     expect((await read()).effective.build.lockedReason).toBe("Locked by Project Manager");
     // Tightening parent rules safely ignores obsolete lower-scope settings.
-    const systemResponse = await fetch(`${process.base}/api/model-settings`, {
-      method: "PUT",
-      headers: { ...headers, cookie: adminCookie },
-      body: JSON.stringify({
-        version: 0,
-        planningModelId: "system-model",
-        buildModelId: "system-model",
-        rules: {
-          planning: { models, allowOverride: true },
-          build: { models: ["system-model"], allowOverride: false },
+    const systemResponse = await callFactoryFunction(
+      process.base,
+      "saveModelSettings",
+      [
+        {
+          version: 0,
+          planningModelId: "system-model",
+          buildModelId: "system-model",
+          rules: {
+            planning: { models, allowOverride: true },
+            build: { models: ["system-model"], allowOverride: false },
+          },
         },
-      }),
-    });
-    expect(systemResponse.status).toBe(200);
+      ],
+      { ...headers, cookie: adminCookie },
+    );
+    expect(systemResponse.ok).toBe(true);
     const locked = await read();
     expect(locked.effective.build.allowOverride).toBe(false);
     expect(locked.effective.build.lockedReason).toBe("Locked by System Manager");
     expect(locked.effective.build.available).toBe(false);
     expect(
       (
-        await write("", {
+        await write("project", {
           ...locked.project,
           build: { modelId: "personal-model", models, allowOverride: true },
         })
@@ -153,7 +174,7 @@ test("scoped model commands enforce hierarchy, roles, Reset and CAS across resta
     ).toBe(409);
     expect(
       (
-        await write("", {
+        await write("project", {
           ...locked.project,
           build: { modelId: null, models: null, allowOverride: null },
         })
@@ -163,9 +184,11 @@ test("scoped model commands enforce hierarchy, roles, Reset and CAS across resta
     expect(reset.effective.build.modelId).toBe("system-model");
     expect(reset.effective.build.available).toBe(true);
     await database.client`DELETE FROM factory.project_membership WHERE project_id = ${owned.projectID} AND user_id = ${owned.userID}`;
-    expect((await fetch(url, { headers })).status).toBe(404);
     expect(
-      (await write("/personal", { ...reset.personal, planningModelId: null, buildModelId: null }))
+      await callFactoryFunction(process.base, "getProjectModels", [projectID], headers),
+    ).toMatchObject({ ok: false, status: 404 });
+    expect(
+      (await write("personal", { ...reset.personal, planningModelId: null, buildModelId: null }))
         .status,
     ).toBe(404);
   } finally {

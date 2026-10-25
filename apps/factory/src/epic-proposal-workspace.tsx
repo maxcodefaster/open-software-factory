@@ -56,7 +56,19 @@ export function EpicProposalWorkspace(props: {
   return (
     <section class="ticket-workspace epic-proposal-workspace" aria-label="Proposed Epic">
       <div class="ticket-document">
-        <header class="ticket-status-row">
+        <header class="ticket-status-row workspace-heading">
+          <textarea
+            class="ticket-draft-title workspace-heading-title"
+            rows={1}
+            aria-label="Epic title"
+            value={proposal().epic.title}
+            onInput={(event) =>
+              update({
+                ...proposal(),
+                epic: { ...proposal().epic, title: event.currentTarget.value },
+              })
+            }
+          />
           <WorkspaceActionBar label="Epic actions" class="ticket-header-actions">
             <button
               type="button"
@@ -68,20 +80,8 @@ export function EpicProposalWorkspace(props: {
               Confirm work
             </button>
           </WorkspaceActionBar>
-          <span class="ticket-status-context">Proposed work</span>
+          <span class="ticket-status-context workspace-heading-meta">Proposed work</span>
         </header>
-        <textarea
-          class="ticket-draft-title"
-          rows={1}
-          aria-label="Epic title"
-          value={proposal().epic.title}
-          onInput={(event) =>
-            update({
-              ...proposal(),
-              epic: { ...proposal().epic, title: event.currentTarget.value },
-            })
-          }
-        />
         <MarkdownEditor
           label="Epic outcome"
           value={proposal().epic.description}

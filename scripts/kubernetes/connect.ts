@@ -183,7 +183,7 @@ async function forward(
     let confirmed = false;
     const path =
       target.component === "factory"
-        ? "/api/session"
+        ? "/health/ready"
         : target.component === "forgejo"
           ? "/api/healthz"
           : "/keepalive";

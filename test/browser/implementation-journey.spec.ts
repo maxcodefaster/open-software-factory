@@ -1,15 +1,37 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
-import { type AgentView, conversationViewSchema } from "../../apps/factory/src/api-contracts";
+import {
+  type AgentView,
+  agentViewSchema,
+  changesResponseSchema,
+  conversationViewSchema,
+  deliveryViewSchema,
+  developerIDEViewSchema,
+  sourceWorkspaceViewSchema,
+  writerViewSchema,
+} from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
-import type { ReviewFeedback } from "../../packages/conversation-domain/src/visual-review";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import {
+  type ReviewFeedback,
+  visualReviewSchema,
+} from "../../packages/conversation-domain/src/visual-review";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { fulfillAgentView, streamedAgentView } from "../support/agent-activity-route";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import {
+  browserBootstrap,
+  browserFunction,
+  completedConversation,
+  mockAgentView,
+  mockBootstrap,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
+import { streamedAgentView } from "../support/agent-activity-route";
 import { serveChatAssets } from "../support/chat-assets";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -22,22 +44,35 @@ test.beforeEach(async ({ page }) => {
   await serveChatAssets(page);
   await signIn(page);
   await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   projectID = crypto.randomUUID();
   ticketID = crypto.randomUUID();
   revisionID = crypto.randomUUID();
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no source" } }),
-  );
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) =>
-    route.fulfill({ status: 503, json: { error: "Controlled planning fixture has no IDE" } }),
-  );
-  // Scripted Changes have no database review. Individual review cases override this route.
-  await page.route("**/api/changes/*/review", (route) =>
-    route.fulfill({
-      json: { feedback: [], recordingEnabled: true, recording: null, scenarios: [] },
-    }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        throw new CommandError("unavailable", "Controlled planning fixture has no source");
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureEditor: async () => {
+        throw new CommandError("unavailable", "Controlled planning fixture has no IDE");
+      },
+    },
+  });
+  // Scripted Changes have no database review. Individual cases override the service double.
+  await mockFactoryFunctions(page, {
+    review: {
+      get: async () =>
+        visualReviewSchema.parse({
+          feedback: [],
+          recording: null,
+          scenarios: [],
+        }),
+    },
+  });
   const canonical = canonicalRequirementContent({
     summary: "Make the **starter** welcoming.",
     acceptanceCriteria: ["A clear first action."],
@@ -71,89 +106,99 @@ async function selectProject(page: Parameters<typeof signIn>[0]) {
 test("review distinguishes source checks from App video timing", async ({ page }) => {
   const changeID = crypto.randomUUID();
   const recordingID = crypto.randomUUID();
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-source-case",
-            baseSha: "a".repeat(40),
-            state: "active",
-            runtimeState: "ready",
-            branchState: "succeeded",
-            implementationState: "committed",
-            buildTurnState: "completed",
-          },
-        ],
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-source-case",
+              baseSha: "a".repeat(40),
+              state: "active",
+              runtimeState: "ready",
+              branchState: "succeeded",
+              implementationState: "committed",
+              buildTurnState: "completed",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: "committed",
+      sessionAvailable: true,
+      runtimeConnected: true,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
+    }),
+    { activity: true },
+  );
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({
+          verificationState: "succeeded",
+          reviewState: "passed",
+          reviewCurrent: true,
+        });
       },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: "committed",
-        sessionAvailable: true,
-        runtimeConnected: true,
-        messagesAvailable: true,
-        messages: [],
-        stopPending: false,
-        stopId: null,
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
-    route.fulfill({
-      json: { verificationState: "succeeded", reviewState: "passed", reviewCurrent: true },
-    }),
-  );
+    },
+  });
   await page.route(`**/api/changes/${changeID}/review/media/${recordingID}`, (route) =>
     route.fulfill({ status: 503, body: "Controlled video unavailability, not an App result." }),
   );
-  await page.route(`**/api/changes/${changeID}/review`, (route) =>
-    route.fulfill({
-      json: {
-        feedback: [],
-        recordingEnabled: true,
-        recordingCurrent: true,
-        recording: {
-          id: recordingID,
-          state: "complete",
-          commitSha: "b".repeat(40),
-          durationMs: 15000,
-          reason: null,
-        },
-        scenarios: [
-          {
-            id: "source-check",
-            title: "Protected repository checks",
-            category: "normal",
-            observationKind: "source",
-            startedMs: 0,
-            endedMs: null,
-            hasRecordingPosition: false,
-            status: "passed",
-            expected: "The reviewed commit has relevant protected checks.",
-            observed: "Read the exact workflow and tests; Factory confirmed the same commit's CI.",
+  await mockFactoryFunctions(page, {
+    review: {
+      get: async () =>
+        visualReviewSchema.parse({
+          feedback: [],
+          recordingCurrent: true,
+          recording: {
+            id: recordingID,
+            state: "complete",
+            commitSha: "b".repeat(40),
+            durationMs: 15000,
+            reason: null,
           },
-          {
-            id: "app-check",
-            title: "Invalid App input",
-            category: "error",
-            observationKind: "app",
-            startedMs: 0,
-            endedMs: null,
-            hasRecordingPosition: false,
-            status: "passed",
-            expected: "Invalid input is rejected.",
-            observed: "The App showed its validation error.",
-          },
-        ],
-      },
-    }),
-  );
+          scenarios: [
+            {
+              id: "source-check",
+              title: "Protected repository checks",
+              category: "normal",
+              observationKind: "source",
+              startedMs: 0,
+              endedMs: null,
+              hasRecordingPosition: false,
+              status: "passed",
+              expected: "The reviewed commit has relevant protected checks.",
+              observed:
+                "Read the exact workflow and tests; Factory confirmed the same commit's CI.",
+            },
+            {
+              id: "app-check",
+              title: "Invalid App input",
+              category: "error",
+              observationKind: "app",
+              startedMs: 0,
+              endedMs: null,
+              hasRecordingPosition: false,
+              status: "passed",
+              expected: "Invalid input is rejected.",
+              observed: "The App showed its validation error.",
+            },
+          ],
+        }),
+    },
+  });
   await selectProject(page);
   await page
     .getByRole("region", { name: "Ticket board" })
@@ -219,7 +264,7 @@ for (const state of [
           : state.id === "checks-paused"
             ? "stopped"
             : "passed";
-    const { session } = await (await page.request.get("/api/session")).json();
+    const { session } = await browserBootstrap(page);
     const database = createDatabase(1);
     try {
       await database.client`UPDATE factory.ticket
@@ -229,10 +274,10 @@ for (const state of [
       await database.client.end();
     }
     if (state.id === "proposal") {
-      const detail = await (await page.request.get(`/api/tickets/${ticketID}`)).json();
-      await page.route(`**/api/tickets/${ticketID}`, (route) =>
-        route.fulfill({
-          json: {
+      const detail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
+      await mockFactoryFunctions(page, {
+        tickets: {
+          detail: async () => ({
             ...detail,
             proposal: {
               id: crypto.randomUUID(),
@@ -244,100 +289,106 @@ for (const state of [
               },
               base: { version: detail.ticket.version, documentId: null, revisionId: revisionID },
             },
-          },
-        }),
-      );
+          }),
+        },
+      });
     }
-    await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-      route.fulfill({
-        json: {
-          changes: hasChange
-            ? [
-                {
-                  id: changeID,
-                  projectId: projectID,
-                  ticketId: ticketID,
-                  branchName: "factory/owned-action-bar",
-                  baseSha: "a".repeat(40),
-                  state: delivered ? "delivered" : preparing ? "starting" : "active",
-                  runtimeState: preparing ? "create-intended" : "ready",
-                  branchState: "succeeded",
-                  implementationState: preparing
-                    ? "starting"
-                    : coding || paused
-                      ? "working"
-                      : "committed",
-                  buildTurnState:
-                    preparing || paused ? "pending" : coding ? "running" : "completed",
-                },
-              ]
-            : [],
-        },
-      }),
-    );
-    await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-      fulfillAgentView(route, {
-        json: {
-          state: preparing || paused ? "starting" : coding ? "working" : "committed",
-          sessionAvailable: true,
-          runtimeConnected: !preparing,
-          messagesAvailable: true,
-          messages: [],
-          stopPending: false,
-          stopId: null,
-          codingPause: paused ? { turnID, reason: "finish-reserve-used" } : null,
-        },
-      }),
-    );
-    await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
-      route.fulfill({
-        json:
-          preparing || coding || paused
-            ? {}
-            : {
-                verificationState: state.id === "checks-paused" ? "cancelled" : "succeeded",
-                reviewState,
-                reviewCurrent: true,
-                openReviewThreads: state.id === "revision" ? 1 : 0,
-                ...(state.id === "checks-paused" ? { checksStopId: crypto.randomUUID() } : {}),
-              },
-      }),
-    );
-    await page.route(`**/api/changes/${changeID}/review`, (route) =>
-      route.fulfill({
-        json: {
-          feedback:
-            state.id === "revision"
+    await mockFactoryFunctions(page, {
+      runtime: {
+        changes: async () =>
+          changesResponseSchema.parse({
+            changes: hasChange
               ? [
                   {
-                    id: crypto.randomUUID(),
-                    kind: "thread",
-                    state: "open",
-                    version: 1,
-                    authorId: session.user.id,
-                    author: "Reviewer",
-                    commitSha: "a".repeat(40),
-                    annotation: null,
-                    createdAt: new Date().toISOString(),
-                    messages: [
-                      {
-                        id: crypto.randomUUID(),
-                        author: "Reviewer",
-                        body: "Keep the entered draft after validation.",
-                        createdAt: new Date().toISOString(),
-                      },
-                    ],
+                    id: changeID,
+                    projectId: projectID,
+                    ticketId: ticketID,
+                    branchName: "factory/owned-action-bar",
+                    baseSha: "a".repeat(40),
+                    state: delivered ? "delivered" : preparing ? "starting" : "active",
+                    runtimeState: preparing ? "create-intended" : "ready",
+                    branchState: "succeeded",
+                    implementationState: preparing
+                      ? "starting"
+                      : coding || paused
+                        ? "working"
+                        : "committed",
+                    buildTurnState:
+                      preparing || paused ? "pending" : coding ? "running" : "completed",
                   },
                 ]
               : [],
-          recordingEnabled: false,
-          recording: null,
-          scenarios: [],
-          canSendCorrections: state.id === "revision",
-          readOnly: delivered,
-        },
+          }),
+      },
+    });
+    await mockAgentView(
+      page,
+      changeID,
+      async () => ({
+        state: preparing || paused ? "starting" : coding ? "working" : "committed",
+        sessionAvailable: true,
+        runtimeConnected: !preparing,
+        messagesAvailable: true,
+        messages: [],
+        stopPending: false,
+        stopId: null,
+        codingPause: paused ? { turnID, reason: "finish-reserve-used" } : null,
       }),
+      { activity: true },
     );
+    await mockFactoryFunctions(page, {
+      delivery: {
+        async get(_actor, id) {
+          if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+          return deliveryViewSchema.parse(
+            preparing || coding || paused
+              ? {}
+              : {
+                  verificationState: state.id === "checks-paused" ? "cancelled" : "succeeded",
+                  reviewState,
+                  reviewCurrent: true,
+                  openReviewThreads: state.id === "revision" ? 1 : 0,
+                  ...(state.id === "checks-paused" ? { checksStopId: crypto.randomUUID() } : {}),
+                },
+          );
+        },
+      },
+    });
+    await mockFactoryFunctions(page, {
+      review: {
+        get: async () =>
+          visualReviewSchema.parse({
+            feedback:
+              state.id === "revision"
+                ? [
+                    {
+                      id: crypto.randomUUID(),
+                      kind: "thread",
+                      state: "open",
+                      version: 1,
+                      authorId: session.user.id,
+                      author: "Reviewer",
+                      commitSha: "a".repeat(40),
+                      annotation: null,
+                      createdAt: new Date().toISOString(),
+                      messages: [
+                        {
+                          id: crypto.randomUUID(),
+                          author: "Reviewer",
+                          body: "Keep the entered draft after validation.",
+                          createdAt: new Date().toISOString(),
+                        },
+                      ],
+                    },
+                  ]
+                : [],
+            recording: null,
+            scenarios: [],
+            canSendCorrections: state.id === "revision",
+            readOnly: delivered,
+          }),
+      },
+    });
     let commands = 0;
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -404,6 +455,23 @@ for (const state of [
         };
       });
       expect(metrics.icons).toBe(0);
+      const header = await page.locator(".ticket-document-heading").evaluate((element) => {
+        const title = element.querySelector(".workspace-heading-title")?.getBoundingClientRect();
+        const actions = element.querySelector(".workspace-action-bar")?.getBoundingClientRect();
+        if (!title || !actions) throw new Error("Missing document title or actions");
+        return {
+          title: title.toJSON(),
+          actions: actions.toJSON(),
+          overflow: element.scrollWidth - element.clientWidth,
+        };
+      });
+      expect(header.overflow).toBeLessThanOrEqual(1);
+      expect(header.title.top).toBeLessThanOrEqual(header.actions.top + 1);
+      if (header.actions.top < header.title.bottom - 1)
+        expect(header.title.right).toBeLessThanOrEqual(header.actions.left + 1);
+      else expect(header.title.bottom).toBeLessThanOrEqual(header.actions.top + 1);
+      if (width === 1440)
+        expect(Math.abs(header.title.top - header.actions.top)).toBeLessThanOrEqual(1);
       for (const style of metrics.styles)
         expect(style).toEqual(["rgba(0, 0, 0, 0)", "0px", "none", "32px"]);
       if (state.primary) expect(metrics.last).toBe("true");
@@ -427,8 +495,8 @@ for (const state of [
         expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
         expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(960);
         if (state.id === "revision" && width === 430) {
-          const refreshed = page.waitForResponse(
-            (response) => new URL(response.url()).pathname === `/api/changes/${changeID}/review`,
+          const refreshed = page.waitForResponse((response) =>
+            new URL(response.url()).pathname.startsWith("/_server/data/getVisualReview-"),
           );
           await page.evaluate(
             (id) => window.dispatchEvent(new CustomEvent("factory-review-changed", { detail: id })),
@@ -529,28 +597,42 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
     implementationState: "starting",
     buildTurnState: "pending",
   };
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({ json: { changes: [change] } }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: "starting",
-        sessionAvailable: true,
-        runtimeConnected: false,
-        messagesAvailable: true,
-        messages: [],
-        stopPending: false,
-        stopId: null,
-        computeWait: paused ? null : "capacity",
-        codingPause: paused ? { turnID, reason: "finish-reserve-used" } : null,
-      },
+  await mockFactoryFunctions(page, {
+    runtime: { changes: async () => changesResponseSchema.parse({ changes: [change] }) },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: "starting",
+      sessionAvailable: true,
+      runtimeConnected: false,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
+      computeWait: paused ? null : "capacity",
+      codingPause: paused ? { turnID, reason: "finish-reserve-used" } : null,
     }),
+    { activity: true },
   );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
-  await page.route(`**/api/changes/${changeID}/agent/resume`, (route) => {
-    resumes.push(route.request().postDataJSON());
-    return route.abort("failed");
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    agent: {
+      resume: async (_actor, factoryTargetID, factoryCommand) => {
+        resumes.push(factoryCommand);
+        return (() => {
+          throw new Error("Controlled lost response");
+        })();
+      },
+    },
   });
   await selectProject(page);
   await page
@@ -603,50 +685,59 @@ test("a queued first Build shows preparation after reconnect, not active impleme
     )
       executionWrites++;
   });
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-preparing",
-            baseSha: "a".repeat(40),
-            state: working ? "active" : "starting",
-            branchState: "succeeded",
-            runtimeState: working ? "ready" : "create-intended",
-            implementationState: working ? "working" : "starting",
-            buildTurnState: working ? "running" : "pending",
-          },
-        ],
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-preparing",
+              baseSha: "a".repeat(40),
+              state: working ? "active" : "starting",
+              branchState: "succeeded",
+              runtimeState: working ? "ready" : "create-intended",
+              implementationState: working ? "working" : "starting",
+              buildTurnState: working ? "running" : "pending",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: working ? "working" : "starting",
+      sessionAvailable: working,
+      runtimeConnected: working,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
+      turn: {
+        id: turnID,
+        commandId: commandID,
+        mode: "build",
+        engine: "opencode",
+        modelId: "owned-coding-model",
+        codingReasoning: "medium",
+        skills: [],
+        state: working ? "running" : "pending",
       },
     }),
+    { activity: true },
   );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: working ? "working" : "starting",
-        sessionAvailable: working,
-        runtimeConnected: working,
-        messagesAvailable: true,
-        messages: [],
-        stopPending: false,
-        stopId: null,
-        turn: {
-          id: turnID,
-          commandId: commandID,
-          mode: "build",
-          engine: "opencode",
-          modelId: "owned-coding-model",
-          codingReasoning: "medium",
-          skills: [],
-          state: working ? "running" : "pending",
-        },
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
       },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+    },
+  });
   const open = async () => {
     await selectProject(page);
     await page
@@ -711,37 +802,39 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
     if (request.method() === "POST" && /\/agent\/(?:start|prompt)$/.test(request.url()))
       implementationRequests.push(request.url());
   });
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-stopped",
-            baseSha: "a".repeat(40),
-            state: "active",
-            branchState: "succeeded",
-            implementationState: resumed ? "committed" : "stopped",
-            buildTurnState: "completed",
-          },
-        ],
-      },
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-stopped",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              implementationState: resumed ? "committed" : "stopped",
+              buildTurnState: "completed",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: resumed ? "committed" : "stopped",
+      sessionAvailable: true,
+      runtimeConnected: false,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
     }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: resumed ? "committed" : "stopped",
-        sessionAvailable: true,
-        runtimeConnected: false,
-        messagesAvailable: true,
-        messages: [],
-        stopPending: false,
-        stopId: null,
-      },
-    }),
+    { activity: true },
   );
   const delivery = () => ({
     verificationId: verificationID,
@@ -749,15 +842,28 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
     verificationState: "runner-starting",
     ...(!resumed ? { checksStopId: stopID } : {}),
   });
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
-    route.fulfill({ json: delivery() }),
-  );
-  await page.route(`**/api/changes/${changeID}/delivery/resume-checks`, (route) => {
-    requests.push(route.request().postDataJSON());
-    if (requests.length === 1) return route.abort("failed");
-    resumed = true;
-    return route.fulfill({ status: 202, json: delivery() });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse(delivery());
+      },
+    },
   });
+  await mockFactoryFunctions(
+    page,
+    {
+      delivery: {
+        async resumeChecks(_actor, id, input) {
+          expect(id).toBe(changeID);
+          requests.push(input);
+          if (requests.length > 1) resumed = true;
+          return deliveryViewSchema.parse(delivery());
+        },
+      },
+    },
+    (name) => name === "resumeVerification" && requests.length === 1,
+  );
   await selectProject(page);
   await page
     .getByRole("region", { name: "implementation", exact: true })
@@ -796,11 +902,18 @@ test("Implement is one explicit recoverable action and does not open IDE or Assi
   page,
 }) => {
   const requests: Array<{ commandId: string; revisionId: string }> = [];
-  await page.route(`**/api/tickets/${ticketID}/implement`, async (route) => {
-    requests.push(route.request().postDataJSON());
-    if (requests.length === 1) return route.abort("failed");
-    return route.fulfill({ status: 202, contentType: "application/json", body: "{}" });
-  });
+  await mockFactoryFunctions(
+    page,
+    {
+      tickets: {
+        async implement(_actor, _id, input) {
+          requests.push(input);
+          return { id: crypto.randomUUID() };
+        },
+      },
+    },
+    (name) => name === "implementTicket" && requests.length === 1,
+  );
   await selectProject(page);
   await page
     .getByRole("region", { name: "requirements", exact: true })
@@ -834,7 +947,11 @@ test("developer Coding options choose reasoning before the normal atomic Impleme
   test.setTimeout(60_000);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  const requests: Array<{ commandId: string; revisionId: string; codingReasoning?: string }> = [];
+  const requests: Array<{
+    commandId: string;
+    revisionId: string;
+    codingReasoning?: string | undefined;
+  }> = [];
   const codingTitle =
     "Implement the staff support inbox with personal request tracking, open and done filters, keyboard access, and safe account switching";
   const fixtureDatabase = createDatabase(1);
@@ -843,25 +960,25 @@ test("developer Coding options choose reasoning before the normal atomic Impleme
   } finally {
     await fixtureDatabase.client.end();
   }
-  const sessionSnapshot = await (await page.request.get("/api/session")).json();
-  const configuration = await (
-    await page.request.get(`/api/projects/${projectID}/model-settings`)
-  ).json();
+  const sessionSnapshot = await browserBootstrap(page);
+  const configuration = await serverCall(browserFunction(page, "getProjectModels", [projectID]));
   configuration.system.connection.buildProvider = "openai";
   configuration.system.rules.build.reasoningEffort = "medium";
   configuration.effective.build.modelId = "gpt-6.1-sol";
-  await page.route("**/api/session", (route) =>
-    route.fulfill({ json: { ...sessionSnapshot, modelRelayConfigured: true } }),
+  await mockBootstrap(page, () => ({ ...sessionSnapshot, modelRelayConfigured: true }));
+  await mockFactoryFunctions(page, { models: { inherited: async () => configuration } });
+  await mockFactoryFunctions(
+    page,
+    {
+      tickets: {
+        async implement(_actor, _id, input) {
+          requests.push(input);
+          return { id: crypto.randomUUID() };
+        },
+      },
+    },
+    (name) => name === "implementTicket" && requests.length === 1,
   );
-  await page.route(`**/api/projects/${projectID}/model-settings`, (route) =>
-    route.fulfill({ json: configuration }),
-  );
-  await page.route(`**/api/tickets/${ticketID}/implement`, (route) => {
-    requests.push(route.request().postDataJSON());
-    return requests.length === 1
-      ? route.abort("connectionreset")
-      : route.fulfill({ status: 202, json: {} });
-  });
   await selectProject(page);
   await page
     .getByRole("region", { name: "requirements", exact: true })
@@ -955,69 +1072,81 @@ test("an admitted Coding-options request with a lost response reconnects to its 
   const turnID = crypto.randomUUID();
   const requests: Array<{ commandId: string; codingReasoning: string }> = [];
   let admitted = false;
-  const session = await (await page.request.get("/api/session")).json();
-  const configuration = await (
-    await page.request.get(`/api/projects/${projectID}/model-settings`)
-  ).json();
+  const session = await browserBootstrap(page);
+  const configuration = await serverCall(browserFunction(page, "getProjectModels", [projectID]));
   configuration.system.connection.buildProvider = "openai";
   configuration.effective.build.modelId = "gpt-6.1-sol";
-  await page.route("**/api/session", (route) =>
-    route.fulfill({ json: { ...session, modelRelayConfigured: true } }),
-  );
-  await page.route(`**/api/projects/${projectID}/model-settings`, (route) =>
-    route.fulfill({ json: configuration }),
-  );
-  await page.route(`**/api/tickets/${ticketID}/implement`, (route) => {
-    requests.push(route.request().postDataJSON());
-    admitted = true;
-    return route.abort("connectionreset");
-  });
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: admitted
-          ? [
-              {
-                id: changeID,
-                projectId: projectID,
-                ticketId: ticketID,
-                branchName: "factory/owned-options-recovery",
-                baseSha: "a".repeat(40),
-                state: "starting",
-                branchState: "succeeded",
-                runtimeState: "starting",
-                implementationState: "starting",
-                buildTurnState: "pending",
-              },
-            ]
-          : [],
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: "starting",
-        sessionAvailable: false,
-        runtimeConnected: false,
-        messagesAvailable: true,
-        messages: [],
-        stopPending: false,
-        stopId: null,
-        turn: {
-          id: turnID,
-          commandId: requests[0]?.commandId,
-          engine: "opencode",
-          mode: "build",
-          modelId: "gpt-6.1-sol",
-          codingReasoning: "high",
-          state: "pending",
-          skills: [],
+  await mockBootstrap(page, () => ({ ...session, modelRelayConfigured: true }));
+  await mockFactoryFunctions(page, { models: { inherited: async () => configuration } });
+  await mockFactoryFunctions(
+    page,
+    {
+      tickets: {
+        async implement(_actor, _id, input) {
+          if (!input.codingReasoning) throw new Error("Expected the selected reasoning");
+          requests.push({ ...input, codingReasoning: input.codingReasoning });
+          admitted = true;
+          return { id: changeID };
         },
       },
-    }),
+    },
+    (name) => name === "implementTicket",
   );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: admitted
+            ? [
+                {
+                  id: changeID,
+                  projectId: projectID,
+                  ticketId: ticketID,
+                  branchName: "factory/owned-options-recovery",
+                  baseSha: "a".repeat(40),
+                  state: "starting",
+                  branchState: "succeeded",
+                  runtimeState: "starting",
+                  implementationState: "starting",
+                  buildTurnState: "pending",
+                },
+              ]
+            : [],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: "starting",
+      sessionAvailable: false,
+      runtimeConnected: false,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
+      turn: {
+        id: turnID,
+        commandId: requests[0]?.commandId,
+        engine: "opencode",
+        mode: "build",
+        modelId: "gpt-6.1-sol",
+        codingReasoning: "high",
+        state: "pending",
+        skills: [],
+      },
+    }),
+    { activity: true },
+  );
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
+      },
+    },
+  });
   await selectProject(page);
   await page
     .getByRole("region", { name: "requirements", exact: true })
@@ -1055,9 +1184,13 @@ test("an implementing Ticket never offers another Implement while its Change rea
   const db = createDatabase(1);
   try {
     await db.client`UPDATE factory.ticket SET state='in-progress' WHERE id=${ticketID}`;
-    await page.route(`**/api/changes?projectId=${projectID}`, async (route) => {
-      await release.promise;
-      await route.fulfill({ json: { changes: [] } });
+    await mockFactoryFunctions(page, {
+      runtime: {
+        changes: async (_actor, factoryTargetID) => {
+          await release.promise;
+          return changesResponseSchema.parse({ changes: [] });
+        },
+      },
     });
     await selectProject(page);
     await page
@@ -1081,46 +1214,66 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
   page,
 }) => {
   const changeID = crypto.randomUUID();
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-failed",
-            baseSha: "a".repeat(40),
-            state: "failed",
-            branchState: "succeeded",
-            runtimeState: "failed",
-            implementationState: "failed",
-            buildTurnState: "failed",
-          },
-        ],
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-failed",
+              baseSha: "a".repeat(40),
+              state: "failed",
+              branchState: "succeeded",
+              runtimeState: "failed",
+              implementationState: "failed",
+              buildTurnState: "failed",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: "failed",
+      sessionAvailable: true,
+      runtimeConnected: false,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
+      lastError: "Owned Sandbox startup failed",
+    }),
+    { activity: true },
+  );
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
       },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: "failed",
-        sessionAvailable: true,
-        runtimeConnected: false,
-        messagesAvailable: true,
-        messages: [],
-        stopPending: false,
-        stopId: null,
-        lastError: "Owned Sandbox startup failed",
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
-  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
-    route.fulfill({
-      json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
-    }),
-  );
+    },
+  });
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{ state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+        }),
+      observe: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{ state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+        }),
+    },
+  });
   await selectProject(page);
   await page
     .getByRole("region", { name: "implementation", exact: true })
@@ -1165,8 +1318,8 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   let agentReads = 0;
   const firstObservation = Promise.withResolvers<void>();
   let holdingFirstObservation = true;
-  let commandId = crypto.randomUUID();
-  const starts: Array<{ commandId: string; codingReasoning?: string }> = [];
+  let commandId: string = crypto.randomUUID();
+  const starts: Array<{ commandId: string; codingReasoning?: string | undefined }> = [];
   const view = () => ({
     state,
     sessionAvailable: state !== "idle",
@@ -1190,73 +1343,105 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
           },
         }),
   });
-  const sessionSnapshot = await (await page.request.get("/api/session")).json();
-  const configurationSnapshot = await (
-    await page.request.get(`/api/projects/${projectID}/model-settings`)
-  ).json();
+  const sessionSnapshot = await browserBootstrap(page);
+  const configurationSnapshot = await serverCall(
+    browserFunction(page, "getProjectModels", [projectID]),
+  );
   configurationSnapshot.system.connection.buildProvider = "openai";
   configurationSnapshot.system.rules.build.reasoningEffort = "medium";
   configurationSnapshot.effective.build.modelId = "gpt-6.1-sol";
-  await page.route("**/api/session", (route) =>
-    route.fulfill({
-      json: { ...sessionSnapshot, modelRelayConfigured: true },
-    }),
-  );
-  await page.route(`**/api/projects/${projectID}/model-settings`, (route) => {
-    configurationReads++;
-    return route.fulfill({ json: configurationSnapshot });
-  });
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-reasoning",
-            baseSha: "a".repeat(40),
-            state: "active",
-            branchState: "succeeded",
-            runtimeState: "ready",
-            implementationState: state,
-            buildTurnState:
-              state === "idle" ? undefined : state === "working" ? "running" : "stopped",
-          },
-        ],
+  await mockBootstrap(page, () => ({ ...sessionSnapshot, modelRelayConfigured: true }));
+  await mockFactoryFunctions(page, {
+    models: {
+      inherited: async () => {
+        configurationReads++;
+        return configurationSnapshot;
       },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, async (route) => {
-    agentReads++;
-    if (holdingFirstObservation) await firstObservation.promise;
-    return fulfillAgentView(route, { json: view() });
+    },
   });
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
-  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
-    route.fulfill({
-      json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
-    }),
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-reasoning",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              runtimeState: "ready",
+              implementationState: state,
+              buildTurnState:
+                state === "idle" ? undefined : state === "working" ? "running" : "stopped",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async (factoryTargetID, factoryHistory) => {
+      agentReads++;
+      if (holdingFirstObservation) await firstObservation.promise;
+      return agentViewSchema.parse(view());
+    },
+    { activity: true },
   );
-  await page.route(`**/api/projects/${projectID}/conversation/mode`, (route) =>
-    route.fulfill({
-      json: {
-        id: crypto.randomUUID(),
-        projectId: projectID,
-        ticketId: ticketID,
-        mode: "build",
-        version: 1,
-        entries: [],
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
       },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent/start`, (route) => {
-    const input = route.request().postDataJSON();
-    starts.push(input);
-    if (starts.length === 1) return route.abort("connectionreset");
-    commandId = input.commandId;
-    state = "working";
-    return route.fulfill({ json: view() });
+    },
+  });
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{ state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+        }),
+      observe: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{ state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+        }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      mode: async () =>
+        conversationViewSchema.parse({
+          id: crypto.randomUUID(),
+          projectId: projectID,
+          ticketId: ticketID,
+          mode: "build",
+          version: 1,
+          entries: [],
+        }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    agent: {
+      start: async (_actor, factoryTargetID, factoryCommand) => {
+        const input = factoryCommand;
+        starts.push(input);
+        if (starts.length === 1)
+          return (() => {
+            throw new Error("Controlled lost response");
+          })();
+        commandId = input.commandId;
+        state = "working";
+        return agentViewSchema.parse(view());
+      },
+    },
   });
   await selectProject(page);
   await page
@@ -1290,26 +1475,30 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   ).toBeEnabled();
   await expect(panel.getByRole("button", { name: "Send message", exact: true })).toHaveCount(0);
   async function expectToolbar(action: string) {
+    const composer = panel.locator(".agent-composer");
     const toolbar = panel.locator(".agent-compose-toolbar");
     const button = toolbar.getByRole("button", { name: action, exact: true });
     await expect(button).toBeVisible();
     await expect
       .poll(() =>
-        toolbar.evaluate((element) => {
+        composer.evaluate((element) => {
           const selection = element.querySelector("select")?.getBoundingClientRect();
-          const action = element.querySelector("button")?.getBoundingClientRect();
+          const action = element.querySelector(".composer-actions button")?.getBoundingClientRect();
           const bounds = element.getBoundingClientRect();
+          const padding = Number.parseFloat(getComputedStyle(element).paddingRight);
+          const hasDraft = !!element.querySelector("textarea");
           return selection && action
             ? {
-                sameLine:
-                  Math.abs(selection.y + selection.height / 2 - action.y - action.height / 2) <= 2,
-                selectionBeforeAction: selection.right <= action.x,
-                actionAtRight: Math.abs(bounds.right - action.right) <= 2,
+                selectionPositionCorrect: hasDraft
+                  ? selection.bottom <= action.top
+                  : Math.abs(selection.y + selection.height / 2 - action.y - action.height / 2) <=
+                      2 && selection.right <= action.x,
+                actionAtRight: Math.abs(bounds.right - padding - action.right) <= 2,
               }
             : {};
         }),
       )
-      .toEqual({ sameLine: true, selectionBeforeAction: true, actionAtRight: true });
+      .toEqual({ selectionPositionCorrect: true, actionAtRight: true });
     expect(await toolbar.locator("button").count()).toBe(1);
   }
   await expectToolbar("Start implementation");
@@ -1359,8 +1548,15 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   await expect(panel.locator(".agent-input-shell")).toHaveCSS("outline-style", "solid");
   await expect(panel.locator(".agent-input-shell")).toHaveCSS("outline-width", "2px");
   const inputBox = await panel.getByLabel("Message conversation").boundingBox();
-  const footerBox = await panel.locator(".agent-compose-toolbar").boundingBox();
-  expect(inputBox && footerBox && inputBox.width >= footerBox.width - 2).toBe(true);
+  const inputWidth = await panel.locator(".agent-composer").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return (
+      element.clientWidth -
+      Number.parseFloat(style.paddingLeft) -
+      Number.parseFloat(style.paddingRight)
+    );
+  });
+  expect(inputBox && inputBox.width >= inputWidth - 2).toBe(true);
   await expect(
     panel.getByRole("button", { name: "Retry implementation", exact: true }),
   ).toHaveCount(0);
@@ -1398,12 +1594,9 @@ for (const role of ["developer", "product-contributor"] as const) {
     test.setTimeout(90_000);
     const password = "owned-coding-model-scope-password";
     const email = `coding-model-${projectID}@factory.local`;
-    const created = await page.request.post("/api/admin/users", {
-      headers: { origin: new URL(page.url()).origin },
-      data: { name: `Coding model ${role}`, email, password },
-    });
-    expect(created.status()).toBe(201);
-    const user: { id: string } = await created.json();
+    const user = await serverCall(
+      browserFunction(page, "createAccount", [{ name: `Coding model ${role}`, email, password }]),
+    );
     const context = await browser.newContext({
       baseURL: new URL(page.url()).origin,
       viewport: { width: 1440, height: 900 },
@@ -1417,70 +1610,87 @@ for (const role of ["developer", "product-contributor"] as const) {
     const commandID = crypto.randomUUID();
     let hasChange = false;
     try {
-      const membership = await page.request.post(`/api/projects/${projectID}/members`, {
-        headers: { origin: new URL(page.url()).origin },
+      const membership = await browserFunction(page, "saveProjectMember", [
+        projectID,
         // Managing a Project does not grant developer access.
-        data: { email, role, manageProject: role === "product-contributor" },
+        { email, role, manageProject: role === "product-contributor" },
+      ]);
+      expect(membership.ok).toBe(true);
+      await mockFactoryFunctions(member, {
+        workspaces: {
+          async ensurePersonalSource() {
+            throw new CommandError("unavailable", "No runtime in model control fixture");
+          },
+          async ensureEditor() {
+            throw new CommandError("unavailable", "No runtime in model control fixture");
+          },
+        },
       });
-      expect(membership.ok()).toBe(true);
-      for (const resource of ["source-workspace", "developer-ide"]) {
-        await member.route(`**/api/projects/${projectID}/${resource}/ensure`, (route) =>
-          route.fulfill({ status: 503, json: { error: "No runtime in model control fixture" } }),
-        );
-      }
-      await member.route(`**/api/changes?projectId=${projectID}`, (route) =>
-        route.fulfill({
-          json: {
-            changes: hasChange
-              ? [
-                  {
-                    id: changeID,
-                    projectId: projectID,
-                    ticketId: ticketID,
-                    branchName: "factory/owned-model-scope",
-                    baseSha: "a".repeat(40),
-                    state: "active",
-                    branchState: "succeeded",
-                    verificationState: "succeeded",
-                    implementationState: "committed",
-                    buildTurnState: "completed",
-                  },
-                ]
-              : [],
+      await mockFactoryFunctions(member, {
+        runtime: {
+          changes: async () =>
+            changesResponseSchema.parse({
+              changes: hasChange
+                ? [
+                    {
+                      id: changeID,
+                      projectId: projectID,
+                      ticketId: ticketID,
+                      branchName: "factory/owned-model-scope",
+                      baseSha: "a".repeat(40),
+                      state: "active",
+                      branchState: "succeeded",
+                      verificationState: "succeeded",
+                      implementationState: "committed",
+                      buildTurnState: "completed",
+                    },
+                  ]
+                : [],
+            }),
+        },
+      });
+      await mockAgentView(
+        member,
+        changeID,
+        async () => ({
+          state: "committed",
+          sessionAvailable: true,
+          runtimeConnected: false,
+          messagesAvailable: true,
+          messages: [],
+          stopPending: false,
+          stopId: null,
+          turn: {
+            id: turnID,
+            commandId: commandID,
+            engine: "opencode",
+            mode: "build",
+            modelId: "gpt-6.1-sol",
+            codingReasoning: "medium",
+            state: "completed",
+            skills: [],
           },
         }),
+        { activity: true },
       );
-      await member.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-        fulfillAgentView(route, {
-          json: {
-            state: "committed",
-            sessionAvailable: true,
-            runtimeConnected: false,
-            messagesAvailable: true,
-            messages: [],
-            stopPending: false,
-            stopId: null,
-            turn: {
-              id: turnID,
-              commandId: commandID,
-              engine: "opencode",
-              mode: "build",
-              modelId: "gpt-6.1-sol",
-              codingReasoning: "medium",
-              state: "completed",
-              skills: [],
-            },
+      await mockFactoryFunctions(member, {
+        delivery: {
+          async get(_actor, id) {
+            if (id !== changeID) return serverCall(browserFunction(member, "getDelivery", [id]));
+            return deliveryViewSchema.parse({});
           },
-        }),
-      );
-      await member.route(`**/api/changes/${changeID}/delivery`, (route) =>
-        route.fulfill({ json: {} }),
-      );
-      await member.route(`**/api/changes/${changeID}/review`, (route) =>
-        route.fulfill({
-          json: { feedback: [], recording: null, recordingEnabled: false, scenarios: [] },
-        }),
-      );
+        },
+      });
+      await mockFactoryFunctions(member, {
+        review: {
+          get: async () =>
+            visualReviewSchema.parse({
+              feedback: [],
+              recording: null,
+              scenarios: [],
+            }),
+        },
+      });
       await member.goto("/");
       await member.getByLabel("Email", { exact: true }).fill(email);
       await member.getByLabel("Password", { exact: true }).fill(password);
@@ -1572,72 +1782,92 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
   const changeID = crypto.randomUUID();
   const command = "node --test src/support/lifecycle.test.mjs ".repeat(8);
   const output = Array.from({ length: 80 }, (_, index) => `Test ${index + 1} passed`).join("\n");
-  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
-    route.fulfill({
-      json: { state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
-    }),
-  );
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-tool-ui",
-            baseSha: "a".repeat(40),
-            state: "failed",
-            branchState: "succeeded",
-            runtimeState: "failed",
-            implementationState: "failed",
-            buildTurnState: "failed",
-          },
-        ],
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, {
-      json: {
-        state: "failed",
-        sessionAvailable: true,
-        runtimeConnected: false,
-        messagesAvailable: true,
-        messages: [
-          {
-            id: "owned-tool-one",
-            role: "tool",
-            text: command,
-            at: Date.now(),
-            activity: { name: "shell", status: "completed", detail: output },
-          },
-          {
-            id: "owned-tool-two",
-            role: "tool",
-            text: "Read src/web.tsx",
-            at: Date.now() + 1,
-            activity: { name: "read", status: "completed" },
-          },
-          {
-            id: "owned-tool-three",
-            role: "tool",
-            text: "node --test invalid.mjs",
-            at: Date.now() + 2,
-            activity: {
-              name: "shell",
-              status: "error",
-              detail: "The named test file was not found.",
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{ state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+        }),
+      observe: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{ state: "agent", epoch: 1, canWrite: false, yours: false, commandID: null },
+        }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-tool-ui",
+              baseSha: "a".repeat(40),
+              state: "failed",
+              branchState: "succeeded",
+              runtimeState: "failed",
+              implementationState: "failed",
+              buildTurnState: "failed",
             },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: "failed",
+      sessionAvailable: true,
+      runtimeConnected: false,
+      messagesAvailable: true,
+      messages: [
+        {
+          id: "owned-tool-one",
+          role: "tool",
+          text: command,
+          at: Date.now(),
+          activity: { name: "shell", status: "completed", detail: output },
+        },
+        {
+          id: "owned-tool-two",
+          role: "tool",
+          text: "Read src/web.tsx",
+          at: Date.now() + 1,
+          activity: { name: "read", status: "completed" },
+        },
+        {
+          id: "owned-tool-three",
+          role: "tool",
+          text: "node --test invalid.mjs",
+          at: Date.now() + 2,
+          activity: {
+            name: "shell",
+            status: "error",
+            detail: "The named test file was not found.",
           },
-        ],
-        stopPending: false,
-        stopId: null,
-        lastError: "Owned stopped UI fixture",
-      },
+        },
+      ],
+      stopPending: false,
+      stopId: null,
+      lastError: "Owned stopped UI fixture",
     }),
+    { activity: true },
   );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
+      },
+    },
+  });
   await selectProject(page);
   await page
     .getByRole("region", { name: "implementation", exact: true })
@@ -1686,7 +1916,8 @@ test("tool activity is one collapsed line, keyboard expandable and compact at na
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(summary).toBeVisible();
-  expect((await row.boundingBox())?.height).toBeLessThanOrEqual(32);
+  await expect(summary).toHaveCSS("min-height", "44px");
+  expect((await row.boundingBox())?.height).toBe(44);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({
     path: ".factory/test-results/implementation-journey/tool-collapsed-narrow.png",
@@ -1721,52 +1952,84 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
       },
     ],
   };
-  const stream = await streamedAgentView(view, new URL(page.url()).origin);
+  const stream = await streamedAgentView(view);
   let statusReads = 0;
   let mutations = 0;
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
+    if (
+      /\/_server\/data\/(?:startCoding|resumeCoding|stopCoding|checkCodingStop|newCodingConversation|sendCodingPrompt|requestCodingChanges)-/.test(
+        request.url(),
+      )
+    )
       mutations++;
   });
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-stream",
-            baseSha: "a".repeat(40),
-            state: "active",
-            branchState: "succeeded",
-            implementationState: "failed",
-            buildTurnState: "failed",
-            runtimeState: "ready",
-          },
-        ],
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) => {
-    statusReads++;
-    return route.fulfill({ json: view });
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-stream",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              implementationState: "failed",
+              buildTurnState: "failed",
+              runtimeState: "ready",
+            },
+          ],
+        }),
+    },
   });
-  await page.route(`**/api/changes/${changeID}/agent/activity`, (route) =>
-    route.continue({ url: stream.url }),
+  await mockAgentView(
+    page,
+    changeID,
+    async (factoryTargetID, factoryHistory) => {
+      statusReads++;
+      return agentViewSchema.parse(view);
+    },
+    { activity: false },
   );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
-  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
-    route.fulfill({
-      json: {
-        state: "agent",
-        epoch: 1,
-        canWrite: false,
-        yours: false,
-        commandID: null,
+  await mockFactoryFunctions(page, { agent: { activity: stream.activity } });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
       },
-    }),
-  );
+    },
+  });
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{
+            state: "agent",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
+          },
+        }),
+      observe: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{
+            state: "agent",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
+          },
+        }),
+    },
+  });
   const workspaceID = crypto.randomUUID();
   const source = {
     workspaceID,
@@ -1775,12 +2038,22 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
     state: "preparing",
     failure: null,
   };
-  await page.route(`**/api/changes/${changeID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ json: source }),
-  );
-  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) =>
-    route.fulfill({ json: source }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureChangeSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source),
+      }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      getSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source),
+      }),
+    },
+  });
   try {
     await selectProject(page);
     await page
@@ -1791,6 +2064,7 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
     await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
     await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     const rows = page.locator("details.agent-activity");
+    await expect.poll(stream.requests).toBe(1);
     await expect(rows).toHaveCount(1);
     const reads = statusReads;
     await page.waitForTimeout(1_200);
@@ -1845,31 +2119,34 @@ test("returning to the same Ticket keeps its retained Coding stream observable",
   } finally {
     await database.client.end();
   }
-  await page.route(`**/api/projects/${projectID}/conversation?ticketId=${ticketID}{,&*}`, (route) =>
-    route.fulfill({
-      json: conversationViewSchema.parse({
-        id: contextID,
-        projectId: projectID,
-        ticketId: ticketID,
-        mode: "build",
-        version: 1,
-        entries: [],
-        contextId: contextID,
-        activeCodingContextId: contextID,
-        isActiveCoding: true,
-        contexts: [
-          {
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async () =>
+        conversationViewSchema.nullable().parse(
+          conversationViewSchema.parse({
             id: contextID,
-            kind: "coding",
-            title: "Original Coding",
-            ordinal: 1,
-            original: true,
-            createdAt: new Date(0).toISOString(),
-          },
-        ],
-      }),
-    }),
-  );
+            projectId: projectID,
+            ticketId: ticketID,
+            mode: "build",
+            version: 1,
+            entries: [],
+            contextId: contextID,
+            activeCodingContextId: contextID,
+            isActiveCoding: true,
+            contexts: [
+              {
+                id: contextID,
+                kind: "coding",
+                title: "Original Coding",
+                ordinal: 1,
+                original: true,
+                createdAt: new Date(0).toISOString(),
+              },
+            ],
+          }),
+        ),
+    },
+  });
   const view: AgentView = {
     state: "waiting",
     runtimeState: "ready",
@@ -1892,52 +2169,75 @@ test("returning to the same Ticket keeps its retained Coding stream observable",
       },
     ],
   };
-  const stream = await streamedAgentView(view, new URL(page.url()).origin);
+  const stream = await streamedAgentView(view);
   let mutations = 0;
   page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes(`/changes/${changeID}/agent`))
+    if (
+      /\/_server\/data\/(?:startCoding|resumeCoding|stopCoding|checkCodingStop|newCodingConversation|sendCodingPrompt|requestCodingChanges)-/.test(
+        request.url(),
+      )
+    )
       mutations++;
   });
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-retained-stream",
-            baseSha: "a".repeat(40),
-            state: "active",
-            branchState: "succeeded",
-            implementationState: "waiting",
-            buildTurnState: "completed",
-            runtimeState: "ready",
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-retained-stream",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              implementationState: "waiting",
+              buildTurnState: "completed",
+              runtimeState: "ready",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(page, changeID, async () => view, { activity: false });
+  await mockFactoryFunctions(page, { agent: { activity: stream.activity } });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{
+            state: "agent",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
           },
-        ],
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({ json: view }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent/activity`, (route) =>
-    route.continue({ url: stream.url }),
-  );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
-  await page.route(`**/api/changes/${changeID}/writer{,/status}`, (route) =>
-    route.fulfill({
-      json: {
-        state: "agent",
-        epoch: 1,
-        canWrite: false,
-        yours: false,
-        commandID: null,
-        actor: null,
-        requester: null,
-      },
-    }),
-  );
+        }),
+      observe: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{
+            state: "agent",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
+          },
+        }),
+    },
+  });
   const workspaceID = crypto.randomUUID();
   const source = {
     workspaceID,
@@ -1946,12 +2246,22 @@ test("returning to the same Ticket keeps its retained Coding stream observable",
     state: "preparing",
     failure: null,
   };
-  await page.route(`**/api/changes/${changeID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ json: source }),
-  );
-  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) =>
-    route.fulfill({ json: source }),
-  );
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureChangeSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source),
+      }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      getSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source),
+      }),
+    },
+  });
   try {
     await selectProject(page);
     const ticket = page
@@ -2025,45 +2335,66 @@ test("admitted instructions remain visible before native dispatch and appear onc
     stopId: null,
     lastError: "Source Pod is no longer ready",
   };
-  const stream = await streamedAgentView(view, new URL(page.url()).origin);
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({
-      json: {
-        changes: [
-          {
-            id: changeID,
-            projectId: projectID,
-            ticketId: ticketID,
-            branchName: "factory/owned-input",
-            baseSha: "a".repeat(40),
-            state: "active",
-            branchState: "succeeded",
-            implementationState: "failed",
-            buildTurnState: "failed",
-            runtimeState: "stopped",
+  const stream = await streamedAgentView(view);
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-input",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              implementationState: "failed",
+              buildTurnState: "failed",
+              runtimeState: "stopped",
+            },
+          ],
+        }),
+    },
+  });
+  await mockAgentView(page, changeID, async () => view, { activity: false });
+  await mockFactoryFunctions(page, { agent: { activity: stream.activity } });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({});
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    writer: {
+      status: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{
+            state: "agent",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
           },
-        ],
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*}`, (route) =>
-    route.fulfill({ json: view }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent/activity`, (route) =>
-    route.continue({ url: stream.url }),
-  );
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) => route.fulfill({ json: {} }));
-  await page.route(`**/api/changes/${changeID}/writer`, (route) =>
-    route.fulfill({
-      json: {
-        state: "agent",
-        epoch: 1,
-        canWrite: false,
-        yours: false,
-        commandID: null,
-      },
-    }),
-  );
+        }),
+      observe: async () =>
+        writerViewSchema.parse({
+          actor: null,
+          requester: null,
+          ...{
+            state: "agent",
+            epoch: 1,
+            canWrite: false,
+            yours: false,
+            commandID: null,
+          },
+        }),
+    },
+  });
   try {
     await selectProject(page);
     await page
@@ -2076,6 +2407,7 @@ test("admitted instructions remain visible before native dispatch and appear onc
     const panel = page.locator(".agent-panel");
     await expect(panel.getByText(text, { exact: true })).toHaveCount(1);
     await expect(panel).toContainText("Activity will load when the Workspace resumes.");
+    await expect(page.getByRole("alert")).toHaveCount(0);
     await mkdir(".factory/test-results/opencode-integration-fix-20261019", { recursive: true });
     await page.screenshot({
       path: ".factory/test-results/opencode-integration-fix-20261019/admitted-input-retained.png",
@@ -2126,16 +2458,25 @@ test("a failed editor has an explicit restart that waits for confirmed Stop with
     failure:
       editorState === "failed" ? "Editor preparation failed. Stop and retry the editor." : null,
   });
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
-    ensures++;
-    if (editorState === "stopped") editorState = "ready";
-    return route.fulfill({ json: editor() });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      async ensureEditor() {
+        ensures++;
+        if (editorState === "stopped") editorState = "ready";
+        return developerIDEViewSchema.parse(editor());
+      },
+    },
   });
-  await page.route("**/api/developer-ide", (route) => route.fulfill({ json: editor() }));
-  await page.route("**/api/developer-ide/stop", (route) => {
-    stops++;
-    editorState = "stop-intended";
-    return route.fulfill({ status: 202, body: "" });
+  await mockFactoryFunctions(page, {
+    workspaces: { getEditor: async () => developerIDEViewSchema.parse(editor()) },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      async stopEditor() {
+        stops++;
+        editorState = "stop-intended";
+      },
+    },
   });
   await page.route("**/api/developer-ide/access?*", (route) =>
     route.fulfill({
@@ -2180,7 +2521,7 @@ test("slow valid editor and file preparation connects without a manual retry or 
 }) => {
   test.setTimeout(90_000);
   const workspaceID = crypto.randomUUID();
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   const origin = developerIDEOrigin(new URL(page.url()).origin, session.user.id, 1);
   let prepared = false;
   let editorReads = 0;
@@ -2205,20 +2546,29 @@ test("slow valid editor and file preparation connects without a manual retry or 
     )
       runtimeCommands.push(new URL(request.url()).pathname);
   });
-  await page.route(`**/api/projects/${projectID}/source-workspace/ensure`, (route) =>
-    route.fulfill({ json: source() }),
-  );
-  await page.route(`**/api/workspaces/${workspaceID}/source`, (route) => {
-    sourceReads++;
-    return route.fulfill({ json: source() });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => ({
+        label: "Owned source",
+        ...sourceWorkspaceViewSchema.parse(source()),
+      }),
+    },
   });
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
-    editorEnsures++;
-    return route.fulfill({ json: editor() });
-  });
-  await page.route("**/api/developer-ide", (route) => {
-    editorReads++;
-    return route.fulfill({ json: editor() });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      async getSource() {
+        sourceReads++;
+        return { label: "Owned source", ...sourceWorkspaceViewSchema.parse(source()) };
+      },
+      async ensureEditor() {
+        editorEnsures++;
+        return developerIDEViewSchema.parse(editor());
+      },
+      async getEditor() {
+        editorReads++;
+        return developerIDEViewSchema.parse(editor());
+      },
+    },
   });
   await page.route("**/api/developer-ide/access?*", (route) =>
     route.fulfill({
@@ -2298,14 +2648,23 @@ test("a failed editor Stop leaves restart unconfirmed without ensuring another e
     state: "failed",
     failure: "Editor preparation failed. Stop and retry the editor.",
   };
-  await page.route(`**/api/projects/${projectID}/developer-ide/ensure`, (route) => {
-    ensures++;
-    return route.fulfill({ json: editor });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      async ensureEditor() {
+        ensures++;
+        return developerIDEViewSchema.parse(editor);
+      },
+    },
   });
-  await page.route("**/api/developer-ide", (route) => route.fulfill({ json: editor }));
-  await page.route("**/api/developer-ide/stop", (route) => {
-    stops++;
-    return route.fulfill({ status: 202, body: "" });
+  await mockFactoryFunctions(page, {
+    workspaces: { getEditor: async () => developerIDEViewSchema.parse(editor) },
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      async stopEditor() {
+        stops++;
+      },
+    },
   });
   await selectProject(page);
   await page.getByRole("button", { name: "IDE", exact: true }).click();
@@ -2384,31 +2743,40 @@ for (const reviewState of ["incomplete", "stopped"] as const)
         state: running ? "running" : reviewState === "stopped" ? "stopped" : "completed",
       },
     });
-    await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-      route.fulfill({ json: { changes: [change()] } }),
-    );
-    await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
-      route.fulfill({ json: delivery() }),
-    );
-    await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-      fulfillAgentView(route, { json: agent() }),
-    );
-    await page.route(`**/api/projects/${projectID}/conversation{,?*}`, (route) =>
-      route.fulfill({
-        json: {
-          id: crypto.randomUUID(),
-          projectId: projectID,
-          ticketId: ticketID,
-          mode: "build",
-          version: 1,
-          entries: [],
+    await mockFactoryFunctions(page, {
+      runtime: { changes: async () => changesResponseSchema.parse({ changes: [change()] }) },
+    });
+    await mockFactoryFunctions(page, {
+      delivery: {
+        async get(_actor, id) {
+          if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+          return deliveryViewSchema.parse(delivery());
         },
-      }),
-    );
-    await page.route(`**/api/changes/${changeID}/delivery/retry-review`, async (route) => {
-      request = route.request().postDataJSON();
-      running = true;
-      await route.fulfill({ json: delivery() });
+      },
+    });
+    await mockAgentView(page, changeID, async () => agent(), { activity: true });
+    await mockFactoryFunctions(page, {
+      conversations: {
+        get: async () =>
+          conversationViewSchema.nullable().parse({
+            id: crypto.randomUUID(),
+            projectId: projectID,
+            ticketId: ticketID,
+            mode: "build",
+            version: 1,
+            entries: [],
+          }),
+      },
+    });
+    await mockFactoryFunctions(page, {
+      delivery: {
+        async retryReview(_actor, id, input) {
+          expect(id).toBe(changeID);
+          request = input;
+          running = true;
+          return deliveryViewSchema.parse(delivery());
+        },
+      },
     });
     await selectProject(page);
     await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
@@ -2462,7 +2830,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   let researchRequests = 0;
   let state = "committed";
   const feedback: ReviewFeedback[] = [];
-  const { session } = await (await page.request.get("/api/session")).json();
+  const { session } = await browserBootstrap(page);
   const agent = {
     state: "committed",
     sessionAvailable: true,
@@ -2492,70 +2860,82 @@ test("Review corrections send to the retained Build without IDE; checks and cont
     version: 1,
     entries: [],
   };
-  await page.route(`**/api/changes?projectId=${projectID}`, (route) =>
-    route.fulfill({ json: { changes: [change] } }),
-  );
-  await page.route(`**/api/changes/${changeID}/agent{,?*,/activity}`, (route) =>
-    fulfillAgentView(route, { json: { ...agent, state } }),
-  );
-  await page.route(`**/api/changes/${changeID}/review`, (route) =>
-    route.fulfill({
-      json: {
-        feedback,
-        recording: null,
-        recordingEnabled: false,
-        scenarios: [],
-        canSendCorrections: state === "committed",
-      },
-    }),
-  );
-  await page.route(`**/api/changes/${changeID}/review/feedback`, (route) => {
-    const input = route.request().postDataJSON() as { kind: "comment" | "thread"; body: string };
-    const id = crypto.randomUUID();
-    feedback.push({
-      id,
-      kind: input.kind,
-      state: "open",
-      version: 1,
-      authorId: session.user.id,
-      author: "Reviewer",
-      commitSha: "d".repeat(40),
-      annotation: null,
-      createdAt: new Date().toISOString(),
-      messages: [
-        {
-          id: crypto.randomUUID(),
+  await mockFactoryFunctions(page, {
+    runtime: { changes: async () => changesResponseSchema.parse({ changes: [change] }) },
+  });
+  await mockAgentView(page, changeID, async () => ({ ...agent, state }), { activity: true });
+  await mockFactoryFunctions(page, {
+    review: {
+      get: async () =>
+        visualReviewSchema.parse({
+          feedback,
+          recording: null,
+          scenarios: [],
+          canSendCorrections: state === "committed",
+        }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    review: {
+      async create(_actor, _change, input) {
+        const id = crypto.randomUUID();
+        feedback.push({
+          id,
+          kind: input.kind,
+          state: "open",
+          version: 1,
+          authorId: session.user.id,
           author: "Reviewer",
-          body: input.body,
+          commitSha: "d".repeat(40),
+          annotation: null,
           createdAt: new Date().toISOString(),
-        },
-      ],
-    });
-    return route.fulfill({ json: { feedbackId: id } });
-  });
-  await page.route(`**/api/changes/${changeID}/delivery`, (route) =>
-    route.fulfill({
-      json: {
-        pullRequestNumber: 1,
-        pullRequestUrl: "http://127.0.0.1:33030/owned/starter/pulls/1",
-        verificationState: "succeeded",
-        reviewState: "passed",
-        actionRunUrl: "http://127.0.0.1:33030/owned/starter/actions/runs/1",
+          messages: [
+            {
+              id: crypto.randomUUID(),
+              author: "Reviewer",
+              body: input.body,
+              createdAt: new Date().toISOString(),
+            },
+          ],
+        });
+        return { feedbackId: id };
       },
-    }),
-  );
-  await page.route(`**/api/projects/${projectID}/conversation/mode`, (route) =>
-    route.fulfill({ json: conversation }),
-  );
-  await page.route(`**/api/projects/${projectID}/conversation/message`, (route) => {
-    researchRequests += 1;
-    return route.fulfill({ json: conversation });
+    },
   });
-  await page.route(`**/api/changes/${changeID}/review/send`, (route) => {
-    received = route.request().postDataJSON();
-    state = "working";
-    for (const item of feedback) if (item.kind === "thread") item.correctionState = "running";
-    return route.fulfill({ json: { turnId: crypto.randomUUID() } });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse({
+          pullRequestNumber: 1,
+          pullRequestUrl: "http://127.0.0.1:33030/owned/starter/pulls/1",
+          verificationState: "succeeded",
+          reviewState: "passed",
+          actionRunUrl: "http://127.0.0.1:33030/owned/starter/actions/runs/1",
+        });
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    conversations: { mode: async () => conversationViewSchema.parse(conversation) },
+  });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      message: async (_actor, factoryTargetID, factoryCommand) => {
+        researchRequests += 1;
+        return completedConversation(conversationViewSchema.parse(conversation));
+      },
+    },
+  });
+  await mockFactoryFunctions(page, {
+    review: {
+      async send(_actor, _change, input) {
+        received = input;
+        state = "working";
+        for (const item of feedback) if (item.kind === "thread") item.correctionState = "running";
+        return { turnId: crypto.randomUUID() };
+      },
+    },
   });
   await selectProject(page);
   await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
@@ -2697,7 +3077,7 @@ test("post-start human edits and selected History retain immutable scope without
   const db = createDatabase(1);
   const changeID = crypto.randomUUID();
   try {
-    const { session } = await (await page.request.get("/api/session")).json();
+    const { session } = await browserBootstrap(page);
     const approvalID = crypto.randomUUID();
     await db.client`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
       VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${session.user.id})`;
@@ -2815,7 +3195,7 @@ test("delivered work creates one linked unapproved follow-up without another Bui
 }) => {
   const db = createDatabase(1);
   try {
-    const { session } = await (await page.request.get("/api/session")).json();
+    const { session } = await browserBootstrap(page);
     const approvalID = crypto.randomUUID();
     await db.client`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
       VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${session.user.id})`;
