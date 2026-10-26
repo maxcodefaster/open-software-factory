@@ -8,6 +8,7 @@ import {
   runFactoryboxKubernetes,
 } from "./factorybox-worker";
 import { runtimeVolumeClaimSpec } from "./storage";
+import { workspaceSourceKey } from "./source-manifest";
 
 const exactImage = z
   .string()
@@ -161,17 +162,15 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
             env: [...worker.env, ...environment],
             volumeMounts: [
               ...worker.volumeMounts,
-              { name: "assignment", mountPath: "/factory/assignment", readOnly: true },
               { name: "registry-ca", mountPath: "/factory/registry-ca", readOnly: true },
               ...(input.sharedSource
-                ? [{ name: "runtime-data", mountPath: "/factory-source", subPath: "home" }]
+                ? [{ name: "runtime-data", mountPath: "/factory-source" }]
                 : []),
             ],
           },
         ],
         volumes: [
           ...resources[2].spec.volumes,
-          { name: "assignment", secret: { secretName: "runtime-assignment", defaultMode: 256 } },
           { name: "registry-ca", secret: { secretName: "registry-ca", defaultMode: 256 } },
           ...(input.sharedSource
             ? [{ name: "runtime-data", persistentVolumeClaim: { claimName: "runtime-data" } }]
@@ -182,7 +181,7 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
   };
 }
 
-export function factoryboxPreparationRequest(
+function factoryboxPreparationIdentity(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
 ) {
@@ -193,16 +192,82 @@ export function factoryboxPreparationRequest(
   )
     throw new Error("Factory preparation does not match its admitted worker");
   return {
-    version: 2,
+    version: 3,
     sandboxID: input.sandboxID,
     storeID: identity.storeID,
     epoch: identity.epoch,
     podUID: identity.podUID,
     runtimeHostImage: input.runtimeHostImage,
     sharedSource: input.sharedSource,
+    sourceWorkspaceID: input.sharedSource ? workspaceSourceKey(input.runtimeOwnerID) : null,
     bootstrap: input.reserve ? factoryboxReserveBootstrapProgram : factoryboxBootstrapProgram,
     reserveSeed: input.reserve ?? false,
   };
+}
+
+export function factoryboxPreparationRequest(
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  assignment: Readonly<Record<string, string>>,
+) {
+  const owner = factoryboxPreparationIdentity(input, identity);
+  const text = z
+    .string()
+    .min(1)
+    .refine((value) => !value.includes("\0"));
+  const files: Record<string, string> = input.reserve
+    ? z.strictObject({ "slot.json": text }).parse(assignment)
+    : z
+        .strictObject({
+          "assignment.json": text,
+          "parent-token": text,
+          "child-token": text,
+        })
+        .parse(assignment);
+  const executionID = input.reserve
+    ? z
+        .object({ version: z.literal(1), id: z.string() })
+        .parse(JSON.parse(files["slot.json"] ?? "")).id
+    : z
+        .object({
+          version: z.literal(1),
+          runtimeAttemptId: z.literal(input.attemptID),
+          generation: z.number().int().positive(),
+        })
+        .parse(JSON.parse(files["assignment.json"] ?? "")).runtimeAttemptId;
+  if (factoryboxSandboxID(executionID) !== input.sandboxID)
+    throw new Error("Sandbox assignment belongs to another immutable execution");
+  const request = { ...owner, assignment: files };
+  if (Buffer.byteLength(JSON.stringify(request)) > 65_536)
+    throw new Error("Factory preparation request exceeds 64 KiB");
+  return request;
+}
+
+export function factoryboxPreparationAssignment(input: FactoryboxRuntimeInput, value: unknown) {
+  factoryboxRuntimeRequest(input);
+  const secret = z
+    .object({
+      metadata: z.object({ labels: z.record(z.string(), z.string()) }),
+      data: z.record(z.string(), z.string()),
+    })
+    .parse(value);
+  const labels = secret.metadata.labels;
+  if (
+    labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
+    labels["factory.dev/runtime-owner"] !== input.runtimeOwnerID ||
+    (input.reserve
+      ? labels["factory.dev/execution-slot"] !== input.labels["factory.dev/execution-slot"]
+      : labels["factory.dev/runtime-attempt"] !== input.attemptID)
+  )
+    throw new Error("Sandbox assignment belongs to another immutable execution owner");
+  const names = input.reserve ? ["slot.json"] : ["assignment.json", "parent-token", "child-token"];
+  return Object.fromEntries(
+    names.map((name) => {
+      const encoded = secret.data[name];
+      if (!encoded) throw new Error("Sandbox assignment is incomplete");
+      return [name, Buffer.from(encoded, "base64").toString("utf8")];
+    }),
+  );
 }
 
 export function factoryboxRuntimeDeclaration(input: FactoryboxRuntimeInput) {
@@ -235,6 +300,17 @@ export async function prepareFactoryboxRuntime(
     run,
     factoryboxRuntimeDeclaration(input),
   );
+  const secret = await run([
+    "get",
+    "secret",
+    "runtime-assignment",
+    "-n",
+    input.namespace,
+    "-o",
+    "json",
+  ]);
+  if (secret.exitCode !== 0) throw new Error("Sandbox assignment observation is unavailable");
+  const assignment = factoryboxPreparationAssignment(input, JSON.parse(secret.stdout));
   const result = await run(
     [
       "exec",
@@ -249,14 +325,14 @@ export async function prepareFactoryboxRuntime(
       "-c",
       factoryboxPrepareProgram,
     ],
-    JSON.stringify(factoryboxPreparationRequest(input, identity)),
+    JSON.stringify(factoryboxPreparationRequest(input, identity, assignment)),
     { timeoutMS: Math.max(1, deadline - performance.now()), outputBytes: 1024 ** 2 },
   );
   if (result.exitCode !== 0)
     throw new Error(`Factorybox preparation is unconfirmed: ${result.stderr}`);
   return z
     .strictObject({
-      version: z.literal(2),
+      version: z.literal(3),
       sandboxID: z.literal(input.sandboxID),
       bundle: z.literal(`/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle`),
       configSHA256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -296,7 +372,7 @@ export async function releaseFactoryboxRuntime(
       "release",
       ...(neverStarted ? ["--never-started"] : []),
     ],
-    JSON.stringify(factoryboxPreparationRequest(input, identity)),
+    JSON.stringify(factoryboxPreparationIdentity(input, identity)),
     { timeoutMS: 60_000, outputBytes: 1024 ** 2 },
   );
   if (result.exitCode !== 0)

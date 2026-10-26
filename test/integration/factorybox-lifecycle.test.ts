@@ -115,6 +115,24 @@ test.each(["arm64", "amd64"] as const)(
           },
         },
       };
+      const assignment = {
+        "assignment.json": JSON.stringify({
+          version: 1,
+          runtimeAttemptId: owned.attemptID,
+          generation: Number(attempt.generation),
+        }),
+        "parent-token": "only-this-parent",
+        "child-token": "only-this-child",
+      };
+      const secret = {
+        metadata: { labels: input.labels },
+        data: Object.fromEntries(
+          Object.entries(assignment).map(([key, value]) => [
+            key,
+            Buffer.from(value).toString("base64"),
+          ]),
+        ),
+      };
       const record: {
         version: number;
         id: string;
@@ -138,7 +156,9 @@ test.each(["arm64", "amd64"] as const)(
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify(
-              ({ namespace, pvc: claim, pod, node } as Record<string, unknown>)[args[1] ?? ""],
+              ({ namespace, pvc: claim, pod, node, secret } as Record<string, unknown>)[
+                args[1] ?? ""
+              ],
             ),
           };
         if (args.at(-1) === "worker-status")
@@ -146,6 +166,7 @@ test.each(["arm64", "amd64"] as const)(
         if (args.includes("python3")) {
           expect(JSON.parse(body ?? "null").sandboxID).toBe(input.sandboxID);
           if (args.at(-1) === "release") {
+            expect(JSON.parse(body ?? "null").assignment).toBeUndefined();
             releases++;
             return {
               exitCode: 0,
@@ -154,6 +175,10 @@ test.each(["arm64", "amd64"] as const)(
             };
           }
           preparations++;
+          expect(JSON.parse(body ?? "null").assignment).toEqual(assignment);
+          expect(JSON.parse(body ?? "null").sourceWorkspaceID).toBe(
+            attempt.workspaceID.replaceAll("-", ""),
+          );
           const [intent] = await database.client<
             Array<{ attempted: boolean }>
           >`SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${owned.attemptID} AND action='prepare'`;
@@ -162,7 +187,7 @@ test.each(["arm64", "amd64"] as const)(
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
-              version: 2,
+              version: 3,
               sandboxID: input.sandboxID,
               bundle: `/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle`,
               configSHA256: "1".repeat(64),
@@ -223,6 +248,11 @@ test.each(["arm64", "amd64"] as const)(
       await recovered.ensureStarted(owned.attemptID);
       expect(mutations).toEqual(["start"]);
       expect(preparations).toBe(1);
+      const [privateInput] = await database.client<
+        Array<{ request: string }>
+      >`SELECT request::text AS request FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
+      expect(privateInput?.request).not.toContain("only-this-parent");
+      expect(privateInput?.request).not.toContain("only-this-child");
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
       await execution.pause(owned.attemptID);
       const [paused] = await database.client<

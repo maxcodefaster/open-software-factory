@@ -18,7 +18,7 @@ import {
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
 export type { ExecutionSlot } from "../../../../packages/runtime-domain/src/reserve";
 const fields =
-  'id,role,state,runtime_host_image AS "runtimeHostImage",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted"';
+  'id,role,state,runtime_host_image AS "runtimeHostImage",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted"';
 export const executionCapacityLock = "factory-execution-capacity";
 
 export function createReserveStore(
@@ -138,13 +138,17 @@ export function createReserveStore(
         ready: boolean;
         factoryboxIdentity?: unknown;
         factoryboxPreparation?: unknown;
+        factoryboxPaused?: boolean;
       },
     ) {
       if (observed.ready) {
         const [started] = await sql`SELECT id FROM factory.execution_slot WHERE id=${id}
-          AND factorybox_identity IS NOT NULL AND factorybox_preparation IS NOT NULL AND factorybox_start_attempted`;
-        if (!started)
-          throw new Error("Execution slot is not ready before its durable Factorybox Start");
+          AND factorybox_identity IS NOT NULL AND factorybox_preparation IS NOT NULL
+          AND factorybox_start_attempted AND factorybox_pause_attempted`;
+        if (!started || observed.factoryboxPaused !== true)
+          throw new Error(
+            "Execution slot is not ready before its confirmed Factorybox standby Pause",
+          );
       }
       await sql`UPDATE factory.execution_slot SET namespace_uid=${observed.namespaceUID},pod_uid=${observed.podUID},claim_uid=coalesce(${observed.claimUID ?? null},claim_uid),
         factorybox_identity=coalesce(factorybox_identity,${observed.factoryboxIdentity === undefined ? null : JSON.stringify(observed.factoryboxIdentity)}::text::jsonb),
@@ -156,6 +160,16 @@ export function createReserveStore(
       const result =
         await sql`UPDATE factory.execution_slot SET factorybox_start_attempted=true WHERE id=${id}
         AND state='creating' AND factorybox_identity IS NOT NULL AND factorybox_preparation IS NOT NULL AND NOT factorybox_start_attempted`;
+      return result.count === 1;
+    },
+    async intendStandby(sql: SQL, id: string, action: "pause" | "resume") {
+      const result =
+        action === "pause"
+          ? await sql`UPDATE factory.execution_slot SET factorybox_pause_attempted=true WHERE id=${id}
+            AND state='creating' AND factorybox_start_attempted AND NOT factorybox_pause_attempted`
+          : await sql`UPDATE factory.execution_slot SET factorybox_resume_attempted=true WHERE id=${id}
+            AND state='assigned' AND assigned_attempt_id IS NOT NULL AND factorybox_pause_attempted
+            AND NOT factorybox_resume_attempted`;
       return result.count === 1;
     },
     async defer(sql: SQL, id: string) {

@@ -18,6 +18,7 @@ const input: SourceResources = {
   capability: "test-only-capability",
   filesImage: `registry.invalid/source@sha256:${"1".repeat(64)}`,
   storageNode: "source-node",
+  sourceDirectory: "workspaces/11111111111151118111111111111111/home",
   namespaceUID: "namespace-uid",
   claimUID: "claim-uid",
   podUID: "pod-uid",

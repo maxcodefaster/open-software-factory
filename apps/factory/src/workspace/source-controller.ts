@@ -47,6 +47,7 @@ interface SourceRow {
   claimUID: string | null;
   podUID: string | null;
   storageNode: string | null;
+  sourceDirectory: string;
   failure: string | null;
 }
 export interface SourceWorkspaceView {
@@ -99,7 +100,7 @@ export function createWorkspaceSourceController(
         source.access_epoch::text AS epoch,source.state,source.files_image AS "filesImage",
         source.capability_hash AS "capabilityHash",
         source.namespace_uid AS "namespaceUID",source.claim_uid AS "claimUID",source.pod_uid AS "podUID",
-        source.storage_node AS "storageNode",source.failure
+        source.storage_node AS "storageNode",source.source_directory AS "sourceDirectory",source.failure
       FROM factory.workspace_source source JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
       JOIN factory.project project ON project.id=workspace.project_id
       LEFT JOIN factory.ticket ticket ON ticket.id=workspace.ticket_id
@@ -143,6 +144,7 @@ export function createWorkspaceSourceController(
       claimUID: source.claimUID,
       podUID: source.podUID,
       storageNode: source.storageNode,
+      sourceDirectory: source.sourceDirectory,
     };
   }
   async function authority(workspaceID: string, userID: string, sql: AgentTurnTransaction) {

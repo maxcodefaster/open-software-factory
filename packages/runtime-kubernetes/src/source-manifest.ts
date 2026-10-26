@@ -13,9 +13,18 @@ export interface WorkspaceSourceManifest {
   readonly capability: string;
   readonly filesImage: string;
   readonly storageNode: string | null;
+  readonly sourceDirectory: string;
+}
+
+export function workspaceSourceKey(workspaceID: string) {
+  if (!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(workspaceID))
+    throw new Error("Canonical source requires an exact Workspace identity");
+  return workspaceID.replaceAll("-", "");
 }
 
 export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
+  if (input.sourceDirectory !== `workspaces/${workspaceSourceKey(input.identity.workspaceID)}/home`)
+    throw new Error("Canonical source directory differs from its retained Workspace identity");
   for (const image of [input.filesImage]) {
     if (!/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(image))
       throw new Error("Workspace source artifacts must be pinned by digest");
@@ -113,7 +122,11 @@ export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
             },
             readinessProbe: { tcpSocket: { port: 4600 }, periodSeconds: 1, failureThreshold: 3 },
             volumeMounts: [
-              { name: "data", mountPath: "/data/home", subPath: "home" },
+              {
+                name: "data",
+                mountPath: "/data/home",
+                subPath: input.sourceDirectory,
+              },
               { name: "assignment", mountPath: "/assignment", readOnly: true },
               { name: "temporary", mountPath: "/tmp" },
             ],

@@ -18,6 +18,7 @@ test("source access mounts only canonical source, remains independent and requir
     capability: "server-only-source-capability",
     filesImage: `registry.invalid/source@sha256:${"1".repeat(64)}`,
     storageNode: "source-node",
+    sourceDirectory: "workspaces/11111111111151118111111111111111/home",
   };
   const resources = renderWorkspaceSourceResources(input);
   const pod = resources.find((resource) => resource.kind === "Pod");
@@ -26,7 +27,11 @@ test("source access mounts only canonical source, remains independent and requir
     "kubernetes.io/hostname": "source-node",
   });
   expect(pod?.spec?.containers?.[0]?.volumeMounts).toEqual([
-    { name: "data", mountPath: "/data/home", subPath: "home" },
+    {
+      name: "data",
+      mountPath: "/data/home",
+      subPath: "workspaces/11111111111151118111111111111111/home",
+    },
     { name: "assignment", mountPath: "/assignment", readOnly: true },
     { name: "temporary", mountPath: "/tmp" },
   ]);
@@ -39,6 +44,10 @@ test("source access mounts only canonical source, remains independent and requir
   expect(() => renderWorkspaceSourceResources({ ...input, filesImage: "source:latest" })).toThrow(
     "pinned by digest",
   );
+  for (const sourceDirectory of ["home", "workspaces/another/home", "../another"])
+    expect(() => renderWorkspaceSourceResources({ ...input, sourceDirectory })).toThrow(
+      "retained Workspace identity",
+    );
 });
 
 test("chunked source requests are bounded before dispatch, without trusting Content-Length", async () => {
@@ -90,6 +99,7 @@ test("ambiguous source create recovery validates storage, the complete Pod and i
     capability: "server-only-source-capability",
     filesImage: `registry.invalid/source@sha256:${"1".repeat(64)}`,
     storageNode: "source-node",
+    sourceDirectory: "workspaces/11111111111151118111111111111111/home",
     namespaceUID: "namespace",
     claimUID: "claim",
     podUID: "pod",

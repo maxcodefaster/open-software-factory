@@ -897,7 +897,9 @@ BEGIN
   IF NEW.factorybox_profile IS DISTINCT FROM OLD.factorybox_profile
     OR (OLD.factorybox_identity IS NOT NULL AND NEW.factorybox_identity IS DISTINCT FROM OLD.factorybox_identity)
     OR (OLD.factorybox_preparation IS NOT NULL AND NEW.factorybox_preparation IS DISTINCT FROM OLD.factorybox_preparation)
-    OR (OLD.factorybox_start_attempted AND NOT NEW.factorybox_start_attempted) THEN
+    OR (OLD.factorybox_start_attempted AND NOT NEW.factorybox_start_attempted)
+    OR (OLD.factorybox_pause_attempted AND NOT NEW.factorybox_pause_attempted)
+    OR (OLD.factorybox_resume_attempted AND NOT NEW.factorybox_resume_attempted) THEN
     RAISE EXCEPTION 'Factorybox execution slot artifacts and admitted identity are immutable';
   END IF;
   RETURN NEW;
@@ -2045,6 +2047,8 @@ CREATE TABLE factory.execution_slot (
     factorybox_identity jsonb,
     factorybox_preparation jsonb,
     factorybox_start_attempted boolean DEFAULT false NOT NULL,
+    factorybox_pause_attempted boolean DEFAULT false NOT NULL,
+    factorybox_resume_attempted boolean DEFAULT false NOT NULL,
     CONSTRAINT execution_slot_check CHECK (((assigned_attempt_id IS NULL) = (assigned_at IS NULL))),
     CONSTRAINT execution_slot_check1 CHECK (((state <> 'assigned'::text) OR (assigned_attempt_id IS NOT NULL))),
     CONSTRAINT execution_slot_check2 CHECK (((state <> 'ready'::text) OR ((namespace_uid IS NOT NULL) AND (pod_uid IS NOT NULL) AND (claim_uid IS NOT NULL)))),
@@ -3342,6 +3346,7 @@ CREATE TABLE factory.wiki_source_update (
 
 CREATE TABLE factory.workspace_source (
     workspace_id uuid NOT NULL,
+    source_directory text GENERATED ALWAYS AS (('workspaces/'::text || replace(workspace_id::text, '-'::text, ''::text)) || '/home'::text) STORED NOT NULL,
     access_epoch bigint DEFAULT 1 NOT NULL,
     state text NOT NULL,
     files_image text NOT NULL,

@@ -61,11 +61,23 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
     });
     expect(await store.intendStart(database.client, slot.id)).toBe(true);
     expect(await store.intendStart(database.client, slot.id)).toBe(false);
+    await expect(
+      store.observe(database.client, slot.id, {
+        namespaceUID: "owned-namespace",
+        podUID: "owned-pod",
+        claimUID: "owned-claim",
+        ready: true,
+      }),
+    ).rejects.toThrow("standby Pause");
+    expect(await store.intendStandby(database.client, slot.id, "resume")).toBe(false);
+    expect(await store.intendStandby(database.client, slot.id, "pause")).toBe(true);
+    expect(await store.intendStandby(database.client, slot.id, "pause")).toBe(false);
     await store.observe(database.client, slot.id, {
       namespaceUID: "owned-namespace",
       podUID: "owned-pod",
       claimUID: "owned-claim",
       ready: true,
+      factoryboxPaused: true,
     });
     const second = await database.client.begin((sql) => store.plan(sql));
     expect(second).toHaveLength(1);
@@ -88,6 +100,18 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
     const assigned = admissions.find((admission) => admission.claimed);
     if (!assigned) throw new Error("Expected exactly one claimed slot");
     expect((await store.assigned(database.client, assigned.attemptID))?.id).toBe(slot.id);
+    expect(await store.intendStandby(database.client, slot.id, "resume")).toBe(true);
+    expect(await store.intendStandby(database.client, slot.id, "resume")).toBe(false);
+    for (const field of ["factorybox_pause_attempted", "factorybox_resume_attempted"]) {
+      await expect(
+        (async () => {
+          await database.client.unsafe(
+            `UPDATE factory.execution_slot SET ${field}=false WHERE id=$1`,
+            [slot.id],
+          );
+        })(),
+      ).rejects.toThrow("immutable");
+    }
     await expect(admit()).rejects.toThrow("capacity is occupied");
     expect(
       await database.client`SELECT id FROM factory.runtime_attempt WHERE state='create-intended'`,
@@ -123,11 +147,13 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
       factoryboxPreparation: { bundle: "second" },
     });
     expect(await store.intendStart(database.client, verificationSlot.id)).toBe(true);
+    expect(await store.intendStandby(database.client, verificationSlot.id, "pause")).toBe(true);
     await store.observe(database.client, verificationSlot.id, {
       namespaceUID: "second-ns",
       podUID: "second-pod",
       claimUID: "second-claim",
       ready: true,
+      factoryboxPaused: true,
     });
     const next = await database.client.begin((sql) => store.plan(sql));
     expect(next.some((candidate) => candidate.role === "staging" && candidate.id !== slot.id)).toBe(
@@ -157,11 +183,13 @@ test("expired unassigned slots retire before admission and cannot return to the 
       factoryboxPreparation: { bundle: "expired" },
     });
     expect(await store.intendStart(database.client, id)).toBe(true);
+    expect(await store.intendStandby(database.client, id, "pause")).toBe(true);
     await store.observe(database.client, id, {
       namespaceUID: "expired-ns",
       podUID: "expired-pod",
       claimUID: "expired-claim",
       ready: true,
+      factoryboxPaused: true,
     });
     const due = await database.client.begin((sql) => store.plan(sql));
     expect(due).toHaveLength(1);
@@ -176,6 +204,32 @@ test("expired unassigned slots retire before admission and cannot return to the 
         await database.client`UPDATE factory.execution_slot SET state='ready' WHERE id=${id}`;
       })(),
     ).rejects.toThrow("cannot return");
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await processFixture.dispose();
+  }
+}, 30_000);
+
+test("cold worker preparation keeps its lifecycle deadline without extending stale slots", async () => {
+  const processFixture = await factoryProcess();
+  const database = processFixture.connect();
+  const store = createReserveStore(defaultReservePolicy, images, profile);
+  const cold = crypto.randomUUID();
+  const stale = crypto.randomUUID();
+  try {
+    for (const [id, age] of [
+      [cold, 240],
+      [stale, 421],
+    ] as const) {
+      await database.client`INSERT INTO factory.execution_slot
+        (id,role,state,runtime_host_image,kubernetes_namespace,created_at,expires_at,factorybox_profile)
+        VALUES(${id},'staging','creating',${images.staging},
+          ${`factory-reserve-${id.replaceAll("-", "").slice(0, 12)}`},
+          now()-${age}*interval '1 second',now()+interval '10 minutes',${JSON.stringify(profile)}::text::jsonb)`;
+    }
+    const due = await database.client.begin((sql) => store.plan(sql));
+    expect(due.find((slot) => slot.id === cold)?.state).toBe("creating");
+    expect(due.find((slot) => slot.id === stale)?.state).toBe("retiring");
   } finally {
     await database.client.end({ timeout: 2 });
     await processFixture.dispose();

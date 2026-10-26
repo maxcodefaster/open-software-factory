@@ -9,6 +9,12 @@ import subprocess
 import sys
 
 
+SOURCE_ROOT = Path('/factory-source')
+SOURCE_USER = (101000, 101000)
+IDENTITY_FIELDS = {'version', 'sandboxID', 'storeID', 'epoch', 'podUID', 'runtimeHostImage',
+                   'sharedSource', 'sourceWorkspaceID', 'bootstrap', 'reserveSeed'}
+
+
 def digest(path):
     value = hashlib.sha256()
     with path.open('rb') as stream:
@@ -43,6 +49,88 @@ def input_mounts(bundle):
             info = os.stat(target, follow_symlinks=False)
             rows[target] = {'mountinfo': line, 'device': info.st_dev, 'inode': info.st_ino}
     return rows
+
+
+def validate_identity(request, with_assignment=False):
+    if type(request) is not dict or set(request) != IDENTITY_FIELDS | ({'assignment'} if with_assignment else set()):
+        raise ValueError('Unexpected Factory preparation fields')
+    if (type(request['version']) is not int or request['version'] != 3 or
+            any(not isinstance(request[key], str) for key in
+                ['sandboxID', 'storeID', 'epoch', 'podUID', 'runtimeHostImage', 'bootstrap']) or
+            not re.fullmatch(r'runtime-[a-f0-9]{32}', request['sandboxID']) or
+            type(request['sharedSource']) is not bool or type(request['reserveSeed']) is not bool or
+            (request['reserveSeed'] and request['sharedSource']) or
+            (request['sharedSource'] and not isinstance(request['sourceWorkspaceID'], str)) or
+            (request['sharedSource'] and not re.fullmatch('[a-f0-9]{32}', request['sourceWorkspaceID'])) or
+            (not request['sharedSource'] and request['sourceWorkspaceID'] is not None) or
+            not all(re.fullmatch('[a-f0-9]{32}', request[key]) for key in ['storeID', 'epoch']) or
+            not re.fullmatch(r'[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}', request['runtimeHostImage']) or
+            request['podUID'] != os.environ['FACTORY_POD_UID'] or
+            request['storeID'] != os.environ['FACTORY_STORE_ID'] or
+            not isinstance(request['bootstrap'], str) or len(request['bootstrap']) > 16384):
+        raise ValueError('Factory preparation identity differs from the admitted Pod')
+    if with_assignment:
+        validate_assignment(request)
+
+
+def validate_assignment(request):
+    files = request['assignment']
+    names = {'slot.json'} if request['reserveSeed'] else {'assignment.json', 'parent-token', 'child-token'}
+    if (type(files) is not dict or set(files) != names or
+            any(not isinstance(value, str) or not value or '\0' in value for value in files.values())):
+        raise ValueError('Sandbox assignment files are incomplete or undeclared')
+    value = json.loads(files['slot.json' if request['reserveSeed'] else 'assignment.json'])
+    if type(value) is not dict:
+        raise ValueError('Sandbox assignment must be a versioned object')
+    owner = value.get('id' if request['reserveSeed'] else 'runtimeAttemptId')
+    if (value.get('version') != 1 or not isinstance(owner, str) or
+            'runtime-'+owner.replace('-', '') != request['sandboxID'] or
+            (not request['reserveSeed'] and
+             (type(value.get('generation')) is not int or value['generation'] < 1))):
+        raise ValueError('Sandbox assignment belongs to another immutable execution')
+
+
+def canonical_source(request):
+    if not request['sharedSource']:
+        return None
+    if not isinstance(request['sourceWorkspaceID'], str) or not re.fullmatch('[a-f0-9]{32}', request['sourceWorkspaceID']):
+        raise ValueError('Canonical Project source requires its exact Workspace identity')
+    components = ['workspaces', request['sourceWorkspaceID'], 'home', 'project']
+    descriptor = None
+    try:
+        # Check every ancestor without following aliases into another Workspace.
+        descriptor = os.open(SOURCE_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        for component in components:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                            dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+        info = os.fstat(descriptor)
+        if (info.st_uid, info.st_gid) != SOURCE_USER:
+            raise ValueError('Canonical Project source must retain the Source service identity')
+        return {'workspaceID': request['sourceWorkspaceID'],
+                'path': str(SOURCE_ROOT.joinpath(*components)),
+                'device': info.st_dev, 'inode': info.st_ino}
+    except OSError as error:
+        raise ValueError('Canonical Project source path is missing or aliased') from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def prepared_input(request, status):
+    root = Path(status['store'])/'input'/request['sandboxID']
+    plan = json.loads((root/'intent.json').read_text())
+    if {key: plan['request'].get(key) for key in IDENTITY_FIELDS} != {key: request[key] for key in IDENTITY_FIELDS}:
+        raise ValueError('Private input already belongs to another preparation')
+    completed = json.loads((root/'prepared.json').read_text())
+    if (completed.get('version') != 3 or completed.get('sandboxID') != request['sandboxID'] or
+            completed.get('bundle') != str(root/'bundle') or completed.get('storeID') != request['storeID'] or
+            completed.get('epoch') != request['epoch'] or completed.get('podUID') != request['podUID'] or
+            completed.get('rootfsSHA256') != plan['rootfsSHA256'] or
+            digest(root/'bundle/config.json') != completed['configSHA256']):
+        raise ValueError('Prepared OCI configuration changed')
+    return completed
 
 
 def image_base(request, status, seed, rootfs_sha256, cli):
@@ -82,23 +170,13 @@ def image_base(request, status, seed, rootfs_sha256, cli):
 
 
 def prepare(request):
-    request.setdefault('reserveSeed', False)
-    if set(request) != {'version', 'sandboxID', 'storeID', 'epoch', 'podUID', 'runtimeHostImage', 'sharedSource', 'bootstrap', 'reserveSeed'}:
-        raise ValueError('Unexpected Factory preparation fields')
-    if (request['version'] != 2 or not re.fullmatch(r'runtime-[a-f0-9]{32}', request['sandboxID']) or
-            type(request['sharedSource']) is not bool or type(request['reserveSeed']) is not bool or
-            (request['reserveSeed'] and request['sharedSource']) or
-            not all(re.fullmatch('[a-f0-9]{32}', request[key]) for key in ['storeID', 'epoch']) or
-            not re.fullmatch(r'[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}', request['runtimeHostImage']) or
-            request['podUID'] != os.environ['FACTORY_POD_UID'] or
-            request['storeID'] != os.environ['FACTORY_STORE_ID'] or
-            len(request['bootstrap']) > 16384):
-        raise ValueError('Factory preparation identity differs from the admitted Pod')
+    validate_identity(request, with_assignment=True)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
            '--worker-store-id', request['storeID'], '--worker-epoch', request['epoch']]
     status = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
     if status['store_id'] != request['storeID'] or status['epoch'] != request['epoch']:
         raise ValueError('Worker identity changed before consumer preparation')
+    source = canonical_source(request)
     seed = Path('/var/lib/sysbox/seed')
     if (seed/'intent').read_text().splitlines() != [request['podUID'], request['storeID'], request['runtimeHostImage']]:
         raise ValueError('Consumer export belongs to another Pod or image')
@@ -106,18 +184,11 @@ def prepare(request):
     if len(expected) != 2 or expected[1] != 'rootfs.tar' or digest(seed/'rootfs.tar') != expected[0]:
         raise ValueError('Complete consumer rootfs differs from its committed export')
     root = Path(status['store'])/'input'/request['sandboxID']
-    plan = {'request': request, 'rootfsSHA256': expected[0]}
+    plan = {'request': request, 'rootfsSHA256': expected[0], 'source': source}
     if root.exists():
         if json.loads((root/'intent.json').read_text()) != plan:
             raise ValueError('Private input already belongs to another preparation')
-        completed = json.loads((root/'prepared.json').read_text())
-        if (completed.get('version') != 2 or completed.get('sandboxID') != request['sandboxID'] or
-                completed.get('bundle') != str(root/'bundle') or completed.get('storeID') != request['storeID'] or
-                completed.get('epoch') != request['epoch'] or completed.get('podUID') != request['podUID'] or
-                completed.get('rootfsSHA256') != expected[0] or
-                digest(root/'bundle/config.json') != completed['configSHA256']):
-            raise ValueError('Prepared OCI configuration changed')
-        return completed
+        return prepared_input(request, status)
     root.parent.mkdir(mode=0o700, exist_ok=True)
     root.mkdir(mode=0o700)
     publish(root/'intent.json', plan)
@@ -135,10 +206,9 @@ def prepare(request):
         (filesystem/'home/coder/project').mkdir()
     # Secrets, Pod DNS and the bootstrap are private files, never extra foreign
     # binds. The only external writable bind is canonical Project source.
-    for name in (['slot.json'] if request['reserveSeed'] else ['assignment.json', 'parent-token', 'child-token']):
-        value = Path('/factory/assignment', name).read_bytes()
+    for name, value in request['assignment'].items():
         path = filesystem/'factory/assignment'/name
-        path.write_bytes(value)
+        path.write_text(value, encoding='utf-8')
         path.chmod(0o400)
     certificate = Path('/factory/registry-ca/ca.crt').read_bytes()
     (filesystem/'factory/registry-ca/ca.crt').write_bytes(certificate)
@@ -180,31 +250,32 @@ def prepare(request):
     annotations.update({'io.factorybox.base': 'factory-runtime', 'io.factorybox.outbound-ipv4': 'true',
                         'io.factorybox.checkpoint.irmap-scan-paths': json.dumps(['/home/coder/project'])})
     if request['sharedSource']:
-        project = Path('/factory-source/project')
-        info = project.lstat()
-        if project.is_symlink() or not project.is_dir() or (info.st_uid, info.st_gid) != (101000, 101000):
-            raise ValueError('Canonical Project source must retain the Source service identity')
-        spec['mounts'].append({'type': 'bind', 'source': str(project), 'destination': '/home/coder/project',
+        spec['mounts'].append({'type': 'bind', 'source': source['path'], 'destination': '/home/coder/project',
                                'options': ['rbind', 'rw', 'rprivate', 'nosuid', 'nodev']})
-        annotations['io.factorybox.shared-source'] = json.dumps({'source': str(project), 'destination': '/home/coder/project'})
+        annotations['io.factorybox.shared-source'] = json.dumps({'source': source['path'], 'destination': '/home/coder/project'})
     config.write_text(json.dumps(spec, separators=(',', ':'))+'\n')
     os.sync()
     mounts = input_mounts(bundle)
     if set(mounts) != {str(bundle/name) for name in ['rootfs', 'lower']}:
         raise ValueError('Prepared input mount pair is incomplete')
     publish(root/'mounts.json', mounts)
-    completed = {'version': 2, 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': expected[0],
+    completed = {'version': 3, 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': expected[0],
                  'storeID': request['storeID'], 'epoch': request['epoch'], 'podUID': request['podUID']}
     publish(root/'prepared.json', completed)
     return completed
 
 
 def release(request, never_started):
+    # Cleanup needs the immutable identity, not live credentials or an accessible
+    # Source directory. Only this Sandbox's private mount pair may be released.
+    validate_identity(request)
     status = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
+    if status['store_id'] != request['storeID'] or status['epoch'] != request['epoch']:
+        raise ValueError('Worker identity changed before private input release')
     root = Path(status['store'])/'input'/request['sandboxID']
     if not (root/'prepared.json').is_file():
         raise ValueError('Incomplete preparation must remain retained for inspection')
-    prepared = prepare(request)
+    prepared = prepared_input(request, status)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
            '--worker-store-id', prepared['storeID'], '--worker-epoch', prepared['epoch']]
     if never_started:

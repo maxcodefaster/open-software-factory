@@ -43,12 +43,12 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
     let lost: { id: string; namespaceUID: string; podUID: string; claimUID: string } | undefined;
     const adapter: ReserveClient = {
       ...client,
-      async prepare(slot) {
+      async prepare(slot, options) {
         const [intent] = await database.client<
           Array<{ state: string }>
         >`SELECT state FROM factory.execution_slot WHERE id=${slot.id}`;
         expect(intent?.state).toBe("creating");
-        const result = await client.prepare(slot);
+        const result = await client.prepare(slot, options);
         if (!lost) {
           lost = {
             id: slot.id,
@@ -63,7 +63,7 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
     };
     const slots = () =>
       database.client.unsafe<ExecutionSlot[]>(
-        'SELECT id,role,state,runtime_host_image AS "runtimeHostImage",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID" FROM factory.execution_slot ORDER BY created_at,id',
+        'SELECT id,role,state,runtime_host_image AS "runtimeHostImage",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted" FROM factory.execution_slot ORDER BY created_at,id',
       );
     const api = (path: string, body?: unknown) =>
       fetch(`${fixture.base}${path}`, {

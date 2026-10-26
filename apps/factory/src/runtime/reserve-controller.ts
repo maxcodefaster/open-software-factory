@@ -76,7 +76,10 @@ export function createExecutionReserve(
             requested = true;
           } else {
             const startAllowed = await store.intendStart(sql, planned.id);
-            const observed = await adapter.prepare(planned, { startAllowed });
+            const observed = await adapter.prepare(planned, {
+              startAllowed,
+              intendStandby: (action) => store.intendStandby(sql, planned.id, action),
+            });
             await store.observe(sql, planned.id, observed);
             if (observed.failed) await store.retire(sql, planned.id);
             if (observed.ready || observed.failed) requested = true;
@@ -119,7 +122,11 @@ export function createExecutionReserve(
       if (!slot) return null;
       if (slot.state !== "assigned")
         throw new Error("Used execution slot cannot restart as unassigned compute");
-      return withSlotLock(slot.id, () => adapter.activate(slot, resources));
+      return withSlotLock(slot.id, (sql) =>
+        adapter.activate(slot, resources, {
+          intendStandby: (action) => store.intendStandby(sql, slot.id, action),
+        }),
+      );
     },
     removed: (sql: SQL, attemptID: string) => store.usedRemoved(sql, attemptID),
     async cleanup(attemptID: string, generation: number) {

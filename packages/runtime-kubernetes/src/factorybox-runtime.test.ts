@@ -5,6 +5,7 @@ import {
   type FactoryboxRuntimeInput,
   factoryboxOriginalWorkerRetired,
   factoryboxPreparationRequest,
+  factoryboxPreparationAssignment,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
 import type { runFactoryboxKubernetes } from "./factorybox-worker";
@@ -29,6 +30,95 @@ const input: FactoryboxRuntimeInput = {
   },
 };
 
+function assignmentFiles(execution = input): Readonly<Record<string, string>> {
+  return execution.reserve
+    ? {
+        "slot.json": JSON.stringify({
+          version: 1,
+          id: execution.labels["factory.dev/execution-slot"],
+        }),
+      }
+    : {
+        "assignment.json": JSON.stringify({
+          version: 1,
+          runtimeAttemptId: execution.attemptID,
+          generation: 1,
+        }),
+        "parent-token": "parent-private",
+        "child-token": "child-private",
+      };
+}
+
+test("shared workers receive only the selected Sandbox assignment, never an ambient Secret mount", () => {
+  const identity = {
+    version: 1 as const,
+    namespaceUID: "namespace",
+    claimUID: "claim",
+    podUID: "pod",
+    storeID: input.attemptID.replaceAll("-", ""),
+    epoch: "e".repeat(32),
+    bootID: "boot",
+    executableSHA256: input.profile.executableSHA256,
+    controllerRoot: "/controller",
+  };
+  const assignment = assignmentFiles();
+  const request = factoryboxPreparationRequest(input, identity, assignment);
+  expect(request.version).toBe(3);
+  expect(request.assignment).toEqual(assignment);
+  expect(request.sourceWorkspaceID).toBe(input.runtimeOwnerID!.replaceAll("-", ""));
+  const pod = renderFactoryboxRuntime(input).pod;
+  expect(pod.spec.volumes.some((volume) => volume.name === "assignment")).toBe(false);
+  expect(pod.spec.containers[0]!.volumeMounts.some((mount) => mount.name === "assignment")).toBe(
+    false,
+  );
+  expect(JSON.stringify(pod)).not.toContain("parent-private");
+  expect(JSON.stringify(input)).not.toContain("parent-private");
+});
+
+test("assignment reads reject another owner and keep assigned credentials out of a reserve seed", () => {
+  const files = assignmentFiles();
+  const secret = {
+    metadata: {
+      labels: {
+        "app.kubernetes.io/managed-by": "open-software-factory",
+        "factory.dev/runtime-owner": input.runtimeOwnerID,
+        "factory.dev/runtime-attempt": input.attemptID,
+      },
+    },
+    data: Object.fromEntries(
+      Object.entries(files).map(([name, value]) => [name, Buffer.from(value).toString("base64")]),
+    ),
+  };
+  expect(factoryboxPreparationAssignment(input, secret)).toEqual(files);
+  for (const field of ["factory.dev/runtime-owner", "factory.dev/runtime-attempt"])
+    expect(() =>
+      factoryboxPreparationAssignment(input, {
+        ...secret,
+        metadata: { labels: { ...secret.metadata.labels, [field]: "foreign" } },
+      }),
+    ).toThrow("another immutable execution owner");
+  const reserved = {
+    ...input,
+    reserve: true,
+    sharedSource: false,
+    labels: { ...input.labels, "factory.dev/execution-slot": input.attemptID },
+  };
+  const slot = assignmentFiles(reserved);
+  const seed = factoryboxPreparationAssignment(reserved, {
+    ...secret,
+    metadata: {
+      labels: { ...secret.metadata.labels, "factory.dev/execution-slot": input.attemptID },
+    },
+    data: {
+      ...secret.data,
+      "slot.json": Buffer.from(slot["slot.json"]!).toString("base64"),
+    },
+  });
+  expect(seed).toEqual(slot);
+  expect(JSON.stringify(seed)).not.toContain("parent-private");
+  expect(JSON.stringify(seed)).not.toContain("child-private");
+});
+
 test("two executions on one worker retain distinct Sandbox and preparation identities", () => {
   const workerID = "a".repeat(32);
   const identity = {
@@ -42,20 +132,21 @@ test("two executions on one worker retain distinct Sandbox and preparation ident
     executableSHA256: input.profile.executableSHA256,
     controllerRoot: "/controller",
   };
-  const first = factoryboxPreparationRequest({ ...input, workerID }, identity);
-  const second = factoryboxPreparationRequest(
-    {
-      ...input,
-      workerID,
-      attemptID: "21234567-89ab-5def-8123-456789abcdef",
-      sandboxID: "runtime-2123456789ab5def8123456789abcdef",
-    },
-    identity,
-  );
-  expect(first.version).toBe(2);
+  const first = factoryboxPreparationRequest({ ...input, workerID }, identity, assignmentFiles());
+  const sibling = {
+    ...input,
+    workerID,
+    runtimeOwnerID: "31234567-89ab-5def-8123-456789abcdef",
+    attemptID: "21234567-89ab-5def-8123-456789abcdef",
+    sandboxID: "runtime-2123456789ab5def8123456789abcdef",
+  };
+  const second = factoryboxPreparationRequest(sibling, identity, assignmentFiles(sibling));
+  expect(first.version).toBe(3);
   expect(first.sandboxID).toBe("runtime-0123456789ab5def8123456789abcdef");
   expect(second.sandboxID).toBe("runtime-2123456789ab5def8123456789abcdef");
   expect(second.storeID).toBe(first.storeID);
+  expect(second.sourceWorkspaceID).not.toBe(first.sourceWorkspaceID);
+  expect(second.assignment["assignment.json"]).not.toBe(first.assignment["assignment.json"]);
 });
 
 test("missing, changed and another execution's Sandbox identities fail before worker effects", () => {
@@ -89,8 +180,12 @@ test("assigning a never-used reserve keeps its original Sandbox independently of
     executableSHA256: input.profile.executableSHA256,
     controllerRoot: "/controller",
   };
-  const before = factoryboxPreparationRequest(reserved, identity);
-  const after = factoryboxPreparationRequest({ ...reserved, attemptID: input.attemptID }, identity);
+  const before = factoryboxPreparationRequest(reserved, identity, assignmentFiles(reserved));
+  const after = factoryboxPreparationRequest(
+    { ...reserved, attemptID: input.attemptID },
+    identity,
+    assignmentFiles(reserved),
+  );
   expect(after).toEqual(before);
   expect(after.sandboxID).not.toContain(workerID);
 });
@@ -216,7 +311,6 @@ test("consumer image exports before PID 1 starts, with source and credentials co
   expect(pod.spec.containers[0]!.volumeMounts).toContainEqual({
     name: "runtime-data",
     mountPath: "/factory-source",
-    subPath: "home",
   });
   expect(JSON.stringify(pod)).not.toContain("docker.sock");
   expect(JSON.stringify(pod)).not.toContain("CODER_INNER_IMAGE");
@@ -235,17 +329,21 @@ test("isolated execution has no shared source bind and wrong source placement fa
 
 test("preparation rejects another admitted worker before returning any mutation request", () => {
   expect(() =>
-    factoryboxPreparationRequest(input, {
-      version: 1,
-      namespaceUID: "namespace",
-      claimUID: "claim",
-      podUID: "pod",
-      storeID: "d".repeat(32),
-      epoch: "e".repeat(32),
-      bootID: "boot",
-      executableSHA256: input.profile.executableSHA256,
-      controllerRoot: "/controller",
-    }),
+    factoryboxPreparationRequest(
+      input,
+      {
+        version: 1,
+        namespaceUID: "namespace",
+        claimUID: "claim",
+        podUID: "pod",
+        storeID: "d".repeat(32),
+        epoch: "e".repeat(32),
+        bootID: "boot",
+        executableSHA256: input.profile.executableSHA256,
+        controllerRoot: "/controller",
+      },
+      assignmentFiles(),
+    ),
   ).toThrow("admitted worker");
 });
 

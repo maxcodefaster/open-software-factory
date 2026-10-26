@@ -47,6 +47,35 @@ only for that exact worker epoch. Unknown operation outcomes retain ownership an
 they cannot authorize a new Pod, Sandbox or model request. Explicit Stop still removes execution.
 Reserve slots continue to use the existing PostgreSQL controller and locks.
 
+Sandbox identities are independent of worker identities. Preparation protocol 3
+retains a private input directory and OCI configuration for each immutable
+Sandbox ID; a reserve assignment keeps its original slot Sandbox ID. Sandboxes
+reuse the worker's verified common image import, not another Sandbox's writable
+overlay or credentials. Releasing an unused input cannot authorize deletion or
+unmounts for another running Sandbox.
+
+Preparation protocol 3 delivers only that Sandbox's bounded assignment through the
+authenticated provisioning command. The worker Pod has no ambient assignment Secret
+mount. A reserve seed receives no Parent or Child credentials; activation delivers
+those only after its original Sandbox has resumed. Private assignment files do not
+enter Factory's retained preparation request.
+
+Canonical Source uses `workspaces/<full-workspace-id>/home` within its claim. That
+directory is generated and retained with the Source intent, including across access
+epochs. The Source Pod mounts only that directory; the worker resolves the selected
+Workspace beneath its source root without following symlink ancestors. Preparation
+records the Source directory's device and inode for replay and refuses a replaced
+root when preparation is observed again. Existing claims and mismatched layouts are never
+retargeted by recovery. The Greenfield baseline has no migration of an old layout.
+
+A never-used reserve becomes ready only after native Pause confirms its exact
+standby snapshot, zero Sandbox anonymous RAM and no resident snapshot pages.
+Assignment resumes that same Sandbox before delivering its role and credentials.
+Persist each Pause/Resume attempt before the external command. A lost response
+can settle through the original native record but cannot commission another
+mutation or a cold replacement. This is a paused prepared reserve, not a claim
+that the current per-slot workers form a Staging-derived preforked pool.
+
 An explicit Stop can retire a missing, terminal or restarted original worker after exact Namespace
 and Pod UID checks. This records no invented native Delete receipt. It still removes only the
 owned execution Pod and private store, preserving canonical Source. An unavailable Kubernetes read

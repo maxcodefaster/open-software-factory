@@ -771,11 +771,13 @@ test.each([
           factoryboxPreparation: { bundle: "owned" },
         });
         expect(await store.intendStart(database.client, slot.id)).toBe(true);
+        expect(await store.intendStandby(database.client, slot.id, "pause")).toBe(true);
         await store.observe(database.client, slot.id, {
           namespaceUID: "owned-namespace-uid",
           podUID,
           claimUID: "owned-claim",
           ready: true,
+          factoryboxPaused: true,
         });
         exists = true;
         reserve = createExecutionReserve(

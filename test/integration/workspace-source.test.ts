@@ -122,10 +122,19 @@ test("new Source placement uses the admitted Factorybox node before any executio
     );
     expect(requested).toHaveLength(1);
     expect(requested[0]?.storageNode).toBe("admitted-worker");
+    const directory = `workspaces/${first.workspaceID.replaceAll("-", "")}/home`;
+    expect(requested[0]?.sourceDirectory).toBe(directory);
     const [source] = await fixture.database.client<
-      Array<{ node: string }>
-    >`SELECT storage_node AS node FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`;
+      Array<{ node: string; directory: string }>
+    >`SELECT storage_node AS node,source_directory AS directory FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`;
     expect(source?.node).toBe("admitted-worker");
+    expect(source?.directory).toBe(directory);
+    await expect(
+      (async () => {
+        await fixture.database
+          .client`UPDATE factory.workspace_source SET source_directory='home' WHERE workspace_id=${first.workspaceID}`;
+      })(),
+    ).rejects.toThrow("can only be updated to DEFAULT");
   } finally {
     if (previous === undefined) delete process.env["FACTORY_FACTORYBOX_NODE"];
     else process.env["FACTORY_FACTORYBOX_NODE"] = previous;

@@ -187,7 +187,7 @@ export function createFactoryboxExecution(
     if (operation.completed)
       return z
         .object({
-          version: z.literal(2),
+          version: z.literal(3),
           sandboxID: z.literal(saved.request.sandboxID),
           bundle: z.literal(path.replace("/prepared.json", "/bundle")),
         })
@@ -219,7 +219,7 @@ export function createFactoryboxExecution(
         throw new Error("Factorybox preparation remains unconfirmed; its inputs were retained");
       const observed = z
         .object({
-          version: z.literal(2),
+          version: z.literal(3),
           sandboxID: z.literal(saved.request.sandboxID),
           storeID: z.literal(saved.identity.storeID),
           epoch: z.literal(saved.identity.epoch),

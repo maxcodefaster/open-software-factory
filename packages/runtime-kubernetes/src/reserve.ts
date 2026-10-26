@@ -1,5 +1,6 @@
 import { z } from "zod";
 import upstream from "../../../upstream.json" with { type: "json" };
+import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybox-standby";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
@@ -31,10 +32,21 @@ export interface SlotObservation {
   readonly failed: boolean;
   readonly factoryboxIdentity?: unknown;
   readonly factoryboxPreparation?: unknown;
+  readonly factoryboxPaused?: boolean;
+}
+interface StandbyIntent {
+  intendStandby(action: "pause" | "resume"): Promise<boolean>;
 }
 export interface ReserveClient {
-  prepare(slot: ExecutionSlot, options?: { startAllowed: boolean }): Promise<SlotObservation>;
-  activate(slot: ExecutionSlot, resources: readonly unknown[]): Promise<SlotObservation>;
+  prepare(
+    slot: ExecutionSlot,
+    options?: { startAllowed: boolean } & StandbyIntent,
+  ): Promise<SlotObservation>;
+  activate(
+    slot: ExecutionSlot,
+    resources: readonly unknown[],
+    options?: StandbyIntent,
+  ): Promise<SlotObservation>;
   retire(slot: ExecutionSlot): Promise<void>;
   removeAssigned(slot: ExecutionSlot, generation: number): Promise<boolean>;
 }
@@ -267,7 +279,7 @@ export const slotActivationCommand =
   'set -eu\nIFS= read -r expected_uid\ntest "$FACTORY_POD_UID" = "$expected_uid"\ntest -d /home/coder/.factory-reserve\ntest ! -L /home/coder/.factory-reserve\nfile=$(mktemp /home/coder/.factory-reserve/.activation-XXXXXX)\ntrap \'rm -f "$file"\' EXIT\nhead -c 1048577 > "$file"\ntest "$(wc -c < "$file")" -le 1048576\nchmod 0400 "$file"\nchown 100000:100000 "$file"\nsync "$file"\nif test -f /home/coder/.factory-reserve/activation.json; then cmp -s "$file" /home/coder/.factory-reserve/activation.json; else ln "$file" /home/coder/.factory-reserve/activation.json; sync /home/coder/.factory-reserve; fi\n';
 
 const preparation = z.object({
-  version: z.literal(2),
+  version: z.literal(3),
   sandboxID: z.string(),
   bundle: z.string(),
   configSHA256: z.string(),
@@ -285,16 +297,32 @@ async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxW
     factoryboxRuntimeDeclaration(input),
   );
   if (!result.confirmed) throw new Error("Execution slot native state is unconfirmed");
-  return z
-    .object({
-      record: z.object({
-        id: z.literal(input.sandboxID),
-        runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
-        phase: z.literal("running"),
-      }),
-      runtime: z.object({ status: z.literal("running") }),
-    })
-    .parse(JSON.parse(result.stdout));
+  return readFactoryboxStandbyState(input.sandboxID, JSON.parse(result.stdout));
+}
+
+async function standby(
+  slot: ExecutionSlot,
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  action: "pause" | "resume",
+  options?: StandbyIntent,
+) {
+  if (!options) throw new Error("Standby lifecycle requires durable command admission");
+  return settleFactoryboxStandby(input.sandboxID, slot.id.replaceAll("-", ""), action, {
+    state: () => reserveState(input, identity),
+    intend: options.intendStandby,
+    async execute(operation) {
+      const result = await executeFactoryboxOperation(
+        factoryboxRuntimeRequest(input),
+        identity,
+        operation,
+        runFactoryboxKubernetes,
+        factoryboxRuntimeDeclaration(input),
+      );
+      if (!result.confirmed) throw new Error(`Standby ${action} outcome is unconfirmed`);
+      return JSON.parse(result.stdout);
+    },
+  });
 }
 
 async function reserveGuestCommand(
@@ -447,15 +475,23 @@ export function createReserveClient(): ReserveClient {
         if (!started.confirmed) throw new Error("Execution slot Start outcome is unconfirmed");
       }
       const state = await reserveState(input, identity);
+      if (state.record.phase === "paused") {
+        await standby(slot, input, identity, "pause", options);
+        return { ...observed, ready: true, factoryboxPaused: true };
+      }
+      if (state.runtime?.status !== "running")
+        throw new Error("Execution slot preparation has no running native Sandbox");
       const ready = await reserveGuestCommand(
         input,
         identity,
         state.record.runtime_id,
         "test -f /home/coder/.factory-reserve/ready && cat /home/coder/.factory-reserve/ready",
       );
-      return { ...observed, ready: ready.exitCode === 0 && ready.stdout === slot.id };
+      if (ready.exitCode !== 0 || ready.stdout !== slot.id) return { ...observed, ready: false };
+      await standby(slot, input, identity, "pause", options);
+      return { ...observed, ready: true, factoryboxPaused: true };
     },
-    async activate(slot, resources) {
+    async activate(slot, resources, options) {
       if (
         slot.state !== "assigned" ||
         !slot.assignedAttemptID ||
@@ -544,7 +580,7 @@ export function createReserveClient(): ReserveClient {
       });
       const input = factoryboxReserveInput(slot, labels);
       const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
-      const state = await reserveState(input, identity);
+      const state = await standby(slot, input, identity, "resume", options);
       const activated = await reserveGuestCommand(
         input,
         identity,

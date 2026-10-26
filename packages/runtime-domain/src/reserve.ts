@@ -16,6 +16,8 @@ export interface ExecutionSlot {
   readonly factoryboxIdentity?: unknown;
   readonly factoryboxPreparation?: unknown;
   readonly factoryboxStartAttempted?: boolean;
+  readonly factoryboxPauseAttempted?: boolean;
+  readonly factoryboxResumeAttempted?: boolean;
 }
 
 export interface ReservePolicy {
@@ -34,7 +36,9 @@ export const defaultReservePolicy: ReservePolicy = {
   creationConcurrency: 1,
   maxExecutionSlots: 16,
   expiryMS: 15 * 60_000,
-  preparationMS: 3 * 60_000,
+  // Initial image export and worker admission are part of cold preparation.
+  // Match the lifecycle deadline instead of retiring a still-preparing worker.
+  preparationMS: 420_000,
   retryMS: 30_000,
 };
 
