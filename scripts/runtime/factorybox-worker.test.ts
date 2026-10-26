@@ -32,6 +32,7 @@ test("operator CLI persists exact intent before execution and never overwrites a
     storeID: request.storeID,
     epoch: "e".repeat(32),
     bootID: "boot",
+    nodeBootID: "node-boot",
     executableSHA256: request.executableSHA256,
     controllerRoot: `/var/lib/sysbox/fixed-store/data/store/epochs/${"e".repeat(32)}/controller`,
   } as const;

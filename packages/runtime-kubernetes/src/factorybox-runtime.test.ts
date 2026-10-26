@@ -57,6 +57,7 @@ test("shared workers receive only the selected Sandbox assignment, never an ambi
     storeID: input.attemptID.replaceAll("-", ""),
     epoch: "e".repeat(32),
     bootID: "boot",
+    nodeBootID: "node-boot",
     executableSHA256: input.profile.executableSHA256,
     controllerRoot: "/controller",
   };
@@ -128,6 +129,7 @@ test("two executions on one worker retain distinct Sandbox and preparation ident
     storeID: workerID.replaceAll("-", ""),
     epoch: "e".repeat(32),
     bootID: "boot",
+    nodeBootID: "node-boot",
     executableSHA256: input.profile.executableSHA256,
     controllerRoot: "/controller",
   };
@@ -180,6 +182,7 @@ test("assigning a never-used reserve keeps its original Sandbox independently of
     storeID: workerID.replaceAll("-", ""),
     epoch: "e".repeat(32),
     bootID: "boot",
+    nodeBootID: "node-boot",
     executableSHA256: input.profile.executableSHA256,
     controllerRoot: "/controller",
   };
@@ -200,7 +203,10 @@ test("registry trust follows the qualified exact runtime image, including privat
       runtimeHostImage: `${authority}/factory/runtime@sha256:${"a".repeat(64)}`,
     };
     const rendered = renderFactoryboxRuntime(request);
-    expect(rendered.pod.spec.initContainers[0]?.image).toBe(request.runtimeHostImage);
+    expect(
+      rendered.pod.spec.initContainers.find((container) => container.name === "runtime-image")
+        ?.image,
+    ).toBe(request.runtimeHostImage);
     expect(rendered.pod.spec.containers[0]?.volumeMounts).toContainEqual({
       name: "registry-ca",
       mountPath: "/factory/registry-ca",
@@ -234,7 +240,10 @@ test.each(["arm64", "amd64"] as const)(
     });
     const rendered = renderFactoryboxRuntime({ ...input, profile });
     expect(rendered.pod.spec.nodeSelector["kubernetes.io/arch"]).toBe(architecture);
-    expect(rendered.pod.spec.initContainers[0]!.image).toBe(input.runtimeHostImage);
+    expect(
+      rendered.pod.spec.initContainers.find((container) => container.name === "runtime-image")
+        ?.image,
+    ).toBe(input.runtimeHostImage);
     expect(profile.architecture).toBe(architecture);
   },
 );
@@ -258,6 +267,7 @@ for (const scenario of [
       storeID: input.attemptID.replaceAll("-", ""),
       epoch: "e".repeat(32),
       bootID: "boot",
+      nodeBootID: "node-boot",
       executableSHA256: input.profile.executableSHA256,
       controllerRoot: "/controller",
     };
@@ -307,10 +317,21 @@ test("consumer image exports before PID 1 starts, with source and credentials co
   expect(pod.spec.hostNetwork).toBe(false);
   expect(pod.spec.automountServiceAccountToken).toBe(false);
   expect(pod.spec.containers[0]!.resources.limits).toEqual({ cpu: "3", memory: "3Gi" });
-  expect(pod.spec.initContainers[0]!.image).toBe(input.runtimeHostImage);
-  expect(pod.spec.initContainers[0]!.volumeMounts).toEqual([
-    { name: "store", mountPath: "/factory-seed", subPath: "seed" },
+  expect(pod.spec.initContainers.map((container) => container.name)).toEqual([
+    "store-initialize",
+    "runtime-image",
   ]);
+  expect(pod.spec.initContainers[0]!.image).toBe(input.profile.image);
+  expect(pod.spec.initContainers[0]!.volumeMounts).toEqual([
+    { name: "store", mountPath: "/factory-store" },
+  ]);
+  expect(pod.spec.initContainers[0]!.securityContext.capabilities.drop).toEqual(["ALL"]);
+  expect(
+    pod.spec.initContainers.find((container) => container.name === "runtime-image")?.image,
+  ).toBe(input.runtimeHostImage);
+  expect(
+    pod.spec.initContainers.find((container) => container.name === "runtime-image")?.volumeMounts,
+  ).toEqual([{ name: "store", mountPath: "/factory-seed", subPath: "seed" }]);
   expect(pod.spec.containers[0]!.volumeMounts).toContainEqual({
     name: "runtime-data",
     mountPath: "/factory-source",
@@ -342,6 +363,7 @@ test("preparation rejects another admitted worker before returning any mutation 
         storeID: "d".repeat(32),
         epoch: "e".repeat(32),
         bootID: "boot",
+        nodeBootID: "node-boot",
         executableSHA256: input.profile.executableSHA256,
         controllerRoot: "/controller",
       },

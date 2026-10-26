@@ -104,6 +104,12 @@ caller-owned mount pair. An assigned reserve retains its original slot owner thr
 and cleanup. Incomplete preparation with unconfirmed
 mount ownership remains available for inspection instead of being force-unmounted.
 
+Kubernetes volume initialization is limited to a new empty root-owned store and its exact
+Pod/store identity. Existing backing is never repaired by changing permissions. Admission
+pins the node-reported and worker kernel boot IDs independently, alongside original object
+UIDs and the native epoch. It refuses a later change to either boot observation; it does not
+assume those two independently supplied strings are identical.
+
 Factory queues obsolete checkpoints and superseded private Resume images from confirmed native Runtime Attempt observations,
 including inherited standby history. Each retirement retains its exact Sandbox ID,
 snapshot, native owner, checkpoint hash and worker epoch before the external command.

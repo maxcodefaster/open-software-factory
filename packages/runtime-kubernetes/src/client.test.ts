@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
-import { createKubernetesClient, KubernetesObservationUnavailableError } from "./client";
+import {
+  createKubernetesClient,
+  KubernetesObservationUnavailableError,
+  readRuntimeRegistryCA,
+} from "./client";
 import { factoryboxSharedLabels } from "./factorybox-location";
 
 const namespace = {
@@ -13,6 +17,36 @@ const namespace = {
     },
   },
 };
+
+test("Registry trust uses only the explicitly selected Secret, never an old fixture namespace", async () => {
+  const calls: string[][] = [];
+  const run = async (args: string[]) => {
+    calls.push(args);
+    return { exitCode: 0, stdout: Buffer.from("owned certificate").toString("base64"), stderr: "" };
+  };
+  await expect(readRuntimeRegistryCA({}, run)).rejects.toThrow("explicit");
+  expect(calls).toHaveLength(0);
+  expect(
+    await readRuntimeRegistryCA(
+      { FACTORY_REGISTRY_CA_NAMESPACE: "own-registry", FACTORY_REGISTRY_CA_SECRET: "own-trust" },
+      run,
+    ),
+  ).toBe("owned certificate");
+  expect(calls[0]).toEqual([
+    "get",
+    "secret",
+    "own-trust",
+    "-n",
+    "own-registry",
+    "-o",
+    "jsonpath={.data.ca\\.crt}",
+  ]);
+  for (const invalid of ["../other", "other namespace", ""])
+    await expect(
+      readRuntimeRegistryCA({ FACTORY_REGISTRY_CA_NAMESPACE: invalid }, run),
+    ).rejects.toThrow();
+  expect(calls).toHaveLength(1);
+});
 const resources = [
   namespace,
   { apiVersion: "v1", kind: "PersistentVolumeClaim", metadata: { name: "runtime-data" } },

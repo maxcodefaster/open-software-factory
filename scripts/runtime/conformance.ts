@@ -1,18 +1,13 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { ServerWebSocket } from "bun";
+import { readRuntimeRegistryCA } from "../../packages/runtime-kubernetes/src/client";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config";
-import {
-  conformanceManifest,
-  conformanceNamespace,
-  removeConformanceResource,
-} from "./conformance-resources";
+import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { createConformanceRuntime } from "./factorybox-conformance";
 
-const namespace = conformanceNamespace;
 const owner = crypto.randomUUID();
-const pod = `conformance-${owner}`;
-const workspaceContainer = "workspace_cvm";
 const workspace = "/home/coder/runtime-project";
 const sourceWorkspace = "/home/coder/runtime-source-project";
 const config = `${workspace}/.devcontainer/devcontainer.json`;
@@ -36,6 +31,14 @@ const expectedRuntimeHost = (
 if (!/^[a-zA-Z0-9.:/_-]+@sha256:[a-f0-9]{64}$/.test(expectedRuntimeHost))
   throw new Error("Runtime conformance requires an exact registry digest");
 const languageProof = process.env["FACTORY_RUNTIME_LANGUAGE_CONFORMANCE"] === "1";
+const runtime = createConformanceRuntime(
+  owner,
+  expectedRuntimeHost,
+  configuredFactoryboxRuntimeProfile(),
+  await readRuntimeRegistryCA(),
+  artifacts,
+);
+const { namespace, pod } = runtime;
 
 type CommandOptions = {
   input?: string;
@@ -91,27 +94,8 @@ function kubectl(args: string[]) {
   return command(kubernetesCommand(args));
 }
 
-function outerDocker(args: string[]) {
-  return kubectl(["exec", "-n", namespace, pod, "--", "docker", ...args]);
-}
-
 function inner(args: string[], options: CommandOptions = {}) {
-  const interactive = options.input === undefined ? [] : ["-i"];
-  return command(
-    kubernetesCommand([
-      "exec",
-      ...interactive,
-      "-n",
-      namespace,
-      pod,
-      "--",
-      "docker",
-      "exec",
-      workspaceContainer,
-      ...args,
-    ]),
-    options,
-  );
+  return command(runtime.execArgs(args, options.input !== undefined), options);
 }
 
 function innerDocker(args: string[]) {
@@ -124,41 +108,12 @@ function assert(condition: unknown, message: string): asserts condition {
 
 async function prepareSmokeRuntime() {
   await mkdir(artifacts, { recursive: true });
-  await writeFile(
-    resolve(artifacts, "intent.json"),
-    JSON.stringify({ owner, pod, namespace, image: expectedRuntimeHost }, null, 2),
-  );
-  const template = await readFile(
-    resolve(import.meta.dir, "../../deploy/runtime-smoke/envbox.yaml"),
-    "utf8",
-  );
-  await command(kubernetesCommand(["create", "-f", "-"]), {
-    input: JSON.stringify({
-      apiVersion: "v1",
-      kind: "List",
-      items: conformanceManifest(template, owner, expectedRuntimeHost),
-    }),
-  });
-  await kubectl(["wait", "--for=condition=Ready", `pod/${pod}`, "-n", namespace, "--timeout=300s"]);
-  const deadline = Date.now() + 300_000;
+  await runtime.prepare();
+  const deadline = Date.now() + 30_000;
   let lastObservation = "";
   while (Date.now() < deadline) {
     try {
-      const probe = await runCommand(
-        kubernetesCommand([
-          "exec",
-          "-n",
-          namespace,
-          pod,
-          "--",
-          "docker",
-          "exec",
-          workspaceContainer,
-          "docker",
-          "info",
-        ]),
-        undefined,
-      );
+      const probe = await runCommand(runtime.execArgs(["docker", "info"]), undefined);
       if (probe.exitCode === 0) {
         await writeFile(
           resolve(artifacts, "ready.json"),
@@ -176,13 +131,12 @@ async function prepareSmokeRuntime() {
     await Bun.sleep(1_000);
   }
   throw new Error(
-    `The same Envbox workspace Docker daemon did not become ready: ${lastObservation}`,
+    `The same Factorybox private Docker daemon did not become ready: ${lastObservation}`,
   );
 }
 
 async function removeSmokeRuntime() {
-  await removeConformanceResource("pods", owner);
-  await removeConformanceResource("persistentvolumeclaims", owner);
+  await runtime.cleanup();
 }
 
 async function removeIds(resource: "container" | "network" | "volume", ids: string) {
@@ -231,25 +185,7 @@ async function stageFixture(target = workspace) {
     stderr: "pipe",
   });
   const extraction = Bun.spawn(
-    kubernetesCommand([
-      "exec",
-      "-i",
-      "-n",
-      namespace,
-      pod,
-      "--",
-      "docker",
-      "exec",
-      "-i",
-      "--user",
-      "1000:1000",
-      workspaceContainer,
-      "tar",
-      "-C",
-      target,
-      "-xf",
-      "-",
-    ]),
+    runtime.execArgs(["tar", "-C", target, "-xf", "-"], true, "1000:1000"),
     { stdin: archive.stdout, stdout: "pipe", stderr: "pipe" },
   );
   const [archiveExit, extractionExit, archiveError, extractionError] = await Promise.all([
@@ -264,15 +200,7 @@ async function stageFixture(target = workspace) {
 
 async function devcontainerUp() {
   const output = await command(
-    kubernetesCommand([
-      "exec",
-      "-n",
-      namespace,
-      pod,
-      "--",
-      "docker",
-      "exec",
-      workspaceContainer,
+    runtime.execArgs([
       "devcontainer",
       "up",
       "--workspace-folder",
@@ -311,18 +239,7 @@ async function inspectContainer(id: string) {
 }
 
 async function verifyRuntimeBoundary() {
-  const inspected = JSON.parse(await outerDocker(["inspect", workspaceContainer])) as Array<{
-    Config: { Image: string };
-    HostConfig: { Runtime: string };
-    State: { Running: boolean };
-  }>;
-  const runtime = inspected[0];
-  assert(runtime?.HostConfig.Runtime === "sysbox-runc", "Workspace does not use Sysbox");
-  assert(runtime.State.Running, "Sysbox workspace is not running");
-  assert(
-    runtime.Config.Image === expectedRuntimeHost,
-    "Runtime host image is not the pinned image",
-  );
+  await runtime.boundary();
   assert(
     (await kubectl([
       "exec",
@@ -342,7 +259,8 @@ async function verifyRuntimeBoundary() {
     'printf \'%s\\n\' "$(docker version --format \'{{.Server.Version}}\')" "$(docker compose version --short)" "$(node --version)" "$(devcontainer --version)" "$(uname -m)"',
   ]);
   assert(
-    versions === "29.9.0\n5.6.0\nv24.21.0\n0.89.0\naarch64",
+    versions ===
+      `29.9.0\n5.6.0\nv24.21.0\n0.89.0\n${runtime.architecture === "arm64" ? "aarch64" : "x86_64"}`,
     `Unexpected runtime toolchain:\n${versions}`,
   );
   const coderBoundary = await inner([
@@ -1246,7 +1164,7 @@ async function verifyPythonLanguageConnector() {
 }
 
 async function main() {
-  console.log("Checking Envbox and Sysbox boundary");
+  console.log("Checking Factorybox and private Sysbox/Docker boundary");
   await verifyRuntimeBoundary();
   await cleanupInnerStack();
   await stageFixture();
@@ -1257,6 +1175,30 @@ async function main() {
     await verifyAppAndHotUpdate(first.containerId);
     console.log("Restarting the stack and checking named-volume persistence");
     const restarted = await verifyVolumeSurvivesRestart();
+    await verifyStack(restarted);
+    const metricsBefore = await runtime.metrics();
+    assert(
+      metricsBefore.status === "available" && metricsBefore.memoryMiB !== null,
+      "Native per-Sandbox cgroup memory observation is unavailable",
+    );
+    await Bun.sleep(5100);
+    const metricsAfter = await runtime.metrics();
+    assert(
+      metricsAfter.status === "available" &&
+        metricsAfter.cpuMilli !== null &&
+        metricsAfter.cpuMilli > 0,
+      "Native per-Sandbox CPU delta is unavailable",
+    );
+    await writeFile(
+      resolve(artifacts, "sandbox-metrics.json"),
+      JSON.stringify({ before: metricsBefore, after: metricsAfter }, null, 2),
+    );
+    const before = await innerDocker(["ps", "--no-trunc", "--format", "{{.ID}}"]);
+    await runtime.pauseResume();
+    assert(
+      (await innerDocker(["ps", "--no-trunc", "--format", "{{.ID}}"])) === before,
+      "Native cluster Resume replaced the running Dev Containers",
+    );
     await verifyStack(restarted);
   } finally {
     await cleanupInnerStack();
@@ -1280,14 +1222,7 @@ async function main() {
 try {
   await prepareSmokeRuntime();
   await main();
-  await writeFile(
-    resolve(artifacts, "result.json"),
-    JSON.stringify(
-      { owner, pod, image: expectedRuntimeHost, languageProof, passed: true },
-      null,
-      2,
-    ),
-  );
+  await runtime.passed();
 } catch (cause) {
   const diagnostics = await runCommand(
     kubernetesCommand(["logs", "-n", namespace, pod, "--tail=100"]),
@@ -1313,3 +1248,19 @@ try {
 } finally {
   await removeSmokeRuntime();
 }
+await writeFile(
+  resolve(artifacts, "result.json"),
+  JSON.stringify(
+    {
+      owner,
+      pod,
+      namespace,
+      image: expectedRuntimeHost,
+      languageProof,
+      passed: true,
+      cleanup: true,
+    },
+    null,
+    2,
+  ),
+);

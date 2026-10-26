@@ -57,11 +57,11 @@ builds. All components must match `platform`. An AMD64 build on ARM64 remains a
 cross-build; Factory runs the native `doctor` probe only on a matching Linux Docker
 host. Even a matching doctor is not a lifecycle qualification.
 
-ARM64 worker images can be assembled, but the current runtime still refuses ARM64
-execution because its timer continuation is not ported. The build receipt records
-that refusal and `installed: false`. Do not select its candidate profile until native
-Start, shared-source Pause/Resume, Connector and reserve acceptance pass. The existing
-installation stays unchanged when a build or runtime probe fails.
+The current ARM64 candidate implements timer continuation and has native functional
+Start, shared-source Pause/Resume and Connector proofs. Full ARM64 release qualification
+remains open in the standalone repository. Build success is not qualification, and
+selecting a candidate profile requires native acceptance of its exact bytes on the target
+node. The existing installation stays unchanged when a build or runtime probe fails.
 
 ## Request and deployment
 
@@ -90,17 +90,35 @@ and `--worker-epoch`. The previous first-release image does not expose these opt
 Replace the example store and trust-domain IDs with random 32-character hexadecimal identities.
 Factory renders and validates either Linux ARM64 or AMD64 using the same worker protocol.
 The current standalone runtime candidate is qualified only on its exact Linux AMD64 kernel
-and 4096-byte pages. Its ARM64 timer reader and continuation are not implemented. Selecting
+and 4096-byte pages. ARM64 has its own native acceptance requirements. Selecting
 `arm64`, building an image or changing `kernel` does not qualify that runtime. Inspection checks the node's OS,
-architecture, kernel and boot identity against the live worker. Worker startup checks its actual
+architecture and kernel against the live worker. Node-reported and kernel-reported boot IDs
+are pinned separately; a later change to either refuses the original admission. Worker startup checks its actual
 cgroups, component identities, store lease and filesystem. Another node profile needs native
 qualification before use.
 
-The Pod has a 3 CPU / 3 GiB limit and reservation, a private PID namespace, privileged access and
-a read-only `/lib/modules` mount. Its complete `/var/lib/sysbox` state uses a dedicated RWO PVC.
+The Pod has a 3 CPU / 3 GiB limit and reservation, a private PID namespace and privileged access.
+Required kernel facilities must already be present on the admitted node. Factory does not mount
+host `/lib/modules`: Sysbox can pass that external tree into a guest, which violates private
+filesystem capture admission. Its complete `/var/lib/sysbox` state uses a dedicated RWO PVC.
 The bounded filesystem size is explicit; the PVC must also cover 16 GiB of host admission
 headroom and metadata. `storageClass` is optional. Empty volumes must have root-owned parents
 without group/world write permissions; existing stores are never reformatted or migrated.
+
+The product Pod initializes only a new empty root-owned store volume before exporting the
+consumer image. It records the original Pod/store identity and sets private directory modes.
+Nonempty, aliased or differently owned volumes are refused without changing their permissions.
+This handles StorageClasses that provision an initially world-writable root, without repairing
+or adopting a retained worker store.
+
+`bun run runtime:conformance` uses these actual product manifests and adapters against the
+configured Kubernetes API. Supply the `FACTORY_FACTORYBOX_*` profile above and explicit
+Registry trust through `FACTORY_REGISTRY_CA_FILE`, or `FACTORY_REGISTRY_CA_NAMESPACE` and
+`FACTORY_REGISTRY_CA_SECRET`. It creates a unique namespace, worker and store, exercises the
+maintained Dev Container and Connector assertions, and adds native Pause/Resume and
+per-Sandbox resource observations. It never uses an Envbox container or fixture Kubernetes
+responses. A failed runtime proof retains its private store and fences only its own Pod to
+release fixture RAM. `runtime:smoke:down` refuses that retained evidence.
 
 ```sh
 bun run factorybox:worker render .factory/test-results/worker-request.json > .factory/test-results/worker-resources.json

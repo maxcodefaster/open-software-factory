@@ -809,6 +809,8 @@ async function startServer(
     ...process.env,
     FACTORY_STATE_DIRECTORY: stateDirectory,
     FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
+    FACTORY_REGISTRY_CA_NAMESPACE: namespace,
+    FACTORY_REGISTRY_CA_SECRET: "registry-tls",
     ...(process.env["FACTORY_OPENBAO_URL"]
       ? {}
       : await (await localOpenBao(stateDirectory)).start()),

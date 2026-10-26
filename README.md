@@ -471,7 +471,7 @@ for an isolated installation. It does not start or reset that installation.
 | `bun run connector:check` | Host and digest-pinned Linux race tests, native privilege checks and vet |
 | `bun run test:postgres` | Database integration checks |
 | `bun run test:forgejo` | Forgejo integration checks |
-| `bun run runtime:conformance` | Actual Envbox/Dev Container/Connector conformance |
+| `bun run runtime:conformance` | Actual Factorybox/Kubernetes/Dev Container/Connector conformance |
 | `bun run test:browser` | UI journeys; excludes native, paid and retained-installation restart tests |
 | `bun run test:browser:native` | Explicit real IDE/Terminal/Preview/Delivery journeys |
 | `bun run test:browser:paid` | Explicit real provider journeys; incurs model usage |
@@ -511,7 +511,7 @@ environment, semantic diagnostics, completion, dependency navigation and reconne
 `--build-arg FACTORY_LANGUAGE_TOOLS_IMAGE=factory-runtime:language-proof`. Add
 `FACTORY_LANGUAGE_PROOF_IMAGE=factory-language-child:proof` to the proof command above. This
 uses native Connector children and unchanged language servers in isolated containers, not models.
-For the complete Envbox/Dev Container path, set `FACTORY_RUNTIME_LANGUAGE_CONFORMANCE=1`
+For the complete Factorybox/Dev Container path, set `FACTORY_RUNTIME_LANGUAGE_CONFORMANCE=1`
 and an exact `FACTORY_RUNTIME_CONFORMANCE_IMAGE` registry digest when running
 `bun run runtime:conformance`. These overrides affect only the owned proof, never retained pins.
 
@@ -617,9 +617,10 @@ Use `--list` to inspect its selection. Ordinary unit/controller/native lanes dis
 model flags and provider credentials, and do not load `.env` in the test runner or owned Factory
 children. Native runtime
 conformance and Forgejo checks remain explicit commands, not hidden steps in the default integration gate.
-Runtime conformance owns unique Pods/claims in the shared registry namespace. `runtime:smoke:down`
-removes only labeled conformance resources with UID preconditions; it never deletes the namespace
-or registry. Old unlabeled resources require separate ownership review.
+Runtime conformance uses an explicit admitted Factorybox profile and Registry trust. It owns a
+separate namespace, worker and claims, never the shared Registry or retained installation.
+`runtime:smoke:down` removes only completed labeled conformance namespaces with UID preconditions.
+Failed native stores stay retained for diagnosis while their owned worker Pod is fenced to release RAM.
 
 ## Documentation
 

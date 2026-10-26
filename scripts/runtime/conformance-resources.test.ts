@@ -1,53 +1,102 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
 import {
   conformanceLabel,
-  conformanceManifest,
-  ownedConformanceResource,
-} from "./conformance-resources";
+  conformanceNamespaceRemoved,
+  conformanceResources,
+  ownedConformanceNamespace,
+} from "./factorybox-conformance";
 
-test("conformance owns unique Pod/claim, keeps the shared namespace and registry intact", async () => {
-  const owner = crypto.randomUUID();
-  const template = await readFile("deploy/runtime-smoke/envbox.yaml", "utf8");
-  const resources = conformanceManifest(
-    template,
-    owner,
-    `registry.invalid/host@sha256:${"a".repeat(64)}`,
-  );
-  expect(resources.map((resource) => resource.kind)).toEqual(["PersistentVolumeClaim", "Pod"]);
-  expect(
-    resources.every(
-      (resource) =>
-        resource.metadata.name === `conformance-${owner}` &&
-        resource.metadata.labels[conformanceLabel] === owner,
-    ),
-  ).toBe(true);
-  const pod = resources[1]!;
-  expect(
-    pod.spec.volumes.find((volume: { name: string }) => volume.name === "runtime-data")
-      .persistentVolumeClaim.claimName,
-  ).toBe(`conformance-${owner}`);
-  expect(
-    pod.spec.volumes.find((volume: { name: string }) => volume.name === "registry-ca").secret
-      .secretName,
-  ).toBe("registry-tls");
-  expect(
-    ownedConformanceResource(
-      {
-        metadata: {
-          name: `conformance-${owner}`,
-          uid: "original",
-          labels: { [conformanceLabel]: owner },
-        },
-      },
+test.each(["arm64", "amd64"] as const)(
+  "Factorybox %s conformance owns a separate worker/store and uses real product preparation",
+  (architecture) => {
+    const owner = crypto.randomUUID();
+    const resources = conformanceResources(
       owner,
-    ).uid,
-  ).toBe("original");
-  for (const name of ["registry", "runtime-data", "envbox-smoke"])
-    expect(() =>
-      ownedConformanceResource(
-        { metadata: { name, uid: "shared", labels: { [conformanceLabel]: owner } } },
-        owner,
-      ),
-    ).toThrow("ownership");
+      `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
+      {
+        image: `registry.invalid/worker@sha256:${"b".repeat(64)}`,
+        executableSHA256: "c".repeat(64),
+        architecture,
+        nodeName: "owned-node",
+        kernel: "owned-kernel",
+        boundedBytes: 8589934592,
+        claimGiB: 32,
+      },
+      "owned public certificate",
+    );
+    expect(resources.items.map((resource) => resource.kind)).toEqual([
+      "Namespace",
+      "PersistentVolumeClaim",
+      "PersistentVolumeClaim",
+      "Secret",
+      "Secret",
+      "Pod",
+    ]);
+    expect(
+      resources.items.every((resource) => resource.metadata.labels[conformanceLabel] === owner),
+    ).toBe(true);
+    const assignment = resources.items.find(
+      (resource) => resource.kind === "Secret" && resource.metadata.name.startsWith("assignment-"),
+    );
+    expect(
+      assignment && "stringData" in assignment && JSON.parse(assignment.stringData["slot.json"]!),
+    ).toMatchObject({
+      version: 1,
+      id: owner,
+      role: "staging",
+      images: [],
+    });
+    expect(resources.input.namespace).toBe(`factory-box-${owner.replaceAll("-", "")}`);
+    const pod = resources.declaration.pod;
+    expect(pod.spec.containers[0]!.name).toBe("worker");
+    expect(pod.spec.containers[0]!.resources.limits).toEqual({ cpu: "3", memory: "3Gi" });
+    expect(pod.spec.nodeSelector["kubernetes.io/arch"]).toBe(architecture);
+    expect(JSON.stringify(resources.items)).not.toMatch(/envbox|workspace_cvm|docker.sock/);
+    expect(pod.spec.volumes.filter((volume) => "hostPath" in volume)).toEqual([]);
+    expect(JSON.stringify(pod)).not.toContain("/lib/modules");
+    const namespace = {
+      metadata: {
+        name: resources.input.namespace,
+        uid: "original",
+        labels: { [conformanceLabel]: owner },
+      },
+    };
+    expect(ownedConformanceNamespace(namespace, owner).uid).toBe("original");
+    for (const invalid of [
+      { ...namespace, metadata: { ...namespace.metadata, name: "factory-system" } },
+      {
+        ...namespace,
+        metadata: { ...namespace.metadata, labels: { [conformanceLabel]: crypto.randomUUID() } },
+      },
+      { ...namespace, metadata: { ...namespace.metadata, uid: "" } },
+    ])
+      expect(() => ownedConformanceNamespace(invalid, owner)).toThrow();
+  },
+);
+
+test("lost namespace Delete output settles only through original-UID observation", () => {
+  const owner = crypto.randomUUID();
+  const original = {
+    metadata: {
+      name: `factory-box-${owner.replaceAll("-", "")}`,
+      uid: "original",
+      labels: { [conformanceLabel]: owner },
+    },
+  };
+  expect(conformanceNamespaceRemoved(original, owner, "original")).toBe(false);
+  expect(conformanceNamespaceRemoved(undefined, owner, "original")).toBe(true);
+  expect(() =>
+    conformanceNamespaceRemoved(
+      { ...original, metadata: { ...original.metadata, uid: "replacement" } },
+      owner,
+      "original",
+    ),
+  ).toThrow("UID changed");
+  expect(() =>
+    conformanceNamespaceRemoved(
+      { ...original, metadata: { ...original.metadata, labels: {} } },
+      owner,
+      "original",
+    ),
+  ).toThrow();
 });

@@ -84,6 +84,10 @@ export const factoryboxExportProgram = readFileSync(
   new URL("./factorybox/export-rootfs.sh", import.meta.url),
   "utf8",
 );
+export const factoryboxInitializeStoreProgram = readFileSync(
+  new URL("./factorybox/initialize-store.py", import.meta.url),
+  "utf8",
+);
 export const factoryboxPrepareProgram = readFileSync(
   new URL("./factorybox/prepare.py", import.meta.url),
   "utf8",
@@ -156,6 +160,24 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
       spec: {
         ...resources[2].spec,
         initContainers: [
+          {
+            name: "store-initialize",
+            image: request.image,
+            imagePullPolicy: "IfNotPresent",
+            command: ["python3", "-c", factoryboxInitializeStoreProgram],
+            securityContext: {
+              runAsUser: 0,
+              runAsGroup: 0,
+              allowPrivilegeEscalation: false,
+              capabilities: { drop: ["ALL"] },
+            },
+            resources: {
+              requests: { cpu: "250m", memory: "64Mi" },
+              limits: { cpu: "250m", memory: "64Mi" },
+            },
+            env: environment,
+            volumeMounts: [{ name: "store", mountPath: "/factory-store" }],
+          },
           {
             name: "runtime-image",
             image: input.runtimeHostImage,

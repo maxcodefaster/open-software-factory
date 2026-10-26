@@ -1,19 +1,21 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
+import { z } from "zod";
+import { usageRate } from "../../../../packages/conversation-domain/src/usage";
 import {
   currentComputeView,
   usageSettingsView,
 } from "../../../../packages/conversation-domain/src/usage-view";
-import { usageRate } from "../../../../packages/conversation-domain/src/usage";
-import { z } from "zod";
-import { createCurrentMetrics } from "../../../../packages/runtime-kubernetes/src/metrics";
+import type { createDatabase } from "../../../../packages/db/src/client";
+import { createFactoryboxMetrics } from "../../../../packages/runtime-kubernetes/src/factorybox-metrics";
+import type { FactoryboxRuntimeInput } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { factoryboxWorkerIdentity } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import { createAccessController } from "../access/controller";
-import { createUsagePolicy } from "./policy";
 import { createContractRates } from "./contract-rates";
+import { createUsagePolicy } from "./policy";
 
 export function createUsageService(database: ReturnType<typeof createDatabase>) {
   const policies = createUsagePolicy(database);
   const rates = createContractRates(database);
-  const metrics = createCurrentMetrics();
+  const metrics = createFactoryboxMetrics();
   const access = createAccessController(database);
   return {
     async get(userID: string, projectID: string | null) {
@@ -42,16 +44,17 @@ export function createUsageService(database: ReturnType<typeof createDatabase>) 
       const attempts = await database.client<
         Array<{
           id: string;
-          namespace: string;
-          pod: string;
-          uid: string;
+          runtime: FactoryboxRuntimeInput | null;
+          identity: unknown;
           createdAt: Date;
           kind: string;
         }>
       >`
-        SELECT id,kubernetes_namespace AS namespace,kubernetes_pod_name AS pod,kubernetes_uid AS uid,created_at AS "createdAt",coalesce(isolated_kind::text,'development') AS kind
-        FROM factory.runtime_attempt WHERE state NOT IN ('stopped','failed') AND kubernetes_uid IS NOT NULL
-        AND (${projectID}::uuid IS NULL OR project_id=${projectID}) ORDER BY created_at LIMIT 64`;
+        SELECT attempt.id,runtime.request AS runtime,runtime.identity,
+          attempt.created_at AS "createdAt",coalesce(attempt.isolated_kind::text,'development') AS kind
+        FROM factory.runtime_attempt attempt LEFT JOIN factory.factorybox_runtime runtime ON runtime.runtime_attempt_id=attempt.id
+        WHERE attempt.state NOT IN ('stopped','failed') AND attempt.kubernetes_uid IS NOT NULL
+        AND (${projectID}::uuid IS NULL OR attempt.project_id=${projectID}) ORDER BY attempt.created_at LIMIT 64`;
       const values = [];
       // A single view reads at most sixteen runtimes, four at a time.
       for (let offset = 0; offset < Math.min(attempts.length, 16); offset += 4)
@@ -61,7 +64,12 @@ export function createUsageService(database: ReturnType<typeof createDatabase>) 
               id: attempt.id,
               kind: attempt.kind,
               startedAt: new Date(attempt.createdAt).toISOString(),
-              ...(await metrics(attempt.namespace, attempt.pod, attempt.uid)),
+              ...(attempt.runtime && factoryboxWorkerIdentity.safeParse(attempt.identity).success
+                ? await metrics({
+                    input: attempt.runtime,
+                    identity: factoryboxWorkerIdentity.parse(attempt.identity),
+                  })
+                : { status: "unavailable", timestamp: null, cpuMilli: null, memoryMiB: null }),
             })),
           )),
         );

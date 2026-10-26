@@ -584,15 +584,25 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
   };
 }
 
-export async function readRuntimeRegistryCA() {
-  const certificateFile = process.env["FACTORY_REGISTRY_CA_FILE"];
+export async function readRuntimeRegistryCA(environment = process.env, run = kubectl) {
+  const certificateFile = environment["FACTORY_REGISTRY_CA_FILE"];
   if (certificateFile) return readFile(certificateFile, "utf8");
-  const result = await kubectl([
+  const namespace = environment["FACTORY_REGISTRY_CA_NAMESPACE"];
+  const secret = environment["FACTORY_REGISTRY_CA_SECRET"] ?? "registry-ca";
+  if (
+    !namespace ||
+    !/^[a-z0-9][a-z0-9-]{0,62}$/.test(namespace) ||
+    !/^[a-z0-9][a-z0-9.-]{0,252}$/.test(secret)
+  )
+    throw new Error(
+      "Configure FACTORY_REGISTRY_CA_FILE or an explicit Registry CA Secret namespace",
+    );
+  const result = await run([
     "get",
     "secret",
-    "registry-tls",
+    secret,
     "-n",
-    "open-factory-envbox-smoke",
+    namespace,
     "-o",
     "jsonpath={.data.ca\\.crt}",
   ]);

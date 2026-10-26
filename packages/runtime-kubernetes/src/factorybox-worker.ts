@@ -62,6 +62,7 @@ export const factoryboxWorkerIdentity = z.strictObject({
   storeID: token,
   epoch: token,
   bootID: uid,
+  nodeBootID: uid,
   executableSHA256: digest,
   controllerRoot: z.string(),
 });
@@ -172,16 +173,10 @@ export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
               timeoutSeconds: 5,
               failureThreshold: 1,
             },
-            volumeMounts: [
-              { name: "store", mountPath: "/var/lib/sysbox" },
-              { name: "kernel-modules", mountPath: "/lib/modules", readOnly: true },
-            ],
+            volumeMounts: [{ name: "store", mountPath: "/var/lib/sysbox" }],
           },
         ],
-        volumes: [
-          { name: "store", persistentVolumeClaim: { claimName } },
-          { name: "kernel-modules", hostPath: { path: "/lib/modules", type: "Directory" } },
-        ],
+        volumes: [{ name: "store", persistentVolumeClaim: { claimName } }],
       },
     },
   ] as const;
@@ -332,6 +327,8 @@ export async function inspectFactoryboxWorker(
       previous.podUID !== pod.metadata.uid)
   )
     throw new Error("Factorybox Kubernetes UID changed; explicit new admission is required");
+  if (previous && previous.nodeBootID !== node.status.nodeInfo.bootID)
+    throw new Error("Factorybox node boot identity changed; explicit new admission is required");
 
   // No exec has been created before HTTP readiness and exact Pod validation.
   const result = await run([
@@ -352,7 +349,7 @@ export async function inspectFactoryboxWorker(
       store_id: z.literal(input.storeID),
       store: z.literal(storeRoot),
       epoch: token,
-      boot_id: z.literal(node.status.nodeInfo.bootID),
+      boot_id: uid,
       supervisor_sha256: z.literal(input.executableSHA256),
       supervisor: z.object({ pid: z.literal(1) }),
       ready_at: z.string().min(1),
@@ -380,6 +377,7 @@ export async function inspectFactoryboxWorker(
     storeID: input.storeID,
     epoch: status.epoch,
     bootID: status.boot_id,
+    nodeBootID: node.status.nodeInfo.bootID,
     executableSHA256: status.supervisor_sha256,
     controllerRoot: status.lifecycle.root,
   };

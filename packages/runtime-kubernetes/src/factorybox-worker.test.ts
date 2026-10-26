@@ -116,7 +116,7 @@ test("worker admission preserves the complete private store and finite worker ce
     persistentVolumeClaim: { claimName: `store-${request.storeID}` },
   });
   expect(JSON.stringify(resources)).not.toMatch(
-    /docker.sock|runtime-data|home\/coder|ServiceAccountToken":true|execProbe|livenessProbe/,
+    /docker.sock|hostPath|\/lib\/modules|runtime-data|home\/coder|ServiceAccountToken":true|execProbe|livenessProbe/,
   );
   expect(() => factoryboxWorkerRequest.parse({ ...request, claimGiB: 20 })).toThrow();
   expect(() => factoryboxWorkerRequest.parse({ ...request, image: "factorybox:latest" })).toThrow();
@@ -289,7 +289,7 @@ test("real status must bind the supervisor, bounded filesystem, boot and epoch",
       f.status.lifecycle.bounded_store.direct_io = false;
     },
     (f: ReturnType<typeof fixture>) => {
-      f.status.boot_id = "old-boot";
+      f.status.boot_id = "";
     },
     (f: ReturnType<typeof fixture>) => {
       f.node.status.nodeInfo.kernelVersion = "unqualified";
@@ -316,6 +316,26 @@ test("real status must bind the supervisor, bounded filesystem, boot and epoch",
   }
 });
 
+test("node-reported and kernel-reported boot identities are independently pinned, never equated", async () => {
+  const f = fixture();
+  f.node.status.nodeInfo.bootID = "kubelet-boot";
+  f.status.boot_id = "worker-kernel-boot";
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  expect(identity.nodeBootID).toBe("kubelet-boot");
+  expect(identity.bootID).toBe("worker-kernel-boot");
+  await inspectFactoryboxWorker(request, identity, f.run);
+  f.node.status.nodeInfo.bootID = "replacement-node-boot";
+  f.calls.length = 0;
+  await expect(inspectFactoryboxWorker(request, identity, f.run)).rejects.toThrow(
+    "boot identity changed",
+  );
+  expect(f.calls.every((args) => args[0] === "get")).toBe(true);
+  f.node.status.nodeInfo.bootID = "kubelet-boot";
+  f.status.boot_id = "replacement-worker-boot";
+  await expect(inspectFactoryboxWorker(request, identity, f.run)).rejects.toThrow(
+    "live identity changed",
+  );
+});
 test("UID or epoch replacement refuses a delayed operation without issuing it", async () => {
   const f = fixture();
   const identity = await inspectFactoryboxWorker(request, undefined, f.run);
