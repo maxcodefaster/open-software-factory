@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
+import { type RuntimeHub, RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
 import {
   createPersonalGit,
   personalGitRepository,
 } from "../../apps/factory/src/workspace/personal-git";
-import { RuntimeParentOperationError, type RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -18,15 +18,12 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
     const next = "b".repeat(40);
     await database.client`
       INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,
-        source_revision,kubernetes_namespace,volume_name,created_by)
-      VALUES(${workspaceID},${owned.projectID},'personal',${owned.userID},'main',${head},
-        ${`factory-workspace-${workspaceID.replaceAll("-", "").slice(0, 12)}`},'never-created',${owned.userID})`;
+        source_revision,created_by)
+      VALUES(${workspaceID},${owned.projectID},'personal',${owned.userID},'main',${head},${owned.userID})`;
     await database.client`
-      INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
-        kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,
+      INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
         create_intended_at,created_by)
-      VALUES(${attemptID},${owned.projectID},${workspaceID},1,${head},'ready','owned-git',
-        'never-created',${"c".repeat(64)},${"d".repeat(64)},now(),${owned.userID})`;
+      VALUES(${attemptID},${owned.projectID},${workspaceID},1,${head},'ready',${"c".repeat(64)},${"d".repeat(64)},now(),${owned.userID})`;
     let mode: "success" | "lost" | "rejected" | "revoked" = "success";
     let sends = 0;
     let remoteHead = head;

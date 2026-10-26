@@ -13,9 +13,14 @@ import { factoryProcess } from "../fixtures/factory-process";
 
 // Kubernetes and worker transport observations are fixtures. These cases prove
 // persisted Factory ownership, not native qualification of either architecture.
-test.each(["arm64", "amd64"] as const)(
-  "Factorybox %s keeps ownership across Pause/Resume and observes a lost Start response without repeating it",
-  async (architecture) => {
+test.each([
+  ["arm64", false],
+  ["amd64", false],
+  ["arm64", true],
+  ["amd64", true],
+] as const)(
+  "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s",
+  async (architecture, reserveDeleted) => {
     const processFixture = await factoryProcess();
     const database = processFixture.connect();
     try {
@@ -28,10 +33,12 @@ test.each(["arm64", "amd64"] as const)(
           generation: string;
           parent: string;
           child: string;
+          workerID: string;
         }>
       >`
       SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",workspace_id AS "workspaceID",generation,
-        parent_connector_token_hash AS parent,child_connector_token_hash AS child FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        parent_connector_token_hash AS parent,child_connector_token_hash AS child,
+        factorybox_worker_id AS "workerID" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
       if (!attempt) throw new Error("Missing owned attempt");
       const profile = {
         image: `registry.invalid/worker@sha256:${"a".repeat(64)}`,
@@ -44,6 +51,7 @@ test.each(["arm64", "amd64"] as const)(
       };
       const input: FactoryboxRuntimeInput = {
         attemptID: owned.attemptID,
+        workerID: attempt.workerID,
         sandboxID: factoryboxSandboxID(owned.attemptID),
         namespace: attempt.namespace,
         podName: attempt.podName,
@@ -64,6 +72,10 @@ test.each(["arm64", "amd64"] as const)(
       await database.client`INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image,factorybox_profile)
       VALUES(${owned.attemptID},'build',${input.runtimeHostImage},${`registry.invalid/browser@sha256:${"d".repeat(64)}`},${JSON.stringify(profile)}::text::jsonb)`;
       await database.client`UPDATE factory.runtime_attempt SET state='starting',kubernetes_namespace_uid='namespace-uid',kubernetes_uid='pod-uid' WHERE id=${owned.attemptID}`;
+      await database.client`UPDATE factory.factorybox_worker SET profile=${JSON.stringify(profile)}::text::jsonb,
+        runtime_host_image=${input.runtimeHostImage},node_name=${profile.nodeName},
+        namespace_uid='namespace-uid',pod_uid='pod-uid',claim_uid='claim-uid',create_attempted=true
+        WHERE id=${attempt.workerID}`;
       const request = factoryboxRuntimeRequest(input);
       const declared = factoryboxRuntimeDeclaration(input);
       const epoch = "e".repeat(32);
@@ -139,7 +151,13 @@ test.each(["arm64", "amd64"] as const)(
         owner: string;
         phase: string;
         input_sha256: string;
-        pause?: { snapshot_id: string; completed_at: string; resume?: { completed_at: string } };
+        pause?: {
+          snapshot_id: string;
+          checkpoint_sha256: string;
+          completed_at: string;
+          resume?: { completed_at: string };
+        };
+        pause_history?: unknown[];
       } = {
         version: 1,
         id: input.sandboxID,
@@ -150,6 +168,27 @@ test.each(["arm64", "amd64"] as const)(
       const mutations: string[] = [];
       let preparations = 0;
       let releases = 0;
+      const reclaimed = new Set<string>();
+      let lostRetirementReply = false;
+      let resumeCommands = 0;
+      const activeSnapshot = () => {
+        const snapshot = record.pause?.snapshot_id;
+        if (!snapshot) throw new Error("Missing native snapshot");
+        return snapshot;
+      };
+      const retirement = (snapshot: string) => ({
+        version: 1,
+        request: {
+          source_id: input.sandboxID,
+          snapshot_id: snapshot,
+          source_owner: record.owner,
+          checkpoint_sha256: "2".repeat(64),
+        },
+        intent_sha256: "3".repeat(64),
+        completed_at: "2026-10-26T10:02:01Z",
+        before: { root, filesystem_available_bytes: 1024 },
+        after: { root, filesystem_available_bytes: 2048 },
+      });
       const run: typeof runFactoryboxKubernetes = async (args, body) => {
         if (args[0] === "get")
           return {
@@ -215,15 +254,45 @@ test.each(["arm64", "amd64"] as const)(
         }
         if (action === "pause") {
           record.phase = "paused";
+          if (record.pause) {
+            record.pause_history ??= [];
+            record.pause_history.push(record.pause);
+          }
+          const snapshot = args[args.indexOf("--snapshot-id") + 1];
+          if (!snapshot) throw new Error("Missing native Pause snapshot");
           record.pause = {
-            snapshot_id: args[args.indexOf("--snapshot-id") + 1]!,
+            snapshot_id: snapshot,
+            checkpoint_sha256: "2".repeat(64),
             completed_at: "2026-10-25T10:01:00Z",
           };
         }
         if (action === "resume") {
+          resumeCommands++;
           record.phase = "running";
           if (!record.pause) throw new Error("Missing Pause");
           record.pause.resume = { completed_at: "2026-10-25T10:02:00Z" };
+          if (resumeCommands === 2)
+            return { exitCode: 1, stderr: "reply lost after the second native Resume", stdout: "" };
+        }
+        if (action === "retire-checkpoint") {
+          if (!record.pause) throw new Error("Missing checkpoint");
+          expect(args[args.indexOf("--source-owner") + 1]).toBe(record.owner);
+          expect(args[args.indexOf("--checkpoint-sha256") + 1]).toBe("2".repeat(64));
+          expect(args[args.indexOf("--snapshot-id") + 1]).toBe(record.pause.snapshot_id);
+          reclaimed.add(record.pause.snapshot_id);
+          if (!lostRetirementReply) {
+            lostRetirementReply = true;
+            return {
+              exitCode: 1,
+              stderr: "reply lost after exact checkpoint retirement",
+              stdout: "",
+            };
+          }
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify(retirement(record.pause.snapshot_id)),
+          };
         }
         if (action === "delete") {
           record.phase = "deleted";
@@ -264,6 +333,14 @@ test.each(["arm64", "amd64"] as const)(
         parent: attempt.parent,
         child: attempt.child,
       });
+      const [pauseIdentity] = await database.client<
+        Array<{ observation: { checkpointSHA256: string } }>
+      >`SELECT observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${owned.attemptID} AND action='pause' AND completed_at IS NOT NULL`;
+      expect(pauseIdentity?.observation.checkpointSHA256).toBe("2".repeat(64));
+      await execution.reclaimStorage();
+      expect(mutations).toEqual(["start", "pause"]);
+      expect(reclaimed.size).toBe(0);
       await execution.resume(owned.attemptID);
       expect(mutations).toEqual(["start", "pause", "resume"]);
       const [resumed] = await database.client<
@@ -273,6 +350,74 @@ test.each(["arm64", "amd64"] as const)(
       const completed =
         await database.client`SELECT id FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${owned.attemptID} AND completed_at IS NOT NULL`;
       expect(completed).toHaveLength(4);
+      const [pendingRetirement] = await database.client<
+        Array<{ request: unknown; completed: boolean }>
+      >`SELECT request,completed_at IS NOT NULL AS completed FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${owned.attemptID} AND action='retire-checkpoint'`;
+      expect(pendingRetirement?.completed).toBe(false);
+      expect(pendingRetirement?.request).toEqual(retirement(activeSnapshot()).request);
+      await expect(
+        (async () => {
+          await database.client`UPDATE factory.factorybox_lifecycle_operation SET request='{}'::jsonb
+            WHERE runtime_attempt_id=${owned.attemptID} AND action='retire-checkpoint'`;
+        })(),
+      ).rejects.toThrow("immutable");
+      await Promise.all([execution.reclaimStorage(), execution.reclaimStorage()]);
+      expect(reclaimed.size).toBe(1);
+      const [unconfirmed] = await database.client<
+        Array<{ attempted: boolean; completed: boolean }>
+      >`SELECT attempted_at IS NOT NULL AS attempted,completed_at IS NOT NULL AS completed
+        FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${owned.attemptID} AND action='retire-checkpoint'`;
+      expect(unconfirmed).toEqual({ attempted: true, completed: false });
+      const [stillRunning] = await database.client<
+        Array<{ state: string; failure: string | null }>
+      >`SELECT state,failure FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      expect(stillRunning).toEqual({ state: "starting", failure: null });
+      const retentionRecovered = createFactoryboxExecution(database, hub, run);
+      await retentionRecovered.reclaimStorage();
+      await retentionRecovered.reclaimStorage();
+      const [retired] = await database.client<
+        Array<{ observation: unknown }>
+      >`SELECT observation FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${owned.attemptID} AND action='retire-checkpoint' AND completed_at IS NOT NULL`;
+      expect(retired?.observation).toEqual({
+        version: 1,
+        request: retirement(activeSnapshot()).request,
+        intentSHA256: "3".repeat(64),
+        completedAt: "2026-10-26T10:02:01Z",
+        availableBytesBefore: 1024,
+        availableBytesAfter: 2048,
+      });
+      expect(mutations).toEqual([
+        "start",
+        "pause",
+        "resume",
+        "retire-checkpoint",
+        "retire-checkpoint",
+      ]);
+      await expect(
+        (async () => {
+          await database.client`UPDATE factory.factorybox_lifecycle_operation SET request='{}'::jsonb
+            WHERE runtime_attempt_id=${owned.attemptID} AND action='retire-checkpoint'`;
+        })(),
+      ).rejects.toThrow("immutable");
+      await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
+      await execution.pause(owned.attemptID);
+      const secondSnapshot = activeSnapshot();
+      await execution.reclaimStorage();
+      expect(reclaimed.has(secondSnapshot)).toBe(false);
+      await expect(execution.resume(owned.attemptID)).rejects.toThrow("unconfirmed");
+      expect(resumeCommands).toBe(2);
+      const [lostResume] = await database.client<
+        Array<{ state: string }>
+      >`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      expect(lostResume?.state).toBe("resuming");
+      const resumeRecovered = createFactoryboxExecution(database, hub, run);
+      await resumeRecovered.resume(owned.attemptID);
+      expect(resumeCommands).toBe(2);
+      await resumeRecovered.reclaimStorage();
+      expect(reclaimed.size).toBe(2);
+      expect(reclaimed.has(secondSnapshot)).toBe(true);
+      const settledMutations = [...mutations];
       await expect(
         (async () => {
           await database.client`UPDATE factory.factorybox_runtime SET identity='{}'::jsonb WHERE runtime_attempt_id=${owned.attemptID}`;
@@ -284,23 +429,43 @@ test.each(["arm64", "amd64"] as const)(
         })(),
       ).rejects.toThrow("immutable");
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
-      pod.metadata.uid = "foreign-pod";
-      await expect(execution.pause(owned.attemptID)).rejects.toThrow("UID changed");
-      expect(mutations).toEqual(["start", "pause", "resume"]);
-      const [refused] = await database.client<
-        Array<{ state: string }>
-      >`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
-      expect(refused?.state).toBe("pausing");
-      pod.metadata.uid = "pod-uid";
+      if (reserveDeleted) {
+        await execution.pause(owned.attemptID);
+        expect(reclaimed.has(activeSnapshot())).toBe(false);
+        // The reserve controller already confirmed this same native Delete.
+        // Runtime Attempt cleanup must observe it and retire the final Pause.
+        record.phase = "deleted";
+      } else {
+        pod.metadata.uid = "foreign-pod";
+        await expect(execution.pause(owned.attemptID)).rejects.toThrow("UID changed");
+        expect(mutations).toEqual(settledMutations);
+        const [refused] = await database.client<
+          Array<{ state: string }>
+        >`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        expect(refused?.state).toBe("pausing");
+        pod.metadata.uid = "pod-uid";
+      }
       await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
-      await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
-      await execution.deleteSandbox(owned.attemptID);
-      await execution.deleteSandbox(owned.attemptID);
-      expect(mutations).toEqual(["start", "pause", "resume", "delete"]);
+      if (!reserveDeleted)
+        await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
+      await execution.deleteSandbox(owned.attemptID, reserveDeleted);
+      await execution.deleteSandbox(owned.attemptID, reserveDeleted);
+      expect(mutations).toEqual([
+        ...settledMutations,
+        ...(reserveDeleted ? ["pause", "retire-checkpoint"] : ["delete"]),
+      ]);
+      expect(reclaimed.size).toBe(reserveDeleted ? 3 : 2);
       expect(releases).toBe(1);
-      const [released] =
-        await database.client`SELECT inputs_released_at FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
-      expect(released?.["inputs_released_at"]).not.toBeNull();
+      const [released] = await database.client<
+        Array<{ inputs_released_at: Date | null }>
+      >`SELECT inputs_released_at FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
+      expect(released?.inputs_released_at).not.toBeNull();
+      expect(
+        await database.client`SELECT id FROM factory.development_workspace WHERE id=${attempt.workspaceID}`,
+      ).toHaveLength(1);
+      expect(
+        await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${owned.ticketID}`,
+      ).toHaveLength(1);
     } finally {
       await database.client.end({ timeout: 2 });
       await processFixture.dispose();

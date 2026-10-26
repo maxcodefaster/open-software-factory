@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
+import { readFactoryboxCheckpointRetirement } from "./factorybox-retention";
 
 const token = z.string().regex(/^[a-f0-9]{32}$/);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -75,6 +76,13 @@ export const factoryboxOperation = z.discriminatedUnion("action", [
   }),
   z.strictObject({ action: z.literal("pause"), sandboxID: sandbox, snapshotID: token }),
   z.strictObject({ action: z.literal("resume"), sandboxID: sandbox, snapshotID: token }),
+  z.strictObject({
+    action: z.literal("retire-checkpoint"),
+    sandboxID: sandbox,
+    snapshotID: token,
+    sourceOwner: token,
+    checkpointSHA256: digest,
+  }),
 ]);
 export type FactoryboxOperation = z.infer<typeof factoryboxOperation>;
 
@@ -394,7 +402,10 @@ export async function executeFactoryboxOperation(
     op.action,
   ];
   if (op.action === "start") args.push("--bundle", op.bundle);
-  if (op.action === "pause" || op.action === "resume") args.push("--snapshot-id", op.snapshotID);
+  if (op.action === "pause" || op.action === "resume" || op.action === "retire-checkpoint")
+    args.push("--snapshot-id", op.snapshotID);
+  if (op.action === "retire-checkpoint")
+    args.push("--source-owner", op.sourceOwner, "--checkpoint-sha256", op.checkpointSHA256);
   if (op.action !== "capacity") args.push(op.sandboxID);
   const remainingMS = deadline - performance.now();
   if (remainingMS <= 0) throw new Error("Factorybox lifecycle deadline expired before mutation");
@@ -418,6 +429,17 @@ export async function executeFactoryboxOperation(
   if (op.action === "capacity") {
     if (output.root !== admitted.controllerRoot)
       throw new Error("Capacity response has a different controller");
+  } else if (op.action === "retire-checkpoint") {
+    readFactoryboxCheckpointRetirement(
+      {
+        source_id: op.sandboxID,
+        snapshot_id: op.snapshotID,
+        source_owner: op.sourceOwner,
+        checkpoint_sha256: op.checkpointSHA256,
+      },
+      admitted.controllerRoot,
+      output,
+    );
   } else {
     const record = output.record;
     const expectedPhase = {

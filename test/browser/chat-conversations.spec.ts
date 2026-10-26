@@ -1,13 +1,13 @@
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { serveChatAssets } from "../support/chat-assets";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
@@ -498,11 +498,11 @@ test("shared Coding keeps an old unsent draft readable and respects another deve
         idempotency_key,state,observed_head_sha,completed_at)
         VALUES(${crypto.randomUUID()},${changeID},'owned-process-fixture',${slug},${`factory/change-${suffix}`},
           ${"a".repeat(40)},${changeID},'succeeded',${"a".repeat(40)},now())`;
-      await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
-        VALUES(${workspaceID},${projectID},'ticket',${ticketID},${changeID},${`factory/change-${suffix}`},${"a".repeat(40)},${`factory-workspace-${suffix}`},'never-created',${session.user.id})`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,
+      await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by)
+        VALUES(${workspaceID},${projectID},'ticket',${ticketID},${changeID},${`factory/change-${suffix}`},${"a".repeat(40)},${session.user.id})`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,
         parent_connector_token_hash,child_connector_token_hash,create_intended_at,stop_intended_at,stopped_at,created_by)
-        VALUES(${attemptID},${projectID},${changeID},${workspaceID},1,${"a".repeat(40)},'stopped',${`owned-chat-${suffix}`},'never-created',
+        VALUES(${attemptID},${projectID},${changeID},${workspaceID},1,${"a".repeat(40)},'stopped',
           ${"b".repeat(64)},${"c".repeat(64)},now(),now(),now(),${session.user.id})`;
       await sql`UPDATE factory.change SET runtime_attempt_id=${attemptID} WHERE id=${changeID}`;
       await sql`INSERT INTO factory.change_agent_session(change_id,runtime_attempt_id,opencode_session_id,state,native_session_confirmed_at,created_by)

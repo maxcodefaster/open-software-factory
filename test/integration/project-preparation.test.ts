@@ -73,8 +73,8 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
       Array<{ environment: "development" | "main-preview" }>
     >`SELECT environment FROM factory.project_image_preparation WHERE id=${preparationID}`;
     if (!job) throw new Error("Missing producer job");
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended','owned-preparation','runtime-2',${(await database.client<{ hash: string }[]>`SELECT parent_connector_token_hash AS hash FROM factory.runtime_attempt WHERE id=${owned.attemptID}`)[0]!.hash},${"c".repeat(64)},now(),${owned.userID})`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended',${(await database.client<{ hash: string }[]>`SELECT parent_connector_token_hash AS hash FROM factory.runtime_attempt WHERE id=${owned.attemptID}`)[0]!.hash},${"c".repeat(64)},now(),${owned.userID})`;
     await database.client`UPDATE factory.project_image_preparation SET runtime_attempt_id=${producerID} WHERE id=${preparationID}`;
     await freezeRuntimeArtifacts(database.client, producerID, {
       factoryboxProfile: ownedFactoryboxProfile,
@@ -150,8 +150,8 @@ test("restarted preparation expires old producers and waits for confirmed teardo
     >`SELECT id FROM factory.project_image_preparation ORDER BY environment LIMIT 1`;
     if (!job) throw new Error("Missing owned preparation");
     const producerID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended','owned-expired-producer','runtime-2',${"a".repeat(64)},${"b".repeat(64)},now()-interval '13 minutes',${owned.userID})`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now()-interval '13 minutes',${owned.userID})`;
     await database.client`UPDATE factory.project_image_preparation SET state='running',runtime_attempt_id=${producerID},updated_at=now()-interval '13 minutes' WHERE id=${job.id}`;
     const restarted = createProjectPreparation(input);
     await restarted.drain();

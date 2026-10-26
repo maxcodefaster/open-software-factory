@@ -1,24 +1,26 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import type { TransactionSql } from "postgres";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import {
+  type ExecutionSlot,
+  type ReservePolicy,
+  type ReserveRole,
   requireReservePolicy,
   reserveCreationCount,
   reserveIdentity,
-  type ReservePolicy,
-  type ReserveRole,
-  type ExecutionSlot,
 } from "../../../../packages/runtime-domain/src/reserve";
-import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
-import { lockUsageIn } from "../usage/policy";
 import {
   configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
+import { lockUsageIn } from "../usage/policy";
 
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
+
 export type { ExecutionSlot } from "../../../../packages/runtime-domain/src/reserve";
+
 const fields =
-  'id,role,state,runtime_host_image AS "runtimeHostImage",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted"';
+  'id,role,state,runtime_host_image AS "runtimeHostImage",factorybox_worker_id AS "workerID",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted",factorybox_delete_attempted AS "factoryboxDeleteAttempted"';
 export const executionCapacityLock = "factory-execution-capacity";
 
 export function createReserveStore(
@@ -73,8 +75,8 @@ export function createReserveStore(
             break;
           }
           const identity = reserveIdentity(crypto.randomUUID());
-          await sql`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,kubernetes_namespace,expires_at,factorybox_profile)
-            VALUES(${identity.id},${role},'creating',${images[role]},${identity.namespace},now()+${policy.expiryMS}*interval '1 millisecond',${JSON.stringify(selected)}::text::jsonb)`;
+          await sql`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,expires_at,factorybox_profile)
+            VALUES(${identity.id},${role},'creating',${images[role]},now()+${policy.expiryMS}*interval '1 millisecond',${JSON.stringify(selected)}::text::jsonb)`;
         }
       }
       return sql.unsafe<ExecutionSlot[]>(
@@ -170,6 +172,11 @@ export function createReserveStore(
           : await sql`UPDATE factory.execution_slot SET factorybox_resume_attempted=true WHERE id=${id}
             AND state='assigned' AND assigned_attempt_id IS NOT NULL AND factorybox_pause_attempted
             AND NOT factorybox_resume_attempted`;
+      return result.count === 1;
+    },
+    async intendDelete(sql: SQL, id: string) {
+      const result = await sql`UPDATE factory.execution_slot SET factorybox_delete_attempted=true
+        WHERE id=${id} AND state IN ('retiring','assigned') AND NOT factorybox_delete_attempted`;
       return result.count === 1;
     },
     async defer(sql: SQL, id: string) {

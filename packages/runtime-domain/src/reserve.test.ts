@@ -32,8 +32,6 @@ test("reserve policy cannot exceed bounded targets or create invalid resource id
     );
   expect(reserveIdentity("ec253fc1-4e17-4a75-a36d-c4efef02e77e")).toEqual({
     id: "ec253fc1-4e17-4a75-a36d-c4efef02e77e",
-    namespace: "factory-reserve-ec253fc14e17",
-    podName: "slot",
   });
   expect(() => reserveIdentity("../another-owner")).toThrow("identity");
 });

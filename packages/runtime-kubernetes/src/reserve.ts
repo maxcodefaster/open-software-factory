@@ -1,27 +1,32 @@
 import { z } from "zod";
 import upstream from "../../../upstream.json" with { type: "json" };
-import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybox-standby";
-import { runCommand } from "./command";
-import { kubernetesCommand } from "./config";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
 import { createKubernetesClient, readRuntimeRegistryCA } from "./client";
+import { runCommand } from "./command";
+import { kubernetesCommand } from "./config";
 import {
+  factoryboxAssignmentSecret,
+  factoryboxLocation,
+  factoryboxSharedLabels,
+} from "./factorybox-location";
+import {
+  type FactoryboxRuntimeInput,
+  factoryboxOriginalWorkerRetired,
+  factoryboxRuntimeDeclaration,
   factoryboxRuntimeProfile,
-  renderFactoryboxRuntime,
   factoryboxRuntimeRequest,
   factoryboxSandboxID,
-  factoryboxRuntimeDeclaration,
   prepareFactoryboxRuntime,
   releaseFactoryboxRuntime,
-  factoryboxOriginalWorkerRetired,
-  type FactoryboxRuntimeInput,
+  renderFactoryboxRuntime,
 } from "./factorybox-runtime";
+import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybox-standby";
 import {
-  inspectFactoryboxWorker,
   executeFactoryboxOperation,
-  factoryboxWorkerIdentity,
-  runFactoryboxKubernetes,
   type FactoryboxWorkerIdentity,
+  factoryboxWorkerIdentity,
+  inspectFactoryboxWorker,
+  runFactoryboxKubernetes,
 } from "./factorybox-worker";
 
 export interface SlotObservation {
@@ -37,18 +42,24 @@ export interface SlotObservation {
 interface StandbyIntent {
   intendStandby(action: "pause" | "resume"): Promise<boolean>;
 }
+interface DeleteIntent {
+  intendDelete(): Promise<boolean>;
+}
 export interface ReserveClient {
   prepare(
     slot: ExecutionSlot,
-    options?: { startAllowed: boolean } & StandbyIntent,
+    options?: {
+      startAllowed: boolean;
+      provision(resources: readonly unknown[]): Promise<unknown>;
+    } & StandbyIntent,
   ): Promise<SlotObservation>;
   activate(
     slot: ExecutionSlot,
     resources: readonly unknown[],
     options?: StandbyIntent,
   ): Promise<SlotObservation>;
-  retire(slot: ExecutionSlot): Promise<void>;
-  removeAssigned(slot: ExecutionSlot, generation: number): Promise<boolean>;
+  retire(slot: ExecutionSlot, options?: DeleteIntent): Promise<void>;
+  removeAssigned(slot: ExecutionSlot, generation: number, options?: DeleteIntent): Promise<boolean>;
 }
 const metadata = z.object({
   name: z.string(),
@@ -79,11 +90,11 @@ export function renderReserveResources(slot: ExecutionSlot, registryCA: string) 
   };
   const execution = renderFactoryboxRuntime(factoryboxReserveInput(slot, labels));
   return [
-    { apiVersion: "v1", kind: "Namespace" as const, metadata: { name: slot.namespace, labels } },
+    execution.namespace,
     {
       apiVersion: "v1",
       kind: "Secret" as const,
-      metadata: { name: "runtime-assignment", namespace: slot.namespace, labels },
+      metadata: { name: factoryboxAssignmentSecret(slot.id), namespace: slot.namespace, labels },
       stringData: {
         "slot.json": JSON.stringify({
           version: 1,
@@ -97,9 +108,14 @@ export function renderReserveResources(slot: ExecutionSlot, registryCA: string) 
     {
       apiVersion: "v1",
       kind: "Secret" as const,
-      metadata: { name: "registry-ca", namespace: slot.namespace, labels },
+      metadata: {
+        name: "registry-ca",
+        namespace: slot.namespace,
+        labels: factoryboxSharedLabels(slot.workerID),
+      },
       stringData: { "ca.crt": registryCA },
     },
+    execution.sourceClaim,
     execution.claim,
     execution.pod,
   ];
@@ -119,10 +135,10 @@ export function factoryboxReserveInput(
   return {
     attemptID: slot.assignedAttemptID ?? slot.id,
     sandboxID: factoryboxSandboxID(slot.id),
-    workerID: slot.id,
+    workerID: slot.workerID,
     reserve: true,
     namespace: slot.namespace,
-    podName: "slot",
+    podName: "worker",
     runtimeOwnerID: declared["factory.dev/runtime-owner"] ?? slot.id,
     labels: declared,
     runtimeHostImage: slot.runtimeHostImage,
@@ -169,7 +185,7 @@ function requireDeclaredResource(
     throw new Error("Execution slot tools, storage or seed differs from create intent");
   if ("stringData" in expected) {
     const assignedKeys =
-      assignedOwner && item.metadata.name === "runtime-assignment"
+      assignedOwner && item.metadata.name.startsWith("assignment-")
         ? ["assignment.json", "parent-token", "child-token"]
         : [];
     for (const [key, value] of Object.entries(item.data ?? {})) {
@@ -212,24 +228,30 @@ export function validateReserveObservation(
   if (assignedOwner && (slot.state !== "assigned" || assignedOwner !== slot.assignedAttemptID))
     throw new Error("Execution slot observation requires its durable assignment owner");
   const actual = observed.map((value) => object.parse(value));
-  const pod = actual.find((value) => value.kind === "Pod" && value.metadata.name === "slot");
+  const pod = actual.find((value) => value.kind === "Pod" && value.metadata.name === "worker");
   const namespace = actual.find(
     (value) => value.kind === "Namespace" && value.metadata.name === slot.namespace,
   );
   const claim = actual.find(
     (value) =>
       value.kind === "PersistentVolumeClaim" &&
-      value.metadata.name === `store-${slot.id.replaceAll("-", "")}`,
+      value.metadata.name === `store-${slot.workerID.replaceAll("-", "")}`,
   );
   if (!pod || !namespace || !claim) throw new Error("Execution slot resources are incomplete");
   for (const item of actual) {
     requireDeclaredResource(item, resources, assignedOwner, assignmentData);
     const labels = item.metadata.labels;
-    if (
+    if (labels["factory.dev/shared-resource"] === "true") {
+      if (
+        !Object.entries(factoryboxSharedLabels(slot.workerID)).every(
+          ([key, value]) => labels[key] === value,
+        )
+      )
+        throw new Error("Shared Factory worker ownership changed");
+    } else if (
       labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
       labels["factory.dev/execution-slot"] !== slot.id ||
-      (labels["factory.dev/runtime-owner"] !== slot.id &&
-        (!assignedOwner || labels["factory.dev/runtime-owner"] !== assignedOwner))
+      labels["factory.dev/runtime-owner"] !== slot.id
     )
       throw new Error("Execution slot ownership changed");
   }
@@ -352,7 +374,7 @@ sys.exit(result.returncode)
     [
       "exec",
       ...(body === undefined ? [] : ["-i"]),
-      "slot",
+      input.podName,
       "-n",
       input.namespace,
       "-c",
@@ -375,60 +397,145 @@ sys.exit(result.returncode)
   );
 }
 
-export function createReserveClient(): ReserveClient {
-  const kubernetes = createKubernetesClient();
+export function createReserveClient(
+  run: typeof command = command,
+  kubernetes = createKubernetesClient(),
+): ReserveClient {
   async function read(slot: ExecutionSlot) {
     const resources: ObservedObject[] = [];
-    const namespace = await command(["get", "namespace", slot.namespace, "-o", "json"]);
+    const namespace = await run(["get", "namespace", slot.namespace, "-o", "json"]);
     if (namespace) resources.push(object.parse(JSON.parse(namespace)));
-    const listing = await command(["get", "pods,pvc,secrets", "-n", slot.namespace, "-o", "json"]);
+    const listing = await run([
+      "get",
+      "pod/worker",
+      `pvc/store-${slot.workerID.replaceAll("-", "")}`,
+      "pvc/runtime-data",
+      "secret/registry-ca",
+      `secret/${factoryboxAssignmentSecret(slot.id)}`,
+      "-n",
+      slot.namespace,
+      "--ignore-not-found",
+      "-o",
+      "json",
+    ]);
     if (listing)
       resources.push(...z.object({ items: z.array(object) }).parse(JSON.parse(listing)).items);
     return resources;
   }
-  async function cleanupNative(slot: ExecutionSlot, resources: ObservedObject[]) {
+  async function cleanupNative(
+    slot: ExecutionSlot,
+    resources: ObservedObject[],
+    options?: DeleteIntent,
+  ) {
     const pod = resources.find((value) => value.kind === "Pod");
     if (!pod || !slot.factoryboxIdentity || !slot.factoryboxPreparation) return;
     const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
     if (pod.metadata.uid !== identity.podUID)
       throw new Error("Execution slot worker UID changed before native cleanup");
-    const input = factoryboxReserveInput(slot, pod.metadata.labels);
+    const input = factoryboxReserveInput(slot);
     if (await factoryboxOriginalWorkerRetired(input, identity)) return;
     if (slot.factoryboxStartAttempted) {
-      const result = await executeFactoryboxOperation(
+      const observation = await executeFactoryboxOperation(
         factoryboxRuntimeRequest(input),
         identity,
-        { action: "delete", sandboxID: input.sandboxID },
+        { action: "state", sandboxID: input.sandboxID },
         runFactoryboxKubernetes,
         factoryboxRuntimeDeclaration(input),
       );
-      if (!result.confirmed) throw new Error("Execution slot native Delete is unconfirmed");
+      if (!observation.confirmed) throw new Error("Execution slot native state is unconfirmed");
+      const state = z
+        .object({ record: z.object({ phase: z.string() }) })
+        .parse(JSON.parse(observation.stdout));
+      if (state.record.phase !== "deleted") {
+        if (slot.factoryboxDeleteAttempted || !options || !(await options.intendDelete()))
+          throw new Error("Execution slot Delete is unconfirmed; observe its original outcome");
+        const result = await executeFactoryboxOperation(
+          factoryboxRuntimeRequest(input),
+          identity,
+          { action: "delete", sandboxID: input.sandboxID },
+          runFactoryboxKubernetes,
+          factoryboxRuntimeDeclaration(input),
+        );
+        if (!result.confirmed) throw new Error("Execution slot native Delete is unconfirmed");
+      }
     }
     await releaseFactoryboxRuntime(input, identity, !slot.factoryboxStartAttempted);
+  }
+  async function cleanup(slot: ExecutionSlot, options?: DeleteIntent) {
+    if (slot.namespace !== factoryboxLocation(slot.workerID).namespace)
+      throw new Error("Execution slot belongs to another Factory Namespace");
+    const current = await read(slot);
+    if (!current.length) return;
+    const namespace = current.find((item) => item.kind === "Namespace");
+    if (!namespace) throw new Error("Execution slot has resources without its Namespace");
+    const shared = factoryboxSharedLabels(slot.workerID);
+    const storeName = `store-${slot.workerID.replaceAll("-", "")}`;
+    const assignmentName = factoryboxAssignmentSecret(slot.id);
+    for (const item of current) {
+      const { kind, metadata } = item;
+      const key = `${kind}/${metadata.name}`;
+      const isAssignment = key === `Secret/${assignmentName}`;
+      if (isAssignment) {
+        if (
+          metadata.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
+          metadata.labels["factory.dev/runtime-owner"] !== slot.id ||
+          metadata.labels["factory.dev/execution-slot"] !== slot.id ||
+          metadata.labels["factory.dev/shared-resource"] === "true"
+        )
+          throw new Error("Execution slot cleanup ownership changed");
+      } else if (
+        ![
+          `Namespace/${slot.namespace}`,
+          "Pod/worker",
+          `PersistentVolumeClaim/${storeName}`,
+          "PersistentVolumeClaim/runtime-data",
+          "Secret/registry-ca",
+        ].includes(key) ||
+        !Object.entries(shared).every(([name, value]) => metadata.labels[name] === value)
+      )
+        throw new Error("Shared Factory worker ownership changed before slot cleanup");
+      const expectedUID =
+        kind === "Namespace"
+          ? slot.namespaceUID
+          : kind === "Pod"
+            ? slot.podUID
+            : key === `PersistentVolumeClaim/${storeName}`
+              ? slot.claimUID
+              : null;
+      if (expectedUID && metadata.uid !== expectedUID)
+        throw new Error("Execution slot cleanup UID changed");
+    }
+    await cleanupNative(slot, current, options);
+    // An assigned slot keeps its private seed owner. Common resources belong
+    // to the Factory for the worker's entire lifetime, never to this slot.
+    await kubernetes.deleteSecret({
+      namespace: slot.namespace,
+      namespaceUID: namespace.metadata.uid,
+      name: assignmentName,
+      ownerID: slot.id,
+    });
   }
   return {
     async prepare(slot, options) {
       const resources = renderReserveResources(slot, await readRuntimeRegistryCA());
       const current = await read(slot);
-      if (current.length) {
-        // Partial creates may resume only under this persisted unpredictable slot identity.
-        for (const item of current) {
-          if (
-            item.metadata.labels["factory.dev/runtime-owner"] !== slot.id ||
-            item.metadata.labels["factory.dev/execution-slot"] !== slot.id ||
-            item.metadata.labels["app.kubernetes.io/managed-by"] !== "open-software-factory"
-          )
-            throw new Error("Refusing to adopt another execution slot");
-          requireDeclaredResource(item, resources);
-        }
+      for (const item of current) {
+        requireDeclaredResource(item, resources);
+        const labels = item.metadata.labels;
+        const expectedOwner =
+          labels["factory.dev/shared-resource"] === "true" ? slot.workerID : slot.id;
+        if (
+          labels["factory.dev/runtime-owner"] !== expectedOwner ||
+          labels["app.kubernetes.io/managed-by"] !== "open-software-factory"
+        )
+          throw new Error("Refusing another execution slot or Factory worker");
       }
       const namespace = current.find((item) => item.kind === "Namespace");
       if (slot.namespaceUID && namespace?.metadata.uid !== slot.namespaceUID)
         throw new Error("Execution slot Namespace UID changed");
-      await kubernetes.apply(
-        resources,
-        namespace ? { ownerID: slot.id, uid: namespace.metadata.uid } : undefined,
-      );
+      if (!options?.provision)
+        throw new Error("Execution slots require shared Factory worker admission");
+      await options.provision(resources);
       const observed = validateReserveObservation(slot, resources, await read(slot));
       if (!observed.ready || !slot.namespaceUID || !slot.podUID || !slot.claimUID)
         return { ...observed, ready: false };
@@ -507,7 +614,8 @@ export function createReserveClient(): ReserveClient {
           typeof resource === "object" &&
           resource !== null &&
           Reflect.get(resource, "kind") === "Secret" &&
-          Reflect.get(Reflect.get(resource, "metadata"), "name") === "runtime-assignment",
+          Reflect.get(Reflect.get(resource, "metadata"), "name") ===
+            factoryboxAssignmentSecret(slot.id),
       ) as
         | { metadata: { labels: Record<string, string> }; stringData: Record<string, string> }
         | undefined;
@@ -526,13 +634,15 @@ export function createReserveClient(): ReserveClient {
         assignment.stringData,
       );
       const labels = {
-        "factory.dev/factorybox-store": slot.id.replaceAll("-", ""),
-        "factory.dev/trust-domain": slot.id.replaceAll("-", ""),
         ...assignment.metadata.labels,
+        "factory.dev/runtime-owner": slot.id,
         "factory.dev/execution-slot": slot.id,
       };
-      for (const item of current) {
-        await command([
+      for (const item of current.filter(
+        (value) =>
+          value.kind === "Secret" && value.metadata.name === factoryboxAssignmentSecret(slot.id),
+      )) {
+        await run([
           "patch",
           item.kind,
           item.metadata.name,
@@ -548,16 +658,20 @@ export function createReserveClient(): ReserveClient {
       // Keep the immutable slot seed for process restart. Never replace the running Pod or its PVC.
       const seedAssignment = seed
         .filter((value) => value.kind === "Secret")
-        .find((value) => value.metadata.name === "runtime-assignment");
+        .find((value) => value.metadata.name === factoryboxAssignmentSecret(slot.id));
       for (const resource of resources) {
         const candidate = resource as {
           kind: string;
           metadata: { name: string };
           stringData?: Record<string, string>;
         };
-        if (candidate.kind !== "Secret") continue;
+        if (
+          candidate.kind !== "Secret" ||
+          candidate.metadata.name !== factoryboxAssignmentSecret(slot.id)
+        )
+          continue;
         const seeded =
-          candidate.metadata.name === "runtime-assignment"
+          candidate.metadata.name === factoryboxAssignmentSecret(slot.id)
             ? {
                 ...candidate,
                 stringData: {
@@ -566,7 +680,7 @@ export function createReserveClient(): ReserveClient {
                 },
               }
             : candidate;
-        await command(
+        await run(
           ["apply", "--server-side", "--field-manager", "open-software-factory", "-f", "-"],
           JSON.stringify({ ...seeded, metadata: { ...candidate.metadata, labels } }),
         );
@@ -591,7 +705,7 @@ export function createReserveClient(): ReserveClient {
       if (activated.exitCode !== 0) throw new Error("Execution slot activation is unconfirmed");
       return observed;
     },
-    async removeAssigned(slot, generation) {
+    async removeAssigned(slot, generation, options) {
       if (
         !slot.assignedAttemptID ||
         !slot.namespaceUID ||
@@ -601,129 +715,13 @@ export function createReserveClient(): ReserveClient {
         generation < 1
       )
         throw new Error("Assigned slot cleanup requires immutable owner outcomes");
-      const current = await read(slot);
-      if (!current.length) return true;
-      const namespace = current.find((item) => item.kind === "Namespace");
-      const pod = current.find((item) => item.kind === "Pod");
-      const claim = current.find((item) => item.kind === "PersistentVolumeClaim");
-      if (pod && pod.metadata.uid !== slot.podUID) return false;
-      if (
-        namespace?.metadata.uid !== slot.namespaceUID ||
-        (claim && claim.metadata.uid !== slot.claimUID)
-      )
-        throw new Error("Assigned execution slot cleanup UID changed");
-      const listing = await command([
-        "get",
-        "pods,pvc,secrets",
-        "-n",
-        slot.namespace,
-        "-o",
-        "json",
-      ]);
-      for (const item of z.object({ items: z.array(object) }).parse(JSON.parse(listing ?? "{}"))
-        .items) {
-        if (
-          !current.some(
-            (expected) =>
-              expected.kind === item.kind && expected.metadata.uid === item.metadata.uid,
-          )
-        )
-          throw new Error("Assigned execution slot cleanup found unrelated data");
-      }
-      for (const item of current) {
-        const labels = item.metadata.labels;
-        if (
-          labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-          labels["factory.dev/execution-slot"] !== slot.id ||
-          ![slot.id, slot.assignedAttemptID].includes(labels["factory.dev/runtime-owner"] ?? "")
-        )
-          throw new Error("Assigned execution slot cleanup ownership changed");
-        await command([
-          "patch",
-          item.kind,
-          item.metadata.name,
-          ...(item.kind === "Namespace" ? [] : ["-n", slot.namespace]),
-          "--type=json",
-          "-p",
-          JSON.stringify([
-            { op: "test", path: "/metadata/uid", value: item.metadata.uid },
-            {
-              op: "replace",
-              path: "/metadata/labels",
-              value: {
-                ...labels,
-                "factory.dev/runtime-owner": slot.assignedAttemptID,
-                "factory.dev/runtime-attempt": slot.assignedAttemptID,
-                "factory.dev/runtime-generation": String(generation),
-              },
-            },
-          ]),
-        ]);
-      }
-      await cleanupNative(slot, await read(slot));
-      await kubernetes.deleteNamespace({
-        namespace: slot.namespace,
-        podName: "slot",
-        attemptID: slot.assignedAttemptID,
-        generation,
-        namespaceUID: slot.namespaceUID,
-        uid: pod?.metadata.uid ?? null,
-        ownerID: slot.assignedAttemptID,
-      });
+      await cleanup(slot, options);
       return true;
     },
-    async retire(slot) {
+    async retire(slot, options) {
       if (slot.assignedAttemptID)
         throw new Error("Assigned slots use their Runtime Attempt cleanup");
-      const current = await read(slot);
-      if (!current.length) return;
-      const namespace = current.find((item) => item.kind === "Namespace");
-      if (!namespace) throw new Error("Execution slot has resources without its Namespace");
-      const listing = await command([
-        "get",
-        "pods,pvc,secrets",
-        "-n",
-        slot.namespace,
-        "-o",
-        "json",
-      ]);
-      for (const item of z.object({ items: z.array(object) }).parse(JSON.parse(listing ?? "{}"))
-        .items) {
-        if (
-          !current.some(
-            (expected) =>
-              expected.kind === item.kind && expected.metadata.uid === item.metadata.uid,
-          ) ||
-          item.metadata.labels["factory.dev/runtime-owner"] !== slot.id ||
-          item.metadata.labels["factory.dev/execution-slot"] !== slot.id
-        )
-          throw new Error("Execution slot cleanup found unrelated data");
-      }
-      for (const item of current) {
-        if (
-          item.metadata.labels["factory.dev/runtime-owner"] !== slot.id ||
-          item.metadata.labels["factory.dev/execution-slot"] !== slot.id
-        )
-          throw new Error("Execution slot cleanup ownership changed");
-      }
-      const pod = current.find((item) => item.kind === "Pod");
-      const claim = current.find((item) => item.kind === "PersistentVolumeClaim");
-      if (
-        (slot.namespaceUID && namespace.metadata.uid !== slot.namespaceUID) ||
-        (slot.podUID && pod && slot.podUID !== pod.metadata.uid) ||
-        (slot.claimUID && claim && slot.claimUID !== claim.metadata.uid)
-      )
-        throw new Error("Execution slot cleanup UID changed");
-      await cleanupNative(slot, current);
-      await kubernetes.deleteNamespace({
-        namespace: slot.namespace,
-        podName: "slot",
-        attemptID: slot.id,
-        generation: 0,
-        namespaceUID: namespace.metadata.uid,
-        uid: pod?.metadata.uid ?? null,
-        ownerID: slot.id,
-      });
+      await cleanup(slot, options);
     },
   };
 }

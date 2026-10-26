@@ -1,13 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
+import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
-import { createTicketTrashController } from "../../apps/factory/src/change/trash";
-import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import type { KubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 // Kubernetes is injected below. These pinned fixture identities are never launched.
 const configuration = {
@@ -73,20 +73,17 @@ test.each([
       const personalAttemptID = crypto.randomUUID();
       const stagingAttemptID = crypto.randomUUID();
       await database.client`INSERT INTO factory.development_workspace(id, project_id, kind, owner_user_id,
-        source_branch, source_revision, kubernetes_namespace, volume_name, created_by)
-        VALUES (${personalWorkspaceID}, ${owned.projectID}, 'personal', ${owned.userID}, 'main', ${"a".repeat(40)},
-          ${`factory-workspace-${personalWorkspaceID.replaceAll("-", "").slice(0, 12)}`}, 'never-created', ${owned.userID})`;
+        source_branch, source_revision, created_by)
+        VALUES (${personalWorkspaceID}, ${owned.projectID}, 'personal', ${owned.userID}, 'main', ${"a".repeat(40)}, ${owned.userID})`;
       await database.client`INSERT INTO factory.runtime_attempt(id, project_id, workspace_id, generation,
-        revision, state, kubernetes_namespace, kubernetes_pod_name,
+        revision, state,
         parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        SELECT ${personalAttemptID}, project_id, ${personalWorkspaceID}, 1, revision, 'ready',
-          'owned-personal-not-created', 'never-created', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+        SELECT ${personalAttemptID}, project_id, ${personalWorkspaceID}, 1, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
         FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
       await database.client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind, generation,
-        revision, state, kubernetes_namespace, kubernetes_pod_name,
+        revision, state,
         parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        SELECT ${stagingAttemptID}, project_id, 'staging', 1, revision, 'ready',
-          'owned-staging-not-created', 'never-created', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+        SELECT ${stagingAttemptID}, project_id, 'staging', 1, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
         FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
       await database.client`INSERT INTO factory.staging_preview(project_id, revision, runtime_attempt_id)
         VALUES (${owned.projectID}, ${"a".repeat(40)}, ${stagingAttemptID})`;
@@ -113,10 +110,10 @@ test.each([
           VALUES (${verificationID}, ${owned.changeID}, ${commitSHA}, 1, 'owned-replacement', 16,
             ${crypto.randomUUID()}, 'owned-token', ${owned.userID})`;
         await database.client`INSERT INTO factory.runtime_attempt(id, project_id, verification_id, isolated_kind,
-          generation, revision, state, kubernetes_namespace, kubernetes_pod_name,
+          generation, revision, state,
           parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
           VALUES (${attemptID}, ${owned.projectID}, ${verificationID}, 'verification', 2, ${commitSHA},
-            'stopped', 'owned-not-created', 'never-created', ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${owned.userID})`;
+            'stopped', ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${owned.userID})`;
         await database.client`UPDATE factory.verification SET runtime_attempt_id = ${attemptID} WHERE id = ${verificationID}`;
       }
       let rejectedRevocations = 0;
@@ -276,6 +273,7 @@ test.each(["verification", "change", "trashed", "restored-stop"] as const)(
       readSecret: async () => {
         throw new Error("Unexpected Secret read");
       },
+      deleteSecret: async () => {},
       deletePod: async () => {},
       deleteNamespace: async () => {},
     };

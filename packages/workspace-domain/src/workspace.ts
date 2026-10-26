@@ -18,8 +18,6 @@ function identity(kind: DevelopmentWorkspaceKind, ownerID: string) {
   const workspaceID = uuidFromDigest(digest);
   return {
     workspaceID,
-    kubernetesNamespace: `factory-workspace-${workspaceID.replaceAll("-", "").slice(0, 12)}`,
-    volumeName: "workspace-data",
   };
 }
 

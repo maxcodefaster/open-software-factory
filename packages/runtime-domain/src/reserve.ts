@@ -7,6 +7,7 @@ export interface ExecutionSlot {
   readonly state: ReserveState;
   readonly runtimeHostImage: string;
   readonly namespace: string;
+  readonly workerID: string;
   readonly namespaceUID: string | null;
   readonly podUID: string | null;
   readonly claimUID: string | null;
@@ -18,6 +19,7 @@ export interface ExecutionSlot {
   readonly factoryboxStartAttempted?: boolean;
   readonly factoryboxPauseAttempted?: boolean;
   readonly factoryboxResumeAttempted?: boolean;
+  readonly factoryboxDeleteAttempted?: boolean;
 }
 
 export interface ReservePolicy {
@@ -68,8 +70,6 @@ export function reserveIdentity(id: string) {
     throw new Error("Invalid execution slot identity");
   return {
     id,
-    namespace: `factory-reserve-${id.replaceAll("-", "").slice(0, 12)}`,
-    podName: "slot",
   };
 }
 

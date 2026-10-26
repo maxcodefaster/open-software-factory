@@ -36,6 +36,7 @@ const sourcePod = z.object({
 const claim = z.object({ metadata, spec: z.object({ accessModes: z.array(z.string()) }) });
 
 export interface SourceResources extends WorkspaceSourceManifest {
+  readonly sharedCreateAllowed: boolean;
   readonly namespaceUID: string | null;
   readonly claimUID: string | null;
   readonly podUID: string | null;
@@ -53,7 +54,7 @@ export interface WorkspaceSourceClient {
     namespace: string;
     podName: string;
     podUID: string;
-    workspaceID: string;
+    workerID: string;
   }): Promise<string>;
   prepare(input: SourceResources): Promise<SourceResourceObservation>;
   observe(input: SourceResources): Promise<SourceResourceObservation | null>;
@@ -197,9 +198,9 @@ export function validateSourceObservation(
       );
     }) ||
     namespace.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-    namespace.labels["factory.dev/runtime-owner"] !== input.identity.workspaceID ||
+    namespace.labels["factory.dev/runtime-owner"] !== input.workerID ||
     volume.metadata.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-    volume.metadata.labels["factory.dev/runtime-owner"] !== input.identity.workspaceID ||
+    volume.metadata.labels["factory.dev/runtime-owner"] !== input.workerID ||
     volume.spec.accessModes.join(",") !== "ReadWriteOnce" ||
     (input.namespaceUID && namespace.uid !== input.namespaceUID) ||
     (input.claimUID && volume.metadata.uid !== input.claimUID) ||
@@ -317,7 +318,7 @@ export function createWorkspaceSourceClient(
       const pod = sourcePod.parse(JSON.parse(raw));
       if (
         pod.metadata.uid !== input.podUID ||
-        pod.metadata.labels["factory.dev/runtime-owner"] !== input.workspaceID ||
+        pod.metadata.labels["factory.dev/runtime-owner"] !== input.workerID ||
         !pod.spec.nodeName
       )
         throw new Error("Existing execution storage identity differs");
@@ -354,7 +355,7 @@ export function createWorkspaceSourceClient(
       if (
         namespace &&
         (namespace.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-          namespace.labels["factory.dev/runtime-owner"] !== input.identity.workspaceID ||
+          namespace.labels["factory.dev/runtime-owner"] !== input.workerID ||
           (input.namespaceUID && input.namespaceUID !== namespace.uid))
       )
         throw new Error("Refusing unrelated source namespace");
@@ -392,9 +393,20 @@ export function createWorkspaceSourceClient(
         if (uid && recorded && metadata.parse(recorded.metadata).uid !== uid)
           throw new Error(`Recorded source ${label} identity differs from persisted intent`);
       }
+      if (!namespace && !input.sharedCreateAllowed)
+        throw new Error("Original Factory Namespace disappeared before Source creation");
       await kubernetes.apply(
         renderWorkspaceSourceResources(input),
-        namespace ? { ownerID: input.identity.workspaceID, uid: namespace.uid } : undefined,
+        namespace
+          ? {
+              ownerID: input.workerID,
+              uid: namespace.uid,
+              createShared: input.sharedCreateAllowed,
+              ...(input.claimUID
+                ? { sharedUIDs: { "PersistentVolumeClaim/runtime-data": input.claimUID } }
+                : {}),
+            }
+          : undefined,
       );
       const created = await observe(input);
       if (!created) throw new Error("Source resources were not observed after create");

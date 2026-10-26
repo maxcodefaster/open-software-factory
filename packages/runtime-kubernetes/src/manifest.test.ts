@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { renderRuntimeResources } from "./manifest";
+import {
+  ownedFactoryboxLocation,
+  ownedFactoryboxProfile,
+} from "../../../test/fixtures/runtime-configuration";
 import { factoryboxBootstrapProgram } from "./factorybox-runtime";
-import { ownedFactoryboxProfile } from "../../../test/fixtures/runtime-configuration";
+import { renderRuntimeResources } from "./manifest";
 
 const systemContract = {
   version: 1 as const,
@@ -36,8 +39,7 @@ describe("runtime Kubernetes resources", () => {
       factoryboxProfile: ownedFactoryboxProfile,
       attemptID: "01234567-89ab-5def-8123-456789abcdef",
       generation: 1,
-      namespace: "factory-runtime-0123456789ab",
-      podName: "runtime",
+      ...ownedFactoryboxLocation,
       projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
       repositoryURL: "file:///factory/project",
       revision: "main",
@@ -101,8 +103,7 @@ describe("runtime Kubernetes resources", () => {
       factoryboxProfile: ownedFactoryboxProfile,
       attemptID: "01234567-89ab-5def-8123-456789abcdef",
       generation: 1,
-      namespace: "factory-runtime-0123456789ab",
-      podName: "runtime-1",
+      ...ownedFactoryboxLocation,
       projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
       repositoryURL: "file:///factory/project",
       revision: "a".repeat(40),
@@ -140,8 +141,7 @@ describe("runtime Kubernetes resources", () => {
       factoryboxProfile: ownedFactoryboxProfile,
       attemptID: "01234567-89ab-5def-8123-456789abcdef",
       generation: 3,
-      namespace: "factory-runtime-0123456789ab",
-      podName: "runtime-3",
+      ...ownedFactoryboxLocation,
       projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
       repositoryURL: "https://forge.example/factory/project.git",
       revision: "b".repeat(40),
@@ -199,8 +199,7 @@ describe("runtime Kubernetes resources", () => {
         factoryboxProfile: ownedFactoryboxProfile,
         attemptID: "01234567-89ab-5def-8123-456789abcdef",
         generation: 2,
-        namespace: "factory-workspace-0123456789ab",
-        podName: "runtime-2",
+        ...ownedFactoryboxLocation,
         projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
         repositoryURL: "https://forge.example/factory/project.git",
         revision: "a".repeat(40),

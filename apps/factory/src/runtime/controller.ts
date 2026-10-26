@@ -12,12 +12,13 @@ import {
 } from "../../../../packages/runtime-domain/src/identity";
 import {
   createKubernetesClient,
-  KubernetesObservationUnavailableError,
   type KubernetesClient,
+  KubernetesObservationUnavailableError,
   type RuntimePodObservation,
   readRuntimeRegistryCA,
   requireRuntimePodArtifacts,
 } from "../../../../packages/runtime-kubernetes/src/client";
+import { factoryboxAssignmentSecret } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
 import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
 import {
   parseSystemContract,
@@ -36,8 +37,8 @@ import { createComputeWait } from "../usage/compute-wait";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
 import { freezeRuntimeArtifacts } from "./artifacts";
-import { createFactoryboxExecution } from "./factorybox";
 import { runtimeFactoryURL, runtimeForgeURL, runtimeReleaseRegistryURL } from "./endpoints";
+import { createFactoryboxExecution } from "./factorybox";
 import {
   prepareRuntimeRepository,
   readRepositoryFileAtRevision,
@@ -54,8 +55,14 @@ import {
 import { recoveredConnectionObserver } from "./recovered-connections";
 import type { ExecutionReserve } from "./reserve-controller";
 import type { RuntimeAttemptView } from "./types";
+import { createFactoryboxWorker, factoryboxAllocation } from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
+type ExecutionIdentity = ReturnType<typeof runtimeIdentity> & {
+  workerID: string;
+  namespace: string;
+  podName: string;
+};
 const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
 const systemContractPath = ".factory/system.json";
 
@@ -171,6 +178,10 @@ export function createRuntimeController(
   const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
   const computeWait = createComputeWait(database, reserve);
   const factorybox = createFactoryboxExecution(database, hub);
+  const worker = createFactoryboxWorker(database, kubernetes);
+  async function executionIdentity(ownerID: string, generation: number, sql: Database["client"]) {
+    return { ...runtimeIdentity(ownerID, generation), ...(await worker.location(sql)) };
+  }
   let drainingCompute = false;
   async function admitOrWait(
     sql: Database["client"],
@@ -272,7 +283,11 @@ export function createRuntimeController(
         await computeWait.launch(attemptID, () =>
           launchRuntimeResources(input, {
             ...ports,
-            kubernetes,
+            kubernetes: {
+              apply: (resources) =>
+                worker.provision(resources, input.factoryboxProfile, input.runtimeHostImage),
+              getPod: (namespace, podName) => kubernetes.getPod(namespace, podName),
+            },
             transitionObserved: (podUID, namespaceUID) =>
               recordCreated(sql, attemptID, podUID, namespaceUID),
           }),
@@ -349,40 +364,23 @@ export function createRuntimeController(
         createOpenCodeClient((request, path) => hub.request(attemptID, "agent", request, path)),
       );
     } else await createRecordedOpenCodeUsage(database).markUnavailable(attemptID);
-    await factorybox.deleteSandbox(attemptID);
     const removedByReserve = await reserve?.cleanup(attemptID, Number(attempt.generation));
-    const observedNamespace = await kubernetes.getNamespace(attempt.namespace);
-    if (observedNamespace && !removedByReserve) {
-      if (attempt.namespaceUID && attempt.namespaceUID !== observedNamespace.uid) {
-        throw new Error("Runtime Namespace UID does not match persisted intent");
-      }
-      // Source owns the Workspace Namespace/PVC. Even cancelled compute removes only its Pod.
-      if (attempt.workspaceID) {
-        const pod = await kubernetes.getPod(attempt.namespace, attempt.podName);
-        if (pod) {
-          if (!attempt.uid || pod.uid !== attempt.uid) {
-            throw new Error("Runtime Pod UID does not match persisted intent");
-          }
-          await kubernetes.deletePod({
-            namespace: attempt.namespace,
-            podName: attempt.podName,
-            attemptID,
-            generation: Number(attempt.generation),
-            uid: attempt.uid,
-          });
-        }
-        await factorybox.deleteStore(attemptID);
-      } else {
-        await kubernetes.deleteNamespace({
+    // Reserve cleanup already owns Delete. Observe that result without another
+    // mutation, then drain this assigned Sandbox's retained checkpoints too.
+    await factorybox.deleteSandbox(attemptID, Boolean(removedByReserve));
+    if (!removedByReserve) {
+      const shared = await factoryboxAllocation(sql);
+      const namespaceUID = attempt.namespaceUID ?? shared.namespaceUID;
+      if (namespaceUID)
+        await kubernetes.deleteSecret({
           namespace: attempt.namespace,
-          namespaceUID: attempt.namespaceUID ?? observedNamespace.uid,
-          podName: attempt.podName,
-          attemptID,
-          generation: Number(attempt.generation),
-          uid: attempt.uid,
+          namespaceUID,
+          name: factoryboxAssignmentSecret(attemptID),
           ownerID: attempt.workspaceID ?? attemptID,
+          attemptID,
         });
-      }
+      else if (await kubernetes.getNamespace(attempt.namespace))
+        throw new Error("Shared Namespace outcome is unconfirmed; assignment was retained");
     }
     await removeRuntimeRepository(attemptID);
     await reserve?.removed(sql, attemptID);
@@ -587,147 +585,56 @@ export function createRuntimeController(
   }
   async function observeStartup(
     attemptID: string,
-    runtimeOwnerID: string,
+    _runtimeOwnerID: string,
     namespace: string,
     podName: string,
     resources: readonly unknown[],
   ) {
-    const factoryboxSelected = resources.some((resource) => {
-      const pod = resource as { kind?: string; spec?: { containers?: Array<{ name: string }> } };
-      return (
-        pod.kind === "Pod" && pod.spec?.containers?.some((container) => container.name === "worker")
-      );
-    });
     const deadline = performance.now() + 420_000;
-    for (let replacement = 0; replacement < 3; replacement += 1) {
-      for (let observation = 0; observation < (factoryboxSelected ? 420 : 300); observation += 1) {
-        if (factoryboxSelected && performance.now() >= deadline) break;
-        const attempt = await database.client<Array<{ state: string; uid: string | null }>>`
+    while (performance.now() < deadline) {
+      const attempt = await database.client<Array<{ state: string; uid: string | null }>>`
           SELECT state, kubernetes_uid AS uid FROM factory.runtime_attempt WHERE id = ${attemptID}
         `;
-        const current = attempt[0];
-        if (current?.state !== "starting") return;
-        let pod: RuntimePodObservation | null;
-        try {
-          pod = await kubernetes.getPod(namespace, podName);
-        } catch (cause) {
-          if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
-          // An unavailable read says nothing about the owned Pod. Reobserve
-          // within this startup window; do not clean up or replay its create.
-          await Bun.sleep(1_000);
-          continue;
-        }
-        if (factoryboxSelected) {
-          if (
-            !pod ||
-            !current.uid ||
-            current.uid !== pod.uid ||
-            ["Failed", "Succeeded"].includes(pod.phase)
-          ) {
-            await database.client`UPDATE factory.runtime_attempt SET failure='Original Factorybox worker is unavailable; its execution identity was retained',updated_at=now()
-              WHERE id=${attemptID} AND state='starting'`;
-            return;
-          }
-          if (pod.ready) {
-            try {
-              await factorybox.ensureStarted(attemptID, resources, deadline);
-              if (hub.connected(attemptID)) await updateStatus(attemptID, "ready");
-            } catch (cause) {
-              await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed"},updated_at=now()
-                WHERE id=${attemptID} AND state='starting'`;
-            }
-          }
-          await Bun.sleep(1_000);
-          continue;
-        }
-        if (!pod) break;
-        if (pod.phase === "Failed" || pod.phase === "Succeeded") {
-          if (!current.uid || current.uid !== pod.uid) {
-            await updateStatus(
-              attemptID,
-              "failed",
-              "Terminal runtime Pod UID did not match persisted create intent",
-            );
-            return;
-          }
-          if (replacement === 2) {
-            await updateStatus(
-              attemptID,
-              "failed",
-              "Runtime Pod terminated after bounded startup recovery",
-            );
-            return;
-          }
-          const removed = await withResourceLock(attemptID, async (sql) => {
-            const intent = await sql<{ state: string; generation: string }[]>`
-              SELECT state, generation FROM factory.runtime_attempt WHERE id = ${attemptID}
-            `;
-            if (intent[0]?.state !== "starting") return false;
-            await kubernetes.deletePod({
-              namespace,
-              podName,
-              attemptID,
-              generation: Number(intent[0].generation),
-              uid: pod.uid,
-            });
-            return true;
-          });
-          if (!removed) return;
-          break;
-        }
+      const current = attempt[0];
+      if (current?.state !== "starting") return;
+      let pod: RuntimePodObservation | null;
+      try {
+        pod = await kubernetes.getPod(namespace, podName);
+      } catch (cause) {
+        if (!(cause instanceof KubernetesObservationUnavailableError)) throw cause;
+        // An unavailable read says nothing about the owned Pod. Reobserve
+        // within this startup window; do not clean up or replay its create.
         await Bun.sleep(1_000);
+        continue;
       }
-      if (factoryboxSelected) {
-        await database.client`UPDATE factory.runtime_attempt SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
-          WHERE id=${attemptID} AND state='starting'`;
+      if (
+        !pod ||
+        !current.uid ||
+        current.uid !== pod.uid ||
+        ["Failed", "Succeeded"].includes(pod.phase)
+      ) {
+        await database.client`UPDATE factory.runtime_attempt SET failure='Original Factorybox worker is unavailable; its execution identity was retained',updated_at=now()
+              WHERE id=${attemptID} AND state='starting'`;
         return;
       }
-      if (replacement === 2) break;
-      const current = await kubernetes.getPod(namespace, podName);
-      if (current) continue;
-      await Bun.sleep(2_000);
-      const recreated = await withResourceLock(attemptID, async (sql) => {
-        const intent = await sql<
-          Array<{
-            state: string;
-            generation: string;
-            namespaceUID: string | null;
-            uid: string | null;
-          }>
-        >`
-          SELECT state, generation, kubernetes_namespace_uid AS "namespaceUID", kubernetes_uid AS uid
-          FROM factory.runtime_attempt WHERE id = ${attemptID}
-        `;
-        const active = intent[0];
-        if (active?.state !== "starting") return "stopped";
-        const applied = await kubernetes.apply(resources, {
-          ownerID: runtimeOwnerID,
-          uid: active.namespaceUID,
-        });
-        const recreated = await kubernetes.getPod(namespace, podName);
-        if (!recreated) return "missing";
-        const recorded = await sql`
-          UPDATE factory.runtime_attempt SET kubernetes_uid = ${recreated.uid},
-            kubernetes_namespace_uid = ${applied.namespaceUID},
-            create_observed_at = now(), updated_at = now()
-          WHERE id = ${attemptID} AND kubernetes_uid IS NOT DISTINCT FROM ${active.uid}
-            AND kubernetes_namespace_uid IS NOT DISTINCT FROM ${active.namespaceUID}
-        `;
-        if (recorded.count !== 1) throw new Error("Runtime replacement identities changed");
-        return "created";
-      });
-      if (recreated === "stopped") return;
+      if (pod.ready) {
+        try {
+          await factorybox.ensureStarted(attemptID, resources, deadline);
+          if (hub.connected(attemptID)) await updateStatus(attemptID, "ready");
+        } catch (cause) {
+          await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed"},updated_at=now()
+                WHERE id=${attemptID} AND state='starting'`;
+        }
+      }
+      await Bun.sleep(1_000);
     }
-    await updateStatus(
-      attemptID,
-      "failed",
-      "Runtime Pod did not establish its connectors after bounded startup recovery",
-    );
+    await database.client`UPDATE factory.runtime_attempt SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
+          WHERE id=${attemptID} AND state='starting'`;
   }
 
   async function launchIsolated(
     input: {
-      identity: ReturnType<typeof runtimeIdentity>;
+      identity: ExecutionIdentity;
       generation: number;
       projectID: string;
       repositoryURL: string;
@@ -772,6 +679,8 @@ export function createRuntimeController(
         controlURL,
         runtimeHostImage: artifacts.runtimeHostImage,
         factoryboxProfile: artifacts.factoryboxProfile,
+        workerID: artifacts.workerID,
+        ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
         environmentVersion: artifacts.environmentVersion,
         registryCA: await readRegistryCA(),
         mode: input.kind,
@@ -885,6 +794,7 @@ export function createRuntimeController(
             revision: string;
             devcontainerPath: string;
             namespaceUID: string | null;
+            workerID: string;
           }>
         >`
       SELECT kubernetes_namespace AS namespace, kubernetes_pod_name AS "podName",
@@ -898,7 +808,7 @@ export function createRuntimeController(
       release.version AS "publicationVersion",
       project.repository_url AS "repositoryURL",
       attempt.revision, project.devcontainer_path AS "devcontainerPath",
-      attempt.kubernetes_namespace_uid AS "namespaceUID"
+      attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.factorybox_worker_id AS "workerID"
     FROM factory.runtime_attempt attempt
     JOIN factory.project project ON project.id = attempt.project_id
     LEFT JOIN factory.verification verification ON verification.id = attempt.verification_id
@@ -923,6 +833,7 @@ export function createRuntimeController(
         );
         const identity = {
           ...expectedIdentity,
+          workerID: row.workerID,
           namespace: row.namespace,
           podName: row.podName,
         };
@@ -964,6 +875,8 @@ export function createRuntimeController(
           controlURL,
           runtimeHostImage: artifacts.runtimeHostImage,
           factoryboxProfile: artifacts.factoryboxProfile,
+          workerID: artifacts.workerID,
+          ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
           environmentVersion: artifacts.environmentVersion,
           registryCA: await readRegistryCA(),
           mode: row.isolatedKind ?? "development",
@@ -1035,31 +948,17 @@ export function createRuntimeController(
           reserve?.refill();
           return;
         }
-        let namespace = await kubernetes.getNamespace(row.namespace);
-        let pod = await kubernetes.getPod(row.namespace, row.podName);
-        if (!namespace || !pod) {
-          const applied = await computeWait.launch(attempt.id, () =>
-            kubernetes.apply(
-              resources,
-              namespace
-                ? {
-                    ownerID: runtimeOwnerID,
-                    uid: row.namespaceUID ?? canonicalSource?.namespaceUID ?? namespace.uid,
-                  }
-                : undefined,
-            ),
-          );
-          if (!applied) return;
-          namespace = await kubernetes.getNamespace(row.namespace);
-          pod = await kubernetes.getPod(row.namespace, row.podName);
-          if (namespace && namespace.uid !== applied.namespaceUID) {
-            throw new Error("created Namespace UID changed during recovery");
-          }
-        }
+        const applied = await computeWait.launch(attempt.id, () =>
+          worker.provision(resources, artifacts.factoryboxProfile, artifacts.runtimeHostImage),
+        );
+        if (!applied) return;
+        const namespace = await kubernetes.getNamespace(row.namespace);
+        const pod = await kubernetes.getPod(row.namespace, row.podName);
+        const secretName = factoryboxAssignmentSecret(artifacts.reserveSlotID ?? attempt.id);
         const [parentToken, childToken, assignmentText] = await Promise.all([
-          kubernetes.readSecret(row.namespace, "runtime-assignment", "parent-token"),
-          kubernetes.readSecret(row.namespace, "runtime-assignment", "child-token"),
-          kubernetes.readSecret(row.namespace, "runtime-assignment", "assignment.json"),
+          kubernetes.readSecret(row.namespace, secretName, "parent-token"),
+          kubernetes.readSecret(row.namespace, secretName, "child-token"),
+          kubernetes.readSecret(row.namespace, secretName, "assignment.json"),
         ]);
         const assignment = JSON.parse(assignmentText) as {
           runtimeAttemptId?: string;
@@ -1073,12 +972,9 @@ export function createRuntimeController(
           !namespace ||
           !pod ||
           namespace.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-          namespace.labels["factory.dev/runtime-owner"] !== runtimeOwnerID ||
-          namespace.labels["factory.dev/project"] !== row.projectID ||
+          namespace.labels["factory.dev/runtime-owner"] !== artifacts.workerID ||
           pod.labels["app.kubernetes.io/managed-by"] !== "open-software-factory" ||
-          pod.labels["factory.dev/runtime-attempt"] !== attempt.id ||
-          pod.labels["factory.dev/runtime-generation"] !== String(attempt.generation) ||
-          pod.labels["factory.dev/project"] !== row.projectID ||
+          pod.labels["factory.dev/runtime-owner"] !== artifacts.workerID ||
           assignment.runtimeAttemptId !== attempt.id ||
           assignment.generation !== generation ||
           assignment.repositoryUrl !== expectedRepositoryURL ||
@@ -1119,6 +1015,7 @@ export function createRuntimeController(
   }
 
   return {
+    reclaimStorage: () => factorybox.reclaimStorage(),
     async resumeForApp(attemptID: string, userID: string, deadline?: number) {
       await createAccessController(database).requireRuntime(userID, attemptID, "app");
       const current = await this.get(attemptID);
@@ -1239,7 +1136,11 @@ export function createRuntimeController(
             SELECT COALESCE(MAX(generation),0)+1 AS generation FROM factory.runtime_attempt
             WHERE project_id=${job.projectID} AND change_id IS NULL AND workspace_id IS NULL`;
           const generation = Number(next?.generation ?? 1);
-          const identity = runtimeIdentity(`project-prebuild:${preparationID}`, generation);
+          const identity = await executionIdentity(
+            `project-prebuild:${preparationID}`,
+            generation,
+            lock,
+          );
           attemptID = identity.attemptID;
           const tokens = runtimeConnectorTokens(connectorSecret, attemptID, generation);
           await lock`BEGIN`;
@@ -1254,8 +1155,8 @@ export function createRuntimeController(
               return;
             }
             await admitOrWait(lock, attemptID, job.projectID, "prebuild");
-            await lock`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-              VALUES(${attemptID},${job.projectID},'prebuild',${generation},${job.revision},'create-intended',${identity.namespace},${identity.podName},${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${job.userID})`;
+            await lock`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+              VALUES(${attemptID},${job.projectID},'prebuild',${generation},${job.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${job.userID})`;
             await lock`UPDATE factory.project_image_preparation SET runtime_attempt_id=${attemptID},state='running',updated_at=now() WHERE id=${preparationID}`;
             await artifactsFor(attemptID, lock);
             await lock`COMMIT`;
@@ -1302,6 +1203,8 @@ export function createRuntimeController(
           controlURL,
           runtimeHostImage: artifacts.runtimeHostImage,
           factoryboxProfile: artifacts.factoryboxProfile,
+          workerID: artifacts.workerID,
+          ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
           environmentVersion: artifacts.environmentVersion,
           registryCA: await readRegistryCA(),
           mode: "prebuild",
@@ -1553,11 +1456,10 @@ export function createRuntimeController(
           >`
             INSERT INTO factory.development_workspace(
               id, project_id, kind, owner_user_id, source_branch, source_revision,
-              kubernetes_namespace, volume_name, created_by
+              created_by
             ) VALUES (
               ${workspaceIdentity.workspaceID}, ${projectID}, 'personal', ${userID},
-              ${project.defaultBranch}, ${revision}, ${workspaceIdentity.kubernetesNamespace},
-              ${workspaceIdentity.volumeName}, ${userID}
+              ${project.defaultBranch}, ${revision}, ${userID}
             )
             RETURNING id, source_revision AS revision, kubernetes_namespace AS namespace,
               volume_name AS "volumeName"
@@ -1605,8 +1507,9 @@ export function createRuntimeController(
         FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
       `;
         const generation = Number(generations[0]?.generation ?? 1);
-        const attemptIdentity = runtimeIdentity(workspace.id, generation);
-        const identity = { ...attemptIdentity, namespace: workspace.namespace };
+        const identity = await executionIdentity(workspace.id, generation, lock);
+        if (identity.namespace !== workspace.namespace)
+          throw new Error("Workspace belongs to another Factory");
         const revision = workspace.revision;
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         const token = tokens.parent;
@@ -1621,12 +1524,11 @@ export function createRuntimeController(
           await lock`
         INSERT INTO factory.runtime_attempt(
           id, project_id, workspace_id, generation, revision, state,
-          kubernetes_namespace, kubernetes_pod_name,
           parent_connector_token_hash, child_connector_token_hash,
           create_intended_at, created_by
         ) VALUES (
           ${identity.attemptID}, ${projectID}, ${workspace.id}, ${generation}, ${revision}, 'create-intended',
-          ${identity.namespace}, ${identity.podName}, ${tokenHash}, ${childTokenHash}, now(), ${userID}
+          ${tokenHash}, ${childTokenHash}, now(), ${userID}
         )
       `;
           await lock`COMMIT`;
@@ -1659,6 +1561,8 @@ export function createRuntimeController(
             controlURL,
             runtimeHostImage: artifacts.runtimeHostImage,
             factoryboxProfile: artifacts.factoryboxProfile,
+            workerID: artifacts.workerID,
+            ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
             environmentVersion: artifacts.environmentVersion,
             registryCA: await readRegistryCA(),
             systemContract,
@@ -1768,20 +1672,19 @@ export function createRuntimeController(
           WHERE project_id = ${projectID} AND change_id IS NULL AND workspace_id IS NULL
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        let identity = runtimeIdentity(`staging:${projectID}`, generation);
+        const identity = await executionIdentity(`staging:${projectID}`, generation, lock);
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         await lock`BEGIN`;
         try {
-          const slot = await admitOrWait(lock, identity.attemptID, projectID, "staging", "staging");
-          if (slot) identity = { ...identity, namespace: slot.namespace, podName: "slot" };
+          await admitOrWait(lock, identity.attemptID, projectID, "staging", "staging");
           await lock`
             INSERT INTO factory.runtime_attempt(
-              id, project_id, isolated_kind, generation, revision, state, kubernetes_namespace,
-              kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+              id, project_id, isolated_kind, generation, revision, state,
+              parent_connector_token_hash, child_connector_token_hash,
               create_intended_at, created_by
             ) VALUES (
               ${identity.attemptID}, ${projectID}, 'staging', ${generation}, ${preview.revision},
-              'create-intended', ${identity.namespace}, ${identity.podName},
+              'create-intended',
               ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
               ${userID}
             )
@@ -1826,6 +1729,8 @@ export function createRuntimeController(
             controlURL,
             runtimeHostImage: artifacts.runtimeHostImage,
             factoryboxProfile: artifacts.factoryboxProfile,
+            workerID: artifacts.workerID,
+            ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
             environmentVersion: artifacts.environmentVersion,
             registryCA: await readRegistryCA(),
             mode: "staging",
@@ -1962,11 +1867,10 @@ export function createRuntimeController(
           workspaces = await lock<Array<{ id: string; namespace: string; revision: string }>>`
             INSERT INTO factory.development_workspace(
               id, project_id, kind, ticket_id, change_id, source_branch, source_revision,
-              kubernetes_namespace, volume_name, created_by
+              created_by
             ) VALUES (
               ${workspaceIdentity.workspaceID}, ${projectID}, 'ticket', ${row.ticketID}, ${changeID},
-              ${row.branchName}, ${row.baseSHA}, ${workspaceIdentity.kubernetesNamespace},
-              ${workspaceIdentity.volumeName}, ${userID}
+              ${row.branchName}, ${row.baseSHA}, ${userID}
             )
             RETURNING id, kubernetes_namespace AS namespace, source_revision AS revision
           `;
@@ -1979,8 +1883,9 @@ export function createRuntimeController(
           FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        const attemptIdentity = runtimeIdentity(workspace.id, generation);
-        const identity = { ...attemptIdentity, namespace: workspace.namespace };
+        const identity = await executionIdentity(workspace.id, generation, lock);
+        if (identity.namespace !== workspace.namespace)
+          throw new Error("Workspace belongs to another Factory");
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         const parent = tokens.parent;
         const child = tokens.child;
@@ -2002,12 +1907,11 @@ export function createRuntimeController(
           await lock`
             INSERT INTO factory.runtime_attempt(
               id, project_id, change_id, workspace_id, generation, revision, state,
-              kubernetes_namespace, kubernetes_pod_name,
               parent_connector_token_hash, child_connector_token_hash,
               create_intended_at, created_by
             ) VALUES (
               ${identity.attemptID}, ${projectID}, ${changeID}, ${workspace.id}, ${generation}, ${workspace.revision},
-              'create-intended', ${identity.namespace}, ${identity.podName},
+              'create-intended',
               ${hashConnectorToken(parent)}, ${hashConnectorToken(child)}, now(), ${userID}
             )
           `;
@@ -2049,6 +1953,8 @@ export function createRuntimeController(
             controlURL,
             runtimeHostImage: artifacts.runtimeHostImage,
             factoryboxProfile: artifacts.factoryboxProfile,
+            workerID: artifacts.workerID,
+            ...(artifacts.reserveSlotID ? { reserveSlotID: artifacts.reserveSlotID } : {}),
             environmentVersion: artifacts.environmentVersion,
             registryCA: await readRegistryCA(),
             systemContract,
@@ -2174,7 +2080,7 @@ export function createRuntimeController(
           WHERE project_id = ${verification.projectID} AND isolated_kind IS NOT NULL
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        let identity = runtimeIdentity(verificationID, generation);
+        const identity = await executionIdentity(verificationID, generation, lock);
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         await lock`BEGIN`;
         try {
@@ -2193,24 +2099,21 @@ export function createRuntimeController(
             await lock`ROLLBACK`;
             return null;
           }
-          const slot = await admitOrWait(
+          await admitOrWait(
             lock,
             identity.attemptID,
             verification.projectID,
             "verification",
             "verification",
           );
-          if (slot) identity = { ...identity, namespace: slot.namespace, podName: "slot" };
           await lock`
             INSERT INTO factory.runtime_attempt(
               id, project_id, verification_id, isolated_kind, generation, revision, state,
-              kubernetes_namespace, kubernetes_pod_name,
               parent_connector_token_hash, child_connector_token_hash,
               create_intended_at, created_by
             ) VALUES (
               ${identity.attemptID}, ${verification.projectID}, ${verificationID}, 'verification',
-              ${generation}, ${verification.commitSHA}, 'create-intended', ${identity.namespace},
-              ${identity.podName}, ${hashConnectorToken(tokens.parent)},
+              ${generation}, ${verification.commitSHA}, 'create-intended', ${hashConnectorToken(tokens.parent)},
               ${hashConnectorToken(tokens.child)}, now(), ${userID}
             )
           `;
@@ -2297,7 +2200,7 @@ export function createRuntimeController(
           SELECT (COALESCE(MAX(generation),0)+1)::float8 AS generation FROM factory.runtime_attempt
           WHERE project_id=${row.projectID} AND isolated_kind IS NOT NULL`;
         const generation = sequence!.generation;
-        const identity = runtimeIdentity(publicationID, generation);
+        const identity = await executionIdentity(publicationID, generation, lock);
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         await lock.begin(async (tx) => {
           await tx`SELECT pg_advisory_xact_lock(hashtext(${`runtime:isolated:${row.projectID}`}))`;
@@ -2307,9 +2210,9 @@ export function createRuntimeController(
             row.projectID,
             "publication",
           );
-          await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,
+          await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,
             parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-            VALUES(${identity.attemptID},${row.projectID},'publication',${generation},${row.revision},'create-intended',${identity.namespace},${identity.podName},
+            VALUES(${identity.attemptID},${row.projectID},'publication',${generation},${row.revision},'create-intended',
             ${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID})`;
           await tx`UPDATE factory.release_attempt SET runtime_attempt_id=${identity.attemptID} WHERE id=${publicationID}`;
           await artifactsFor(identity.attemptID, tx as unknown as Database["client"]);
@@ -2387,27 +2290,23 @@ export function createRuntimeController(
           WHERE project_id = ${promotion.projectID} AND isolated_kind IS NOT NULL
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        let identity = runtimeIdentity(`staging:${promotion.projectID}`, generation);
+        const identity = await executionIdentity(
+          `staging:${promotion.projectID}`,
+          generation,
+          lock,
+        );
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         await lock`BEGIN`;
         try {
-          const slot = await admitOrWait(
-            lock,
-            identity.attemptID,
-            promotion.projectID,
-            "staging",
-            "staging",
-          );
-          if (slot) identity = { ...identity, namespace: slot.namespace, podName: "slot" };
+          await admitOrWait(lock, identity.attemptID, promotion.projectID, "staging", "staging");
           await lock`
             INSERT INTO factory.runtime_attempt(
               id, project_id, isolated_kind, generation, revision, state,
-              kubernetes_namespace, kubernetes_pod_name,
               parent_connector_token_hash, child_connector_token_hash,
               create_intended_at, created_by
             ) VALUES (
               ${identity.attemptID}, ${promotion.projectID}, 'staging', ${generation},
-              ${promotion.commitSHA}, 'create-intended', ${identity.namespace}, ${identity.podName},
+              ${promotion.commitSHA}, 'create-intended',
               ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
               ${userID}
             )

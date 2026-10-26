@@ -146,9 +146,9 @@ test("release recovery retains immutable intent, never depends on a consumer and
     const contract = releaseContract.parse({ schemaVersion: 1, images: ["web"] });
     await database.client`INSERT INTO factory.project_release(id,project_id,command_id,version,commit_sha,workflow,contract,notes,state,created_by)
       VALUES(${publicationID},${projectID},${publicationID},'1.2.4',${sha},'.forgejo/workflows/factory-release.yml',${JSON.stringify(contract)}::text::jsonb,'admitted fixture','running',${userID})`;
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,
       parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${identity.attemptID},${projectID},'publication',1,${sha},'create-intended',${identity.namespace},${identity.podName},${"c".repeat(64)},${"d".repeat(64)},now(),${userID})`;
+      VALUES(${identity.attemptID},${projectID},'publication',1,${sha},'create-intended',${"c".repeat(64)},${"d".repeat(64)},now(),${userID})`;
     await database.client`INSERT INTO factory.project_environment(project_id,environment,version,secret_key)
       VALUES(${projectID},'development',1,'synthetic-development-secrets')`;
     await expect(

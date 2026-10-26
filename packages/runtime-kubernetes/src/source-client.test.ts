@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ownedFactoryboxLocation } from "../../../test/fixtures/runtime-configuration";
 import { workspaceSourceIdentity } from "../../workspace-domain/src/source";
 import { createKubernetesClient } from "./client";
 import { renderWorkspaceSourceResources } from "./source-manifest";
@@ -11,7 +12,8 @@ import {
 const input: SourceResources = {
   identity: workspaceSourceIdentity("11111111-1111-5111-8111-111111111111", 1),
   projectID: "22222222-2222-5222-8222-222222222222",
-  namespace: "factory-source-client-test",
+  ...ownedFactoryboxLocation,
+  sharedCreateAllowed: true,
   revision: "a".repeat(40),
   repositoryURL: "https://forge.invalid/project.git",
   originURL: "https://forge.invalid/project.git",
@@ -57,93 +59,98 @@ function resources(request: SourceResources = input) {
   }));
 }
 
-test("stopping one Source epoch preserves another validated connection in the same namespace", async () => {
-  const next: SourceResources = {
-    ...input,
-    identity: workspaceSourceIdentity(input.identity.workspaceID, 2),
-    podUID: "next-pod-uid",
-    capability: "test-only-next-capability",
-  };
-  const inventory = new Map(
-    [input, next].flatMap((request) =>
-      resources(request).map(
-        (resource) => [`${resource.kind}:${resource.metadata.name}`, resource] as const,
+test.each(["epoch", "workspace"] as const)(
+  "stopping one Source preserves another %s in the shared Factory namespace",
+  async (peer) => {
+    const nextWorkspaceID = peer === "epoch" ? input.identity.workspaceID : crypto.randomUUID();
+    const next: SourceResources = {
+      ...input,
+      identity: workspaceSourceIdentity(nextWorkspaceID, peer === "epoch" ? 2 : 1),
+      sourceDirectory: `workspaces/${nextWorkspaceID.replaceAll("-", "")}/home`,
+      podUID: "next-pod-uid",
+      capability: "test-only-next-capability",
+    };
+    const inventory = new Map(
+      [input, next].flatMap((request) =>
+        resources(request).map(
+          (resource) => [`${resource.kind}:${resource.metadata.name}`, resource] as const,
+        ),
       ),
-    ),
-  );
-  const opened: Array<{
-    podName: string;
-    cancel: AbortController;
-    kills: number;
-  }> = [];
-  const client = createWorkspaceSourceClient(
-    createKubernetesClient(),
-    async (args) => {
-      if (args[0] === "delete") {
-        const path = args[2] ?? "";
-        const [plural, name] = path.split("/").slice(-2);
-        const kind = plural === "pods" ? "Pod" : "Secret";
-        inventory.delete(`${kind}:${name}`);
-        return "{}";
-      }
-      if (args[1]?.startsWith("pod/")) {
-        const request = args[1] === `pod/${input.identity.podName}` ? input : next;
-        return JSON.stringify({
-          items: resources(request).filter((resource) =>
-            inventory.has(`${resource.kind}:${resource.metadata.name}`),
-          ),
-        });
-      }
-      const kind = args[1] === "pods" ? "Pod" : "Secret";
-      const resource = inventory.get(`${kind}:${args[2]}`);
-      return resource ? JSON.stringify(resource) : null;
-    },
-    Object.assign(
-      async (_url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
-        expect(options?.signal?.aborted).toBe(false);
-        return Response.json({ kind: "directory" });
-      },
-      { preconnect: fetch.preconnect },
-    ),
-    (_role, _namespace, podName) => {
-      const exit = Promise.withResolvers<number>();
-      const connection = { podName, cancel: new AbortController(), kills: 0 };
-      opened.push(connection);
-      return {
-        endpoint: Promise.resolve("http://127.0.0.1:4600"),
-        cancel: connection.cancel,
-        child: {
-          exited: exit.promise,
-          kill() {
-            connection.kills++;
-            exit.resolve(0);
-          },
-        },
-      };
-    },
-  );
-  try {
-    await client.connect(input);
-    await client.connect(next);
-    expect(opened).toHaveLength(2);
-    await client.stop(input);
-    expect(opened[0]?.cancel.signal.aborted).toBe(true);
-    expect(opened[0]?.kills).toBe(1);
-    expect(opened[1]?.cancel.signal.aborted).toBe(false);
-    expect(opened[1]?.kills).toBe(0);
-    await client.request(
-      next,
-      "stat",
-      new Request("http://factory.invalid/stat", { method: "POST", body: '{"path":""}' }),
-      new AbortController().signal,
     );
-    expect(opened).toHaveLength(2);
-    expect(inventory.has(`Pod:${next.identity.podName}`)).toBe(true);
-    expect(inventory.has(`Secret:${next.identity.secretName}`)).toBe(true);
-  } finally {
-    client.close();
-  }
-});
+    const opened: Array<{
+      podName: string;
+      cancel: AbortController;
+      kills: number;
+    }> = [];
+    const client = createWorkspaceSourceClient(
+      createKubernetesClient(),
+      async (args) => {
+        if (args[0] === "delete") {
+          const path = args[2] ?? "";
+          const [plural, name] = path.split("/").slice(-2);
+          const kind = plural === "pods" ? "Pod" : "Secret";
+          inventory.delete(`${kind}:${name}`);
+          return "{}";
+        }
+        if (args[1]?.startsWith("pod/")) {
+          const request = args[1] === `pod/${input.identity.podName}` ? input : next;
+          return JSON.stringify({
+            items: resources(request).filter((resource) =>
+              inventory.has(`${resource.kind}:${resource.metadata.name}`),
+            ),
+          });
+        }
+        const kind = args[1] === "pods" ? "Pod" : "Secret";
+        const resource = inventory.get(`${kind}:${args[2]}`);
+        return resource ? JSON.stringify(resource) : null;
+      },
+      Object.assign(
+        async (_url: Parameters<typeof fetch>[0], options?: Parameters<typeof fetch>[1]) => {
+          expect(options?.signal?.aborted).toBe(false);
+          return Response.json({ kind: "directory" });
+        },
+        { preconnect: fetch.preconnect },
+      ),
+      (_role, _namespace, podName) => {
+        const exit = Promise.withResolvers<number>();
+        const connection = { podName, cancel: new AbortController(), kills: 0 };
+        opened.push(connection);
+        return {
+          endpoint: Promise.resolve("http://127.0.0.1:4600"),
+          cancel: connection.cancel,
+          child: {
+            exited: exit.promise,
+            kill() {
+              connection.kills++;
+              exit.resolve(0);
+            },
+          },
+        };
+      },
+    );
+    try {
+      await client.connect(input);
+      await client.connect(next);
+      expect(opened).toHaveLength(2);
+      await client.stop(input);
+      expect(opened[0]?.cancel.signal.aborted).toBe(true);
+      expect(opened[0]?.kills).toBe(1);
+      expect(opened[1]?.cancel.signal.aborted).toBe(false);
+      expect(opened[1]?.kills).toBe(0);
+      await client.request(
+        next,
+        "stat",
+        new Request("http://factory.invalid/stat", { method: "POST", body: '{"path":""}' }),
+        new AbortController().signal,
+      );
+      expect(opened).toHaveLength(2);
+      expect(inventory.has(`Pod:${next.identity.podName}`)).toBe(true);
+      expect(inventory.has(`Secret:${next.identity.secretName}`)).toBe(true);
+    } finally {
+      client.close();
+    }
+  },
+);
 
 test.each(["Succeeded", "Failed"])(
   "a terminal %s source daemon requires explicit recovery instead of endless preparation",
@@ -226,11 +233,16 @@ test("fresh source uses one inventory then guarded apply and outcome observation
     writes.push(args);
     if (args[0] === "get") return { stdout: "", stderr: "NotFound", exitCode: 1 };
     if (args[0] === "create") {
-      expect(JSON.parse(body ?? "{}").kind).toBe("Namespace");
-      return { stdout: JSON.stringify(observed[0]), stderr: "", exitCode: 0 };
+      const manifest = JSON.parse(body ?? "{}");
+      expect(["Namespace", "PersistentVolumeClaim"]).toContain(manifest.kind);
+      return {
+        stdout: JSON.stringify(observed.find((item) => item.kind === manifest.kind)),
+        stderr: "",
+        exitCode: 0,
+      };
     }
     expect(args[0]).toBe("apply");
-    expect(JSON.parse(body ?? "{}").items).toHaveLength(3);
+    expect(JSON.parse(body ?? "{}").items).toHaveLength(2);
     return { stdout: "", stderr: "", exitCode: 0 };
   });
   const client = createWorkspaceSourceClient(kubernetes, async (args) => {
@@ -239,7 +251,7 @@ test("fresh source uses one inventory then guarded apply and outcome observation
   });
   expect((await client.prepare(fresh)).podUID).toBe("pod-uid");
   expect(calls).toHaveLength(2);
-  expect(writes.map((args) => args[0])).toEqual(["get", "create", "apply"]);
+  expect(writes.map((args) => args[0])).toEqual(["get", "create", "get", "create", "apply"]);
   client.close();
 });
 

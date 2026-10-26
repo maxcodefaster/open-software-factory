@@ -1,8 +1,13 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { z } from "zod";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
+import {
+  factoryboxAllocation,
+  rememberFactoryboxSource,
+} from "../../apps/factory/src/runtime/worker";
 import {
   hashConnectorToken,
   runtimeConnectorTokens,
@@ -28,6 +33,58 @@ afterAll(() => {
   restoreConfiguration();
 });
 
+const resource = z
+  .object({
+    kind: z.string(),
+    metadata: z
+      .object({
+        name: z.string(),
+        labels: z.record(z.string(), z.string()),
+      })
+      .passthrough(),
+    stringData: z.record(z.string(), z.string()).optional(),
+  })
+  .passthrough();
+type Resource = z.infer<typeof resource>;
+function mergeResources(current: readonly Resource[], incoming: readonly unknown[]) {
+  const values = new Map(current.map((item) => [`${item.kind}/${item.metadata.name}`, item]));
+  for (const item of incoming.map((item) => resource.parse(item)))
+    values.set(`${item.kind}/${item.metadata.name}`, item);
+  return [...values.values()];
+}
+function acknowledge(resources: readonly unknown[], namespaceUID: string, podUID: string) {
+  return {
+    namespaceUID,
+    sharedUIDs: Object.fromEntries(
+      resources
+        .map((item) => resource.parse(item))
+        .filter(
+          (item) =>
+            item.kind !== "Namespace" &&
+            item.metadata.labels["factory.dev/shared-resource"] === "true",
+        )
+        .map((item) => [
+          `${item.kind}/${item.metadata.name}`,
+          item.kind === "Pod"
+            ? podUID
+            : item.kind === "PersistentVolumeClaim"
+              ? item.metadata.name === "runtime-data"
+                ? "owned-source-claim"
+                : "owned-claim"
+              : "owned-registry-ca",
+        ]),
+    ),
+  };
+}
+async function sourceOnly(sql: Parameters<typeof factoryboxAllocation>[0], namespaceUID: string) {
+  const worker = await factoryboxAllocation(sql);
+  await rememberFactoryboxSource(sql, worker.id, {
+    namespaceUID,
+    claimUID: "owned-source-claim",
+    storageNode: configuration.FACTORY_FACTORYBOX_NODE,
+  });
+}
+
 test.each(["reconnect", "Stop"] as const)(
   "startup observation timeout preserves live compute until %s without replaying creates",
   async (outcome) => {
@@ -36,10 +93,12 @@ test.each(["reconnect", "Stop"] as const)(
     const unavailable = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     let reads = 0;
+    let faultObserved = false;
     let creates = 0;
     let deletions = 0;
     let exists = false;
-    let manifest: Array<{ kind: string; metadata: { labels: Record<string, string> } }> = [];
+    let namespaceCreated = false;
+    let manifest: Resource[] = [];
     const failedRead = createKubernetesClient(async () => ({
       stdout: "",
       stderr:
@@ -62,16 +121,31 @@ test.each(["reconnect", "Stop"] as const)(
         {
           ...createKubernetesClient(),
           apply: async (resources) => {
-            creates++;
-            exists = true;
-            manifest = resources as typeof manifest;
-            return { namespaceUID: "owned-observation-namespace" };
+            if (resources.some((item) => resource.parse(item).kind === "Pod")) {
+              creates++;
+              exists = true;
+            }
+            namespaceCreated = true;
+            manifest = mergeResources(manifest, resources);
+            return acknowledge(resources, "owned-observation-namespace", "owned-observation-pod");
           },
           getNamespace: async () =>
-            exists ? { uid: "owned-observation-namespace", labels: {} } : null,
+            namespaceCreated
+              ? {
+                  uid: "owned-observation-namespace",
+                  labels: manifest.find((item) => item.kind === "Namespace")?.metadata.labels ?? {},
+                }
+              : null,
           getPod: async (namespace, podName) => {
+            if (!exists) return null;
             reads++;
-            if (reads === 2) {
+            const [current] = await database.client<Array<{ observed: boolean }>>`
+              SELECT EXISTS(SELECT 1 FROM factory.runtime_attempt
+                WHERE kubernetes_namespace=${namespace} AND kubernetes_pod_name=${podName}
+                  AND isolated_kind='verification' AND state='starting'
+                  AND create_observed_at IS NOT NULL) AS observed`;
+            if (!faultObserved && current?.observed) {
+              faultObserved = true;
               unavailable.resolve();
               await release.promise;
               return failedRead.getPod(namespace, podName);
@@ -89,11 +163,12 @@ test.each(["reconnect", "Stop"] as const)(
           },
           deleteNamespace: async () => {
             deletions++;
-            exists = false;
+            throw new Error("Stop must preserve the shared Factory Namespace");
           },
           deletePod: async () => {
             throw new Error("Unavailable observation must not replace a Pod");
           },
+          deleteSecret: async () => {},
         },
         async () => "",
       );
@@ -291,12 +366,11 @@ test.each(["personal", "staging", "ticket"] as const)(
       let expected = owned.attemptID;
       if (kind === "personal") {
         const workspaceID = crypto.randomUUID();
-        const namespace = `factory-workspace-${workspaceID.replaceAll("-", "").slice(0, 12)}`;
         expected = crypto.randomUUID();
-        await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
-        VALUES(${workspaceID},${owned.projectID},'personal',${owned.userID},'main',${"a".repeat(40)},${namespace},'never-created',${owned.userID})`;
-        await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${expected},${owned.projectID},${workspaceID},1,${"a".repeat(40)},'ready',${namespace},'never-created',${"a".repeat(64)},${"b".repeat(64)},now(),${owned.userID})`;
+        await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+        VALUES(${workspaceID},${owned.projectID},'personal',${owned.userID},'main',${"a".repeat(40)},${owned.userID})`;
+        await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${expected},${owned.projectID},${workspaceID},1,${"a".repeat(40)},'ready',${"a".repeat(64)},${"b".repeat(64)},now(),${owned.userID})`;
         pending = controller.start(owned.projectID, owned.userID);
       } else if (kind === "staging") {
         await database.client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id) VALUES(${owned.projectID},${"a".repeat(40)},${owned.attemptID})`;
@@ -328,10 +402,11 @@ test("Stop retires a failed older attempt without reactivating it or stopping it
   const database = processFixture.connect();
   try {
     const owned = await fixture(undefined, undefined, database);
+    await sourceOnly(database.client, "owned-source-namespace");
     await database.client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${owned.attemptID}`;
     const replacement = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${replacement},project_id,change_id,workspace_id,2,revision,'ready',kubernetes_namespace,'runtime-2',parent_connector_token_hash,child_connector_token_hash,now(),created_by
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      SELECT ${replacement},project_id,change_id,workspace_id,2,revision,'ready',parent_connector_token_hash,child_connector_token_hash,now(),created_by
       FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
     let failObservation = true;
     let deletions = 0;
@@ -345,23 +420,25 @@ test("Stop retires a failed older attempt without reactivating it or stopping it
             throw new Error("Stop must not prepare source");
           },
         },
-        {
-          ...createKubernetesClient(),
-          getNamespace: async () => {
+        createKubernetesClient(async (args) => {
+          if (args[0] !== "get") {
+            deletions++;
+            throw new Error("Stop must not remove the shared worker");
+          }
+          if (args[1] === "namespace") {
             if (failObservation) throw new Error("Owned transient observation failure");
-            return { uid: "owned-source-namespace", labels: {} };
-          },
-          getPod: async (_namespace, podName) => {
-            expect(podName).toBe("never-created");
-            return null;
-          },
-          deleteNamespace: async () => {
-            deletions++;
-          },
-          deletePod: async () => {
-            deletions++;
-          },
-        },
+            return {
+              stdout: JSON.stringify({ metadata: { uid: "owned-source-namespace" } }),
+              stderr: "",
+              exitCode: 0,
+            };
+          }
+          return {
+            stdout: "",
+            stderr: "Error from server (NotFound): assignment never created",
+            exitCode: 1,
+          };
+        }),
         async () => "",
       );
     await expect(controller().stop(owned.attemptID)).rejects.toThrow(
@@ -399,10 +476,11 @@ test("a transient namespace read during failed-attempt Stop settles without anot
   try {
     const owned = await fixture(undefined, undefined, database);
     attemptID = owned.attemptID;
+    await sourceOnly(database.client, "owned-source-namespace");
     await database.client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${attemptID}`;
     const replacement = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${replacement},project_id,change_id,workspace_id,2,revision,'ready',kubernetes_namespace,'runtime-2',parent_connector_token_hash,child_connector_token_hash,now(),created_by
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      SELECT ${replacement},project_id,change_id,workspace_id,2,revision,'ready',parent_connector_token_hash,child_connector_token_hash,now(),created_by
       FROM factory.runtime_attempt WHERE id=${attemptID}`;
     controller = createRuntimeController(
       database,
@@ -413,25 +491,27 @@ test("a transient namespace read during failed-attempt Stop settles without anot
           throw new Error("Stop must not prepare source or repeat work");
         },
       },
-      {
-        ...createKubernetesClient(),
-        getNamespace: async () => {
+      createKubernetesClient(async (args) => {
+        if (args[0] !== "get") {
+          deletions++;
+          throw new Error("Stop must not remove the shared worker");
+        }
+        if (args[1] === "namespace") {
           if (++reads === 1)
             throw new KubernetesObservationUnavailableError("Owned namespace read timed out");
           await release.promise;
-          return { uid: "owned-source-namespace", labels: {} };
-        },
-        getPod: async (_namespace, podName) => {
-          expect(podName).toBe("never-created");
-          return null;
-        },
-        deleteNamespace: async () => {
-          deletions++;
-        },
-        deletePod: async () => {
-          deletions++;
-        },
-      },
+          return {
+            stdout: JSON.stringify({ metadata: { uid: "owned-source-namespace" } }),
+            stderr: "",
+            exitCode: 0,
+          };
+        }
+        return {
+          stdout: "",
+          stderr: "Error from server (NotFound): assignment never created",
+          exitCode: 1,
+        };
+      }),
       async () => "",
     );
     await controller.stop(attemptID);
@@ -502,6 +582,7 @@ test("cancelling Ticket compute before create retains its independently owned so
   const database = processFixture.connect();
   try {
     const owned = await fixture(undefined, undefined, database);
+    await sourceOnly(database.client, "owned-source-namespace");
     await database.client`UPDATE factory.change SET cancel_requested_at=now() WHERE id=${owned.changeID}`;
     let namespaceDeletes = 0;
     const controller = createRuntimeController(
@@ -513,14 +594,23 @@ test("cancelling Ticket compute before create retains its independently owned so
           throw new Error("Stop must not prepare source");
         },
       },
-      {
-        ...createKubernetesClient(),
-        getNamespace: async () => ({ uid: "owned-source-namespace", labels: {} }),
-        getPod: async () => null,
-        deleteNamespace: async () => {
+      createKubernetesClient(async (args) => {
+        if (args[0] !== "get") {
           namespaceDeletes++;
-        },
-      },
+          throw new Error("Compute Stop must not delete canonical Source");
+        }
+        return args[1] === "namespace"
+          ? {
+              stdout: JSON.stringify({ metadata: { uid: "owned-source-namespace" } }),
+              stderr: "",
+              exitCode: 0,
+            }
+          : {
+              stdout: "",
+              stderr: "Error from server (NotFound): compute never created",
+              exitCode: 1,
+            };
+      }),
       async () => "owned-ca",
     );
     await controller.stop(owned.attemptID);
@@ -614,6 +704,7 @@ test.each([
     const preparing = Promise.withResolvers<void>();
     const prepared = Promise.withResolvers<void>();
     let exists = false;
+    let namespaceCreated = false;
     let deleted = false;
     let applies = 0;
     let podReads = 0;
@@ -625,26 +716,32 @@ test.each([
     const recoveredCreate =
       boundary === "recovered create" || boundary === "reserved recovered create";
     let reserve: ReturnType<typeof createExecutionReserve> | undefined;
-    let manifest: Array<{
-      kind: string;
-      metadata: { labels: Record<string, string> };
-      stringData?: Record<string, string>;
-    }> = [];
+    let manifest: Resource[] = [];
     const hub = new RuntimeHub(async () => {});
     const kubernetes: KubernetesClient = {
       apply: async (resources) => {
+        if (!resources.some((item) => resource.parse(item).kind === "Pod")) {
+          namespaceCreated = true;
+          manifest = mergeResources(manifest, resources);
+          return acknowledge(resources, "owned-namespace-uid", podUID);
+        }
+        if (exists) {
+          manifest = mergeResources(manifest, resources);
+          return acknowledge(resources, "owned-namespace-uid", podUID);
+        }
         applies += 1;
-        manifest = resources as typeof manifest;
+        manifest = mergeResources(manifest, resources);
         if (boundary === "terminal worker observation") {
           exists = true;
-          return { namespaceUID: "owned-namespace-uid" };
+          return acknowledge(resources, "owned-namespace-uid", podUID);
         }
         entered.resolve();
         await release.promise;
         exists = true;
-        return { namespaceUID: "owned-namespace-uid" };
+        return acknowledge(resources, "owned-namespace-uid", podUID);
       },
       getPod: async () => {
+        if (!exists) return null;
         if (boundary === "terminal worker observation" && ++podReads >= 2) entered.resolve();
         return exists
           ? {
@@ -659,7 +756,7 @@ test.each([
       },
       getNamespace: async () => {
         cleanupObserved.resolve();
-        return exists
+        return namespaceCreated
           ? {
               uid: "owned-namespace-uid",
               labels:
@@ -676,14 +773,20 @@ test.each([
         if (!value) throw new Error("Owned Secret missing");
         return value;
       },
+      deleteSecret: async (input) => {
+        expect(input.namespaceUID).toBe("owned-namespace-uid");
+        manifest = manifest.filter(
+          (item) => item.kind !== "Secret" || item.metadata.name !== input.name,
+        );
+        deleted = true;
+      },
       deletePod: async () => {
         throw new Error("Factorybox must never replace the original worker");
       },
       deleteNamespace: async (input) => {
         expect(input.namespaceUID).toBe("owned-namespace-uid");
         expect(input.uid).toBe(podUID);
-        exists = false;
-        deleted = true;
+        throw new Error("A Sandbox Stop must never delete the Factory Namespace");
       },
     };
     const controller = (first = false) =>
@@ -780,6 +883,7 @@ test.each([
           factoryboxPaused: true,
         });
         exists = true;
+        namespaceCreated = true;
         reserve = createExecutionReserve(
           database,
           images,
@@ -793,7 +897,7 @@ test.each([
               activations++;
               if (!attemptID) throw new Error("Owned runtime intent missing");
               expect(assigned.assignedAttemptID).toBe(attemptID);
-              manifest = resources as typeof manifest;
+              manifest = mergeResources(manifest, resources);
               entered.resolve();
               await release.promise;
               return {
@@ -808,7 +912,12 @@ test.each([
               if (!attemptID) throw new Error("Owned runtime intent missing");
               expect(assigned.podUID).toBe(podUID);
               expect(assigned.assignedAttemptID).toBe(attemptID);
-              exists = false;
+              manifest = manifest.filter(
+                (item) =>
+                  item.kind !== "Secret" ||
+                  item.metadata.labels["factory.dev/runtime-attempt"] !==
+                    assigned.assignedAttemptID,
+              );
               deleted = true;
               return true;
             },
@@ -864,7 +973,7 @@ test.each([
       await creating.catch(() => undefined);
       await recovering;
       await eventually(read, (row) => row?.state === "stopped", "Stopped runtime was not settled");
-      expect(exists).toBe(false);
+      expect(exists).toBe(reserved || !beforeCreate);
       expect(deleted).toBe(reserved || !beforeCreate);
       expect(await read()).toMatchObject({
         state: "stopped",
@@ -876,6 +985,13 @@ test.each([
       expect((await read())?.state).toBe("stopped");
       expect(canConnect()).toBe(false);
       expect(applies).toBe(reserved || beforeCreate ? 0 : 1);
+      expect(
+        manifest.some(
+          (item) =>
+            item.kind === "Secret" &&
+            item.metadata.labels["factory.dev/runtime-attempt"] === attemptID,
+        ),
+      ).toBe(false);
       expect(secretReads).toBe(boundary === "recovered create" ? 3 : 0);
       if (reserved) {
         expect(activations).toBe(beforeCreate ? 0 : 1);

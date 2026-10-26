@@ -1282,6 +1282,11 @@ const servers = serveFactory<FactorySocketData>(factoryHost, {
 observeRecoveredRuntimes();
 void executionReserve.start();
 idleCompute.start();
+setInterval(() => {
+  void runtimeController
+    .reclaimStorage()
+    .catch(() => console.error("Factorybox storage reconciliation failed"));
+}, 15_000).unref();
 console.log(`Factory listening on ${servers[0]!.url}`);
 let releasesReconciling = false;
 setInterval(() => {

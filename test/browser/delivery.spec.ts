@@ -1,14 +1,14 @@
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { requestFunction } from "../fixtures/server-functions";
 import { createHash } from "node:crypto";
 import { mkdir, readFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { requestFunction } from "../fixtures/server-functions";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
@@ -200,23 +200,19 @@ test("Forgejo Actions verifies, approves, merges, and replaces Staging", async (
     `;
     await transaction`
       INSERT INTO factory.development_workspace(
-        id, project_id, kind, ticket_id, change_id, source_branch, source_revision,
-        kubernetes_namespace, volume_name, created_by
+        id, project_id, kind, ticket_id, change_id, source_branch, source_revision, created_by
       ) VALUES (
         ${workspace.workspaceID}, ${projectID}, 'ticket', ${ticketID}, ${identity.changeID},
-        ${identity.branchName}, ${base.headSha}, ${workspace.kubernetesNamespace},
-        ${workspace.volumeName}, ${userID}
+        ${identity.branchName}, ${base.headSha}, ${userID}
       )
     `;
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, change_id, workspace_id, generation, revision, state,
-        kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash,
+        id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
         child_connector_token_hash, create_intended_at, created_by
       ) VALUES (
         ${historicalAttempt.attemptID}, ${projectID}, ${identity.changeID},
-        ${workspace.workspaceID}, 1, ${base.headSha}, 'stopped', ${workspace.kubernetesNamespace},
-        ${historicalAttempt.podName}, ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${userID}
+        ${workspace.workspaceID}, 1, ${base.headSha}, 'stopped', ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${userID}
       )
     `;
     await transaction`

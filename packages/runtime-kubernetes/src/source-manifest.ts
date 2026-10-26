@@ -1,9 +1,11 @@
 import type { WorkspaceSourceIdentity } from "../../workspace-domain/src/source";
-import { runtimeVolumeClaimSpec } from "./storage";
 import { runtimeNodeSelector } from "./config";
+import { factoryboxLocation, factoryboxSharedLabels } from "./factorybox-location";
+import { runtimeVolumeClaimSpec } from "./storage";
 
 export interface WorkspaceSourceManifest {
   readonly identity: WorkspaceSourceIdentity;
+  readonly workerID: string;
   readonly projectID: string;
   readonly namespace: string;
   readonly revision: string;
@@ -23,6 +25,8 @@ export function workspaceSourceKey(workspaceID: string) {
 }
 
 export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
+  if (input.namespace !== factoryboxLocation(input.workerID).namespace)
+    throw new Error("Canonical Source must use its Factory's Namespace");
   if (input.sourceDirectory !== `workspaces/${workspaceSourceKey(input.identity.workspaceID)}/home`)
     throw new Error("Canonical source directory differs from its retained Workspace identity");
   for (const image of [input.filesImage]) {
@@ -39,6 +43,7 @@ export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
     "factory.dev/source-service": input.identity.serviceID,
     "factory.dev/source-epoch": String(input.identity.epoch),
   };
+  const shared = factoryboxSharedLabels(input.workerID);
   const assignment = {
     workspaceId: input.identity.workspaceID,
     serviceId: input.identity.serviceID,
@@ -57,12 +62,12 @@ export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
     {
       apiVersion: "v1",
       kind: "Namespace" as const,
-      metadata: { name: input.namespace, labels: ownerLabels },
+      metadata: { name: input.namespace, labels: shared },
     },
     {
       apiVersion: "v1",
       kind: "PersistentVolumeClaim" as const,
-      metadata: { name: "runtime-data", namespace: input.namespace, labels: ownerLabels },
+      metadata: { name: "runtime-data", namespace: input.namespace, labels: shared },
       spec: runtimeVolumeClaimSpec(),
     },
     {

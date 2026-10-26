@@ -22,6 +22,7 @@ import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { runtimeFactoryURL, runtimeRepositoryCloneURL } from "../runtime/endpoints";
 import { resolveRepositoryRevision, serveRuntimeRepository } from "../runtime/git-http";
+import { factoryboxAllocation, rememberFactoryboxSource } from "../runtime/worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type SourceSQL = Database["client"] | AgentTurnTransaction;
@@ -29,6 +30,11 @@ type SourceSQL = Database["client"] | AgentTurnTransaction;
 // The source process separately bounds actual checkout initialization to 120s.
 const sourceObservationTimeoutMS = 300_000;
 interface SourceRow {
+  workerID: string;
+  workerNamespaceUID: string | null;
+  workerSourceClaimUID: string | null;
+  workerNode: string | null;
+  workerAttempted: boolean;
   workspaceID: string;
   projectID: string;
   projectName: string;
@@ -102,8 +108,12 @@ export function createWorkspaceSourceController(
         source.capability_hash AS "capabilityHash",
         source.namespace_uid AS "namespaceUID",source.claim_uid AS "claimUID",source.pod_uid AS "podUID",
         source.storage_node AS "storageNode",source.source_directory AS "sourceDirectory",
-        source.resource_key AS "resourceKey",source.failure
+        source.resource_key AS "resourceKey",source.failure,
+        worker.id AS "workerID",worker.namespace_uid AS "workerNamespaceUID",
+        worker.source_claim_uid AS "workerSourceClaimUID",worker.node_name AS "workerNode",
+        worker.create_attempted AS "workerAttempted"
       FROM factory.workspace_source source JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
+      JOIN factory.factorybox_worker worker ON worker.id=workspace.factorybox_worker_id
       JOIN factory.project project ON project.id=workspace.project_id
       LEFT JOIN factory.ticket ticket ON ticket.id=workspace.ticket_id
       WHERE source.workspace_id=${workspaceID}`;
@@ -139,6 +149,8 @@ export function createWorkspaceSourceController(
       throw new CommandError("unavailable", "Source access capability cannot be recovered");
     return {
       identity,
+      workerID: source.workerID,
+      sharedCreateAllowed: !source.workerAttempted,
       namespace: source.namespace,
       projectID: source.projectID,
       revision: source.revision,
@@ -151,10 +163,10 @@ export function createWorkspaceSourceController(
         : runtimeRepositoryCloneURL(source.repositoryURL),
       capability,
       filesImage: source.filesImage,
-      namespaceUID: source.namespaceUID,
-      claimUID: source.claimUID,
+      namespaceUID: source.namespaceUID ?? source.workerNamespaceUID,
+      claimUID: source.claimUID ?? source.workerSourceClaimUID,
       podUID: source.podUID,
-      storageNode: source.storageNode,
+      storageNode: source.storageNode ?? source.workerNode,
       sourceDirectory: source.sourceDirectory,
     };
   }
@@ -173,6 +185,7 @@ export function createWorkspaceSourceController(
     outcome: SourceResourceObservation,
     sql: SourceSQL = database.client,
   ) {
+    await rememberFactoryboxSource(sql, source.workerID, outcome);
     const [updated] =
       await sql`UPDATE factory.workspace_source SET namespace_uid=${outcome.namespaceUID},claim_uid=${outcome.claimUID},pod_uid=${outcome.podUID},storage_node=COALESCE(${outcome.storageNode},storage_node),
       state=${outcome.failed ? "failed" : outcome.ready ? "ready" : "preparing"},failure=${outcome.failed ? "Source preparation failed. Stop and retry source access." : null},create_observed_at=COALESCE(create_observed_at,now()),updated_at=now()
@@ -325,8 +338,9 @@ export function createWorkspaceSourceController(
     const [runtime] = await database.client<
       Array<{ namespace: string; podName: string; podUID: string }>
     >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",kubernetes_uid AS "podUID" FROM factory.runtime_attempt WHERE workspace_id=${workspaceID} AND state IN ('ready','pausing','paused','resuming') ORDER BY generation DESC LIMIT 1`;
+    const allocation = await factoryboxAllocation(database.client);
     const storageNode = runtime
-      ? await client.executionNode({ ...runtime, workspaceID })
+      ? await client.executionNode({ ...runtime, workerID: allocation.workerID })
       : (process.env["FACTORY_FACTORYBOX_NODE"] ?? null);
     await database.client.begin(async (sql) => {
       await authority(workspaceID, userID, sql);
@@ -344,6 +358,7 @@ export function createWorkspaceSourceController(
     storageNode: string | null,
     sql: AgentTurnTransaction,
   ) {
+    await factoryboxAllocation(sql, storageNode);
     await sql`SELECT id FROM factory.development_workspace WHERE id=${workspaceID} FOR UPDATE`;
     const existing = await row(workspaceID, sql);
     const epoch = existing ? Number(existing.epoch) + (existing.state === "stopped" ? 1 : 0) : 1;
@@ -475,7 +490,7 @@ export function createWorkspaceSourceController(
           project.repositoryURL,
           project.defaultBranch,
         );
-        await sql`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by) VALUES(${identity.workspaceID},${projectID},'personal',${userID},${project.defaultBranch},${revision},${identity.kubernetesNamespace},${identity.volumeName},${userID})`;
+        await sql`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by) VALUES(${identity.workspaceID},${projectID},'personal',${userID},${project.defaultBranch},${revision},${userID})`;
       });
       return ensure(identity.workspaceID, userID);
     },
@@ -497,7 +512,7 @@ export function createWorkspaceSourceController(
         await projectDevelopmentAuthorityIn(sql, userID, change.projectID);
         if (!change.ready || !["starting", "active", "failed"].includes(change.state))
           throw new CommandError("unavailable", "Change source is not ready for editing");
-        await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by) VALUES(${identity.workspaceID},${change.projectID},'ticket',${change.ticketID},${changeID},${change.branch},${change.revision},${identity.kubernetesNamespace},${identity.volumeName},${userID}) ON CONFLICT(id) DO NOTHING`;
+        await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by) VALUES(${identity.workspaceID},${change.projectID},'ticket',${change.ticketID},${changeID},${change.branch},${change.revision},${userID}) ON CONFLICT(id) DO NOTHING`;
       });
       return ensure(identity.workspaceID, userID);
     },

@@ -40,8 +40,8 @@ test("runtime artifact selection follows persisted role, freezes before create a
     await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,created_by)
       VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,'owned-artifact-runner',${owned.userID})`;
     const personalID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
-      VALUES(${personalID},${owned.projectID},'personal',${owned.userID},'main',${"a".repeat(40)},${`factory-workspace-${personalID.replaceAll("-", "").slice(0, 12)}`},'never-created',${owned.userID})`;
+    await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+      VALUES(${personalID},${owned.projectID},'personal',${owned.userID},'main',${"a".repeat(40)},${owned.userID})`;
     for (const [index, role] of (
       ["development", "build", "verification", "staging", "publication"] as const
     ).entries()) {
@@ -50,11 +50,16 @@ test("runtime artifact selection follows persisted role, freezes before create a
         role === "build" ? build.workspaceID : role === "development" ? personalID : null;
       const isolatedKind =
         role === "verification" || role === "staging" || role === "publication" ? role : null;
-      await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,verification_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${attemptID},${owned.projectID},${role === "build" ? owned.changeID : null},${workspaceID},${role === "verification" ? verificationID : null},${isolatedKind},${index + 2},${"a".repeat(40)},'create-intended','owned-artifact-intent',${`runtime-${index}`},${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+      await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,verification_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${attemptID},${owned.projectID},${role === "build" ? owned.changeID : null},${workspaceID},${role === "verification" ? verificationID : null},${isolatedKind},${index + 2},${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
       const first = await freezeRuntimeArtifacts(database.client, attemptID, configuration);
+      const [location] = await database.client<Array<{ workerID: string }>>`
+        SELECT factorybox_worker_id AS "workerID" FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!location) throw new Error("Missing Runtime Attempt worker");
       const artifactRole = role === "publication" ? "verification" : role;
       expect(first).toEqual({
+        workerID: location.workerID,
+        reserveSlotID: null,
         role: artifactRole,
         runtimeHostImage: configuration.hostImages[artifactRole],
         browserToolsImage: role === "build" ? configuration.browserToolsImage : null,
@@ -80,8 +85,8 @@ test("runtime artifact selection follows persisted role, freezes before create a
       expect(await freezeRuntimeArtifacts(database.client, attemptID, changed)).toEqual(first);
     }
     const stoppedID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${stoppedID},${owned.projectID},${personalID},9,${"a".repeat(40)},'stop-intended','owned-artifact-intent','stopped',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${stoppedID},${owned.projectID},${personalID},9,${"a".repeat(40)},'stop-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
     await expect(freezeRuntimeArtifacts(database.client, stoppedID, configuration)).rejects.toThrow(
       "active create intent",
     );
@@ -90,8 +95,8 @@ test("runtime artifact selection follows persisted role, freezes before create a
     ).toHaveLength(0);
     const invalidID = crypto.randomUUID();
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${stoppedID}`;
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${invalidID},${owned.projectID},${personalID},10,${"a".repeat(40)},'create-intended','owned-artifact-intent','invalid',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${invalidID},${owned.projectID},${personalID},10,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
     await expect(
       freezeRuntimeArtifacts(database.client, invalidID, {
         ...configuration,

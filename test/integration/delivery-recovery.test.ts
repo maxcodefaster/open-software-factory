@@ -195,8 +195,8 @@ test("promotion retains the healthy Staging while starting, then retries only ow
       [replacement, f.sha, "starting", 3],
     ] as const) {
       await f.database
-        .client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind, generation, revision, state, kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        VALUES (${id}, ${f.owned.projectID}, 'staging', ${generation}, ${revision}, ${state}::factory.runtime_attempt_state, ${`owned-not-created-${id}`}, 'never-created', ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${f.owned.userID})`;
+        .client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
+        VALUES (${id}, ${f.owned.projectID}, 'staging', ${generation}, ${revision}, ${state}::factory.runtime_attempt_state, ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${f.owned.userID})`;
     }
     await f.database
       .client`INSERT INTO factory.staging_preview(project_id, revision, runtime_attempt_id) VALUES (${f.owned.projectID}, ${"a".repeat(40)}, ${previous})`;

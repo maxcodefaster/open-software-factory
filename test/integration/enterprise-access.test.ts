@@ -4,9 +4,9 @@ import { createAccessController } from "../../apps/factory/src/access/controller
 import { createMembershipCommands } from "../../apps/factory/src/access/membership";
 import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test("Product leads manage without code, cannot self-upgrade, and serialize last-manager removal", async () => {
   const process = await factoryProcess();
@@ -329,10 +329,10 @@ test("personal App previews are project-wide, files and runtime management remai
       VALUES(${project},${`preview-${project}`},'Preview','https://example.invalid/repo.git','main','.devcontainer/devcontainer.json',${owner})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
       VALUES(${project},${owner},'developer',${owner}),(${project},${contributor},'product-contributor',${owner})`;
-    await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
-      VALUES(${workspace},${project},'personal',${owner},'main',${"a".repeat(40)},${`factory-workspace-${workspace.replaceAll("-", "").slice(0, 12)}`},'never-created',${owner})`;
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${attempt},${project},${workspace},1,${"a".repeat(40)},'ready','owned-preview','never-created',${"b".repeat(64)},${"c".repeat(64)},now(),${owner})`;
+    await database.client`INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+      VALUES(${workspace},${project},'personal',${owner},'main',${"a".repeat(40)},${owner})`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${attempt},${project},${workspace},1,${"a".repeat(40)},'ready',${"b".repeat(64)},${"c".repeat(64)},now(),${owner})`;
     const access = createAccessController(database);
     await access.requireRuntime(contributor, attempt, "app");
     const previews = createProjectAppPreviews(database, (id) =>

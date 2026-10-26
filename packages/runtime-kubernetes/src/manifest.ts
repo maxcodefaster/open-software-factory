@@ -1,16 +1,18 @@
-import type { SystemContract } from "../../system-contract/src/system-contract";
-import { verificationSupervisor } from "./verification-process";
-import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
-import { runtimeVolumeClaimSpec } from "./storage";
+import type { SystemContract } from "../../system-contract/src/system-contract";
+import { factoryboxAssignmentSecret, factoryboxSharedLabels } from "./factorybox-location";
 import {
+  type FactoryboxRuntimeProfile,
   factoryboxSandboxID,
   renderFactoryboxRuntime,
-  type FactoryboxRuntimeProfile,
 } from "./factorybox-runtime";
+import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
+import { verificationSupervisor } from "./verification-process";
 
 export interface RuntimeManifestInput {
   readonly attemptID: string;
+  readonly workerID: string;
+  readonly reserveSlotID?: string;
   readonly generation: number;
   readonly namespace: string;
   readonly podName: string;
@@ -98,17 +100,14 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
       : (input.systemContract?.apps ?? []);
   const primaryApp = input.systemContract?.primaryApp;
   const runtimeName = (appID: string) => (appID === primaryApp ? "app" : `app-${appID}`);
-  const namespaceLabels = {
-    "app.kubernetes.io/managed-by": "open-software-factory",
-    "factory.dev/project": input.projectID,
-    "factory.dev/runtime-owner": ownerID,
-  };
+  const namespaceLabels = factoryboxSharedLabels(input.workerID);
   const labels = {
     "app.kubernetes.io/managed-by": "open-software-factory",
     "factory.dev/runtime-attempt": input.attemptID,
     "factory.dev/runtime-generation": String(input.generation),
     "factory.dev/project": input.projectID,
-    "factory.dev/runtime-owner": ownerID,
+    "factory.dev/runtime-owner": input.reserveSlotID ?? ownerID,
+    ...(input.reserveSlotID ? { "factory.dev/execution-slot": input.reserveSlotID } : {}),
   };
   const assignment = JSON.stringify({
     version: 1,
@@ -270,9 +269,10 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
   });
   const execution = renderFactoryboxRuntime({
     ...input,
-    sandboxID: factoryboxSandboxID(input.attemptID),
+    sandboxID: factoryboxSandboxID(input.reserveSlotID ?? input.attemptID),
+    reserve: Boolean(input.reserveSlotID),
     labels,
-    runtimeOwnerID: ownerID,
+    runtimeOwnerID: input.reserveSlotID ?? ownerID,
     profile: input.factoryboxProfile,
     sharedSource: input.preserveWorkspace ?? false,
   });
@@ -285,7 +285,11 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
     {
       apiVersion: "v1",
       kind: "Secret" as const,
-      metadata: { name: "runtime-assignment", namespace: input.namespace, labels },
+      metadata: {
+        name: factoryboxAssignmentSecret(input.reserveSlotID ?? input.attemptID),
+        namespace: input.namespace,
+        labels,
+      },
       stringData: {
         "assignment.json": assignment,
         "parent-token": input.connectorToken,
@@ -295,15 +299,10 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
     {
       apiVersion: "v1",
       kind: "Secret" as const,
-      metadata: { name: "registry-ca", namespace: input.namespace, labels },
+      metadata: { name: "registry-ca", namespace: input.namespace, labels: namespaceLabels },
       stringData: { "ca.crt": input.registryCA },
     },
-    {
-      apiVersion: "v1",
-      kind: "PersistentVolumeClaim" as const,
-      metadata: { name: "runtime-data", namespace: input.namespace, labels },
-      spec: runtimeVolumeClaimSpec(),
-    },
+    execution.sourceClaim,
     execution.claim,
     execution.pod,
   ];

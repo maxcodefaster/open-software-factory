@@ -1,14 +1,16 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import type { TransactionSql } from "postgres";
-import { freezeRuntimeEnvironment } from "../environments/runtime";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   configuredFactoryboxRuntimeProfile,
-  factoryboxRuntimeProfile,
   type FactoryboxRuntimeProfile,
+  factoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { freezeRuntimeEnvironment } from "../environments/runtime";
 
 export type RuntimeArtifactRole = "development" | "build" | "verification" | "staging";
 export interface RuntimeArtifactIntent {
+  readonly workerID: string;
+  readonly reserveSlotID: string | null;
   readonly role: RuntimeArtifactRole;
   readonly runtimeHostImage: string;
   readonly browserToolsImage: string | null;
@@ -37,9 +39,14 @@ export async function freezeRuntimeArtifacts(
   const read = async () =>
     (
       await sql<RuntimeArtifactIntent[]>`
-        SELECT role,runtime_host_image AS "runtimeHostImage",browser_tools_image AS "browserToolsImage",${environment.version}::float8 AS "environmentVersion",
-          factorybox_profile AS "factoryboxProfile"
-        FROM factory.runtime_artifact_intent WHERE runtime_attempt_id=${attemptID}`
+        SELECT artifact.role,artifact.runtime_host_image AS "runtimeHostImage",
+          artifact.browser_tools_image AS "browserToolsImage",${environment.version}::float8 AS "environmentVersion",
+          artifact.factorybox_profile AS "factoryboxProfile",attempt.factorybox_worker_id AS "workerID",
+          slot.id AS "reserveSlotID"
+        FROM factory.runtime_artifact_intent artifact
+        JOIN factory.runtime_attempt attempt ON attempt.id=artifact.runtime_attempt_id
+        LEFT JOIN factory.execution_slot slot ON slot.assigned_attempt_id=attempt.id
+        WHERE artifact.runtime_attempt_id=${attemptID}`
     )[0];
   const retained = await read();
   if (retained) {

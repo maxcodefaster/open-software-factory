@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
-import { z } from "zod";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
-import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
-import { zeroServerMutators } from "../../packages/zero-schema/src/server";
-import { fixture } from "../fixtures/change-agent-turns";
+import { z } from "zod";
 import {
   searchProjectKnowledge,
   searchProjectTickets,
 } from "../../apps/factory/src/project-agent/controller";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
+import { zeroServerMutators } from "../../packages/zero-schema/src/server";
+import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 
@@ -425,14 +425,12 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     const personalAttemptID = crypto.randomUUID();
     const suffix = personalWorkspaceID.replaceAll("-", "").slice(0, 12);
     await database.client`INSERT INTO factory.development_workspace(id, project_id, kind, owner_user_id,
-      source_branch, source_revision, kubernetes_namespace, volume_name, created_by)
-      VALUES (${personalWorkspaceID}, ${first.projectID}, 'personal', ${administrator}, 'main', ${"a".repeat(40)},
-        ${`factory-workspace-${suffix}`}, 'never-created', ${administrator})`;
+      source_branch, source_revision, created_by)
+      VALUES (${personalWorkspaceID}, ${first.projectID}, 'personal', ${administrator}, 'main', ${"a".repeat(40)}, ${administrator})`;
     await database.client`INSERT INTO factory.runtime_attempt(id, project_id, workspace_id, generation,
-      revision, state, kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash,
+      revision, state, parent_connector_token_hash,
       child_connector_token_hash, create_intended_at, created_by)
-      VALUES (${personalAttemptID}, ${first.projectID}, ${personalWorkspaceID}, 1, ${"a".repeat(40)}, 'ready',
-        ${`owned-access-${suffix}`}, 'never-created', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), ${administrator})`;
+      VALUES (${personalAttemptID}, ${first.projectID}, ${personalWorkspaceID}, 1, ${"a".repeat(40)}, 'ready', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), ${administrator})`;
     expect(
       (await command(`/api/runtime-access?path=/runtime/${personalAttemptID}/ide/`, cookie)).status,
     ).toBe(404);

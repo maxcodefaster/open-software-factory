@@ -12,7 +12,7 @@ describe("Development Workspace identity", () => {
     expect(first.workspaceID).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    expect(first.kubernetesNamespace).toMatch(/^factory-workspace-[0-9a-f]{12}$/);
+    expect(Object.keys(first)).toEqual(["workspaceID"]);
   });
 
   test("separates developers and Projects", () => {

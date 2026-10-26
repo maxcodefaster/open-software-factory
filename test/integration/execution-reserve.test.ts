@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts";
+import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { defaultReservePolicy, type ReserveRole } from "../../packages/runtime-domain/src/reserve";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -89,8 +89,8 @@ test("reserve persists clean create intent, serializes claims, freezes assignmen
       const attemptID = crypto.randomUUID();
       return database.client.begin(async (sql) => {
         const claimed = await store.admit(sql, attemptID, role);
-        await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          VALUES(${attemptID},${owned.projectID},'staging',${generation++},${"a".repeat(40)},'create-intended',${claimed?.namespace ?? `factory-runtime-${attemptID.replaceAll("-", "").slice(0, 12)}`},${claimed ? "slot" : "runtime-1"},${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${attemptID},${owned.projectID},'staging',${generation++},${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
         await freezeRuntimeArtifacts(sql, attemptID, artifacts);
         return { attemptID, claimed };
       });
@@ -170,10 +170,9 @@ test("expired unassigned slots retire before admission and cannot return to the 
   const database = processFixture.connect();
   const store = createReserveStore({ ...defaultReservePolicy, readyPerRole: 0 }, images, profile);
   const id = crypto.randomUUID();
-  const namespace = `factory-reserve-${id.replaceAll("-", "").slice(0, 12)}`;
   try {
-    await database.client`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,kubernetes_namespace,created_at,expires_at)
-      VALUES(${id},'staging','creating',${images.staging},${namespace},now()-interval '16 minutes',now()-interval '1 second')`;
+    await database.client`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,created_at,expires_at)
+      VALUES(${id},'staging','creating',${images.staging},now()-interval '16 minutes',now()-interval '1 second')`;
     await store.observe(database.client, id, {
       namespaceUID: "expired-ns",
       podUID: "expired-pod",
@@ -222,9 +221,8 @@ test("cold worker preparation keeps its lifecycle deadline without extending sta
       [stale, 421],
     ] as const) {
       await database.client`INSERT INTO factory.execution_slot
-        (id,role,state,runtime_host_image,kubernetes_namespace,created_at,expires_at,factorybox_profile)
+        (id,role,state,runtime_host_image,created_at,expires_at,factorybox_profile)
         VALUES(${id},'staging','creating',${images.staging},
-          ${`factory-reserve-${id.replaceAll("-", "").slice(0, 12)}`},
           now()-${age}*interval '1 second',now()+interval '10 minutes',${JSON.stringify(profile)}::text::jsonb)`;
     }
     const due = await database.client.begin((sql) => store.plan(sql));

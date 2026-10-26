@@ -2,11 +2,11 @@ import { expect } from "bun:test";
 import { createHash } from "node:crypto";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
+import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import type { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { factoryProcess } from "./factory-process";
-import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 
 const { FACTORY_AGENT_MODEL_ID } = process.env;
 export const buildModelID = FACTORY_AGENT_MODEL_ID ?? "factory-coding-model";
@@ -66,13 +66,11 @@ export async function fixture(
       await sql`INSERT INTO factory.change(id, project_id, ticket_id, requirement_approval_id, branch_name, base_sha, state, created_by)
         VALUES (${changeID}, ${projectID}, ${ticketID}, ${approvalID}, ${`factory/change-${suffix}`}, ${baseSHA}, 'active', ${userID})`;
       await sql`INSERT INTO factory.development_workspace(id, project_id, kind, ticket_id, change_id,
-      source_branch, source_revision, kubernetes_namespace, volume_name, created_by)
+      source_branch, source_revision, created_by)
       VALUES (${workspaceID}, ${projectID}, 'ticket', ${ticketID}, ${changeID}, ${`factory/change-${suffix}`},
-        ${baseSHA}, ${`factory-workspace-${suffix}`}, 'never-created', ${userID})`;
-      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state,
-      kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'ready',
-        ${`owned-build-${suffix}`}, 'never-created', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
+        ${baseSHA}, ${userID})`;
+      await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
+        VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'ready', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
       await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptID} WHERE id = ${changeID}`;
       await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id, state, native_session_confirmed_at, created_by)
       VALUES (${changeID}, ${attemptID}, ${`ses_owned_${suffix}`}, 'committed', now(), ${userID})`;

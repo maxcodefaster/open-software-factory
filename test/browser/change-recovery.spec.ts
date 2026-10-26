@@ -1,10 +1,9 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { expect, test } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { promisify } from "node:util";
+import { expect, test } from "@playwright/test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
@@ -13,6 +12,7 @@ import {
   runtimeIdentity,
 } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
+import { requestFunction } from "../fixtures/server-functions";
 import { teardownFactoryProject } from "../support/factory-fixture";
 
 const execute = promisify(execFile);
@@ -199,22 +199,19 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
   await database.client.begin(async (transaction) => {
     await transaction`
       INSERT INTO factory.development_workspace(
-        id, project_id, kind, ticket_id, change_id, source_branch, source_revision,
-        kubernetes_namespace, volume_name, created_by
+        id, project_id, kind, ticket_id, change_id, source_branch, source_revision, created_by
       ) VALUES (
         ${workspace.workspaceID}, ${projectID}, 'ticket', ${runtimeRecovery.ticketID},
-        ${runtimeRecovery.changeID}, ${runtimeRecovery.branchName}, ${base.headSha},
-        ${workspace.kubernetesNamespace}, ${workspace.volumeName}, ${userID}
+        ${runtimeRecovery.changeID}, ${runtimeRecovery.branchName}, ${base.headSha}, ${userID}
       )
     `;
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, change_id, workspace_id, generation, revision, state,
-        kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash,
+        id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash,
         child_connector_token_hash, create_intended_at, created_by
       ) VALUES (
         ${runtime.attemptID}, ${projectID}, ${runtimeRecovery.changeID}, ${workspace.workspaceID},
-        1, ${base.headSha}, 'create-intended', ${workspace.kubernetesNamespace}, ${runtime.podName},
+        1, ${base.headSha}, 'create-intended',
         ${createHash("sha256").update(connectorTokens.parent).digest("hex")},
         ${createHash("sha256").update(connectorTokens.child).digest("hex")}, now(), ${userID}
       )
@@ -224,18 +221,11 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
       WHERE id = ${runtimeRecovery.changeID}
     `;
   });
-  expect(
-    await command("kubectl", [
-      "--context",
-      "orbstack",
-      "get",
-      "namespace",
-      workspace.kubernetesNamespace,
-      "--ignore-not-found",
-      "-o",
-      "name",
-    ]),
-  ).toBe("");
+  const [location] = await database.client<Array<{ namespace: string; uid: string | null }>>`
+    SELECT kubernetes_namespace AS namespace,kubernetes_uid AS uid
+    FROM factory.runtime_attempt WHERE id=${runtime.attemptID}`;
+  if (!location) throw new Error("Missing recovered Runtime Attempt");
+  expect(location.uid).toBeNull();
 
   await command("bun", ["run", "factory:restart"]);
   await expect
@@ -267,7 +257,19 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
     SELECT id, kubernetes_namespace AS namespace FROM factory.runtime_attempt
     WHERE change_id = ${runtimeRecovery.changeID}
   `;
-  expect(attempts).toEqual([{ id: runtime.attemptID, namespace: workspace.kubernetesNamespace }]);
+  expect(attempts).toEqual([{ id: runtime.attemptID, namespace: location.namespace }]);
+  const workerUID = await command("kubectl", [
+    "--context",
+    "orbstack",
+    "get",
+    "pod",
+    "worker",
+    "-n",
+    location.namespace,
+    "-o",
+    "jsonpath={.metadata.uid}",
+  ]);
+  expect(workerUID).not.toBe("");
 
   await serverCall(
     requestFunction(page.context().request, "cancelChange", [runtimeRecovery.changeID]),
@@ -290,14 +292,15 @@ test("Factory recovers pending branch, Staging, and Ticket Workspace intent", as
           "--context",
           "orbstack",
           "get",
-          "namespace",
-          workspace.kubernetesNamespace,
-          "--ignore-not-found",
+          "pod",
+          "worker",
+          "-n",
+          location.namespace,
           "-o",
-          "name",
+          "jsonpath={.metadata.uid}",
         ]),
       { timeout: 180_000 },
     )
-    .toBe("");
+    .toBe(workerUID);
   await database.client.end();
 });

@@ -96,17 +96,14 @@ try {
     `;
     await transaction`
       INSERT INTO factory.development_workspace(
-        id, project_id, kind, owner_user_id, source_branch, source_revision,
-        kubernetes_namespace, volume_name, created_by
+        id, project_id, kind, owner_user_id, source_branch, source_revision, created_by
       ) VALUES
         (
-          ${personalWorkspaceID}, ${projectID}, 'personal', ${userID}, 'main', ${"9".repeat(40)},
-          ${`factory-workspace-${suffix.padEnd(12, "0")}`}, 'workspace-data', ${userID}
+          ${personalWorkspaceID}, ${projectID}, 'personal', ${userID}, 'main', ${"9".repeat(40)}, ${userID}
         ),
         (
           ${otherPersonalWorkspaceID}, ${projectID}, 'personal', ${otherUserID}, 'main',
-          ${"9".repeat(40)}, ${`factory-workspace-${suffix.padEnd(12, "1")}`},
-          'workspace-data', ${otherUserID}
+          ${"9".repeat(40)}, ${otherUserID}
         )
     `;
     await expectRejected(
@@ -114,12 +111,10 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.development_workspace(
-            id, project_id, kind, owner_user_id, source_branch, source_revision,
-            kubernetes_namespace, volume_name, created_by
+            id, project_id, kind, owner_user_id, source_branch, source_revision, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${projectID}, 'personal', ${userID}, 'main',
-            ${"9".repeat(40)}, ${`factory-workspace-${suffix.padEnd(12, "2")}`},
-            'workspace-data', ${userID}
+            ${"9".repeat(40)}, ${userID}
           )
         `;
       },
@@ -128,12 +123,10 @@ try {
     );
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, workspace_id, generation, revision, state, kubernetes_namespace,
-        kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+        id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
         create_intended_at, created_by
       ) VALUES (
-        ${firstAttempt}, ${projectID}, ${personalWorkspaceID}, 1, ${"9".repeat(40)}, 'create-intended',
-        ${`factory-runtime-${suffix}`}, 'runtime', ${"a".repeat(64)}, ${"c".repeat(64)},
+        ${firstAttempt}, ${projectID}, ${personalWorkspaceID}, 1, ${"9".repeat(40)}, 'create-intended', ${"a".repeat(64)}, ${"c".repeat(64)},
         now(), ${userID}
       )
     `;
@@ -169,12 +162,10 @@ try {
       await transaction.savepoint(async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, workspace_id, generation, revision, state, kubernetes_namespace,
-            kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
-            ${secondAttempt}, ${projectID}, ${personalWorkspaceID}, 2, ${"9".repeat(40)}, 'starting',
-            ${`factory-runtime-${suffix}-two`}, 'runtime', ${"b".repeat(64)}, ${"d".repeat(64)},
+            ${secondAttempt}, ${projectID}, ${personalWorkspaceID}, 2, ${"9".repeat(40)}, 'starting', ${"b".repeat(64)}, ${"d".repeat(64)},
             now(), ${userID}
           )
         `;
@@ -186,12 +177,11 @@ try {
       throw new Error("PostgreSQL allowed two active Runtime Attempts for one Workspace");
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, workspace_id, generation, revision, state, kubernetes_namespace,
-        kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+        id, project_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
         create_intended_at, created_by
       ) VALUES (
         ${otherPersonalAttempt}, ${projectID}, ${otherPersonalWorkspaceID}, 1,
-        ${"9".repeat(40)}, 'create-intended', ${`factory-runtime-${suffix}-other`}, 'runtime',
+        ${"9".repeat(40)}, 'create-intended',
         ${"7".repeat(64)}, ${"8".repeat(64)}, now(), ${otherUserID}
       )
     `;
@@ -327,11 +317,10 @@ try {
     `;
     await transaction`
       INSERT INTO factory.development_workspace(
-        id, project_id, kind, ticket_id, change_id, source_branch, source_revision,
-        kubernetes_namespace, volume_name, created_by
+        id, project_id, kind, ticket_id, change_id, source_branch, source_revision, created_by
       ) VALUES (
         ${ticketWorkspaceID}, ${projectID}, 'ticket', ${ticketID}, ${changeID}, ${branchName},
-        ${baseSHA}, ${`factory-workspace-${suffix.padEnd(12, "3")}`}, 'workspace-data', ${userID}
+        ${baseSHA}, ${userID}
       )
     `;
     await expectRejected(
@@ -339,12 +328,10 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.development_workspace(
-            id, project_id, kind, ticket_id, change_id, source_branch, source_revision,
-            kubernetes_namespace, volume_name, created_by
+            id, project_id, kind, ticket_id, change_id, source_branch, source_revision, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${projectID}, 'ticket', ${ticketID}, ${changeID},
-            ${branchName}, ${baseSHA}, ${`factory-workspace-${suffix.padEnd(12, "4")}`},
-            'workspace-data', ${userID}
+            ${branchName}, ${baseSHA}, ${userID}
           )
         `;
       },
@@ -421,13 +408,11 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, change_id, workspace_id, generation, revision, state, kubernetes_namespace,
-            kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${secondProjectID}, ${changeID}, ${ticketWorkspaceID}, 1,
-            ${baseSHA}, 'create-intended',
-            ${`factory-runtime-${suffix}-wrong`}, 'runtime', ${"1".repeat(64)}, ${"2".repeat(64)},
+            ${baseSHA}, 'create-intended', ${"1".repeat(64)}, ${"2".repeat(64)},
             now(), ${userID}
           )
         `;
@@ -440,13 +425,12 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, change_id, workspace_id, generation, revision, state, kubernetes_namespace,
-            kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${projectID}, ${changeID}, ${ticketWorkspaceID}, 1,
             ${"f".repeat(40)},
-            'create-intended', ${`factory-runtime-${suffix}-wrong-revision`}, 'runtime',
+            'create-intended',
             ${"1".repeat(64)}, ${"2".repeat(64)}, now(), ${userID}
           )
         `;
@@ -456,13 +440,11 @@ try {
     );
     await transaction`
       INSERT INTO factory.runtime_attempt(
-        id, project_id, change_id, workspace_id, generation, revision, state, kubernetes_namespace,
-        kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+        id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
         create_intended_at, created_by
       ) VALUES (
         ${changeAttemptID}, ${projectID}, ${changeID}, ${ticketWorkspaceID}, 1, ${baseSHA},
-        'create-intended',
-        ${`factory-runtime-${suffix}-change`}, 'runtime', ${"3".repeat(64)}, ${"4".repeat(64)},
+        'create-intended', ${"3".repeat(64)}, ${"4".repeat(64)},
         now(), ${userID}
       )
     `;
@@ -471,13 +453,11 @@ try {
       async (savepoint) => {
         await savepoint`
           INSERT INTO factory.runtime_attempt(
-            id, project_id, change_id, workspace_id, generation, revision, state, kubernetes_namespace,
-            kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash,
+            id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash,
             create_intended_at, created_by
           ) VALUES (
             ${crypto.randomUUID()}, ${projectID}, ${changeID}, ${ticketWorkspaceID}, 2, ${baseSHA},
-            'starting',
-            ${`factory-runtime-${suffix}-change-two`}, 'runtime', ${"5".repeat(64)},
+            'starting', ${"5".repeat(64)},
             ${"6".repeat(64)}, now(), ${userID}
           )
         `;

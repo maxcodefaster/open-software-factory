@@ -3,10 +3,11 @@ import { mkdir, mkdtemp, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import { renderRuntimeResources } from "../../packages/runtime-kubernetes/src/manifest";
-import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
 import upstream from "../../upstream.json";
 import { eventually } from "../fixtures/factory-process";
+import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
 
 // This isolates the pinned runner's actual Dev Container invocation. It makes no Build,
 // repository or approval, and the endpoint owns only dummy authentication.
@@ -68,8 +69,7 @@ test.skipIf(process.env["FACTORY_RUN_VERIFICATION_RUNNER_PROOF"] !== "1" && !rea
       factoryboxProfile: ownedFactoryboxProfile,
       attemptID: owner,
       generation: 1,
-      namespace: "owned-runner-probe",
-      podName: "runtime-1",
+      ...factoryboxLocation(owner),
       projectID: owner,
       repositoryURL: "https://repository.example.invalid/owned.git",
       revision: "a".repeat(40),

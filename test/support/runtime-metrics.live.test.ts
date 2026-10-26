@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { createReserveClient } from "../../packages/runtime-kubernetes/src/reserve";
-import { createCurrentMetrics } from "../../packages/runtime-kubernetes/src/metrics";
-import { reserveIdentity } from "../../packages/runtime-domain/src/reserve";
 import type { ExecutionSlot } from "../../packages/runtime-domain/src/reserve";
+import { reserveIdentity } from "../../packages/runtime-domain/src/reserve";
+import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
+import { createCurrentMetrics } from "../../packages/runtime-kubernetes/src/metrics";
+import { createReserveClient } from "../../packages/runtime-kubernetes/src/reserve";
 import upstream from "../../upstream.json";
 
 test.skipIf(process.env["FACTORY_RUN_METRICS_PROOF"] !== "1")(
@@ -12,6 +13,7 @@ test.skipIf(process.env["FACTORY_RUN_METRICS_PROOF"] !== "1")(
     const identity = reserveIdentity(crypto.randomUUID());
     let slot: ExecutionSlot = {
       ...identity,
+      ...factoryboxLocation(crypto.randomUUID()),
       role: "staging",
       state: "creating",
       runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),

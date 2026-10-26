@@ -2,13 +2,18 @@ import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { runCommand } from "./command";
 import {
+  factoryboxAssignmentSecret,
+  factoryboxLocation,
+  factoryboxSharedLabels,
+} from "./factorybox-location";
+import {
   type FactoryboxWorkerIdentity,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
   runFactoryboxKubernetes,
 } from "./factorybox-worker";
-import { runtimeVolumeClaimSpec } from "./storage";
 import { workspaceSourceKey } from "./source-manifest";
+import { runtimeVolumeClaimSpec } from "./storage";
 
 const exactImage = z
   .string()
@@ -56,7 +61,7 @@ export function configuredFactoryboxRuntimeProfile(
 export interface FactoryboxRuntimeInput {
   readonly attemptID: string;
   readonly sandboxID: string;
-  readonly workerID?: string;
+  readonly workerID: string;
   readonly reserve?: boolean;
   readonly namespace: string;
   readonly podName: string;
@@ -105,13 +110,16 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   const executionID = input.reserve ? input.labels["factory.dev/execution-slot"] : input.attemptID;
   if (!executionID || input.sandboxID !== factoryboxSandboxID(executionID))
     throw new Error("Sandbox identity differs from its immutable execution or reserve slot");
+  const location = factoryboxLocation(input.workerID);
+  if (input.namespace !== location.namespace || input.podName !== location.podName)
+    throw new Error("Sandbox execution must use its Factory's shared worker");
   return {
     version: 1 as const,
     ...profile,
     namespace: input.namespace,
     podName: input.podName,
-    storeID: identifier(input.workerID ?? input.attemptID),
-    trustDomainID: identifier(input.workerID ?? input.runtimeOwnerID),
+    storeID: identifier(input.workerID),
+    trustDomainID: identifier(input.workerID),
   };
 }
 
@@ -119,13 +127,24 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
   const request = factoryboxRuntimeRequest(input);
   const resources = renderFactoryboxWorker(request);
   const worker = resources[2].spec.containers[0];
-  const labels = { ...resources[2].metadata.labels, ...input.labels };
+  const shared = factoryboxSharedLabels(input.workerID);
+  const labels = { ...resources[2].metadata.labels, ...shared };
   const environment = [
     { name: "FACTORY_POD_UID", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } },
     { name: "FACTORY_STORE_ID", value: request.storeID },
     { name: "FACTORY_RUNTIME_IMAGE", value: input.runtimeHostImage },
   ];
   return {
+    namespace: {
+      ...resources[0],
+      metadata: { ...resources[0].metadata, labels: shared },
+    },
+    sourceClaim: {
+      apiVersion: "v1",
+      kind: "PersistentVolumeClaim" as const,
+      metadata: { name: "runtime-data", namespace: input.namespace, labels: shared },
+      spec: runtimeVolumeClaimSpec(),
+    },
     claim: {
       ...resources[1],
       metadata: { ...resources[1].metadata, labels },
@@ -163,18 +182,14 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
             volumeMounts: [
               ...worker.volumeMounts,
               { name: "registry-ca", mountPath: "/factory/registry-ca", readOnly: true },
-              ...(input.sharedSource
-                ? [{ name: "runtime-data", mountPath: "/factory-source" }]
-                : []),
+              { name: "runtime-data", mountPath: "/factory-source" },
             ],
           },
         ],
         volumes: [
           ...resources[2].spec.volumes,
           { name: "registry-ca", secret: { secretName: "registry-ca", defaultMode: 256 } },
-          ...(input.sharedSource
-            ? [{ name: "runtime-data", persistentVolumeClaim: { claimName: "runtime-data" } }]
-            : []),
+          { name: "runtime-data", persistentVolumeClaim: { claimName: "runtime-data" } },
         ],
       },
     },
@@ -271,20 +286,7 @@ export function factoryboxPreparationAssignment(input: FactoryboxRuntimeInput, v
 }
 
 export function factoryboxRuntimeDeclaration(input: FactoryboxRuntimeInput) {
-  return {
-    ...renderFactoryboxRuntime(input),
-    namespace: {
-      metadata: {
-        labels: {
-          "app.kubernetes.io/managed-by": "open-software-factory",
-          "factory.dev/runtime-owner": input.runtimeOwnerID,
-          ...(input.labels["factory.dev/project"]
-            ? { "factory.dev/project": input.labels["factory.dev/project"] }
-            : {}),
-        },
-      },
-    },
-  };
+  return renderFactoryboxRuntime(input);
 }
 
 export async function prepareFactoryboxRuntime(
@@ -303,7 +305,9 @@ export async function prepareFactoryboxRuntime(
   const secret = await run([
     "get",
     "secret",
-    "runtime-assignment",
+    factoryboxAssignmentSecret(
+      input.reserve ? input.labels["factory.dev/execution-slot"]! : input.attemptID,
+    ),
     "-n",
     input.namespace,
     "-o",
@@ -384,7 +388,7 @@ export async function releaseFactoryboxRuntime(
 
 // Explicit Stop may retire a lost original worker. It cannot manufacture a
 // native Delete receipt, adopt a replacement Pod, or treat an unavailable read
-// as absence. The caller still deletes only its exact Pod and store claim.
+// as absence. The caller retires only its Sandbox, never the shared Pod or store.
 export async function factoryboxOriginalWorkerRetired(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
@@ -420,71 +424,4 @@ export async function factoryboxOriginalWorkerRetired(
     ) ||
     false
   );
-}
-
-export async function deleteFactoryboxStore(
-  input: {
-    namespace: string;
-    namespaceUID: string;
-    podName: string;
-    attemptID: string;
-    storeID: string;
-    claimUID?: string;
-  },
-  run: typeof runCommand = runFactoryboxKubernetes,
-) {
-  const dns = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/);
-  dns.parse(input.namespace);
-  dns.parse(input.podName);
-  z.string()
-    .regex(/^[a-f0-9]{32}$/)
-    .parse(input.storeID);
-  const name = `store-${input.storeID}`;
-  const missing = (value: { exitCode: number; stderr: string }) =>
-    value.exitCode !== 0 && /^Error from server \(NotFound\):/m.test(value.stderr);
-  const namespace = await run(["get", "namespace", input.namespace, "-o", "json"]);
-  if (missing(namespace)) return;
-  if (namespace.exitCode !== 0)
-    throw new Error("Factorybox store Namespace observation is unavailable");
-  const owner = z
-    .object({ metadata: z.object({ uid: z.literal(input.namespaceUID) }) })
-    .safeParse(JSON.parse(namespace.stdout));
-  if (!owner.success) throw new Error("Factorybox store Namespace UID changed");
-  const pod = await run(["get", "pod", input.podName, "-n", input.namespace, "-o", "json"]);
-  if (!missing(pod))
-    throw new Error("Factorybox store must remain until its original worker Pod is gone");
-  const claim = await run(["get", "pvc", name, "-n", input.namespace, "-o", "json"]);
-  if (missing(claim)) return;
-  if (claim.exitCode !== 0) throw new Error("Factorybox store claim observation is unavailable");
-  const observed = z
-    .object({
-      metadata: z.object({ uid: z.string().min(1), labels: z.record(z.string(), z.string()) }),
-    })
-    .parse(JSON.parse(claim.stdout));
-  if (
-    (input.claimUID && observed.metadata.uid !== input.claimUID) ||
-    observed.metadata.labels["factory.dev/factorybox-store"] !== input.storeID ||
-    observed.metadata.labels["factory.dev/runtime-attempt"] !== input.attemptID ||
-    observed.metadata.labels["app.kubernetes.io/managed-by"] !== "open-software-factory"
-  )
-    throw new Error("Factorybox store claim ownership changed");
-  const result = await run(
-    [
-      "delete",
-      "--raw",
-      `/api/v1/namespaces/${input.namespace}/persistentvolumeclaims/${name}`,
-      "-f",
-      "-",
-    ],
-    JSON.stringify({
-      apiVersion: "v1",
-      kind: "DeleteOptions",
-      preconditions: { uid: observed.metadata.uid },
-    }),
-  );
-  if (result.exitCode !== 0) throw new Error("Factorybox store deletion is unconfirmed");
-  // A deletion response can precede finalizer completion. Leave the retained
-  // Stop pending until observation confirms that exact backing is gone.
-  const after = await run(["get", "pvc", name, "-n", input.namespace, "-o", "json"]);
-  if (!missing(after)) throw new Error("Factorybox store deletion is still pending");
 }

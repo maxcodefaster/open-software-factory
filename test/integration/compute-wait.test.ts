@@ -224,8 +224,8 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
         kind: "staging",
       });
       expect(adopted?.id).toBe(slot.id);
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${attemptID},${work.projectID},'staging',1,${"a".repeat(40)},'create-intended',${slot.namespace},'slot',${"b".repeat(64)},${"c".repeat(64)},now(),${work.userID})`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${attemptID},${work.projectID},'staging',1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${work.userID})`;
       await freezeRuntimeArtifacts(sql, attemptID, {
         hostImages: { staging: image, verification: image, development: image, build: image },
         browserToolsImage: image,

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createKubernetesClient, KubernetesObservationUnavailableError } from "./client";
+import { factoryboxSharedLabels } from "./factorybox-location";
 
 const namespace = {
   apiVersion: "v1",
@@ -182,3 +183,187 @@ test("partially failed batch retains deterministic intent for an observed-namesp
   expect(batches).toHaveLength(2);
   expect(batches[0]).toBe(batches[1]);
 });
+
+const sharedLabels = factoryboxSharedLabels("68f16b47-92d3-493d-8145-f92742951764");
+const common = {
+  apiVersion: "v1",
+  kind: "PersistentVolumeClaim",
+  metadata: { name: "runtime-data", namespace: namespace.metadata.name, labels: sharedLabels },
+  spec: { accessModes: ["ReadWriteOnce"], resources: { requests: { storage: "32Gi" } } },
+};
+const privateAssignment = {
+  apiVersion: "v1",
+  kind: "Secret",
+  metadata: {
+    name: "assignment-owned",
+    namespace: namespace.metadata.name,
+    labels: {
+      "app.kubernetes.io/managed-by": "open-software-factory",
+      "factory.dev/runtime-owner": "sandbox",
+    },
+  },
+  stringData: { "assignment.json": "owned" },
+};
+
+test("existing shared storage is observed and UID-checked, never reapplied with a Sandbox", async () => {
+  const calls: Array<{ args: string[]; input?: string }> = [];
+  const client = createKubernetesClient(async (args, input) => {
+    calls.push({ args, ...(input === undefined ? {} : { input }) });
+    return {
+      stdout: JSON.stringify(
+        args[1] === "namespace"
+          ? { metadata: { uid: "namespace-uid", labels: namespace.metadata.labels } }
+          : { ...common, metadata: { ...common.metadata, uid: "claim-uid" } },
+      ),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  expect(
+    await client.apply([namespace, common, privateAssignment], {
+      ownerID: "workspace",
+      uid: "namespace-uid",
+      sharedUIDs: { "PersistentVolumeClaim/runtime-data": "claim-uid" },
+    }),
+  ).toEqual({
+    namespaceUID: "namespace-uid",
+    sharedUIDs: { "PersistentVolumeClaim/runtime-data": "claim-uid" },
+  });
+  expect(calls.map((call) => call.args[0])).toEqual(["get", "get", "apply"]);
+  expect(JSON.parse(calls[2]?.input ?? "{}").items).toEqual([privateAssignment]);
+});
+
+test.each(["UID", "owner", "spec"] as const)(
+  "shared storage %s drift refuses before private writes",
+  async (changed) => {
+    const writes: string[][] = [];
+    const client = createKubernetesClient(async (args) => {
+      if (args[0] !== "get") writes.push(args);
+      return {
+        stdout: JSON.stringify(
+          args[1] === "namespace"
+            ? { metadata: { uid: "namespace-uid", labels: namespace.metadata.labels } }
+            : {
+                ...common,
+                metadata: {
+                  ...common.metadata,
+                  uid: changed === "UID" ? "replacement" : "claim-uid",
+                  labels: {
+                    ...common.metadata.labels,
+                    ...(changed === "owner" ? { "factory.dev/runtime-owner": "foreign" } : {}),
+                  },
+                },
+                spec:
+                  changed === "spec"
+                    ? { ...common.spec, accessModes: ["ReadWriteMany"] }
+                    : common.spec,
+              },
+        ),
+        stderr: "",
+        exitCode: 0,
+      };
+    });
+    await expect(
+      client.apply([namespace, common, privateAssignment], {
+        ownerID: "workspace",
+        uid: "namespace-uid",
+        sharedUIDs: { "PersistentVolumeClaim/runtime-data": "claim-uid" },
+      }),
+    ).rejects.toThrow("immutable owner");
+    expect(writes).toHaveLength(0);
+  },
+);
+
+test("a surviving worker cannot recreate even an unrecorded missing shared resource", async () => {
+  const writes: string[][] = [];
+  const client = createKubernetesClient(async (args) => {
+    if (args[0] !== "get") writes.push(args);
+    if (args[1] === "namespace")
+      return {
+        stdout: JSON.stringify({
+          metadata: { uid: "namespace-uid", labels: namespace.metadata.labels },
+        }),
+        stderr: "",
+        exitCode: 0,
+      };
+    if (args[0] === "get")
+      return { stdout: "", stderr: "Error from server (NotFound): missing claim", exitCode: 1 };
+    return {
+      stdout: JSON.stringify({ metadata: { uid: "replacement" } }),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  await expect(
+    client.apply([namespace, common, privateAssignment], {
+      ownerID: "workspace",
+      uid: "namespace-uid",
+      createShared: false,
+    }),
+  ).rejects.toThrow("disappeared");
+  expect(writes).toHaveLength(0);
+});
+
+test.each([
+  "original",
+  "foreign-namespace",
+  "foreign-owner",
+  "shared-secret",
+  "unavailable",
+] as const)(
+  "private assignment cleanup is UID-bound and preserves shared resources: %s",
+  async (scenario) => {
+    const calls: Array<{ args: string[]; input?: string }> = [];
+    const client = createKubernetesClient(async (args, input) => {
+      calls.push({ args, ...(input === undefined ? {} : { input }) });
+      if (scenario === "unavailable")
+        return { stdout: "", stderr: "Connection refused", exitCode: 1 };
+      return {
+        stdout: JSON.stringify(
+          args[1] === "namespace"
+            ? {
+                metadata: {
+                  uid: scenario === "foreign-namespace" ? "replacement" : "namespace-uid",
+                },
+              }
+            : {
+                metadata: {
+                  uid: "assignment-uid",
+                  labels: {
+                    ...privateAssignment.metadata.labels,
+                    ...(scenario === "foreign-owner"
+                      ? { "factory.dev/runtime-owner": "other" }
+                      : {}),
+                    ...(scenario === "shared-secret"
+                      ? { "factory.dev/shared-resource": "true" }
+                      : {}),
+                  },
+                },
+              },
+        ),
+        stderr: "",
+        exitCode: 0,
+      };
+    });
+    const deletion = client.deleteSecret({
+      namespace: namespace.metadata.name,
+      namespaceUID: "namespace-uid",
+      name: privateAssignment.metadata.name,
+      ownerID: "sandbox",
+    });
+    if (scenario === "original") {
+      await deletion;
+      const removed = calls.filter((call) => call.args[0] === "delete");
+      expect(removed).toHaveLength(1);
+      expect(removed[0]?.args[2]).toBe(
+        `/api/v1/namespaces/${namespace.metadata.name}/secrets/${privateAssignment.metadata.name}`,
+      );
+      expect(JSON.parse(removed[0]?.input ?? "{}").preconditions).toEqual({
+        uid: "assignment-uid",
+      });
+    } else {
+      await expect(deletion).rejects.toThrow();
+      expect(calls.every((call) => call.args[0] === "get")).toBe(true);
+    }
+  },
+);

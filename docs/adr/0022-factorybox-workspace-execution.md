@@ -6,8 +6,20 @@ status: accepted
 
 Replace Envbox execution with an admitted, pinned Factorybox worker. Factory remains the sole
 control plane. Keep the existing Runtime Attempt, Connector credentials and PostgreSQL reserve
-ownership. One worker initially belongs to one Workspace or isolated execution slot; it must
-never pool live customer processes across trust domains.
+ownership. One worker and its private store belong to one Factory trust domain. Independent
+Sandboxes share that worker, never another Sandbox's writable overlay, Source directory or
+credentials. Different customer trust domains require separate workers.
+
+Allocate the Factory worker identity lazily, so independently initialized installations never
+inherit the same identity from a database template. Workspace file access can allocate its
+Namespace and canonical Source claim without starting compute. The first execution pins the
+worker profile and consumer image. All roles on that worker use those exact pins. Namespace,
+Source claim, private store and original Pod UIDs remain immutable once observed.
+
+Shared resource creation is serialized and admitted before its external effect. A lost create
+response can be reconciled through the surviving original objects. A surviving Pod cannot
+authorize recreation of missing storage or trust inputs. Missing or replacement worker UIDs
+refuse new execution instead of silently starting a second worker.
 
 The immutable worker profile pins `arm64` or `amd64` explicitly, independent of the Factory server's
 architecture. The same command and admission protocol serves both. Image, executable, node and
@@ -60,7 +72,8 @@ mount. A reserve seed receives no Parent or Child credentials; activation delive
 those only after its original Sandbox has resumed. Private assignment files do not
 enter Factory's retained preparation request.
 
-Canonical Source uses `workspaces/<full-workspace-id>/home` within its claim. That
+All Workspaces use the Factory's canonical Source claim. Canonical Source uses
+`workspaces/<full-workspace-id>/home` within that claim. That
 directory is generated and retained with the Source intent, including across access
 epochs. The Source Pod mounts only that directory; the worker resolves the selected
 Workspace beneath its source root without following symlink ancestors. Preparation
@@ -80,14 +93,35 @@ Assignment resumes that same Sandbox before delivering its role and credentials.
 Persist each Pause/Resume attempt before the external command. A lost response
 can settle through the original native record but cannot commission another
 mutation or a cold replacement. This is a paused prepared reserve, not a claim
-that the current per-slot workers form a Staging-derived preforked pool.
+that cold preparation forms a Staging-derived preforked pool.
 
-An explicit Stop can retire a missing, terminal or restarted original worker after exact Namespace
-and Pod UID checks. This records no invented native Delete receipt. It still removes only the
-owned execution Pod and private store, preserving canonical Source. An unavailable Kubernetes read
-or a replacement UID retains Stop for observation. Healthy Stop confirms native Delete and releases
-the exact caller-owned mount pair before worker shutdown. Incomplete preparation with unconfirmed
+An explicit Stop can retire execution on a missing, terminal or restarted original worker after exact Namespace
+and Pod UID checks. This records no invented native Delete receipt. It still removes only that
+Sandbox's private assignment and inputs. It never deletes or relabels the shared worker Pod,
+Namespace, private store or canonical Source claim. An unavailable Kubernetes read or a replacement
+UID retains Stop for observation. Healthy Stop confirms native Delete and releases the exact
+caller-owned mount pair. An assigned reserve retains its original slot owner through activation
+and cleanup. Incomplete preparation with unconfirmed
 mount ownership remains available for inspection instead of being force-unmounted.
+
+Factory queues obsolete checkpoints from confirmed native Runtime Attempt observations,
+including inherited standby history. Each retirement retains its exact Sandbox ID,
+snapshot, native owner, checkpoint hash and worker epoch before the external command.
+A periodic sweep runs outside the Resume response path; healthy Stop drains its queued
+retirements before confirming the Runtime Attempt's removal. A current unresumed
+Pause is not eligible. Native recovery selections, shared bases and live dependencies
+remain independent deletion guards.
+
+Checkpoint retirement can continue the same native deletion inventory after interruption
+or lost output. This explicit native continuation contract does not allow replaying an
+uncertain Start, Pause or Resume. Factory retains the completed retirement receipt and
+before/after filesystem availability, without treating concurrent filesystem counters as
+the byte size of one Sandbox.
+
+Releasing private input mounts is not disk reclamation. Native Delete still retains
+per-Sandbox filesystem backing and private Resume images; checkpoint retirement alone
+does not remove those files. The shared worker and canonical Source claim must not be
+deleted to hide that remaining retention gap.
 
 Native runtime evidence on one Linux profile establishes only that profile. Before installation,
 admit the actual cluster's node, kernel, CNI and storage with the pinned worker. A provider-neutral

@@ -59,10 +59,8 @@ test("completed history can be read from the same retained Workspace without reb
     await owned.database
       .client`UPDATE factory.runtime_attempt SET state = 'failed' WHERE id = ${owned.attemptID}`;
     await owned.database
-      .client`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state,
-      kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${replacementID}, project_id, change_id, workspace_id, generation + 1, revision, 'ready',
-        kubernetes_namespace, 'never-created-replacement', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+      .client`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
+      SELECT ${replacementID}, project_id, change_id, workspace_id, generation + 1, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
       FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
     await owned.database
       .client`UPDATE factory.change SET runtime_attempt_id = ${replacementID} WHERE id = ${owned.changeID}`;

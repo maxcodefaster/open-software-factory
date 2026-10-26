@@ -1,32 +1,49 @@
-import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
+  type FactoryboxCheckpointRequest,
+  factoryboxCheckpointRequest,
+  factoryboxObsoleteCheckpoints,
+  readFactoryboxCheckpointRetirement,
+} from "../../../../packages/runtime-kubernetes/src/factorybox-retention";
+import {
+  type FactoryboxRuntimeInput,
+  factoryboxOriginalWorkerRetired,
   factoryboxRuntimeDeclaration,
   factoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
   factoryboxSandboxID,
-  renderFactoryboxRuntime,
   prepareFactoryboxRuntime,
   releaseFactoryboxRuntime,
-  deleteFactoryboxStore,
-  factoryboxOriginalWorkerRetired,
-  type FactoryboxRuntimeInput,
+  renderFactoryboxRuntime,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
   executeFactoryboxOperation,
-  inspectFactoryboxWorker,
-  runFactoryboxKubernetes,
   type FactoryboxOperation,
   type FactoryboxWorkerIdentity,
   factoryboxWorkerIdentity,
+  inspectFactoryboxWorker,
+  runFactoryboxKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import type { RuntimeHub } from "./hub";
+import { factoryboxAllocation, rememberFactoryboxIdentity } from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"];
-type Operation = { id: string; attempted: boolean; completed: boolean; observation: unknown };
+type Operation = {
+  id: string;
+  snapshotID: string | null;
+  attempted: boolean;
+  completed: boolean;
+  request: unknown;
+  observation: unknown;
+};
+type LifecycleOperation = Extract<
+  FactoryboxOperation,
+  { action: "start" | "pause" | "resume" | "delete" }
+>;
 type Retained = {
   request: FactoryboxRuntimeInput;
   identity: FactoryboxWorkerIdentity | null;
@@ -38,6 +55,8 @@ export function createFactoryboxExecution(
   hub: RuntimeHub,
   transport = runFactoryboxKubernetes,
 ) {
+  let reclaiming: Promise<void> | null = null;
+  let reclaimAfter: string | null = null;
   const deadlines = new AsyncLocalStorage<number>();
   const run: typeof transport = (args, input, limits) => {
     const remaining = (deadlines.getStore() ?? performance.now() + 420_000) - performance.now();
@@ -77,15 +96,20 @@ export function createFactoryboxExecution(
     attemptID: string,
     action: string,
     snapshot: string | null = null,
+    request: FactoryboxCheckpointRequest | null = null,
   ) {
-    await connection`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,snapshot_id)
-      VALUES(${attemptID},${action},${snapshot}) ON CONFLICT DO NOTHING`;
+    if (request && request.snapshot_id !== snapshot)
+      throw new Error("Checkpoint retirement request differs from its retained snapshot");
+    await connection`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,snapshot_id,request)
+      VALUES(${attemptID},${action},${snapshot},${request === null ? null : JSON.stringify(request)}::text::jsonb) ON CONFLICT DO NOTHING`;
     const [operation] = await connection<
       Operation[]
-    >`SELECT id,attempted_at IS NOT NULL AS attempted,
-      completed_at IS NOT NULL AS completed,observation FROM factory.factorybox_lifecycle_operation
+    >`SELECT id,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,
+      completed_at IS NOT NULL AS completed,request,observation FROM factory.factorybox_lifecycle_operation
       WHERE runtime_attempt_id=${attemptID} AND action=${action} AND snapshot_id IS NOT DISTINCT FROM ${snapshot}`;
     if (!operation) throw new Error("Factorybox lifecycle intent was not retained");
+    if (!isDeepStrictEqual(operation.request, request))
+      throw new Error("Factorybox lifecycle request differs from its immutable intent");
     return operation;
   }
   async function attempted(connection: SQL, operation: Operation) {
@@ -103,7 +127,7 @@ export function createFactoryboxExecution(
     connection: SQL,
     attemptID: string,
     saved: Retained,
-    op: FactoryboxOperation,
+    op: LifecycleOperation,
     observeOnly = false,
   ) {
     const identity = saved.identity;
@@ -151,10 +175,15 @@ export function createFactoryboxExecution(
           pause: z
             .object({
               snapshot_id: z.string(),
+              checkpoint_sha256: z
+                .string()
+                .regex(/^[a-f0-9]{64}$/)
+                .optional(),
               completed_at: z.string().optional(),
               resume: z.object({ completed_at: z.string().optional() }).optional(),
             })
             .optional(),
+          pause_history: z.array(z.unknown()).optional(),
         }),
       })
       .parse(JSON.parse(observation.stdout));
@@ -166,9 +195,22 @@ export function createFactoryboxExecution(
       ((op.action === "pause" || op.action === "resume") &&
         (result.record.pause?.snapshot_id !== op.snapshotID ||
           !result.record.pause.completed_at ||
+          !result.record.pause.checkpoint_sha256 ||
           (op.action === "resume" && !result.record.pause.resume?.completed_at)))
     )
       throw new Error(`Factorybox ${op.action} is not confirmed by its original native record`);
+    if (op.action === "resume") {
+      const [pause] = await connection<
+        Array<{ observation: unknown }>
+      >`SELECT observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${attemptID} AND action='pause' AND snapshot_id=${op.snapshotID}
+          AND completed_at IS NOT NULL`;
+      z.object({
+        owner: z.literal(result.record.owner),
+        snapshotID: z.literal(op.snapshotID),
+        checkpointSHA256: z.literal(result.record.pause?.checkpoint_sha256),
+      }).parse(pause?.observation);
+    }
     const compact = {
       version: 1,
       id: result.record.id,
@@ -176,9 +218,64 @@ export function createFactoryboxExecution(
       phase: result.record.phase,
       inputSHA256: result.record.input_sha256,
       ...("snapshotID" in op ? { snapshotID: op.snapshotID } : {}),
+      ...(result.record.pause?.checkpoint_sha256
+        ? { checkpointSHA256: result.record.pause.checkpoint_sha256 }
+        : {}),
     };
+    for (const checkpoint of factoryboxObsoleteCheckpoints(saved.request.sandboxID, result.record))
+      await intent(connection, attemptID, "retire-checkpoint", checkpoint.snapshot_id, checkpoint);
     await completed(connection, record, compact);
     return compact;
+  }
+  async function reclaimAttempt(connection: SQL, attemptID: string, saved: Retained) {
+    if (!saved.identity)
+      throw new Error("Checkpoint retirement requires its original worker identity");
+    const operations = await connection<
+      Operation[]
+    >`SELECT id,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,false AS completed,request,observation
+      FROM factory.factorybox_lifecycle_operation
+      WHERE runtime_attempt_id=${attemptID} AND action='retire-checkpoint' AND completed_at IS NULL
+      ORDER BY intended_at,id`;
+    for (const operation of operations) {
+      const request = factoryboxCheckpointRequest.parse(operation.request);
+      if (
+        request.source_id !== saved.request.sandboxID ||
+        request.snapshot_id !== operation.snapshotID
+      )
+        throw new Error("Checkpoint retirement intent belongs to another Sandbox or snapshot");
+      if (!operation.attempted) await attempted(connection, operation);
+      // Unlike Start/Resume, native retirement explicitly continues one exact
+      // durable deletion inventory after interruption. Reusing this request
+      // never selects a fresh checkpoint or removes a successor at its path.
+      const result = await executeFactoryboxOperation(
+        factoryboxRuntimeRequest(saved.request),
+        saved.identity,
+        {
+          action: "retire-checkpoint",
+          sandboxID: request.source_id,
+          snapshotID: request.snapshot_id,
+          sourceOwner: request.source_owner,
+          checkpointSHA256: request.checkpoint_sha256,
+        },
+        run,
+        factoryboxRuntimeDeclaration(saved.request),
+      );
+      if (!result.confirmed)
+        throw new Error("Factorybox checkpoint retirement remains unconfirmed");
+      const receipt = readFactoryboxCheckpointRetirement(
+        request,
+        saved.identity.controllerRoot,
+        JSON.parse(result.stdout),
+      );
+      await completed(connection, operation, {
+        version: 1,
+        request,
+        intentSHA256: receipt.intent_sha256,
+        completedAt: receipt.completed_at,
+        availableBytesBefore: receipt.before.filesystem_available_bytes,
+        availableBytesAfter: receipt.after.filesystem_available_bytes,
+      });
+    }
   }
   async function preparation(connection: SQL, attemptID: string, saved: Retained) {
     factoryboxRuntimeRequest(saved.request);
@@ -239,6 +336,34 @@ export function createFactoryboxExecution(
     return result;
   }
   return {
+    reclaimStorage() {
+      if (reclaiming) return reclaiming;
+      reclaiming = (async () => {
+        const attempts = await database.client<
+          Array<{ id: string }>
+        >`SELECT DISTINCT runtime_attempt_id AS id FROM factory.factorybox_lifecycle_operation
+          WHERE action='retire-checkpoint' AND completed_at IS NULL
+            AND (${reclaimAfter}::uuid IS NULL OR runtime_attempt_id>${reclaimAfter}::uuid)
+          ORDER BY id LIMIT 16`;
+        reclaimAfter = attempts.length === 16 ? (attempts.at(-1)?.id ?? null) : null;
+        for (const attempt of attempts) {
+          try {
+            await locked(attempt.id, async (connection) => {
+              const saved = await retained(connection, attempt.id);
+              if (!saved) throw new Error("Checkpoint retirement lost its retained Sandbox");
+              await reclaimAttempt(connection, attempt.id, saved);
+            });
+          } catch {
+            // Execution stays usable. The exact attempted intent remains for
+            // the next sweep, including after a Factory process restart.
+            console.error("Factorybox checkpoint retirement needs observation", attempt.id);
+          }
+        }
+      })().finally(() => {
+        reclaiming = null;
+      });
+      return reclaiming;
+    },
     async startupResources(attemptID: string) {
       const saved = await retained(database.client, attemptID);
       if (saved) return [renderFactoryboxRuntime(saved.request).pod];
@@ -253,25 +378,28 @@ export function createFactoryboxExecution(
           slotID: string | null;
           profile: unknown;
           runtimeHostImage: string;
+          workerID: string;
         }>
       >`SELECT attempt.kubernetes_namespace AS namespace,attempt.kubernetes_pod_name AS "podName",
         attempt.project_id AS "projectID",coalesce(attempt.workspace_id,attempt.id) AS "ownerID",
         attempt.generation,attempt.workspace_id IS NOT NULL AS "sharedSource",slot.id AS "slotID",
-        artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage"
+        artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",
+        attempt.factorybox_worker_id AS "workerID"
         FROM factory.runtime_attempt attempt JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
         LEFT JOIN factory.execution_slot slot ON slot.assigned_attempt_id=attempt.id
         WHERE attempt.id=${attemptID} AND attempt.state='starting' AND attempt.stop_intended_at IS NULL`;
       if (!attempt?.profile) return null;
       const input: FactoryboxRuntimeInput = {
         attemptID,
+        workerID: attempt.workerID,
         sandboxID: factoryboxSandboxID(attempt.slotID ?? attemptID),
         namespace: attempt.namespace,
         podName: attempt.podName,
-        runtimeOwnerID: attempt.ownerID,
+        runtimeOwnerID: attempt.slotID ?? attempt.ownerID,
         labels: {
           "app.kubernetes.io/managed-by": "open-software-factory",
           "factory.dev/project": attempt.projectID,
-          "factory.dev/runtime-owner": attempt.ownerID,
+          "factory.dev/runtime-owner": attempt.slotID ?? attempt.ownerID,
           "factory.dev/runtime-attempt": attemptID,
           "factory.dev/runtime-generation": String(attempt.generation),
           ...(attempt.slotID ? { "factory.dev/execution-slot": attempt.slotID } : {}),
@@ -279,33 +407,11 @@ export function createFactoryboxExecution(
         profile: factoryboxRuntimeProfile.parse(attempt.profile),
         runtimeHostImage: attempt.runtimeHostImage,
         sharedSource: attempt.sharedSource,
-        ...(attempt.slotID ? { workerID: attempt.slotID, reserve: true } : {}),
+        ...(attempt.slotID ? { reserve: true } : {}),
       };
       return [renderFactoryboxRuntime(input).pod];
     },
-    async deleteStore(attemptID: string) {
-      const [attempt] = await database.client<
-        Array<{ namespace: string; namespaceUID: string | null; podName: string; profile: unknown }>
-      >`
-        SELECT attempt.kubernetes_namespace AS namespace,attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.kubernetes_pod_name AS "podName",
-          artifact.factorybox_profile AS profile FROM factory.runtime_attempt attempt
-          JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id WHERE attempt.id=${attemptID}`;
-      if (!attempt?.profile) return;
-      if (!attempt.namespaceUID) throw new Error("Factorybox store Namespace UID was not observed");
-      const saved = await retained(database.client, attemptID);
-      await deleteFactoryboxStore(
-        {
-          namespace: attempt.namespace,
-          namespaceUID: attempt.namespaceUID,
-          podName: attempt.podName,
-          attemptID,
-          storeID: saved?.identity?.storeID ?? attemptID.replaceAll("-", ""),
-          ...(saved?.identity ? { claimUID: saved.identity.claimUID } : {}),
-        },
-        run,
-      );
-    },
-    async deleteSandbox(attemptID: string) {
+    async deleteSandbox(attemptID: string, nativeDeleteObserved = false) {
       return locked(attemptID, async (connection) => {
         const saved = await retained(connection, attemptID);
         if (!saved?.identity) return;
@@ -322,10 +428,14 @@ export function createFactoryboxExecution(
         if (!prepared?.completed)
           throw new Error("Incomplete Factorybox preparation was retained for inspection");
         if (start?.attempted)
-          await perform(connection, attemptID, saved, {
-            action: "delete",
-            sandboxID: saved.request.sandboxID,
-          });
+          await perform(
+            connection,
+            attemptID,
+            saved,
+            { action: "delete", sandboxID: saved.request.sandboxID },
+            nativeDeleteObserved,
+          );
+        await reclaimAttempt(connection, attemptID, saved);
         await releaseFactoryboxRuntime(saved.request, saved.identity, !start?.attempted, run);
         await connection`UPDATE factory.factorybox_runtime SET inputs_released_at=now() WHERE runtime_attempt_id=${attemptID} AND inputs_released_at IS NULL`;
       });
@@ -348,10 +458,19 @@ export function createFactoryboxExecution(
               runtimeHostImage: string;
               slotID: string | null;
               slotIdentity: unknown;
+              workerID: string;
+              workspaceID: string | null;
+              projectID: string;
+              generation: string;
+              namespace: string;
+              podName: string;
             }>
           >`
           SELECT attempt.state,attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.kubernetes_uid AS "podUID",
-            artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",slot.id AS "slotID",slot.factorybox_identity AS "slotIdentity"
+            artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",slot.id AS "slotID",slot.factorybox_identity AS "slotIdentity",
+            attempt.factorybox_worker_id AS "workerID",attempt.workspace_id AS "workspaceID",
+            attempt.project_id AS "projectID",attempt.generation,
+            attempt.kubernetes_namespace AS namespace,attempt.kubernetes_pod_name AS "podName"
           FROM factory.runtime_attempt attempt JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
           LEFT JOIN factory.execution_slot slot ON slot.assigned_attempt_id=attempt.id
           WHERE attempt.id=${attemptID} AND attempt.stop_intended_at IS NULL`;
@@ -366,30 +485,33 @@ export function createFactoryboxExecution(
                 namespace: z.string(),
                 labels: z.record(z.string(), z.string()),
               }),
-              spec: z.object({ volumes: z.array(z.object({ name: z.string() }).passthrough()) }),
             })
             .parse(pod);
-          const owner = parsed.metadata.labels["factory.dev/runtime-owner"];
-          if (!owner) throw new Error("Factorybox runtime has no durable owner");
+          if (
+            parsed.metadata.name !== attempt.podName ||
+            parsed.metadata.namespace !== attempt.namespace
+          )
+            throw new Error("Runtime resources belong to another Factory worker");
+          const owner = attempt.slotID ?? attempt.workspaceID ?? attemptID;
           const request: FactoryboxRuntimeInput = {
             attemptID,
+            workerID: attempt.workerID,
             sandboxID: factoryboxSandboxID(attempt.slotID ?? attemptID),
-            namespace: parsed.metadata.namespace,
-            podName: parsed.metadata.name,
+            namespace: attempt.namespace,
+            podName: attempt.podName,
             runtimeOwnerID: owner,
             labels: {
-              ...Object.fromEntries(
-                Object.entries(parsed.metadata.labels).filter(
-                  ([key]) =>
-                    !["factory.dev/factorybox-store", "factory.dev/trust-domain"].includes(key),
-                ),
-              ),
+              "app.kubernetes.io/managed-by": "open-software-factory",
+              "factory.dev/runtime-owner": owner,
+              "factory.dev/runtime-attempt": attemptID,
+              "factory.dev/runtime-generation": String(attempt.generation),
+              "factory.dev/project": attempt.projectID,
               ...(attempt.slotID ? { "factory.dev/execution-slot": attempt.slotID } : {}),
             },
             runtimeHostImage: attempt.runtimeHostImage,
             profile: factoryboxRuntimeProfile.parse(attempt.profile),
-            sharedSource: parsed.spec.volumes.some((volume) => volume.name === "runtime-data"),
-            ...(attempt.slotID ? { workerID: attempt.slotID, reserve: true } : {}),
+            sharedSource: Boolean(attempt.workspaceID),
+            ...(attempt.slotID ? { reserve: true } : {}),
           };
           if (attempt.slotID) {
             if (request.sharedSource)
@@ -400,9 +522,13 @@ export function createFactoryboxExecution(
           if (!saved || !isDeepStrictEqual(saved.request, request)) {
             throw new Error("Factorybox input differs from its immutable preparation intent");
           }
+          const worker = await factoryboxAllocation(connection);
+          if (worker.workerID !== request.workerID)
+            throw new Error("Runtime Attempt belongs to another Factory worker");
           const identity = await inspectFactoryboxWorker(
             factoryboxRuntimeRequest(request),
             saved.identity ??
+              worker.identity ??
               (attempt.slotID ? factoryboxWorkerIdentity.parse(attempt.slotIdentity) : undefined),
             run,
             factoryboxRuntimeDeclaration(request),
@@ -410,6 +536,7 @@ export function createFactoryboxExecution(
           if (identity.namespaceUID !== attempt.namespaceUID || identity.podUID !== attempt.podUID)
             throw new Error("Factorybox worker UIDs differ from the Runtime Attempt");
           if (!saved.identity) {
+            await rememberFactoryboxIdentity(connection, request.workerID, identity);
             await connection`UPDATE factory.factorybox_runtime SET identity=${JSON.stringify(identity)}::text::jsonb WHERE runtime_attempt_id=${attemptID} AND identity IS NULL`;
             saved.identity = identity;
           }

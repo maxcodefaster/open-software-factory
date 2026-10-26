@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
-import { renderWorkspaceSourceResources } from "./source-manifest";
+import { ownedFactoryboxLocation } from "../../../test/fixtures/runtime-configuration";
 import { workspaceSourceIdentity } from "../../workspace-domain/src/source";
+import { renderWorkspaceSourceResources } from "./source-manifest";
 import {
   boundedSourceBody,
   sourceResourceListObservation,
@@ -11,7 +12,8 @@ test("source access mounts only canonical source, remains independent and requir
   const input = {
     identity: workspaceSourceIdentity("11111111-1111-5111-8111-111111111111", 1),
     projectID: "22222222-2222-5222-8222-222222222222",
-    namespace: "factory-workspace-111111111111",
+    ...ownedFactoryboxLocation,
+    sharedCreateAllowed: true,
     revision: "a".repeat(40),
     repositoryURL: "https://forge.invalid/project.git",
     originURL: "https://forge.invalid/project.git",
@@ -92,7 +94,8 @@ test("ambiguous source create recovery validates storage, the complete Pod and i
   const input = {
     identity: workspaceSourceIdentity("11111111-1111-5111-8111-111111111111", 1),
     projectID: "22222222-2222-5222-8222-222222222222",
-    namespace: "factory-workspace-111111111111",
+    ...ownedFactoryboxLocation,
+    sharedCreateAllowed: true,
     revision: "a".repeat(40),
     repositoryURL: "https://forge.invalid/project.git",
     originURL: "https://forge.invalid/project.git",

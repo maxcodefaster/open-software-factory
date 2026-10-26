@@ -1,15 +1,17 @@
 import { expect, test } from "bun:test";
 import { parse } from "yaml";
+import {
+  ownedFactoryboxLocation,
+  ownedFactoryboxProfile,
+} from "../../../test/fixtures/runtime-configuration";
 import { renderRuntimeResources } from "./manifest";
-import { ownedFactoryboxProfile } from "../../../test/fixtures/runtime-configuration";
 
 test("publication is a bound one-job Sandbox without development apps or publication credentials", () => {
   const resources = renderRuntimeResources({
     factoryboxProfile: ownedFactoryboxProfile,
     attemptID: crypto.randomUUID(),
     generation: 1,
-    namespace: "factory-publication-proof",
-    podName: "runtime",
+    ...ownedFactoryboxLocation,
     projectID: crypto.randomUUID(),
     mode: "publication",
     revision: "a".repeat(40),
@@ -36,7 +38,7 @@ test("publication is a bound one-job Sandbox without development apps or publica
     },
   });
   const secret = resources.find(
-    (value) => value.kind === "Secret" && value.metadata.name === "runtime-assignment",
+    (value) => value.kind === "Secret" && value.metadata.name.startsWith("assignment-"),
   );
   if (
     !secret ||

@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
+import { factoryboxLocation } from "./factorybox-location";
 import {
   configuredFactoryboxRuntimeProfile,
-  deleteFactoryboxStore,
   type FactoryboxRuntimeInput,
   factoryboxOriginalWorkerRetired,
-  factoryboxPreparationRequest,
   factoryboxPreparationAssignment,
+  factoryboxPreparationRequest,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
 import type { runFactoryboxKubernetes } from "./factorybox-worker";
@@ -14,8 +14,7 @@ const input: FactoryboxRuntimeInput = {
   attemptID: "01234567-89ab-5def-8123-456789abcdef",
   sandboxID: "runtime-0123456789ab5def8123456789abcdef",
   runtimeOwnerID: "11234567-89ab-5def-8123-456789abcdef",
-  namespace: "factory-test",
-  podName: "runtime-1",
+  ...factoryboxLocation("01234567-89ab-5def-8123-456789abcdef"),
   labels: { "factory.dev/runtime-attempt": "01234567-89ab-5def-8123-456789abcdef" },
   runtimeHostImage: `registry.example/runtime@sha256:${"a".repeat(64)}`,
   sharedSource: true,
@@ -120,22 +119,26 @@ test("assignment reads reject another owner and keep assigned credentials out of
 });
 
 test("two executions on one worker retain distinct Sandbox and preparation identities", () => {
-  const workerID = "a".repeat(32);
+  const workerID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const identity = {
     version: 1 as const,
     namespaceUID: "namespace",
     claimUID: "claim",
     podUID: "pod",
-    storeID: workerID,
+    storeID: workerID.replaceAll("-", ""),
     epoch: "e".repeat(32),
     bootID: "boot",
     executableSHA256: input.profile.executableSHA256,
     controllerRoot: "/controller",
   };
-  const first = factoryboxPreparationRequest({ ...input, workerID }, identity, assignmentFiles());
+  const first = factoryboxPreparationRequest(
+    { ...input, ...factoryboxLocation(workerID) },
+    identity,
+    assignmentFiles(),
+  );
   const sibling = {
     ...input,
-    workerID,
+    ...factoryboxLocation(workerID),
     runtimeOwnerID: "31234567-89ab-5def-8123-456789abcdef",
     attemptID: "21234567-89ab-5def-8123-456789abcdef",
     sandboxID: "runtime-2123456789ab5def8123456789abcdef",
@@ -159,12 +162,12 @@ test("missing, changed and another execution's Sandbox identities fail before wo
 
 test("assigning a never-used reserve keeps its original Sandbox independently of the worker ID", () => {
   const slotID = "31234567-89ab-5def-8123-456789abcdef";
-  const workerID = "a".repeat(32);
+  const workerID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
   const reserved = {
     ...input,
     attemptID: slotID,
     sandboxID: `runtime-${slotID.replaceAll("-", "")}`,
-    workerID,
+    ...factoryboxLocation(workerID),
     reserve: true,
     sharedSource: false,
     labels: { ...input.labels, "factory.dev/execution-slot": slotID },
@@ -174,7 +177,7 @@ test("assigning a never-used reserve keeps its original Sandbox independently of
     namespaceUID: "namespace",
     claimUID: "claim",
     podUID: "pod",
-    storeID: workerID,
+    storeID: workerID.replaceAll("-", ""),
     epoch: "e".repeat(32),
     bootID: "boot",
     executableSHA256: input.profile.executableSHA256,
@@ -318,8 +321,8 @@ test("consumer image exports before PID 1 starts, with source and credentials co
   expect(claim.metadata.name).toBe("store-0123456789ab5def8123456789abcdef");
 });
 
-test("isolated execution has no shared source bind and wrong source placement fails before create", () => {
-  expect(JSON.stringify(renderFactoryboxRuntime({ ...input, sharedSource: false }))).not.toContain(
+test("the shared worker retains canonical Source while isolated Sandbox preparation has no Source bind", () => {
+  expect(JSON.stringify(renderFactoryboxRuntime({ ...input, sharedSource: false }))).toContain(
     "/factory-source",
   );
   expect(() => renderFactoryboxRuntime({ ...input, storageNode: "different-node" })).toThrow(
@@ -346,98 +349,3 @@ test("preparation rejects another admitted worker before returning any mutation 
     ),
   ).toThrow("admitted worker");
 });
-
-test("store cleanup requires a gone worker, exact ownership and a UID precondition", async () => {
-  const calls: Array<{ args: readonly string[]; input?: string }> = [];
-  const storeID = "a".repeat(32);
-  let removed = false;
-  const run: typeof runFactoryboxKubernetes = async (args, body) => {
-    calls.push({ args, ...(body === undefined ? {} : { input: body }) });
-    if (args[0] === "delete") {
-      removed = true;
-      return { exitCode: 0, stdout: "{}", stderr: "" };
-    }
-    if (args[1] === "namespace")
-      return {
-        exitCode: 0,
-        stderr: "",
-        stdout: JSON.stringify({ metadata: { uid: "namespace-uid" } }),
-      };
-    if (args[1] === "pod" || removed)
-      return {
-        exitCode: 1,
-        stderr: "Error from server (NotFound): owned object not found",
-        stdout: "",
-      };
-    return {
-      exitCode: 0,
-      stderr: "",
-      stdout: JSON.stringify({
-        metadata: {
-          uid: "claim-uid",
-          labels: {
-            "app.kubernetes.io/managed-by": "open-software-factory",
-            "factory.dev/factorybox-store": storeID,
-            "factory.dev/runtime-attempt": input.attemptID,
-          },
-        },
-      }),
-    };
-  };
-  await deleteFactoryboxStore(
-    {
-      namespace: input.namespace,
-      namespaceUID: "namespace-uid",
-      podName: input.podName,
-      attemptID: input.attemptID,
-      storeID,
-      claimUID: "claim-uid",
-    },
-    run,
-  );
-  const deletes = calls.filter(({ args }) => args[0] === "delete");
-  expect(deletes).toHaveLength(1);
-  expect(deletes[0]?.args).toContain(
-    `/api/v1/namespaces/${input.namespace}/persistentvolumeclaims/store-${storeID}`,
-  );
-  expect(JSON.parse(deletes[0]?.input ?? "{}").preconditions).toEqual({ uid: "claim-uid" });
-  expect(JSON.stringify(calls)).not.toContain("runtime-data");
-});
-
-test.each(["foreign-namespace", "live-worker", "missing-kubeconfig"])(
-  "store cleanup refuses %s without mutation",
-  async (kind) => {
-    let deletes = 0;
-    const run: typeof runFactoryboxKubernetes = async (args) => {
-      if (args[0] === "delete") deletes++;
-      if (kind === "missing-kubeconfig")
-        return { exitCode: 1, stdout: "", stderr: "Kubeconfig file not found" };
-      if (args[1] === "namespace")
-        return {
-          exitCode: 0,
-          stderr: "",
-          stdout: JSON.stringify({
-            metadata: { uid: kind === "foreign-namespace" ? "foreign" : "namespace-uid" },
-          }),
-        };
-      return {
-        exitCode: 0,
-        stderr: "",
-        stdout: JSON.stringify({ metadata: { uid: "live-worker" } }),
-      };
-    };
-    await expect(
-      deleteFactoryboxStore(
-        {
-          namespace: input.namespace,
-          namespaceUID: "namespace-uid",
-          podName: input.podName,
-          attemptID: input.attemptID,
-          storeID: "a".repeat(32),
-        },
-        run,
-      ),
-    ).rejects.toThrow();
-    expect(deletes).toBe(0);
-  },
-);

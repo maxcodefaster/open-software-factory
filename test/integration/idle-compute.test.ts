@@ -43,17 +43,13 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
       SELECT gen_random_uuid(),'fairness-' || n,${owned.projectID} || '-' || n || '@fairness.test',true
       FROM generate_series(1,65) n RETURNING id,name
     ), workspaces AS (
-      INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,
-        kubernetes_namespace,volume_name,created_by)
-      SELECT gen_random_uuid(),${owned.projectID},'personal',users.id,'main',${"a".repeat(40)},
-        'factory-workspace-' || substring(replace(users.id::text,'-',''),1,12),'never-created',${owned.userID} FROM users
+      INSERT INTO factory.development_workspace(id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+      SELECT gen_random_uuid(),${owned.projectID},'personal',users.id,'main',${"a".repeat(40)},${owned.userID} FROM users
       RETURNING id,owner_user_id,kubernetes_namespace
-    ) INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,
-      kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,
+    ) INSERT INTO factory.runtime_attempt(id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,
       create_intended_at,created_by,updated_at)
       SELECT CASE WHEN users.name='fairness-65' THEN ${tail}::uuid ELSE gen_random_uuid() END,
-        ${owned.projectID},workspaces.id,1,${"a".repeat(40)},'ready',workspaces.kubernetes_namespace,
-        'never-created',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},
+        ${owned.projectID},workspaces.id,1,${"a".repeat(40)},'ready',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID},
         CASE WHEN users.name='fairness-65' THEN now() ELSE now()-interval '1 minute' END
       FROM workspaces JOIN users ON users.id=workspaces.owner_user_id`;
     await idle.close();

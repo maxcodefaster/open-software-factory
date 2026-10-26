@@ -1,9 +1,8 @@
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { callFactoryFunction } from "../fixtures/server-functions";
 import { expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import {
@@ -14,6 +13,7 @@ import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { editorFixtureKubectl } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 // No inference: isolate real exact-commit CI from editor/Agent/second-Ticket startup.
 test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
@@ -60,10 +60,10 @@ test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
       await sql`INSERT INTO factory.requirement_revision(id,ticket_id,ordinal,canonical_content,content_digest,created_by) VALUES(${revisionID},${ticketID},1,${requirement},${requirementDigest(requirement)},${userID})`;
       await sql`INSERT INTO factory.requirement_approval(id,ticket_id,requirement_revision_id,approved_by) VALUES(${approvalID},${ticketID},${revisionID},${userID})`;
       await sql`INSERT INTO factory.change(id,project_id,ticket_id,requirement_approval_id,branch_name,base_sha,state,created_by) VALUES(${identity.changeID},${projectID},${ticketID},${approvalID},${identity.branchName},${base},'active',${userID})`;
-      await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,kubernetes_namespace,volume_name,created_by)
-        VALUES(${workspace.workspaceID},${projectID},'ticket',${ticketID},${identity.changeID},${identity.branchName},${base},${workspace.kubernetesNamespace},${workspace.volumeName},${userID})`;
-      await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${historical.attemptID},${projectID},${identity.changeID},${workspace.workspaceID},1,${base},'stopped',${workspace.kubernetesNamespace},${historical.podName},${"a".repeat(64)},${"b".repeat(64)},now(),${userID})`;
+      await sql`INSERT INTO factory.development_workspace(id,project_id,kind,ticket_id,change_id,source_branch,source_revision,created_by)
+        VALUES(${workspace.workspaceID},${projectID},'ticket',${ticketID},${identity.changeID},${identity.branchName},${base},${userID})`;
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${historical.attemptID},${projectID},${identity.changeID},${workspace.workspaceID},1,${base},'stopped',${"a".repeat(64)},${"b".repeat(64)},now(),${userID})`;
     });
     const directory = resolve(".factory/test-results/verification-runtime", owned.projectID);
     await mkdir(directory, { recursive: true });

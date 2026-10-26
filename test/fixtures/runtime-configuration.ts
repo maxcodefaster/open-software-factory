@@ -1,4 +1,7 @@
+import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import type { FactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+
+export const ownedFactoryboxLocation = factoryboxLocation("68f16b47-92d3-493d-8145-f92742951764");
 
 // Controller fixtures inject Kubernetes. These artifacts are never pulled or started.
 export const ownedFactoryboxProfile = {

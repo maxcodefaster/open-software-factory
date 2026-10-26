@@ -1,10 +1,10 @@
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { controlledForgeProtection } from "../fixtures/forge-protection";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 const ConnectorSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
@@ -26,10 +26,9 @@ test.each(["Build", "Staging"] as const)(
       if (target === "Staging") {
         // Use an independent Staging attempt; the Ticket runtime remains untouched.
         await database.client`INSERT INTO factory.runtime_attempt(id, project_id, isolated_kind,
-          generation, revision, state, kubernetes_namespace, kubernetes_pod_name,
+          generation, revision, state,
           parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-          SELECT ${crypto.randomUUID()}, project_id, 'staging', generation, revision, 'ready',
-            'owned-staging-not-created', 'never-created', parent_connector_token_hash,
+          SELECT ${crypto.randomUUID()}, project_id, 'staging', generation, revision, 'ready', parent_connector_token_hash,
             child_connector_token_hash, now(), created_by FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
         await database.client`INSERT INTO factory.staging_preview(project_id, revision, runtime_attempt_id)
           SELECT project_id, revision, id FROM factory.runtime_attempt

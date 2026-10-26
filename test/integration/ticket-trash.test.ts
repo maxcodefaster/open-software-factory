@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
-import { createTicketTrashController } from "../../apps/factory/src/change/trash";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { fixture, buildModelID } from "../fixtures/change-agent-turns";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
+import { createTicketTrashController } from "../../apps/factory/src/change/trash";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 test("Trash fences admission before Stop, retains workspace and approval, and Restore dispatches nothing", async () => {
   const process = await factoryProcess();
@@ -23,10 +23,8 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
     const verificationAttemptID = crypto.randomUUID();
     await db.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number, runner_name, runner_token, created_by)
       VALUES (${verificationID}, ${owned.changeID}, ${"d".repeat(40)}, 1, 'owned-trash-verification', 'owned-token', ${owned.userID})`;
-    await db.client`INSERT INTO factory.runtime_attempt(id, project_id, verification_id, isolated_kind, generation, revision, state,
-      kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${verificationAttemptID}, project_id, ${verificationID}, 'verification', 2, ${"d".repeat(40)}, 'ready',
-        'owned-trash-verification', 'never-created', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+    await db.client`INSERT INTO factory.runtime_attempt(id, project_id, verification_id, isolated_kind, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
+      SELECT ${verificationAttemptID}, project_id, ${verificationID}, 'verification', 2, ${"d".repeat(40)}, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
       FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
     const stop = createChangeAgentStop(db, owned.hub);
     const stopped: string[] = [];

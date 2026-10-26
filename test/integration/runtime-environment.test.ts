@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { createEnvironmentController } from "../../apps/factory/src/environments/controller";
-import {
-  freezeRuntimeEnvironment,
-  createRuntimeEnvironmentEndpoint,
-} from "../../apps/factory/src/environments/runtime";
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
+import {
+  createRuntimeEnvironmentEndpoint,
+  freezeRuntimeEnvironment,
+} from "../../apps/factory/src/environments/runtime";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -89,8 +89,8 @@ test("runtime environment freezes version, authenticates parent generation, isol
     await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,created_by) VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,'owned-environment-runner',${owned.userID})`;
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
     const verificationAttempt = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,verification_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${verificationAttempt},project_id,NULL,${verificationID},'verification',2,revision,'create-intended','owned-verification-env','never-created',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,verification_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      SELECT ${verificationAttempt},project_id,NULL,${verificationID},'verification',2,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
     await freezeRuntimeEnvironment(database.client, verificationAttempt);
     // New Verification uses the current Development version, with explicit grants only.
     const verified = await (await endpoint(request(token, 2), verificationAttempt)).json();
@@ -108,8 +108,8 @@ test("runtime environment freezes version, authenticates parent generation, isol
       registries: [],
     });
     const stagingAttempt = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,kubernetes_namespace,kubernetes_pod_name,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${stagingAttempt},project_id,'staging',1,revision,'create-intended','owned-staging-env','never-created',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      SELECT ${stagingAttempt},project_id,'staging',1,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
     expect(await freezeRuntimeEnvironment(database.client, stagingAttempt)).toMatchObject({
       environment: "main-preview",
       version: 1,

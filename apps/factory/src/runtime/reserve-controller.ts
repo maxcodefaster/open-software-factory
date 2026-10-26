@@ -6,11 +6,14 @@ import {
   type ReserveRole,
   requireReservePolicy,
 } from "../../../../packages/runtime-domain/src/reserve";
+import { createKubernetesClient } from "../../../../packages/runtime-kubernetes/src/client";
+import { factoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
   createReserveClient,
   type ReserveClient,
 } from "../../../../packages/runtime-kubernetes/src/reserve";
 import { createReserveStore } from "./reserve-store";
+import { createFactoryboxWorker, rememberFactoryboxIdentity } from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | TransactionSql;
@@ -41,6 +44,7 @@ export function createExecutionReserve(
   adapter: ReserveClient = createReserveClient(),
 ) {
   const store = createReserveStore(policy, images);
+  const worker = createFactoryboxWorker(database, createKubernetesClient());
   let closed = false;
   let running: Promise<void> | null = null;
   let requested = false;
@@ -71,7 +75,9 @@ export function createExecutionReserve(
         if (state?.state !== planned.state) return;
         try {
           if (planned.state === "retiring") {
-            await adapter.retire(planned);
+            await adapter.retire(planned, {
+              intendDelete: () => store.intendDelete(sql, planned.id),
+            });
             await store.retired(sql, planned.id);
             requested = true;
           } else {
@@ -79,7 +85,19 @@ export function createExecutionReserve(
             const observed = await adapter.prepare(planned, {
               startAllowed,
               intendStandby: (action) => store.intendStandby(sql, planned.id, action),
+              provision: (resources) =>
+                worker.provision(
+                  resources,
+                  factoryboxRuntimeProfile.parse(planned.factoryboxProfile),
+                  planned.runtimeHostImage,
+                ),
             });
+            if (observed.factoryboxIdentity)
+              await rememberFactoryboxIdentity(
+                sql,
+                planned.workerID,
+                observed.factoryboxIdentity as Parameters<typeof rememberFactoryboxIdentity>[2],
+              );
             await store.observe(sql, planned.id, observed);
             if (observed.failed) await store.retire(sql, planned.id);
             if (observed.ready || observed.failed) requested = true;
@@ -132,7 +150,11 @@ export function createExecutionReserve(
     async cleanup(attemptID: string, generation: number) {
       const slot = await store.assigned(database.client, attemptID);
       if (!slot) return false;
-      return withSlotLock(slot.id, () => adapter.removeAssigned(slot, generation));
+      return withSlotLock(slot.id, (sql) =>
+        adapter.removeAssigned(slot, generation, {
+          intendDelete: () => store.intendDelete(sql, slot.id),
+        }),
+      );
     },
     async start() {
       await wake();

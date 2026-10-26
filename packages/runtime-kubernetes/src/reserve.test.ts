@@ -1,18 +1,21 @@
 import { expect, test } from "bun:test";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
+import { createKubernetesClient } from "./client";
+import { factoryboxAssignmentSecret, factoryboxLocation } from "./factorybox-location";
 import { factoryboxReserveBootstrapProgram } from "./factorybox-runtime";
 import {
+  createReserveClient,
   renderReserveResources,
-  validateReserveObservation,
   slotActivationCommand,
+  validateReserveObservation,
 } from "./reserve";
 
 const slot: ExecutionSlot = {
   id: "ec253fc1-4e17-4a75-a36d-c4efef02e77e",
+  ...factoryboxLocation("e35856d5-d042-4226-971c-901cd27ec021"),
   role: "verification",
   state: "creating",
   runtimeHostImage: `registry.invalid/check@sha256:${"1".repeat(64)}`,
-  namespace: "factory-reserve-ec253fc14e17",
   namespaceUID: null,
   podUID: null,
   claimUID: null,
@@ -65,8 +68,8 @@ test("reserve uses the exact Factorybox topology without repository, user capabi
   expect(validateReserveObservation(slot, resources, observations())).toMatchObject({
     ready: true,
     failed: false,
-    podUID: "owned-Pod-slot",
-    claimUID: "owned-PersistentVolumeClaim-store-ec253fc14e174a75a36dc4efef02e77e",
+    podUID: "owned-Pod-worker",
+    claimUID: "owned-PersistentVolumeClaim-store-e35856d5d0424226971c901cd27ec021",
   });
 });
 test("reserve observation rejects changed tools, mounts, seeds, ownership and resource identities", () => {
@@ -146,7 +149,8 @@ test("assigned replay allows only the exact activation keys under its durable ow
   const resources = renderReserveResources(assigned, "approved-ca");
   const actual = observations();
   const secret = actual.find(
-    (value) => value.kind === "Secret" && value.metadata.name === "runtime-assignment",
+    (value) =>
+      value.kind === "Secret" && value.metadata.name === factoryboxAssignmentSecret(slot.id),
   );
   if (!secret || !("data" in secret)) throw new Error("Expected assignment Secret");
   const assignmentData = {
@@ -183,4 +187,102 @@ test("assigned replay allows only the exact activation keys under its durable ow
   if (!ca || !("data" in ca)) throw new Error("Expected registry CA Secret");
   Reflect.set(ca.data, "parent-token", Buffer.from("not-clean").toString("base64"));
   expect(validate).toThrow("changed credentials");
+});
+
+function cleanupFixture(change?: (actual: ReturnType<typeof observations>) => void) {
+  const actual = observations();
+  const observed = validateReserveObservation(
+    slot,
+    renderReserveResources(slot, "approved-ca"),
+    actual,
+  );
+  change?.(actual);
+  const deleted: string[] = [];
+  const reads: string[][] = [];
+  const adapter = createReserveClient(
+    async (args) => {
+      reads.push(args);
+      if (args[0] !== "get" || args.includes("pods,pvc,secrets"))
+        throw new Error("Cleanup must not list a Namespace or mutate shared resources");
+      if (args[1] === "namespace")
+        return JSON.stringify(actual.find((item) => item.kind === "Namespace"));
+      return JSON.stringify({ items: actual.filter((item) => item.kind !== "Namespace") });
+    },
+    {
+      ...createKubernetesClient(async () => {
+        throw new Error("Unexpected Kubernetes operation");
+      }),
+      async deleteSecret(input) {
+        expect(input).toEqual({
+          namespace: slot.namespace,
+          namespaceUID: observed.namespaceUID,
+          name: factoryboxAssignmentSecret(slot.id),
+          ownerID: slot.id,
+        });
+        deleted.push(input.name);
+      },
+      async deleteNamespace() {
+        throw new Error("Cleanup must preserve the Factory Namespace");
+      },
+    },
+  );
+  return {
+    adapter,
+    deleted,
+    reads,
+    slot: {
+      ...slot,
+      namespaceUID: observed.namespaceUID,
+      podUID: observed.podUID,
+      claimUID: observed.claimUID,
+    },
+  };
+}
+
+test("retiring an unused slot deletes only its private assignment and preserves the shared worker", async () => {
+  const fixture = cleanupFixture();
+  await fixture.adapter.retire({ ...fixture.slot, state: "retiring" });
+  expect(fixture.deleted).toEqual([factoryboxAssignmentSecret(slot.id)]);
+  expect(fixture.reads.every((args) => args[0] === "get")).toBe(true);
+});
+
+test("assigned slot cleanup preserves Factory resources and keeps its original slot owner", async () => {
+  const fixture = cleanupFixture();
+  expect(
+    await fixture.adapter.removeAssigned(
+      {
+        ...fixture.slot,
+        state: "assigned",
+        assignedAttemptID: "3e8ca245-0686-49f3-bd1f-097f42760567",
+      },
+      1,
+    ),
+  ).toBe(true);
+  expect(fixture.deleted).toEqual([factoryboxAssignmentSecret(slot.id)]);
+});
+
+test("slot cleanup refuses changed shared ownership or UIDs before deleting credentials", async () => {
+  for (const change of [
+    (actual: ReturnType<typeof observations>) => {
+      const pod = actual.find((item) => item.kind === "Pod");
+      if (!pod) throw new Error("Expected shared worker");
+      pod.metadata.uid = "replacement";
+    },
+    (actual: ReturnType<typeof observations>) => {
+      const namespace = actual.find((item) => item.kind === "Namespace");
+      if (!namespace) throw new Error("Expected Factory Namespace");
+      Reflect.set(namespace.metadata.labels, "factory.dev/runtime-owner", slot.id);
+    },
+    (actual: ReturnType<typeof observations>) => {
+      const claim = actual.find(
+        (item) => item.kind === "PersistentVolumeClaim" && item.metadata.name === "runtime-data",
+      );
+      if (!claim) throw new Error("Expected shared Source claim");
+      Reflect.deleteProperty(claim.metadata.labels, "factory.dev/shared-resource");
+    },
+  ]) {
+    const fixture = cleanupFixture(change);
+    await expect(fixture.adapter.retire({ ...fixture.slot, state: "retiring" })).rejects.toThrow();
+    expect(fixture.deleted).toEqual([]);
+  }
 });

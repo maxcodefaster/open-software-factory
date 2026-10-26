@@ -1,30 +1,32 @@
-import { requestFunction, factoryFunctionRequest } from "../fixtures/server-functions";
-import { completedConversation } from "../fixtures/server-functions";
-import { agentViewSchema } from "../../apps/factory/src/api-contracts";
-import { mockAgentView } from "../fixtures/server-functions";
-import {
-  attemptsResponseSchema,
-  conversationViewSchema,
-} from "../../apps/factory/src/api-contracts";
-import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import ts from "typescript";
 import {
-  repositoryDocumentsSchema,
-  knowledgeGenerationSchema,
+  agentViewSchema,
+  attemptsResponseSchema,
+  conversationViewSchema,
   developerIDEViewSchema,
+  knowledgeGenerationSchema,
+  repositoryDocumentsSchema,
   sourceWorkspaceViewSchema,
   ticketDetailSchema,
 } from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { mockBootstrap } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
+import {
+  browserFunction,
+  completedConversation,
+  factoryFunctionRequest,
+  mockAgentView,
+  mockBootstrap,
+  mockFactoryFunctions,
+  requestFunction,
+} from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
@@ -1203,18 +1205,15 @@ test("Stop confirmation endpoint authenticates and rejects missing or stale iden
   if (!change) throw new Error("Missing fixture Change");
   const attemptId = crypto.randomUUID();
   const workspaceId = crypto.randomUUID();
-  const workspaceNamespace = `factory-workspace-${workspaceId.replaceAll("-", "").slice(0, 12)}`;
   const stopId = crypto.randomUUID();
   await database.client.begin(async (sql) => {
     await sql`INSERT INTO factory.development_workspace(id, project_id, kind, ticket_id, change_id,
-      source_branch, source_revision, kubernetes_namespace, volume_name, created_by)
-      SELECT ${workspaceId}, project_id, 'ticket', ticket_id, id, branch_name, base_sha,
-        ${workspaceNamespace}, 'never-created', created_by FROM factory.change WHERE id = ${change.id}`;
+      source_branch, source_revision, created_by)
+      SELECT ${workspaceId}, project_id, 'ticket', ticket_id, id, branch_name, base_sha, created_by FROM factory.change WHERE id = ${change.id}`;
     await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation,
-      revision, state, kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash,
+      revision, state, parent_connector_token_hash,
       child_connector_token_hash, create_intended_at, created_by)
-      SELECT ${attemptId}, project_id, id, ${workspaceId}, 1, base_sha, 'failed',
-        ${workspaceNamespace}, 'never-created', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), created_by
+      SELECT ${attemptId}, project_id, id, ${workspaceId}, 1, base_sha, 'failed', ${"b".repeat(64)}, ${"c".repeat(64)}, now(), created_by
       FROM factory.change WHERE id = ${change.id}`;
     await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptId} WHERE id = ${change.id}`;
     await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id,

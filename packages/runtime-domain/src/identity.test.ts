@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   hashConnectorToken,
+  runtimeBuildBrowserToken,
   runtimeConnectorTokens,
   runtimeIdentity,
   runtimeModelToken,
-  runtimeBuildBrowserToken,
 } from "./identity";
 
 describe("Runtime Attempt identity", () => {
@@ -14,7 +14,7 @@ describe("Runtime Attempt identity", () => {
     expect(identity.attemptID).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     );
-    expect(identity.podName).toBe("runtime-3");
+    expect(Object.keys(identity).sort()).toEqual(["attemptID", "composeProjectName"]);
   });
 
   test("changes with the generation", () => {

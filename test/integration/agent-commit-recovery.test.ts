@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
-import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 
 test.each(["same Workspace", "Stop"])(
   "replacement checkout observation is read-only and scoped: %s",
@@ -40,10 +40,9 @@ test.each(["same Workspace", "Stop"])(
       await owned.database
         .client`UPDATE factory.runtime_attempt SET state = 'failed' WHERE id = ${owned.attemptID}`;
       await owned.database
-        .client`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state,
-      kubernetes_namespace, kubernetes_pod_name, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
+        .client`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
       SELECT ${replacementID}, project_id, change_id, ${original.workspace}::uuid,
-        2, revision, 'ready', kubernetes_namespace, 'never-created-replacement', parent_connector_token_hash, child_connector_token_hash, now(), created_by
+        2, revision, 'ready', parent_connector_token_hash, child_connector_token_hash, now(), created_by
       FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;
       await owned.database
         .client`UPDATE factory.change SET runtime_attempt_id = ${replacementID} WHERE id = ${owned.changeID}`;

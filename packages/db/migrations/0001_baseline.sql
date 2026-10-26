@@ -802,11 +802,44 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION factory.factorybox_namespace(worker_id uuid) RETURNS text
+    LANGUAGE sql IMMUTABLE
+    AS $$ SELECT 'factory-box-'::text || replace(worker_id::text, '-'::text, ''::text) $$;
+
+CREATE FUNCTION factory.ensure_factorybox_worker() RETURNS uuid
+    LANGUAGE plpgsql
+    AS $$
+DECLARE worker_id uuid;
+BEGIN
+  INSERT INTO factory.factorybox_worker(singleton) VALUES(true) ON CONFLICT(singleton) DO NOTHING;
+  SELECT id INTO STRICT worker_id FROM factory.factorybox_worker WHERE singleton;
+  RETURN worker_id;
+END $$;
+
+CREATE FUNCTION factory.protect_factorybox_worker() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN RAISE EXCEPTION 'Factory worker intent cannot be deleted'; END IF;
+  IF NEW.id<>OLD.id OR NEW.singleton<>OLD.singleton OR NEW.created_at<>OLD.created_at
+    OR (OLD.profile IS NOT NULL AND NEW.profile IS DISTINCT FROM OLD.profile)
+    OR (OLD.runtime_host_image IS NOT NULL AND NEW.runtime_host_image IS DISTINCT FROM OLD.runtime_host_image)
+    OR (OLD.node_name IS NOT NULL AND NEW.node_name IS DISTINCT FROM OLD.node_name)
+    OR (OLD.namespace_uid IS NOT NULL AND NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid)
+    OR (OLD.source_claim_uid IS NOT NULL AND NEW.source_claim_uid IS DISTINCT FROM OLD.source_claim_uid)
+    OR (OLD.claim_uid IS NOT NULL AND NEW.claim_uid IS DISTINCT FROM OLD.claim_uid)
+    OR (OLD.pod_uid IS NOT NULL AND NEW.pod_uid IS DISTINCT FROM OLD.pod_uid)
+    OR (OLD.identity IS NOT NULL AND NEW.identity IS DISTINCT FROM OLD.identity)
+    OR (OLD.create_attempted AND NOT NEW.create_attempted)
+  THEN RAISE EXCEPTION 'Factory worker identity and admitted profile are immutable'; END IF;
+  RETURN NEW;
+END $$;
+
 CREATE FUNCTION factory.protect_development_workspace_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF NEW.project_id <> OLD.project_id
+  IF NEW.factorybox_worker_id <> OLD.factorybox_worker_id OR NEW.project_id <> OLD.project_id
     OR NEW.kind <> OLD.kind
     OR NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id
     OR NEW.ticket_id IS DISTINCT FROM OLD.ticket_id
@@ -829,7 +862,7 @@ CREATE FUNCTION factory.protect_execution_slot() RETURNS trigger
     AS $$
 BEGIN
   IF TG_OP = 'UPDATE' THEN
-    IF NEW.id <> OLD.id OR NEW.role <> OLD.role OR NEW.runtime_host_image <> OLD.runtime_host_image
+    IF NEW.factorybox_worker_id <> OLD.factorybox_worker_id OR NEW.id <> OLD.id OR NEW.role <> OLD.role OR NEW.runtime_host_image <> OLD.runtime_host_image
       OR NEW.kubernetes_namespace <> OLD.kubernetes_namespace OR NEW.created_at <> OLD.created_at
       OR NEW.expires_at <> OLD.expires_at
       OR (OLD.namespace_uid IS NOT NULL AND NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid)
@@ -862,8 +895,8 @@ CREATE FUNCTION factory.protect_factorybox_operation() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF ROW(NEW.id,NEW.runtime_attempt_id,NEW.action,NEW.snapshot_id,NEW.intended_at)
-    IS DISTINCT FROM ROW(OLD.id,OLD.runtime_attempt_id,OLD.action,OLD.snapshot_id,OLD.intended_at)
+  IF ROW(NEW.id,NEW.runtime_attempt_id,NEW.action,NEW.snapshot_id,NEW.request,NEW.intended_at)
+    IS DISTINCT FROM ROW(OLD.id,OLD.runtime_attempt_id,OLD.action,OLD.snapshot_id,OLD.request,OLD.intended_at)
     OR (OLD.attempted_at IS NOT NULL AND NEW.attempted_at IS DISTINCT FROM OLD.attempted_at)
     OR (OLD.completed_at IS NOT NULL AND NEW IS DISTINCT FROM OLD) THEN
     RAISE EXCEPTION 'Factorybox lifecycle intent and completed observation are immutable';
@@ -899,7 +932,8 @@ BEGIN
     OR (OLD.factorybox_preparation IS NOT NULL AND NEW.factorybox_preparation IS DISTINCT FROM OLD.factorybox_preparation)
     OR (OLD.factorybox_start_attempted AND NOT NEW.factorybox_start_attempted)
     OR (OLD.factorybox_pause_attempted AND NOT NEW.factorybox_pause_attempted)
-    OR (OLD.factorybox_resume_attempted AND NOT NEW.factorybox_resume_attempted) THEN
+    OR (OLD.factorybox_resume_attempted AND NOT NEW.factorybox_resume_attempted)
+    OR (OLD.factorybox_delete_attempted AND NOT NEW.factorybox_delete_attempted) THEN
     RAISE EXCEPTION 'Factorybox execution slot artifacts and admitted identity are immutable';
   END IF;
   RETURN NEW;
@@ -1033,7 +1067,7 @@ CREATE FUNCTION factory.protect_runtime_attempt_identity() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF NEW.project_id <> OLD.project_id
+  IF NEW.factorybox_worker_id <> OLD.factorybox_worker_id OR NEW.project_id <> OLD.project_id
     OR NEW.change_id IS DISTINCT FROM OLD.change_id
     OR NEW.workspace_id IS DISTINCT FROM OLD.workspace_id
     OR NEW.generation <> OLD.generation
@@ -1183,7 +1217,8 @@ BEGIN
     JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
     WHERE attempt.id=NEW.assigned_attempt_id AND attempt.isolated_kind::text=NEW.role
       AND attempt.workspace_id IS NULL AND attempt.kubernetes_namespace=NEW.kubernetes_namespace
-      AND attempt.kubernetes_pod_name='slot' AND artifact.runtime_host_image=NEW.runtime_host_image
+      AND attempt.factorybox_worker_id=NEW.factorybox_worker_id
+      AND attempt.kubernetes_pod_name='worker' AND artifact.runtime_host_image=NEW.runtime_host_image
   ) THEN
     RAISE EXCEPTION 'Execution slot assignment requires matching immutable runtime intent' USING ERRCODE = '23514';
   END IF;
@@ -1938,6 +1973,23 @@ CREATE TABLE factory.developer_ide (
     CONSTRAINT developer_ide_state_check CHECK ((state = ANY (ARRAY['create-intended'::text, 'preparing'::text, 'ready'::text, 'failed'::text, 'stop-intended'::text, 'stopped'::text])))
 );
 
+CREATE TABLE factory.factorybox_worker (
+    singleton boolean DEFAULT true NOT NULL PRIMARY KEY CHECK (singleton),
+    id uuid DEFAULT gen_random_uuid() NOT NULL UNIQUE,
+    profile jsonb,
+    runtime_host_image text,
+    node_name text,
+    namespace_uid text,
+    source_claim_uid text,
+    claim_uid text,
+    pod_uid text,
+    identity jsonb,
+    create_attempted boolean DEFAULT false NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CHECK ((profile IS NULL) = (runtime_host_image IS NULL)),
+    CHECK (runtime_host_image IS NULL OR runtime_host_image ~ '@sha256:[0-9a-f]{64}$')
+);
+
 CREATE TABLE factory.development_workspace (
     id uuid NOT NULL,
     project_id uuid NOT NULL,
@@ -1947,13 +1999,14 @@ CREATE TABLE factory.development_workspace (
     change_id uuid,
     source_branch text NOT NULL,
     source_revision text NOT NULL,
-    kubernetes_namespace text NOT NULL,
-    volume_name text NOT NULL,
+    factorybox_worker_id uuid DEFAULT factory.ensure_factorybox_worker() NOT NULL REFERENCES factory.factorybox_worker(id),
+    kubernetes_namespace text GENERATED ALWAYS AS (factory.factorybox_namespace(factorybox_worker_id)) STORED NOT NULL,
+    volume_name text GENERATED ALWAYS AS ('runtime-data'::text) STORED NOT NULL,
     created_by uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT development_workspace_check CHECK ((((kind = 'personal'::factory.development_workspace_kind) AND (owner_user_id IS NOT NULL) AND (ticket_id IS NULL) AND (change_id IS NULL)) OR ((kind = 'ticket'::factory.development_workspace_kind) AND (owner_user_id IS NULL) AND (ticket_id IS NOT NULL) AND (change_id IS NOT NULL)))),
-    CONSTRAINT development_workspace_kubernetes_namespace_check CHECK ((kubernetes_namespace ~ '^factory-workspace-[0-9a-f]{12}$'::text)),
+    CONSTRAINT development_workspace_kubernetes_namespace_check CHECK ((kubernetes_namespace ~ '^factory-box-[0-9a-f]{32}$'::text)),
     CONSTRAINT development_workspace_source_branch_check CHECK (((length(source_branch) >= 1) AND (length(source_branch) <= 200))),
     CONSTRAINT development_workspace_source_revision_check CHECK ((source_revision ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
     CONSTRAINT development_workspace_volume_name_check CHECK ((volume_name ~ '^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'::text))
@@ -2034,7 +2087,8 @@ CREATE TABLE factory.execution_slot (
     role text NOT NULL,
     state text NOT NULL,
     runtime_host_image text NOT NULL,
-    kubernetes_namespace text NOT NULL,
+    factorybox_worker_id uuid DEFAULT factory.ensure_factorybox_worker() NOT NULL REFERENCES factory.factorybox_worker(id),
+    kubernetes_namespace text GENERATED ALWAYS AS (factory.factorybox_namespace(factorybox_worker_id)) STORED NOT NULL,
     namespace_uid text,
     pod_uid text,
     claim_uid text,
@@ -2049,11 +2103,12 @@ CREATE TABLE factory.execution_slot (
     factorybox_start_attempted boolean DEFAULT false NOT NULL,
     factorybox_pause_attempted boolean DEFAULT false NOT NULL,
     factorybox_resume_attempted boolean DEFAULT false NOT NULL,
+    factorybox_delete_attempted boolean DEFAULT false NOT NULL,
     CONSTRAINT execution_slot_check CHECK (((assigned_attempt_id IS NULL) = (assigned_at IS NULL))),
     CONSTRAINT execution_slot_check1 CHECK (((state <> 'assigned'::text) OR (assigned_attempt_id IS NOT NULL))),
     CONSTRAINT execution_slot_check2 CHECK (((state <> 'ready'::text) OR ((namespace_uid IS NOT NULL) AND (pod_uid IS NOT NULL) AND (claim_uid IS NOT NULL)))),
     CONSTRAINT execution_slot_check3 CHECK ((expires_at > created_at)),
-    CONSTRAINT execution_slot_kubernetes_namespace_check CHECK ((kubernetes_namespace ~ '^factory-reserve-[0-9a-f]{12}$'::text)),
+    CONSTRAINT execution_slot_kubernetes_namespace_check CHECK ((kubernetes_namespace ~ '^factory-box-[0-9a-f]{32}$'::text)),
     CONSTRAINT execution_slot_role_check CHECK ((role = ANY (ARRAY['staging'::text, 'verification'::text]))),
     CONSTRAINT execution_slot_runtime_host_image_check CHECK ((runtime_host_image ~ '^[a-zA-Z0-9.:/-]+@sha256:[0-9a-f]{64}$'::text)),
     CONSTRAINT execution_slot_state_check CHECK ((state = ANY (ARRAY['creating'::text, 'ready'::text, 'assigned'::text, 'retiring'::text, 'deleted'::text])))
@@ -2073,12 +2128,15 @@ CREATE TABLE factory.factorybox_lifecycle_operation (
     runtime_attempt_id uuid NOT NULL,
     action text NOT NULL,
     snapshot_id text,
+    request jsonb,
     intended_at timestamp with time zone DEFAULT now() NOT NULL,
     attempted_at timestamp with time zone,
     completed_at timestamp with time zone,
     observation jsonb,
-    CONSTRAINT factorybox_lifecycle_operation_action_check CHECK ((action = ANY (ARRAY['prepare'::text, 'start'::text, 'pause'::text, 'resume'::text, 'delete'::text]))),
-    CONSTRAINT factorybox_lifecycle_operation_check CHECK (((action = ANY (ARRAY['pause'::text, 'resume'::text])) = (snapshot_id IS NOT NULL))),
+    CONSTRAINT factorybox_lifecycle_operation_action_check CHECK ((action = ANY (ARRAY['prepare'::text, 'start'::text, 'pause'::text, 'resume'::text, 'delete'::text, 'retire-checkpoint'::text]))),
+    CONSTRAINT factorybox_lifecycle_operation_check CHECK (((action = ANY (ARRAY['pause'::text, 'resume'::text, 'retire-checkpoint'::text])) = (snapshot_id IS NOT NULL))),
+    CONSTRAINT factorybox_lifecycle_operation_request_check CHECK (((action = 'retire-checkpoint'::text) = (request IS NOT NULL))),
+    CONSTRAINT factorybox_lifecycle_operation_request_snapshot_check CHECK (((request IS NULL) OR ((jsonb_typeof(request) = 'object'::text) AND ((request ->> 'snapshot_id'::text) IS NOT DISTINCT FROM snapshot_id)))),
     CONSTRAINT factorybox_lifecycle_operation_snapshot_id_check CHECK ((snapshot_id ~ '^[a-f0-9]{32}$'::text))
 );
 
@@ -3033,9 +3091,10 @@ CREATE TABLE factory.runtime_attempt (
     generation bigint NOT NULL,
     revision text NOT NULL,
     state factory.runtime_attempt_state NOT NULL,
-    kubernetes_namespace text NOT NULL,
+    factorybox_worker_id uuid DEFAULT factory.ensure_factorybox_worker() NOT NULL REFERENCES factory.factorybox_worker(id),
+    kubernetes_namespace text GENERATED ALWAYS AS (factory.factorybox_namespace(factorybox_worker_id)) STORED NOT NULL,
     kubernetes_namespace_uid text,
-    kubernetes_pod_name text NOT NULL,
+    kubernetes_pod_name text GENERATED ALWAYS AS ('worker'::text) STORED NOT NULL,
     kubernetes_uid text,
     parent_connector_token_hash text NOT NULL,
     child_connector_token_hash text NOT NULL,
@@ -3653,8 +3712,7 @@ ALTER TABLE ONLY factory.development_workspace
 ALTER TABLE ONLY factory.development_workspace
     ADD CONSTRAINT development_workspace_id_project_id_key UNIQUE (id, project_id);
 
-ALTER TABLE ONLY factory.development_workspace
-    ADD CONSTRAINT development_workspace_kubernetes_namespace_key UNIQUE (kubernetes_namespace);
+
 
 ALTER TABLE ONLY factory.development_workspace
     ADD CONSTRAINT development_workspace_pkey PRIMARY KEY (id);
@@ -3686,8 +3744,7 @@ ALTER TABLE ONLY factory.execution_policy
 ALTER TABLE ONLY factory.execution_slot
     ADD CONSTRAINT execution_slot_assigned_attempt_id_key UNIQUE (assigned_attempt_id);
 
-ALTER TABLE ONLY factory.execution_slot
-    ADD CONSTRAINT execution_slot_kubernetes_namespace_key UNIQUE (kubernetes_namespace);
+
 
 ALTER TABLE ONLY factory.execution_slot
     ADD CONSTRAINT execution_slot_pkey PRIMARY KEY (id);
@@ -4040,8 +4097,7 @@ ALTER TABLE ONLY factory.runtime_attempt
 ALTER TABLE ONLY factory.runtime_attempt
     ADD CONSTRAINT runtime_attempt_id_workspace_id_key UNIQUE (id, workspace_id);
 
-ALTER TABLE ONLY factory.runtime_attempt
-    ADD CONSTRAINT runtime_attempt_kubernetes_namespace_kubernetes_pod_name_key UNIQUE (kubernetes_namespace, kubernetes_pod_name);
+
 
 ALTER TABLE ONLY factory.runtime_attempt
     ADD CONSTRAINT runtime_attempt_pkey PRIMARY KEY (id);
@@ -4403,6 +4459,8 @@ CREATE CONSTRAINT TRIGGER execution_slot_assignment AFTER INSERT OR UPDATE ON fa
 CREATE TRIGGER execution_slot_identity BEFORE INSERT OR UPDATE ON factory.execution_slot FOR EACH ROW EXECUTE FUNCTION factory.protect_execution_slot();
 
 CREATE TRIGGER factorybox_operation_identity BEFORE UPDATE ON factory.factorybox_lifecycle_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_factorybox_operation();
+
+CREATE TRIGGER factorybox_worker_identity BEFORE UPDATE OR DELETE ON factory.factorybox_worker FOR EACH ROW EXECUTE FUNCTION factory.protect_factorybox_worker();
 
 CREATE TRIGGER factorybox_runtime_identity BEFORE INSERT OR UPDATE ON factory.factorybox_runtime FOR EACH ROW EXECUTE FUNCTION factory.protect_factorybox_runtime();
 
