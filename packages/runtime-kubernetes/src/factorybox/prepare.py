@@ -1,5 +1,6 @@
 """Prepare one Factory-owned OCI input inside an admitted live worker."""
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -44,11 +45,48 @@ def input_mounts(bundle):
     return rows
 
 
+def image_base(request, status, seed, rootfs_sha256, cli):
+    # All Sandboxes on this worker use one exact consumer image. Serialize its
+    # import, rather than extracting another multi-gigabyte source per Sandbox.
+    images = Path(status['store'])/'consumer-images'
+    images.mkdir(mode=0o700, exist_ok=True)
+    descriptor = os.open(images/'.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, 'r+') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        root = images/rootfs_sha256
+        intent = {'version': 1, 'storeID': request['storeID'], 'epoch': request['epoch'],
+                  'podUID': request['podUID'], 'runtimeHostImage': request['runtimeHostImage'],
+                  'rootfsSHA256': rootfs_sha256}
+        if root.exists():
+            if json.loads((root/'prepared.json').read_text()) != intent:
+                raise ValueError('Shared consumer image import is incomplete or belongs to another identity')
+        else:
+            root.mkdir(mode=0o700)
+            publish(root/'intent.json', intent)
+            source = root/'source'
+            source.mkdir(mode=0o755)
+            subprocess.run(['tar', '--numeric-owner', '--same-owner', '-xpf', str(seed/'rootfs.tar'),
+                            '-C', str(source)], check=True, timeout=90)
+            for directory in ['proc', 'sys', 'dev', 'run', 'tmp', 'workspace',
+                              'factory/assignment', 'factory/registry-ca', 'home/coder']:
+                (source/directory).mkdir(parents=True, exist_ok=True)
+            # No authored checkout may be baked into the common image.
+            # A shared-source mountpoint is created later in that Sandbox's upper.
+            project = source/'home/coder/project'
+            if project.exists():
+                project.rmdir()
+            (source/'tmp').chmod(0o1777)
+            publish(root/'prepared.json', intent)
+        return json.loads(subprocess.check_output(
+            [*cli, 'prepare-base', '--source', str(root/'source'), 'factory-runtime'], timeout=120))
+
+
 def prepare(request):
     request.setdefault('reserveSeed', False)
-    if set(request) != {'version', 'storeID', 'epoch', 'podUID', 'runtimeHostImage', 'sharedSource', 'bootstrap', 'reserveSeed'}:
+    if set(request) != {'version', 'sandboxID', 'storeID', 'epoch', 'podUID', 'runtimeHostImage', 'sharedSource', 'bootstrap', 'reserveSeed'}:
         raise ValueError('Unexpected Factory preparation fields')
-    if (request['version'] != 1 or type(request['sharedSource']) is not bool or type(request['reserveSeed']) is not bool or
+    if (request['version'] != 2 or not re.fullmatch(r'runtime-[a-f0-9]{32}', request['sandboxID']) or
+            type(request['sharedSource']) is not bool or type(request['reserveSeed']) is not bool or
             (request['reserveSeed'] and request['sharedSource']) or
             not all(re.fullmatch('[a-f0-9]{32}', request[key]) for key in ['storeID', 'epoch']) or
             not re.fullmatch(r'[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}', request['runtimeHostImage']) or
@@ -67,13 +105,17 @@ def prepare(request):
     expected = (seed/'rootfs.sha256').read_text().split()
     if len(expected) != 2 or expected[1] != 'rootfs.tar' or digest(seed/'rootfs.tar') != expected[0]:
         raise ValueError('Complete consumer rootfs differs from its committed export')
-    root = Path(status['store'])/'input'/request['storeID']
+    root = Path(status['store'])/'input'/request['sandboxID']
     plan = {'request': request, 'rootfsSHA256': expected[0]}
     if root.exists():
         if json.loads((root/'intent.json').read_text()) != plan:
             raise ValueError('Private input already belongs to another preparation')
         completed = json.loads((root/'prepared.json').read_text())
-        if digest(root/'bundle/config.json') != completed['configSHA256']:
+        if (completed.get('version') != 2 or completed.get('sandboxID') != request['sandboxID'] or
+                completed.get('bundle') != str(root/'bundle') or completed.get('storeID') != request['storeID'] or
+                completed.get('epoch') != request['epoch'] or completed.get('podUID') != request['podUID'] or
+                completed.get('rootfsSHA256') != expected[0] or
+                digest(root/'bundle/config.json') != completed['configSHA256']):
             raise ValueError('Prepared OCI configuration changed')
         return completed
     root.parent.mkdir(mode=0o700, exist_ok=True)
@@ -81,20 +123,7 @@ def prepare(request):
     publish(root/'intent.json', plan)
     bundle = root/'bundle'
     bundle.mkdir(mode=0o700)
-    source = bundle/'lower-input'
-    source.mkdir(mode=0o755)
-    subprocess.run(['tar', '--numeric-owner', '--same-owner', '-xpf', str(seed/'rootfs.tar'), '-C', str(source)], check=True, timeout=90)
-    for directory in ['proc', 'sys', 'dev', 'run', 'tmp', 'workspace', 'factory/assignment', 'factory/registry-ca', 'home/coder']:
-        (source/directory).mkdir(parents=True, exist_ok=True)
-    project_target = source/'home/coder/project'
-    if request['sharedSource']:
-        project_target.mkdir(parents=True, exist_ok=True)
-    elif project_target.exists():
-        # A fresh isolated checkout and an unassigned reserve must start with
-        # no Project directory. Never accept image-baked repository contents.
-        project_target.rmdir()
-    (source/'tmp').chmod(0o1777)
-    base = json.loads(subprocess.check_output([*cli, 'prepare-base', '--source', str(source), 'factory-runtime'], timeout=120))
+    base = image_base(request, status, seed, expected[0], cli)
     for name in ['lower', 'upper', 'work', 'rootfs']:
         (bundle/name).mkdir(mode=0o755)
     subprocess.run(['mount', '--bind', base['tree']['saved'], str(bundle/'lower')], check=True)
@@ -102,6 +131,8 @@ def prepare(request):
     subprocess.run(['mount', '-t', 'overlay', 'overlay', '-o',
                     f'index=off,lowerdir={bundle}/lower,upperdir={bundle}/upper,workdir={bundle}/work', str(bundle/'rootfs')], check=True)
     filesystem = bundle/'rootfs'
+    if request['sharedSource']:
+        (filesystem/'home/coder/project').mkdir()
     # Secrets, Pod DNS and the bootstrap are private files, never extra foreign
     # binds. The only external writable bind is canonical Project source.
     for name in (['slot.json'] if request['reserveSeed'] else ['assignment.json', 'parent-token', 'child-token']):
@@ -162,7 +193,7 @@ def prepare(request):
     if set(mounts) != {str(bundle/name) for name in ['rootfs', 'lower']}:
         raise ValueError('Prepared input mount pair is incomplete')
     publish(root/'mounts.json', mounts)
-    completed = {'version': 1, 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': expected[0],
+    completed = {'version': 2, 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': expected[0],
                  'storeID': request['storeID'], 'epoch': request['epoch'], 'podUID': request['podUID']}
     publish(root/'prepared.json', completed)
     return completed
@@ -170,18 +201,18 @@ def prepare(request):
 
 def release(request, never_started):
     status = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
-    root = Path(status['store'])/'input'/request['storeID']
+    root = Path(status['store'])/'input'/request['sandboxID']
     if not (root/'prepared.json').is_file():
         raise ValueError('Incomplete preparation must remain retained for inspection')
     prepared = prepare(request)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
            '--worker-store-id', prepared['storeID'], '--worker-epoch', prepared['epoch']]
     if never_started:
-        if (Path(status['lifecycle']['root'])/'objects/runtime').exists():
+        if (Path(status['lifecycle']['root'])/'objects'/request['sandboxID']).exists():
             raise ValueError('Native runtime object exists despite never-started cleanup intent')
     else:
-        state = json.loads(subprocess.check_output([*cli, 'state', 'runtime'], timeout=15))
-        if state['record']['phase'] != 'deleted':
+        state = json.loads(subprocess.check_output([*cli, 'state', request['sandboxID']], timeout=15))
+        if state['record']['id'] != request['sandboxID'] or state['record']['phase'] != 'deleted':
             raise ValueError('Private input mounts can only release after confirmed native Delete')
     bundle = Path(prepared['bundle'])
     expected = json.loads((root/'mounts.json').read_text())

@@ -3,7 +3,11 @@ import { verificationSupervisor } from "./verification-process";
 import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
 import { runtimeVolumeClaimSpec } from "./storage";
-import { renderFactoryboxRuntime, type FactoryboxRuntimeProfile } from "./factorybox-runtime";
+import {
+  factoryboxSandboxID,
+  renderFactoryboxRuntime,
+  type FactoryboxRuntimeProfile,
+} from "./factorybox-runtime";
 
 export interface RuntimeManifestInput {
   readonly attemptID: string;
@@ -266,6 +270,7 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
   });
   const execution = renderFactoryboxRuntime({
     ...input,
+    sandboxID: factoryboxSandboxID(input.attemptID),
     labels,
     runtimeOwnerID: ownerID,
     profile: input.factoryboxProfile,

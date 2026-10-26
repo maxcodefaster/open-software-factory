@@ -54,6 +54,7 @@ export function configuredFactoryboxRuntimeProfile(
 
 export interface FactoryboxRuntimeInput {
   readonly attemptID: string;
+  readonly sandboxID: string;
   readonly workerID?: string;
   readonly reserve?: boolean;
   readonly namespace: string;
@@ -64,6 +65,13 @@ export interface FactoryboxRuntimeInput {
   readonly profile: FactoryboxRuntimeProfile;
   readonly sharedSource: boolean;
   readonly storageNode?: string;
+}
+
+export function factoryboxSandboxID(executionID: string) {
+  return `runtime-${z
+    .string()
+    .regex(/^[a-f0-9]{32}$/)
+    .parse(executionID.replaceAll("-", ""))}`;
 }
 
 export const factoryboxExportProgram = readFileSync(
@@ -93,6 +101,9 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
       .parse(value.replaceAll("-", ""));
   if (input.storageNode && input.storageNode !== profile.nodeName)
     throw new Error("Canonical source and the admitted Factorybox worker must use the same node");
+  const executionID = input.reserve ? input.labels["factory.dev/execution-slot"] : input.attemptID;
+  if (!executionID || input.sandboxID !== factoryboxSandboxID(executionID))
+    throw new Error("Sandbox identity differs from its immutable execution or reserve slot");
   return {
     version: 1 as const,
     ...profile,
@@ -182,7 +193,8 @@ export function factoryboxPreparationRequest(
   )
     throw new Error("Factory preparation does not match its admitted worker");
   return {
-    version: 1,
+    version: 2,
+    sandboxID: input.sandboxID,
     storeID: identity.storeID,
     epoch: identity.epoch,
     podUID: identity.podUID,
@@ -244,8 +256,9 @@ export async function prepareFactoryboxRuntime(
     throw new Error(`Factorybox preparation is unconfirmed: ${result.stderr}`);
   return z
     .strictObject({
-      version: z.literal(1),
-      bundle: z.literal(`/var/lib/sysbox/fixed-store/data/store/input/${identity.storeID}/bundle`),
+      version: z.literal(2),
+      sandboxID: z.literal(input.sandboxID),
+      bundle: z.literal(`/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle`),
       configSHA256: z.string().regex(/^[a-f0-9]{64}$/),
       rootfsSHA256: z.string().regex(/^[a-f0-9]{64}$/),
       storeID: z.literal(identity.storeID),

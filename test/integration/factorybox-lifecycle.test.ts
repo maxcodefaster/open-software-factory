@@ -5,6 +5,7 @@ import {
   type FactoryboxRuntimeInput,
   factoryboxRuntimeDeclaration,
   factoryboxRuntimeRequest,
+  factoryboxSandboxID,
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import type { runFactoryboxKubernetes } from "../../packages/runtime-kubernetes/src/factorybox-worker";
 import { fixture } from "../fixtures/change-agent-turns";
@@ -43,6 +44,7 @@ test.each(["arm64", "amd64"] as const)(
       };
       const input: FactoryboxRuntimeInput = {
         attemptID: owned.attemptID,
+        sandboxID: factoryboxSandboxID(owned.attemptID),
         namespace: attempt.namespace,
         podName: attempt.podName,
         runtimeOwnerID: attempt.workspaceID,
@@ -122,7 +124,7 @@ test.each(["arm64", "amd64"] as const)(
         pause?: { snapshot_id: string; completed_at: string; resume?: { completed_at: string } };
       } = {
         version: 1,
-        id: "runtime",
+        id: input.sandboxID,
         owner: "f".repeat(32),
         phase: "starting",
         input_sha256: "1".repeat(64),
@@ -130,7 +132,7 @@ test.each(["arm64", "amd64"] as const)(
       const mutations: string[] = [];
       let preparations = 0;
       let releases = 0;
-      const run: typeof runFactoryboxKubernetes = async (args) => {
+      const run: typeof runFactoryboxKubernetes = async (args, body) => {
         if (args[0] === "get")
           return {
             exitCode: 0,
@@ -142,6 +144,7 @@ test.each(["arm64", "amd64"] as const)(
         if (args.at(-1) === "worker-status")
           return { exitCode: 0, stderr: "", stdout: JSON.stringify(status) };
         if (args.includes("python3")) {
+          expect(JSON.parse(body ?? "null").sandboxID).toBe(input.sandboxID);
           if (args.at(-1) === "release") {
             releases++;
             return {
@@ -159,8 +162,9 @@ test.each(["arm64", "amd64"] as const)(
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
-              version: 1,
-              bundle: `/var/lib/sysbox/fixed-store/data/store/input/${request.storeID}/bundle`,
+              version: 2,
+              sandboxID: input.sandboxID,
+              bundle: `/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle`,
               configSHA256: "1".repeat(64),
               rootfsSHA256: "2".repeat(64),
               storeID: request.storeID,
@@ -172,6 +176,7 @@ test.each(["arm64", "amd64"] as const)(
         const index = args.indexOf("--worker-epoch");
         const action = args[index + 2];
         if (!action) throw new Error("Missing lifecycle command");
+        expect(args.at(-1)).toBe(input.sandboxID);
         if (action !== "state") {
           mutations.push(action);
           const [intent] = await database.client<

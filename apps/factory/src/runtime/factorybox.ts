@@ -6,6 +6,7 @@ import {
   factoryboxRuntimeDeclaration,
   factoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
+  factoryboxSandboxID,
   renderFactoryboxRuntime,
   prepareFactoryboxRuntime,
   releaseFactoryboxRuntime,
@@ -107,14 +108,20 @@ export function createFactoryboxExecution(
   ) {
     const identity = saved.identity;
     if (!identity) throw new Error("Factorybox worker has no admitted identity");
+    const request = factoryboxRuntimeRequest(saved.request);
+    if ("sandboxID" in op && op.sandboxID !== saved.request.sandboxID)
+      throw new Error("Factorybox operation belongs to another Sandbox");
     const record = await intent(
       connection,
       attemptID,
       op.action,
       "snapshotID" in op ? op.snapshotID : null,
     );
-    if (record.completed) return record.observation;
-    const request = factoryboxRuntimeRequest(saved.request);
+    if (record.completed)
+      return z
+        .object({ id: z.literal(saved.request.sandboxID) })
+        .passthrough()
+        .parse(record.observation);
     const declaration = factoryboxRuntimeDeclaration(saved.request);
     // Once an external command may have run, only observation can settle it.
     // The same native command is never retried after lost output.
@@ -124,7 +131,7 @@ export function createFactoryboxExecution(
         ? await executeFactoryboxOperation(
             request,
             identity,
-            { action: "state", sandboxID: "runtime" },
+            { action: "state", sandboxID: saved.request.sandboxID },
             run,
             declaration,
           )
@@ -137,7 +144,7 @@ export function createFactoryboxExecution(
       .object({
         runtime: z.object({ status: z.string() }).optional(),
         record: z.object({
-          id: z.literal("runtime"),
+          id: z.literal(saved.request.sandboxID),
           phase: z.string(),
           input_sha256: z.string().optional(),
           owner: z.string(),
@@ -174,8 +181,17 @@ export function createFactoryboxExecution(
     return compact;
   }
   async function preparation(connection: SQL, attemptID: string, saved: Retained) {
+    factoryboxRuntimeRequest(saved.request);
+    const path = `/var/lib/sysbox/fixed-store/data/store/input/${saved.request.sandboxID}/prepared.json`;
     const operation = await intent(connection, attemptID, "prepare");
-    if (operation.completed) return z.object({ bundle: z.string() }).parse(operation.observation);
+    if (operation.completed)
+      return z
+        .object({
+          version: z.literal(2),
+          sandboxID: z.literal(saved.request.sandboxID),
+          bundle: z.literal(path.replace("/prepared.json", "/bundle")),
+        })
+        .parse(operation.observation);
     if (operation.attempted) {
       // Preparation publishes a private commit marker. A missing/incomplete
       // marker requires an explicit Stop; do not repeat extraction or mounts.
@@ -186,7 +202,6 @@ export function createFactoryboxExecution(
         run,
         factoryboxRuntimeDeclaration(saved.request),
       );
-      const path = `/var/lib/sysbox/fixed-store/data/store/input/${saved.identity.storeID}/prepared.json`;
       const result = await run([
         "exec",
         saved.request.podName,
@@ -204,7 +219,8 @@ export function createFactoryboxExecution(
         throw new Error("Factorybox preparation remains unconfirmed; its inputs were retained");
       const observed = z
         .object({
-          version: z.literal(1),
+          version: z.literal(2),
+          sandboxID: z.literal(saved.request.sandboxID),
           storeID: z.literal(saved.identity.storeID),
           epoch: z.literal(saved.identity.epoch),
           podUID: z.literal(saved.identity.podUID),
@@ -248,6 +264,7 @@ export function createFactoryboxExecution(
       if (!attempt?.profile) return null;
       const input: FactoryboxRuntimeInput = {
         attemptID,
+        sandboxID: factoryboxSandboxID(attempt.slotID ?? attemptID),
         namespace: attempt.namespace,
         podName: attempt.podName,
         runtimeOwnerID: attempt.ownerID,
@@ -305,7 +322,10 @@ export function createFactoryboxExecution(
         if (!prepared?.completed)
           throw new Error("Incomplete Factorybox preparation was retained for inspection");
         if (start?.attempted)
-          await perform(connection, attemptID, saved, { action: "delete", sandboxID: "runtime" });
+          await perform(connection, attemptID, saved, {
+            action: "delete",
+            sandboxID: saved.request.sandboxID,
+          });
         await releaseFactoryboxRuntime(saved.request, saved.identity, !start?.attempted, run);
         await connection`UPDATE factory.factorybox_runtime SET inputs_released_at=now() WHERE runtime_attempt_id=${attemptID} AND inputs_released_at IS NULL`;
       });
@@ -353,6 +373,7 @@ export function createFactoryboxExecution(
           if (!owner) throw new Error("Factorybox runtime has no durable owner");
           const request: FactoryboxRuntimeInput = {
             attemptID,
+            sandboxID: factoryboxSandboxID(attempt.slotID ?? attemptID),
             namespace: parsed.metadata.namespace,
             podName: parsed.metadata.name,
             runtimeOwnerID: owner,
@@ -399,7 +420,7 @@ export function createFactoryboxExecution(
             saved,
             {
               action: "start",
-              sandboxID: "runtime",
+              sandboxID: request.sandboxID,
               bundle: prepared.bundle,
             },
             Boolean(attempt.slotID),
@@ -432,7 +453,7 @@ export function createFactoryboxExecution(
         hub.revoke(attemptID);
         await perform(connection, attemptID, saved, {
           action: "pause",
-          sandboxID: "runtime",
+          sandboxID: saved.request.sandboxID,
           snapshotID: snapshot,
         });
         await connection`UPDATE factory.runtime_attempt SET state='paused',failure=NULL,updated_at=now()
@@ -471,7 +492,7 @@ export function createFactoryboxExecution(
           hub.allow(attemptID, Number(attempt.generation), attempt.parent, attempt.child);
           await perform(connection, attemptID, saved, {
             action: "resume",
-            sandboxID: "runtime",
+            sandboxID: saved.request.sandboxID,
             snapshotID: pause.snapshot,
           });
           await connection`UPDATE factory.runtime_attempt SET state='starting',failure=NULL,updated_at=now()

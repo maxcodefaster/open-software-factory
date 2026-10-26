@@ -11,6 +11,7 @@ import type { runFactoryboxKubernetes } from "./factorybox-worker";
 
 const input: FactoryboxRuntimeInput = {
   attemptID: "01234567-89ab-5def-8123-456789abcdef",
+  sandboxID: "runtime-0123456789ab5def8123456789abcdef",
   runtimeOwnerID: "11234567-89ab-5def-8123-456789abcdef",
   namespace: "factory-test",
   podName: "runtime-1",
@@ -27,6 +28,72 @@ const input: FactoryboxRuntimeInput = {
     claimGiB: 32,
   },
 };
+
+test("two executions on one worker retain distinct Sandbox and preparation identities", () => {
+  const workerID = "a".repeat(32);
+  const identity = {
+    version: 1 as const,
+    namespaceUID: "namespace",
+    claimUID: "claim",
+    podUID: "pod",
+    storeID: workerID,
+    epoch: "e".repeat(32),
+    bootID: "boot",
+    executableSHA256: input.profile.executableSHA256,
+    controllerRoot: "/controller",
+  };
+  const first = factoryboxPreparationRequest({ ...input, workerID }, identity);
+  const second = factoryboxPreparationRequest(
+    {
+      ...input,
+      workerID,
+      attemptID: "21234567-89ab-5def-8123-456789abcdef",
+      sandboxID: "runtime-2123456789ab5def8123456789abcdef",
+    },
+    identity,
+  );
+  expect(first.version).toBe(2);
+  expect(first.sandboxID).toBe("runtime-0123456789ab5def8123456789abcdef");
+  expect(second.sandboxID).toBe("runtime-2123456789ab5def8123456789abcdef");
+  expect(second.storeID).toBe(first.storeID);
+});
+
+test("missing, changed and another execution's Sandbox identities fail before worker effects", () => {
+  for (const sandboxID of [undefined, "runtime", "runtime-" + "a".repeat(32)]) {
+    expect(() =>
+      renderFactoryboxRuntime({ ...input, sandboxID } as FactoryboxRuntimeInput),
+    ).toThrow("Sandbox identity");
+  }
+});
+
+test("assigning a never-used reserve keeps its original Sandbox independently of the worker ID", () => {
+  const slotID = "31234567-89ab-5def-8123-456789abcdef";
+  const workerID = "a".repeat(32);
+  const reserved = {
+    ...input,
+    attemptID: slotID,
+    sandboxID: `runtime-${slotID.replaceAll("-", "")}`,
+    workerID,
+    reserve: true,
+    sharedSource: false,
+    labels: { ...input.labels, "factory.dev/execution-slot": slotID },
+  };
+  const identity = {
+    version: 1 as const,
+    namespaceUID: "namespace",
+    claimUID: "claim",
+    podUID: "pod",
+    storeID: workerID,
+    epoch: "e".repeat(32),
+    bootID: "boot",
+    executableSHA256: input.profile.executableSHA256,
+    controllerRoot: "/controller",
+  };
+  const before = factoryboxPreparationRequest(reserved, identity);
+  const after = factoryboxPreparationRequest({ ...reserved, attemptID: input.attemptID }, identity);
+  expect(after).toEqual(before);
+  expect(after.sandboxID).not.toContain(workerID);
+});
 
 test("registry trust follows the qualified exact runtime image, including private ports", () => {
   for (const authority of ["ghcr.io", "registry.portable.svc:5000"]) {

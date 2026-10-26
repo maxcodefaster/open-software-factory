@@ -8,6 +8,7 @@ import {
   factoryboxRuntimeProfile,
   renderFactoryboxRuntime,
   factoryboxRuntimeRequest,
+  factoryboxSandboxID,
   factoryboxRuntimeDeclaration,
   prepareFactoryboxRuntime,
   releaseFactoryboxRuntime,
@@ -105,6 +106,7 @@ export function factoryboxReserveInput(
   };
   return {
     attemptID: slot.assignedAttemptID ?? slot.id,
+    sandboxID: factoryboxSandboxID(slot.id),
     workerID: slot.id,
     reserve: true,
     namespace: slot.namespace,
@@ -265,7 +267,8 @@ export const slotActivationCommand =
   'set -eu\nIFS= read -r expected_uid\ntest "$FACTORY_POD_UID" = "$expected_uid"\ntest -d /home/coder/.factory-reserve\ntest ! -L /home/coder/.factory-reserve\nfile=$(mktemp /home/coder/.factory-reserve/.activation-XXXXXX)\ntrap \'rm -f "$file"\' EXIT\nhead -c 1048577 > "$file"\ntest "$(wc -c < "$file")" -le 1048576\nchmod 0400 "$file"\nchown 100000:100000 "$file"\nsync "$file"\nif test -f /home/coder/.factory-reserve/activation.json; then cmp -s "$file" /home/coder/.factory-reserve/activation.json; else ln "$file" /home/coder/.factory-reserve/activation.json; sync /home/coder/.factory-reserve; fi\n';
 
 const preparation = z.object({
-  version: z.literal(1),
+  version: z.literal(2),
+  sandboxID: z.string(),
   bundle: z.string(),
   configSHA256: z.string(),
   rootfsSHA256: z.string(),
@@ -277,7 +280,7 @@ async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxW
   const result = await executeFactoryboxOperation(
     factoryboxRuntimeRequest(input),
     identity,
-    { action: "state", sandboxID: "runtime" },
+    { action: "state", sandboxID: input.sandboxID },
     runFactoryboxKubernetes,
     factoryboxRuntimeDeclaration(input),
   );
@@ -285,7 +288,7 @@ async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxW
   return z
     .object({
       record: z.object({
-        id: z.literal("runtime"),
+        id: z.literal(input.sandboxID),
         runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
         phase: z.literal("running"),
       }),
@@ -367,7 +370,7 @@ export function createReserveClient(): ReserveClient {
       const result = await executeFactoryboxOperation(
         factoryboxRuntimeRequest(input),
         identity,
-        { action: "delete", sandboxID: "runtime" },
+        { action: "delete", sandboxID: input.sandboxID },
         runFactoryboxKubernetes,
         factoryboxRuntimeDeclaration(input),
       );
@@ -424,11 +427,20 @@ export function createReserveClient(): ReserveClient {
           ),
         };
       const prepared = preparation.parse(slot.factoryboxPreparation);
+      if (
+        prepared.sandboxID !== input.sandboxID ||
+        prepared.bundle !==
+          `/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle` ||
+        prepared.storeID !== identity.storeID ||
+        prepared.epoch !== identity.epoch ||
+        prepared.podUID !== identity.podUID
+      )
+        throw new Error("Execution slot preparation belongs to another Sandbox or worker");
       if (options?.startAllowed) {
         const started = await executeFactoryboxOperation(
           factoryboxRuntimeRequest(input),
           identity,
-          { action: "start", sandboxID: "runtime", bundle: prepared.bundle },
+          { action: "start", sandboxID: input.sandboxID, bundle: prepared.bundle },
           runFactoryboxKubernetes,
           factoryboxRuntimeDeclaration(input),
         );
