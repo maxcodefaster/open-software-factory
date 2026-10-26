@@ -3348,6 +3348,7 @@ CREATE TABLE factory.workspace_source (
     workspace_id uuid NOT NULL,
     source_directory text GENERATED ALWAYS AS (('workspaces/'::text || replace(workspace_id::text, '-'::text, ''::text)) || '/home'::text) STORED NOT NULL,
     access_epoch bigint DEFAULT 1 NOT NULL,
+    resource_key text GENERATED ALWAYS AS ((replace(workspace_id::text, '-'::text, ''::text) || '-'::text) || access_epoch::text) STORED NOT NULL,
     state text NOT NULL,
     files_image text NOT NULL,
     capability_hash text NOT NULL,

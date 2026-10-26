@@ -65,7 +65,7 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     const sql = await readFile("packages/db/migrations/0001_baseline.sql", "utf8");
     await candidate.unsafe(sql);
     expect(digest(await dump(container, probeName))).toBe(
-      "58e945481777a2986c49a4c6a5afdfd295fdb16d5ba28fc750f6305f52f2661b",
+      "8cfdb4e47fc8cd898e8612ec9661794c575b7399392ba692df45382f19c00306",
     );
     const freshPublication = await candidate<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables

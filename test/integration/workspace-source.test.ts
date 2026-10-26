@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { hashConnectorToken, runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import type {
@@ -9,6 +9,7 @@ import type {
   SourceResources,
   WorkspaceSourceClient,
 } from "../../packages/runtime-kubernetes/src/workspace-source";
+import { workspaceSourceIdentity } from "../../packages/workspace-domain/src/source";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 
@@ -125,14 +126,22 @@ test("new Source placement uses the admitted Factorybox node before any executio
     const directory = `workspaces/${first.workspaceID.replaceAll("-", "")}/home`;
     expect(requested[0]?.sourceDirectory).toBe(directory);
     const [source] = await fixture.database.client<
-      Array<{ node: string; directory: string }>
-    >`SELECT storage_node AS node,source_directory AS directory FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`;
+      Array<{ node: string; directory: string; resourceKey: string }>
+    >`SELECT storage_node AS node,source_directory AS directory,resource_key AS "resourceKey" FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`;
     expect(source?.node).toBe("admitted-worker");
     expect(source?.directory).toBe(directory);
+    expect(source?.resourceKey).toBe(`${first.workspaceID.replaceAll("-", "")}-1`);
+    expect(requested[0]?.identity).toEqual(workspaceSourceIdentity(first.workspaceID, 1));
     await expect(
       (async () => {
         await fixture.database
           .client`UPDATE factory.workspace_source SET source_directory='home' WHERE workspace_id=${first.workspaceID}`;
+      })(),
+    ).rejects.toThrow("can only be updated to DEFAULT");
+    await expect(
+      (async () => {
+        await fixture.database
+          .client`UPDATE factory.workspace_source SET resource_key='another-workspace-1' WHERE workspace_id=${first.workspaceID}`;
       })(),
     ).rejects.toThrow("can only be updated to DEFAULT");
   } finally {
@@ -142,6 +151,70 @@ test("new Source placement uses the admitted Factorybox node before any executio
     await fixture.dispose();
   }
 }, 30000);
+
+test("a Source layout without retained resource names cannot recreate or retarget recorded UIDs", async () => {
+  const fixture = await ownedSourceFixture();
+  let creates = 0;
+  let stops = 0;
+  let observed: SourceResourceObservation | null = null;
+  const adapter: WorkspaceSourceClient = {
+    async executionNode() {
+      throw new Error("No execution is required");
+    },
+    async prepare(input) {
+      creates++;
+      observed = {
+        namespaceUID: "retained-namespace",
+        claimUID: "retained-claim",
+        podUID: "retained-pod",
+        storageNode: input.storageNode ?? "retained-node",
+        ready: true,
+        failed: false,
+      };
+      return observed;
+    },
+    async observe() {
+      return observed;
+    },
+    async connect() {},
+    async request() {
+      throw new Error("No file request is required");
+    },
+    async stop() {
+      stops++;
+    },
+    close() {},
+  };
+  let sources = createWorkspaceSourceController(fixture.database, "retained-source-names", adapter);
+  try {
+    const first = await sources.ensurePersonal(fixture.projectID, fixture.developerID);
+    await eventually(
+      () => sources.get(first.workspaceID, fixture.developerID),
+      (view) => view.state === "ready",
+      "Source did not retain its original resources",
+    );
+    await sources.close();
+    const before = await fixture.database.client`
+      SELECT workspace_id,state,access_epoch,namespace_uid,claim_uid,pod_uid,source_directory
+      FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`;
+    // This is only the fixture's disposable database, not a retained installation.
+    await fixture.database.client`ALTER TABLE factory.workspace_source DROP COLUMN resource_key`;
+    sources = createWorkspaceSourceController(fixture.database, "retained-source-names", adapter);
+    await expect(sources.ensurePersonal(fixture.projectID, fixture.developerID)).rejects.toThrow(
+      "resource_key",
+    );
+    expect(
+      await fixture.database.client`
+        SELECT workspace_id,state,access_epoch,namespace_uid,claim_uid,pod_uid,source_directory
+        FROM factory.workspace_source WHERE workspace_id=${first.workspaceID}`,
+    ).toEqual(before);
+    expect(creates).toBe(1);
+    expect(stops).toBe(0);
+  } finally {
+    await sources.close();
+    await fixture.dispose();
+  }
+}, 30_000);
 
 test("an interrupted observation worker retries the same source intent without a manual wakeup", async () => {
   const fixture = await ownedSourceFixture();
@@ -652,6 +725,13 @@ test("source admission persists intent, recovers lost create acknowledgement and
     expect(created).toBe(2);
     expect(assigned?.capability).not.toBe(firstCapability);
     expect(assigned?.claimUID).toBe("owned-claim");
+    expect(assigned?.identity).toEqual(workspaceSourceIdentity(workspaceID, 2));
+    const [names] = await database.client<Array<{ key: string; directory: string }>>`
+      SELECT resource_key AS key,source_directory AS directory FROM factory.workspace_source WHERE workspace_id=${workspaceID}`;
+    expect(names).toEqual({
+      key: `${workspaceID.replaceAll("-", "")}-2`,
+      directory: `workspaces/${workspaceID.replaceAll("-", "")}/home`,
+    });
   } finally {
     await sources.close();
     await fixture.dispose();

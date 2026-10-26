@@ -26,12 +26,13 @@ export function workspaceSourceIdentity(
     epoch < 1
   )
     throw new Error("Invalid Workspace source identity");
+  const key = `${workspaceID.replaceAll("-", "")}-${epoch}`;
   return {
     workspaceID,
     epoch,
-    serviceID: `source-${workspaceID.slice(0, 8)}-${epoch}`,
-    podName: `source-${epoch}`,
-    secretName: `source-access-${epoch}`,
+    serviceID: `source-${key}`,
+    podName: `source-${key}`,
+    secretName: `source-access-${key}`,
   };
 }
 

@@ -1,16 +1,17 @@
-import {
-  sourceWorkspaceViewSchema,
-  developerIDEViewSchema,
-} from "../../apps/factory/src/api-contracts";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { expect, test } from "bun:test";
 import { mkdir, rm } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
+import {
+  developerIDEViewSchema,
+  sourceWorkspaceViewSchema,
+} from "../../apps/factory/src/api-contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
+import { workspaceSourceIdentity } from "../../packages/workspace-domain/src/source";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 
 test("failed file access can be explicitly restarted without discarding the editor or starting compute", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -94,7 +95,7 @@ test("failed file access can be explicitly restarted without discarding the edit
     });
     const source = () => ({
       workspaceID,
-      serviceID: `source-${workspaceID.slice(0, 8)}-${epoch}`,
+      serviceID: workspaceSourceIdentity(workspaceID, epoch).serviceID,
       epoch,
       state,
       failure:

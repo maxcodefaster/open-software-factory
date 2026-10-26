@@ -67,6 +67,12 @@ Workspace beneath its source root without following symlink ancestors. Preparati
 records the Source directory's device and inode for replay and refuses a replaced
 root when preparation is observed again. Existing claims and mismatched layouts are never
 retargeted by recovery. The Greenfield baseline has no migration of an old layout.
+Source service, Pod and Secret names include the full Workspace ID and access epoch.
+The Greenfield Source intent retains their generated key; a database without that
+layout cannot derive new names for older recorded UIDs.
+Stopping one Source epoch closes only its own connections, not every connection in
+its Namespace. Resource names do not depend on a dedicated Namespace for uniqueness;
+Factory verifies Namespace ownership and placement separately.
 
 A never-used reserve becomes ready only after native Pause confirms its exact
 standby snapshot, zero Sandbox anonymous RAM and no resident snapshot pages.

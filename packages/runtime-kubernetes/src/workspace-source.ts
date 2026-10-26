@@ -149,6 +149,12 @@ function intendedFields(actual: unknown, expected: unknown): boolean {
   return actual === expected;
 }
 
+type SourceForward = {
+  endpoint: Promise<string>;
+  cancel: AbortController;
+  child: { exited: Promise<number>; kill(): void };
+};
+
 export function validateSourceObservation(
   input: SourceResources,
   observed: {
@@ -231,13 +237,21 @@ export function createWorkspaceSourceClient(
   kubernetes: KubernetesClient = createKubernetesClient(),
   command: typeof executeCommand = executeCommand,
   transport: typeof fetch = fetch,
+  forward: (
+    role: "source",
+    namespace: string,
+    podName: string,
+  ) => SourceForward = startServiceForward,
 ): WorkspaceSourceClient {
   const connections = new Map<
     string,
     {
       origin: Promise<string>;
-      child: ReturnType<typeof Bun.spawn>;
+      child: SourceForward["child"];
       cancel: AbortController;
+      namespace: string;
+      workspaceID: string;
+      epoch: number;
     }
   >();
   const observations = new WeakMap<
@@ -272,7 +286,7 @@ export function createWorkspaceSourceClient(
   }
   async function endpoint(input: SourceResources, observation?: SourceResourceObservation) {
     if (!input.podUID) throw new Error("Source Pod outcome has not been recorded");
-    const key = `${input.namespace}:${input.podUID}`;
+    const key = `${input.namespace}:${input.identity.workspaceID}:${input.identity.epoch}:${input.podUID}`;
     const retained = connections.get(key);
     if (retained) return retained;
     const recent = observation ? observations.get(observation) : undefined;
@@ -281,10 +295,17 @@ export function createWorkspaceSourceClient(
       recent && recent.expires > performance.now() ? recent.resources : await inventory(input);
     const current = completeSourceObservation(input, resources);
     if (!current?.ready) throw new Error("Source Pod is no longer ready");
-    const forward = startServiceForward("source", input.namespace, input.identity.podName);
-    const connection = { origin: forward.endpoint, child: forward.child, cancel: forward.cancel };
+    const opening = forward("source", input.namespace, input.identity.podName);
+    const connection = {
+      origin: opening.endpoint,
+      child: opening.child,
+      cancel: opening.cancel,
+      namespace: input.namespace,
+      workspaceID: input.identity.workspaceID,
+      epoch: input.identity.epoch,
+    };
     connections.set(key, connection);
-    void forward.child.exited.then(() => {
+    void opening.child.exited.then(() => {
       if (connections.get(key) === connection) connections.delete(key);
     });
     return connection;
@@ -408,7 +429,11 @@ export function createWorkspaceSourceClient(
     },
     async stop(input) {
       for (const [key, connection] of connections) {
-        if (key.startsWith(`${input.namespace}:`)) {
+        if (
+          connection.namespace === input.namespace &&
+          connection.workspaceID === input.identity.workspaceID &&
+          connection.epoch === input.identity.epoch
+        ) {
           connection.cancel.abort();
           connection.child.kill();
           connections.delete(key);
