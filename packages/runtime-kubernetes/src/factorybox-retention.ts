@@ -10,17 +10,47 @@ export const factoryboxCheckpointRequest = z.strictObject({
   checkpoint_sha256: digest,
 });
 export type FactoryboxCheckpointRequest = z.infer<typeof factoryboxCheckpointRequest>;
+export const factoryboxBackingRequest = z.strictObject({
+  sandbox_id: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+  sandbox_owner: token,
+  input_sha256: digest,
+});
+export type FactoryboxBackingRequest = z.infer<typeof factoryboxBackingRequest>;
 
-// An unresumed Pause is the only copy of the stopped processes. A completed
-// Resume has independent images; confirmed Delete no longer needs any of them.
-export function factoryboxObsoleteCheckpoints(sandboxID: string, value: unknown) {
+export function readFactoryboxBackingRetirement(
+  request: FactoryboxBackingRequest,
+  controllerRoot: string,
+  value: unknown,
+) {
+  const capacity = z.object({
+    root: z.literal(controllerRoot),
+    filesystem_available_bytes: z.number().int().nonnegative().safe(),
+  });
+  return z
+    .object({
+      version: z.literal(1),
+      payload_kind: z.literal("sandbox-backing"),
+      request: z.strictObject({
+        sandbox_id: z.literal(request.sandbox_id),
+        sandbox_owner: z.literal(request.sandbox_owner),
+        input_sha256: z.literal(request.input_sha256),
+      }),
+      intent_sha256: digest,
+      completed_at: z.string().min(1),
+      before: capacity,
+      after: capacity,
+    })
+    .parse(value);
+}
+
+function checkpointRecord(sandboxID: string, value: unknown) {
   const pause = z.object({
     snapshot_id: token,
     checkpoint_sha256: digest.optional(),
     completed_at: z.string().optional(),
     resume: z.object({ completed_at: z.string().optional() }).optional(),
   });
-  const record = z
+  return z
     .object({
       id: z.literal(sandboxID),
       owner: token,
@@ -29,6 +59,12 @@ export function factoryboxObsoleteCheckpoints(sandboxID: string, value: unknown)
       pause_history: z.array(pause).optional(),
     })
     .parse(value);
+}
+
+// An unresumed Pause is the only copy of the stopped processes. A completed
+// Resume has independent images; confirmed Delete no longer needs any of them.
+export function factoryboxObsoleteCheckpoints(sandboxID: string, value: unknown) {
+  const record = checkpointRecord(sandboxID, value);
   const requests = new Map<string, FactoryboxCheckpointRequest>();
   for (const generation of [
     ...(record.pause_history ?? []),
@@ -50,10 +86,30 @@ export function factoryboxObsoleteCheckpoints(sandboxID: string, value: unknown)
   return [...requests.values()];
 }
 
+export function factoryboxObsoleteResumeImages(sandboxID: string, value: unknown) {
+  const record = checkpointRecord(sandboxID, value);
+  if (
+    record.phase !== "deleted" &&
+    (!record.pause?.completed_at || !record.pause.checkpoint_sha256)
+  )
+    return [];
+  const resumed = new Set(
+    [...(record.pause_history ?? []), ...(record.pause ? [record.pause] : [])]
+      .filter((pause) => Boolean(pause.resume?.completed_at))
+      .map((pause) => pause.snapshot_id),
+  );
+  return factoryboxObsoleteCheckpoints(sandboxID, record).filter(
+    (request) =>
+      resumed.has(request.snapshot_id) &&
+      (record.phase === "deleted" || request.snapshot_id !== record.pause?.snapshot_id),
+  );
+}
+
 export function readFactoryboxCheckpointRetirement(
   request: FactoryboxCheckpointRequest,
   controllerRoot: string,
   value: unknown,
+  payloadKind?: "resume-images",
 ) {
   const capacity = z.object({
     root: z.literal(controllerRoot),
@@ -62,6 +118,7 @@ export function readFactoryboxCheckpointRetirement(
   return z
     .object({
       version: z.literal(1),
+      payload_kind: payloadKind ? z.literal(payloadKind) : z.undefined().optional(),
       request: z.object({
         source_id: z.literal(request.source_id),
         snapshot_id: z.literal(request.snapshot_id),

@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { factoryboxObsoleteCheckpoints } from "./factorybox-retention";
+import {
+  factoryboxObsoleteCheckpoints,
+  factoryboxObsoleteResumeImages,
+} from "./factorybox-retention";
 
 const id = `runtime-${"a".repeat(32)}`;
 const owner = "b".repeat(32);
@@ -75,4 +78,35 @@ test("changed ownership, hashes, unresolved state and conflicting generations re
     { ...record, pause_history: [{ ...current, checkpoint_sha256: "1".repeat(64) }] },
   ])
     expect(() => factoryboxObsoleteCheckpoints(id, invalid)).toThrow();
+});
+
+test("old Resume images become eligible only after a later complete Pause", () => {
+  const record = { id, owner, phase: "paused", pause: current, pause_history: [prior] };
+  expect(factoryboxObsoleteResumeImages(id, record)).toEqual([request(prior)]);
+  expect(
+    factoryboxObsoleteResumeImages(id, {
+      ...record,
+      phase: "running",
+      pause: { ...current, resume: { completed_at: "resumed" } },
+    }),
+  ).toEqual([request(prior)]);
+  expect(
+    factoryboxObsoleteResumeImages(id, {
+      ...record,
+      phase: "running",
+      pause: { ...current, completed_at: "" },
+    }),
+  ).toEqual([]);
+});
+
+test("Delete retires the last completed Resume but does not invent images for an unresumed Pause", () => {
+  const record = { id, owner, phase: "deleted", pause: current, pause_history: [prior] };
+  expect(factoryboxObsoleteResumeImages(id, record)).toEqual([request(prior)]);
+  expect(
+    factoryboxObsoleteResumeImages(id, {
+      ...record,
+      pause: { ...current, resume: { completed_at: "resumed" } },
+    }),
+  ).toEqual([request(prior), request(current)]);
+  expect(factoryboxObsoleteResumeImages(id, { id, owner, phase: "running" })).toEqual([]);
 });

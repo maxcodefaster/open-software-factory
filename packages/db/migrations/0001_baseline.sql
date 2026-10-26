@@ -2133,9 +2133,9 @@ CREATE TABLE factory.factorybox_lifecycle_operation (
     attempted_at timestamp with time zone,
     completed_at timestamp with time zone,
     observation jsonb,
-    CONSTRAINT factorybox_lifecycle_operation_action_check CHECK ((action = ANY (ARRAY['prepare'::text, 'start'::text, 'pause'::text, 'resume'::text, 'delete'::text, 'retire-checkpoint'::text]))),
-    CONSTRAINT factorybox_lifecycle_operation_check CHECK (((action = ANY (ARRAY['pause'::text, 'resume'::text, 'retire-checkpoint'::text])) = (snapshot_id IS NOT NULL))),
-    CONSTRAINT factorybox_lifecycle_operation_request_check CHECK (((action = 'retire-checkpoint'::text) = (request IS NOT NULL))),
+    CONSTRAINT factorybox_lifecycle_operation_action_check CHECK ((action = ANY (ARRAY['prepare'::text, 'start'::text, 'pause'::text, 'resume'::text, 'delete'::text, 'retire-checkpoint'::text, 'retire-resume'::text, 'retire-sandbox'::text]))),
+    CONSTRAINT factorybox_lifecycle_operation_check CHECK (((action = ANY (ARRAY['pause'::text, 'resume'::text, 'retire-checkpoint'::text, 'retire-resume'::text])) = (snapshot_id IS NOT NULL))),
+    CONSTRAINT factorybox_lifecycle_operation_request_check CHECK (((action = ANY (ARRAY['retire-checkpoint'::text, 'retire-resume'::text, 'retire-sandbox'::text])) = (request IS NOT NULL))),
     CONSTRAINT factorybox_lifecycle_operation_request_snapshot_check CHECK (((request IS NULL) OR ((jsonb_typeof(request) = 'object'::text) AND ((request ->> 'snapshot_id'::text) IS NOT DISTINCT FROM snapshot_id)))),
     CONSTRAINT factorybox_lifecycle_operation_snapshot_id_check CHECK ((snapshot_id ~ '^[a-f0-9]{32}$'::text))
 );

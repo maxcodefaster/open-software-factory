@@ -3,9 +3,13 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
+  type FactoryboxBackingRequest,
   type FactoryboxCheckpointRequest,
+  factoryboxBackingRequest,
   factoryboxCheckpointRequest,
   factoryboxObsoleteCheckpoints,
+  factoryboxObsoleteResumeImages,
+  readFactoryboxBackingRetirement,
   readFactoryboxCheckpointRetirement,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-retention";
 import {
@@ -34,6 +38,7 @@ type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"];
 type Operation = {
   id: string;
+  action: string;
   snapshotID: string | null;
   attempted: boolean;
   completed: boolean;
@@ -96,15 +101,15 @@ export function createFactoryboxExecution(
     attemptID: string,
     action: string,
     snapshot: string | null = null,
-    request: FactoryboxCheckpointRequest | null = null,
+    request: FactoryboxCheckpointRequest | FactoryboxBackingRequest | null = null,
   ) {
-    if (request && request.snapshot_id !== snapshot)
+    if (request && "snapshot_id" in request && request.snapshot_id !== snapshot)
       throw new Error("Checkpoint retirement request differs from its retained snapshot");
     await connection`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,snapshot_id,request)
       VALUES(${attemptID},${action},${snapshot},${request === null ? null : JSON.stringify(request)}::text::jsonb) ON CONFLICT DO NOTHING`;
     const [operation] = await connection<
       Operation[]
-    >`SELECT id,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,
+    >`SELECT id,action,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,
       completed_at IS NOT NULL AS completed,request,observation FROM factory.factorybox_lifecycle_operation
       WHERE runtime_attempt_id=${attemptID} AND action=${action} AND snapshot_id IS NOT DISTINCT FROM ${snapshot}`;
     if (!operation) throw new Error("Factorybox lifecycle intent was not retained");
@@ -224,6 +229,8 @@ export function createFactoryboxExecution(
     };
     for (const checkpoint of factoryboxObsoleteCheckpoints(saved.request.sandboxID, result.record))
       await intent(connection, attemptID, "retire-checkpoint", checkpoint.snapshot_id, checkpoint);
+    for (const checkpoint of factoryboxObsoleteResumeImages(saved.request.sandboxID, result.record))
+      await intent(connection, attemptID, "retire-resume", checkpoint.snapshot_id, checkpoint);
     await completed(connection, record, compact);
     return compact;
   }
@@ -232,12 +239,14 @@ export function createFactoryboxExecution(
       throw new Error("Checkpoint retirement requires its original worker identity");
     const operations = await connection<
       Operation[]
-    >`SELECT id,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,false AS completed,request,observation
+    >`SELECT id,action,snapshot_id AS "snapshotID",attempted_at IS NOT NULL AS attempted,false AS completed,request,observation
       FROM factory.factorybox_lifecycle_operation
-      WHERE runtime_attempt_id=${attemptID} AND action='retire-checkpoint' AND completed_at IS NULL
+      WHERE runtime_attempt_id=${attemptID} AND action IN ('retire-checkpoint','retire-resume') AND completed_at IS NULL
       ORDER BY intended_at,id`;
     for (const operation of operations) {
       const request = factoryboxCheckpointRequest.parse(operation.request);
+      if (operation.action !== "retire-checkpoint" && operation.action !== "retire-resume")
+        throw new Error("Unknown Factorybox retirement action");
       if (
         request.source_id !== saved.request.sandboxID ||
         request.snapshot_id !== operation.snapshotID
@@ -251,7 +260,7 @@ export function createFactoryboxExecution(
         factoryboxRuntimeRequest(saved.request),
         saved.identity,
         {
-          action: "retire-checkpoint",
+          action: operation.action,
           sandboxID: request.source_id,
           snapshotID: request.snapshot_id,
           sourceOwner: request.source_owner,
@@ -266,9 +275,11 @@ export function createFactoryboxExecution(
         request,
         saved.identity.controllerRoot,
         JSON.parse(result.stdout),
+        operation.action === "retire-resume" ? "resume-images" : undefined,
       );
       await completed(connection, operation, {
         version: 1,
+        ...(receipt.payload_kind ? { payloadKind: receipt.payload_kind } : {}),
         request,
         intentSHA256: receipt.intent_sha256,
         completedAt: receipt.completed_at,
@@ -276,6 +287,61 @@ export function createFactoryboxExecution(
         availableBytesAfter: receipt.after.filesystem_available_bytes,
       });
     }
+  }
+  async function reclaimBacking(
+    connection: SQL,
+    attemptID: string,
+    saved: Retained,
+    deleted: unknown,
+  ) {
+    if (!saved.identity) throw new Error("Sandbox backing retirement requires its original worker");
+    const record = z
+      .object({
+        id: z.literal(saved.request.sandboxID),
+        owner: z.string(),
+        inputSHA256: z.string(),
+        phase: z.literal("deleted"),
+      })
+      .parse(deleted);
+    const request = factoryboxBackingRequest.parse({
+      sandbox_id: record.id,
+      sandbox_owner: record.owner,
+      input_sha256: record.inputSHA256,
+    });
+    const operation = await intent(connection, attemptID, "retire-sandbox", null, request);
+    if (operation.completed) return;
+    // Both unmount release and native retirement continue only their original
+    // persisted ownership. A lost reply never selects new paths or credentials.
+    await releaseFactoryboxRuntime(saved.request, saved.identity, false, run);
+    if (!operation.attempted) await attempted(connection, operation);
+    const result = await executeFactoryboxOperation(
+      factoryboxRuntimeRequest(saved.request),
+      saved.identity,
+      {
+        action: "retire-sandbox",
+        sandboxID: request.sandbox_id,
+        sandboxOwner: request.sandbox_owner,
+        inputSHA256: request.input_sha256,
+      },
+      run,
+      factoryboxRuntimeDeclaration(saved.request),
+    );
+    if (!result.confirmed)
+      throw new Error("Factorybox private backing retirement remains unconfirmed");
+    const receipt = readFactoryboxBackingRetirement(
+      request,
+      saved.identity.controllerRoot,
+      JSON.parse(result.stdout),
+    );
+    await completed(connection, operation, {
+      version: 1,
+      payloadKind: receipt.payload_kind,
+      request,
+      intentSHA256: receipt.intent_sha256,
+      completedAt: receipt.completed_at,
+      availableBytesBefore: receipt.before.filesystem_available_bytes,
+      availableBytesAfter: receipt.after.filesystem_available_bytes,
+    });
   }
   async function preparation(connection: SQL, attemptID: string, saved: Retained) {
     factoryboxRuntimeRequest(saved.request);
@@ -342,7 +408,7 @@ export function createFactoryboxExecution(
         const attempts = await database.client<
           Array<{ id: string }>
         >`SELECT DISTINCT runtime_attempt_id AS id FROM factory.factorybox_lifecycle_operation
-          WHERE action='retire-checkpoint' AND completed_at IS NULL
+          WHERE action IN ('retire-checkpoint','retire-resume') AND completed_at IS NULL
             AND (${reclaimAfter}::uuid IS NULL OR runtime_attempt_id>${reclaimAfter}::uuid)
           ORDER BY id LIMIT 16`;
         reclaimAfter = attempts.length === 16 ? (attempts.at(-1)?.id ?? null) : null;
@@ -427,8 +493,9 @@ export function createFactoryboxExecution(
           FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${attemptID} AND action='prepare'`;
         if (!prepared?.completed)
           throw new Error("Incomplete Factorybox preparation was retained for inspection");
+        let deleted: unknown;
         if (start?.attempted)
-          await perform(
+          deleted = await perform(
             connection,
             attemptID,
             saved,
@@ -436,7 +503,8 @@ export function createFactoryboxExecution(
             nativeDeleteObserved,
           );
         await reclaimAttempt(connection, attemptID, saved);
-        await releaseFactoryboxRuntime(saved.request, saved.identity, !start?.attempted, run);
+        if (start?.attempted) await reclaimBacking(connection, attemptID, saved, deleted);
+        else await releaseFactoryboxRuntime(saved.request, saved.identity, true, run);
         await connection`UPDATE factory.factorybox_runtime SET inputs_released_at=now() WHERE runtime_attempt_id=${attemptID} AND inputs_released_at IS NULL`;
       });
     },

@@ -55,7 +55,7 @@ class PreparationTests(unittest.TestCase):
             "\n".join(request[key] for key in ["podUID", "storeID", "runtimeHostImage"]) + "\n")
         root = self.root / "input" / request["sandboxID"]
         (root / "bundle").mkdir(parents=True)
-        (root / "intent.json").write_text(json.dumps({"request": request, "rootfsSHA256": rootfs, "source": None}))
+        (root / "intent.json").write_text(json.dumps(self.module["preparation_plan"](request, rootfs, None)))
         (root / "prepared.json").write_text(json.dumps({
             "version": 3, "sandboxID": "runtime-" + "e" * 32,
             "bundle": str(root / "bundle"), "storeID": request["storeID"],
@@ -71,6 +71,19 @@ class PreparationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Prepared OCI configuration changed"):
                 self.module["prepare"](request)
             mutation.assert_not_called()
+
+    def test_preparation_metadata_retains_assignment_hash_not_credentials(self):
+        request = self.assigned()
+        plan = self.module["preparation_plan"](request, "a" * 64, None)
+        encoded = json.dumps(plan)
+        for secret in request["assignment"].values():
+            self.assertNotIn(secret, encoded)
+        self.assertNotIn("assignment", plan["request"])
+        self.assertEqual(len(plan["assignmentSHA256"]), 64)
+        reordered = {**request, "assignment": dict(reversed(list(request["assignment"].items())))}
+        self.assertEqual(plan, self.module["preparation_plan"](reordered, "a" * 64, None))
+        changed = {**request, "assignment": {**request["assignment"], "parent-token": "another-parent"}}
+        self.assertNotEqual(plan, self.module["preparation_plan"](changed, "a" * 64, None))
 
     def test_one_image_source_is_reused_across_distinct_sandbox_preparations(self):
         seed = self.root / "seed"

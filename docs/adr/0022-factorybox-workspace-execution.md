@@ -104,12 +104,13 @@ caller-owned mount pair. An assigned reserve retains its original slot owner thr
 and cleanup. Incomplete preparation with unconfirmed
 mount ownership remains available for inspection instead of being force-unmounted.
 
-Factory queues obsolete checkpoints from confirmed native Runtime Attempt observations,
+Factory queues obsolete checkpoints and superseded private Resume images from confirmed native Runtime Attempt observations,
 including inherited standby history. Each retirement retains its exact Sandbox ID,
 snapshot, native owner, checkpoint hash and worker epoch before the external command.
 A periodic sweep runs outside the Resume response path; healthy Stop drains its queued
 retirements before confirming the Runtime Attempt's removal. A current unresumed
-Pause is not eligible. Native recovery selections, shared bases and live dependencies
+Pause is not eligible. Current Resume images remain protected until a later complete Pause
+or confirmed Delete. Native recovery selections, shared bases and live dependencies
 remain independent deletion guards.
 
 Checkpoint retirement can continue the same native deletion inventory after interruption
@@ -118,10 +119,15 @@ uncertain Start, Pause or Resume. Factory retains the completed retirement recei
 before/after filesystem availability, without treating concurrent filesystem counters as
 the byte size of one Sandbox.
 
-Releasing private input mounts is not disk reclamation. Native Delete still retains
-per-Sandbox filesystem backing and private Resume images; checkpoint retirement alone
-does not remove those files. The shared worker and canonical Source claim must not be
-deleted to hide that remaining retention gap.
+Releasing private input mounts is not disk reclamation. After confirmed native Delete,
+Factory retains a separate private-backing retirement intent containing the original Sandbox
+owner and Start input hash. It releases the exact caller-owned mount pair, then asks Factorybox
+to retire its original private payload inventory. Lost output continues that same inventory.
+Only a completed native receipt permits marking the Runtime Attempt's inputs released.
+Original directory identities, registered bases, live peers, foreign mounts and unexpected
+entries remain deletion guards. The shared worker and canonical Source claim are never deleted
+to reclaim one Sandbox. Incomplete preparation and unresolved native outcomes remain retained
+for inspection.
 
 Native runtime evidence on one Linux profile establishes only that profile. Before installation,
 admit the actual cluster's node, kernel, CNI and storage with the pinned worker. A provider-neutral

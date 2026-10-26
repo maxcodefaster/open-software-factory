@@ -169,6 +169,15 @@ def image_base(request, status, seed, rootfs_sha256, cli):
             [*cli, 'prepare-base', '--source', str(root/'source'), 'factory-runtime'], timeout=120))
 
 
+def preparation_plan(request, rootfs_sha256, source):
+    # Keep replay equality without retaining a second plaintext credential
+    # copy after private Sandbox backing has been retired.
+    assignment = json.dumps(request['assignment'], sort_keys=True, separators=(',', ':')).encode()
+    return {'request': {key: request[key] for key in IDENTITY_FIELDS},
+            'assignmentSHA256': hashlib.sha256(assignment).hexdigest(),
+            'rootfsSHA256': rootfs_sha256, 'source': source}
+
+
 def prepare(request):
     validate_identity(request, with_assignment=True)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
@@ -184,7 +193,7 @@ def prepare(request):
     if len(expected) != 2 or expected[1] != 'rootfs.tar' or digest(seed/'rootfs.tar') != expected[0]:
         raise ValueError('Complete consumer rootfs differs from its committed export')
     root = Path(status['store'])/'input'/request['sandboxID']
-    plan = {'request': request, 'rootfsSHA256': expected[0], 'source': source}
+    plan = preparation_plan(request, expected[0], source)
     if root.exists():
         if json.loads((root/'intent.json').read_text()) != plan:
             raise ValueError('Private input already belongs to another preparation')

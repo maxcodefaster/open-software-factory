@@ -145,19 +145,20 @@ test.each([
           ]),
         ),
       };
+      type NativePause = {
+        snapshot_id: string;
+        checkpoint_sha256: string;
+        completed_at: string;
+        resume?: { completed_at: string };
+      };
       const record: {
         version: number;
         id: string;
         owner: string;
         phase: string;
         input_sha256: string;
-        pause?: {
-          snapshot_id: string;
-          checkpoint_sha256: string;
-          completed_at: string;
-          resume?: { completed_at: string };
-        };
-        pause_history?: unknown[];
+        pause?: NativePause;
+        pause_history?: NativePause[];
       } = {
         version: 1,
         id: input.sandboxID,
@@ -169,15 +170,19 @@ test.each([
       let preparations = 0;
       let releases = 0;
       const reclaimed = new Set<string>();
+      const resumeReclaimed = new Set<string>();
       let lostRetirementReply = false;
+      let lostResumeRetirementReply = false;
+      let lostBackingRetirementReply = false;
       let resumeCommands = 0;
       const activeSnapshot = () => {
         const snapshot = record.pause?.snapshot_id;
         if (!snapshot) throw new Error("Missing native snapshot");
         return snapshot;
       };
-      const retirement = (snapshot: string) => ({
+      const retirement = (snapshot: string, resume = false) => ({
         version: 1,
+        ...(resume ? { payload_kind: "resume-images" } : {}),
         request: {
           source_id: input.sandboxID,
           snapshot_id: snapshot,
@@ -274,13 +279,21 @@ test.each([
           if (resumeCommands === 2)
             return { exitCode: 1, stderr: "reply lost after the second native Resume", stdout: "" };
         }
-        if (action === "retire-checkpoint") {
-          if (!record.pause) throw new Error("Missing checkpoint");
+        if (action === "retire-checkpoint" || action === "retire-resume") {
+          const snapshot = args[args.indexOf("--snapshot-id") + 1];
+          const generation = [
+            ...(record.pause_history ?? []),
+            ...(record.pause ? [record.pause] : []),
+          ].find((value) => value.snapshot_id === snapshot);
+          if (!generation || !snapshot) throw new Error("Missing checkpoint");
           expect(args[args.indexOf("--source-owner") + 1]).toBe(record.owner);
           expect(args[args.indexOf("--checkpoint-sha256") + 1]).toBe("2".repeat(64));
-          expect(args[args.indexOf("--snapshot-id") + 1]).toBe(record.pause.snapshot_id);
-          reclaimed.add(record.pause.snapshot_id);
-          if (!lostRetirementReply) {
+          if (action === "retire-resume") {
+            expect(generation.resume?.completed_at).toBeTruthy();
+            expect(record.phase === "deleted" || snapshot !== record.pause?.snapshot_id).toBe(true);
+            resumeReclaimed.add(snapshot);
+          } else reclaimed.add(snapshot);
+          if (action === "retire-checkpoint" && !lostRetirementReply) {
             lostRetirementReply = true;
             return {
               exitCode: 1,
@@ -288,15 +301,54 @@ test.each([
               stdout: "",
             };
           }
+          if (action === "retire-resume" && !lostResumeRetirementReply) {
+            lostResumeRetirementReply = true;
+            return {
+              exitCode: 1,
+              stderr: "reply lost after exact Resume-image retirement",
+              stdout: "",
+            };
+          }
           return {
             exitCode: 0,
             stderr: "",
-            stdout: JSON.stringify(retirement(record.pause.snapshot_id)),
+            stdout: JSON.stringify(retirement(snapshot, action === "retire-resume")),
           };
         }
         if (action === "delete") {
           record.phase = "deleted";
           return { exitCode: 1, stderr: "response lost after completed native Delete", stdout: "" };
+        }
+        if (action === "retire-sandbox") {
+          expect(record.phase).toBe("deleted");
+          expect(releases).toBeGreaterThan(0);
+          expect(args[args.indexOf("--sandbox-owner") + 1]).toBe(record.owner);
+          expect(args[args.indexOf("--input-sha256") + 1]).toBe(record.input_sha256);
+          if (!lostBackingRetirementReply) {
+            lostBackingRetirementReply = true;
+            return {
+              exitCode: 1,
+              stderr: "reply lost after private backing retirement",
+              stdout: "",
+            };
+          }
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              version: 1,
+              payload_kind: "sandbox-backing",
+              request: {
+                sandbox_id: input.sandboxID,
+                sandbox_owner: record.owner,
+                input_sha256: record.input_sha256,
+              },
+              intent_sha256: "4".repeat(64),
+              completed_at: "2026-10-26T10:03:00Z",
+              before: { root, filesystem_available_bytes: 2048 },
+              after: { root, filesystem_available_bytes: 4096 },
+            }),
+          };
         }
         return {
           exitCode: 0,
@@ -405,6 +457,8 @@ test.each([
       const secondSnapshot = activeSnapshot();
       await execution.reclaimStorage();
       expect(reclaimed.has(secondSnapshot)).toBe(false);
+      expect(resumeReclaimed.size).toBe(1);
+      expect(resumeReclaimed.has(secondSnapshot)).toBe(false);
       await expect(execution.resume(owned.attemptID)).rejects.toThrow("unconfirmed");
       expect(resumeCommands).toBe(2);
       const [lostResume] = await database.client<
@@ -417,6 +471,8 @@ test.each([
       await resumeRecovered.reclaimStorage();
       expect(reclaimed.size).toBe(2);
       expect(reclaimed.has(secondSnapshot)).toBe(true);
+      expect(resumeReclaimed.has(secondSnapshot)).toBe(false);
+      expect(mutations.filter((action) => action === "retire-resume")).toHaveLength(2);
       const settledMutations = [...mutations];
       await expect(
         (async () => {
@@ -448,14 +504,36 @@ test.each([
       await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
       if (!reserveDeleted)
         await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
+      await expect(execution.deleteSandbox(owned.attemptID, reserveDeleted)).rejects.toThrow(
+        "unconfirmed",
+      );
+      const [unreleased] = await database.client<Array<{ released: boolean }>>`
+        SELECT inputs_released_at IS NOT NULL AS released FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
+      expect(unreleased?.released).toBe(false);
+      const backingRecovered = createFactoryboxExecution(database, hub, run);
+      await backingRecovered.deleteSandbox(owned.attemptID, reserveDeleted);
       await execution.deleteSandbox(owned.attemptID, reserveDeleted);
-      await execution.deleteSandbox(owned.attemptID, reserveDeleted);
-      expect(mutations).toEqual([
-        ...settledMutations,
-        ...(reserveDeleted ? ["pause", "retire-checkpoint"] : ["delete"]),
-      ]);
+      expect(mutations.slice(0, settledMutations.length)).toEqual(settledMutations);
+      expect(mutations.slice(settledMutations.length).sort()).toEqual(
+        (reserveDeleted
+          ? ["pause", "retire-resume", "retire-checkpoint", "retire-sandbox", "retire-sandbox"]
+          : ["delete", "retire-resume", "retire-sandbox", "retire-sandbox"]
+        ).sort(),
+      );
       expect(reclaimed.size).toBe(reserveDeleted ? 3 : 2);
-      expect(releases).toBe(1);
+      expect(resumeReclaimed.size).toBe(2);
+      expect(releases).toBe(2);
+      const [backing] = await database.client<
+        Array<{ request: unknown; observation: { payloadKind: string } }>
+      >`
+        SELECT request,observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${owned.attemptID} AND action='retire-sandbox' AND completed_at IS NOT NULL`;
+      expect(backing?.request).toEqual({
+        sandbox_id: input.sandboxID,
+        sandbox_owner: record.owner,
+        input_sha256: record.input_sha256,
+      });
+      expect(backing?.observation.payloadKind).toBe("sandbox-backing");
       const [released] = await database.client<
         Array<{ inputs_released_at: Date | null }>
       >`SELECT inputs_released_at FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;

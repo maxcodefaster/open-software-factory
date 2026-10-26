@@ -139,69 +139,74 @@ test("no exec is admitted until exact Kubernetes resources and HTTP readiness ag
   expect(f.calls.every((args) => args[0] === "get")).toBe(true);
 });
 
-test("checkpoint retirement pins the original worker, Sandbox, owner and complete checkpoint hash", async () => {
-  const f = fixture();
-  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
-  const checkpoint = {
-    source_id: "owned",
-    snapshot_id: "a".repeat(32),
-    source_owner: "b".repeat(32),
-    checkpoint_sha256: "c".repeat(64),
-  };
-  const operation = {
-    action: "retire-checkpoint" as const,
-    sandboxID: checkpoint.source_id,
-    snapshotID: checkpoint.snapshot_id,
-    sourceOwner: checkpoint.source_owner,
-    checkpointSHA256: checkpoint.checkpoint_sha256,
-  };
-  const receipt = {
-    version: 1,
-    request: checkpoint,
-    intent_sha256: "d".repeat(64),
-    completed_at: "2026-10-26T12:00:00Z",
-    before: { root, filesystem_available_bytes: 1024 },
-    after: { root, filesystem_available_bytes: 2048 },
-  };
-  f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(receipt) });
-  const result = await executeFactoryboxOperation(request, identity, operation, f.run);
-  expect(result.confirmed).toBe(true);
-  expect(f.calls.at(-1)?.slice(-10)).toEqual([
-    "--worker-epoch",
-    epoch,
-    "retire-checkpoint",
-    "--snapshot-id",
-    checkpoint.snapshot_id,
-    "--source-owner",
-    checkpoint.source_owner,
-    "--checkpoint-sha256",
-    checkpoint.checkpoint_sha256,
-    checkpoint.source_id,
-  ]);
-  for (const invalid of [
-    { ...receipt, request: { ...checkpoint, source_owner: "e".repeat(32) } },
-    { ...receipt, request: { ...checkpoint, snapshot_id: "e".repeat(32) } },
-    { ...receipt, request: { ...checkpoint, checkpoint_sha256: "e".repeat(64) } },
-    { ...receipt, completed_at: "" },
-    { ...receipt, after: { ...receipt.after, root: "/another-controller" } },
-    { ...receipt, before: { ...receipt.before, filesystem_available_bytes: -1 } },
-  ]) {
-    f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(invalid) });
-    await expect(executeFactoryboxOperation(request, identity, operation, f.run)).rejects.toThrow();
-  }
-  const previousCalls = f.calls.length;
-  f.result({
-    exitCode: 1,
-    stderr: "retirement output was lost",
-    stdout: JSON.stringify(receipt),
-  });
-  expect((await executeFactoryboxOperation(request, identity, operation, f.run)).confirmed).toBe(
-    false,
-  );
-  expect(
-    f.calls.slice(previousCalls).filter((args) => args.includes("retire-checkpoint")),
-  ).toHaveLength(1);
-});
+test.each(["retire-checkpoint", "retire-resume"] as const)(
+  "%s pins the original worker, Sandbox, owner and complete checkpoint hash",
+  async (action) => {
+    const f = fixture();
+    const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+    const checkpoint = {
+      source_id: "owned",
+      snapshot_id: "a".repeat(32),
+      source_owner: "b".repeat(32),
+      checkpoint_sha256: "c".repeat(64),
+    };
+    const operation = {
+      action,
+      sandboxID: checkpoint.source_id,
+      snapshotID: checkpoint.snapshot_id,
+      sourceOwner: checkpoint.source_owner,
+      checkpointSHA256: checkpoint.checkpoint_sha256,
+    };
+    const receipt = {
+      version: 1,
+      ...(action === "retire-resume" ? { payload_kind: "resume-images" } : {}),
+      request: checkpoint,
+      intent_sha256: "d".repeat(64),
+      completed_at: "2026-10-26T12:00:00Z",
+      before: { root, filesystem_available_bytes: 1024 },
+      after: { root, filesystem_available_bytes: 2048 },
+    };
+    f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(receipt) });
+    const result = await executeFactoryboxOperation(request, identity, operation, f.run);
+    expect(result.confirmed).toBe(true);
+    expect(f.calls.at(-1)?.slice(-10)).toEqual([
+      "--worker-epoch",
+      epoch,
+      action,
+      "--snapshot-id",
+      checkpoint.snapshot_id,
+      "--source-owner",
+      checkpoint.source_owner,
+      "--checkpoint-sha256",
+      checkpoint.checkpoint_sha256,
+      checkpoint.source_id,
+    ]);
+    for (const invalid of [
+      { ...receipt, request: { ...checkpoint, source_owner: "e".repeat(32) } },
+      { ...receipt, request: { ...checkpoint, snapshot_id: "e".repeat(32) } },
+      { ...receipt, request: { ...checkpoint, checkpoint_sha256: "e".repeat(64) } },
+      { ...receipt, completed_at: "" },
+      { ...receipt, after: { ...receipt.after, root: "/another-controller" } },
+      { ...receipt, before: { ...receipt.before, filesystem_available_bytes: -1 } },
+      { ...receipt, payload_kind: action === "retire-resume" ? undefined : "resume-images" },
+    ]) {
+      f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(invalid) });
+      await expect(
+        executeFactoryboxOperation(request, identity, operation, f.run),
+      ).rejects.toThrow();
+    }
+    const previousCalls = f.calls.length;
+    f.result({
+      exitCode: 1,
+      stderr: "retirement output was lost",
+      stdout: JSON.stringify(receipt),
+    });
+    expect((await executeFactoryboxOperation(request, identity, operation, f.run)).confirmed).toBe(
+      false,
+    );
+    expect(f.calls.slice(previousCalls).filter((args) => args.includes(action))).toHaveLength(1);
+  },
+);
 
 test.each(["arm64", "amd64"] as const)(
   "%s admission pins the requested architecture and refuses a different node before exec",
@@ -216,6 +221,53 @@ test.each(["arm64", "amd64"] as const)(
     expect(f.calls.every((args) => args[0] === "get")).toBe(true);
   },
 );
+
+test("private backing retirement requires exact deleted owner, input and worker receipt", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  const operation = {
+    action: "retire-sandbox",
+    sandboxID: "owned",
+    sandboxOwner: "a".repeat(32),
+    inputSHA256: "b".repeat(64),
+  } as const;
+  const receipt = {
+    version: 1,
+    payload_kind: "sandbox-backing",
+    request: {
+      sandbox_id: "owned",
+      sandbox_owner: operation.sandboxOwner,
+      input_sha256: operation.inputSHA256,
+    },
+    intent_sha256: "c".repeat(64),
+    completed_at: "2026-10-26T12:00:00Z",
+    before: { root, filesystem_available_bytes: 1024 },
+    after: { root, filesystem_available_bytes: 2048 },
+  };
+  f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(receipt) });
+  expect((await executeFactoryboxOperation(request, identity, operation, f.run)).confirmed).toBe(
+    true,
+  );
+  expect(f.calls.at(-1)?.slice(-6)).toEqual([
+    "retire-sandbox",
+    "--sandbox-owner",
+    operation.sandboxOwner,
+    "--input-sha256",
+    operation.inputSHA256,
+    "owned",
+  ]);
+  for (const invalid of [
+    { ...receipt, payload_kind: "resume-images" },
+    { ...receipt, request: { ...receipt.request, sandbox_id: "foreign" } },
+    { ...receipt, request: { ...receipt.request, sandbox_owner: "d".repeat(32) } },
+    { ...receipt, request: { ...receipt.request, input_sha256: "d".repeat(64) } },
+    { ...receipt, completed_at: "" },
+    { ...receipt, after: { ...receipt.after, root: "/foreign" } },
+  ]) {
+    f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(invalid) });
+    await expect(executeFactoryboxOperation(request, identity, operation, f.run)).rejects.toThrow();
+  }
+});
 
 test("worker architecture is explicit and rejects unsupported or inferred targets", () => {
   expect(() => factoryboxWorkerRequest.parse({ ...request, architecture: undefined })).toThrow();
