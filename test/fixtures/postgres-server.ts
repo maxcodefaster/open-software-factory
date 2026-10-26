@@ -29,7 +29,7 @@ async function verify(identity: PostgresIdentity) {
   )
     throw new Error("Test PostgreSQL ownership mismatch");
 }
-export async function startOwnedPostgres(owner: string, command = docker) {
+export async function startOwnedPostgres(owner: string, command = docker, network?: string) {
   const name = `factory-test-postgres-${owner}`;
   // Keep the exact intended identity observable even if Docker accepts the
   // create but its acknowledgement times out. Never infer cleanup ownership.
@@ -41,6 +41,7 @@ export async function startOwnedPostgres(owner: string, command = docker) {
     name,
     "--label",
     `${label}=${owner}`,
+    ...(network ? ["--network", network] : []),
     "--env",
     "POSTGRES_USER=factory",
     "--env",
@@ -82,7 +83,23 @@ export async function startOwnedPostgres(owner: string, command = docker) {
 export async function ownedPostgresServer() {
   const owner = crypto.randomUUID();
   const name = `factory-test-postgres-${owner}`;
-  await startOwnedPostgres(owner);
+  // A fixture owns its network too. Never depend on, repair or reset docker0.
+  await docker(["network", "create", "--label", `${label}=${owner}`, name]);
+  async function removeNetwork() {
+    if (
+      (await docker(["network", "inspect", "--format", `{{index .Labels "${label}"}}`, name])) !==
+      owner
+    )
+      throw new Error("Test PostgreSQL network ownership mismatch");
+    await docker(["network", "rm", name]);
+  }
+  try {
+    await startOwnedPostgres(owner, docker, name);
+  } catch (cause) {
+    // Do not erase an uncertain or still-attached resource to make setup pass.
+    await removeNetwork().catch(() => {});
+    throw cause;
+  }
   const port = (await docker(["port", name, "5432/tcp"])).split(":").at(-1);
   const identity = {
     owner,
@@ -91,6 +108,7 @@ export async function ownedPostgresServer() {
   async function dispose() {
     await verify(identity);
     await docker(["rm", "--force", name]);
+    await removeNetwork();
   }
   try {
     const migration = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {
@@ -105,7 +123,12 @@ export async function ownedPostgresServer() {
     throw cause;
   }
 }
-export async function ownedTestDatabase(identity: PostgresIdentity, id: string, retained = false) {
+export async function ownedTestDatabase(
+  identity: PostgresIdentity,
+  id: string,
+  retained = false,
+  template: "factory" | "template0" = "factory",
+) {
   await verify(identity);
   if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error("Invalid test database identity");
   const name = `owned_${id.replaceAll("-", "")}`;
@@ -117,7 +140,7 @@ export async function ownedTestDatabase(identity: PostgresIdentity, id: string, 
         { name: string }[]
       >`SELECT datname AS name FROM pg_database WHERE datname=${name}`;
       if (!existing) throw new Error("Retained owned test database is missing");
-    } else await admin.unsafe(`CREATE DATABASE ${name} TEMPLATE factory`);
+    } else await admin.unsafe(`CREATE DATABASE ${name} TEMPLATE ${template}`);
   } finally {
     await admin.end();
   }

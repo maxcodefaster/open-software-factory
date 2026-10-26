@@ -9,6 +9,7 @@ export interface WorkspaceSourceManifest {
   readonly revision: string;
   readonly repositoryURL: string;
   readonly originURL: string;
+  readonly branch?: string;
   readonly capability: string;
   readonly filesImage: string;
   readonly storageNode: string | null;
@@ -41,6 +42,7 @@ export function renderWorkspaceSourceResources(input: WorkspaceSourceManifest) {
     revision: input.revision,
     repositoryUrl: input.repositoryURL,
     originUrl: input.originURL,
+    ...(input.branch ? { branch: input.branch } : {}),
   };
   return [
     {

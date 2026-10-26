@@ -10,7 +10,7 @@ export type RuntimeLaunchInput = {
   podName: string;
   missingPodMessage: string;
   runtimeHostImage: string;
-  factoryboxProfile?: FactoryboxRuntimeProfile;
+  factoryboxProfile: FactoryboxRuntimeProfile;
   expectedNamespace?: { ownerID: string; uid: string | null };
 };
 
@@ -26,7 +26,7 @@ export async function launchRuntimeResources(input: RuntimeLaunchInput, ports: R
     const applied = await ports.kubernetes.apply(input.resources, input.expectedNamespace);
     const pod = await ports.kubernetes.getPod(input.namespace, input.podName);
     if (!pod) throw new Error(input.missingPodMessage);
-    requireRuntimePodArtifacts(pod, input.runtimeHostImage, input.factoryboxProfile?.image);
+    requireRuntimePodArtifacts(pod, input.runtimeHostImage, input.factoryboxProfile.image);
     if (await ports.transitionObserved(pod.uid, applied.namespaceUID)) {
       void ports.observe().catch((cause) => ports.fail("observe", cause));
     }

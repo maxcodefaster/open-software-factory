@@ -23,6 +23,7 @@ type Initialization struct {
 	Revision      string `json:"revision"`
 	RepositoryURL string `json:"repositoryUrl"`
 	OriginURL     string `json:"originUrl"`
+	Branch        string `json:"branch,omitempty"`
 }
 
 var sourceRevision = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
@@ -32,6 +33,7 @@ type initializationIdentity struct {
 	ProjectID   string `json:"projectId"`
 	Revision    string `json:"revision"`
 	OriginURL   string `json:"originUrl"`
+	Branch      string `json:"branch,omitempty"`
 }
 
 func sourceRepositoryURL(value string) bool {
@@ -79,6 +81,11 @@ func Initialize(ctx context.Context, parent string, input Initialization) error 
 		!sourceRepositoryURL(input.RepositoryURL) || !sourceRepositoryURL(input.OriginURL) {
 		return errors.New("invalid source initialization identity")
 	}
+	if input.Branch != "" {
+		if _, err := initGit(ctx, "", "check-ref-format", "refs/heads/"+input.Branch); err != nil {
+			return errors.New("invalid personal source branch")
+		}
+	}
 	if err := os.Mkdir(parent, 0755); err != nil && !os.IsExist(err) {
 		return errors.New("source parent could not be created")
 	}
@@ -117,7 +124,7 @@ func Initialize(ctx context.Context, parent string, input Initialization) error 
 		return errors.New("source checkout is unavailable")
 	}
 	staging := filepath.Join(parent, ".factory-source-init-"+input.WorkspaceID)
-	identity := initializationIdentity{input.WorkspaceID, input.ProjectID, input.Revision, input.OriginURL}
+	identity := initializationIdentity{input.WorkspaceID, input.ProjectID, input.Revision, input.OriginURL, input.Branch}
 	if err := os.Mkdir(staging, 0700); err == nil {
 		encoded, _ := json.Marshal(identity)
 		if err := os.WriteFile(filepath.Join(staging, "identity.json"), encoded, 0600); err != nil {
@@ -151,8 +158,18 @@ func Initialize(ctx context.Context, parent string, input Initialization) error 
 		if _, err := initGit(ctx, "", "clone", "--no-checkout", "--no-hardlinks", "--", input.RepositoryURL, checkout); err != nil {
 			return err
 		}
-		if _, err := initGit(ctx, checkout, "checkout", "--detach", input.Revision); err != nil {
+		checkoutArgs := []string{"checkout", "--detach", input.Revision}
+		if input.Branch != "" {
+			// This is still private initializer staging, never a retained tree.
+			checkoutArgs = []string{"checkout", "-B", input.Branch, input.Revision}
+		}
+		if _, err := initGit(ctx, checkout, checkoutArgs...); err != nil {
 			return errors.New("source revision checkout failed")
+		}
+		if input.Branch != "" {
+			if _, err := initGit(ctx, checkout, "branch", "--set-upstream-to=origin/"+input.Branch, input.Branch); err != nil {
+				return errors.New("personal source upstream is unavailable")
+			}
 		}
 		// Mark only a fully initialized checkout as recoverable after lost acknowledgement.
 		if _, err := initGit(ctx, checkout, "remote", "set-url", "origin", input.OriginURL); err != nil {
@@ -173,7 +190,7 @@ func Initialize(ctx context.Context, parent string, input Initialization) error 
 		if err != nil {
 			return err
 		}
-		return os.Lchown(name, 101000, 101000) // Envbox's exact 100000 + canonical development UID 1000.
+		return os.Lchown(name, 101000, 101000) // Sysbox's exact 100000 + canonical development UID 1000.
 	}); err != nil {
 		return errors.New("source checkout ownership could not be prepared")
 	}

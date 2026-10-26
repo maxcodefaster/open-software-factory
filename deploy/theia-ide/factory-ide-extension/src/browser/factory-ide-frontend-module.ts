@@ -40,6 +40,7 @@ import {
   factoryTerminalWidgetID,
 } from "./factory-terminal-widget";
 import "./factory-ide.css";
+import { FactoryGitContribution, FactoryGitWidget, factoryGitWidgetID } from "./factory-git-widget";
 
 export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
   bind(FactoryLanguageGrammars).toSelf().inSingletonScope();
@@ -126,4 +127,13 @@ export default new ContainerModule((bind, _unbind, _isBound, rebind) => {
     .inSingletonScope();
   bindViewContribution(bind, FactoryTerminalContribution);
   bind(FrontendApplicationContribution).toService(FactoryTerminalContribution);
+  bind(FactoryGitWidget).toSelf();
+  bind(WidgetFactory)
+    .toDynamicValue((context) => ({
+      id: factoryGitWidgetID,
+      createWidget: () => context.container.get(FactoryGitWidget),
+    }))
+    .inSingletonScope();
+  bindViewContribution(bind, FactoryGitContribution);
+  bind(FrontendApplicationContribution).toService(FactoryGitContribution);
 });

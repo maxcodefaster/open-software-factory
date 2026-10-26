@@ -5,9 +5,9 @@ const fixture = {
   metadata: { name: "runtime-1", namespace: "owned" },
   timestamp,
   window: "15s",
-  containers: [{ name: "envbox", usage: { cpu: "150000000n", memory: "128Mi" } }],
+  containers: [{ name: "worker", usage: { cpu: "150000000n", memory: "128Mi" } }],
 };
-test("current Envbox metrics parse units, stale and wrong identity without fabricating zero", () => {
+test("current Factorybox worker metrics parse units, stale and wrong identity without fabricating zero", () => {
   expect(parsePodMetrics(fixture, "owned", "runtime-1", Date.parse(timestamp))).toEqual({
     status: "available",
     timestamp,
@@ -20,12 +20,37 @@ test("current Envbox metrics parse units, stale and wrong identity without fabri
   expect(parsePodMetrics(fixture, "other", "runtime-1").cpuMilli).toBeNull();
   expect(
     parsePodMetrics(
-      { ...fixture, containers: [{ name: "envbox", usage: { cpu: "0.5", memory: "1Gi" } }] },
+      { ...fixture, containers: [{ name: "worker", usage: { cpu: "0.5", memory: "1Gi" } }] },
       "owned",
       "runtime-1",
       Date.parse(timestamp),
     ).cpuMilli,
   ).toBe(500);
+});
+test("metrics require one exact worker and do not count init containers or old runtimes", () => {
+  for (const containers of [
+    [],
+    [{ name: "envbox", usage: { cpu: "1", memory: "1Gi" } }],
+    [fixture.containers[0]!, fixture.containers[0]!],
+  ])
+    expect(
+      parsePodMetrics({ ...fixture, containers }, "owned", "runtime-1", Date.parse(timestamp))
+        .status,
+    ).toBe("unavailable");
+  expect(
+    parsePodMetrics(
+      {
+        ...fixture,
+        containers: [
+          { name: "runtime-image", usage: { cpu: "1", memory: "1Gi" } },
+          ...fixture.containers,
+        ],
+      },
+      "owned",
+      "runtime-1",
+      Date.parse(timestamp),
+    ).memoryMiB,
+  ).toBe(128);
 });
 test("pod replacement during observations cannot return old-identity metrics", async () => {
   let calls = 0;

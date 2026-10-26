@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import { parse } from "yaml";
 import { renderRuntimeResources } from "./manifest";
+import { ownedFactoryboxProfile } from "../../../test/fixtures/runtime-configuration";
 
 test("publication is a bound one-job Sandbox without development apps or publication credentials", () => {
   const resources = renderRuntimeResources({
+    factoryboxProfile: ownedFactoryboxProfile,
     attemptID: crypto.randomUUID(),
     generation: 1,
     namespace: "factory-publication-proof",

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderRuntimeResources } from "./manifest";
+import { factoryboxBootstrapProgram } from "./factorybox-runtime";
+import { ownedFactoryboxProfile } from "../../../test/fixtures/runtime-configuration";
 
 const systemContract = {
   version: 1 as const,
@@ -31,6 +33,7 @@ const multiAppSystemContract = {
 describe("runtime Kubernetes resources", () => {
   test("keep Factory authority out of the runtime", () => {
     const resources = renderRuntimeResources({
+      factoryboxProfile: ownedFactoryboxProfile,
       attemptID: "01234567-89ab-5def-8123-456789abcdef",
       generation: 1,
       namespace: "factory-runtime-0123456789ab",
@@ -43,8 +46,8 @@ describe("runtime Kubernetes resources", () => {
       connectorToken: "one-use-token",
       childConnectorToken: "one-use-child-token",
       controlURL: "ws://factory.example/runtime/connect",
-      runtimeHostImage: "registry.example/runtime-host@sha256:0123",
-      storageNode: "canonical-source-node",
+      runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
+      storageNode: ownedFactoryboxProfile.nodeName,
       registryCA: "certificate",
       systemContract,
     });
@@ -52,42 +55,34 @@ describe("runtime Kubernetes resources", () => {
     expect(pod?.spec?.automountServiceAccountToken).toBe(false);
     expect(pod?.spec?.nodeSelector).toEqual({
       "kubernetes.io/os": "linux",
-      "kubernetes.io/hostname": "canonical-source-node",
+      "kubernetes.io/arch": "amd64",
+      "kubernetes.io/hostname": ownedFactoryboxProfile.nodeName,
     });
     expect(JSON.stringify(pod?.spec?.volumes)).not.toContain("docker.sock");
     expect(JSON.stringify(pod?.spec?.containers?.[0]?.volumeMounts)).not.toContain("docker.sock");
     expect(JSON.stringify(pod)).not.toContain('hostPath":{"path":"/Users');
     expect(JSON.stringify(pod)).not.toContain("FACTORY_AUTH_SECRET");
-    expect(JSON.stringify(pod)).toContain("unused-required-by-envbox");
-    expect(JSON.stringify(pod)).toContain("CODER_AGENT_URL is forbidden");
-    expect(JSON.stringify(pod)).toContain(
+    expect(JSON.stringify(pod)).not.toContain("envbox");
+    expect(factoryboxBootstrapProgram).toContain(
       "unset CODER_AGENT_TOKEN CODER_AGENT_SUBSYSTEM CODER_AGENT_URL",
     );
     expect(JSON.stringify(pod)).not.toContain("factory-bootstrap");
-    const envbox = pod?.spec?.containers?.[0];
-    expect(envbox?.env?.find((entry) => entry.name === "CODER_MOUNTS")?.value).not.toContain(
-      "docker.sock",
-    );
-    expect(envbox?.volumeMounts).toContainEqual({
+    const worker = pod?.spec?.containers?.[0];
+    expect(worker?.name).toBe("worker");
+    expect(worker?.image).toBe(ownedFactoryboxProfile.image);
+    expect(worker?.volumeMounts).toContainEqual({
       name: "registry-ca",
       mountPath: "/factory/registry-ca",
       readOnly: true,
     });
-    expect(envbox?.env?.find((entry) => entry.name === "CODER_MOUNTS")?.value).toContain(
-      "/factory/registry-ca:/factory/registry-ca:ro",
-    );
-    const bootstrap = envbox?.env?.find((entry) => entry.name === "CODER_BOOTSTRAP_SCRIPT")?.value;
-    const install = "cp /factory/registry-ca/ca.crt /etc/docker/certs.d/registry.example/ca.crt";
-    expect(bootstrap).toContain(install);
-    expect(bootstrap?.indexOf(install)).toBeLessThan(
-      bootstrap?.indexOf("dockerd-entrypoint.sh") ?? -1,
-    );
+    const bootstrap = factoryboxBootstrapProgram;
     expect(bootstrap).not.toContain("insecure-registry");
     expect(bootstrap).not.toContain("until docker info");
     expect(bootstrap).toContain("exec factory-runtime-connector parent");
     expect(bootstrap).toContain("--token-file /run/factory-parent-token");
     expect(bootstrap).not.toContain("/tmp/factory-parent-token");
-    expect(bootstrap).toContain("dockerd-entrypoint.sh dockerd --host=unix:///var/run/docker.sock");
+    expect(bootstrap).toContain("dockerd --host=unix:///var/run/docker.sock");
+    expect(bootstrap).not.toContain("dockerd-entrypoint.sh");
     const assignment = String(
       resources.find((resource) => resource.kind === "Secret")?.stringData?.["assignment.json"],
     );
@@ -103,6 +98,7 @@ describe("runtime Kubernetes resources", () => {
 
   test("keeps development tools out of Staging", () => {
     const resources = renderRuntimeResources({
+      factoryboxProfile: ownedFactoryboxProfile,
       attemptID: "01234567-89ab-5def-8123-456789abcdef",
       generation: 1,
       namespace: "factory-runtime-0123456789ab",
@@ -115,7 +111,7 @@ describe("runtime Kubernetes resources", () => {
       connectorToken: "one-use-token",
       childConnectorToken: "one-use-child-token",
       controlURL: "ws://factory.example/runtime/connect",
-      runtimeHostImage: "registry.example/runtime-host@sha256:0123",
+      runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
       registryCA: "certificate",
       mode: "staging",
       systemContract: multiAppSystemContract,
@@ -134,13 +130,14 @@ describe("runtime Kubernetes resources", () => {
     expect(
       resources.find((resource) => resource.kind === "Pod")?.spec?.containers?.[0]?.resources,
     ).toMatchObject({
-      requests: { cpu: "100m", memory: "256Mi", "ephemeral-storage": "512Mi" },
-      limits: { cpu: "2", memory: "2Gi", "ephemeral-storage": "2Gi" },
+      requests: { cpu: "3", memory: "3Gi" },
+      limits: { cpu: "3", memory: "3Gi" },
     });
   });
 
   test("runs one exact Forgejo Actions job in a Verification Sandbox", () => {
     const resources = renderRuntimeResources({
+      factoryboxProfile: ownedFactoryboxProfile,
       attemptID: "01234567-89ab-5def-8123-456789abcdef",
       generation: 3,
       namespace: "factory-runtime-0123456789ab",
@@ -153,7 +150,7 @@ describe("runtime Kubernetes resources", () => {
       connectorToken: "one-use-token",
       childConnectorToken: "one-use-child-token",
       controlURL: "ws://factory.example/runtime/connect",
-      runtimeHostImage: "registry.example/runtime-host@sha256:0123",
+      runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
       registryCA: "certificate",
       mode: "verification",
       verification: {
@@ -190,8 +187,8 @@ describe("runtime Kubernetes resources", () => {
     expect(
       resources.find((resource) => resource.kind === "Pod")?.spec?.containers?.[0]?.resources,
     ).toMatchObject({
-      requests: { cpu: "250m", memory: "768Mi", "ephemeral-storage": "2Gi" },
-      limits: { cpu: "6", memory: "8Gi", "ephemeral-storage": "8Gi" },
+      requests: { cpu: "3", memory: "3Gi" },
+      limits: { cpu: "3", memory: "3Gi" },
     });
   });
 
@@ -199,6 +196,7 @@ describe("runtime Kubernetes resources", () => {
     "adds OpenCode with the frozen Coding configuration: %s",
     (reasoningEffort) => {
       const resources = renderRuntimeResources({
+        factoryboxProfile: ownedFactoryboxProfile,
         attemptID: "01234567-89ab-5def-8123-456789abcdef",
         generation: 2,
         namespace: "factory-workspace-0123456789ab",
@@ -211,7 +209,7 @@ describe("runtime Kubernetes resources", () => {
         connectorToken: "one-use-token",
         childConnectorToken: "one-use-child-token",
         controlURL: "ws://factory.example/runtime/connect",
-        runtimeHostImage: "registry.example/runtime-host@sha256:0123",
+        runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
         registryCA: "certificate",
         agent: {
           modelBaseURL: "http://host.orb.internal:3000/internal/model/attempt/v1",

@@ -13,8 +13,6 @@ export const ownedFactoryboxProfile = {
 
 export const ownedRuntimeConfiguration = {
   FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
-  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
   FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
   FACTORY_FACTORYBOX_WORKER_IMAGE: ownedFactoryboxProfile.image,
   FACTORY_FACTORYBOX_EXECUTABLE_SHA256: ownedFactoryboxProfile.executableSHA256,

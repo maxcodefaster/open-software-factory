@@ -34,6 +34,7 @@ type ConnectorMessage = {
   exitCode?: number;
   terminalId?: string;
   terminalCount?: number;
+  terminalBusy?: number;
   terminalRevision?: number;
   channels?: Array<{ name?: string; kind?: string }>;
   error?: string;
@@ -78,6 +79,7 @@ type PendingHTTP = {
   body: ReadableStream<Uint8Array>;
   responded: boolean;
   head: boolean;
+  keepsAwake: boolean;
   appPath?: string;
   resolve(response: Response): void;
   reject(error: Error): void;
@@ -141,7 +143,13 @@ export class RuntimeHub {
   readonly #onStatus: (attemptID: string, phase: string, error?: string) => Promise<void>;
   readonly #activity = new Map<
     string,
-    { lastUse: number; terminals: number | null; revision: number }
+    {
+      lastUse: number;
+      terminals: number | null;
+      busyTerminals: number | null;
+      terminalObservedAt: number;
+      revision: number;
+    }
   >();
   readonly #idleClaims = new Set<string>();
 
@@ -247,7 +255,7 @@ export class RuntimeHub {
       const streamID = crypto.randomUUID();
       this.#browsers.set(streamID, { socket, connector: child, ready: false, pending: [] });
       this.#browserStreams.set(socket, streamID);
-      this.#touch(socket.data.attemptID);
+      if (socket.data.channel === "terminal") this.#touch(socket.data.attemptID);
       child.send(
         JSON.stringify({
           type: "websocket-open",
@@ -274,7 +282,10 @@ export class RuntimeHub {
 
   message(socket: ServerWebSocket<RuntimeSocketData>, raw: string | Buffer) {
     if (socket.data.kind === "browser") {
-      this.#touch(socket.data.attemptID);
+      // Only terminal input is human activity. Language traffic, App polling
+      // and live-reload keepalives must not keep an unattended Workspace awake.
+      if (socket.data.channel === "terminal" && Buffer.isBuffer(raw))
+        this.#touch(socket.data.attemptID);
       const streamID = this.#browserStreams.get(socket);
       const child = this.#children.get(socket.data.attemptID);
       const stream = streamID ? this.#browsers.get(streamID) : undefined;
@@ -305,6 +316,7 @@ export class RuntimeHub {
       const activity = this.#activity.get(socket.data.attemptID);
       if (activity) {
         activity.terminals = null;
+        activity.busyTerminals = null;
         activity.revision = -1;
       }
       this.#observeTerminals(socket.data.attemptID, message);
@@ -578,6 +590,9 @@ export class RuntimeHub {
         body,
         responded: false,
         head: request.method === "HEAD",
+        keepsAwake:
+          request.headers.get("sec-fetch-mode") === "navigate" ||
+          !["GET", "HEAD", "OPTIONS"].includes(request.method),
         ...(this.hasAppChannel(attemptID, channel) &&
         new URL(request.url).pathname.startsWith("/runtime/")
           ? {
@@ -624,7 +639,11 @@ export class RuntimeHub {
         ) <= 0
       )
         throw new Error("Connector send failed");
-      this.#touch(attemptID);
+      if (
+        request.headers.get("sec-fetch-mode") === "navigate" ||
+        !["GET", "HEAD", "OPTIONS"].includes(request.method)
+      )
+        this.#touch(attemptID);
     };
     const forward = async () => {
       if (beforeSend) await beforeSend(send);
@@ -798,20 +817,29 @@ export class RuntimeHub {
     return this.#parents.has(attemptID);
   }
 
+  use(attemptID: string) {
+    if (!this.connected(attemptID) || this.#idleClaims.has(attemptID)) return false;
+    this.#touch(attemptID);
+    return true;
+  }
+
   claimIdle(attemptID: string, idleMS: number) {
     const activity = this.#activity.get(attemptID);
     if (
+      // Native PTY Resume currently fails to reopen /dev/tty. Do not admit
+      // automatic Pause of an open terminal, including a detached idle shell.
       activity?.terminals !== 0 ||
+      activity?.busyTerminals !== 0 ||
+      this.now() - activity.terminalObservedAt > 15_000 ||
       this.now() - activity.lastUse < idleMS ||
       !this.connected(attemptID) ||
       this.#idleClaims.has(attemptID) ||
-      this.processEvents.hasView(attemptID) ||
-      [...this.#browsers.values()].some((stream) => stream.socket.data.attemptID === attemptID) ||
-      [
-        ...this.#pendingHTTP.values(),
-        ...this.#pendingOperations.values(),
-        ...this.#pendingChildOperations.values(),
-      ].some((operation) => operation.attemptID === attemptID)
+      [...this.#pendingHTTP.values()].some(
+        (operation) => operation.attemptID === attemptID && operation.keepsAwake,
+      ) ||
+      [...this.#pendingOperations.values(), ...this.#pendingChildOperations.values()].some(
+        (operation) => operation.attemptID === attemptID,
+      )
     )
       return false;
     this.#idleClaims.add(attemptID);
@@ -824,10 +852,17 @@ export class RuntimeHub {
   #touch(attemptID: string) {
     const activity = this.#activity.get(attemptID);
     if (activity) activity.lastUse = this.now();
-    else this.#activity.set(attemptID, { lastUse: this.now(), terminals: null, revision: -1 });
+    else
+      this.#activity.set(attemptID, {
+        lastUse: this.now(),
+        terminals: null,
+        busyTerminals: null,
+        terminalObservedAt: this.now(),
+        revision: -1,
+      });
   }
   #observeTerminals(attemptID: string, message: ConnectorMessage) {
-    const { terminalCount, terminalRevision } = message;
+    const { terminalCount, terminalBusy, terminalRevision } = message;
     const activity = this.#activity.get(attemptID);
     if (!activity) return;
     if (
@@ -836,14 +871,29 @@ export class RuntimeHub {
       !Number.isSafeInteger(terminalCount) ||
       terminalCount < 0 ||
       terminalCount > 8 ||
+      terminalBusy === undefined ||
+      !Number.isSafeInteger(terminalBusy) ||
+      terminalBusy < 0 ||
+      terminalBusy > terminalCount ||
       !Number.isSafeInteger(terminalRevision) ||
       terminalRevision < 0
     ) {
       activity.terminals = null;
+      activity.busyTerminals = null;
       return;
     }
-    if (terminalRevision <= activity.revision) return;
+    if (terminalRevision < activity.revision) return;
+    if (terminalRevision === activity.revision) {
+      if (activity.terminals !== terminalCount || activity.busyTerminals !== terminalBusy) {
+        activity.busyTerminals = null;
+        return;
+      }
+      activity.terminalObservedAt = this.now();
+      return;
+    }
     activity.terminals = terminalCount;
+    activity.busyTerminals = terminalBusy;
+    activity.terminalObservedAt = this.now();
     activity.revision = terminalRevision;
     activity.lastUse = this.now();
   }

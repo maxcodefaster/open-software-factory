@@ -62,7 +62,7 @@ test("terminal parent status is not replaced by reconnect failure on socket clos
   hub.revoke("attempt");
 });
 
-test("idle admission retains detached PTYs, active views and unknown/stale terminal observations", async () => {
+test("idle admission retains detached PTYs and unknown observations, not unattended views", async () => {
   let now = 0;
   const hub = new RuntimeHub(
     async () => {},
@@ -72,8 +72,11 @@ test("idle admission retains detached PTYs, active views and unknown/stale termi
   const child = connectorSocket("child");
   hub.open(parent);
   hub.open(child);
-  const observe = (terminalCount: number, terminalRevision: number) =>
-    hub.message(child, JSON.stringify({ type: "terminal-state", terminalCount, terminalRevision }));
+  const observe = (terminalCount: number, terminalRevision: number, terminalBusy = terminalCount) =>
+    hub.message(
+      child,
+      JSON.stringify({ type: "terminal-state", terminalCount, terminalBusy, terminalRevision }),
+    );
   try {
     now = 1000;
     expect(hub.claimIdle("attempt", 100)).toBe(false);
@@ -90,9 +93,9 @@ test("idle admission retains detached PTYs, active views and unknown/stale termi
     now = 3500;
     const cancel = new AbortController();
     const view = hub.processEvents.subscribe("attempt", "viewer", cancel.signal);
-    expect(hub.claimIdle("attempt", 100)).toBe(false);
-    await view.body?.cancel();
     expect(hub.claimIdle("attempt", 100)).toBe(true);
+    expect(hub.use("attempt")).toBe(false);
+    await view.body?.cancel();
     expect((await hub.request("attempt", "app", new Request("http://app/"), "/")).status).toBe(503);
     await expect(
       hub.childOperation("attempt", { operationId: "late", action: "process-start" }),
@@ -100,9 +103,119 @@ test("idle admission retains detached PTYs, active views and unknown/stale termi
     hub.releaseIdle("attempt");
     expect(hub.claimIdle("attempt", 100)).toBe(false);
     now = 4000;
+    expect(hub.use("attempt")).toBe(true);
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    now = 4200;
     expect(hub.claimIdle("attempt", 100)).toBe(true);
   } finally {
     hub.revoke("attempt");
+  }
+});
+
+test("open terminals block automatic Pause even when the shell reports an idle prompt", () => {
+  let now = 0;
+  const hub = new RuntimeHub(
+    async () => {},
+    () => now,
+  );
+  const parent = connectorSocket("parent");
+  const child = connectorSocket("child");
+  hub.open(parent);
+  hub.open(child);
+  const observe = (terminalBusy: number, terminalRevision: number) =>
+    hub.message(
+      child,
+      JSON.stringify({ type: "terminal-state", terminalCount: 1, terminalBusy, terminalRevision }),
+    );
+  try {
+    observe(0, 1);
+    now = 1_000;
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    observe(1, 2);
+    now = 2_000;
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    observe(0, 3);
+    now = 20_000;
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    observe(0, 3); // Same observation refreshes freshness, not human use.
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    now = 21_000;
+    observe(1, 3); // A changed payload cannot reuse an old revision.
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test("automatic Pause requires a fresh and consistent empty terminal observation", () => {
+  let now = 0;
+  const hub = new RuntimeHub(async () => {}, () => now);
+  hub.open(connectorSocket("parent"));
+  const child = connectorSocket("child");
+  hub.open(child);
+  const observe = (terminalCount: number, terminalRevision: number) =>
+    hub.message(
+      child,
+      JSON.stringify({
+        type: "terminal-state",
+        terminalCount,
+        terminalBusy: 0,
+        terminalRevision,
+      }),
+    );
+  try {
+    observe(0, 1);
+    now = 20_000;
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+    observe(0, 1);
+    expect(hub.claimIdle("attempt", 100)).toBe(true);
+    hub.releaseIdle("attempt");
+    now = 21_000;
+    observe(1, 1);
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
+test("background HTTP reads cannot keep compute awake while a pending write remains protected", async () => {
+  let now = 0;
+  const hub = new RuntimeHub(
+    async () => {},
+    () => now,
+  );
+  hub.open(connectorSocket("parent"));
+  const child = connectorSocket("child");
+  hub.open(child);
+  hub.message(
+    child,
+    JSON.stringify({
+      type: "terminal-state",
+      terminalCount: 0,
+      terminalBusy: 0,
+      terminalRevision: 1,
+    }),
+  );
+  const read = hub.request("attempt", "app", new Request("http://app/events"), "/events");
+  void read.catch(() => {});
+  let write: Promise<Response> | undefined;
+  try {
+    now = 1_000;
+    expect(hub.claimIdle("attempt", 100)).toBe(true);
+    hub.releaseIdle("attempt");
+    write = hub.request(
+      "attempt",
+      "app",
+      new Request("http://app/save", { method: "POST", body: "work" }),
+      "/save",
+    );
+    void write.catch(() => {});
+    await Bun.sleep(0);
+    now = 2_000;
+    expect(hub.claimIdle("attempt", 100)).toBe(false);
+  } finally {
+    hub.revoke("attempt");
+    await Promise.allSettled([read, ...(write ? [write] : [])]);
   }
 });
 

@@ -55,6 +55,9 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     if (event instanceof CustomEvent && typeof event.detail?.workspaceID === "string")
       this.#editing.queue(event.detail.workspaceID, "edit");
   };
+  readonly #use = (event: Event) => {
+    if (event.isTrusted && !document.hidden) void factoryRuntimeContext.use();
+  };
   constructor(
     @inject(StatusBar) private readonly statusBar: StatusBar,
     @inject(EditorManager) private readonly editors: EditorManager,
@@ -63,6 +66,9 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     for (const widget of this.editors.all) this.#observeEditor(widget);
     this.#editorSubscriptions.push(this.editors.onCreated((widget) => this.#observeEditor(widget)));
     window.addEventListener("factory:editing-activity", this.#terminalInput);
+    document.addEventListener("pointerdown", this.#use, { passive: true });
+    document.addEventListener("wheel", this.#use, { passive: true });
+    document.addEventListener("keydown", this.#use);
     this.#heartbeat = setInterval(() => {
       if (!document.hidden && this.#workspaceID)
         this.#editing.queue(this.#workspaceID, "heartbeat");
@@ -166,6 +172,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
           : undefined;
       this.#editing.confirm(workspaceID, editingEpoch);
       factoryWriteContext.confirm(workspaceID, value.canWrite);
+      factoryRuntimeContext.setWritable(workspaceID, value.canWrite);
       const observed =
         "epoch" in value && typeof value.epoch === "number" ? value.epoch : undefined;
       const idle =
@@ -219,10 +226,14 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
               ? "Editing requested"
               : "Request editing"
             : "Take over editing";
-      if (takeOver && value.canWrite) factoryRuntimeContext.select(workspaceID);
+      if (takeOver && value.canWrite) {
+        factoryRuntimeContext.select(workspaceID, true);
+        factoryRuntimeContext.setWritable(workspaceID, true);
+      }
     } catch (cause) {
       if (this.#workspaceID === workspaceID && !cancellation.signal.aborted) {
         factoryWriteContext.confirm(workspaceID, false);
+        factoryRuntimeContext.setWritable(workspaceID, false);
         this.#bar.hidden = false;
         this.#editing.confirm(workspaceID, undefined);
         this.#copy.textContent =
@@ -245,6 +256,9 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     clearInterval(this.#heartbeat);
     this.#editorSubscriptions.dispose();
     window.removeEventListener("factory:editing-activity", this.#terminalInput);
+    document.removeEventListener("pointerdown", this.#use);
+    document.removeEventListener("wheel", this.#use);
+    document.removeEventListener("keydown", this.#use);
     void this.statusBar.removeElement("factory-writing");
     this.#subscription?.dispose();
     if (this.#timer) clearInterval(this.#timer);

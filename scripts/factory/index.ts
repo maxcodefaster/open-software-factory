@@ -104,11 +104,6 @@ const runtimeImageFile = resolve(stateDirectory, "runtime-host-image");
 const browserImageFile = resolve(stateDirectory, "browser-tools-image");
 const sourceFilesImageFile = resolve(sharedStateDirectory, "workspace-files-image");
 const developerIDEImageFile = resolve(sharedStateDirectory, "developer-ide-image");
-const buildRuntimeImageFile = resolve(sharedStateDirectory, "build-runtime-host-image");
-const verificationRuntimeImageFile = resolve(
-  sharedStateDirectory,
-  "verification-runtime-host-image",
-);
 const serverPIDFile = resolve(stateDirectory, "server.pid");
 const forgejoTokenFile = resolve(stateDirectory, "forgejo-token");
 const forgejoAdminTokenFile = resolve(stateDirectory, "forgejo-admin-token");
@@ -308,22 +303,6 @@ async function publishRuntimeHost() {
         state: runtimeImageFile,
         dockerfile: "deploy/runtime-host/Dockerfile",
         target: "runtime-host",
-      },
-      {
-        name: "build-runtime-host",
-        repository: `${registryHost}/open-factory/build-runtime-host`,
-        metadata: resolve(sharedStateDirectory, "build-runtime-host-metadata.json"),
-        state: buildRuntimeImageFile,
-        dockerfile: "deploy/runtime-host/Dockerfile",
-        target: "build-runtime-host",
-      },
-      {
-        name: "verification-runtime-host",
-        repository: `${registryHost}/open-factory/verification-runtime-host`,
-        metadata: resolve(sharedStateDirectory, "verification-runtime-host-metadata.json"),
-        state: verificationRuntimeImageFile,
-        dockerfile: "deploy/runtime-host/Dockerfile",
-        target: "verification-runtime-host",
       },
       {
         name: "browser-tools",
@@ -793,21 +772,12 @@ async function publishedSourceImages() {
 }
 
 async function configuredRuntimeArtifacts(runtimeImage: string) {
-  const artifacts = await publishedRuntimeArtifacts(sharedStateDirectory);
   const sourceImages = await publishedSourceImages();
   return runtimeArtifactsSchema.parse({
     "runtime-host": runtimeImage,
     "browser-tools": await publishedBrowserImage(),
     "workspace-files": sourceImages.FACTORY_WORKSPACE_FILES_IMAGE,
     "developer-ide": sourceImages.FACTORY_DEVELOPER_IDE_IMAGE,
-    "build-runtime-host":
-      process.env["FACTORY_BUILD_RUNTIME_HOST_IMAGE"] ??
-      artifacts?.["build-runtime-host"] ??
-      (await readFile(buildRuntimeImageFile, "utf8")).trim(),
-    "verification-runtime-host":
-      process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"] ??
-      artifacts?.["verification-runtime-host"] ??
-      (await readFile(verificationRuntimeImageFile, "utf8")).trim(),
   });
 }
 
@@ -842,8 +812,6 @@ async function startServer(
     ...(process.env["FACTORY_OPENBAO_URL"]
       ? {}
       : await (await localOpenBao(stateDirectory)).start()),
-    FACTORY_BUILD_RUNTIME_HOST_IMAGE: artifacts["build-runtime-host"],
-    FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: artifacts["verification-runtime-host"],
     FACTORY_BROWSER_TOOLS_IMAGE: artifacts["browser-tools"],
     FACTORY_WORKSPACE_FILES_IMAGE: artifacts["workspace-files"],
     FACTORY_DEVELOPER_IDE_IMAGE: artifacts["developer-ide"],

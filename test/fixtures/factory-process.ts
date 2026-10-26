@@ -49,8 +49,6 @@ export async function factoryProcess(
     FACTORY_BROWSER_TOOLS_IMAGE?: string;
     FACTORY_WORKSPACE_FILES_IMAGE?: string;
     FACTORY_DEVELOPER_IDE_IMAGE?: string;
-    FACTORY_BUILD_RUNTIME_HOST_IMAGE?: string;
-    FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE?: string;
     FACTORY_EXECUTION_IDLE_MINUTES?: string;
     FACTORY_FACTORYBOX_WORKER_IMAGE?: string;
     FACTORY_FACTORYBOX_EXECUTABLE_SHA256?: string;
@@ -80,8 +78,6 @@ export async function factoryProcess(
     ? Object.fromEntries(
         await Promise.all(
           [
-            ["FACTORY_BUILD_RUNTIME_HOST_IMAGE", "build-runtime-host"],
-            ["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE", "verification-runtime-host"],
             ["FACTORY_BROWSER_TOOLS_IMAGE", "browser-tools"],
             ["FACTORY_WORKSPACE_FILES_IMAGE", "workspace-files"],
             ["FACTORY_DEVELOPER_IDE_IMAGE", "developer-ide"],
@@ -205,8 +201,6 @@ export async function factoryProcess(
       FACTORY_RUNTIME_HOST_IMAGE:
         liveRuntime?.runtimeHostImage ??
         `registry.example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-      FACTORY_BUILD_RUNTIME_HOST_IMAGE: `registry.example.invalid/owned-build@sha256:${"b".repeat(64)}`,
-      FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `registry.example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
       FACTORY_EXECUTION_RESERVE_TARGET: "0",
       ...(!liveRuntime
         ? {

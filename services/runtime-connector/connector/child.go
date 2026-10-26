@@ -104,6 +104,7 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 		<-agentDone
 	}()
 	runtime.terminals = newTerminalManager(ctx, assignment, runtime.send)
+	go runtime.terminals.watch()
 	defer runtime.terminals.closeAll()
 	runtime.languages = newLanguageManager(ctx, assignment, runtime.send)
 	defer runtime.languages.closeAll()
@@ -118,6 +119,7 @@ func RunChild(ctx context.Context, assignment Assignment, token string) error {
 			Generation:       assignment.Generation,
 			Channels:         assignment.Channels,
 			TerminalCount:    terminals.TerminalCount,
+			TerminalBusy:     terminals.TerminalBusy,
 			TerminalRevision: terminals.TerminalRevision,
 		}); err != nil {
 			control.close()

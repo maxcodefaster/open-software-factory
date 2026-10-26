@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { z } from "zod";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { renderRuntimeResources } from "../../packages/runtime-kubernetes/src/manifest";
+import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
 import upstream from "../../upstream.json";
 import { eventually } from "../fixtures/factory-process";
 
@@ -19,7 +20,7 @@ test.skipIf(process.env["FACTORY_RUN_VERIFICATION_RUNNER_PROOF"] !== "1" && !rea
     const dummyToken = "a".repeat(40);
     await mkdir(".factory/test-results/verification-runner", { recursive: true });
     const directory = await mkdtemp(resolve(".factory/test-results/verification-runner/probe-"));
-    const image = (await readFile(".factory/verification-runtime-host-image", "utf8"))
+    const image = (await readFile(".factory/runtime-host-image", "utf8"))
       .trim()
       .replace(
         "registry.open-factory-envbox-smoke.svc.cluster.local:5000",
@@ -64,6 +65,7 @@ test.skipIf(process.env["FACTORY_RUN_VERIFICATION_RUNNER_PROOF"] !== "1" && !rea
         JSON.stringify({ id: registration.id, uuid: registration.uuid, name: runnerName }),
       );
     const resources = renderRuntimeResources({
+      factoryboxProfile: ownedFactoryboxProfile,
       attemptID: owner,
       generation: 1,
       namespace: "owned-runner-probe",

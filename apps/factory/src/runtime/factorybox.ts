@@ -439,42 +439,46 @@ export function createFactoryboxExecution(
           WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
       });
     },
-    async resume(attemptID: string) {
-      return locked(attemptID, async (connection) => {
-        const saved = await retained(connection, attemptID);
-        if (!saved?.identity)
-          throw new Error("Runtime Attempt has no admitted Factorybox execution");
-        const [attempt] = await connection<
-          Array<{ state: string; generation: string; parent: string; child: string }>
-        >`
+    async resume(attemptID: string, deadline?: number) {
+      return locked(
+        attemptID,
+        async (connection) => {
+          const saved = await retained(connection, attemptID);
+          if (!saved?.identity)
+            throw new Error("Runtime Attempt has no admitted Factorybox execution");
+          const [attempt] = await connection<
+            Array<{ state: string; generation: string; parent: string; child: string }>
+          >`
           SELECT state,generation,parent_connector_token_hash AS parent,child_connector_token_hash AS child
           FROM factory.runtime_attempt WHERE id=${attemptID} AND stop_intended_at IS NULL`;
-        if (!attempt || !["paused", "resuming"].includes(attempt.state))
-          throw new Error("Runtime Attempt is not paused");
-        const [pause] = await connection<
-          Array<{ snapshot: string }>
-        >`SELECT snapshot_id AS snapshot FROM factory.factorybox_lifecycle_operation
+          if (!attempt || !["paused", "resuming"].includes(attempt.state))
+            throw new Error("Runtime Attempt is not paused");
+          const [pause] = await connection<
+            Array<{ snapshot: string }>
+          >`SELECT snapshot_id AS snapshot FROM factory.factorybox_lifecycle_operation
           WHERE runtime_attempt_id=${attemptID} AND action='pause' AND completed_at IS NOT NULL ORDER BY intended_at DESC LIMIT 1`;
-        if (!pause) throw new Error("Runtime Attempt has no committed Pause");
-        await intent(connection, attemptID, "resume", pause.snapshot);
-        await connection`UPDATE factory.runtime_attempt SET state='resuming',failure=NULL,updated_at=now()
+          if (!pause) throw new Error("Runtime Attempt has no committed Pause");
+          await intent(connection, attemptID, "resume", pause.snapshot);
+          await connection`UPDATE factory.runtime_attempt SET state='resuming',failure=NULL,updated_at=now()
           WHERE id=${attemptID} AND state IN ('paused','resuming') AND stop_intended_at IS NULL`;
-        // Check the original live worker before reauthorizing its credentials.
-        await inspectFactoryboxWorker(
-          factoryboxRuntimeRequest(saved.request),
-          saved.identity,
-          run,
-          factoryboxRuntimeDeclaration(saved.request),
-        );
-        hub.allow(attemptID, Number(attempt.generation), attempt.parent, attempt.child);
-        await perform(connection, attemptID, saved, {
-          action: "resume",
-          sandboxID: "runtime",
-          snapshotID: pause.snapshot,
-        });
-        await connection`UPDATE factory.runtime_attempt SET state='starting',failure=NULL,updated_at=now()
+          // Check the original live worker before reauthorizing its credentials.
+          await inspectFactoryboxWorker(
+            factoryboxRuntimeRequest(saved.request),
+            saved.identity,
+            run,
+            factoryboxRuntimeDeclaration(saved.request),
+          );
+          hub.allow(attemptID, Number(attempt.generation), attempt.parent, attempt.child);
+          await perform(connection, attemptID, saved, {
+            action: "resume",
+            sandboxID: "runtime",
+            snapshotID: pause.snapshot,
+          });
+          await connection`UPDATE factory.runtime_attempt SET state='starting',failure=NULL,updated_at=now()
           WHERE id=${attemptID} AND state='resuming' AND stop_intended_at IS NULL`;
-      });
+        },
+        deadline,
+      );
     },
   };
 }

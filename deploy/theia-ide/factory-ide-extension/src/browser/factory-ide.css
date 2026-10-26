@@ -268,6 +268,99 @@
   }
 }
 
+.factory-git-widget {
+  background: var(--theia-editor-background);
+  color: var(--theia-editor-foreground);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.factory-git-widget .factory-runtime-toolbar {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+.factory-git-identity {
+  align-self: center;
+  overflow-wrap: anywhere;
+}
+.factory-git-commit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--theia-panel-border);
+}
+.factory-git-commit input {
+  min-width: 120px;
+  flex: 1;
+  background: var(--theia-input-background);
+  color: var(--theia-input-foreground);
+  border: 1px solid var(--theia-input-border, var(--theia-panel-border));
+  border-radius: 4px;
+  padding: 5px 8px;
+  font: inherit;
+}
+.factory-git-widget button {
+  background: var(--theia-button-secondaryBackground);
+  color: var(--theia-button-secondaryForeground);
+  border: 0;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font: inherit;
+  cursor: pointer;
+}
+.factory-git-widget button:hover:not(:disabled) {
+  background: var(--theia-list-hoverBackground);
+}
+.factory-git-widget button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.factory-git-widget :is(button, input):focus-visible {
+  outline: 2px solid var(--theia-focusBorder);
+  outline-offset: 1px;
+}
+.factory-git-body {
+  display: grid;
+  grid-template-columns: minmax(140px, 28%) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1;
+}
+.factory-git-files {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  overflow: auto;
+  border-right: 1px solid var(--theia-panel-border);
+}
+.factory-git-files button {
+  background: transparent;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.factory-git-files button[aria-pressed="true"] {
+  background: var(--theia-list-activeSelectionBackground);
+  color: var(--theia-list-activeSelectionForeground);
+}
+.factory-git-notice {
+  margin: 0;
+  padding: 10px 12px;
+  line-height: 1.5;
+}
+@media (max-width: 600px) {
+  .factory-git-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(70px, 35%) minmax(0, 1fr);
+  }
+  .factory-git-files {
+    border-right: 0;
+    border-bottom: 1px solid var(--theia-panel-border);
+  }
+}
+
 .factory-terminal-widget {
   background: var(--theia-editor-background);
   color: var(--theia-editor-foreground);

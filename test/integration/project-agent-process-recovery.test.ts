@@ -170,8 +170,6 @@ test("actual Factory startup recovers Project input and never replays dispatched
       FACTORY_FORGEJO_TOKEN: "owned-unused-forge-token",
       FACTORY_FORGEJO_OWNER: "owned-process-fixture",
       FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
-      FACTORY_BUILD_RUNTIME_HOST_IMAGE: `registry.example.invalid/owned-build@sha256:${"b".repeat(64)}`,
-      FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `registry.example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
       FACTORY_EXECUTION_RESERVE_TARGET: "0",
       FACTORY_PLANNING_MODEL_BASE_URL: "",
       FACTORY_PLANNING_MODEL_API_KEY: "",

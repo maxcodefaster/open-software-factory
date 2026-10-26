@@ -33,7 +33,7 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
     expect(
       await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${owned.ticketID}`,
     ).toHaveLength(1);
-    expect(executionIdleMS({})).toBe(30 * 60_000);
+    expect(executionIdleMS({})).toBe(5 * 60_000);
     expect(executionIdleMS({ FACTORY_EXECUTION_IDLE_MINUTES: "0" })).toBe(0);
     expect(() => executionIdleMS({ FACTORY_EXECUTION_IDLE_MINUTES: "1441" })).toThrow("0–1440");
     // Keep the oldest 64 candidates busy. A bounded sweep must eventually reach the idle tail.

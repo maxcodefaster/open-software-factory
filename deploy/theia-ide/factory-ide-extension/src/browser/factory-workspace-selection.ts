@@ -107,7 +107,7 @@ export class FactoryWorkspaceSelection extends WorkspaceService {
     if (serial !== this.selection) return;
     await this.setWorkspace(stat);
     if (serial !== this.selection) return;
-    factoryRuntimeContext.select(workspaceID);
+    factoryRuntimeContext.select(workspaceID, true);
     if (this.navigatorWorkspace === workspaceID) this.acknowledge(workspaceID);
   }
 

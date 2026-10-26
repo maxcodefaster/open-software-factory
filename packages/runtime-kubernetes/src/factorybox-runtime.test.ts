@@ -28,6 +28,35 @@ const input: FactoryboxRuntimeInput = {
   },
 };
 
+test("registry trust follows the qualified exact runtime image, including private ports", () => {
+  for (const authority of ["ghcr.io", "registry.portable.svc:5000"]) {
+    const request = {
+      ...input,
+      runtimeHostImage: `${authority}/factory/runtime@sha256:${"a".repeat(64)}`,
+    };
+    const rendered = renderFactoryboxRuntime(request);
+    expect(rendered.pod.spec.initContainers[0]?.image).toBe(request.runtimeHostImage);
+    expect(rendered.pod.spec.containers[0]?.volumeMounts).toContainEqual({
+      name: "registry-ca",
+      mountPath: "/factory/registry-ca",
+      readOnly: true,
+    });
+    expect(JSON.stringify(rendered)).not.toContain("envbox");
+  }
+});
+
+test("runtime image names cannot inject commands or traverse certificate directories", () => {
+  for (const image of [
+    "registry;id/factory",
+    "registry$(id)/factory",
+    "../factory",
+    "/factory",
+    "unqualified-image",
+    `registry.example/../runtime@sha256:${"a".repeat(64)}`,
+  ])
+    expect(() => renderFactoryboxRuntime({ ...input, runtimeHostImage: image })).toThrow();
+});
+
 test.each(["arm64", "amd64"] as const)(
   "%s runtime preparation uses its admitted profile rather than the control-plane architecture",
   (architecture) => {

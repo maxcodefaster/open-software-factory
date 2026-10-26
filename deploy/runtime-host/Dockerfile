@@ -120,15 +120,11 @@ FROM runtime-host-base AS runtime-host
 COPY --from=language-tools /opt/factory/language-tools/node_modules /opt/factory/language-tools/node_modules
 COPY --from=language-node-glibc /opt/node-runtime /opt/factory/language-tools/glibc
 COPY --from=language-node-musl /opt/node-runtime /opt/factory/language-tools/musl
-
-FROM runtime-host AS build-runtime-host
 COPY --from=build-tool /opt/factory/opencode/opencode /opt/factory/opencode/opencode
 COPY --from=build-tool /opt/factory/opencode/glibc/opencode /opt/factory/opencode/glibc/opencode
 COPY --from=opencode-server /opt/factory/opencode/server /opt/factory/opencode/server
 COPY --from=bun-tool /opt/factory/opencode/glibc/bun /opt/factory/opencode/glibc/bun
 COPY --from=bun-tool /opt/factory/opencode/musl/bun /opt/factory/opencode/musl/bun
-
-FROM runtime-host-base AS verification-runtime-host
 COPY --from=verification-tool /usr/local/bin/forgejo-runner /usr/local/bin/forgejo-runner
 
 FROM runtime-host AS runtime

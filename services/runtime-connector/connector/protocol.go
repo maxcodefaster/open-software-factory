@@ -22,6 +22,7 @@ type Message struct {
 	ExitCode             *int              `json:"exitCode,omitempty"`
 	TerminalID           string            `json:"terminalId,omitempty"`
 	TerminalCount        *int              `json:"terminalCount,omitempty"`
+	TerminalBusy         *int              `json:"terminalBusy,omitempty"`
 	TerminalRevision     *uint64           `json:"terminalRevision,omitempty"`
 	Channels             []Channel         `json:"channels,omitempty"`
 	StreamID             string            `json:"streamId,omitempty"`

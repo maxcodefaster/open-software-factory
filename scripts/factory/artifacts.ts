@@ -5,8 +5,6 @@ import { requirePinnedImage } from "./preflight";
 
 export const runtimeArtifactNames = [
   "runtime-host",
-  "build-runtime-host",
-  "verification-runtime-host",
   "browser-tools",
   "workspace-files",
   "developer-ide",

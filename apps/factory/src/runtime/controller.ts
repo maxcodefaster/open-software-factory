@@ -133,8 +133,8 @@ export function createRuntimeController(
     hostImages: {
       development: pinnedRuntimeHostImage,
       staging: pinnedRuntimeHostImage,
-      build: process.env["FACTORY_BUILD_RUNTIME_HOST_IMAGE"],
-      verification: process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"],
+      build: pinnedRuntimeHostImage,
+      verification: pinnedRuntimeHostImage,
     },
     browserToolsImage: process.env["FACTORY_BROWSER_TOOLS_IMAGE"],
   };
@@ -567,8 +567,11 @@ export function createRuntimeController(
             ? "stopping"
             : null;
     if (!state) return;
+    const apps = state === "ready" ? hub.appChannels(attemptID) : [];
     const changed = await database.client`
       UPDATE factory.runtime_attempt SET state = ${state}::factory.runtime_attempt_state,
+        declared_apps=CASE WHEN declared_apps='[]'::jsonb
+          THEN ${JSON.stringify(apps)}::text::jsonb ELSE declared_apps END,
         failure = ${error ?? null}, stopped_at = CASE WHEN ${state} = 'stopped' THEN now() ELSE stopped_at END,
         updated_at = now() WHERE id = ${attemptID}
           AND (
@@ -1116,6 +1119,25 @@ export function createRuntimeController(
   }
 
   return {
+    async resumeForApp(attemptID: string, userID: string, deadline?: number) {
+      await createAccessController(database).requireRuntime(userID, attemptID, "app");
+      const current = await this.get(attemptID);
+      if (!current || current.failure || !["pausing", "paused", "resuming"].includes(current.state))
+        return current;
+      try {
+        await factorybox.resume(attemptID, deadline);
+      } catch (cause) {
+        const observed = await this.get(attemptID);
+        if (!observed || !["starting", "ready"].includes(observed.state)) {
+          await database.client`UPDATE factory.runtime_attempt SET
+            failure=${cause instanceof Error ? cause.message : "Factorybox Resume is unconfirmed"},updated_at=now()
+            WHERE id=${attemptID} AND state='resuming'`;
+          throw cause;
+        }
+      }
+      if (hub.connected(attemptID)) await updateStatus(attemptID, "ready");
+      return this.get(attemptID);
+    },
     async pause(attemptID: string) {
       try {
         await factorybox.pause(attemptID);

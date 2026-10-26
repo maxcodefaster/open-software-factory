@@ -7,10 +7,21 @@ export interface FactoryRuntimeReference {
 export interface FactoryRuntimeState {
   readonly workspaceID: string;
   readonly attemptID: string | null;
+  readonly kind?: string;
   readonly state: string;
   readonly failure: string | null;
 }
 const identity = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/;
+const preparingStates = new Set([
+  "loading",
+  "create-intended",
+  "starting",
+  "reconnecting",
+  "pausing",
+  "resuming",
+  "stop-intended",
+  "stopping",
+]);
 
 export function factoryWorkspaceRuntimePath(workspaceID: string, href = window.location.href) {
   if (!identity.test(workspaceID)) throw new Error("Workspace identity is invalid");
@@ -56,11 +67,13 @@ export function readyRuntime(
 export function runtimePreparationCopy(value: FactoryRuntimeState | undefined) {
   if (!value) return "Select a Workspace to use its compute.";
   if (value.failure) return value.failure;
-  if (["loading", "create-intended", "starting", "reconnecting"].includes(value.state))
+  if (["loading", "create-intended", "starting", "reconnecting", "resuming"].includes(value.state))
     return "Preparing Workspace compute. Your source files remain available.";
+  if (value.state === "pausing" || value.state === "paused")
+    return "Workspace compute is paused. Continue working to resume it.";
   if (["stop-intended", "stopping", "cleanup-failed"].includes(value.state))
     return "Workspace compute is stopping. Your source files remain available.";
-  return "Workspace compute is stopped. Start it when you need a terminal or App.";
+  return "Workspace compute starts automatically when you open it for editing.";
 }
 
 export class FactoryRuntimeContext {
@@ -69,6 +82,10 @@ export class FactoryRuntimeContext {
   #selection = 0;
   #cancel: AbortController | undefined;
   #observing = false;
+  #writable = false;
+  #demanded = false;
+  #lastActivity = -Infinity;
+  #preparationFailure: string | undefined;
   constructor(
     private readonly href: () => string = () => window.location.href,
     private readonly fetcher: (
@@ -88,10 +105,14 @@ export class FactoryRuntimeContext {
       },
     };
   }
-  select(workspaceID: string) {
+  select(workspaceID: string, automatic = false) {
     this.#cancel?.abort();
     this.#cancel = new AbortController();
     const selection = ++this.#selection;
+    this.#writable = false;
+    this.#demanded = automatic;
+    this.#lastActivity = -Infinity;
+    this.#preparationFailure = undefined;
     this.#set({ workspaceID, attemptID: null, state: "loading", failure: null });
     void this.#read(workspaceID, selection, this.#cancel.signal);
   }
@@ -100,7 +121,50 @@ export class FactoryRuntimeContext {
       this.#value?.workspaceID === runtime.workspaceID &&
       this.#value.attemptID === runtime.attemptID
     )
-      this.select(runtime.workspaceID);
+      void this.observe();
+  }
+  setWritable(workspaceID: string, allowed: boolean) {
+    if (workspaceID !== this.#value?.workspaceID) return;
+    this.#writable = allowed;
+    this.#prepareDemand();
+  }
+  async use() {
+    const current = this.#value;
+    if (!current || !this.#writable) return;
+    this.#demanded = true;
+    this.#prepareDemand();
+    if (current.state !== "ready" || Date.now() - this.#lastActivity < 15_000) return;
+    this.#lastActivity = Date.now();
+    try {
+      const response = await this.fetcher(
+        `${factoryWorkspaceRuntimePath(current.workspaceID, this.href())}/activity`,
+        { method: "POST", credentials: "same-origin", signal: this.#cancel?.signal ?? null },
+      );
+      if (response.status === 409 && this.#value?.workspaceID === current.workspaceID) {
+        this.#demanded = true;
+        await this.observe();
+      }
+    } catch {
+      // A lost activity report does not authorize a second Start.
+    } finally {
+      if (this.#value?.workspaceID === current.workspaceID && this.#value.state === "ready")
+        this.#demanded = false;
+    }
+  }
+  #prepareDemand() {
+    const current = this.#value;
+    if (!this.#demanded || !this.#writable || !current || this.#preparationFailure) return;
+    if (
+      current.state === "ready" ||
+      current.state === "failed" ||
+      current.state === "unavailable"
+    ) {
+      this.#demanded = false;
+      return;
+    }
+    if (!["stopped", "paused"].includes(current.state)) return;
+    this.#demanded = false;
+    void this.prepare();
   }
   async observe() {
     const current = this.#value;
@@ -110,25 +174,14 @@ export class FactoryRuntimeContext {
       !signal ||
       signal.aborted ||
       this.#observing ||
-      [
-        "loading",
-        "create-intended",
-        "starting",
-        "reconnecting",
-        "stop-intended",
-        "stopping",
-      ].includes(current.state)
+      preparingStates.has(current.state)
     )
       return;
     const selection = this.#selection;
     this.#observing = true;
     try {
       await this.#request(current.workspaceID, selection, signal);
-      if (
-        ["create-intended", "starting", "reconnecting", "stop-intended", "stopping"].includes(
-          this.#value?.state ?? "",
-        )
-      )
+      if (preparingStates.has(this.#value?.state ?? ""))
         await this.#read(current.workspaceID, selection, signal);
     } catch (cause) {
       this.#fail(current.workspaceID, selection, signal, cause);
@@ -140,20 +193,12 @@ export class FactoryRuntimeContext {
     const current = this.#value;
     if (
       !current ||
-      [
-        "loading",
-        "create-intended",
-        "starting",
-        "ready",
-        "reconnecting",
-        "unavailable",
-        "stop-intended",
-        "stopping",
-        "cleanup-failed",
-      ].includes(current.state)
+      preparingStates.has(current.state) ||
+      ["ready", "unavailable", "cleanup-failed"].includes(current.state)
     )
       return;
     const selection = this.#selection;
+    this.#preparationFailure = undefined;
     this.#cancel?.abort();
     this.#cancel = new AbortController();
     const signal = this.#cancel.signal;
@@ -162,6 +207,9 @@ export class FactoryRuntimeContext {
       await this.#request(current.workspaceID, selection, signal, true);
       if (!signal.aborted) await this.#read(current.workspaceID, selection, signal);
     } catch (cause) {
+      if (!signal.aborted && selection === this.#selection)
+        this.#preparationFailure =
+          cause instanceof Error ? cause.message : "Workspace preparation is unconfirmed";
       this.#fail(current.workspaceID, selection, signal, cause);
     }
   }
@@ -170,13 +218,7 @@ export class FactoryRuntimeContext {
       const deadline = Date.now() + 300_000;
       while (!signal.aborted && selection === this.#selection) {
         await this.#request(workspaceID, selection, signal);
-        if (
-          !this.#value ||
-          !["create-intended", "starting", "reconnecting", "stop-intended", "stopping"].includes(
-            this.#value.state,
-          )
-        )
-          return;
+        if (!this.#value || !preparingStates.has(this.#value.state)) return;
         if (Date.now() > deadline)
           throw new Error(
             "Compute is still preparing. Reopen this Workspace to check its progress.",
@@ -232,7 +274,14 @@ export class FactoryRuntimeContext {
       (value.failure !== null && typeof value.failure !== "string")
     )
       throw new Error("Workspace compute context is invalid");
-    if (!signal.aborted && selection === this.#selection) this.#set(value as FactoryRuntimeState);
+    if (!signal.aborted && selection === this.#selection) {
+      const observed = value as FactoryRuntimeState;
+      this.#set(
+        this.#preparationFailure && ["stopped", "paused"].includes(observed.state)
+          ? { ...observed, state: "failed", failure: this.#preparationFailure }
+          : observed,
+      );
+    }
   }
   #fail(workspaceID: string, selection: number, signal: AbortSignal, cause: unknown) {
     if (!signal.aborted && selection === this.#selection)
@@ -253,6 +302,7 @@ export class FactoryRuntimeContext {
       return;
     this.#value = value;
     for (const listener of this.#listeners) listener(value);
+    this.#prepareDemand();
   }
 }
 export const factoryRuntimeContext = new FactoryRuntimeContext();

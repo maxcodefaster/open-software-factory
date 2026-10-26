@@ -1,5 +1,4 @@
 import type { SystemContract } from "../../system-contract/src/system-contract";
-import { renderEnvboxPod } from "./envbox-pod";
 import { verificationSupervisor } from "./verification-process";
 import { openCodeModelConfiguration, openCodeModelMetadata } from "./opencode-model";
 import type { CodingReasoning } from "../../conversation-domain/src/model-settings";
@@ -25,7 +24,7 @@ export interface RuntimeManifestInput {
   readonly childConnectorToken: string;
   readonly controlURL: string;
   readonly runtimeHostImage: string;
-  readonly factoryboxProfile?: FactoryboxRuntimeProfile;
+  readonly factoryboxProfile: FactoryboxRuntimeProfile;
   readonly registryCA: string;
   readonly environmentVersion?: number;
   readonly prebuild?: {
@@ -265,6 +264,13 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
     ],
     connectorStateDir: "/home/coder/connector-state",
   });
+  const execution = renderFactoryboxRuntime({
+    ...input,
+    labels,
+    runtimeOwnerID: ownerID,
+    profile: input.factoryboxProfile,
+    sharedSource: input.preserveWorkspace ?? false,
+  });
   return [
     {
       apiVersion: "v1",
@@ -293,17 +299,7 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
       metadata: { name: "runtime-data", namespace: input.namespace, labels },
       spec: runtimeVolumeClaimSpec(),
     },
-    ...(input.factoryboxProfile
-      ? (() => {
-          const execution = renderFactoryboxRuntime({
-            ...input,
-            labels,
-            runtimeOwnerID: ownerID,
-            profile: input.factoryboxProfile,
-            sharedSource: input.preserveWorkspace ?? false,
-          });
-          return [execution.claim, execution.pod];
-        })()
-      : [renderEnvboxPod({ ...input, hostname: input.attemptID, labels, mode })]),
+    execution.claim,
+    execution.pod,
   ];
 }

@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
@@ -28,6 +29,8 @@ type terminalSession struct {
 	command    *exec.Cmd
 	attachment string
 	output     []byte
+	executable os.FileInfo
+	cpu        uint64
 }
 
 type terminalManager struct {
@@ -38,13 +41,38 @@ type terminalManager struct {
 	sessions   map[string]*terminalSession
 	streams    map[string]string
 	revision   uint64
+	busy       int
 }
 
 func (manager *terminalManager) observation() Message {
 	manager.mutex.Lock()
 	defer manager.mutex.Unlock()
 	count, revision := len(manager.sessions), manager.revision
-	return Message{Type: "terminal-state", TerminalCount: &count, TerminalRevision: &revision}
+	busy := 0
+	for _, session := range manager.sessions {
+		if terminalBusy(session) {
+			busy++
+		}
+	}
+	if manager.busy != busy {
+		manager.busy = busy
+		manager.revision++
+		revision = manager.revision
+	}
+	return Message{Type: "terminal-state", TerminalCount: &count, TerminalBusy: &busy, TerminalRevision: &revision}
+}
+
+func (manager *terminalManager) watch() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-manager.ctx.Done():
+			return
+		case <-ticker.C:
+			manager.publish()
+		}
+	}
 }
 
 func (manager *terminalManager) publish() {
@@ -125,7 +153,8 @@ func (manager *terminalManager) start(id string) (*terminalSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &terminalSession{id: id, file: file, command: command}, nil
+	executable, _ := os.Stat(command.Path)
+	return &terminalSession{id: id, file: file, command: command, executable: executable}, nil
 }
 
 func (manager *terminalManager) read(session *terminalSession) {

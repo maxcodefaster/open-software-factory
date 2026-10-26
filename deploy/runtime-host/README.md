@@ -1,17 +1,16 @@
 # Runtime artifacts
 
-`runtime-host` is the inner host used by Envbox for Development and Staging. It contains Docker
+`runtime-host` is the common Factorybox consumer image for Development, Coding, Staging,
+Verification and publication. It contains Docker
 Engine 29.9.0, the integrity-checked Dev Containers CLI 0.89.0 and the static Factory Runtime Connector.
-It contains no editor, Change Agent or Verification runner. Its development language preset
+It also contains the pinned OpenCode server, admitted Skill installer and Forgejo runner.
+Factory starts only the processes and grants only the capabilities of the assigned role.
+Its development language preset
 contains pinned TypeScript Language Server and Pyright packages with the exact Node 24.21.0
 runtime for glibc and musl. Only interactive Development assignments inject those tools; source
 opening starts none of them. They use the Dev Container's Project toolchain and dependencies.
-The Verification image derives from the smaller common host and contains no language preset.
-
-`build-runtime-host` adds the pinned OpenCode server and Factory's admitted Skill package installer.
-`verification-runtime-host` adds only the
-pinned Forgejo runner. The Connector injects the tools required by the assigned role into its primary
-Dev Container. A Runtime Attempt records its exact role-specific artifact before creating compute;
+The Connector injects the tools required by the assigned role into its primary
+Dev Container. A Runtime Attempt records its exact artifact and role before creating compute;
 recovery cannot replace that artifact through changed installation settings.
 
 `developer-ide` contains the independent pinned Theia 1.76.0 composition. One developer backend
@@ -21,7 +20,7 @@ Sandbox. Its package composition and npm integrity lock remain in `deploy/theia-
 Publish the artifacts with:
 
 ```sh
-bun scripts/factory/index.ts publish-runtime
+mise exec -- bun scripts/factory/index.ts publish-runtime
 ```
 
 Publication updates the local digest files without restarting Factory or replacing existing runtime
@@ -38,7 +37,8 @@ or warming an image cache. The local Registry check uses its approved CA and ver
 manifest digest. Missing images fail with the artifact name before replacing the running Factory
 server; local Registry failures also identify the HTTP status. Restore the exact artifacts, or publish
 a complete generation and restart to select it for new Attempts. Publication adopts its complete
-generation atomically only after all six role manifests and the Starter images are confirmed.
+generation atomically only after the common runtime, editor, source and browser manifests and
+the Starter images are confirmed.
 
 Normal `factory:up` reuses an available published set instead of rebuilding all roles. The manual
 [distribution workflow](../../.github/workflows/images.yaml) builds amd64/arm64 roles and embeds
@@ -52,23 +52,30 @@ is one slot per role, with one concurrent creation, two spare slots and sixteen 
 spare/creating/retiring slots. Unassigned slots expire after fifteen minutes; preparation is bounded
 at three minutes and failure replacement waits thirty seconds. `FACTORY_EXECUTION_RESERVE_TARGET`
 accepts 0–4 per role; `FACTORY_EXECUTION_MAX_SLOTS` accepts 2–256 and must cover the configured reserve.
-Every Pod has role-specific CPU/memory/storage requests and limits, including reserve Pods.
+Every Factorybox worker currently has a shared 3-CPU/3-GiB ceiling, including reserve workers.
 Assignment preserves its exact Pod/PVC, issues new Attempt capabilities and immediately requests
 refill. Used slots are destroyed, never returned. Development Workspaces retain their canonical
 source and normal retained-storage preparation; no running Pod/PVC hot swap is performed.
 
-Development compute idles after thirty minutes without use. `FACTORY_EXECUTION_IDLE_MINUTES`
+Opening an editable Workspace automatically starts or resumes its compute. This commissions no
+Agent Turn. Read-only observation does not claim writing authority. A failed Start remains visible
+with an explicit Retry, rather than repeating on every observation.
+
+Development compute idles after five minutes without use. `FACTORY_EXECUTION_IDLE_MINUTES`
 accepts 0–1440; zero disables it. Admitted/uncertain Build, working Sessions, pending commits,
-retained PTYs, live runtime streams and Run views prevent automatic Stop. Terminal counts are
-bounded change events, not polling; browser detachment does not end a PTY. Stop intent is committed
-under the Build admission locks before external Stop. Restart grants a fresh inactivity period.
+open terminal sessions and pending runtime operations prevent automatic Pause. Native PTY Resume
+currently fails to reopen `/dev/tty`, so even detached idle prompts block Pause. A Run view,
+language connection or background App polling does not count as human use.
+The Connector samples terminal work every five seconds; missing or stale observations block Pause.
+Pause intent is committed under the Build admission locks before the native operation.
+Real editor activity resumes the same Attempt. Restart grants a fresh inactivity period.
 Source/approved data and the independent editor are retained. Staging and Verification do not idle.
 
 After successful prebuild and compute cleanup, private Docker trims unused build cache toward
 1 GB within fifteen seconds. It never prunes images, containers, volumes, installed dependencies or
 checkout. This is a best-effort cache target, not a filesystem quota. The local RWO provisioner's
 8 GiB claim request does not establish a hard disk quota; deployments need storage-enforced quotas
-for that guarantee. CPU bursts and RAM/ephemeral storage use the outer Pod's declared role limits;
+for that guarantee. CPU bursts and RAM use the worker's declared total limits;
 local measured RAM remains unavailable when Kubernetes Metrics is not installed.
 
 The parent resolves the approved Dev Container configuration before startup and prepares only the

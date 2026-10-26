@@ -13,7 +13,6 @@ import {
   type KubernetesClient,
   KubernetesObservationUnavailableError,
 } from "../../packages/runtime-kubernetes/src/client";
-import upstream from "../../upstream.json";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import {
@@ -83,9 +82,8 @@ test.each(["reconnect", "Stop"] as const)(
                   phase: "Running",
                   labels:
                     manifest.find((resource) => resource.kind === "Pod")?.metadata.labels ?? {},
-                  envboxImage: upstream.envbox.image,
                   factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
-                  runtimeHostImage: configuration.FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE,
+                  runtimeHostImage: configuration.FACTORY_RUNTIME_HOST_IMAGE,
                 }
               : null;
           },
@@ -206,7 +204,7 @@ test.each(["live", "observation unavailable", "reconnected during observation"] 
                   uid: "owned-live-pod",
                   phase: "Running",
                   labels: {},
-                  envboxImage: upstream.envbox.image,
+                  factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
                   runtimeHostImage: "owned-image-not-used-by-observation",
                 }
               : null;
@@ -653,11 +651,9 @@ test.each([
               uid: podUID,
               phase: boundary === "terminal worker observation" ? "Failed" : "Pending",
               labels: manifest.find((resource) => resource.kind === "Pod")?.metadata.labels ?? {},
-              envboxImage: upstream.envbox.image,
               factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
               runtimeHostImage:
-                globalThis.process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"] ??
-                "missing-test-image",
+                globalThis.process.env["FACTORY_RUNTIME_HOST_IMAGE"] ?? "missing-test-image",
             }
           : null;
       },
@@ -755,7 +751,7 @@ test.each([
     try {
       const owned = await fixture(undefined, undefined, database);
       if (reserved) {
-        const verificationImage = globalThis.process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"];
+        const verificationImage = globalThis.process.env["FACTORY_RUNTIME_HOST_IMAGE"];
         const stagingImage = globalThis.process.env["FACTORY_RUNTIME_HOST_IMAGE"];
         if (!verificationImage || !stagingImage) throw new Error("Pinned test images required");
         const images = { staging: stagingImage, verification: verificationImage };

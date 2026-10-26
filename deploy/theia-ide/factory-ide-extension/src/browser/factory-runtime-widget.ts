@@ -108,8 +108,8 @@ export class FactoryRuntimeWidget extends BaseWidget {
       this.#processList.replaceChildren();
       this.#main.replaceChildren(this.#output);
       this.#output.textContent = runtimePreparationCopy(state);
-      if (!this.#runtime && state && ["stopped", "failed"].includes(state.state)) {
-        const start = controlButton("Start compute", () => void factoryRuntimeContext.prepare());
+      if (!this.#runtime && state?.state === "failed") {
+        const start = controlButton("Retry compute", () => void factoryRuntimeContext.prepare());
         start.disabled = !factoryWriteContext.allows(state.workspaceID);
         const controls = document.createElement("div");
         controls.className = "factory-compute-status";
@@ -120,7 +120,7 @@ export class FactoryRuntimeWidget extends BaseWidget {
     });
     this.#writeSubscription = factoryWriteContext.subscribe(() => {
       if (this.#runtime) this.#render();
-      const start = this.node.querySelector<HTMLButtonElement>('[data-control="Start compute"]');
+      const start = this.node.querySelector<HTMLButtonElement>('[data-control="Retry compute"]');
       const workspaceID = factoryRuntimeContext.value?.workspaceID;
       if (start) start.disabled = !workspaceID || !factoryWriteContext.allows(workspaceID);
     });

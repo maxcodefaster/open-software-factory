@@ -9,9 +9,20 @@ import {
 } from "./factorybox-worker";
 import { runtimeVolumeClaimSpec } from "./storage";
 
-const exactImage = z.string().regex(/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/);
+const exactImage = z
+  .string()
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9.:-]*\/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/)
+  .refine(
+    (value) =>
+      value
+        .split("@")[0]!
+        .split("/")
+        .slice(1)
+        .every((part) => part !== "" && part !== "." && part !== ".."),
+    { message: "Runtime images need a qualified registry and canonical repository path" },
+  );
 export const factoryboxRuntimeProfile = z.strictObject({
-  image: exactImage,
+  image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
   executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
   architecture: z.enum(["arm64", "amd64"]),
   nodeName: z

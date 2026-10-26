@@ -319,6 +319,13 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 		return response
 	}
 	switch message.Action {
+	case "workspace-git":
+		result, err := personalGit(ctx, assignment, message)
+		if err != nil {
+			response.Error = err.Error()
+		} else {
+			response.Data = result
+		}
 	case "skills-install":
 		response.Error = errorText(installAdmittedSkills(ctx, assignment, message.Data))
 	case "git-prepare-commit", "git-observe-commit":

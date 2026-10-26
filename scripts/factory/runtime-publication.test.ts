@@ -3,9 +3,9 @@ import { publishRuntimeImage } from "./runtime-publication";
 
 const artifact = {
   dockerfile: "deploy/runtime-host/Dockerfile",
-  target: "verification-runtime-host",
-  repository: "registry.localhost:12345/open-factory/verification-runtime-host",
-  metadata: "/owned/verification-metadata.json",
+  target: "runtime-host",
+  repository: "registry.localhost:12345/open-factory/runtime-host",
+  metadata: "/owned/runtime-metadata.json",
 };
 
 test("runtime publication uses the same trusted Docker push as Starter, without an insecure HTTP fallback", async () => {

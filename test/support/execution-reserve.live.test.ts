@@ -25,7 +25,7 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
     const image = async (name: string) => (await readFile(`.factory/${name}-image`, "utf8")).trim();
     const images = {
       staging: await image("runtime-host"),
-      verification: await image("verification-runtime-host"),
+      verification: await image("runtime-host"),
     };
     const fixture = await factoryProcess({
       runtimeHostImage: images.staging,

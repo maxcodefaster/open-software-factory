@@ -12,8 +12,6 @@ import { factoryProcess, eventually } from "../fixtures/factory-process";
 // Kubernetes is injected below. These pinned fixture identities are never launched.
 const configuration = {
   FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
-  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
   FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
   FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
   FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",

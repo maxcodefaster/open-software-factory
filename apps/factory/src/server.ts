@@ -78,6 +78,8 @@ import { createReviewService } from "./review/service";
 import { appTimeoutResponse } from "./runtime/app-timeout";
 import { createRuntimeWriterBoundary } from "./runtime/browser-writer";
 import { createRuntimeController } from "./runtime/controller";
+import { createRuntimeDemand, runtimeDocumentRequest } from "./runtime/demand";
+import { personalGitRepository } from "./workspace/personal-git";
 import {
   previewBridgeResponse,
   previewRendererResponse,
@@ -257,10 +259,10 @@ const runtimeAccess = createRuntimeAccess(database, (token) => runtimeHub.revoke
 const workspaceSources = createWorkspaceSourceController(database, runtimeSecret);
 const reserveImages = {
   staging: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
-  verification: process.env["FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE"],
+  verification: process.env["FACTORY_RUNTIME_HOST_IMAGE"],
 };
 if (!reserveImages.staging || !reserveImages.verification)
-  throw new Error("Exact runtime role images are required before execution reserve admission");
+  throw new Error("An exact runtime image is required before execution reserve admission");
 const executionReserve = createExecutionReserve(database, {
   staging: reserveImages.staging,
   verification: reserveImages.verification,
@@ -441,6 +443,8 @@ async function runtimeReady(attemptID: string) {
   `;
   return attempts[0]?.ready === true;
 }
+
+const demandRuntime = createRuntimeDemand(runtimeController, runtimeHub);
 
 async function requireSession(request: Request) {
   return factoryAuth.session(request);
@@ -864,7 +868,12 @@ async function route(request: Request) {
         return json({ error: "Runtime path is invalid" }, 400);
       }
       await accessController.requireRuntime(session.user.id, attemptID, channel);
-      if (!(await runtimeReady(attemptID))) return json({ error: "Runtime is not ready" }, 409);
+      if (
+        !(channel === "app"
+          ? await demandRuntime(attemptID, session.user.id)
+          : await runtimeReady(attemptID))
+      )
+        return json({ error: "Runtime is not ready" }, 409);
       if (previewChannel && !runtimeHub.hasAppChannel(attemptID, previewChannel)) {
         return json({ error: "Declared App is not available" }, 404);
       }
@@ -897,6 +906,14 @@ async function route(request: Request) {
       if (!accessToken) {
         return json({ error: "Runtime access required" }, 401);
       }
+      if (channel === "app" && suffix === "/__factory/activity" && request.method === "POST") {
+        if (!sameRuntimeOrigin(request)) return json({ error: "Runtime origin is invalid" }, 403);
+        return (await demandRuntime(attemptID, await runtimeAccess.user(accessToken)))
+          ? new Response(null, { status: 204 })
+          : json({ error: "Runtime is not ready" }, 409);
+      }
+      if (channel === "app" && runtimeDocumentRequest(request))
+        await demandRuntime(attemptID, await runtimeAccess.user(accessToken));
       if (!(await runtimeReady(attemptID))) return json({ error: "Runtime is not ready" }, 409);
       if (channel === "ide" && suffix === "/__factory/processes") {
         return json(await runtimeController.processOutput(attemptID));
@@ -992,6 +1009,14 @@ async function route(request: Request) {
       if (!accessToken) {
         return json({ error: "Runtime access required" }, 401);
       }
+      if (suffix === "/__factory/activity" && request.method === "POST") {
+        if (!sameRuntimeOrigin(request)) return json({ error: "Runtime origin is invalid" }, 403);
+        return (await demandRuntime(attemptID, await runtimeAccess.user(accessToken)))
+          ? new Response(null, { status: 204 })
+          : json({ error: "Runtime is not ready" }, 409);
+      }
+      if (runtimeDocumentRequest(request))
+        await demandRuntime(attemptID, await runtimeAccess.user(accessToken));
       if (!(await runtimeReady(attemptID))) return json({ error: "Runtime is not ready" }, 409);
       if (!runtimeHub.hasAppChannel(attemptID, appChannel)) {
         return json({ error: "Declared App is not available" }, 404);
@@ -1016,6 +1041,21 @@ async function route(request: Request) {
         response,
         factoryOrigin,
         `/runtime/${attemptID}/preview/${appChannel}/__factory/review-bridge.js`,
+      );
+    }
+    const personalGitSource = url.pathname.match(
+      /^\/internal\/personal-git\/([a-f0-9-]{36})\/([a-f0-9]{64})(\/.*)?$/,
+    );
+    if (personalGitSource?.[1] && personalGitSource[2]) {
+      const [, commandID, capability] = personalGitSource;
+      if (!validRuntimeSourceCapability(`personal-git:${commandID}`, capability))
+        return new Response("Not found", { status: 404 });
+      const repository = await personalGitRepository(database, commandID);
+      if (!repository) return new Response("Not found", { status: 404 });
+      return serveRuntimeRepository(
+        request,
+        repository,
+        `/internal/personal-git/${commandID}/${capability}`,
       );
     }
     const runtimeSource = url.pathname.match(

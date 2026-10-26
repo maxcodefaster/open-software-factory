@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import upstream from "../../upstream.json";
 
-test("runtime hosts contain only tools for their fixed execution role", async () => {
+test("one runtime host contains role tools while the independent editor remains separate", async () => {
   const dockerfile = await readFile("deploy/runtime-host/Dockerfile", "utf8");
   const base = dockerfile
     .split(" AS runtime-host-base\n")[1]
@@ -13,28 +13,21 @@ test("runtime hosts contain only tools for their fixed execution role", async ()
   expect(base).not.toContain("forgejo-runner");
   expect(base).not.toContain("theia");
   expect(base).not.toContain("COPY --from=language-tools");
-  const development = dockerfile
+  const runtime = dockerfile
     .split("FROM runtime-host-base AS runtime-host")[1]
-    ?.split("FROM runtime-host AS build-runtime-host")[0];
-  expect(development).toContain("COPY --from=language-tools");
-  expect(development).toContain("COPY --from=language-node-glibc");
-  expect(development).toContain("COPY --from=language-node-musl");
-  expect(development).not.toContain("COPY --from=bun-tool");
-  expect(development).not.toContain("theia");
+    ?.split("FROM runtime-host AS runtime")[0];
+  expect(runtime).toContain("COPY --from=language-tools");
+  expect(runtime).toContain("COPY --from=language-node-glibc");
+  expect(runtime).toContain("COPY --from=language-node-musl");
+  expect(runtime).toContain("COPY --from=bun-tool");
+  expect(runtime).toContain("COPY --from=build-tool /opt/factory/opencode/opencode");
+  expect(runtime).toContain("COPY --from=verification-tool /usr/local/bin/forgejo-runner");
+  expect(runtime).not.toContain("theia");
+  expect(dockerfile).not.toContain("AS build-runtime-host");
+  expect(dockerfile).not.toContain("AS verification-runtime-host");
   const editor = dockerfile.split(" AS developer-ide\n")[1]?.split(" AS runtime-host-base")[0];
   expect(editor).toContain("ENV THEIA_CONFIG_DIR=/home/node/.factory-theia");
   expect(editor).not.toContain("COPY --from=language-tools");
-  const build = dockerfile
-    .split("FROM runtime-host AS build-runtime-host")[1]
-    ?.split("FROM runtime-host-base AS verification-runtime-host")[0];
-  expect(build).toContain("COPY --from=build-tool /opt/factory/opencode/opencode");
-  expect(build).not.toContain("forgejo-runner");
-  const verification = dockerfile
-    .split("FROM runtime-host-base AS verification-runtime-host")[1]
-    ?.split("FROM runtime-host AS runtime")[0];
-  expect(verification).toContain("COPY --from=verification-tool /usr/local/bin/forgejo-runner");
-  expect(verification).not.toContain("opencode");
-  expect(verification).not.toContain("language-tools");
 });
 
 test("Project prebuild identity binds the same integrity-checked Dev Containers CLI shipped by the host", async () => {

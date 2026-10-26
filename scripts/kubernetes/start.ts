@@ -97,8 +97,6 @@ const artifacts = runtimeArtifactsSchema.parse(
 );
 const roleVariables = {
   "runtime-host": "FACTORY_RUNTIME_HOST_IMAGE",
-  "build-runtime-host": "FACTORY_BUILD_RUNTIME_HOST_IMAGE",
-  "verification-runtime-host": "FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE",
   "browser-tools": "FACTORY_BROWSER_TOOLS_IMAGE",
   "workspace-files": "FACTORY_WORKSPACE_FILES_IMAGE",
   "developer-ide": "FACTORY_DEVELOPER_IDE_IMAGE",

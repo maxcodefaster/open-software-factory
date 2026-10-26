@@ -18,7 +18,7 @@ func initializerFixture(t *testing.T) (string, Initialization) {
 	parent := t.TempDir()
 	repository := t.TempDir()
 	ctx := context.Background()
-	for _, args := range [][]string{{"init"}, {"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@factory.invalid"}} {
+	for _, args := range [][]string{{"init", "--initial-branch=main"}, {"config", "user.name", "Fixture"}, {"config", "user.email", "fixture@factory.invalid"}} {
 		if _, err := initGit(ctx, repository, args...); err != nil {
 			t.Fatal(err)
 		}
@@ -81,6 +81,22 @@ func TestSourceInitializationPublishesOnceAndRetainsHumanWork(t *testing.T) {
 	intent.ProjectID = "another-project"
 	if err := Initialize(ctx, parent, intent); err == nil {
 		t.Fatal("initializer adopted unrelated source")
+	}
+}
+
+func TestPersonalSourceStartsOnANamedBranchWithoutChangingTicketInitialization(t *testing.T) {
+	parent, intent := initializerFixture(t)
+	intent.Branch = "main"
+	if err := Initialize(context.Background(), parent, intent); err != nil {
+		t.Fatal(err)
+	}
+	branch, err := initGit(context.Background(), filepath.Join(parent, "project"), "symbolic-ref", "--short", "HEAD")
+	if err != nil || branch != intent.Branch {
+		t.Fatalf("personal source is not on its named branch: %q %v", branch, err)
+	}
+	upstream, err := initGit(context.Background(), filepath.Join(parent, "project"), "rev-parse", "--abbrev-ref", "@{upstream}")
+	if err != nil || upstream != "origin/main" {
+		t.Fatalf("personal source lacks its normal upstream: %q %v", upstream, err)
 	}
 }
 

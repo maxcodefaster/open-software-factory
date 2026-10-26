@@ -354,10 +354,10 @@ export class FactoryTerminalWidget extends BaseWidget {
       const copy = document.createElement("p");
       copy.textContent = runtimePreparationCopy(state);
       this.#status.append(copy);
-      if (state && ["stopped", "failed"].includes(state.state)) {
+      if (state?.state === "failed") {
         const start = document.createElement("button");
         start.type = "button";
-        start.textContent = "Start compute";
+        start.textContent = "Retry compute";
         start.addEventListener("click", () => void factoryRuntimeContext.prepare());
         this.#status.append(start);
       }

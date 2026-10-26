@@ -4,7 +4,7 @@ import type { RuntimeHub } from "./hub";
 type Database = ReturnType<typeof createDatabase>;
 
 export function executionIdleMS(environment: Readonly<Record<string, string | undefined>>) {
-  const configured = environment["FACTORY_EXECUTION_IDLE_MINUTES"] ?? "30";
+  const configured = environment["FACTORY_EXECUTION_IDLE_MINUTES"] ?? "5";
   if (!/^\d+$/.test(configured) || Number(configured) > 1440)
     throw new Error("Execution idle retention requires 0–1440 minutes");
   return Number(configured) * 60_000;

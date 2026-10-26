@@ -185,7 +185,9 @@ Development Workspace
 Developer -> one independent Theia IDE across authorized Workspaces
 ```
 
-Opening the IDE can prepare source without starting Apps or Build. A Ticket with an active Change
+Opening an editable IDE Workspace prepares its source and automatically starts or resumes compute,
+without commissioning Build or inference. Observation without writing authority does not start it.
+A Ticket with an active Change
 selects its shared Workspace; other editing uses the developer's personal Workspace and grants no
 Ticket Build authority. Workspace-qualified file identities keep dirty buffers and later saves
 bound to their original checkout when selection changes. PTY sessions, processes and Agent turns
@@ -213,8 +215,8 @@ lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execu
 Each immutable worker profile includes its explicit `arm64` or `amd64` architecture, exact image
 and executable, node and kernel. The same Factory commands render and check either architecture;
 the control-plane host does not select the worker's CPU. Node mismatch fails before the first
-worker exec. This adapter contract is not native runtime qualification. The current standalone
-Factorybox release remains AMD64-only; its ARM64 timer reader and continuation are not implemented.
+worker exec. This adapter contract is not native runtime qualification; the exact Linux profile
+still needs the standalone Factorybox qualification gates for its architecture.
 RAM snapshots do not move between CPU architectures.
 
 Every Sandbox uses the same topology:
@@ -228,8 +230,10 @@ Kubernetes -> digest-pinned Factorybox worker Pod with its own bounded store
       -> bounded Compose dependencies
 ```
 
-Factory prepares the exact consumer image before native Start. Idle execution pauses; explicit
-Start resumes the same Attempt and Connector credentials. The Source service and independent
+Factory prepares the exact consumer image before native Start. After five minutes without genuine
+use, eligible Development execution pauses. Continuing to use the editor resumes the same Attempt
+and Connector credentials. Active Agent work, open terminal sessions and uncertain operations remain protected;
+background polling and Run views do not keep compute awake. The Source service and independent
 editor retain the canonical checkout while execution is paused. Explicit Stop deletes execution
 and its private store. Lost native command output is observed without replaying a mutation.
 
@@ -238,11 +242,20 @@ Docker socket. The privileged outer Factorybox worker is trusted infrastructure;
 host kernel and does not establish VM-grade isolation. Factory has one concrete runtime topology
 and no Coder control plane or generic runtime provider layer.
 
-Exact role images separate ordinary execution, OpenCode Build, Forgejo Verification, the Developer
-IDE, source service and optional browser tools. A persisted Runtime Attempt keeps its image through
+One exact consumer image contains ordinary execution, OpenCode and Forgejo Verification tools.
+Assignments select role processes and credentials; the Developer IDE, source service and browser
+tools remain separate artifacts. A persisted Runtime Attempt keeps its image through
 later publication. Fresh Staging and Verification may consume never-used prepared slots. A used
 slot never returns to the reserve, and no running Pod swaps its PVC. Existing Workspaces retain
 their own source and data identities. The local reserve target is zero.
+
+The IDE's Git tab operates only on the selected developer's Personal Workspace. Status and file diffs
+are reads; Commit, Fetch and Pull use authenticated, persisted command identities. Git runs as the
+development user in the execution Sandbox, never in the independent editor or privileged Source
+initializer. Pull uses the Project default branch and fast-forward only. Divergence retains local
+commits for an explicit merge; unsaved editor buffers block Commit and Pull. No automatic stash,
+reset or push bypasses Ticket Verification and Delivery. The Workspace's initialization revision
+remains immutable even as its working Git HEAD advances.
 
 Project-owned prebuilds reuse only exact recipe, commit, image/Feature, platform and environment
 inputs. Immutable artifacts can be reused; mutable dependency trees, used Sandboxes and previous

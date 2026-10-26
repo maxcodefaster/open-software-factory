@@ -10,6 +10,7 @@ import { workspaceWriteAuthorityIn } from "../access/change-writer";
 import { z } from "zod";
 import { executeEditingCommand } from "../access/writer-command";
 import type { createChangeWriterController } from "../access/writer-controller";
+import { createPersonalGit } from "./personal-git";
 
 type EditorAuthorization = { token: string; grant: DeveloperIDEGrant };
 type Workspace = { projectID: string; changeID: string | null; kind: string; available: boolean };
@@ -28,6 +29,7 @@ export function createDeveloperIDERuntime(
   >,
 ) {
   const authority = createAccessController(database);
+  const git = createPersonalGit(database, hub);
   const terminalGrants = new Map<
     string,
     { editorToken: string; attemptID: string; token: string }
@@ -52,6 +54,7 @@ export function createDeveloperIDERuntime(
     if (!source.available)
       return {
         workspaceID,
+        kind: source.kind,
         attemptID: null,
         state: "unavailable",
         failure: "This implementation is no longer active. Source files remain available.",
@@ -66,6 +69,7 @@ export function createDeveloperIDERuntime(
       ORDER BY generation DESC LIMIT 1`;
     return {
       workspaceID,
+      kind: source.kind,
       attemptID: attempt?.attemptID ?? null,
       state:
         attempt?.state === "ready" && !hub.connected(attempt.attemptID)
@@ -79,7 +83,7 @@ export function createDeveloperIDERuntime(
     if (current.attemptID !== attemptID || current.state !== "ready" || !hub.connected(attemptID))
       throw new CommandError(
         "conflict",
-        "This Runtime Attempt is not connected. Start compute for the selected Workspace.",
+        "This Runtime Attempt is not connected. Reopen the selected Workspace to resume compute.",
       );
   }
   async function executionToken(authorized: EditorAuthorization, attemptID: string) {
@@ -107,6 +111,26 @@ export function createDeveloperIDERuntime(
       request: Request,
       authorized: EditorAuthorization,
     ): Promise<Response | undefined> {
+      const gitRoute = suffix.match(
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/git\/(status|diff|commit|fetch|pull)$/,
+      );
+      if (gitRoute?.[1] && gitRoute[2]) {
+        if (request.method !== "POST") return new Response(null, { status: 405 });
+        const source = await workspace(gitRoute[1], authorized.grant.userID);
+        if (source.kind !== "personal")
+          throw new CommandError("forbidden", "Git controls are for your personal Workspace");
+        if (gitRoute[2] === "status")
+          return json(await git.read(gitRoute[1], authorized.grant.userID));
+        if (gitRoute[2] === "diff") {
+          const input = z
+            .strictObject({ path: z.string().min(1).max(4096) })
+            .parse(await request.json());
+          return json(await git.read(gitRoute[1], authorized.grant.userID, input.path));
+        }
+        return json(
+          await git.mutate(gitRoute[1], authorized.grant.userID, gitRoute[2], await request.json()),
+        );
+      }
       const writer = suffix.match(
         /^\/__factory\/workspaces\/([0-9a-f-]{36})\/writer(?:\/(activity|request|approve|release|idle-takeover))?$/,
       );
@@ -168,7 +192,7 @@ export function createDeveloperIDERuntime(
         return new Response(null, { status: 405 });
       }
       const selection = suffix.match(
-        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime(?:\/(ensure))?$/,
+        /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime(?:\/(ensure|activity))?$/,
       );
       if (selection?.[1]) {
         const workspaceID = selection[1];
@@ -183,6 +207,12 @@ export function createDeveloperIDERuntime(
         await database.client.begin((sql) =>
           workspaceWriteAuthorityIn(sql, workspaceID, authorized.grant.userID),
         );
+        if (selection[2] === "activity") {
+          const current = await context(workspaceID, authorized.grant.userID);
+          if (!current.attemptID || current.state !== "ready" || !hub.use(current.attemptID))
+            throw new CommandError("conflict", "Workspace compute is not running");
+          return new Response(null, { status: 204 });
+        }
         if (source.changeID)
           await runtimes.startPersisted(source.changeID, authorized.grant.userID);
         else await runtimes.start(source.projectID, authorized.grant.userID);

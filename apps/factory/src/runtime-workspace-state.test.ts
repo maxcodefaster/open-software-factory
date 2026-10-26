@@ -58,6 +58,18 @@ describe("runtime workspace frame identity", () => {
     ).toBeUndefined();
   });
 
+  test("an active App can resume a paused Attempt while untouched background tabs never mount a frame", () => {
+    const paused = { ...ready, state: "paused" };
+    const url = runtimeWorkspaceURL(preview, projectID, [paused]);
+    expect(url).toBeDefined();
+    expect(runtimeWorkspaceURL(preview, projectID, [paused], undefined, [], false)).toBeUndefined();
+    expect(runtimeWorkspaceURL(preview, projectID, [paused], url, [], false)).toBe(url);
+    expect(runtimeWorkspaceURL(preview, projectID, [ready], undefined, [], false)).toBeUndefined();
+    expect(
+      runtimeWorkspaceURL(preview, projectID, [{ ...paused, state: "failed" }]),
+    ).toBeUndefined();
+  });
+
   test("retains only an already-attached exact frame during Connector reconnection", () => {
     const attached = runtimeWorkspaceURL(preview, projectID, [ready]);
     expect(attached).toBeDefined();

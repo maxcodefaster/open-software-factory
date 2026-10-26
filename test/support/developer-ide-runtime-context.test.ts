@@ -126,3 +126,86 @@ test("quiet runtime observation follows externally started compute without reset
   expect(context.value?.attemptID).toBe(runtime.attemptID);
   expect(calls.every((method) => method === "GET")).toBe(true);
 });
+
+test("deliberately opening an editable Workspace starts once after writing authority arrives", async () => {
+  let state = "stopped";
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (_input, init) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") state = "ready";
+      return Response.json({
+        ...runtime,
+        attemptID: state === "ready" ? runtime.attemptID : null,
+        state,
+        failure: null,
+      });
+    },
+  );
+  context.select(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  expect(calls).toEqual(["GET"]);
+  context.setWritable("44444444-4444-4444-8444-444444444444", true);
+  expect(calls).toEqual(["GET"]);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  context.setWritable(runtime.workspaceID, true);
+  await context.observe();
+  expect(context.value?.state).toBe("ready");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(1);
+});
+
+test("idle observation never wakes compute; real use resumes the original paused Attempt", async () => {
+  let state = "ready";
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (input, init) => {
+      const action = String(input).split("/").at(-1)!;
+      calls.push(`${init?.method ?? "GET"}:${action}`);
+      if (action === "activity") return new Response(null, { status: 409 });
+      if (init?.method === "POST") state = "ready";
+      return Response.json({ ...runtime, state, failure: null });
+    },
+  );
+  context.select(runtime.workspaceID, true);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  state = "paused";
+  await context.observe();
+  await context.observe();
+  expect(context.value?.state).toBe("paused");
+  expect(calls.filter((call) => call.startsWith("POST"))).toHaveLength(0);
+  await context.use();
+  await Bun.sleep(0);
+  expect(context.value?.attemptID).toBe(runtime.attemptID);
+  expect(context.value?.state).toBe("ready");
+  expect(calls.filter((call) => call === "POST:ensure")).toHaveLength(1);
+  // The browser can still show ready while the server has just paused.
+  state = "paused";
+  await context.use();
+  await Bun.sleep(0);
+  expect(calls.filter((call) => call === "POST:ensure")).toHaveLength(2);
+});
+
+test("failed automatic preparation is visible and is never repeated by observations or typing", async () => {
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (_input, init) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") throw new Error("Original Start outcome is unconfirmed");
+      return Response.json({ ...runtime, state: "stopped", failure: null });
+    },
+  );
+  context.select(runtime.workspaceID, true);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  expect(context.value?.state).toBe("failed");
+  expect(context.value?.failure).toContain("unconfirmed");
+  await context.observe();
+  await context.use();
+  context.setWritable(runtime.workspaceID, true);
+  expect(calls.filter((method) => method === "POST")).toHaveLength(1);
+});

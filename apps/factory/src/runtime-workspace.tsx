@@ -31,7 +31,14 @@ export function RuntimeWorkspaceTabs(props: {
               candidate.id === tab().attemptID && candidate.projectId === props.projectID,
           );
         const url = createMemo<string | undefined>((attachedURL) =>
-          runtimeWorkspaceURL(tab(), props.projectID, props.attempts, attachedURL, props.previews),
+          runtimeWorkspaceURL(
+            tab(),
+            props.projectID,
+            props.attempts,
+            attachedURL,
+            props.previews,
+            active(),
+          ),
         );
         const reconnecting = () => runtimeReconnecting(attempt());
         const review = createMemo(() => {
@@ -131,6 +138,17 @@ function AttachedRuntimeFrame(props: {
 }) {
   const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
   let frame: HTMLIFrameElement | undefined;
+  function usePreview() {
+    if (props.title !== "Preview" || !props.attemptID || props.active === false) return;
+    frame?.contentWindow?.postMessage(
+      { type: "factory-runtime-use" },
+      appRuntimeOrigin(location.origin, props.attemptID, "app"),
+    );
+  }
+  createEffect(
+    () => [props.active, props.attemptID] as const,
+    () => usePreview(),
+  );
   createEffect(
     () => props.url,
     () => {
@@ -161,6 +179,7 @@ function AttachedRuntimeFrame(props: {
         // The document is attached even if a nonessential image is still loading.
         // This is not App health, runtime readiness or review evidence.
         setPhase("loaded");
+        usePreview();
       };
       window.addEventListener("message", ready);
       return () => window.removeEventListener("message", ready);
@@ -197,6 +216,7 @@ function AttachedRuntimeFrame(props: {
             document?.contentType === "application/json" &&
             new URL(document.URL).pathname === "/api/runtime-access";
           setPhase(accessRejected ? "failed" : "loaded");
+          if (!accessRejected) usePreview();
         }}
         onError={() => setPhase("failed")}
       />

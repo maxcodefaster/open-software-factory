@@ -15,8 +15,6 @@ import upstream from "../../upstream.json";
 // launched, and no fixture may inherit the retained installation's forge token.
 const runtimeConfiguration = {
   FACTORY_RUNTIME_HOST_IMAGE: `example.invalid/owned-runtime@sha256:${"a".repeat(64)}`,
-  FACTORY_BUILD_RUNTIME_HOST_IMAGE: `example.invalid/owned-build@sha256:${"b".repeat(64)}`,
-  FACTORY_VERIFICATION_RUNTIME_HOST_IMAGE: `example.invalid/owned-verification@sha256:${"c".repeat(64)}`,
   FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
   FACTORY_FORGEJO_API_URL: "http://127.0.0.1:1/api/v1",
   FACTORY_FORGEJO_TOKEN: "owned-mocked-forge-token",
@@ -590,7 +588,7 @@ test("native paused Coding resumes only explicitly and journals one retained Ses
           uid: "owned-native-pod",
           phase: "Running",
           labels: {},
-          envboxImage: upstream.envbox.image,
+          factoryboxImage: process.env["FACTORY_FACTORYBOX_WORKER_IMAGE"] ?? "owned-worker",
           runtimeHostImage: process.env["FACTORY_RUNTIME_HOST_IMAGE"] ?? "owned",
         }),
         deletePod: async () => {

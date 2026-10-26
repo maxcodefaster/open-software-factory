@@ -19,6 +19,39 @@ const resources = [
   { apiVersion: "v1", kind: "Pod", metadata: { name: "source" } },
 ];
 
+test("runtime observation requires Factorybox artifacts and never adopts an Envbox Pod", async () => {
+  for (const legacy of [false, true]) {
+    const client = createKubernetesClient(async () => ({
+      stdout: JSON.stringify({
+        metadata: { uid: "owned" },
+        spec: legacy
+          ? {
+              containers: [
+                {
+                  name: "envbox",
+                  image: "legacy",
+                  env: [{ name: "CODER_INNER_IMAGE", value: "legacy-inner" }],
+                },
+              ],
+            }
+          : {
+              containers: [{ name: "worker", image: "owned-worker" }],
+              initContainers: [{ name: "runtime-image", image: "owned-runtime" }],
+            },
+        status: { phase: "Running" },
+      }),
+      stderr: "",
+      exitCode: 0,
+    }));
+    if (legacy) await expect(client.getPod("owned", "runtime")).rejects.toThrow("Factorybox");
+    else
+      expect(await client.getPod("owned", "runtime")).toMatchObject({
+        factoryboxImage: "owned-worker",
+        runtimeHostImage: "owned-runtime",
+      });
+  }
+});
+
 test.each([
   "Unable to connect to the server: context deadline exceeded (Client.Timeout exceeded while awaiting headers)",
   "Unable to connect to the server: dial tcp: i/o timeout",

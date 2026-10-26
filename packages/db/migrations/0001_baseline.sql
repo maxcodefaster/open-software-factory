@@ -1042,6 +1042,7 @@ BEGIN
     OR NEW.child_connector_token_hash <> OLD.child_connector_token_hash
     OR NEW.create_intended_at <> OLD.create_intended_at
     OR NEW.created_by <> OLD.created_by
+    OR (OLD.declared_apps <> '[]'::jsonb AND NEW.declared_apps IS DISTINCT FROM OLD.declared_apps)
   THEN
     RAISE EXCEPTION 'Runtime Attempt identity and create intent are immutable';
   END IF;
@@ -3039,6 +3040,7 @@ CREATE TABLE factory.runtime_attempt (
     stop_intended_at timestamp with time zone,
     stopped_at timestamp with time zone,
     failure text,
+    declared_apps jsonb DEFAULT '[]'::jsonb NOT NULL CHECK (jsonb_typeof(declared_apps) = 'array'),
     cleanup_attempts integer DEFAULT 0 NOT NULL,
     created_by uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -5476,6 +5478,42 @@ ALTER TABLE ONLY factory.wiki_source_update
 
 ALTER TABLE ONLY factory.workspace_source
     ADD CONSTRAINT workspace_source_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES factory.development_workspace(id);
+
+CREATE TABLE factory.personal_git_operation (
+    id uuid PRIMARY KEY,
+    workspace_id uuid NOT NULL REFERENCES factory.development_workspace(id),
+    runtime_attempt_id uuid NOT NULL REFERENCES factory.runtime_attempt(id),
+    user_id uuid NOT NULL REFERENCES auth."user"(id),
+    action text NOT NULL CHECK (action IN ('commit','fetch','pull')),
+    expected_head text NOT NULL CHECK (expected_head ~ '^[a-f0-9]{40}([a-f0-9]{24})?$'),
+    branch text NOT NULL CHECK (length(branch) BETWEEN 1 AND 200),
+    message text NOT NULL CHECK (length(message) <= 240),
+    state text NOT NULL DEFAULT 'intended' CHECK (state IN ('intended','attempted','succeeded','failed','uncertain')),
+    result jsonb,
+    failure text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    attempted_at timestamptz,
+    completed_at timestamptz,
+    CHECK ((state IN ('succeeded','failed')) = (completed_at IS NOT NULL)),
+    CHECK (state <> 'succeeded' OR (result IS NOT NULL AND jsonb_typeof(result) = 'object')),
+    FOREIGN KEY (runtime_attempt_id,workspace_id) REFERENCES factory.runtime_attempt(id,workspace_id)
+);
+CREATE INDEX personal_git_operation_workspace ON factory.personal_git_operation(workspace_id, created_at);
+CREATE FUNCTION factory.protect_personal_git_operation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP = 'DELETE' OR
+      ROW(NEW.id,NEW.workspace_id,NEW.runtime_attempt_id,NEW.user_id,NEW.action,NEW.expected_head,NEW.branch,NEW.message,NEW.created_at)
+      IS DISTINCT FROM ROW(OLD.id,OLD.workspace_id,OLD.runtime_attempt_id,OLD.user_id,OLD.action,OLD.expected_head,OLD.branch,OLD.message,OLD.created_at)
+      OR OLD.state IN ('succeeded','failed')
+      OR (OLD.attempted_at IS NOT NULL AND NEW.attempted_at IS DISTINCT FROM OLD.attempted_at)
+      OR (OLD.state <> 'intended' AND NEW.state = 'intended') THEN
+        RAISE EXCEPTION 'Personal Git intent and completed outcomes are immutable';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER personal_git_operation_immutable BEFORE UPDATE OR DELETE
+    ON factory.personal_git_operation FOR EACH ROW EXECUTE FUNCTION factory.protect_personal_git_operation();
 
 CREATE PUBLICATION factory_zero_publication FOR TABLE factory.epic, factory.knowledge_page, factory.project, factory.project_membership, factory.ticket, factory.ticket_dependency;
 

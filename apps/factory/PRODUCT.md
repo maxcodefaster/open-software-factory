@@ -90,6 +90,14 @@ IDE terminal tabs support keyboard switching and F2 renaming. Session names and 
 survive iframe reloads. Closing all terminals leaves an empty session list until New terminal is
 chosen; it does not start another session on reload.
 
+Opening a Workspace for editing automatically starts or resumes its compute, without commissioning
+Coding. Eligible Development compute pauses after five minutes without genuine use. Running work
+and open terminal sessions remain protected. Close terminal sessions to permit automatic Pause.
+An unattended Run view does not keep compute awake.
+The IDE's Git tab shows personal-Workspace status and diffs, commits saved changes and offers
+Fetch/Pull. Pull never resets or stashes work and stops on divergent history. Unsaved buffers block
+Commit and Pull. Ticket commits and Delivery remain in Factory's reviewed workflow.
+
 Each Project has one shared background from six curated public-domain paintings. Creation picks
 an artwork automatically, preferring less-used choices, and retains it on later visits. Project
 managers can change it in the desktop Settings menu; other members see the same saved choice.
@@ -133,8 +141,9 @@ managers can change it in the desktop Settings menu; other members see the same 
   a definition without credentials. Account reconnect and access revocation fence older work;
   token renewal does not change its authorized identity. Independent review cannot inherit
   library tools. [ADR 0015](../../docs/adr/0015-managed-mcp-library.md) defines that boundary.
-- Navigation, inspection and reconnect do not commission AI, start runtime work or replay an
-  external operation. Actions must state their target and consequences before commitment.
+- Board/history navigation, inspection and reconnect do not commission AI or replay an external
+  operation. Opening a Workspace for editing starts its compute as described above; failed work
+  still needs explicit Retry. Actions state their target and consequences before commitment.
 - Persist intent before external creates. Preserve retained source, history, approvals and runtime
   identities. Show uncertainty and recovery honestly rather than claiming success.
 

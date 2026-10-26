@@ -5,7 +5,6 @@ import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createRecordedOpenCodeUsage } from "../../apps/factory/src/usage/record-opencode";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
-import upstream from "../../upstream.json";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
@@ -166,7 +165,7 @@ test.each([
             uid: "owned-cleanup-pod",
             phase: "Running",
             labels: {},
-            envboxImage: upstream.envbox.image,
+            factoryboxImage: process.env["FACTORY_FACTORYBOX_WORKER_IMAGE"] ?? "owned-worker",
             runtimeHostImage: process.env["FACTORY_RUNTIME_HOST_IMAGE"] ?? "owned",
           }),
           deletePod: async () => {

@@ -1,4 +1,3 @@
-import upstream from "../../../upstream.json" with { type: "json" };
 import { readFile } from "node:fs/promises";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
@@ -7,9 +6,8 @@ export interface RuntimePodObservation {
   readonly uid: string;
   readonly phase: string;
   readonly labels: Record<string, string>;
-  readonly envboxImage: string;
   readonly runtimeHostImage: string;
-  readonly factoryboxImage?: string;
+  readonly factoryboxImage: string;
   readonly ready?: boolean;
 }
 export class KubernetesObservationUnavailableError extends Error {
@@ -30,12 +28,11 @@ function observationReadFailure(message: string) {
 export function requireRuntimePodArtifacts(
   pod: RuntimePodObservation,
   runtimeHostImage: string,
-  factoryboxImage?: string,
+  factoryboxImage: string,
 ) {
   if (
-    (factoryboxImage
-      ? pod.factoryboxImage !== factoryboxImage
-      : pod.envboxImage !== upstream.envbox.image) ||
+    !factoryboxImage ||
+    pod.factoryboxImage !== factoryboxImage ||
     pod.runtimeHostImage !== runtimeHostImage
   )
     throw new Error("Runtime Pod artifacts differ from immutable create intent");
@@ -142,31 +139,22 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
         };
       };
       if (!pod.metadata?.uid) throw new Error("Kubernetes Pod has no UID");
-      const envbox = pod.spec?.containers?.find((container) => container.name === "envbox");
       const worker = pod.spec?.containers?.find((container) => container.name === "worker");
       const runtimeImage = pod.spec?.initContainers?.find(
         (container) => container.name === "runtime-image",
       );
-      const innerImage = envbox?.env?.find(
-        (variable) => variable.name === "CODER_INNER_IMAGE",
-      )?.value;
-      if ((!envbox?.image || !innerImage) && (!worker?.image || !runtimeImage?.image))
-        throw new Error("Runtime Pod has no declared Envbox artifacts");
+      if (!worker?.image || !runtimeImage?.image)
+        throw new Error("Runtime Pod has no declared Factorybox artifacts");
       return {
         uid: pod.metadata.uid,
         phase: pod.status?.phase ?? "Unknown",
         labels: pod.metadata.labels ?? {},
-        envboxImage: envbox?.image ?? "",
-        runtimeHostImage: runtimeImage?.image ?? innerImage!,
-        ...(worker
-          ? {
-              factoryboxImage: worker.image,
-              ready:
-                pod.status?.conditions?.some(
-                  (condition) => condition.type === "Ready" && condition.status === "True",
-                ) ?? false,
-            }
-          : {}),
+        runtimeHostImage: runtimeImage.image,
+        factoryboxImage: worker.image,
+        ready:
+          pod.status?.conditions?.some(
+            (condition) => condition.type === "Ready" && condition.status === "True",
+          ) ?? false,
       };
     },
     async getNamespace(namespace) {

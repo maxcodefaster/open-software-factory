@@ -37,6 +37,7 @@ interface SourceRow {
   kind: string;
   namespace: string;
   revision: string;
+  branch: string;
   repositoryURL: string;
   epoch: string;
   state: WorkspaceSourceState;
@@ -94,7 +95,7 @@ export function createWorkspaceSourceController(
       SELECT workspace.id AS "workspaceID", workspace.project_id AS "projectID", workspace.kind,
         project.name AS "projectName",ticket.title AS "ticketTitle",
         workspace.owner_user_id AS "ownerID", workspace.kubernetes_namespace AS namespace,
-        workspace.source_revision AS revision, project.repository_url AS "repositoryURL",
+        workspace.source_revision AS revision,workspace.source_branch AS branch, project.repository_url AS "repositoryURL",
         source.access_epoch::text AS epoch,source.state,source.files_image AS "filesImage",
         source.capability_hash AS "capabilityHash",
         source.namespace_uid AS "namespaceUID",source.claim_uid AS "claimUID",source.pod_uid AS "podUID",
@@ -129,6 +130,7 @@ export function createWorkspaceSourceController(
       namespace: source.namespace,
       projectID: source.projectID,
       revision: source.revision,
+      ...(source.kind === "personal" ? { branch: source.branch } : {}),
       repositoryURL: runtimeFactoryURL(
         `/internal/workspace-source/${source.workspaceID}/${source.epoch}/${capability}`,
       ),

@@ -58,7 +58,7 @@ jobs:
             exit 1
           fi
           docker buildx create --use
-          for role in runtime-host build-runtime-host verification-runtime-host developer-ide browser-tools workspace-files; do
+          for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE-$ARCH"
             if docker buildx imagetools inspect "$image" > /dev/null 2>&1; then
               echo "Architecture image already exists: $image"
@@ -91,7 +91,7 @@ jobs:
           IMAGE_ROOT="${IMAGE_ROOT,,}"
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           artifacts='{}'
-          for role in runtime-host build-runtime-host verification-runtime-host developer-ide browser-tools workspace-files; do
+          for role in runtime-host developer-ide browser-tools workspace-files; do
             image="$IMAGE_ROOT/$role:$RELEASE"
             docker buildx imagetools create --tag "$image" "$image-amd64" "$image-arm64"
             digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"

@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { launchRuntimeResources } from "./launcher";
-import upstream from "../../../../upstream.json";
+import { ownedFactoryboxProfile } from "../../../../test/fixtures/runtime-configuration";
 
 const runtimeHostImage = `registry.invalid/host@sha256:${"a".repeat(64)}`;
 const observedPod = {
   uid: "pod-uid",
   phase: "Pending",
   labels: {},
-  envboxImage: upstream.envbox.image,
+  factoryboxImage: ownedFactoryboxProfile.image,
   runtimeHostImage,
 };
 
@@ -21,6 +21,7 @@ describe("launchRuntimeResources", () => {
         podName: "pod",
         missingPodMessage: "missing",
         runtimeHostImage,
+        factoryboxProfile: ownedFactoryboxProfile,
       },
       {
         kubernetes: {
@@ -47,6 +48,7 @@ describe("launchRuntimeResources", () => {
         podName: "pod",
         missingPodMessage: "missing",
         runtimeHostImage,
+        factoryboxProfile: ownedFactoryboxProfile,
       },
       {
         kubernetes: {
@@ -82,6 +84,7 @@ describe("launchRuntimeResources", () => {
         podName: "pod",
         missingPodMessage: "Pod missing",
         runtimeHostImage,
+        factoryboxProfile: ownedFactoryboxProfile,
       },
       {
         kubernetes: {
@@ -100,7 +103,7 @@ describe("launchRuntimeResources", () => {
     expect(failures).toEqual(["create:Pod missing"]);
   });
 
-  test.each(["runtimeHostImage", "envboxImage"] as const)(
+  test.each(["runtimeHostImage", "factoryboxImage"] as const)(
     "rejects a mismatched %s before recording create success",
     async (field) => {
       let recorded = false;
@@ -114,6 +117,7 @@ describe("launchRuntimeResources", () => {
             podName: "pod",
             missingPodMessage: "missing",
             runtimeHostImage,
+            factoryboxProfile: ownedFactoryboxProfile,
           },
           {
             kubernetes: {

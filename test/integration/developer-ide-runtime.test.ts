@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createDeveloperIDERuntime } from "../../apps/factory/src/workspace/developer-ide-runtime";
 import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
+import { createProjectAppPreviews } from "../../apps/factory/src/access/previews";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -62,6 +63,7 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     const current = await runtime.route(prefix, request(), auth);
     expect(await current?.json()).toEqual({
       workspaceID: source.id,
+      kind: "ticket",
       attemptID: owned.attemptID,
       state: "ready",
       failure: null,
@@ -74,8 +76,13 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     await expect(
       runtime.route(`${prefix}/${owned.attemptID}/processes/app/restart`, request("POST"), auth),
     ).rejects.toThrow("observation-only");
+    await expect(runtime.route(`${prefix}/activity`, request("POST"), auth)).rejects.toThrow(
+      "observation-only",
+    );
     expect(actions).toHaveLength(0);
     await database.client`UPDATE factory.change_writer SET state='human',user_id=${owned.userID} WHERE change_id=${owned.changeID}`;
+    expect((await runtime.route(`${prefix}/activity`, request("POST"), auth))?.status).toBe(204);
+    expect(starts).toBe(0);
     const data = await runtime.socketData(terminal, auth);
     expect(data?.kind).toBe("browser");
     if (data?.kind !== "browser" || !data.accessToken)
@@ -135,6 +142,9 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
     await runtime.route(`${prefix}/ensure`, request("POST"), auth);
     expect(starts).toBe(1);
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    await expect(runtime.route(`${prefix}/activity`, request("POST"), auth)).rejects.toThrow(
+      "not running",
+    );
     await expect(runtime.socketData(terminal, auth)).rejects.toThrow("not connected");
     await expect(runtime.socketData(language, auth)).rejects.toThrow("not connected");
     await expect(
@@ -149,6 +159,42 @@ test("independent editor execution is exact-Workspace/Attempt-bound, explicitly 
       "Developer access required",
     );
     expect(starts).toBe(1);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await process.dispose();
+  }
+}, 15_000);
+
+test("paused App projections retain declared channels without waking execution or reading a live Connector", async () => {
+  const process = await factoryProcess();
+  const database = process.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.runtime_attempt SET
+      declared_apps=${JSON.stringify(["app", "app-worker"])}::text::jsonb,state='paused'
+      WHERE id=${owned.attemptID}`;
+    const previews = createProjectAppPreviews(database, () => {
+      throw new Error("Retained App routes must not depend on live processes");
+    });
+    expect((await previews(owned.projectID, owned.userID)).map((app) => app.channel)).toEqual([
+      "app",
+      "app-worker",
+    ]);
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.runtime_attempt SET declared_apps='["app-other"]'::jsonb
+        WHERE id=${owned.attemptID}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await database.client`UPDATE factory.project_membership SET role='product-contributor'
+      WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    expect(await previews(owned.projectID, owned.userID)).toHaveLength(2);
+    expect(
+      await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${owned.projectID}`,
+    ).toHaveLength(0);
+    const [attempt] = await database.client<Array<{ state: string }>>`
+      SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    expect(attempt?.state).toBe("paused");
   } finally {
     await database.client.end({ timeout: 2 });
     await process.dispose();

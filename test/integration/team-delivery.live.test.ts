@@ -121,7 +121,7 @@ test.skipIf(process.env["FACTORY_LIVE_TEAM_DELIVERY"] !== "1")(
       database,
       {
         staging: runtimeHostImage,
-        verification: (await readFile(".factory/verification-runtime-host-image", "utf8")).trim(),
+        verification: runtimeHostImage,
       },
       defaultReservePolicy,
     );

@@ -15,7 +15,9 @@ export function runtimeWorkspaceURL(
   attempts: readonly RuntimeAttempt[],
   attachedURL?: string,
   previews: readonly AppPreview[] = [],
+  active = true,
 ) {
+  if (!active && !attachedURL) return undefined;
   if (
     tab.view === "preview" &&
     tab.appChannel &&
@@ -38,7 +40,10 @@ export function runtimeWorkspaceURL(
       return undefined;
   }
   const url = workspaceTabRuntimeURL(tab, true);
-  return attempt.state === "ready" || (runtimeReconnecting(attempt) && attachedURL === url)
+  const paused = ["pausing", "paused", "resuming"].includes(attempt.state);
+  return attempt.state === "ready" ||
+    paused ||
+    (runtimeReconnecting(attempt) && attachedURL === url)
     ? url
     : undefined;
 }

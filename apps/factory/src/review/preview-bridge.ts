@@ -7,6 +7,30 @@ function installPreviewBridge(factoryOrigin: string) {
   let documentId = crypto.randomUUID();
   let currentPage = location.pathname;
   const scriptSource = (document.currentScript as HTMLScriptElement | null)?.src;
+  let lastUse = -Infinity;
+  const reportUse = () => {
+    if (document.hidden || !scriptSource || Date.now() - lastUse < 15_000) return;
+    const target = new URL(scriptSource);
+    if (
+      target.origin !== location.origin ||
+      !target.pathname.endsWith("/__factory/review-bridge.js")
+    )
+      return;
+    target.pathname = target.pathname.replace(/review-bridge\.js$/, "activity");
+    target.search = "";
+    lastUse = Date.now();
+    void fetch(target, {
+      method: "POST",
+      credentials: "same-origin",
+      signal: AbortSignal.timeout(420_000),
+    }).catch(() => {});
+  };
+  const activity = (event: Event) => {
+    if (event.isTrusted) reportUse();
+  };
+  document.addEventListener("pointerdown", activity, { passive: true });
+  document.addEventListener("wheel", activity, { passive: true });
+  document.addEventListener("keydown", activity);
   let token = "";
   let mode = "";
   let selected: Element | null = null;
@@ -287,6 +311,15 @@ function installPreviewBridge(factoryOrigin: string) {
     void contextImage(node, selectionId, page);
   }
   window.addEventListener("message", (event) => {
+    if (
+      event.isTrusted &&
+      event.source === parent &&
+      event.origin === factoryOrigin &&
+      event.data?.type === "factory-runtime-use"
+    ) {
+      reportUse();
+      return;
+    }
     if (
       event.source !== parent ||
       event.origin !== factoryOrigin ||
