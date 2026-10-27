@@ -105,7 +105,16 @@ export function createExecutionReserve(
             if (observed.failed) await store.retire(sql, planned.id);
             if (observed.ready || observed.failed) requested = true;
           }
-        } catch {
+        } catch (cause) {
+          // Reconciliation errors are ephemeral operator diagnostics, not
+          // authorization to replay an uncertain native command.
+          console.error("Factorybox reserve reconciliation deferred", {
+            slotID: planned.id,
+            state: planned.state,
+            error: (cause instanceof Error ? cause.message : "Native outcome is unconfirmed").slice(
+              -2000,
+            ),
+          });
           await store.defer(sql, planned.id);
         }
       });

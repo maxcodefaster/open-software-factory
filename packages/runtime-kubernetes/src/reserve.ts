@@ -327,7 +327,8 @@ async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxW
     runFactoryboxKubernetes,
     factoryboxRuntimeDeclaration(input),
   );
-  if (!result.confirmed) throw new Error("Execution slot native state is unconfirmed");
+  if (!result.confirmed)
+    throw new Error(`Execution slot native state is unconfirmed: ${result.stderr.slice(-2000)}`);
   return readFactoryboxStandbyState(input.sandboxID, JSON.parse(result.stdout));
 }
 
@@ -696,7 +697,10 @@ export function createReserveClient(
           runFactoryboxKubernetes,
           factoryboxRuntimeDeclaration(input),
         );
-        if (!started.confirmed) throw new Error("Execution slot Start outcome is unconfirmed");
+        if (!started.confirmed)
+          throw new Error(
+            `Execution slot Start outcome is unconfirmed: ${started.stderr.slice(-2000)}`,
+          );
       }
       const state = await reserveState(input, identity);
       if (state.record.phase === "paused") {

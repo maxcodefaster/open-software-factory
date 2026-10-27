@@ -335,6 +335,17 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
         }),
       );
       passed = true;
+    } catch (cause) {
+      await writeFile(
+        resolve(artifacts, "failure.json"),
+        JSON.stringify({
+          error: (cause instanceof Error ? cause.message : "Native reserve proof failed")
+            .replaceAll(forgeHost.token, "<REDACTED>")
+            .slice(-4000),
+        }),
+        { flag: "wx", mode: 0o600 },
+      ).catch(() => console.error("Owned reserve failure could not be saved"));
+      throw cause;
     } finally {
       if (!passed)
         await writeFile(
