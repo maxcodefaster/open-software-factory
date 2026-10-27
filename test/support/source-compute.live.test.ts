@@ -15,6 +15,7 @@ import {
 } from "../../packages/workspace-domain/src/source";
 import { starterImagesSchema } from "../../scripts/factory/starter-images";
 import upstream from "../../upstream.json";
+import { automaticIDE, stopAutomaticIDE } from "../fixtures/automatic-ide";
 import { editorFixtureKubectl, editorFixtureNamespaces } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { removeOwnedFactoryboxFixture } from "../fixtures/factorybox-cleanup";
@@ -32,14 +33,17 @@ import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-
 import { slice20StartupTargetFailures } from "./runtime-startup";
 
 const prebuildEnabled = process.env["FACTORY_RUN_PROJECT_PREBUILD_PROOF"] === "1";
-const idleEnabled = process.env["FACTORY_RUN_IDLE_COMPUTE_PROOF"] === "1";
+const ideEnabled = process.env["FACTORY_RUN_AUTOMATIC_IDE_PROOF"] === "1";
+const idleEnabled = process.env["FACTORY_RUN_IDLE_COMPUTE_PROOF"] === "1" || ideEnabled;
 const performanceEnabled = process.env["FACTORY_CHECK_SLICE20_STARTUP_TARGETS"] === "1";
 const enabled =
   process.env["FACTORY_RUN_SOURCE_COMPUTE_PROOF"] === "1" || prebuildEnabled || idleEnabled;
 const sourceFile = z.object({ content: z.string(), version: z.string() });
 
 test.skipIf(!enabled)(
-  "execution uses initialized canonical source and retains human/runtime edits through Stop and restart",
+  ideEnabled
+    ? "the real IDE automatically starts compute and resumes its same paused Factorybox Sandbox"
+    : "execution uses initialized canonical source and retains human/runtime edits through Stop and restart",
   async () => {
     if (performanceEnabled && idleEnabled)
       throw new Error(
@@ -51,7 +55,9 @@ test.skipIf(!enabled)(
           ? process.env["FACTORY_WORKSPACE_FILES_IMAGE"]
           : name === "runtime-host"
             ? process.env["FACTORY_RUNTIME_HOST_IMAGE"]
-            : undefined) ?? (await readFile(`.factory/${name}-image`, "utf8"))
+            : name === "developer-ide"
+              ? process.env["FACTORY_DEVELOPER_IDE_IMAGE"]
+              : undefined) ?? (await readFile(`.factory/${name}-image`, "utf8"))
       ).trim();
     const proofID = crypto.randomUUID();
     const projectID = crypto.randomUUID();
@@ -103,6 +109,8 @@ test.skipIf(!enabled)(
     let namespaceUID = "";
     let cleaned = false;
     let terminal: Awaited<ReturnType<typeof ownedRuntimeTerminal>> | undefined;
+    let ide: Awaited<ReturnType<typeof automaticIDE>> | undefined;
+    let editorUserID = "";
     const api = (path: string, body?: unknown) =>
       fetch(`${fixture.base}${path}`, {
         method: body === undefined ? "GET" : "POST",
@@ -277,19 +285,47 @@ test.skipIf(!enabled)(
       ).toHaveLength(0);
       const started = performance.now();
       const initialStartedAt = new Date().toISOString();
-      const attempt = runtimeAttemptSchema.parse(
-        await serverCall(
-          callFactoryFunction(
-            fixture.base,
-            "startPersonalWorkspace",
-            [projectID],
-            { cookie, origin: fixture.base, "content-type": "application/json" },
-            AbortSignal.timeout(180_000),
-          ),
-        ),
-      );
+      const attempt = ideEnabled
+        ? await (async () => {
+            editorUserID = session.user.id;
+            ide = await automaticIDE({
+              factory: fixture,
+              projectID,
+              workspaceID,
+              userID: session.user.id,
+              cookie,
+              artifacts,
+            });
+            const created = await eventually(
+              async () =>
+                (
+                  await database.client<Array<{ id: string }>>`
+                    SELECT id FROM factory.runtime_attempt WHERE workspace_id=${workspaceID}`
+                )[0],
+              (current) => Boolean(current),
+              "Opening the owned IDE did not automatically admit compute",
+              30_000,
+            );
+            if (!created) throw new Error("Owned IDE did not admit its exact Workspace");
+            return getAttempt(created.id);
+          })()
+        : runtimeAttemptSchema.parse(
+            await serverCall(
+              callFactoryFunction(
+                fixture.base,
+                "startPersonalWorkspace",
+                [projectID],
+                { cookie, origin: fixture.base, "content-type": "application/json" },
+                AbortSignal.timeout(180_000),
+              ),
+            ),
+          );
       await ready(attempt.id);
       const readyMS = Math.round(performance.now() - started);
+      if (ide) {
+        await ide.terminal("start");
+        await ide.closeTerminals();
+      }
       terminal = await ownedRuntimeTerminal(fixture.base, cookie, attempt.id);
       const connectedTerminalMS = Math.round(performance.now() - started);
       expect(await terminal.evaluate<string>("return process.cwd()")).toBe("/workspace/project");
@@ -495,6 +531,7 @@ test.skipIf(!enabled)(
         expect(healthWhilePaused.ok).toBe(false);
         expect((await getAttempt(attempt.id)).state).toBe("paused");
         const resumedAt = performance.now();
+        if (ide) await ide.terminal("resume");
         // Merely opening the App must wake the original Attempt. No lifecycle
         // button, explicit start command or replacement Sandbox is involved.
         await eventually(
@@ -531,7 +568,13 @@ test.skipIf(!enabled)(
             idleMinutes: 1,
             detachedPTYRetainedMS,
             idlePauseMS,
-            automaticAppResumeMS: Math.round(performance.now() - resumedAt),
+            ...(ide
+              ? {
+                  automaticIDEResumeMS: Math.round(performance.now() - resumedAt),
+                  automaticIDESelectionMS: ide.selectedMS,
+                  noStartButtonOrCentralStartCommand: true,
+                }
+              : { automaticAppResumeMS: Math.round(performance.now() - resumedAt) }),
             sameRAMActor: { beforePause, afterResume },
             pausedAnonymousAndSnapshotResidencyZero: true,
             exactAttempt: attempt.id,
@@ -723,6 +766,10 @@ test.skipIf(!enabled)(
           [],
         );
     } catch (cause) {
+      if (ide)
+        await ide.page
+          .screenshot({ path: resolve(artifacts, "automatic-ide-failure.png") })
+          .catch(() => {});
       const attempts = await database.client<
         Array<{ id: string; state: string; failure: string | null }>
       >`SELECT id,state,failure FROM factory.runtime_attempt WHERE project_id=${projectID}`;
@@ -811,6 +858,8 @@ test.skipIf(!enabled)(
     } finally {
       terminal?.close();
       try {
+        await ide?.close();
+        if (editorUserID) await stopAutomaticIDE(fixture, editorUserID, cookie, artifacts);
         const attempts = await database.client<
           Array<{ id: string; state: string }>
         >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${projectID}`;

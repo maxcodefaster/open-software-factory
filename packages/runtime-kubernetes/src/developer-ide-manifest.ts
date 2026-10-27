@@ -58,7 +58,7 @@ export function renderDeveloperIDEResources(input: DeveloperIDEResources) {
             },
             resources: {
               requests: { cpu: "50m", memory: "256Mi" },
-              limits: { cpu: "2", memory: "2Gi" },
+              limits: { cpu: "1", memory: "768Mi" },
             },
             readinessProbe: {
               httpGet: { path: "/", port: 4400 },

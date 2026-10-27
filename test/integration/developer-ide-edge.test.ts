@@ -1,18 +1,19 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
+import { chromium, expect as visible } from "@playwright/test";
+import { createAccountRevocation } from "../../apps/factory/src/access/account-revocation";
+import { createAccessRevocation } from "../../apps/factory/src/access/revocation";
+import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createDeveloperIDEController } from "../../apps/factory/src/workspace/developer-ide-controller";
-import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import {
   createDeveloperIDEEdge,
   type DeveloperEditorSocketData,
 } from "../../apps/factory/src/workspace/developer-ide-edge";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { createDeveloperIDERuntime } from "../../apps/factory/src/workspace/developer-ide-runtime";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
-import { createRuntimeAccess } from "../../apps/factory/src/access/runtime";
-import { createAccountRevocation } from "../../apps/factory/src/access/account-revocation";
-import { createAccessRevocation } from "../../apps/factory/src/access/revocation";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
+import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 const ClientSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
@@ -43,6 +44,10 @@ async function verifyEditorIngress(protocol: string) {
       }
       if (new URL(request.url).pathname === "/redirect")
         return Response.redirect("https://untrusted.invalid/", 302);
+      if (new URL(request.url).pathname === "/__browser")
+        return new Response('<main id="theia-app-shell">Authenticated editor</main>', {
+          headers: { "content-type": "text/html" },
+        });
       return new Response("theia proof", {
         headers: {
           "set-cookie":
@@ -111,6 +116,16 @@ async function verifyEditorIngress(protocol: string) {
     port: 0,
     async fetch(request, server) {
       try {
+        if (new URL(request.url).pathname === "/__editor-access") {
+          const issued = new URL(await edge.issue(userID, sessionID, true));
+          issued.pathname += "__browser";
+          return Response.redirect(issued.href, 302);
+        }
+        if (new URL(request.url).pathname === "/__embed") {
+          return new Response('<iframe title="Editor" src="/__editor-access"></iframe>', {
+            headers: { "content-type": "text/html" },
+          });
+        }
         if (request.headers.get("upgrade") === "websocket") {
           const data = await edge.socketData(request);
           if (data instanceof Response) return data;
@@ -181,6 +196,18 @@ async function verifyEditorIngress(protocol: string) {
       (value) => value.state === "ready",
       "Source did not prepare",
     );
+    if (protocol === "http:") {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.goto(new URL("/__embed", frontend.url).href);
+        await visible(
+          page.frameLocator('iframe[title="Editor"]').locator("#theia-app-shell"),
+        ).toBeVisible({ timeout: 10_000 });
+      } finally {
+        await browser.close();
+      }
+    }
     const issued = new URL(await edge.issue(userID, sessionID, true, source.workspaceID));
     expect(issued.hostname).toBe(
       `${userID.replaceAll("-", "")}-1-${protocol === "https:" ? "s" : "h"}${frontend.url.port}-editor.runtime.localhost`,
@@ -247,6 +274,7 @@ async function verifyEditorIngress(protocol: string) {
       await (await edge.route(new Request(runtimeURL, { headers: { cookie } }))).json(),
     ).toEqual({
       workspaceID: source.workspaceID,
+      kind: "personal",
       attemptID: null,
       state: "stopped",
       failure: null,

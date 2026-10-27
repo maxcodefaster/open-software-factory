@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import { developerIDEIdentity } from "../../workspace-domain/src/developer-ide";
-import { renderDeveloperIDEResources } from "./developer-ide-manifest";
-import { createDeveloperIDEClient, validateDeveloperIDEObservation } from "./developer-ide";
 import { createKubernetesClient } from "./client";
+import { createDeveloperIDEClient, validateDeveloperIDEObservation } from "./developer-ide";
+import { renderDeveloperIDEResources } from "./developer-ide-manifest";
 
 const input = {
   identity: developerIDEIdentity(
@@ -25,6 +25,12 @@ test("one editor identity per developer and epoch, with no Project or execution 
   expect(() => developerIDEIdentity("../another-user", 1, input.identity.resourceID)).toThrow();
   expect(() => developerIDEIdentity(input.identity.userID, 1, "../another-service")).toThrow();
   const resources = renderDeveloperIDEResources(input);
+  expect(
+    resources.find((resource) => resource.kind === "Pod")?.spec.containers[0]?.resources,
+  ).toEqual({
+    requests: { cpu: "50m", memory: "256Mi" },
+    limits: { cpu: "1", memory: "768Mi" },
+  });
   expect(JSON.stringify(resources)).not.toMatch(
     /Secret|PersistentVolumeClaim|hostPath|docker.sock|opencode|repository|token/,
   );

@@ -1,14 +1,15 @@
 import type { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
-import { inject, injectable } from "@theia/core/shared/inversify";
 import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
-import { factoryRuntimeContext, factoryWorkspaceRuntimePath } from "./factory-runtime-context";
-import { factoryWriteContext } from "./factory-write-context";
-import { factoryWriterLabel } from "./factory-writer-label";
-import { FactoryEditingActivity } from "./factory-editing-activity";
+import { DisposableCollection } from "@theia/core/lib/common/disposable";
+import { inject, injectable } from "@theia/core/shared/inversify";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
 import type { EditorWidget } from "@theia/editor/lib/browser/editor-widget";
-import { DisposableCollection } from "@theia/core/lib/common/disposable";
+import { FactoryEditingActivity } from "./factory-editing-activity";
+import { factoryRuntimeContext, factoryWorkspaceRuntimePath } from "./factory-runtime-context";
+import { observeFactoryRuntimeUse } from "./factory-runtime-use";
 import { workspaceScheme } from "./factory-workspace-files";
+import { factoryWriteContext } from "./factory-write-context";
+import { factoryWriterLabel } from "./factory-writer-label";
 
 // One quiet status/Take over action. Server enforcement does not trust this UI.
 @injectable()
@@ -55,9 +56,6 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     if (event instanceof CustomEvent && typeof event.detail?.workspaceID === "string")
       this.#editing.queue(event.detail.workspaceID, "edit");
   };
-  readonly #use = (event: Event) => {
-    if (event.isTrusted && !document.hidden) void factoryRuntimeContext.use();
-  };
   constructor(
     @inject(StatusBar) private readonly statusBar: StatusBar,
     @inject(EditorManager) private readonly editors: EditorManager,
@@ -66,9 +64,9 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     for (const widget of this.editors.all) this.#observeEditor(widget);
     this.#editorSubscriptions.push(this.editors.onCreated((widget) => this.#observeEditor(widget)));
     window.addEventListener("factory:editing-activity", this.#terminalInput);
-    document.addEventListener("pointerdown", this.#use, { passive: true });
-    document.addEventListener("wheel", this.#use, { passive: true });
-    document.addEventListener("keydown", this.#use);
+    this.#editorSubscriptions.push(
+      observeFactoryRuntimeUse(document, () => factoryRuntimeContext.use()),
+    );
     this.#heartbeat = setInterval(() => {
       if (!document.hidden && this.#workspaceID)
         this.#editing.queue(this.#workspaceID, "heartbeat");
@@ -256,9 +254,6 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     clearInterval(this.#heartbeat);
     this.#editorSubscriptions.dispose();
     window.removeEventListener("factory:editing-activity", this.#terminalInput);
-    document.removeEventListener("pointerdown", this.#use);
-    document.removeEventListener("wheel", this.#use);
-    document.removeEventListener("keydown", this.#use);
     void this.statusBar.removeElement("factory-writing");
     this.#subscription?.dispose();
     if (this.#timer) clearInterval(this.#timer);
