@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createForgejoDiagnostics } from "./diagnostics";
 
 export interface ForgeRepository {
   readonly owner: string;
@@ -805,6 +806,7 @@ export function createForgejoClient(options: {
         throw new ForgeAmbiguousWriteError("Repository Document update outcome is unknown");
       }
     },
+    ...createForgejoDiagnostics(response, options.token),
     async listActionRuns(repository: ForgeRepository, commitSha: string) {
       const value = actionRunsResponse.parse(
         await json(
