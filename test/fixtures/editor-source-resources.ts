@@ -1,9 +1,10 @@
-import { z } from "zod";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
-import { eventually } from "./factory-process";
+import { z } from "zod";
 import type { createDatabase } from "../../packages/db/src/client";
+import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import { developerIDEIdentity } from "../../packages/workspace-domain/src/developer-ide";
+import { eventually } from "./factory-process";
 
 export async function recordedEditorIdentity(
   database: ReturnType<typeof createDatabase>,
@@ -27,13 +28,16 @@ export async function removeOwnedProjectSources(
       state: string;
       namespace: string;
       namespaceUID: string | null;
+      workerID: string;
     }>
   >`
     SELECT workspace.id,source.state,workspace.kubernetes_namespace AS namespace,
-      source.namespace_uid AS "namespaceUID"
+      source.namespace_uid AS "namespaceUID",workspace.factorybox_worker_id AS "workerID"
     FROM factory.development_workspace workspace JOIN factory.workspace_source source ON source.workspace_id=workspace.id
     WHERE workspace.project_id=${projectID}`;
   for (const source of sources) {
+    if (source.namespace !== factoryboxLocation(source.workerID).namespace)
+      throw new Error("Project source does not belong to its recorded Factory worker");
     if (source.state !== "stopped") {
       await stop(source.id);
       await eventually(
@@ -47,11 +51,8 @@ export async function removeOwnedProjectSources(
         40_000,
       );
     }
-    if (source.namespaceUID)
-      await removeEditorFixtureNamespaceInChild(source.namespace, {
-        ownerID: source.id,
-        uid: source.namespaceUID,
-      });
+    // Source Stop removes only its own service epoch. The shared claim and
+    // worker remain for other Projects. Whole-fixture teardown is separate.
   }
 }
 

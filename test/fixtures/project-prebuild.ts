@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import upstream from "../../upstream.json";
-import { editorFixtureKubectl } from "./editor-source-resources";
+import { type FactoryboxFixtureTarget, factoryboxFixtureCommand } from "./factorybox-runtime";
 
 export async function projectPrebuildRecipe(artifacts: string) {
   const directory = resolve(artifacts, "recipe-repository");
@@ -96,49 +96,18 @@ const prebuildResult = z
   .strict();
 
 export async function produceOwnedProjectPrebuild(input: {
-  namespace: string;
-  podName: string;
-  podUID: string;
-  attemptID: string;
+  target: FactoryboxFixtureTarget;
   projectID: string;
   commit: string;
-  runtimeHostImage: string;
 }) {
-  const pod = z
-    .object({ metadata: z.object({ uid: z.string(), labels: z.record(z.string(), z.string()) }) })
-    .parse(
-      JSON.parse(
-        await editorFixtureKubectl([
-          "get",
-          "pod",
-          input.podName,
-          "-n",
-          input.namespace,
-          "-o",
-          "json",
-        ]),
-      ),
-    );
-  if (
-    pod.metadata.uid !== input.podUID ||
-    pod.metadata.labels["factory.dev/runtime-attempt"] !== input.attemptID
-  )
-    throw new Error("Project prebuild proof does not own its exact execution Pod");
-  const registry = input.runtimeHostImage.slice(0, input.runtimeHostImage.indexOf("/"));
+  const { runtimeHostImage, profile } = input.target.input;
+  const registry = runtimeHostImage.slice(0, runtimeHostImage.indexOf("/"));
   const command = [
-    "exec",
-    "-n",
-    input.namespace,
-    input.podName,
-    "--",
-    "docker",
-    "exec",
-    "workspace_cvm",
     "factory-project-prebuild",
     "--commit",
     input.commit,
     "--platform",
-    "linux/arm64",
+    `linux/${profile.architecture}`,
     "--config",
     ".devcontainer/prebuild/devcontainer.json",
     "--image-repository",
@@ -146,12 +115,12 @@ export async function produceOwnedProjectPrebuild(input: {
   ];
   const started = performance.now();
   const first = prebuildResult.parse(
-    JSON.parse(await editorFixtureKubectl(command, undefined, 180_000)),
+    JSON.parse(await factoryboxFixtureCommand(input.target, command, 180_000)),
   );
   const firstMS = Math.round(performance.now() - started);
   const replayAt = performance.now();
   const replay = prebuildResult.parse(
-    JSON.parse(await editorFixtureKubectl(command, undefined, 180_000)),
+    JSON.parse(await factoryboxFixtureCommand(input.target, command, 180_000)),
   );
   if (JSON.stringify(first) !== JSON.stringify(replay))
     throw new Error("Project prebuild replay changed its immutable artifact");
@@ -161,15 +130,7 @@ export async function produceOwnedProjectPrebuild(input: {
     .object({ feature: z.string(), dependency: z.string() })
     .parse(
       JSON.parse(
-        await editorFixtureKubectl([
-          "exec",
-          "-n",
-          input.namespace,
-          input.podName,
-          "--",
-          "docker",
-          "exec",
-          "workspace_cvm",
+        await factoryboxFixtureCommand(input.target, [
           "docker",
           "run",
           "--rm",

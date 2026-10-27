@@ -11,12 +11,12 @@ export const monitoringNativeSource = z
   })
   .strict();
 
-export async function ownedMonitoringForge(directory: string, id: string) {
+export async function ownedMonitoringForge(directory: string, id: string, network?: string) {
   z.uuid().parse(id);
   const container = `factory-owned-monitoring-forge-${id}`;
   const volumes = [`${container}-data`, `${container}-config`];
   const image =
-    "codeberg.org/forgejo/forgejo:15.0.10-rootless@sha256:6ffebd9ab9ee9f6677e3523fa60debd9de630ff2a226fa681d6cc0c7ba541d77";
+    "codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8";
   const owner = "factory-mutation";
   const tokenFile = resolve(directory, "forge-token");
   const originFile = resolve(directory, "forge-origin");
@@ -87,6 +87,8 @@ export async function ownedMonitoringForge(directory: string, id: string) {
     await docker(
       "run",
       "--rm",
+      "--network",
+      "none",
       "--user",
       "0",
       "--entrypoint",
@@ -104,6 +106,7 @@ export async function ownedMonitoringForge(directory: string, id: string) {
       "--detach",
       "--name",
       container,
+      ...(network ? ["--network", network, "--network-alias", "forge"] : []),
       "--label",
       `factory.owned-monitoring-forge=${id}`,
       "--mount",

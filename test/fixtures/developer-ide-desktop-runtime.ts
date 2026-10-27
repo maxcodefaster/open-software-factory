@@ -1,40 +1,54 @@
-import { expect, type Page } from "@playwright/test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { expect, type Page } from "@playwright/test";
 import { z } from "zod";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { starterImagesSchema } from "../../scripts/factory/starter-images";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { starterImagesSchema } from "../../scripts/factory/starter-images";
+import { readFactoryboxFixtureTarget } from "./factorybox-runtime";
 import { runtimeCacheObservation } from "./runtime-cache-observation";
 import { browserFunction } from "./server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 export async function startEditorCompute(page: Page) {
   const frame = page.frameLocator('iframe[title="Factory IDE"]');
   await expect(frame.locator("#theia-app-shell")).toBeVisible({ timeout: 60_000 });
   await frame.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
-  const start = frame.getByRole("button", { name: "Start compute", exact: true });
+  const iframe = page.locator('iframe[title="Factory IDE"]');
+  await expect(iframe).toHaveAttribute("data-workspace-id", /^[a-f0-9-]{36}$/);
+  const workspaceID = z.uuid().parse(await iframe.getAttribute("data-workspace-id"));
   const takeOver = frame.getByRole("button", { name: "Take over editing", exact: true });
+  if (await takeOver.isVisible()) await takeOver.click();
+  let observed: unknown;
+  // The editor starts or resumes editable selections automatically. Observe
+  // its scoped protocol without a central command or a synthetic Start click.
   await expect
     .poll(
-      async () =>
-        ((await start.count()) > 0 && (await start.isEnabled())) || (await takeOver.isVisible()),
+      async () => {
+        observed = await frame.locator("body").evaluate(async (_body, id) => {
+          const prefix = new URL("./", window.location.href).pathname;
+          const response = await fetch(`${prefix}__factory/workspaces/${id}/runtime`, {
+            credentials: "same-origin",
+            cache: "no-store",
+          });
+          if (!response.ok) throw new Error("Owned IDE runtime observation failed");
+          return response.json();
+        }, workspaceID);
+        const state = z
+          .object({
+            workspaceID: z.literal(workspaceID),
+            state: z.string(),
+            failure: z.string().nullable(),
+          })
+          .parse(observed);
+        if (state.failure || ["failed", "unavailable"].includes(state.state))
+          throw new Error(state.failure ?? `Owned Workspace became ${state.state}`);
+        return state.state;
+      },
+      { timeout: 240_000, intervals: [1000] },
     )
-    .toBe(true);
-  if (await takeOver.isVisible()) await takeOver.click();
-  await expect(start).toBeEnabled();
-  // The independently granted IDE owns this native protocol. Opening source
-  // alone must not dispatch a central Factory compute command.
-  const pending = page.waitForResponse(
-    (response) =>
-      /\/__factory\/workspaces\/[0-9a-f-]{36}\/runtime\/ensure$/.test(
-        new URL(response.url()).pathname,
-      ) && response.request().method() === "POST",
-  );
-  await start.click();
-  const response = await pending;
-  expect(response.status()).toBe(202);
-  return z.object({ workspaceID: z.uuid(), attemptID: z.uuid() }).parse(await response.json());
+    .toBe("ready");
+  return z.object({ workspaceID: z.literal(workspaceID), attemptID: z.uuid() }).parse(observed);
 }
 
 export async function proveDesktopRuntime(input: {
@@ -60,11 +74,8 @@ export async function proveDesktopRuntime(input: {
   const run = frame.locator(".factory-runtime-widget");
   const documentID = await frame.locator("body").evaluate(() => performance.timeOrigin);
   await terminalTab.click();
-  await expect(terminal).toContainText("Workspace compute is stopped");
-  await expect(host).toHaveCount(0);
   const computeStart = performance.now();
   const admittedAt = new Date().toISOString();
-  await terminal.getByRole("button", { name: "Start compute", exact: true }).click();
   await expect(frame.locator(".monaco-editor:visible")).toBeVisible();
   await expect(host).toHaveAttribute("data-connection-state", "connected", { timeout: 240_000 });
   const connectedMS = Math.round(performance.now() - computeStart);
@@ -101,9 +112,7 @@ export async function proveDesktopRuntime(input: {
       if (!identity?.podUID || !identity.node)
         throw new Error("Missing owned ready runtime observation");
       const caches = await runtimeCacheObservation({
-        ...identity,
-        attemptID,
-        runtimeHostImage: identity.image,
+        target: await readFactoryboxFixtureTarget(database, attemptID),
         startedAt,
         projectImages: [projectImages.development, projectImages.support],
       });
@@ -145,8 +154,7 @@ export async function proveDesktopRuntime(input: {
   await selectProject(1);
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   await terminalTab.click();
-  await expect(terminal).toContainText("Workspace compute is stopped");
-  await expect(host).toHaveCount(0);
+  await expect(iframe).not.toHaveAttribute("data-workspace-id", workspaceID);
   await selectProject(0);
   await page.getByRole("button", { name: "IDE", exact: true }).click();
   await expect(iframe).toHaveAttribute("data-workspace-id", workspaceID);
@@ -208,13 +216,15 @@ export async function proveDesktopRuntime(input: {
     )
     .toBe("stopped");
   await terminalTab.click();
-  await expect(terminal.getByRole("button", { name: "Start compute", exact: true })).toBeVisible({
-    timeout: 40_000,
-  });
+  await expect(terminal).toContainText("starts automatically", { timeout: 40_000 });
   await expect(editor.locator(".view-lines")).toContainText(`desktop-dirty-${proofID}`);
   const restarted = performance.now();
   const restartedAt = new Date().toISOString();
-  await terminal.getByRole("button", { name: "Start compute", exact: true }).click();
+  await selectProject(1);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await selectProject(0);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await terminalTab.click();
   await expect(host).toHaveAttribute("data-connection-state", "connected", { timeout: 150_000 });
   const restartedConnectedMS = Math.round(performance.now() - restarted);
   await command(

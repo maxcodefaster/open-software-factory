@@ -1,26 +1,35 @@
-import { callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
-import { authenticatedBootstrap } from "../fixtures/server-functions";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import upstream from "../../upstream.json";
-import { starterImagesSchema } from "../../scripts/factory/starter-images";
 import {
   runtimeAttemptSchema,
   sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { ownedRuntimeTerminal } from "../fixtures/runtime-access";
-import { runtimeCacheObservation } from "../fixtures/runtime-cache-observation";
-import { projectPrebuildRecipe, produceOwnedProjectPrebuild } from "../fixtures/project-prebuild";
-import { slice20StartupTargetFailures } from "./runtime-startup";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { forgeUsername } from "../../packages/forge/src/access";
+import { createForgejoClient } from "../../packages/forge/src/forge";
 import {
-  editorFixtureNamespaces,
-  editorFixtureKubectl,
-  removeStoppedEditorSourceNamespace,
-} from "../fixtures/editor-source-resources";
+  workspaceSourceCapability,
+  workspaceSourceIdentity,
+} from "../../packages/workspace-domain/src/source";
+import { starterImagesSchema } from "../../scripts/factory/starter-images";
+import upstream from "../../upstream.json";
+import { editorFixtureKubectl, editorFixtureNamespaces } from "../fixtures/editor-source-resources";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { removeOwnedFactoryboxFixture } from "../fixtures/factorybox-cleanup";
+import {
+  factoryboxFixtureCommand,
+  observeFactoryboxFixture,
+  readFactoryboxFixtureTarget,
+  requireFixtureWorkerPod,
+} from "../fixtures/factorybox-runtime";
+import { ownedMonitoringForge } from "../fixtures/monitoring-native";
+import { produceOwnedProjectPrebuild, projectPrebuildRecipe } from "../fixtures/project-prebuild";
+import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
+import { runtimeCacheObservation } from "../fixtures/runtime-cache-observation";
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
+import { slice20StartupTargetFailures } from "./runtime-startup";
 
 const prebuildEnabled = process.env["FACTORY_RUN_PROJECT_PREBUILD_PROOF"] === "1";
 const idleEnabled = process.env["FACTORY_RUN_IDLE_COMPUTE_PROOF"] === "1";
@@ -36,19 +45,14 @@ test.skipIf(!enabled)(
       throw new Error(
         "Slice 20 startup targets require the explicit Stop/restart proof, not idle mode",
       );
-    const image = async (name: string) => (await readFile(`.factory/${name}-image`, "utf8")).trim();
-    const fixture = await factoryProcess(
-      {
-        runtimeHostImage: await image("runtime-host"),
-        forgejoToken: (await readFile(".factory/forgejo-token", "utf8")).trim(),
-      },
-      {
-        FACTORY_WORKSPACE_FILES_IMAGE: await image("workspace-files"),
-        FACTORY_DEVELOPER_IDE_IMAGE: await image("developer-ide"),
-        ...(idleEnabled ? { FACTORY_EXECUTION_IDLE_MINUTES: "1" } : {}),
-      },
-    );
-    const database = fixture.connect();
+    const image = async (name: string) =>
+      (
+        (name === "workspace-files"
+          ? process.env["FACTORY_WORKSPACE_FILES_IMAGE"]
+          : name === "runtime-host"
+            ? process.env["FACTORY_RUNTIME_HOST_IMAGE"]
+            : undefined) ?? (await readFile(`.factory/${name}-image`, "utf8"))
+      ).trim();
     const proofID = crypto.randomUUID();
     const projectID = crypto.randomUUID();
     const artifacts = resolve(".factory/test-results/source-compute", proofID);
@@ -60,7 +64,38 @@ test.skipIf(!enabled)(
     const projectImages = recipe
       ? [upstream.nodeDevelopment.image, upstream.node.image]
       : [localImages.development, localImages.support];
-    const repository = recipe?.directory ?? resolve(".factory/runtime-fixture-repository");
+    const repositoryDirectory = recipe?.directory ?? resolve(".factory/runtime-fixture-repository");
+    const sharedPostgres = process.env["FACTORY_TEST_POSTGRES"]
+      ? z.object({ owner: z.uuid() }).parse(JSON.parse(process.env["FACTORY_TEST_POSTGRES"]))
+      : null;
+    const forgeHost = await ownedMonitoringForge(
+      artifacts,
+      proofID,
+      sharedPostgres ? `factory-test-postgres-${sharedPostgres.owner}` : undefined,
+    );
+    const repository = { owner: forgeHost.owner, name: `source-compute-${proofID.slice(0, 12)}` };
+    const forge = createForgejoClient({
+      apiURL: `${forgeHost.origin}/api/v1/`,
+      token: forgeHost.token,
+    });
+    const fixture = await factoryProcess(
+      {
+        runtimeHostImage: await image("runtime-host"),
+        forgejoToken: forgeHost.token,
+      },
+      {
+        FACTORY_FORGEJO_ADMIN_TOKEN: forgeHost.token,
+        FACTORY_FORGEJO_API_URL: `${forgeHost.origin}/api/v1/`,
+        FACTORY_FORGEJO_OWNER: forgeHost.owner,
+        FACTORY_WORKSPACE_FILES_IMAGE: await image("workspace-files"),
+        FACTORY_DEVELOPER_IDE_IMAGE: await image("developer-ide"),
+        ...(idleEnabled ? { FACTORY_EXECUTION_IDLE_MINUTES: "1" } : {}),
+      },
+    ).catch(async (cause) => {
+      await forgeHost.dispose();
+      throw cause;
+    });
+    const database = fixture.connect();
     const before = await editorFixtureNamespaces();
     let cookie = "";
     let workspaceID = "";
@@ -136,8 +171,53 @@ test.skipIf(!enabled)(
       const { session } = z
         .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
         .parse(await authenticatedBootstrap(fixture.base, { cookie }));
-      await writeFile(resolve(artifacts, "intent.json"), JSON.stringify({ projectID, proofID }));
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`source-compute-${proofID}`},'Canonical compute proof',${`file://${repository}`},'main','.devcontainer/devcontainer.json',${session.user.id})`;
+      await forgeHost.execute([
+        "admin",
+        "user",
+        "create",
+        "--username",
+        forgeUsername(session.user.id),
+        "--random-password",
+        "--email",
+        `${proofID}@source-compute.invalid`,
+        "--must-change-password=false",
+      ]);
+      await forge.createSetupRepository({ repository, setupID: proofID });
+      const tracked = Bun.spawn(["git", "ls-files"], {
+        cwd: repositoryDirectory,
+        stdout: "pipe",
+        stderr: "ignore",
+      });
+      const paths = (await new Response(tracked.stdout).text()).trim().split("\n");
+      if ((await tracked.exited) !== 0 || !paths.includes(".devcontainer/devcontainer.json"))
+        throw new Error("Owned source/compute fixture repository is incomplete");
+      await forge.createSetupFiles({
+        repository,
+        setupID: proofID,
+        branch: "main",
+        files: await Promise.all(
+          paths.map(async (path) => ({
+            path,
+            content: await readFile(resolve(repositoryDirectory, path), "utf8"),
+          })),
+        ),
+      });
+      const sourceCommit = (await forge.getDefaultBranch(repository)).headSha;
+      const repositoryURL = `${forgeHost.origin}/${repository.owner}/${repository.name}.git`;
+      await writeFile(
+        resolve(artifacts, "intent.json"),
+        JSON.stringify({
+          projectID,
+          proofID,
+          repository,
+          sourceCommit,
+          factoryID: fixture.id,
+          factoryOrigin: fixture.base,
+          forgeContainer: forgeHost.container,
+          forgeOrigin: forgeHost.origin,
+        }),
+      );
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`source-compute-${proofID}`},'Canonical compute proof',${repositoryURL},'main','.devcontainer/devcontainer.json',${session.user.id})`;
       const source = sourceWorkspaceViewSchema.parse(
         await serverCall(
           callFactoryFunction(fixture.base, "ensurePersonalSource", [projectID], {
@@ -147,17 +227,23 @@ test.skipIf(!enabled)(
       );
       workspaceID = source.workspaceID;
       await eventually(
-        async () =>
-          sourceWorkspaceViewSchema.parse(
+        async () => {
+          const current = sourceWorkspaceViewSchema.parse(
             await serverCall(
               callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
                 cookie: cookie,
               }),
             ),
-          ),
+          );
+          if (current.state === "failed")
+            throw new Error(current.failure ?? "Owned canonical Source preparation failed");
+          return current;
+        },
         (current) => current.state === "ready",
         "Canonical source was not ready",
-        150_000,
+        // Cold PVC provisioning and image startup use the native preparation
+        // window. Terminal Source failures still fail immediately above.
+        420_000,
       );
       const [placement] = await database.client<
         Array<{
@@ -208,29 +294,19 @@ test.skipIf(!enabled)(
       const connectedTerminalMS = Math.round(performance.now() - started);
       expect(await terminal.evaluate<string>("return process.cwd()")).toBe("/workspace/project");
       const executableTerminalMS = Math.round(performance.now() - started);
-      const pod = z
-        .object({
-          metadata: z.object({ uid: z.string() }),
-          spec: z.object({
-            nodeName: z.string(),
-            nodeSelector: z.record(z.string(), z.string()),
-            containers: z.array(
-              z.object({
-                resources: z.object({
-                  requests: z.record(z.string(), z.string()),
-                  limits: z.record(z.string(), z.string()),
-                }),
-              }),
-            ),
-          }),
-        })
-        .parse(
-          JSON.parse(
-            await editorFixtureKubectl(["get", "pod", "runtime-1", "-n", namespace, "-o", "json"]),
-          ),
-        );
+      const initialTarget = await readFactoryboxFixtureTarget(database, attempt.id);
+      const pod = requireFixtureWorkerPod(
+        JSON.parse(
+          await editorFixtureKubectl(["get", "pod", "worker", "-n", namespace, "-o", "json"]),
+        ),
+        initialTarget,
+      );
       expect(pod.spec.nodeName).toBe(placement.node);
-      expect(pod.spec.nodeSelector["kubernetes.io/hostname"]).toBe(placement.node);
+      expect(pod.spec.nodeSelector).toEqual({
+        "kubernetes.io/os": "linux",
+        "kubernetes.io/arch": initialTarget.input.profile.architecture,
+        "kubernetes.io/hostname": placement.node,
+      });
       expect(
         await terminal.evaluate<boolean>('return require("fs").existsSync("/opt/factory/theia")'),
       ).toBe(false);
@@ -255,18 +331,13 @@ test.skipIf(!enabled)(
         browser: null,
       });
       const initialCaches = await runtimeCacheObservation({
-        namespace,
-        podName: "runtime-1",
-        podUID: pod.metadata.uid,
-        attemptID: attempt.id,
-        node: placement.node,
-        runtimeHostImage: await image("runtime-host"),
+        target: initialTarget,
         startedAt: initialStartedAt,
         projectImages,
       });
       expect(initialCaches.kubelet.present).toBe(true);
       expect(initialCaches.kubelet.imageID).toContain("sha256:");
-      expect(initialCaches.envboxDocker.digests).toContain(await image("runtime-host"));
+      expect(initialCaches.factoryboxBase.reference).toBe(await image("runtime-host"));
       for (const cached of initialCaches.privateDocker.project)
         expect(
           cached.digests.some((digest) =>
@@ -277,13 +348,9 @@ test.skipIf(!enabled)(
       await writeFile(resolve(artifacts, "initial-caches.json"), JSON.stringify(initialCaches));
       if (recipe) {
         const prebuilt = await produceOwnedProjectPrebuild({
-          namespace,
-          podName: "runtime-1",
-          podUID: pod.metadata.uid,
-          attemptID: attempt.id,
+          target: initialTarget,
           projectID,
-          commit: recipe.commit,
-          runtimeHostImage: await image("runtime-host"),
+          commit: sourceCommit,
         });
         expect(prebuilt.seed).toEqual({
           feature: "exact committed Feature\n",
@@ -320,6 +387,32 @@ test.skipIf(!enabled)(
         Buffer.from((await readSource("runtime-human.txt")).content, "base64").toString(),
       ).toBe(runtimeText);
       if (idleEnabled) {
+        const ramServer =
+          'const nonce=require("node:crypto").randomUUID();let counter=0;setInterval(()=>counter++,100);require("node:http").createServer((req,res)=>{res.end(JSON.stringify({nonce,pid:process.pid,counter}));}).listen(19471,"127.0.0.1");';
+        await factoryboxFixtureCommand(initialTarget, [
+          "node",
+          "-e",
+          `const child=require("node:child_process").spawn(process.execPath,["-e",${JSON.stringify(ramServer)}],{detached:true,stdio:"ignore"});child.unref();`,
+        ]);
+        const ramState = async () =>
+          z
+            .object({ nonce: z.uuid(), pid: z.number().int().positive(), counter: z.number() })
+            .parse(
+              JSON.parse(
+                await factoryboxFixtureCommand(initialTarget, [
+                  "node",
+                  "-e",
+                  'const req=require("node:http").get("http://127.0.0.1:19471",res=>res.pipe(process.stdout));req.setTimeout(5000,()=>req.destroy(new Error("actor timeout")));req.on("error",()=>process.exit(1));',
+                ]),
+              ),
+            );
+        const beforePause = await eventually(
+          () => ramState().catch(() => null),
+          (value) => value !== null,
+          "Owned RAM actor did not start",
+        );
+        if (!beforePause) throw new Error("Owned RAM actor is missing");
+        const appCookie = await runtimeAccessCookie(fixture.base, cookie, attempt.id, "app");
         console.info("Idle proof: real source/PTY writes pass; observing detached retained shell");
         const runtimeCookie = terminal.runtimeCookie;
         terminal.close();
@@ -355,7 +448,7 @@ test.skipIf(!enabled)(
           },
         );
         expect(closed.ok).toBe(true);
-        console.info("Idle proof: last PTY closed; waiting for automatic compute Stop");
+        console.info("Idle proof: last PTY closed; waiting for automatic Factorybox Pause");
         terminal.close();
         terminal = undefined;
         await eventually(
@@ -363,11 +456,17 @@ test.skipIf(!enabled)(
             await Bun.sleep(1000);
             return getAttempt(attempt.id);
           },
-          (current) => current.state === "stopped",
-          "Idle compute did not Stop after the last retained PTY closed",
+          (current) => current.state === "paused",
+          "Idle compute did not Pause after the last retained PTY closed",
           120_000,
         );
-        const idleStopMS = Math.round(performance.now() - closedAt);
+        const idlePauseMS = Math.round(performance.now() - closedAt);
+        const paused = await observeFactoryboxFixture(initialTarget);
+        expect(paused.record.phase).toBe("paused");
+        expect(paused.record["pause"]).toMatchObject({
+          after: { anon: 0 },
+          snapshot: { resident_bytes_after: 0 },
+        });
         expect(
           Buffer.from((await readSource("runtime-human.txt")).content, "base64").toString(),
         ).toBe(runtimeText);
@@ -389,6 +488,37 @@ test.skipIf(!enabled)(
           claimUID: placement.claimUID,
           podUID: placement.podUID,
         });
+        const healthWhilePaused = await fetch(`${fixture.base}/runtime/${attempt.id}/app/health`, {
+          headers: { cookie: appCookie },
+          signal: AbortSignal.timeout(15_000),
+        });
+        expect(healthWhilePaused.ok).toBe(false);
+        expect((await getAttempt(attempt.id)).state).toBe("paused");
+        const resumedAt = performance.now();
+        // Merely opening the App must wake the original Attempt. No lifecycle
+        // button, explicit start command or replacement Sandbox is involved.
+        await eventually(
+          async () =>
+            fetch(`${fixture.base}/runtime/${attempt.id}/app/health`, {
+              headers: { cookie: appCookie, "sec-fetch-mode": "navigate" },
+              signal: AbortSignal.timeout(90_000),
+            }),
+          (response) => response.ok,
+          "App access did not automatically Resume its paused Sandbox",
+          120_000,
+        );
+        await ready(attempt.id);
+        const afterResume = await ramState();
+        expect(afterResume.nonce).toBe(beforePause.nonce);
+        expect(afterResume.pid).toBe(beforePause.pid);
+        expect(afterResume.counter).toBeGreaterThan(beforePause.counter);
+        expect(await readFactoryboxFixtureTarget(database, attempt.id)).toEqual(initialTarget);
+        expect(
+          (
+            await database.client<Array<{ id: string }>>`
+              SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID}`
+          ).map((row) => row.id),
+        ).toEqual([attempt.id]);
         expect(
           await database.client`SELECT id FROM factory.agent_turn WHERE project_id=${projectID}`,
         ).toHaveLength(0);
@@ -400,7 +530,10 @@ test.skipIf(!enabled)(
             executableTerminalMS,
             idleMinutes: 1,
             detachedPTYRetainedMS,
-            idleStopMS,
+            idlePauseMS,
+            automaticAppResumeMS: Math.round(performance.now() - resumedAt),
+            sameRAMActor: { beforePause, afterResume },
+            pausedAnonymousAndSnapshotResidencyZero: true,
             exactAttempt: attempt.id,
             sourceIdentityRetained: true,
             sourceEditableAfterIdle: true,
@@ -495,20 +628,17 @@ test.skipIf(!enabled)(
         return identity;
       };
       const computeBefore = await computeIdentity();
+      const retainedTarget = await readFactoryboxFixtureTarget(database, second.id);
       const retainedCaches = await runtimeCacheObservation({
-        namespace,
-        podName: "runtime-2",
-        podUID: computeBefore.podUID,
-        attemptID: second.id,
-        node: placement.node,
-        runtimeHostImage: await image("runtime-host"),
+        target: retainedTarget,
         startedAt: retainedStartedAt,
         projectImages,
       });
       expect(retainedCaches.kubelet.present).toBe(true);
-      expect(retainedCaches.envboxDocker).toEqual(initialCaches.envboxDocker);
+      expect(retainedCaches.factoryboxBase).toEqual(initialCaches.factoryboxBase);
       expect(retainedCaches.privateDocker.project).toEqual(initialCaches.privateDocker.project);
-      expect(retainedCaches.privateDocker.pullsSinceAdmission).toEqual([]);
+      // Stop discards the old Sandbox's private Docker graph. Only the worker
+      // base import is shared; a new private daemon may reacquire Project images.
       await writeFile(resolve(artifacts, "retained-caches.json"), JSON.stringify(retainedCaches));
       terminal.close();
       terminal = undefined;
@@ -555,7 +685,7 @@ test.skipIf(!enabled)(
         .object({ metadata: z.object({ uid: z.string() }) })
         .parse(
           JSON.parse(
-            await editorFixtureKubectl(["get", "pod", "runtime-2", "-n", namespace, "-o", "json"]),
+            await editorFixtureKubectl(["get", "pod", "worker", "-n", namespace, "-o", "json"]),
           ),
         );
       expect(restartedPod.metadata.uid).toBe(computeBefore.podUID);
@@ -593,9 +723,89 @@ test.skipIf(!enabled)(
           [],
         );
     } catch (cause) {
+      const attempts = await database.client<
+        Array<{ id: string; state: string; failure: string | null }>
+      >`SELECT id,state,failure FROM factory.runtime_attempt WHERE project_id=${projectID}`;
+      const lifecycle = await database.client`SELECT operation.runtime_attempt_id,operation.action,
+        operation.snapshot_id,operation.attempted_at,operation.completed_at,
+        operation.observation->'record'->>'phase' AS phase,
+        operation.observation#>>'{record,pause,completed_at}' AS pause_completed_at,
+        operation.observation#>>'{record,pause,resume,completed_at}' AS resume_completed_at
+        FROM factory.factorybox_lifecycle_operation operation
+        JOIN factory.runtime_attempt attempt ON attempt.id=operation.runtime_attempt_id
+        WHERE attempt.project_id=${projectID} ORDER BY operation.intended_at`;
+      const [source] = workspaceID
+        ? await database.client<
+            Array<{
+              workspaceID: string;
+              namespace: string;
+              epoch: string;
+              podUID: string | null;
+              state: string;
+              failure: string | null;
+              filesImage: string;
+            }>
+          >`SELECT source.workspace_id AS "workspaceID",workspace.kubernetes_namespace AS namespace,
+            source.access_epoch::text AS epoch,source.pod_uid AS "podUID",source.state,source.failure,
+            source.files_image AS "filesImage" FROM factory.workspace_source source
+            JOIN factory.development_workspace workspace ON workspace.id=source.workspace_id
+            WHERE source.workspace_id=${workspaceID}`.catch(() => [])
+        : [];
+      let sourceDiagnostic = "";
+      let sourcePodStatus: unknown = null;
+      if (source?.podUID) {
+        const identity = workspaceSourceIdentity(workspaceID, Number(source.epoch));
+        try {
+          const pod = JSON.parse(
+            await editorFixtureKubectl([
+              "get",
+              "pod",
+              identity.podName,
+              "-n",
+              source.namespace,
+              "-o",
+              "json",
+            ]),
+          );
+          if (
+            pod.metadata.uid !== source.podUID ||
+            pod.metadata.labels?.["factory.dev/runtime-owner"] !== workspaceID
+          )
+            throw new Error("Owned Source diagnostic UID changed");
+          sourcePodStatus = pod.status;
+          const output = await editorFixtureKubectl([
+            "logs",
+            identity.podName,
+            "-n",
+            source.namespace,
+            "-c",
+            "source",
+            "--tail=12",
+          ]);
+          const capability = workspaceSourceCapability(
+            "owned-process-auth-secret-not-a-production-credential",
+            identity,
+          );
+          // Source initialization emits bounded errors, not Git output. Still
+          // redact both fixture capabilities before retaining compact evidence.
+          sourceDiagnostic = output
+            .replaceAll(capability, "<REDACTED>")
+            .replaceAll(forgeHost.token, "<REDACTED>")
+            .slice(-4000);
+        } catch {
+          sourceDiagnostic = "Original Source Pod diagnostics are unavailable";
+        }
+      }
       await writeFile(
         resolve(artifacts, "failure.json"),
-        JSON.stringify({ error: cause instanceof Error ? cause.message : String(cause) }),
+        JSON.stringify({
+          error: cause instanceof Error ? cause.message : String(cause),
+          source,
+          sourcePodStatus,
+          sourceDiagnostic,
+          attempts: Array.from(attempts),
+          lifecycle: Array.from(lifecycle),
+        }),
       );
       throw cause;
     } finally {
@@ -625,13 +835,8 @@ test.skipIf(!enabled)(
             "Source Stop incomplete",
             40_000,
           );
-          expect(namespace).not.toBe("");
-          expect(namespaceUID).not.toBe("");
-          await removeStoppedEditorSourceNamespace(namespace, {
-            ownerID: workspaceID,
-            uid: namespaceUID,
-          });
         }
+        await removeOwnedFactoryboxFixture(fixture, artifacts);
         const after = await editorFixtureNamespaces();
         expect(
           before.every((item) =>
@@ -640,12 +845,17 @@ test.skipIf(!enabled)(
         ).toBe(true);
         await writeFile(
           resolve(artifacts, "cleanup.json"),
-          JSON.stringify({ ownedNamespaceRemoved: true, unrelatedNamespacesUnchanged: true }),
+          JSON.stringify({ ownedSharedWorkerRemoved: true, unrelatedNamespacesUnchanged: true }),
         );
         cleaned = true;
       } finally {
         await database.client.end({ timeout: 2 });
-        if (cleaned) await fixture.dispose();
+        if (cleaned) {
+          await fixture.dispose();
+          await forgeHost.dispose();
+        } else {
+          await fixture.pause();
+        }
       }
     }
   },

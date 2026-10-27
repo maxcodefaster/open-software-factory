@@ -2,71 +2,44 @@ import { z } from "zod";
 import upstream from "../../upstream.json";
 import { startupMeasurements } from "../support/runtime-startup";
 import { editorFixtureKubectl } from "./editor-source-resources";
+import {
+  type FactoryboxFixtureTarget,
+  factoryboxFixtureCommand,
+  requireFixtureWorkerPod,
+} from "./factorybox-runtime";
 
 const imageSnapshot = z.object({ id: z.string(), digests: z.array(z.string()) });
 
-// Node presence does not establish acquisition in either Docker daemon inside Envbox.
+export async function readProjectImageSnapshots(
+  references: readonly string[],
+  inspect: (reference: string) => Promise<z.infer<typeof imageSnapshot>>,
+) {
+  const project: Array<{ reference: string } & z.infer<typeof imageSnapshot>> = [];
+  // Every read enters one shared worker's native lifecycle lock.
+  for (const reference of references) project.push({ reference, ...(await inspect(reference)) });
+  return project;
+}
+
+// The worker base import and each Sandbox's private Docker cache are different tiers.
 export async function runtimeCacheObservation(input: {
-  namespace: string;
-  podName: string;
-  podUID: string;
-  attemptID: string;
-  node: string;
-  runtimeHostImage: string;
+  target: FactoryboxFixtureTarget;
   startedAt: string;
   projectImages?: readonly string[];
 }) {
-  const pod = z
-    .object({
-      metadata: z.object({
-        uid: z.string(),
-        creationTimestamp: z.string(),
-        labels: z.record(z.string(), z.string()),
-      }),
-      spec: z.object({ nodeName: z.string() }),
-      status: z.object({
-        startTime: z.string(),
-        conditions: z.array(
-          z.object({ type: z.string(), status: z.string(), lastTransitionTime: z.string() }),
-        ),
-        containerStatuses: z.array(
-          z.object({
-            name: z.string(),
-            imageID: z.string(),
-            state: z.object({ running: z.object({ startedAt: z.string() }).optional() }),
-          }),
-        ),
-      }),
-    })
-    .parse(
-      JSON.parse(
-        await editorFixtureKubectl([
-          "get",
-          "pod",
-          input.podName,
-          "-n",
-          input.namespace,
-          "-o",
-          "json",
-        ]),
-      ),
-    );
-  if (
-    pod.metadata.uid !== input.podUID ||
-    pod.metadata.labels["factory.dev/runtime-attempt"] !== input.attemptID ||
-    pod.spec.nodeName !== input.node
-  )
-    throw new Error("Cache observation does not own the exact Runtime Attempt Pod");
+  const target = input.target;
+  const { namespace, podName, profile, runtimeHostImage } = target.input;
+  const pod = requireFixtureWorkerPod(
+    JSON.parse(await editorFixtureKubectl(["get", "pod", podName, "-n", namespace, "-o", "json"])),
+    target,
+  );
   const node = z
     .object({
       status: z.object({
         images: z.array(z.object({ names: z.array(z.string()).nullish() })),
       }),
     })
-    .parse(JSON.parse(await editorFixtureKubectl(["get", "node", input.node, "-o", "json"])));
-  const outer = (args: string[]) =>
-    editorFixtureKubectl(["exec", "-n", input.namespace, input.podName, "--", "docker", ...args]);
-  const inner = (args: string[]) => outer(["exec", "workspace_cvm", ...args]);
+    .parse(JSON.parse(await editorFixtureKubectl(["get", "node", profile.nodeName, "-o", "json"])));
+  const inner = (args: string[]) => factoryboxFixtureCommand(target, args);
   const inspect = (image: string) => [
     "image",
     "inspect",
@@ -74,14 +47,17 @@ export async function runtimeCacheObservation(input: {
     '{"id":{{json .Id}},"digests":{{json .RepoDigests}}}',
     image,
   ];
-  const host = imageSnapshot.parse(JSON.parse(await outer(inspect(input.runtimeHostImage))));
-  const project = await Promise.all(
-    (input.projectImages ?? [upstream.nodeDevelopment.image, upstream.node.image]).map(
-      async (reference) => ({
-        reference,
-        ...imageSnapshot.parse(JSON.parse(await inner(["docker", ...inspect(reference)]))),
-      }),
-    ),
+  // The consumer filesystem comes from the exact init-container image, not
+  // an ambient host Docker daemon. Preparation binds that image to this epoch.
+  const host = {
+    reference: runtimeHostImage,
+    workerEpoch: target.identity.epoch,
+    executableSHA256: target.identity.executableSHA256,
+  };
+  const project = await readProjectImageSnapshots(
+    input.projectImages ?? [upstream.nodeDevelopment.image, upstream.node.image],
+    async (reference) =>
+      imageSnapshot.parse(JSON.parse(await inner(["docker", ...inspect(reference)]))),
   );
   const phases = startupMeasurements(await inner(["cat", "/tmp/factory-startup-timings.jsonl"]));
   const pulls = (
@@ -109,18 +85,22 @@ export async function runtimeCacheObservation(input: {
       podCreatedAt: pod.metadata.creationTimestamp,
       podStartedAt: pod.status.startTime,
       conditions: pod.status.conditions,
-      envboxStartedAt: pod.status.containerStatuses.find((container) => container.name === "envbox")
+      workerStartedAt: pod.status.containerStatuses.find((container) => container.name === "worker")
         ?.state.running?.startedAt,
       connectorStartedAt: phases[0]?.startedAt,
     },
     kubelet: {
-      node: input.node,
-      envbox: upstream.envbox.image,
-      imageID: pod.status.containerStatuses.find((container) => container.name === "envbox")
+      node: profile.nodeName,
+      worker: profile.image,
+      imageID: pod.status.containerStatuses.find((container) => container.name === "worker")
         ?.imageID,
-      present: node.status.images.some((image) => image.names?.includes(upstream.envbox.image)),
+      present: node.status.images.some((image) =>
+        image.names?.some((name) =>
+          name.endsWith(profile.image.slice(profile.image.indexOf("@") + 1)),
+        ),
+      ),
     },
-    envboxDocker: { reference: input.runtimeHostImage, ...host },
+    factoryboxBase: host,
     privateDocker: { project, pullsSinceAdmission: pulls },
     phases,
   };
