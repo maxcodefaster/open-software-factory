@@ -12,6 +12,7 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 import { fixtureNamespace, removeFixtureNamespace } from "../support/owned-namespace";
 import { luminance, rgb } from "../support/visual-contrast";
+import { fixtureValue } from "../fixtures/value";
 
 const origin = "http://127.0.0.1:3000";
 const repository = { owner: "factory-mutation", name: "runtime-fixture" };
@@ -87,9 +88,9 @@ for (const restore of [false, true])
             (await browserFunction(page, "saveProjectMember", [projectID, { email, role }])).ok,
           ).toBe(true);
         }
-        const contributor = await contexts[0]!.newPage();
-        const developer = await contexts[1]!.newPage();
-        await login(contributor, users[0]!.email);
+        const contributor = await fixtureValue(contexts[0], "contexts[0]").newPage();
+        const developer = await fixtureValue(contexts[1], "contexts[1]").newPage();
+        await login(contributor, fixtureValue(users[0], "users[0]").email);
         await contributor.getByRole("button", { name: "New Ticket", exact: true }).click();
         await contributor.getByRole("textbox", { name: "Ticket title", exact: true }).fill(title);
         await contributor
@@ -116,7 +117,7 @@ for (const restore of [false, true])
         const [accepted] = await db.client<
           Array<{ title: string }>
         >`SELECT title FROM factory.ticket WHERE id=${ticketID}`;
-        title = accepted!.title;
+        title = fixtureValue(accepted, "accepted").title;
         await contributor.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
         await expect(contributor.getByRole("button", { name: "IDE", exact: true })).toHaveCount(0);
         await contributor.getByRole("button", { name: "Implement", exact: true }).click();
@@ -140,7 +141,7 @@ for (const restore of [false, true])
             return !!change;
           })
           .toBe(true);
-        await login(developer, users[1]!.email);
+        await login(developer, fixtureValue(users[1], "users[1]").email);
         await openTicket(developer);
         const cold = performance.now();
         await developer.getByRole("button", { name: "Ticket actions", exact: true }).click();
@@ -194,7 +195,7 @@ for (const restore of [false, true])
         expect(
           (
             await contributor.request.get(
-              `/api/runtime-access?path=${encodeURIComponent(`/runtime/${attempt!.id}/ide/`)}`,
+              `/api/runtime-access?path=${encodeURIComponent(`/runtime/${fixtureValue(attempt, "attempt").id}/ide/`)}`,
               { maxRedirects: 0 },
             )
           ).status(),
@@ -322,7 +323,9 @@ for (const restore of [false, true])
           for (const source of sources) {
             const ownerIndex = users.findIndex((user) => user.id === source.ownerID);
             const actorPage = cleanupActor(
-              ownerIndex < 0 ? page : contexts[ownerIndex]!.pages()[0],
+              ownerIndex < 0
+                ? page
+                : fixtureValue(contexts[ownerIndex], "contexts[ownerIndex]").pages()[0],
               "source",
             );
             await serverCall(browserFunction(actorPage, "stopWorkspaceSource", [source.id]));
@@ -347,7 +350,10 @@ for (const restore of [false, true])
             expect(identity).toBeDefined();
             if (!identity) continue;
             const namespace = await fixtureNamespace(identity.namespace, user.id);
-            const actorPage = cleanupActor(contexts[index]!.pages()[0], "editor");
+            const actorPage = cleanupActor(
+              fixtureValue(contexts[index], "contexts[index]").pages()[0],
+              "editor",
+            );
             await serverCall(browserFunction(actorPage, "stopDeveloperIDE", []));
             await expect
               .poll(

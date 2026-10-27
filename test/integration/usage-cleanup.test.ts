@@ -8,6 +8,7 @@ import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/cl
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import { fixtureValue } from "../fixtures/value";
 
 let restoreConfiguration: () => void;
 beforeAll(() => {
@@ -25,7 +26,7 @@ test("retained cleanup recovery leaves database capacity for startup and usage",
     const attempts = [];
     for (let index = 0; index < 4; index++)
       attempts.push(await fixture(undefined, undefined, database));
-    const hub = attempts[0]!.hub;
+    const hub = fixtureValue(attempts[0], "attempts[0]").hub;
     hub.connected = () => false;
     const runtime = createRuntimeController(
       database,

@@ -7,6 +7,7 @@ import { appendConversationEntry } from "../../apps/factory/src/project-agent/co
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
+import { fixtureValue } from "../fixtures/value";
 
 test("fresh Coding retains history on the same Workspace and rejects old or unresolved execution targets", async () => {
   const owned = await fixture();
@@ -120,7 +121,7 @@ test("fresh Coding retains history on the same Workspace and rejects old or unre
           mode: "investigate",
           body: record.command.kind === "project-message" ? record.command.text : "",
           payload: { turnId: record.id, commandId: record.commandId },
-          contextId: research.contextId!,
+          contextId: fixtureValue(research.contextId, "research.contextId"),
           citations: [],
           inReplyToEntryId: null,
           requirementRevisionId: null,
@@ -185,7 +186,12 @@ test("personal Project conversations cannot be selected through another person's
     ).toBe(personal?.contextId);
     await project.newConversation(owned.projectID, undefined, other, crypto.randomUUID());
     await expect(
-      project.get(owned.projectID, undefined, other, personal!.contextId!),
+      project.get(
+        owned.projectID,
+        undefined,
+        other,
+        fixtureValue(fixtureValue(personal, "personal").contextId, "personal!.contextId"),
+      ),
     ).rejects.toThrow("Conversation not found");
     expect(
       (await project.get(owned.projectID, undefined, other))?.contexts.some(

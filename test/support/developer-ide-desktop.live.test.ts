@@ -22,6 +22,7 @@ import { eventually } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject } from "./factory-fixture";
 import { slice20StartupTargetFailures } from "./runtime-startup";
+import { fixtureValue } from "../fixtures/value";
 
 const enabled = process.env["FACTORY_RUN_DEVELOPER_IDE_DESKTOP_PROOF"] === "1";
 const runtimeEnabled = process.env["FACTORY_RUN_DEVELOPER_IDE_RUNTIME_PROOF"] === "1";
@@ -415,10 +416,16 @@ test.skipIf(!enabled)(
             Array<{ uid: string | null }>
           >`SELECT namespace_uid AS uid FROM factory.developer_ide WHERE user_id=${userID}`;
           if (editorOwnership)
-            ownedNamespaces.set((await recordedEditorIdentity(database, userID))!.namespace, {
-              ownerID: userID,
-              ...(editorOwnership.uid ? { uid: editorOwnership.uid } : {}),
-            });
+            ownedNamespaces.set(
+              fixtureValue(
+                await recordedEditorIdentity(database, userID),
+                "(await recordedEditorIdentity(database, userID))",
+              ).namespace,
+              {
+                ownerID: userID,
+                ...(editorOwnership.uid ? { uid: editorOwnership.uid } : {}),
+              },
+            );
           if (editorOwnership) {
             await serverCall(
               callFactoryFunction(base, "stopDeveloperIDE", [], { cookie: developerCookie }),

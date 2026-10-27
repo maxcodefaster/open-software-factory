@@ -37,7 +37,6 @@ export function WikiNavigationResize(props: {
   let origin: { x: number; width: number } | undefined;
   return (
     // biome-ignore lint/a11y/useSemanticElements: An adjustable window splitter is not a document rule.
-    // biome-ignore lint/a11y/useFocusableInteractive: Solid uses lowercase tabindex, which is present below.
     <div
       class="wiki-navigation-resize"
       role="separator"

@@ -197,12 +197,12 @@ export function parseEnvironmentPaste(source: string): Array<{ name: string; val
   const entries: Array<{ name: string; value: string }> = [];
   const lines = source.replace(/\r\n/g, "\n").split("\n");
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index]!.trim();
+    const line = lines.at(index)?.trim();
     if (!line || line.startsWith("#")) continue;
     const match = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
     if (!match) throw new Error(`Invalid variable on line ${index + 1}`);
     const name = variableName.parse(match[1]);
-    let value = match[2]!;
+    let value = match[2] ?? "";
     const quote = value[0];
     if (quote === '"' || quote === "'") {
       while (value.length < 2 || value.at(-1) !== quote) {

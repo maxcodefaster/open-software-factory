@@ -8,6 +8,7 @@ import { createStagingTemplateProducer } from "../../apps/factory/src/runtime/st
 import type { createDatabase } from "../../packages/db/src/client";
 import type { FactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import upstream from "../../upstream.json";
+import { fixtureValue } from "./value";
 
 // PostgreSQL controller fixture only. It deliberately does not claim that its
 // seeded healthy Staging is a native execution proof.
@@ -117,7 +118,7 @@ export async function executionPoolFixture(
     if (!template || template.templateID !== null)
       throw new Error("Owned clean template intent missing");
     async function prepareTemplate() {
-      await store.observe(database.client, template!.id, {
+      await store.observe(database.client, fixtureValue(template, "template").id, {
         namespaceUID: "owned-namespace",
         podUID: "owned-pod",
         claimUID: "owned-claim",
@@ -125,27 +126,33 @@ export async function executionPoolFixture(
         factoryboxIdentity: { epoch: "owned" },
         factoryboxPreparation: { bundle: "owned" },
       });
-      await store.intendSourceImport(database.client, template!.id, "d".repeat(64));
-      await store.completeSourceImport(database.client, template!.id, { sha256: "d".repeat(64) });
-      await store.intendStart(database.client, template!.id);
-      await store.intendStandby(database.client, template!.id, "pause");
-      await store.observe(database.client, template!.id, {
+      await store.intendSourceImport(
+        database.client,
+        fixtureValue(template, "template").id,
+        "d".repeat(64),
+      );
+      await store.completeSourceImport(database.client, fixtureValue(template, "template").id, {
+        sha256: "d".repeat(64),
+      });
+      await store.intendStart(database.client, fixtureValue(template, "template").id);
+      await store.intendStandby(database.client, fixtureValue(template, "template").id, "pause");
+      await store.observe(database.client, fixtureValue(template, "template").id, {
         namespaceUID: "owned-namespace",
         podUID: "owned-pod",
         claimUID: "owned-claim",
         ready: true,
         factoryboxPaused: true,
         factoryboxStandby: {
-          sandboxID: `runtime-${template!.id.replaceAll("-", "")}`,
+          sandboxID: `runtime-${fixtureValue(template, "template").id.replaceAll("-", "")}`,
           owner: "e".repeat(32),
-          snapshotID: template!.id.replaceAll("-", ""),
+          snapshotID: fixtureValue(template, "template").id.replaceAll("-", ""),
           checkpointSHA256: "f".repeat(64),
           inputSHA256: "a".repeat(64),
           anonymousBytes: 0,
           snapshotResidentBytes: 0,
         },
       });
-      return store.get(database.client, template!.id);
+      return store.get(database.client, fixtureValue(template, "template").id);
     }
     return {
       projectID,

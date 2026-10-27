@@ -3,6 +3,7 @@ import { DeveloperIDEWorkspace } from "../../apps/factory/src/developer-ide-work
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/runtime-workspace.css";
+import { fixtureValue } from "./value";
 
 render(
   () => (
@@ -18,5 +19,5 @@ render(
       />
     </main>
   ),
-  document.getElementById("root")!,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
 );

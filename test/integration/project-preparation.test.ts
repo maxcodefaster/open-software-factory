@@ -5,6 +5,7 @@ import { createProjectPreparation } from "../../apps/factory/src/runtime/project
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
+import { fixtureValue } from "../fixtures/value";
 
 test("automatic preparation coalesces exact jobs, bounds producers and fences results to runtime environment", async () => {
   const process = await factoryProcess();
@@ -43,7 +44,7 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
     await database.client`UPDATE factory.runtime_attempt SET state='create-intended' WHERE id=${owned.attemptID}`;
     await freezeRuntimeEnvironment(database.client, owned.attemptID);
     const request = (method = "GET", body?: unknown, authorization = token) =>
-      new Request("https://factory.test/internal/project-image/" + owned.attemptID, {
+      new Request(`https://factory.test/internal/project-image/${owned.attemptID}`, {
         method,
         headers: {
           authorization: `Bearer ${authorization}`,
@@ -61,7 +62,7 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
         await preparation.endpoint(
           request("POST", {
             identity: "a".repeat(64),
-            image: "registry.test/project@sha256:" + "a".repeat(64),
+            image: `registry.test/project@sha256:${"a".repeat(64)}`,
           }),
           owned.attemptID,
         )
@@ -74,12 +75,12 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
     >`SELECT environment FROM factory.project_image_preparation WHERE id=${preparationID}`;
     if (!job) throw new Error("Missing producer job");
     await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended',${(await database.client<{ hash: string }[]>`SELECT parent_connector_token_hash AS hash FROM factory.runtime_attempt WHERE id=${owned.attemptID}`)[0]!.hash},${"c".repeat(64)},now(),${owned.userID})`;
+      VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended',${fixtureValue((await database.client<{ hash: string }[]>`SELECT parent_connector_token_hash AS hash FROM factory.runtime_attempt WHERE id=${owned.attemptID}`)[0], "(await database.client<{ hash: string }[]>`SELECT parent_connector_token_hash AS hash FROM factory.runtime_attempt WHERE").hash},${"c".repeat(64)},now(),${owned.userID})`;
     await database.client`UPDATE factory.project_image_preparation SET runtime_attempt_id=${producerID} WHERE id=${preparationID}`;
     await freezeRuntimeArtifacts(database.client, producerID, {
       factoryboxProfile: ownedFactoryboxProfile,
       hostImages: {
-        development: "registry.test/runtime@sha256:" + "d".repeat(64),
+        development: `registry.test/runtime@sha256:${"d".repeat(64)}`,
         build: undefined,
         verification: undefined,
         staging: undefined,
@@ -88,7 +89,7 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
     });
     const result = {
       identity: "a".repeat(64),
-      image: `registry.test/open-factory/prebuilds/${owned.projectID}@sha256:` + "c".repeat(64),
+      image: `registry.test/open-factory/prebuilds/${owned.projectID}@sha256:${"c".repeat(64)}`,
     };
     const producerRequest = (body: unknown) => {
       const value = request("POST", body);
@@ -110,7 +111,7 @@ test("automatic preparation coalesces exact jobs, bounds producers and fences re
     expect(
       (
         await preparation.endpoint(
-          producerRequest({ ...result, image: "registry.test/other@sha256:" + "c".repeat(64) }),
+          producerRequest({ ...result, image: `registry.test/other@sha256:${"c".repeat(64)}` }),
           producerID,
         )
       ).status,

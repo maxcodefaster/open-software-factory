@@ -12,12 +12,7 @@ import { preserveDocumentSelection } from "./document-selection";
 import { Image } from "@tiptap/extension-image";
 import type { SelectionBookmark } from "@tiptap/pm/state";
 
-import type {
-  DocumentEditor,
-  DocumentFormat,
-  DocumentBlockState,
-  TableCommand,
-} from "./document-model";
+import type { DocumentEditor, DocumentFormat, DocumentBlockState } from "./document-model";
 
 export function documentExtensions() {
   return [

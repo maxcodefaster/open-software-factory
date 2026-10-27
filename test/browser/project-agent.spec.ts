@@ -5,6 +5,7 @@ import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { teardownFactoryProject } from "../support/factory-fixture";
+import { fixtureValue } from "../fixtures/value";
 
 const email = process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local";
 const password = process.env["FACTORY_ADMIN_PASSWORD"] ?? "factory-local-password";
@@ -120,7 +121,9 @@ test("takes one cited Project conversation through interview, approval, and Buil
     await expect(panel.getByText("Ticket · Existing release summary")).toBeVisible();
   }
 
-  const planningCompute = await database!.client<Array<{ workspaces: number; attempts: number }>>`
+  const planningCompute = await fixtureValue(database, "database").client<
+    Array<{ workspaces: number; attempts: number }>
+  >`
     SELECT
       (SELECT count(*)::integer FROM factory.development_workspace
         WHERE project_id = ${projectID}) AS workspaces,
@@ -199,7 +202,9 @@ test("takes one cited Project conversation through interview, approval, and Buil
   }
   await expect(panel.getByText("Requirement revision", { exact: true })).toBeVisible();
 
-  const plannedTickets = await database!.client<Array<{ id: string; title: string }>>`
+  const plannedTickets = await fixtureValue(database, "database").client<
+    Array<{ id: string; title: string }>
+  >`
     SELECT id, title FROM factory.ticket
     WHERE project_id = ${projectID} AND state <> 'done'
     ORDER BY created_at DESC LIMIT 1
@@ -207,7 +212,9 @@ test("takes one cited Project conversation through interview, approval, and Buil
   const plannedTicket = plannedTickets[0];
   if (!plannedTicket) throw new Error("The Project Agent did not create a Ticket");
 
-  const afterPlan = await database!.client<Array<{ workspaces: number; attempts: number }>>`
+  const afterPlan = await fixtureValue(database, "database").client<
+    Array<{ workspaces: number; attempts: number }>
+  >`
     SELECT
       (SELECT count(*)::integer FROM factory.development_workspace
         WHERE project_id = ${projectID}) AS workspaces,
@@ -241,7 +248,9 @@ test("takes one cited Project conversation through interview, approval, and Buil
   await page.getByRole("button", { name: "Start Change", exact: true }).click();
   await expect
     .poll(async () => {
-      const rows = await database!.client<Array<{ id: string; state: string }>>`
+      const rows = await fixtureValue(database, "database").client<
+        Array<{ id: string; state: string }>
+      >`
         SELECT id, state FROM factory.change WHERE project_id = ${projectID}
       `;
       buildChangeID = rows[0]?.id ?? "";
@@ -271,7 +280,7 @@ test("takes one cited Project conversation through interview, approval, and Buil
   }
   await page.screenshot({ path: `${evidenceDirectory}/build-handoff.png` });
 
-  const finalState = await database!.client<
+  const finalState = await fixtureValue(database, "database").client<
     Array<{ attempts: number; mode: string; requirements: number; approvals: number }>
   >`
     SELECT

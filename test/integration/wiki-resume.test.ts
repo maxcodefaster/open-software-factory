@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test.each([false, true])(
   "an explicit Wiki retry reuses only checked partial publication at the same commit: partial=%j",
@@ -52,7 +53,7 @@ test.each([false, true])(
           ],
         };
         if (calls === 1) {
-          if (partial) await input.publish!(output);
+          if (partial) await fixtureValue(input.publish, "input.publish")(output);
           throw new ModelExecutionBoundError("requests");
         }
         return output;

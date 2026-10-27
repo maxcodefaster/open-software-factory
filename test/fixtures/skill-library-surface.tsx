@@ -5,6 +5,7 @@ import "@fontsource/sansita/400-italic.css";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/settings-workspace.css";
+import { fixtureValue } from "./value";
 
 render(
   () => (
@@ -12,5 +13,5 @@ render(
       <SkillLibrary active />
     </main>
   ),
-  document.getElementById("root")!,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
 );

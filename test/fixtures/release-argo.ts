@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { fixtureValue } from "./value";
 
 // Compatibility proof only. Neither image becomes a Factory runtime dependency.
 const argoImage =
@@ -108,7 +109,10 @@ export async function releaseArgoProof(input: {
         if (challenge)
           headers.set(
             "www-authenticate",
-            challenge.replaceAll(input.origin, `https://host.orb.internal:${proxy!.port}`),
+            challenge.replaceAll(
+              input.origin,
+              `https://host.orb.internal:${fixtureValue(proxy, "proxy").port}`,
+            ),
           );
         return new Response(upstream.body, { status: upstream.status, headers });
       },

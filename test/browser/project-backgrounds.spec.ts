@@ -10,6 +10,7 @@ import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { luminance } from "../support/visual-contrast";
+import { fixtureValue } from "../fixtures/value";
 
 test("Project backgrounds stay shared and persistent with a compact, expandable artwork picker", async ({
   page,
@@ -132,10 +133,10 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
     ]) {
       await database.client`INSERT INTO factory.project(
         id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
-        VALUES(${id!},${slug!},${name!},'https://example.invalid/wallpapers.git','main',
-          '.devcontainer/devcontainer.json',${administrator.id},${background!})`;
+        VALUES(${fixtureValue(id, "id")},${fixtureValue(slug, "slug")},${fixtureValue(name, "name")},'https://example.invalid/wallpapers.git','main',
+          '.devcontainer/devcontainer.json',${administrator.id},${fixtureValue(background, "background")})`;
       await database.client`INSERT INTO factory.ticket(id,project_id,title,description,created_by)
-        VALUES(${crypto.randomUUID()},${id!},'Give each Project a familiar workspace',
+        VALUES(${crypto.randomUUID()},${fixtureValue(id, "id")},'Give each Project a familiar workspace',
           'Keep the shared background stable between visits.',${administrator.id})`;
     }
     const contributorEmail = `contributor-${fixture.id}@background.test`;

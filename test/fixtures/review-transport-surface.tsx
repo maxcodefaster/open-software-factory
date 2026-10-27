@@ -2,6 +2,7 @@ import { render } from "@solidjs/web";
 import { ReviewPanel } from "../../apps/factory/src/review/panel";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
+import { fixtureValue } from "./value";
 
 render(
   () => (
@@ -15,5 +16,5 @@ render(
       />
     </main>
   ),
-  document.getElementById("root")!,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
 );

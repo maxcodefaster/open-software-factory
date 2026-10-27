@@ -6,6 +6,7 @@ import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 const ConnectorSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
@@ -83,7 +84,11 @@ test.each(["failed", "pre-dispatch failed"] as const)(
             if (frame.action === "skills-install") {
               const manifest = JSON.parse(frame.data) as { files: { path: string }[] };
               installedSkills = [
-                ...new Set(manifest.files.map((file) => file.path.split("/")[0]!)),
+                ...new Set(
+                  manifest.files.map((file) =>
+                    fixtureValue(file.path.split("/")[0], 'file.path.split("/")[0]'),
+                  ),
+                ),
               ];
               socket.send(
                 JSON.stringify({
@@ -130,7 +135,9 @@ test.each(["failed", "pre-dispatch failed"] as const)(
               data = [...instructions].map(([key, value]) => ({ key, value }));
             else {
               status = 204;
-              const key = decodeURIComponent(request.path.split("/").at(-1)!);
+              const key = decodeURIComponent(
+                fixtureValue(request.path.split("/").at(-1), 'request.path.split("/").at(-1)'),
+              );
               if (request.method === "PUT")
                 instructions.set(key, (JSON.parse(request.body) as { value: unknown }).value);
               else instructions.delete(key);
@@ -142,7 +149,9 @@ test.each(["failed", "pre-dispatch failed"] as const)(
             ].includes(request.path) &&
             request.method === "PUT"
           ) {
-            mcpServers.add(request.path.split("/").at(-1)!);
+            mcpServers.add(
+              fixtureValue(request.path.split("/").at(-1), 'request.path.split("/").at(-1)'),
+            );
             status = 204;
           } else if (request.path === "/api/mcp") {
             // OpenCode's native protocol remains unchanged by the UI migration.

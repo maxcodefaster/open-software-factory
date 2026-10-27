@@ -12,6 +12,7 @@ import { productionBuildEnvironment } from "../../scripts/testing/test-prerequis
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 test("failed file access can be explicitly restarted without discarding the editor or starting compute", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -251,9 +252,13 @@ test("failed file access can be explicitly restarted without discarding the edit
     const buttonBox = await recovery.boundingBox(),
       errorBox = await failure.boundingBox();
     expect(buttonBox && errorBox).toBeTruthy();
-    expect(buttonBox!.x).toBeGreaterThanOrEqual(0);
-    expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(390);
-    expect(errorBox!.y + errorBox!.height).toBeLessThanOrEqual(buttonBox!.y);
+    expect(fixtureValue(buttonBox, "buttonBox").x).toBeGreaterThanOrEqual(0);
+    expect(
+      fixtureValue(buttonBox, "buttonBox").x + fixtureValue(buttonBox, "buttonBox").width,
+    ).toBeLessThanOrEqual(390);
+    expect(
+      fixtureValue(errorBox, "errorBox").y + fixtureValue(errorBox, "errorBox").height,
+    ).toBeLessThanOrEqual(fixtureValue(buttonBox, "buttonBox").y);
     await page.screenshot({
       path: ".factory/test-results/source-recovery-browser/failed-narrow.png",
     });

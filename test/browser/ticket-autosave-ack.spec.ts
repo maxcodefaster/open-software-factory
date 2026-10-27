@@ -7,6 +7,7 @@ import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { fixtureValue } from "../fixtures/value";
 
 test("a newer background read cannot discard the exact autosave acknowledgement", async ({
   page,
@@ -86,9 +87,9 @@ test("a newer background read cannot discard the exact autosave acknowledgement"
     await expect.poll(() => writes.length).toBe(2);
     await secondWrite.promise;
     expect(writes[1]).toMatchObject({
-      expectedVersion: writes[0]!.expectedVersion + 1,
-      expectedDocumentId: writes[0]!.commandId,
-      requirementRevisionId: writes[0]!.commandId,
+      expectedVersion: fixtureValue(writes[0], "writes[0]").expectedVersion + 1,
+      expectedDocumentId: fixtureValue(writes[0], "writes[0]").commandId,
+      requirementRevisionId: fixtureValue(writes[0], "writes[0]").commandId,
     });
     releasePoll.resolve();
     await expect

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createCurrentMetrics, parsePodMetrics, readCurrentPodMetrics } from "./metrics";
+import { fixtureValue } from "../../../test/fixtures/value";
 const timestamp = "2026-10-11T12:00:00.000Z";
 const fixture = {
   metadata: { name: "runtime-1", namespace: "owned" },
@@ -31,7 +32,10 @@ test("metrics require one exact worker and do not count init containers or old r
   for (const containers of [
     [],
     [{ name: "envbox", usage: { cpu: "1", memory: "1Gi" } }],
-    [fixture.containers[0]!, fixture.containers[0]!],
+    [
+      fixtureValue(fixture.containers[0], "fixture.containers[0]"),
+      fixtureValue(fixture.containers[0], "fixture.containers[0]"),
+    ],
   ])
     expect(
       parsePodMetrics({ ...fixture, containers }, "owned", "runtime-1", Date.parse(timestamp))

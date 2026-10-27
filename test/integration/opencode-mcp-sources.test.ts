@@ -6,6 +6,7 @@ import { candidateReviewPermissions } from "../../packages/conversation-domain/s
 import { mcpSourceAlias } from "../../apps/factory/src/mcp/sources";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
+import { fixtureValue } from "../fixtures/value";
 
 test("pinned OpenCode consumes Factory MCP source tools natively while independent review cannot call them", async () => {
   let calls = 0;
@@ -116,7 +117,7 @@ test("pinned OpenCode consumes Factory MCP source tools natively while independe
       resume: true,
     });
     await observe(
-      () => native!.client.message.list({ sessionID: buildId, limit: 50 }),
+      () => fixtureValue(native, "native").client.message.list({ sessionID: buildId, limit: 50 }),
       (page) =>
         requests >= 2 &&
         page.data.some(
@@ -143,7 +144,8 @@ test("pinned OpenCode consumes Factory MCP source tools natively while independe
       resume: true,
     });
     await observe(
-      () => native!.client.message.list({ sessionID: reviewerId, limit: 50 }),
+      () =>
+        fixtureValue(native, "native").client.message.list({ sessionID: reviewerId, limit: 50 }),
       (page) =>
         requests >= 4 &&
         page.data.some(

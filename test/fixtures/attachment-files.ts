@@ -1,9 +1,10 @@
 import { strToU8, zipSync } from "fflate";
+import { fixtureValue } from "./value";
 
 function pdf(objects: (string | Uint8Array)[]) {
   const chunks = [Buffer.from("%PDF-1.4\n")];
   const offsets: number[] = [];
-  let length = chunks[0]!.length;
+  let length = fixtureValue(chunks[0], "chunks[0]").length;
   for (const [index, value] of objects.entries()) {
     offsets.push(length);
     const object = Buffer.concat([

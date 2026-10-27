@@ -7,6 +7,7 @@ import {
 } from "../../packages/runtime-domain/src/reserve";
 import { executionPoolFixture } from "../fixtures/execution-pool";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 const image = `registry.invalid/base@sha256:${"1".repeat(64)}`;
 const images = { staging: image, verification: image };
@@ -225,7 +226,7 @@ test("cold preparation retains the original 420 second deadline, without resetti
   try {
     const ids = [crypto.randomUUID(), crypto.randomUUID()];
     for (const [index, age] of [240, 421].entries()) {
-      const id = ids[index]!;
+      const id = fixtureValue(ids[index], "ids[index]");
       const recipe = { ...(f.template.projectRecipe as object), runtimeAttemptId: id };
       await f.database.client`INSERT INTO factory.execution_slot
         (id,project_id,staging_attempt_id,revision,template_key,project_recipe,seed_expires_at,role,state,runtime_host_image,created_at,expires_at,factorybox_profile)
@@ -235,9 +236,11 @@ test("cold preparation retains the original 420 second deadline, without resetti
     const due = await f.database.client.begin((sql) => f.store.plan(sql));
     expect(due.find((slot) => slot.id === ids[0])?.state).toBe("creating");
     expect(due.find((slot) => slot.id === ids[1])?.state).toBe("retiring");
-    await f.store.defer(f.database.client, ids[1]!);
+    await f.store.defer(f.database.client, fixtureValue(ids[1], "ids[1]"));
     await f.database.client.begin((sql) => f.store.plan(sql));
-    expect((await f.store.get(f.database.client, ids[1]!))?.state).toBe("retiring");
+    expect((await f.store.get(f.database.client, fixtureValue(ids[1], "ids[1]")))?.state).toBe(
+      "retiring",
+    );
     expect(await f.database.client`SELECT id FROM factory.execution_slot`).toHaveLength(3);
   } finally {
     await f.dispose();

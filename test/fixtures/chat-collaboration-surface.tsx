@@ -18,6 +18,7 @@ import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
 import "@fontsource/ibm-plex-mono/400.css";
+import { fixtureValue } from "./value";
 
 const initial: AgentMessage[] = [
   { id: "human", role: "user", text: "Keep the **current layout**.", at: 1 },
@@ -143,7 +144,13 @@ function Surface() {
               setMessages((items) =>
                 items.map((item) =>
                   item.id === "shell"
-                    ? { ...item, activity: { ...item.activity!, status: "completed" } }
+                    ? {
+                        ...item,
+                        activity: {
+                          ...fixtureValue(item.activity, "item.activity"),
+                          status: "completed",
+                        },
+                      }
                     : item,
                 ),
               )
@@ -296,4 +303,7 @@ function Surface() {
   );
 }
 
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

@@ -5,6 +5,7 @@ import {
   factoryProcessActionPath,
   FactoryRuntimeContext,
 } from "../../deploy/theia-ide/factory-ide-extension/src/browser/factory-runtime-context";
+import { fixtureValue } from "../fixtures/value";
 
 const base =
   "http://developer.1.h3000.editor.runtime.localhost:3000/editor/11111111-1111-4111-8111-111111111111/1/";
@@ -162,7 +163,10 @@ test("idle observation never wakes compute; real use resumes the original paused
   const context = new FactoryRuntimeContext(
     () => base,
     async (input, init) => {
-      const action = String(input).split("/").at(-1)!;
+      const action = fixtureValue(
+        String(input).split("/").at(-1),
+        'String(input).split("/").at(-1)',
+      );
       calls.push(`${init?.method ?? "GET"}:${action}`);
       if (action === "activity") return new Response(null, { status: 409 });
       if (init?.method === "POST") state = "ready";

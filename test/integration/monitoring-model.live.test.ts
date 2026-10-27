@@ -6,6 +6,7 @@ import { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/di
 import { projectModelConnection } from "../../apps/factory/src/project-agent/adapter";
 import { recordedMastraUsage } from "../../apps/factory/src/usage/record-mastra";
 import { monitoringFixture } from "../fixtures/monitoring";
+import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_MONITORING_MODEL_LIVE"] !== "1")(
   "configured Mastra diagnosis reads a reviewed MCP source and exact Git code, and refuses missing or operational context",
@@ -147,7 +148,7 @@ test.skipIf(process.env["FACTORY_MONITORING_MODEL_LIVE"] !== "1")(
             control.issue === "operational" ? "Worker CPU saturation" : "Invoice total exception",
           reference: `https://owned.example/issues/${control.issue}`,
           context: JSON.stringify({ issue_id: control.issue }),
-          assignment: authority.assignments[0]!,
+          assignment: fixtureValue(authority.assignments[0], "authority.assignments[0]"),
           mcp: f.mcp,
           code: {
             codePaths: async (projectId, query, userId) => {
@@ -241,7 +242,7 @@ test.skipIf(process.env["FACTORY_MONITORING_MODEL_LIVE"] !== "1")(
             {
               observedAt: new Date().toISOString(),
               modelId,
-              endpoint: new URL(connection.baseURL!).origin,
+              endpoint: new URL(fixtureValue(connection.baseURL, "connection.baseURL")).origin,
               boundary:
                 "Real configured Mastra inference and official MCP transport. Synthetic owned incidents and immutable local Git fixture. No Build, review or Delivery is claimed by this proof.",
               commitSha,

@@ -5,6 +5,7 @@ import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { controlledForgeProtection } from "../fixtures/forge-protection";
 import { callFactoryFunction } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 const ConnectorSocket = WebSocket as typeof WebSocket & {
   new (url: string, options: Bun.WebSocketOptions): WebSocket;
@@ -91,7 +92,13 @@ test.each(["Build", "Staging"] as const)(
             if (frame.action !== "skills-install")
               throw new Error(`Unexpected owned Connector operation: ${frame.action}`);
             const manifest = JSON.parse(frame.data) as { files: { path: string }[] };
-            installedSkills = [...new Set(manifest.files.map((file) => file.path.split("/")[0]!))];
+            installedSkills = [
+              ...new Set(
+                manifest.files.map((file) =>
+                  fixtureValue(file.path.split("/")[0], 'file.path.split("/")[0]'),
+                ),
+              ),
+            ];
             socket.send(
               JSON.stringify({
                 type: "operation-response",
@@ -136,7 +143,9 @@ test.each(["Build", "Staging"] as const)(
               data = [...instructions].map(([key, value]) => ({ key, value }));
             else {
               status = 204;
-              const key = decodeURIComponent(path.split("/").at(-1)!);
+              const key = decodeURIComponent(
+                fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)'),
+              );
               if (frame.method === "PUT")
                 instructions.set(
                   key,
@@ -152,7 +161,7 @@ test.each(["Build", "Staging"] as const)(
             ].includes(path) &&
             frame.method === "PUT"
           ) {
-            mcpServers.add(path.split("/").at(-1)!);
+            mcpServers.add(fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)'));
             status = 204;
           } else if (path === "/api/mcp") {
             data = [...mcpServers].map((name) => ({ name, status: { status: "connected" } }));

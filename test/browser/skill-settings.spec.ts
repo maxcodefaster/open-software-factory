@@ -11,6 +11,7 @@ import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { fixtureValue } from "../fixtures/value";
 
 test("skill gallery preserves discovery, private drafts, scoped choices, imports and reviewed sharing", async ({
   page,
@@ -466,7 +467,7 @@ test("skill gallery preserves discovery, private drafts, scoped choices, imports
     ).toHaveCount(0);
     expect(
       await browserFunction(manager, "getSkillRevision", [
-        privateEntry.revisions[0]!.id,
+        fixtureValue(privateEntry.revisions[0], "privateEntry.revisions[0]").id,
         projectId,
       ]),
     ).toMatchObject({ ok: false, status: 404 });

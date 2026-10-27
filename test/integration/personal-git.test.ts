@@ -6,6 +6,7 @@ import {
 } from "../../apps/factory/src/workspace/personal-git";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("personal Git retains intent before dispatch, rechecks authority and never replays uncertain writes", async () => {
   const processFixture = await factoryProcess();
@@ -59,11 +60,14 @@ test("personal Git retains intent before dispatch, rechecks authority and never 
     await expect(git.read(workspaceID, crypto.randomUUID())).rejects.toThrow("personal Workspace");
     await expect(
       git.read(
-        (
-          await database.client<
-            Array<{ id: string }>
-          >`SELECT id FROM factory.development_workspace WHERE change_id=${owned.changeID}`
-        )[0]!.id,
+        fixtureValue(
+          (
+            await database.client<
+              Array<{ id: string }>
+            >`SELECT id FROM factory.development_workspace WHERE change_id=${owned.changeID}`
+          )[0],
+          "( await database.client< Array<{ id: string }> >`SELECT id FROM factory.development_workspace WHERE change_id=${owned.ch",
+        ).id,
         owned.userID,
       ),
     ).rejects.toThrow("personal Workspace");

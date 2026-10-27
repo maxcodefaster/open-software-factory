@@ -139,18 +139,16 @@ export async function serveRuntimeRepository(
     const target = new URL(repositoryURL);
     target.pathname += requestedSuffix;
     target.search = requestURL.search;
+    const contentEncoding = request.headers.get("content-encoding");
+    const gitProtocol = request.headers.get("git-protocol");
     const response = await fetch(target, {
       method: request.method,
       headers: {
         authorization: `Basic ${Buffer.from(`factory:${configured.token}`).toString("base64")}`,
         "content-type":
           request.headers.get("content-type") ?? "application/x-git-upload-pack-request",
-        ...(request.headers.has("content-encoding")
-          ? { "content-encoding": request.headers.get("content-encoding")! }
-          : {}),
-        ...(request.headers.has("git-protocol")
-          ? { "git-protocol": request.headers.get("git-protocol")! }
-          : {}),
+        ...(contentEncoding !== null ? { "content-encoding": contentEncoding } : {}),
+        ...(gitProtocol !== null ? { "git-protocol": gitProtocol } : {}),
       },
       ...(request.method === "POST" ? { body: request.body } : {}),
       redirect: "manual",

@@ -49,7 +49,7 @@ async function executeCommand(
     stdout: "pipe",
     stderr: "pipe",
   });
-  const readers = [child.stdout.getReader(), child.stderr.getReader()];
+  const readers = [child.stdout.getReader(), child.stderr.getReader()] as const;
   const source = input !== undefined && typeof input !== "string" ? input.getReader() : null;
   let bytes = 0;
   async function read(reader: (typeof readers)[number]) {
@@ -87,7 +87,7 @@ async function executeCommand(
       }
     })();
     const [stdout, stderr, exitCode] = await Promise.race([
-      Promise.all([read(readers[0]!), read(readers[1]!), child.exited, writing]),
+      Promise.all([read(readers[0]), read(readers[1]), child.exited, writing]),
       deadline.promise,
     ]);
     return { stdout, stderr, exitCode };

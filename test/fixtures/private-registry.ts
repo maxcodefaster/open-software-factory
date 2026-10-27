@@ -69,7 +69,7 @@ export async function privateRegistryFixture() {
   const archive = await readFile(join(directory, "feature.tgz"));
   const config = Buffer.from("{}");
   const digest = (value: Uint8Array) =>
-    "sha256:" + createHash("sha256").update(value).digest("hex");
+    `sha256:${createHash("sha256").update(value).digest("hex")}`;
   const manifest = Buffer.from(
     JSON.stringify({
       schemaVersion: 2,

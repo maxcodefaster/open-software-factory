@@ -39,8 +39,8 @@ test("only published releases build and publish both architectures natively", as
   const validate = workflow.jobs.release.steps.find(
     (step: { id?: string }) => step.id === "version",
   );
-  expect(validate.env.RELEASE_TAG).toBe("${{ github.event.release.tag_name }}");
-  expect(validate.run).toContain('version="${RELEASE_TAG#v}"');
+  expect(validate.env.RELEASE_TAG).toBe(`\${{ github.event.release.tag_name }}`);
+  expect(validate.run).toContain(`version="\${RELEASE_TAG#v}"`);
   expect(validate.run).toContain("git merge-base --is-ancestor HEAD origin/main");
   expect(workflow.jobs.roles.needs).toBe("release");
   expect(workflow.jobs.distribution.needs).toEqual(["release", "factory"]);
@@ -50,7 +50,7 @@ test("only published releases build and publish both architectures natively", as
       { arch: "arm64", runner: "ubuntu-24.04-arm" },
     ]);
   for (const job of ["roles", "manifests", "factory", "distribution"])
-    expect(workflow.jobs[job].env.RELEASE).toBe("${{ needs.release.outputs.version }}");
+    expect(workflow.jobs[job].env.RELEASE).toBe(`\${{ needs.release.outputs.version }}`);
   expect(JSON.stringify(workflow)).not.toContain("setup-qemu");
   expect(workflow.jobs.factory.needs).toContain("manifests");
   expect(workflow.jobs.manifests.needs).toContain("roles");

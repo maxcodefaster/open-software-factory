@@ -3,6 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { verificationEnvironment } from "../../scripts/testing/test-prerequisites";
+import { fixtureValue } from "./value";
 
 export async function proveBrowserImageRecovery() {
   const root = resolve(import.meta.dir, "../..");
@@ -60,7 +61,7 @@ export async function proveBrowserImageRecovery() {
   );
   const manifestDigest = digest(manifest);
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-  const port = reservation.port!;
+  const port = fixtureValue(reservation.port, "reservation.port");
   await reservation.stop(true);
   const repository = `factory-owned-browser-image-${id}/browser-tools`;
   const reference = `registry.localhost:${port}/${repository}@${manifestDigest}`;

@@ -19,11 +19,12 @@ import "../../apps/factory/src/runtime-workspace.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
 import "@fontsource/ibm-plex-mono/400.css";
+import { fixtureValue } from "./value";
 
 const query = new URLSearchParams(location.search);
-const changeID = query.get("change")!;
-const userID = query.get("user")!;
-const attemptID = query.get("attempt")!;
+const changeID = fixtureValue(query.get("change"), 'query.get("change")');
+const userID = fixtureValue(query.get("user"), 'query.get("user")');
+const attemptID = fixtureValue(query.get("attempt"), 'query.get("attempt")');
 const projectID = query.get("project") ?? crypto.randomUUID();
 const boundToTicket = query.get("unbound") !== "1";
 const ticketTab = {
@@ -84,7 +85,9 @@ function Surface() {
           id={workspacePanelID}
           role="tabpanel"
           aria-labelledby={
-            state().activeTabID ? workspaceTabElementID(state().activeTabID!) : undefined
+            state().activeTabID
+              ? workspaceTabElementID(fixtureValue(state().activeTabID, "state().activeTabID"))
+              : undefined
           }
         >
           <Show when={state().activeTabID === ticketTab.id}>
@@ -138,4 +141,7 @@ function Surface() {
     </main>
   );
 }
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

@@ -35,9 +35,10 @@ export function parsePodMetrics(
   )
     return missing;
   const worker = parsed.data.containers.filter((container) => container.name === "worker");
-  if (worker.length !== 1) return missing;
-  const cpu = worker[0]!.usage.cpu.match(/^(\d+(?:\.\d+)?)(n|u|m)?$/);
-  const memory = worker[0]!.usage.memory.match(/^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G)?$/);
+  const container = worker[0];
+  if (worker.length !== 1 || !container) return missing;
+  const cpu = container.usage.cpu.match(/^(\d+(?:\.\d+)?)(n|u|m)?$/);
+  const memory = container.usage.memory.match(/^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti|K|M|G)?$/);
   if (!cpu || !memory) return missing;
   const cpuUnits: Record<string, number> = { n: 1e-6, u: 1e-3, m: 1 };
   const cpuMilli = Number(cpu[1]) * (cpuUnits[cpu[2] ?? ""] ?? 1000);

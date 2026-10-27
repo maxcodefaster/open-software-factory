@@ -9,6 +9,7 @@ import { zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test.each([false, true])(
   "a contributor commissions manual Requirements from Ideas=%s without planning AI",
@@ -193,20 +194,20 @@ test("an unadmitted Requirements entry cannot commission work or alter an explic
     const conversationID = crypto.randomUUID();
     for (let i = 0; i < 2; i++) {
       await database.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
-        VALUES(${tickets[i]!},${owned.projectID},${`Retained requirements ${i}`},'ready',${owned.userID})`;
+        VALUES(${fixtureValue(tickets[i], "tickets[i]")},${owned.projectID},${`Retained requirements ${i}`},'ready',${owned.userID})`;
       await database.client`INSERT INTO factory.requirements_entry_intent(ticket_id,command_id,created_by)
-        VALUES(${tickets[i]!},${commands[i]!},${owned.userID})`;
+        VALUES(${fixtureValue(tickets[i], "tickets[i]")},${fixtureValue(commands[i], "commands[i]")},${owned.userID})`;
     }
     await database.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
-      VALUES(${conversationID},${owned.projectID},${tickets[1]!},'plan',${owned.userID})`;
+      VALUES(${conversationID},${owned.projectID},${fixtureValue(tickets[1], "tickets[1]")},'plan',${owned.userID})`;
     const turns = createAgentTurnStore(database);
     const admitted = await turns.admit(
       {
         kind: "project-message",
-        commandId: commands[1]!,
+        commandId: fixtureValue(commands[1], "commands[1]"),
         conversationId: conversationID,
         projectId: owned.projectID,
-        ticketId: tickets[1]!,
+        ticketId: fixtureValue(tickets[1], "tickets[1]"),
         createdBy: owned.userID,
         text: "Retained explicit intent",
         intent: "requirements-interview",
@@ -220,7 +221,7 @@ test("an unadmitted Requirements entry cannot commission work or alter an explic
     );
     const before = await turns.get(admitted.turn.id);
     await database.client`UPDATE factory.requirements_entry_intent SET admitted_at=now()
-      WHERE ticket_id=${tickets[1]!}`;
+      WHERE ticket_id=${fixtureValue(tickets[1], "tickets[1]")}`;
     expect(await turns.get(admitted.turn.id)).toEqual(before);
     const entries = await database.client<
       { ticketID: string; admitted: boolean; failure: string | null }[]
@@ -239,7 +240,7 @@ test("an unadmitted Requirements entry cannot commission work or alter an explic
     const planning = createProjectAgentController(database, { start: async () => null });
     expect(await planning.get(owned.projectID, tickets[0], owned.userID)).toBeNull();
     expect(
-      await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${tickets[0]!}`,
+      await database.client`SELECT id FROM factory.agent_turn WHERE ticket_id=${fixtureValue(tickets[0], "tickets[0]")}`,
     ).toHaveLength(0);
     expect(
       await database.client`SELECT id FROM factory.ticket WHERE id=ANY(${tickets}::uuid[])`,

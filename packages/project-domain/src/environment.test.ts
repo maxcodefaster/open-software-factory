@@ -5,6 +5,7 @@ import {
   parseEnvironmentPaste,
   replaceEnvironment,
 } from "./environment";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 test("masked metadata never includes values, passwords or certificates", () => {
   const manifest = environmentMetadata({
@@ -33,7 +34,7 @@ test("replace-only keeps unspecified values and never grants verification implic
     registries: [],
   });
   const bundle = replaceEnvironment(input, {
-    variables: [{ ...input.variables[0]!, value: "retained" }],
+    variables: [{ ...fixtureValue(input.variables[0], "input.variables[0]"), value: "retained" }],
     registries: [],
   });
   expect(bundle.variables[0]?.value).toBe("retained");

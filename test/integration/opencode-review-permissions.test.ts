@@ -8,6 +8,7 @@ import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { docker, observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
+import { fixtureValue } from "../fixtures/value";
 
 test("pinned OpenCode reviewer denies shell, edits and writing descendants while retaining fixed source tools", async () => {
   const f = await candidateReviewFixture();
@@ -149,7 +150,8 @@ test("pinned OpenCode reviewer denies shell, edits and writing descendants while
       resume: true,
     });
     await observe(
-      () => confirmSettledOpenCodeInput(owned!.client, turn.sessionID, promptID),
+      () =>
+        confirmSettledOpenCodeInput(fixtureValue(owned, "owned").client, turn.sessionID, promptID),
       Boolean,
       "Native reviewer did not settle",
       30_000,

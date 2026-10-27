@@ -5,6 +5,7 @@ import { z } from "zod";
 import { createMCPConnections } from "../../apps/factory/src/mcp/connections";
 import type { MCPSecret } from "../../apps/factory/src/mcp/secrets";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without replay, and rejects scope widening", async () => {
   const fixture = await factoryProcess();
@@ -86,9 +87,11 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
           exchanges++;
           expect(body.get("redirect_uri")).toBe("https://factory.example/api/mcp/oauth/callback");
           expect(body.get("resource")).toBe("https://source.example/mcp");
-          expect(createHash("sha256").update(body.get("code_verifier")!).digest("base64url")).toBe(
-            challenge,
-          );
+          expect(
+            createHash("sha256")
+              .update(fixtureValue(body.get("code_verifier"), 'body.get("code_verifier")'))
+              .digest("base64url"),
+          ).toBe(challenge);
           return reply({
             access_token: "owned-access",
             token_type: "Bearer",
@@ -154,12 +157,15 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     const command = { commandId: crypto.randomUUID(), revisionId, expectedVersion: 0 };
     const result = await connections.connect(id, manager, command);
     expect(result.authorizationUrl).not.toBeNull();
-    const redirect = new URL(result.authorizationUrl!);
+    const redirect = new URL(fixtureValue(result.authorizationUrl, "result.authorizationUrl"));
     expect(redirect.origin).toBe("https://auth.source.example");
-    challenge = redirect.searchParams.get("code_challenge")!;
+    challenge = fixtureValue(
+      redirect.searchParams.get("code_challenge"),
+      'redirect.searchParams.get("code_challenge")',
+    );
     expect(redirect.searchParams.get("code_challenge_method")).toBe("S256");
     const params = new URLSearchParams({
-      state: redirect.searchParams.get("state")!,
+      state: fixtureValue(redirect.searchParams.get("state"), 'redirect.searchParams.get("state")'),
       code: "owned-code",
       iss: "https://auth.source.example",
     });
@@ -184,7 +190,7 @@ test("MCP OAuth binds callbacks, refreshes and recovers stored tokens without re
     const connection = await database.client.begin((sql) =>
       connections.library.connectionIn(sql, id),
     );
-    const tool = connection.tools[0]!;
+    const tool = fixtureValue(connection.tools[0], "connection.tools[0]");
     await connections.library.review(id, manager, connection.version, [
       { name: tool.name, digest: tool.digest },
     ]);

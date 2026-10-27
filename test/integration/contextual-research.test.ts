@@ -4,13 +4,13 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
-import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { createEpicConfirmation } from "../../apps/factory/src/project-agent/epic-confirmation";
 import { readResearch, searchResearch } from "../../apps/factory/src/project-agent/research";
 import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("Ticket detail hides unconfirmed code-derived proposals from Contributors after downgrade", async () => {
   const process = await factoryProcess();
@@ -354,7 +354,7 @@ test("Epic confirmation is atomic, versioned and replayable; converts intent and
       await db.client`SELECT converted_to_epic_id FROM factory.ticket WHERE id=${origin}`;
     expect(state?.["converted_to_epic_id"]).toBe(a.epicId);
     const [newTicket] =
-      await db.client`SELECT state,title FROM factory.ticket WHERE id=${a.ticketIds[1]!}`;
+      await db.client`SELECT state,title FROM factory.ticket WHERE id=${fixtureValue(a.ticketIds[1], "a.ticketIds[1]")}`;
     expect(newTicket).toMatchObject({ state: "ready", title: "Export invoice" });
     expect(
       (

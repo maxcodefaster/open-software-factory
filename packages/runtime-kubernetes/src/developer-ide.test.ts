@@ -3,6 +3,7 @@ import { developerIDEIdentity } from "../../workspace-domain/src/developer-ide";
 import { createKubernetesClient } from "./client";
 import { createDeveloperIDEClient, validateDeveloperIDEObservation } from "./developer-ide";
 import { renderDeveloperIDEResources } from "./developer-ide-manifest";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 const input = {
   identity: developerIDEIdentity(
@@ -65,7 +66,7 @@ test("an incompatible unrecorded editor is neither adopted nor deleted; recorded
   });
   const calls: string[] = [];
   const client = createDeveloperIDEClient(kubernetes, async (args) => {
-    calls.push(args[0]!);
+    calls.push(fixtureValue(args[0], "args[0]"));
     if (args[0] !== "get") throw new Error("Must not delete the other Pod");
     return JSON.stringify(other);
   });

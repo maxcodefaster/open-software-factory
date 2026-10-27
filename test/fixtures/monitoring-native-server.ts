@@ -6,7 +6,7 @@ import { z } from "zod";
 import { monitoringNativeSource } from "./monitoring-native";
 
 const sourceFile = resolve(process.argv[2] ?? "");
-if (!sourceFile.startsWith(resolve(".factory/test-results/monitoring/native") + "/"))
+if (!sourceFile.startsWith(`${resolve(".factory/test-results/monitoring/native")}/`))
   throw new Error("An owned monitoring source fixture is required");
 const source = monitoringNativeSource.parse(JSON.parse(await readFile(sourceFile, "utf8")));
 const handler = createMcpHandler(() => {

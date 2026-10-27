@@ -10,6 +10,7 @@ import {
 } from "./agent-view-state";
 import type { AgentView } from "./api-contracts";
 import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 test("an older activity read cannot undo Stop or another settled command", () => {
   const fence = createAgentReadFence();
@@ -116,7 +117,7 @@ test("a known failed turn in a ready retained Session accepts new Build instruct
     expect(buildAgentNeedsStart(unavailable)).toBe(false);
   for (const blocked of [
     { ...view, sessionAvailable: false },
-    { ...view, turn: { ...view.turn!, state: "uncertain" as const } },
+    { ...view, turn: { ...fixtureValue(view.turn, "view.turn"), state: "uncertain" as const } },
     { ...view, stopPending: true },
     {
       ...view,

@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { createMonitoringWorker } from "../../apps/factory/src/monitoring/worker";
 import { monitoringFixture } from "../fixtures/monitoring";
 import { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
+import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_PROJECT_INPUT_LIVE"] !== "1")(
   "configured Project Harness enriches generic feedback from two required MCP sources and prepares one unapproved Ticket",
@@ -81,7 +82,7 @@ test.skipIf(process.env["FACTORY_PROJECT_INPUT_LIVE"] !== "1")(
       });
       const send = () =>
         f.routes.intake(
-          new Request(saved.url!, {
+          new Request(fixtureValue(saved.url, "saved.url"), {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({
@@ -94,7 +95,7 @@ test.skipIf(process.env["FACTORY_PROJECT_INPUT_LIVE"] !== "1")(
       expect((await send())?.status).toBe(202);
       await worker.project(f.projectId);
       const view = await f.controller.view(f.projectId, f.userId);
-      const event = view.incidents[0]!;
+      const event = fixtureValue(view.incidents[0], "view.incidents[0]");
       const rows = await f.database
         .client`SELECT diagnosis,skill_assignment,model_id FROM factory.monitoring_incident WHERE id=${event.id}`;
       const observations = await f.database

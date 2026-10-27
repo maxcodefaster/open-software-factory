@@ -24,7 +24,7 @@ test("packaged OpenCode loads only Factory configuration and admitted skills", a
         '  ["/workspace/project/.opencode/skills/owned-project", "owned-project"],',
         "]) {",
         "  fs.mkdirSync(directory, { recursive: true });",
-        '  fs.writeFileSync(directory + "/SKILL.md", `---\\nname: ${name}\\ndescription: Unadmitted owned test skill\\n---\\nDo not load this skill.\\n`);',
+        `  fs.writeFileSync(directory + "/SKILL.md", \`---\\nname: \${name}\\ndescription: Unadmitted owned test skill\\n---\\nDo not load this skill.\\n\`);`,
         "}",
       ].join("\n"),
     );

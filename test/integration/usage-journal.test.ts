@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { createUsageJournal } from "../../apps/factory/src/usage/journal";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("usage journal serializes replay, freezes attribution/rates and retains twelve calendar months", async () => {
   const fixture = await factoryProcess();
@@ -53,7 +54,10 @@ test("usage journal serializes replay, freezes attribution/rates and retains twe
     );
     await journal.begin({
       ...operation,
-      rate: { ...operation.rate, tiers: [{ ...operation.rate.tiers[0]!, input: 99 }] },
+      rate: {
+        ...operation.rate,
+        tiers: [{ ...fixtureValue(operation.rate.tiers[0], "operation.rate.tiers[0]"), input: 99 }],
+      },
     });
     await journal.record(operation.id, { ...observation, eventID: "step:2" });
     const [second] = await database.client<
@@ -74,7 +78,7 @@ test("usage journal serializes replay, freezes attribution/rates and retains twe
     await journal.settle(operation.id, "failed");
     const [created] = await database.client<{ created_at: Date }[]>`
       SELECT created_at FROM factory.usage_operation WHERE id=${operation.id}`;
-    const anniversary = new Date(created!.created_at);
+    const anniversary = new Date(fixtureValue(created, "created").created_at);
     anniversary.setUTCFullYear(anniversary.getUTCFullYear() + 1);
     const pruneBefore = new Date(anniversary.getTime() - 1);
     const pruneAfter = new Date(anniversary.getTime() + 1000);

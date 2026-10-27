@@ -416,6 +416,7 @@ export function createWorkspaceSourceClient(
       if (!/^(stat|list|read|write|mkdir|rename|delete|search|events|fence)$/.test(operation))
         throw new Error("Unsupported source operation");
       const connection = await endpoint(input);
+      const writerEpoch = request.headers.get("X-Factory-Writer-Epoch");
       return transport(
         `${await connection.origin}/v1/workspaces/${input.identity.workspaceID}/${operation}`,
         {
@@ -425,9 +426,7 @@ export function createWorkspaceSourceClient(
             Authorization: `Bearer ${input.capability}`,
             "X-Factory-Source-Service": input.identity.serviceID,
             "X-Factory-Source-Epoch": String(input.identity.epoch),
-            ...(request.headers.has("X-Factory-Writer-Epoch")
-              ? { "X-Factory-Writer-Epoch": request.headers.get("X-Factory-Writer-Epoch")! }
-              : {}),
+            ...(writerEpoch !== null ? { "X-Factory-Writer-Epoch": writerEpoch } : {}),
           },
           ...(operation !== "events" ? { body: await boundedSourceBody(request) } : {}),
           redirect: "error",

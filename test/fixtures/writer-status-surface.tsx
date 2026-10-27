@@ -4,6 +4,7 @@ import { ChangeWriterStatus } from "../../apps/factory/src/writer-status";
 import "@fontsource-variable/inter";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
+import { fixtureValue } from "./value";
 
 function Surface() {
   const [active, setActive] = createSignal(true);
@@ -27,4 +28,7 @@ function Surface() {
     </main>
   );
 }
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

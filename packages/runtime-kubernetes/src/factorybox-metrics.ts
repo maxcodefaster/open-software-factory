@@ -167,7 +167,8 @@ export function createFactoryboxMetrics(
       // Remove only expired observations, and keep memory bounded even when
       // many short-lived Sandboxes have appeared since the last view.
       for (const [name, entry] of values) if (entry.until < clock() - 60_000) values.delete(name);
-      if (values.size >= 128 && !values.has(key)) values.delete(values.keys().next().value!);
+      const oldest = values.keys().next();
+      if (values.size >= 128 && !values.has(key) && !oldest.done) values.delete(oldest.value);
       values.set(key, { until: clock() + 5000, previous, value });
       return value;
     })();

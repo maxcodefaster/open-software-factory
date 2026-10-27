@@ -41,8 +41,8 @@ export function createAttachmentRoutes(store: ReturnType<typeof createAttachment
     const attachment = /^\/api\/attachments\/([a-f0-9-]{36})(?:\/(previews\/(\d+)))?$/.exec(
       url.pathname,
     );
-    if (!attachment) return undefined;
-    const id = attachment[1]!;
+    const id = attachment?.[1];
+    if (!attachment || !id) return undefined;
     if (request.method === "GET") {
       return store.read(
         userID,

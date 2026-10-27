@@ -8,7 +8,6 @@ test("owned Factory children cannot load the developer's model or credential env
   await mkdir(directory, { recursive: true });
   await writeFile(resolve(directory, ".env"), "FACTORY_OWNED_ENV_PROBE=must-not-be-loaded\n");
   const env = { ...process.env };
-  // biome-ignore lint/complexity/useLiteralKeys: TypeScript requires index access for inherited environment keys.
   delete env["FACTORY_OWNED_ENV_PROBE"];
   try {
     const child = Bun.spawn(

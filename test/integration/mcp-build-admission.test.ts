@@ -6,6 +6,7 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { seedMonitoringDelegation } from "../fixtures/monitoring";
+import { fixtureValue } from "../fixtures/value";
 
 test("a human-approved Build retains the prepared Input's exact shared sources independently of hook activation", async () => {
   const f = await fixture();
@@ -99,9 +100,9 @@ test.each([true, false])(
             roles: ["build"],
           },
         },
-        manager!.id,
+        fixtureValue(manager, "manager").id,
       );
-      await connections.connect(id, manager!.id, {
+      await connections.connect(id, fixtureValue(manager, "manager").id, {
         commandId: crypto.randomUUID(),
         revisionId,
         expectedVersion: 0,
@@ -111,10 +112,19 @@ test.each([true, false])(
       );
       const tool = connection.tools[0];
       if (!tool) throw new Error("Owned source tool missing");
-      await connections.library.review(id, manager!.id, connection.version, [
-        { name: tool.name, digest: tool.digest },
-      ]);
-      await connections.library.grant(id, f.projectID, manager!.id, true, connection.version + 1);
+      await connections.library.review(
+        id,
+        fixtureValue(manager, "manager").id,
+        connection.version,
+        [{ name: tool.name, digest: tool.digest }],
+      );
+      await connections.library.grant(
+        id,
+        f.projectID,
+        fixtureValue(manager, "manager").id,
+        true,
+        connection.version + 1,
+      );
       await connections.library.choose(
         {
           libraryId: id,
@@ -125,7 +135,7 @@ test.each([true, false])(
           state: "required",
           expectedVersion: 0,
         },
-        manager!.id,
+        fixtureValue(manager, "manager").id,
       );
     }
     try {

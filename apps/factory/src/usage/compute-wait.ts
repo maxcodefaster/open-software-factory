@@ -56,7 +56,7 @@ export function createComputeWait(database: Database, reserve?: ExecutionReserve
           LEFT JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
           LEFT JOIN factory.verification verification ON verification.id=attempt.verification_id
           WHERE attempt.id=${attemptID}`;
-        if (!attempt || attempt.state !== "create-intended" || attempt.stopped) return undefined;
+        if (attempt?.state !== "create-intended" || attempt.stopped) return undefined;
         if (attempt.changeID) {
           await sql`SELECT id FROM factory.agent_turn WHERE change_id=${attempt.changeID} AND state='pending' ORDER BY created_at LIMIT 1 FOR UPDATE`;
           await lockChangeWriterIn(sql, attempt.changeID);

@@ -14,8 +14,7 @@ function release() {
 }
 
 function stream(chunks: unknown[]) {
-  const body =
-    chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n";
+  const body = `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("")}data: [DONE]\n\n`;
   return new Response(body, {
     headers: { "content-type": "text/event-stream; charset=utf-8" },
   });

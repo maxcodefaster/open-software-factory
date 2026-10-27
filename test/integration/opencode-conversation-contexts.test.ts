@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fixture, buildModelID } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { fixtureValue } from "../fixtures/value";
 
 test("a fresh native Coding context keeps its original Session and canonical source without creating another runtime", async () => {
   const owned = await fixture();
@@ -28,7 +29,11 @@ test("a fresh native Coding context keeps its original Session and canonical sou
       resume: true,
     });
     const original = await observe(
-      () => native!.client.message.list({ sessionID: owned.sessionID, limit: 50 }),
+      () =>
+        fixtureValue(native, "native").client.message.list({
+          sessionID: owned.sessionID,
+          limit: 50,
+        }),
       (page) =>
         page.data.some(
           (message) =>
@@ -43,7 +48,10 @@ test("a fresh native Coding context keeps its original Session and canonical sou
       const target = new URL(request.url);
       if (request.method === "POST" && target.pathname === "/api/session") creates++;
       if (request.method === "POST" && target.pathname.endsWith("/prompt")) prompts++;
-      return native!.transport(request, path ?? `${target.pathname}${target.search}`);
+      return fixtureValue(native, "native").transport(
+        request,
+        path ?? `${target.pathname}${target.search}`,
+      );
     };
     controller = owned.controller();
     const modelRequestsBeforeNew = (await native.control()).providerRequests;
@@ -66,7 +74,7 @@ test("a fresh native Coding context keeps its original Session and canonical sou
       contextID,
     );
     await observe(
-      () => controller!.get(owned.changeID),
+      () => fixtureValue(controller, "controller").get(owned.changeID),
       (view) => prompts === 1 && view.messages.some((message) => message.role === "assistant"),
       "Fresh native conversation was not dispatched",
       30_000,

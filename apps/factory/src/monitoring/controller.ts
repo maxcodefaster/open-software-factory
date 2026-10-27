@@ -271,8 +271,7 @@ export function createMonitoringController(
         >`SELECT project_id AS "projectId",policy_id AS "policyId",version::float8 AS version,
           secret_digest AS digest,enabled FROM factory.monitoring_hook WHERE id=${id} FOR UPDATE`;
         if (
-          !hook ||
-          !hook.enabled ||
+          !hook?.enabled ||
           !timingSafeEqual(
             Buffer.from(hook.digest, "hex"),
             Buffer.from(monitoringDigest(presented), "hex"),

@@ -7,6 +7,7 @@ import { createUsageService } from "../../apps/factory/src/usage/service";
 import { createContractRates } from "../../apps/factory/src/usage/contract-rates";
 import { fixture } from "../fixtures/change-agent-turns";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { fixtureValue } from "../fixtures/value";
 
 test("calendar reset excludes expired unknowns and concurrent threshold requests admit no new Coding", async () => {
   const isolated = await factoryProcess();
@@ -228,7 +229,7 @@ test("policy commands serialize versions, replay exact intent and enforce Projec
       ...rateCommand,
       commandID: crypto.randomUUID(),
       version: 1,
-      tiers: [{ ...rateCommand.tiers[0]!, input: 9 }],
+      tiers: [{ ...fixtureValue(rateCommand.tiers[0], "rateCommand.tiers[0]"), input: 9 }],
     });
     expect((await rates.get("owned", "exact"))?.tiers[0]?.input).toBe(9);
     const [historical] = await database.client<

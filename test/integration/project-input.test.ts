@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mcpSourceAlias } from "../../apps/factory/src/mcp/sources";
 import { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
 import { monitoringFixture } from "../fixtures/monitoring";
+import { fixtureValue } from "../fixtures/value";
 
 for (const { consult, explicit } of [
   { consult: true, explicit: true },
@@ -126,7 +127,7 @@ test("Input intake retains plain-text requests and does not coalesce different f
     if (!saved.url) throw new Error("Owned Input URL missing");
     const send = (request: string, timestamp: string) =>
       f.routes.intake(
-        new Request(saved.url!, {
+        new Request(fixtureValue(saved.url, "saved.url"), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({

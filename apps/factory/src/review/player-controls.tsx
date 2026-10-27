@@ -55,22 +55,24 @@ export function ReviewPlayerControls(props: {
               const annotation = item.annotation;
               return annotation?.source === "recording" &&
                 annotation.recordingId === props.recordingID
-                ? annotation.timestampMs / 1000
+                ? { seconds: annotation.timestampMs / 1000 }
                 : undefined;
             };
             return (
-              <Show when={moment() !== undefined}>
-                <button
-                  type="button"
-                  class={`review-timeline-marker ${item.kind === "thread" && item.state !== "resolved" ? "is-thread" : ""}`}
-                  style={{ left: position(moment()!) }}
-                  aria-label={`QA feedback ${index() + 1} at ${reviewTime(moment()!, true)}`}
-                  title={`${reviewTime(moment()!, true)} · ${item.messages[0]?.body ?? "Feedback"}`}
-                  disabled={!props.ready}
-                  onClick={() => props.onFeedback(item)}
-                >
-                  <span />
-                </button>
+              <Show when={moment()}>
+                {(time) => (
+                  <button
+                    type="button"
+                    class={`review-timeline-marker ${item.kind === "thread" && item.state !== "resolved" ? "is-thread" : ""}`}
+                    style={{ left: position(time().seconds) }}
+                    aria-label={`QA feedback ${index() + 1} at ${reviewTime(time().seconds, true)}`}
+                    title={`${reviewTime(time().seconds, true)} · ${item.messages[0]?.body ?? "Feedback"}`}
+                    disabled={!props.ready}
+                    onClick={() => props.onFeedback(item)}
+                  >
+                    <span />
+                  </button>
+                )}
               </Show>
             );
           }}

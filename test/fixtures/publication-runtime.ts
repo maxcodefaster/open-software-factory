@@ -88,7 +88,7 @@ export async function publicationRuntimeProof(input: {
       JSON.stringify({
         image: starter.development,
         workspaceFolder: "/workspace/project",
-        workspaceMount: "source=${localWorkspaceFolder},target=/workspace/project,type=bind",
+        workspaceMount: `source=\${localWorkspaceFolder},target=/workspace/project,type=bind`,
         remoteUser: "node",
         updateRemoteUserUID: false,
         features: starterRecipe.features,

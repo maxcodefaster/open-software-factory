@@ -6,6 +6,7 @@ import { expect, type Page, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { fixtureValue } from "../fixtures/value";
 
 const observer = process.env["FACTORY_REQUIREMENTS_MODEL_OBSERVER"];
 const captures = ".factory/test-results/explicit-requirements";
@@ -45,7 +46,9 @@ test.afterEach(async () => {
 });
 
 async function calls(page: Page) {
-  return ((await (await page.request.get(observer!)).json()) as { calls: number }).calls;
+  return (
+    (await (await page.request.get(fixtureValue(observer, "observer"))).json()) as { calls: number }
+  ).calls;
 }
 async function create(page: Page, title: string, idea = false) {
   await page.getByRole("button", { name: "New Ticket", exact: true }).click();

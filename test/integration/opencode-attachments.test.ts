@@ -11,6 +11,7 @@ import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser
 import { connectOpenCodeBrowser } from "../../apps/factory/src/agent/opencode-browser";
 import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
 import { buildModelID } from "../fixtures/change-agent-turns";
+import { fixtureValue } from "../fixtures/value";
 
 test("pinned OpenCode reads an admitted human attachment as a native model image, without shell or file detours", async () => {
   const f = await fixture();
@@ -23,7 +24,7 @@ test("pinned OpenCode reads an admitted human attachment as a native model image
         blobs.set(key, data);
       },
       async read(key) {
-        return blobs.get(key)!;
+        return fixtureValue(blobs.get(key), "blobs.get(key)");
       },
       async remove(key) {
         blobs.delete(key);
@@ -73,7 +74,7 @@ test("pinned OpenCode reads an admitted human attachment as a native model image
                   ownerID: f.userID,
                   state: "active" as const,
                 },
-                ownerToken: owner.ownerToken!,
+                ownerToken: fixtureValue(owner.ownerToken, "owner.ownerToken"),
               }
             : null,
         authorizeRuntime: async () => null,
@@ -121,7 +122,7 @@ test("pinned OpenCode reads an admitted human attachment as a native model image
       resume: true,
     });
     const state = await observe(
-      () => target!.control(),
+      () => fixtureValue(target, "target").control(),
       (state) => {
         if (state.providerRequests >= 2 && !state.imageRequests)
           throw new Error(

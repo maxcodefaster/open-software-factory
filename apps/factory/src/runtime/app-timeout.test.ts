@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { appTimeoutResponse } from "./app-timeout";
 import { RuntimeHub, type RuntimeSocketData } from "./hub";
 import type { ServerWebSocket } from "bun";
+import { fixtureValue } from "../../../../test/fixtures/value";
 
 const id = crypto.randomUUID();
 const timeout = new Error("Runtime request timed out");
@@ -65,7 +66,7 @@ test("an actual unconfirmed runtime response reaches the App timeout translation
       socket,
       JSON.stringify({
         type: "stream-error",
-        streamId: frame!.streamId,
+        streamId: fixtureValue(frame, "frame").streamId,
         error: "Runtime request timed out",
       }),
     );

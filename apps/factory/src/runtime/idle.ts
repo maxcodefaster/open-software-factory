@@ -30,7 +30,7 @@ export function createIdleCompute(
       WHERE workspace_id IS NOT NULL AND state='ready'
         AND (${after}::uuid IS NULL OR id>${after}::uuid) ORDER BY id LIMIT 64`;
     // Advance even when every candidate is busy. Activity remains ephemeral.
-    after = candidates.length === 64 ? candidates.at(-1)!.id : null;
+    after = candidates.length === 64 ? (candidates.at(-1)?.id ?? null) : null;
     for (const attempt of candidates) {
       if (closed) return;
       let claimed = false;

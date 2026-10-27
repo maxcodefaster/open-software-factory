@@ -6,6 +6,7 @@ import type {
 } from "../../packages/runtime-kubernetes/src/developer-ide";
 import { DeveloperIDEIntentConflict } from "../../packages/runtime-kubernetes/src/developer-ide";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 async function fixture(maxConnections = 10, developerID = crypto.randomUUID()) {
   const owned = await factoryProcess();
@@ -185,8 +186,8 @@ test("separate installations never share an editor namespace even with the same 
     createDeveloperIDEController(second.database, adapter),
   ];
   try {
-    await controllers[0]!.ensure(first.projectID, administratorID);
-    await controllers[1]!.ensure(second.projectID, administratorID);
+    await fixtureValue(controllers[0], "controllers[0]").ensure(first.projectID, administratorID);
+    await fixtureValue(controllers[1], "controllers[1]").ensure(second.projectID, administratorID);
     await eventually(
       async () => Promise.all(controllers.map((controller) => controller.get(administratorID))),
       (views) => views.every((view) => view.state === "ready"),

@@ -6,7 +6,7 @@ import { skillImportInput, repositorySkillImportInput } from "./commands";
 export function previewSkillImport(value: unknown) {
   const input = skillImportInput.parse(value);
   const original = input.files.find((file) => file.path === "SKILL.md");
-  if (!original || original.encoding !== "utf8")
+  if (original?.encoding !== "utf8")
     throw new Error("Choose a package containing a text SKILL.md at its root");
   const match = original.body.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
   if (!match) throw new Error("SKILL.md needs name and description in YAML frontmatter");

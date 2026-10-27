@@ -9,6 +9,7 @@ import {
   runtimeArtifactNames,
   runtimeArtifactsSchema,
 } from "./artifacts";
+import { fixtureValue } from "../../test/fixtures/value";
 
 test("published defaults supersede installation bootstrap pins without changing retained identities", () => {
   const bootstrap = {
@@ -43,9 +44,14 @@ test("only a complete exact artifact set can bypass first-install publication", 
         join(directory, `${name}-image`),
         `registry.example/${name}@sha256:${"a".repeat(64)}`,
       );
-    expect(Object.keys((await publishedRuntimeArtifacts(directory))!)).toEqual([
-      ...runtimeArtifactNames,
-    ]);
+    expect(
+      Object.keys(
+        fixtureValue(
+          await publishedRuntimeArtifacts(directory),
+          "(await publishedRuntimeArtifacts(directory))",
+        ),
+      ),
+    ).toEqual([...runtimeArtifactNames]);
     await writeFile(
       join(directory, "browser-tools-image"),
       "registry.example/browser-tools:latest",

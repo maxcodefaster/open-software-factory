@@ -5,6 +5,7 @@ import { createChangeAdmission } from "../../apps/factory/src/agent/change-admis
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { factoryProcess, eventually } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("Implement atomically freezes requirements and Build before branch create; duplicates and lost outcome never re-admit", async () => {
   const process = await factoryProcess();
@@ -96,7 +97,7 @@ test("Implement atomically freezes requirements and Build before branch create; 
         protectionAttempts++;
         const [change] = await database.client<{ branch: string }[]>`
           SELECT branch_name AS branch FROM factory.change WHERE id=${id}`;
-        expect(branches.has(change!.branch)).toBe(false);
+        expect(branches.has(fixtureValue(change, "change").branch)).toBe(false);
         if (protectionAttempts === 1) throw new Error("Owned lost protection confirmation");
         protectionConfirmed = true;
       },

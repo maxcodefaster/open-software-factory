@@ -48,10 +48,10 @@ test("generated publication keeps prefix notes and rebases disjoint inline human
     generatedBody: generated,
     conflict: false,
   });
-  const includesHuman = human + "\n\nNew source facts.";
+  const includesHuman = `${human}\n\nNew source facts.`;
   expect(mergeGeneratedDocument(base, human, includesHuman)).toEqual({
     body: includesHuman,
-    generatedBody: base + "\n\nNew source facts.",
+    generatedBody: `${base}\n\nNew source facts.`,
     conflict: false,
   });
 });

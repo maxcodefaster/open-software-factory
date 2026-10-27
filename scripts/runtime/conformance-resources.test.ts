@@ -5,6 +5,7 @@ import {
   conformanceResources,
   ownedConformanceNamespace,
 } from "./factorybox-conformance";
+import { fixtureValue } from "../../test/fixtures/value";
 
 test.each(["arm64", "amd64"] as const)(
   "Factorybox %s conformance owns a separate worker/store and uses real product preparation",
@@ -47,7 +48,11 @@ test.each(["arm64", "amd64"] as const)(
       (resource) => resource.kind === "Secret" && resource.metadata.name.startsWith("assignment-"),
     );
     expect(
-      assignment && "stringData" in assignment && JSON.parse(assignment.stringData["slot.json"]!),
+      assignment &&
+        "stringData" in assignment &&
+        JSON.parse(
+          fixtureValue(assignment.stringData["slot.json"], 'assignment.stringData["slot.json"]'),
+        ),
     ).toMatchObject({
       version: 1,
       id: owner,
@@ -56,8 +61,10 @@ test.each(["arm64", "amd64"] as const)(
     });
     expect(resources.input.namespace).toBe(`factory-box-${owner.replaceAll("-", "")}`);
     const pod = resources.declaration.pod;
-    expect(pod.spec.containers[0]!.name).toBe("worker");
-    expect(pod.spec.containers[0]!.resources.limits).toEqual({ cpu: "3", memory: "3Gi" });
+    expect(fixtureValue(pod.spec.containers[0], "pod.spec.containers[0]").name).toBe("worker");
+    expect(fixtureValue(pod.spec.containers[0], "pod.spec.containers[0]").resources.limits).toEqual(
+      { cpu: "3", memory: "3Gi" },
+    );
     expect(pod.spec.nodeSelector["kubernetes.io/arch"]).toBe(architecture);
     expect(JSON.stringify(resources.items)).not.toMatch(/envbox|workspace_cvm|docker.sock/);
     expect(pod.spec.volumes.filter((volume) => "hostPath" in volume)).toEqual([]);

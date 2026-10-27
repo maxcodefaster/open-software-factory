@@ -12,7 +12,7 @@ const hub = new RuntimeHub(async (_id, phase, error) => {
   events.push({ phase, ...(error ? { error } : {}) });
   if (events.length > 500) events.shift();
 });
-const allow = () => hub.allow(attemptID, 1, hash(owner + "-parent"), hash(owner + "-child"));
+const allow = () => hub.allow(attemptID, 1, hash(`${owner}-parent`), hash(`${owner}-child`));
 allow();
 const prepared = Promise.withResolvers<void>();
 let terminal: WebSocket | undefined;

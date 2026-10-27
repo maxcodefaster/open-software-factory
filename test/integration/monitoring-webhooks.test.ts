@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { createMonitoringController } from "../../apps/factory/src/monitoring/controller";
 import { createMonitoringRoutes } from "../../apps/factory/src/monitoring/routes";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("monitoring binds a shared source and Project, deduplicates occurrences and fences changed delegation", async () => {
   const fixture = await factoryProcess();
@@ -78,7 +79,7 @@ test("monitoring binds a shared source and Project, deduplicates occurrences and
     await expect(controller.save(foreign, manager, input)).rejects.toThrow("another Project");
     const created = await controller.save(project, manager, input);
     expect(created.url).toMatch(/^https:\/\/factory.example\/hooks\/inputs\//);
-    const url = created.url!;
+    const url = fixtureValue(created.url, "created.url");
     expect(
       (
         await request(url.replace("/hooks/inputs/", "/hooks/monitoring/"), {
@@ -91,7 +92,7 @@ test("monitoring binds a shared source and Project, deduplicates occurrences and
     await expect(
       controller.save(project, manager, { ...input, name: "Changed command" }),
     ).rejects.toThrow("identity");
-    const key = url.split("/").at(-1)!;
+    const key = fixtureValue(url.split("/").at(-1), 'url.split("/").at(-1)');
     expect((await request(url.replace(key, "x".repeat(43)), alert))?.status).toBe(404);
     expect(
       (
@@ -111,9 +112,10 @@ test("monitoring binds a shared source and Project, deduplicates occurrences and
       SELECT id,context,project_id AS "projectId" FROM factory.monitoring_incident WHERE hook_id=${hook}`;
     expect(incident?.context).not.toContain("must-not-persist");
     expect(incident?.projectId).toBe(project);
-    expect((await controller.authorize(incident!.id)).assignments[0]?.connectionId).toBe(
-      connection,
-    );
+    expect(
+      (await controller.authorize(fixtureValue(incident, "incident").id)).assignments[0]
+        ?.connectionId,
+    ).toBe(connection);
     expect(
       (await request(url, { ...alert, status: "resolved", fingerprint: "resolved" }))?.status,
     ).toBe(202);
@@ -128,25 +130,35 @@ test("monitoring binds a shared source and Project, deduplicates occurrences and
       expectedVersion: 1,
     });
     expect(rotated.url).not.toBe(url);
-    await expect(controller.authorize(incident!.id)).rejects.toThrow("disabled");
+    await expect(controller.authorize(fixtureValue(incident, "incident").id)).rejects.toThrow(
+      "disabled",
+    );
     expect((await request(url, alert))?.status).toBe(404);
-    expect((await request(rotated.url!, alert))?.status).toBe(404);
+    expect((await request(fixtureValue(rotated.url, "rotated.url"), alert))?.status).toBe(404);
     const enabled = { ...input, commandId: crypto.randomUUID(), expectedVersion: 2 };
     await controller.save(project, manager, enabled);
     await database.client`UPDATE factory.monitoring_hook SET received_count=0 WHERE id=${hook}`;
-    expect((await request(rotated.url!, alert))?.status).toBe(202);
+    expect((await request(fixtureValue(rotated.url, "rotated.url"), alert))?.status).toBe(202);
     view = await controller.view(project, manager);
     expect(view.incidents[0]?.occurrences).toBe(10);
     // Re-enabling does not re-commission the old incident or replace its frozen policy.
-    await expect(controller.authorize(incident!.id)).rejects.toThrow("delegation");
+    await expect(controller.authorize(fixtureValue(incident, "incident").id)).rejects.toThrow(
+      "delegation",
+    );
     const [stored] = await database.client<
       { data: string }[]
     >`SELECT row_to_json(hook)::text AS data FROM factory.monitoring_hook hook WHERE id=${hook}`;
     expect(stored?.data).not.toContain(key);
-    expect(stored?.data).not.toContain(rotated.url!.split("/").at(-1));
-    const fresh = await request(rotated.url!, { ...alert, fingerprint: "second-defect" });
+    expect(stored?.data).not.toContain(fixtureValue(rotated.url, "rotated.url").split("/").at(-1));
+    const fresh = await request(fixtureValue(rotated.url, "rotated.url"), {
+      ...alert,
+      fingerprint: "second-defect",
+    });
     expect(fresh?.status).toBe(202);
-    const newest = (await controller.view(project, manager)).incidents[0]!;
+    const newest = fixtureValue(
+      (await controller.view(project, manager)).incidents[0],
+      "(await controller.view(project, manager)).incidents[0]",
+    );
     await database.client`UPDATE factory.mcp_connection SET state='revoked' WHERE id=${connection}`;
     await expect(controller.authorize(newest.id)).rejects.toThrow("Reconnect");
     expect(await controller.view(project, contributor)).toMatchObject({

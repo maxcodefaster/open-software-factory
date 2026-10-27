@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { estimateUsage, usageRate, unknownCounters } from "./usage";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 const base = usageRate.parse({
   provider: "provider",
@@ -28,7 +29,7 @@ test("unknown counters and prices remain partial, explicitly free observed usage
   expect(
     estimateUsage(
       { ...counters, input: 0 },
-      { ...base, tiers: [{ ...base.tiers[0]!, input: null }] },
+      { ...base, tiers: [{ ...fixtureValue(base.tiers[0], "base.tiers[0]"), input: null }] },
     ).complete,
   ).toBe(true);
   expect(
@@ -39,7 +40,13 @@ test("unknown counters and prices remain partial, explicitly free observed usage
   ).toBe("0");
 });
 test("context tier includes cache; missing context cannot select an apparently cheaper tier", () => {
-  const rate = { ...base, tiers: [...base.tiers, { ...base.tiers[0]!, above: 100, input: 4 }] };
+  const rate = {
+    ...base,
+    tiers: [
+      ...base.tiers,
+      { ...fixtureValue(base.tiers[0], "base.tiers[0]"), above: 100, input: 4 },
+    ],
+  };
   expect(estimateUsage(counters, rate).nanoUSD).toBe("929000");
   expect(estimateUsage({ ...counters, input: 70 }, rate).nanoUSD).toBe("669000");
   expect(estimateUsage({ ...counters, cacheRead: null }, rate).nanoUSD).toBeNull();

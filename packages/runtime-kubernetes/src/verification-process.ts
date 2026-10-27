@@ -1,6 +1,6 @@
 // Runs inside the primary Dev Container. The upstream runner stays unmodified;
 // its failure must terminate the Factory-owned managed process, not leave a healthy shell.
-export const verificationSupervisor = String.raw`
+export const verificationSupervisor = `
 const { spawn } = require("node:child_process");
 const { openSync } = require("node:fs");
 const directory = require("node:os").homedir() + "/.factory-runner/";

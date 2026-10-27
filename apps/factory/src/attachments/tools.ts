@@ -83,11 +83,14 @@ export function createAttachmentTools(
       );
       await authorize(turnID, token, call.arguments.id);
       const { image, mediaType, ...text } = result;
+      const images: Array<{ type: "image"; mimeType: "image/jpeg"; data: string }> = [];
+      if (image) {
+        if (!mediaType)
+          throw new CommandError("unavailable", "Attachment image format is missing.");
+        images.push({ type: "image", mimeType: mediaType, data: image });
+      }
       return {
-        content: [
-          { type: "text", text: JSON.stringify(text) },
-          ...(image ? [{ type: "image" as const, mimeType: mediaType!, data: image }] : []),
-        ],
+        content: [{ type: "text", text: JSON.stringify(text) }, ...images],
       };
     },
   };

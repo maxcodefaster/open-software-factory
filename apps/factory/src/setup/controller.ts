@@ -320,7 +320,7 @@ export function createProjectSetupController(options: {
     if (!draft || draft.id !== setupID || draft.state !== "failed" || !draft.commandID)
       throw conflict();
     const row = await intent(draft.commandID);
-    if (!row || row.state !== "failed") throw conflict();
+    if (row?.state !== "failed") throw conflict();
     await execute(row, true);
     return view(userID);
   }

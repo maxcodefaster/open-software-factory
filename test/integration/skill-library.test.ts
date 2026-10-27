@@ -4,6 +4,7 @@ import { factoryProcess } from "../fixtures/factory-process";
 import type { SkillContent } from "../../packages/conversation-domain/src/skills";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { fixtureValue } from "../fixtures/value";
 
 test("product authors keep a private cross-Project library; managers share exact copies and choices inherit", async () => {
   const fixture = await factoryProcess();
@@ -135,10 +136,13 @@ test("product authors keep a private cross-Project library; managers share exact
     );
     const shared = await skills.library.accept(proposal, collaborator);
     expect(await skills.library.accept(proposal, collaborator)).toEqual(shared);
-    const sharedEntry = (await skills.getLibrary(collaborator, project)).entries.find(
-      (entry) => entry.id === shared.libraryId,
-    )!;
-    const sharedRevision = sharedEntry.revisions[0]!;
+    const sharedEntry = fixtureValue(
+      (await skills.getLibrary(collaborator, project)).entries.find(
+        (entry) => entry.id === shared.libraryId,
+      ),
+      "(await skills.getLibrary(collaborator, project)).entries.find( (entry) => entry.id === shared.libraryId, )",
+    );
+    const sharedRevision = fixtureValue(sharedEntry.revisions[0], "sharedEntry.revisions[0]");
     const nextRevision = crypto.randomUUID();
     await skills.library.save(
       {

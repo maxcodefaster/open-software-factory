@@ -6,6 +6,7 @@ import type { MCPSecret } from "../../apps/factory/src/mcp/secrets";
 import { factoryProcess } from "../fixtures/factory-process";
 import type { MCPAssignment } from "../../packages/conversation-domain/src/mcp-library";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { fixtureValue } from "../fixtures/value";
 
 test("MCP library keeps private definitions private, grants exact read tools and fences changed or revoked access", async () => {
   const fixture = await factoryProcess();
@@ -122,7 +123,10 @@ test("MCP library keeps private definitions private, grants exact read tools and
     expect(calls).toBe(0);
     const full = await database.client.begin((sql) => library.connectionIn(sql, libraryId));
     expect(full.state).toBe("review");
-    const read = full.tools.find((tool) => tool.name === "read_issue")!;
+    const read = fixtureValue(
+      full.tools.find((tool) => tool.name === "read_issue"),
+      'full.tools.find((tool) => tool.name === "read_issue")',
+    );
     await expect(
       library.review(libraryId, manager, full.version, [{ name: "read_issue", digest: "wrong" }]),
     ).rejects.toThrow();

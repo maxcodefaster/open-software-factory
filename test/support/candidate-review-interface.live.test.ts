@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer } from "vite";
+import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_REVIEW_UI_PROOF"] !== "1")(
   "independent review states remain compact, keyboard-readable and honest at desktop and narrow widths",
@@ -174,7 +175,9 @@ render(() => <><h1>Review candidate</h1><TicketChecks details={state().details}
           const finding = page.locator(".ticket-check-details details summary");
           await finding.focus();
           await page.keyboard.press("Enter");
-          await browserExpect(page.getByText(findings[0]!.explanation)).toBeVisible();
+          await browserExpect(
+            page.getByText(fixtureValue(findings[0], "findings[0]").explanation),
+          ).toBeVisible();
         }
         for (const width of [1280, 390]) {
           await page.setViewportSize({ width, height: 800 });

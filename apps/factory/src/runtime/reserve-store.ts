@@ -143,16 +143,19 @@ export function createReserveStore(
           ? 0
           : reserveCreationCount(policy, { ...budget, matching: matching?.count ?? 0 });
         for (let index = 0; index < count; index++) {
+          const { projectID, stagingAttemptID, revision, templateKey, seedExpiresAt } = template;
+          if (!projectID || !stagingAttemptID || !revision || !templateKey || !seedExpiresAt)
+            throw new Error("Ready execution template is missing its retained source identity");
           try {
-            await admitComputeIn(sql, template.projectID ?? null, "staging");
+            await admitComputeIn(sql, projectID, "staging");
           } catch (cause) {
             if (!(cause instanceof ComputeCapacityError)) throw cause;
             break;
           }
           const identity = reserveIdentity(crypto.randomUUID());
           await sql`INSERT INTO factory.execution_slot(id,project_id,staging_attempt_id,revision,template_id,template_key,project_recipe,seed_expires_at,role,state,runtime_host_image,expires_at,factorybox_profile)
-            VALUES(${identity.id},${template.projectID!},${template.stagingAttemptID!},${template.revision!},${template.id},${template.templateKey!},
-              ${JSON.stringify(template.projectRecipe)}::text::jsonb,${template.seedExpiresAt!},'staging','creating',${template.runtimeHostImage},
+            VALUES(${identity.id},${projectID},${stagingAttemptID},${revision},${template.id},${templateKey},
+              ${JSON.stringify(template.projectRecipe)}::text::jsonb,${seedExpiresAt},'staging','creating',${template.runtimeHostImage},
               now()+${policy.expiryMS}*interval '1 millisecond',${JSON.stringify(selected)}::text::jsonb)`;
         }
       }

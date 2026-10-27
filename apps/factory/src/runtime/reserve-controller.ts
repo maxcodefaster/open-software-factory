@@ -105,7 +105,7 @@ export function createExecutionReserve(
                 (observation) => store.completeSourceImport(sql, id, observation),
               );
               const refreshed = await store.get(sql, id);
-              if (!refreshed || refreshed.state !== "retiring") return;
+              if (refreshed?.state !== "retiring") return;
               retiring = refreshed;
             }
             await adapter.retire(retiring, {

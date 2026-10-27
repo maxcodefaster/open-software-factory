@@ -30,7 +30,14 @@ const reference =
   /\/api\/attachments\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})(?=[/)\s"'\\]|$)/gi;
 export function attachmentIDs(content: string): string[] {
   const authored = content.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, "").replace(/`[^`]*`/g, "");
-  return [...new Set([...authored.matchAll(reference)].map((match) => match[1]!.toLowerCase()))];
+  return [
+    ...new Set(
+      [...authored.matchAll(reference)].flatMap((match) => {
+        const id = match[1];
+        return id ? [id.toLowerCase()] : [];
+      }),
+    ),
+  ];
 }
 
 export function attachmentURL(id: string, preview?: number) {

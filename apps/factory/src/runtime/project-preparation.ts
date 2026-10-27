@@ -169,7 +169,7 @@ export function createProjectPreparation(input: {
         if (
           !upload ||
           !attempt.imageRepository ||
-          !upload.image.startsWith(attempt.imageRepository + "@")
+          !upload.image.startsWith(`${attempt.imageRepository}@`)
         )
           return denied();
         const [job] = await transaction<

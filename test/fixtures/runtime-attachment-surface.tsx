@@ -7,6 +7,7 @@ import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
+import { fixtureValue } from "./value";
 
 const attemptID = "11111111-1111-4111-8111-111111111111";
 function Surface() {
@@ -38,4 +39,7 @@ function Surface() {
     </main>
   );
 }
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

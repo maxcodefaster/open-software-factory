@@ -21,7 +21,7 @@ const exactImage = z
   .refine(
     (value) =>
       value
-        .split("@")[0]!
+        .slice(0, value.indexOf("@"))
         .split("/")
         .slice(1)
         .every((part) => part !== "" && part !== "." && part !== ".."),
@@ -318,6 +318,8 @@ export async function prepareFactoryboxRuntime(
   timeoutMS = 420_000,
 ) {
   const deadline = performance.now() + timeoutMS;
+  const assignmentID = input.reserve ? input.labels["factory.dev/execution-slot"] : input.attemptID;
+  if (!assignmentID) throw new Error("Sandbox assignment identity is missing");
   await inspectFactoryboxWorker(
     factoryboxRuntimeRequest(input),
     identity,
@@ -327,9 +329,7 @@ export async function prepareFactoryboxRuntime(
   const secret = await run([
     "get",
     "secret",
-    factoryboxAssignmentSecret(
-      input.reserve ? input.labels["factory.dev/execution-slot"]! : input.attemptID,
-    ),
+    factoryboxAssignmentSecret(assignmentID),
     "-n",
     input.namespace,
     "-o",

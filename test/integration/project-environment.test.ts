@@ -5,6 +5,7 @@ import type {
   StoredEnvironment,
 } from "../../apps/factory/src/environments/openbao";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("environment writes persist intent, recover ambiguous outcomes, mask reads and enforce scope", async () => {
   const process = await factoryProcess();
@@ -48,7 +49,7 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
         [contributor, "product-contributor"],
       ])
         await sql`INSERT INTO factory.project_membership(project_id, user_id, role, manage_project, updated_by)
-          VALUES (${projectID}, ${userID!}, ${role!}, ${userID === manager}, ${manager})`;
+          VALUES (${projectID}, ${fixtureValue(userID, "userID")}, ${fixtureValue(role, "role")}, ${userID === manager}, ${manager})`;
     });
     const controller = createEnvironmentController(
       database,
@@ -166,7 +167,10 @@ test("environment writes persist intent, recover ambiguous outcomes, mask reads 
     for (const revoked of ["management", "account"] as const) {
       const commandID = crypto.randomUUID();
       const secretKey = `projects/${projectID}/development/${commandID}`;
-      const previous = stored.get(`projects/${projectID}/development/${winner.commandID}`)!;
+      const previous = fixtureValue(
+        stored.get(`projects/${projectID}/development/${winner.commandID}`),
+        `stored.get(\`projects/\${projectID}/development/\${winner.commandID}\`)`,
+      );
       stored.set(secretKey, { ...previous, commandID });
       await database.client`INSERT INTO factory.environment_write(command_id,project_id,environment,
         base_version,fingerprint,manifest,secret_key,created_by)

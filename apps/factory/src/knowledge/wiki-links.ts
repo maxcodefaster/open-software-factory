@@ -25,7 +25,8 @@ export function wikiLinkIssues(
     if (["code", "codespan", "html", "image"].includes(String(token["type"]))) return;
     if (token["type"] === "text" && !token["tokens"] && typeof token["text"] === "string") {
       for (const match of token["text"].matchAll(/#wiki\/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w/-])/g)) {
-        const slug = match[1]!;
+        const slug = match[1];
+        if (!slug) continue;
         const title = titles.get(slug);
         issues.add(
           title

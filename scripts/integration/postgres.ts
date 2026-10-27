@@ -681,7 +681,8 @@ try {
     const secondEntered = Promise.withResolvers<number>();
     const secondUpdate = client.begin(async (sql) => {
       const [session] = await sql<{ pid: number }[]>`SELECT pg_backend_pid() AS pid`;
-      secondEntered.resolve(session!.pid);
+      if (!session) throw new Error("The competing SQL session did not identify itself");
+      secondEntered.resolve(session.pid);
       return sql`
         UPDATE factory.ticket SET description = 'second', version = version + 1
         WHERE id = ${concurrencyTicketID} AND project_id = ${concurrencyProjectID} AND version = 1

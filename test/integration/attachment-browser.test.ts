@@ -16,6 +16,8 @@ import { attachmentIDs } from "../../packages/conversation-domain/src/attachment
 import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { fixture } from "../fixtures/change-agent-turns";
 import { callFactoryFunction, compiledFactoryEndpoint } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 // Bun does not load playwright.config.ts. Match the ordinary browser lane's
 // observation window, including real conversion and storage acknowledgement.
@@ -58,7 +60,8 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     });
     const review = createVisualReviewController(f.database);
     const directory = resolve(".factory/test-results/attachments-browser", f.projectID);
-    const frontend = resolve(directory, "frontend");
+    const buildDirectory = resolve(directory, "frontend");
+    const frontend = resolve(buildDirectory, "client");
     const personalConversation = crypto.randomUUID(),
       ticketConversation = crypto.randomUUID();
     await mkdir(directory, { recursive: true });
@@ -83,12 +86,14 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
         "--config",
         resolve("test/fixtures/attachments-vite.config.ts"),
         "--outDir",
-        frontend,
+        buildDirectory,
       ],
-      { stdout: "ignore", stderr: "pipe" },
+      { env: productionBuildEnvironment(process.env), stdout: "ignore", stderr: "pipe" },
     );
     const errors = await new Response(build.stderr).text();
     if (await build.exited) throw new Error(errors);
+    if (!(await Bun.file(resolve(frontend, "attachments.html")).exists()))
+      throw new Error("Owned attachment UI build did not emit its component entry");
     server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -187,27 +192,30 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
         }
       },
     });
-    functions = await compiledFactoryEndpoint({
-      origin: server.url.origin,
-      services: {
-        attachments: store,
-        review: createReviewService({
-          controller: review,
-          access: createAccessController(f.database),
-          admit: async () => {
-            throw new Error("Attachment proof does not commission Coding");
+    functions = await compiledFactoryEndpoint(
+      {
+        origin: server.url.origin,
+        services: {
+          attachments: store,
+          review: createReviewService({
+            controller: review,
+            access: createAccessController(f.database),
+            admit: async () => {
+              throw new Error("Attachment proof does not commission Coding");
+            },
+            dispatchPending: async () => {},
+          }),
+        } as unknown as FactoryServices,
+        session: async (request) => ({
+          user: {
+            id: request.headers.get("x-fixture-user") === otherID ? otherID : f.userID,
           },
-          dispatchPending: async () => {},
         }),
-      } as unknown as FactoryServices,
-      session: async (request) => ({
-        user: {
-          id: request.headers.get("x-fixture-user") === otherID ? otherID : f.userID,
-        },
-      }),
-      maintenance: async () => false,
-      requireFresh: async () => {},
-    });
+        maintenance: async () => false,
+        requireFresh: async () => {},
+      },
+      resolve(buildDirectory, "server/start-server.js"),
+    );
     browser = await chromium.launch(
       process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"]
         ? { executablePath: process.env["PLAYWRIGHT_CHROMIUM_EXECUTABLE"] }
@@ -344,16 +352,26 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await page.screenshot({ path: resolve(directory, "draft-desktop.png"), fullPage: true });
     await captureNarrow("draft");
     expect(
-      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [draftAsset!.id], {
-        "x-fixture-user": otherID,
-      }),
+      await callFactoryFunction(
+        server.url.origin,
+        "getAttachmentMetadata",
+        [fixtureValue(draftAsset, "draftAsset").id],
+        {
+          "x-fixture-user": otherID,
+        },
+      ),
     ).toMatchObject({ ok: false, status: 404 });
     await page.getByRole("button", { name: "Create as idea" }).click();
     await visible(page.getByRole("status").filter({ hasText: "Created Ticket" })).toBeVisible();
     expect(
-      await callFactoryFunction(server.url.origin, "getAttachmentMetadata", [draftAsset!.id], {
-        "x-fixture-user": otherID,
-      }),
+      await callFactoryFunction(
+        server.url.origin,
+        "getAttachmentMetadata",
+        [fixtureValue(draftAsset, "draftAsset").id],
+        {
+          "x-fixture-user": otherID,
+        },
+      ),
     ).toMatchObject({ ok: true });
     expect(draftBody).not.toContain("/image");
 
@@ -445,11 +463,14 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await visible(page.locator(".attachment-privacy")).toHaveCount(0);
     await page.screenshot({ path: resolve(directory, "chat-ready-desktop.png"), fullPage: true });
     await captureNarrow("chat-ready");
-    const privateID = attachmentIDs(
-      (await page
-        .getByRole("link", { name: "Open image design.png", exact: true })
-        .getAttribute("href")) ?? "",
-    )[0]!;
+    const privateID = fixtureValue(
+      attachmentIDs(
+        (await page
+          .getByRole("link", { name: "Open image design.png", exact: true })
+          .getAttribute("href")) ?? "",
+      )[0],
+      'attachmentIDs( (await page .getByRole("link", { name: "Open image design.png", exact: true }) .getAttribute("href")) ?? ',
+    );
     await page.getByRole("button", { name: "Send message" }).click();
     await visible(page.getByRole("textbox", { name: "Chat message" })).toHaveValue("");
     await visible(page.getByRole("list", { name: "Prepared attachments" })).toHaveCount(0);
@@ -477,11 +498,14 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await visible(page.getByRole("textbox", { name: "Chat message" })).toHaveValue(
       "Use this reference for the Ticket.",
     );
-    const ticketID = attachmentIDs(
-      (await page
-        .getByRole("link", { name: "Open image pasted.png", exact: true })
-        .getAttribute("href")) ?? "",
-    )[0]!;
+    const ticketID = fixtureValue(
+      attachmentIDs(
+        (await page
+          .getByRole("link", { name: "Open image pasted.png", exact: true })
+          .getAttribute("href")) ?? "",
+      )[0],
+      'attachmentIDs( (await page .getByRole("link", { name: "Open image pasted.png", exact: true }) .getAttribute("href")) ?? ',
+    );
     await page.getByRole("button", { name: "Send message" }).click();
     await visible(page.getByRole("textbox", { name: "Chat message" })).toHaveValue("");
     expect(
@@ -500,11 +524,14 @@ test("Wiki, private drafts, personal/Ticket chat and feedback replies upload thr
     await visible(interview.getByRole("textbox", { name: "Custom answer" })).toHaveValue(
       "Follow this reference.",
     );
-    const interviewID = attachmentIDs(
-      (await interview
-        .getByRole("link", { name: "Download requirements.txt", exact: true })
-        .getAttribute("href")) ?? "",
-    )[0]!;
+    const interviewID = fixtureValue(
+      attachmentIDs(
+        (await interview
+          .getByRole("link", { name: "Download requirements.txt", exact: true })
+          .getAttribute("href")) ?? "",
+      )[0],
+      'attachmentIDs( (await interview .getByRole("link", { name: "Download requirements.txt", exact: true }) .getAttribute("hr',
+    );
     await page.screenshot({ path: resolve(directory, "interview-desktop.png"), fullPage: true });
     await captureNarrow("interview");
     await page.reload();

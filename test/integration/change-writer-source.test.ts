@@ -7,6 +7,7 @@ import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer"
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("native source rejects timed-out human saves after Agent takeover and retains files through service restart", async () => {
   const owner = crypto.randomUUID();
@@ -123,7 +124,7 @@ test("native source rejects timed-out human saves after Agent takeover and retai
     });
     await sources.ensure(workspace.id, owned.userID);
     await eventually(
-      () => sources!.get(workspace.id, owned.userID),
+      () => fixtureValue(sources, "sources").get(workspace.id, owned.userID),
       (value) => value.state === "ready",
       "Source SQL not ready",
     );

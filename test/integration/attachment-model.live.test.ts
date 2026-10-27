@@ -11,6 +11,7 @@ import { fixture } from "../fixtures/change-agent-turns";
 import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { attachmentDOCX, attachmentPDF, scannedAttachmentPDF } from "../fixtures/attachment-files";
 import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
+import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_ATTACHMENT_MODEL_LIVE"] !== "1")(
   "the configured planning model reads actual image, scanned/digital PDF and DOCX content through private S3 tools",
@@ -37,7 +38,11 @@ test.skipIf(process.env["FACTORY_ATTACHMENT_MODEL_LIVE"] !== "1")(
         return new Uint8Array(await canvas.encode("jpeg", 92));
       }
       const files = [
-        { name: "visual.jpg", mediaType: "image/jpeg" as const, data: await image(numbers[0]!) },
+        {
+          name: "visual.jpg",
+          mediaType: "image/jpeg" as const,
+          data: await image(fixtureValue(numbers[0], "numbers[0]")),
+        },
         {
           name: "digital.pdf",
           mediaType: "application/pdf" as const,
@@ -46,7 +51,7 @@ test.skipIf(process.env["FACTORY_ATTACHMENT_MODEL_LIVE"] !== "1")(
         {
           name: "scan.pdf",
           mediaType: "application/pdf" as const,
-          data: scannedAttachmentPDF(await image(numbers[2]!), 480, 180),
+          data: scannedAttachmentPDF(await image(fixtureValue(numbers[2], "numbers[2]")), 480, 180),
         },
         {
           name: "brief.docx",

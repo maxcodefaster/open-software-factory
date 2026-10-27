@@ -7,6 +7,7 @@ import {
   WikiTopicQualityError,
 } from "../../apps/factory/src/knowledge/generation-failure";
 import { ModelExecutionBoundError } from "../../apps/factory/src/models/execution-policy";
+import { fixtureValue } from "../fixtures/value";
 
 test.each([false, true])(
   "Wiki generation fences concurrent human revisions, preserves organization and deduplicates no-op updates, progressive=%s",
@@ -100,7 +101,7 @@ test.each([false, true])(
             ],
       };
       if (progressive) {
-        await input.publish!(output);
+        await fixtureValue(input.publish, "input.publish")(output);
         if (interruptAfterPackage) throw new Error("Lost worker after checked publication");
         return { pages: [] };
       }

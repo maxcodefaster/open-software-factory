@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createForgejoAccess, forgeUsername } from "./access";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 test("alternative-grant reconciliation inventories every page before removals shift offsets", async () => {
   const id = crypto.randomUUID();
@@ -32,7 +33,7 @@ test("alternative-grant reconciliation inventories every page before removals sh
         return Response.json({ data: repositories.slice(offset, offset + 50) });
       }
       if (init?.method === "DELETE") {
-        const name = url.pathname.split("/")[4]!;
+        const name = fixtureValue(url.pathname.split("/")[4], 'url.pathname.split("/")[4]');
         removed.push(name);
         const index = repositories.findIndex((repo) => repo.name === name);
         repositories.splice(index, 1);

@@ -8,12 +8,15 @@ import {
 } from "../../../../test/fixtures/attachment-files";
 import { convertAttachment, validateAttachmentType } from "./conversion";
 import { processAttachment } from "./process";
+import { fixtureValue } from "../../../../test/fixtures/value";
 
 test("attachment conversion retains digital PDF text and actual page pixels", async () => {
   const result = await convertAttachment(attachmentPDF("Reference 7319"), "application/pdf");
   expect(result.text).toContain("Reference 7319");
   expect(result.previews).toHaveLength(1);
-  const image = await loadImage(Buffer.from(result.previews[0]!.data));
+  const image = await loadImage(
+    Buffer.from(fixtureValue(result.previews[0], "result.previews[0]").data),
+  );
   expect(image.width).toBeGreaterThan(100);
   expect(image.height).toBeGreaterThan(50);
 });
@@ -24,7 +27,9 @@ test("the isolated conversion worker returns real image context and UTF-8 docume
   ctx.fillStyle = "#ff0000";
   ctx.fillRect(0, 0, 80, 40);
   const result = await processAttachment(new Uint8Array(await canvas.encode("png")), "image/png");
-  const image = await loadImage(Buffer.from(result.previews[0]!.data));
+  const image = await loadImage(
+    Buffer.from(fixtureValue(result.previews[0], "result.previews[0]").data),
+  );
   const decoded = createCanvas(80, 40);
   decoded.getContext("2d").drawImage(image, 0, 0);
   expect(decoded.getContext("2d").getImageData(20, 20, 1, 1).data[0]).toBeGreaterThan(240);
@@ -45,7 +50,13 @@ test("scanned PDF pages remain images even when they contain no extractable text
   expect(result.previews).toHaveLength(1);
   expect(result.text).not.toContain("0055ff");
   const decoded = createCanvas(320, 160);
-  decoded.getContext("2d").drawImage(await loadImage(Buffer.from(result.previews[0]!.data)), 0, 0);
+  decoded
+    .getContext("2d")
+    .drawImage(
+      await loadImage(Buffer.from(fixtureValue(result.previews[0], "result.previews[0]").data)),
+      0,
+      0,
+    );
   expect(decoded.getContext("2d").getImageData(30, 30, 1, 1).data[2]).toBeGreaterThan(230);
 });
 
@@ -95,7 +106,13 @@ test("DOCX embedded images become actual model-readable previews beside extracte
   expect(result.text).toContain("Embedded image 1");
   expect(result.previews).toHaveLength(1);
   const decoded = createCanvas(80, 40);
-  decoded.getContext("2d").drawImage(await loadImage(Buffer.from(result.previews[0]!.data)), 0, 0);
+  decoded
+    .getContext("2d")
+    .drawImage(
+      await loadImage(Buffer.from(fixtureValue(result.previews[0], "result.previews[0]").data)),
+      0,
+      0,
+    );
   expect(decoded.getContext("2d").getImageData(30, 20, 1, 1).data[2]).toBeGreaterThan(230);
 });
 

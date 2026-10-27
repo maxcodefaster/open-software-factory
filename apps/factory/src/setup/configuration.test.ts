@@ -10,7 +10,7 @@ import { starterFiles } from "./starter";
 test("required environment discovery excludes defaults and values", () => {
   expect(
     requiredEnvironmentVariables([
-      "${DATABASE_URL:?Required} ${PASSWORD?Required} ${OPTIONAL:-default} ${localEnv:API_KEY}",
+      `\${DATABASE_URL:?Required} \${PASSWORD?Required} \${OPTIONAL:-default} \${localEnv:API_KEY}`,
     ]),
   ).toEqual(["API_KEY", "DATABASE_URL", "PASSWORD"]);
 });
@@ -18,7 +18,14 @@ test("required environment discovery excludes defaults and values", () => {
 test("imported Compose requests bare substitutions before starting compute", () => {
   expect(
     requiredEnvironmentVariables([
-      "environment:\n  DATABASE_URL: ${DATABASE_URL}\n  BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}\n  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}\n  OPTIONAL: ${OPTIONAL:-default}\n  EMPTY: ${EMPTY-default}\n  SHELL: $${RUNTIME_ONLY}\n",
+      `environment:
+  DATABASE_URL: \${DATABASE_URL}
+  BETTER_AUTH_SECRET: \${BETTER_AUTH_SECRET}
+  POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}
+  OPTIONAL: \${OPTIONAL:-default}
+  EMPTY: \${EMPTY-default}
+  SHELL: $\${RUNTIME_ONLY}
+`,
     ]),
   ).toEqual(["BETTER_AUTH_SECRET", "DATABASE_URL", "POSTGRES_PASSWORD"]);
 });
@@ -26,7 +33,7 @@ test("imported Compose requests bare substitutions before starting compute", () 
 test("upstream Dev Container path substitutions are not environment credentials", () => {
   expect(
     requiredEnvironmentVariables([
-      "${localWorkspaceFolder} ${localWorkspaceFolderBasename} ${containerWorkspaceFolder} ${containerWorkspaceFolderBasename} ${devcontainerId} ${DATABASE_URL} ${localEnv:API_KEY}",
+      `\${localWorkspaceFolder} \${localWorkspaceFolderBasename} \${containerWorkspaceFolder} \${containerWorkspaceFolderBasename} \${devcontainerId} \${DATABASE_URL} \${localEnv:API_KEY}`,
     ]),
   ).toEqual(["API_KEY", "DATABASE_URL"]);
 });

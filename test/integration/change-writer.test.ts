@@ -9,6 +9,7 @@ import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test.each(["continue", "stop"] as const)(
   "an admitted Build waits for previous writer teardown before %s without a new command",
@@ -301,7 +302,13 @@ test("settled completion releases editing once and a stale completion cannot sto
     failProtection = false;
     const recovered = createChangeWriterController(options);
     expect(
-      (await recovered.takeOver(owned.changeID, owned.userID, pending.commandID!)).canWrite,
+      (
+        await recovered.takeOver(
+          owned.changeID,
+          owned.userID,
+          fixtureValue(pending.commandID, "pending.commandID"),
+        )
+      ).canWrite,
     ).toBe(true);
     expect(stopping).toBe(1);
     const second = await admission.admit(owned.changeID, owned.userID, {

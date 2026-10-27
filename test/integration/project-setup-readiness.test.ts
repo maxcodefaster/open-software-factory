@@ -5,6 +5,7 @@ import { createEnvironmentController } from "../../apps/factory/src/environments
 import type { StoredEnvironment } from "../../apps/factory/src/environments/openbao";
 import { createSetupReadiness } from "../../apps/factory/src/setup/readiness";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("setup readiness separates protected environments, observes exact work and isolates failure and retry", async () => {
   const process = await factoryProcess();
@@ -30,7 +31,7 @@ test("setup readiness separates protected environments, observes exact work and 
       [manager, "developer"],
       [contributor, "product-contributor"],
     ])
-      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${projectID},${userID!},${role!},${userID === manager},${manager})`;
+      await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by) VALUES(${projectID},${fixtureValue(userID, "userID")},${fixtureValue(role, "role")},${userID === manager},${manager})`;
     const environments = createEnvironmentController(
       database,
       {
@@ -72,7 +73,7 @@ test("setup readiness separates protected environments, observes exact work and 
           [result.preview, "main-preview"],
         ])
           await database.client`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,environment_version)
-            VALUES(${id!},${projectID},${environment!},${revision},1)`;
+            VALUES(${fixtureValue(id, "id")},${projectID},${fixtureValue(environment, "environment")},${revision},1)`;
         return result;
       },
       preview: async () => {
@@ -187,7 +188,7 @@ test("setup readiness separates protected environments, observes exact work and 
       (await coordinator.status(projectID, manager)).find((row) => row.task === "wiki")?.state,
     ).toBe("running");
     await database.client`UPDATE factory.knowledge_generation SET state='succeeded',completed_at=now(),page_count=0,conflict_count=0
-      WHERE id=${retriedWiki!.operationID!}`;
+      WHERE id=${fixtureValue(fixtureValue(retriedWiki, "retriedWiki").operationID, "retriedWiki!.operationID")}`;
     expect(
       (await coordinator.status(projectID, manager)).find((row) => row.task === "wiki")?.state,
     ).toBe("ready");

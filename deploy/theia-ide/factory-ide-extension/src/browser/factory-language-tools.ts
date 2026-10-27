@@ -198,7 +198,10 @@ export class FactoryLanguageTools implements FrontendApplicationContribution, Re
             const content = Array.isArray(result.contents) ? result.contents : [result.contents];
             return {
               range: converter.asRange(result.range),
-              contents: content.map((value) => markdown(value)!).filter(Boolean),
+              contents: content.flatMap((value) => {
+                const converted = markdown(value);
+                return converted ? [converted] : [];
+              }),
             };
           },
         }),

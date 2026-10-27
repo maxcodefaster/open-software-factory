@@ -7,6 +7,7 @@ import { connectOpenCodeSources } from "../../apps/factory/src/agent/opencode-br
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { observe, pinnedOpenCode } from "../fixtures/pinned-opencode";
+import { fixtureValue } from "../fixtures/value";
 
 test("native OpenCode searches and reads actual Factory Project sources without a second agent", async () => {
   const f = await fixture();
@@ -161,7 +162,7 @@ test("native OpenCode searches and reads actual Factory Project sources without 
       resume: true,
     });
     await observe(
-      () => native!.client.message.list({ sessionID, limit: 50 }),
+      () => fixtureValue(native, "native").client.message.list({ sessionID, limit: 50 }),
       (page) =>
         calls.length === 2 &&
         catalogues.length >= 3 &&
@@ -191,7 +192,8 @@ test("native OpenCode searches and reads actual Factory Project sources without 
       resume: true,
     });
     await observe(
-      () => native!.client.message.list({ sessionID: reviewerID, limit: 50 }),
+      () =>
+        fixtureValue(native, "native").client.message.list({ sessionID: reviewerID, limit: 50 }),
       (page) =>
         catalogues.length > beforeReview &&
         page.data.some(

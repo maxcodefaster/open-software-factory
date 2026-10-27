@@ -6,6 +6,7 @@ import {
   interviewQuestionInput,
   normalizeInterviewAnswer,
 } from "./conversation";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 test("agent execution commands require caller-owned identity", () => {
   expect(conversationMessageInput.safeParse({ text: "Investigate" }).success).toBe(false);
@@ -89,7 +90,10 @@ describe("Requirements Interview answers", () => {
       ).toThrow("unique");
       const valid = {
         ...duplicate,
-        options: [duplicate.options[0]!, { ...duplicate.options[1]!, id: "edit" }],
+        options: [
+          fixtureValue(duplicate.options[0], "duplicate.options[0]"),
+          { ...fixtureValue(duplicate.options[1], "duplicate.options[1]"), id: "edit" },
+        ],
       };
       expect(
         normalizeInterviewAnswer(valid, { selectedOptionIds: ["access"], customText: "" }).labels,

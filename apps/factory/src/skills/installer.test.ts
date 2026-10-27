@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { nativeSkillManifest } from "./native";
 import { requirementsInterviewSkill } from "./reviewed";
 import { installSkills } from "../../../../deploy/opencode-server/install-skills.mjs";
+import { fixtureValue } from "../../../../test/fixtures/value";
 
 test("native installer is idempotent, refuses replacement, corruption, missing metadata and symlinks", async () => {
   const own = await mkdtemp(join(tmpdir(), "factory-skills-proof-"));
@@ -20,7 +21,7 @@ test("native installer is idempotent, refuses replacement, corruption, missing m
   try {
     await installSkills(manifest, root);
     await installSkills(manifest, root);
-    const target = join(root, manifest.files[0]!.path);
+    const target = join(root, fixtureValue(manifest.files[0], "manifest.files[0]").path);
     expect(await readFile(target, "utf8")).toContain(requirementsInterviewSkill.instructions);
     await expect(installSkills(nativeSkillManifest([]), root)).rejects.toThrow("another");
     await chmod(target, 0o644);
