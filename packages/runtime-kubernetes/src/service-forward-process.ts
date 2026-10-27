@@ -4,8 +4,9 @@ import { serviceForwardTimeoutMS } from "./service-forward";
 export async function runServiceForward(role: "source" | "editor", args: readonly string[]) {
   const [namespace, podName] = args;
   const namespacePattern =
-    role === "source" ? /^factory-workspace-[a-f0-9]{12}$/ : /^factory-editor-[a-f0-9]{32}$/;
-  const podPattern = role === "source" ? /^source-[1-9][0-9]*$/ : /^editor-[1-9][0-9]*$/;
+    role === "source" ? /^factory-box-[a-f0-9]{32}$/ : /^factory-editor-[a-f0-9]{32}$/;
+  const podPattern =
+    role === "source" ? /^source-[a-f0-9]{32}-[1-9][0-9]*$/ : /^editor-[1-9][0-9]*$/;
   if (
     !process.send ||
     !namespace ||
