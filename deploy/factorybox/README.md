@@ -16,8 +16,9 @@ An image built in the developer's Docker daemon is not automatically available t
 
 Stop existing Envbox executions before changing the installation profile. Existing unused reserve
 slots retire when their frozen profile differs. Never adopt a used Envbox execution as Factorybox
-or overwrite its immutable runtime artifacts. The default reserve target remains zero; set
-`executionReserveTarget` only after qualifying the target node, CNI and StorageClass.
+or overwrite its immutable runtime artifacts. The default `executionReserveTarget` is two unused
+paused Forks, not a limit of two running Sandboxes. Qualify the target node, CNI and StorageClass
+before admitting its worker.
 
 Pause/Resume retains RAM on the same live worker. A worker restart or node loss retains canonical
 source but requires an explicit fresh execution; automatic cross-node RAM recovery is unsupported.

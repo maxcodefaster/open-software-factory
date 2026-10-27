@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test } from "bun:test";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
@@ -39,6 +39,13 @@ const performanceEnabled = process.env["FACTORY_CHECK_SLICE20_STARTUP_TARGETS"] 
 const enabled =
   process.env["FACTORY_RUN_SOURCE_COMPUTE_PROOF"] === "1" || prebuildEnabled || idleEnabled;
 const sourceFile = z.object({ content: z.string(), version: z.string() });
+const cleanupTasks: Array<() => Promise<void>> = [];
+// Keep cold setup and idle observations separate from teardown. Every cleanup
+// assertion still runs and failures still fail this file. Lifecycle command
+// bounds and the original body timeout remain unchanged.
+afterAll(async () => {
+  for (const cleanup of cleanupTasks) await cleanup();
+}, 420_000);
 
 test.skipIf(!enabled)(
   ideEnabled
@@ -152,7 +159,9 @@ test.skipIf(!enabled)(
         },
         (current) => current.state === "ready",
         "Owned compute was not ready",
-        300_000,
+        // Observe the existing seven-minute lifecycle bound, including cold
+        // worker storage and image initialization. This does not retry Start.
+        420_000,
       );
     const stopCompute = async (attemptID: string) => {
       expect(
@@ -857,55 +866,57 @@ test.skipIf(!enabled)(
       throw cause;
     } finally {
       terminal?.close();
-      try {
-        await ide?.close();
-        if (editorUserID) await stopAutomaticIDE(fixture, editorUserID, cookie, artifacts);
-        const attempts = await database.client<
-          Array<{ id: string; state: string }>
-        >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${projectID}`;
-        for (const attempt of attempts)
-          if (attempt.state !== "stopped") await stopCompute(attempt.id);
-        if (workspaceID) {
-          expect(
-            await callFactoryFunction(fixture.base, "stopWorkspaceSource", [workspaceID], {
-              cookie: cookie,
-            }),
-          ).toMatchObject({ ok: true });
-          await eventually(
-            async () =>
-              sourceWorkspaceViewSchema.parse(
-                await serverCall(
-                  callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
-                    cookie: cookie,
-                  }),
+      cleanupTasks.push(async () => {
+        try {
+          await ide?.close();
+          if (editorUserID) await stopAutomaticIDE(fixture, editorUserID, cookie, artifacts);
+          const attempts = await database.client<
+            Array<{ id: string; state: string }>
+          >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${projectID}`;
+          for (const attempt of attempts)
+            if (attempt.state !== "stopped") await stopCompute(attempt.id);
+          if (workspaceID) {
+            expect(
+              await callFactoryFunction(fixture.base, "stopWorkspaceSource", [workspaceID], {
+                cookie: cookie,
+              }),
+            ).toMatchObject({ ok: true });
+            await eventually(
+              async () =>
+                sourceWorkspaceViewSchema.parse(
+                  await serverCall(
+                    callFactoryFunction(fixture.base, "getWorkspaceSource", [workspaceID], {
+                      cookie: cookie,
+                    }),
+                  ),
                 ),
-              ),
-            (current) => current.state === "stopped",
-            "Source Stop incomplete",
-            40_000,
+              (current) => current.state === "stopped",
+              "Source Stop incomplete",
+              40_000,
+            );
+          }
+          await removeOwnedFactoryboxFixture(fixture, artifacts);
+          const after = await editorFixtureNamespaces();
+          expect(
+            before.every((item) =>
+              after.some((current) => current.name === item.name && current.uid === item.uid),
+            ),
+          ).toBe(true);
+          await writeFile(
+            resolve(artifacts, "cleanup.json"),
+            JSON.stringify({ ownedSharedWorkerRemoved: true, unrelatedNamespacesUnchanged: true }),
           );
+          cleaned = true;
+        } finally {
+          await database.client.end({ timeout: 2 });
+          if (cleaned) {
+            await fixture.dispose();
+            await forgeHost.dispose();
+          } else {
+            await fixture.pause();
+          }
         }
-        await removeOwnedFactoryboxFixture(fixture, artifacts);
-        const after = await editorFixtureNamespaces();
-        expect(
-          before.every((item) =>
-            after.some((current) => current.name === item.name && current.uid === item.uid),
-          ),
-        ).toBe(true);
-        await writeFile(
-          resolve(artifacts, "cleanup.json"),
-          JSON.stringify({ ownedSharedWorkerRemoved: true, unrelatedNamespacesUnchanged: true }),
-        );
-        cleaned = true;
-      } finally {
-        await database.client.end({ timeout: 2 });
-        if (cleaned) {
-          await fixture.dispose();
-          await forgeHost.dispose();
-        } else {
-          await fixture.pause();
-        }
-      }
+      });
     }
   },
   840_000,
