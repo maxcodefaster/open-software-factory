@@ -77,6 +77,9 @@ export function createExecutionReserve(
           if (planned.state === "retiring") {
             await adapter.retire(planned, {
               intendDelete: () => store.intendDelete(sql, planned.id),
+              intendRetirement: (request) => store.intendRetirement(sql, planned.id, request),
+              completeRetirement: (observation) =>
+                store.completeRetirement(sql, planned.id, observation),
             });
             await store.retired(sql, planned.id);
             requested = true;
@@ -153,6 +156,8 @@ export function createExecutionReserve(
       return withSlotLock(slot.id, (sql) =>
         adapter.removeAssigned(slot, generation, {
           intendDelete: () => store.intendDelete(sql, slot.id),
+          intendRetirement: (request) => store.intendRetirement(sql, slot.id, request),
+          completeRetirement: (observation) => store.completeRetirement(sql, slot.id, observation),
         }),
       );
     },

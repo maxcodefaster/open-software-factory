@@ -209,6 +209,93 @@ test("expired unassigned slots retire before admission and cannot return to the 
   }
 }, 30_000);
 
+test("unused slot retirement persists its exact plan and immutable compact outcome across recovery", async () => {
+  const processFixture = await factoryProcess(),
+    database = processFixture.connect();
+  const store = createReserveStore({ ...defaultReservePolicy, readyPerRole: 0 }, images, profile);
+  const id = crypto.randomUUID();
+  try {
+    await database.client`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,expires_at)
+      VALUES(${id},'staging','creating',${images.staging},now()+interval '10 minutes')`;
+    await store.observe(database.client, id, {
+      namespaceUID: "owned-ns",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      ready: false,
+      factoryboxIdentity: { epoch: "owned" },
+      factoryboxPreparation: { bundle: "owned" },
+    });
+    expect(await store.intendStart(database.client, id)).toBe(true);
+    await store.retire(database.client, id);
+    const request = {
+      version: 1,
+      storeID: "a".repeat(32),
+      epoch: "b".repeat(32),
+      sandboxID: `runtime-${id.replaceAll("-", "")}`,
+      checkpoints: [],
+      resumes: [],
+      backing: {
+        sandbox_id: `runtime-${id.replaceAll("-", "")}`,
+        sandbox_owner: "c".repeat(32),
+        input_sha256: "d".repeat(64),
+      },
+    };
+    const observation = {
+      version: 1,
+      request,
+      receipts: [
+        { action: "retire-sandbox", intentSHA256: "e".repeat(64), completedAt: "completed" },
+      ],
+    };
+    await expect(store.completeRetirement(database.client, id, observation)).rejects.toThrow(
+      "original request",
+    );
+    await store.intendRetirement(database.client, id, request);
+    const recovered = createReserveStore(
+      { ...defaultReservePolicy, readyPerRole: 0 },
+      images,
+      profile,
+    );
+    await recovered.intendRetirement(database.client, id, request);
+    await expect(
+      recovered.intendRetirement(database.client, id, { ...request, epoch: "f".repeat(32) }),
+    ).rejects.toThrow("original request");
+    const [intended] = await database.client<Array<{ request: unknown; outcome: unknown }>>`
+      SELECT factorybox_retirement_request AS request,factorybox_retirement_observation AS outcome FROM factory.execution_slot WHERE id=${id}`;
+    expect(intended).toEqual({ request, outcome: null });
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.execution_slot SET factorybox_retirement_request='{}'::jsonb WHERE id=${id}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await expect(
+      recovered.completeRetirement(database.client, id, {
+        ...observation,
+        request: { ...request, epoch: "f".repeat(32) },
+      }),
+    ).rejects.toThrow("original request");
+    await recovered.completeRetirement(database.client, id, observation);
+    await recovered.completeRetirement(database.client, id, observation);
+    await expect(
+      recovered.completeRetirement(database.client, id, { ...observation, receipts: [] }),
+    ).rejects.toThrow("outcome");
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.execution_slot SET factorybox_retirement_observation=NULL WHERE id=${id}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await recovered.retired(database.client, id);
+    const [retired] = await database.client<
+      Array<{ state: string; request: unknown; observation: unknown }>
+    >`
+      SELECT state,factorybox_retirement_request AS request,factorybox_retirement_observation AS observation FROM factory.execution_slot WHERE id=${id}`;
+    expect(retired).toEqual({ state: "deleted", request, observation });
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await processFixture.dispose();
+  }
+}, 30_000);
+
 test("cold worker preparation keeps its lifecycle deadline without extending stale slots", async () => {
   const processFixture = await factoryProcess();
   const database = processFixture.connect();

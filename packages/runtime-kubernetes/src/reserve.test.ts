@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
 import { createKubernetesClient } from "./client";
 import { factoryboxAssignmentSecret, factoryboxLocation } from "./factorybox-location";
-import { factoryboxReserveBootstrapProgram } from "./factorybox-runtime";
+import { factoryboxReserveBootstrapProgram, factoryboxSandboxID } from "./factorybox-runtime";
+import type { FactoryboxWorkerIdentity } from "./factorybox-worker";
 import {
   createReserveClient,
   renderReserveResources,
@@ -189,7 +190,10 @@ test("assigned replay allows only the exact activation keys under its durable ow
   expect(validate).toThrow("changed credentials");
 });
 
-function cleanupFixture(change?: (actual: ReturnType<typeof observations>) => void) {
+function cleanupFixture(
+  change?: (actual: ReturnType<typeof observations>) => void,
+  native?: Parameters<typeof createReserveClient>[2],
+) {
   const actual = observations();
   const observed = validateReserveObservation(
     slot,
@@ -225,6 +229,7 @@ function cleanupFixture(change?: (actual: ReturnType<typeof observations>) => vo
         throw new Error("Cleanup must preserve the Factory Namespace");
       },
     },
+    native,
   );
   return {
     adapter,
@@ -238,6 +243,243 @@ function cleanupFixture(change?: (actual: ReturnType<typeof observations>) => vo
     },
   };
 }
+
+test("unused paused slot retirement releases checkpoint and private backing before deleting its assignment", async () => {
+  const sandboxID = factoryboxSandboxID(slot.id);
+  const root = `/var/lib/sysbox/fixed-store/data/store/epochs/${"d".repeat(32)}/controller`;
+  const record = {
+    version: 1,
+    id: sandboxID,
+    owner: "a".repeat(32),
+    input_sha256: "b".repeat(64),
+    phase: "paused",
+    start: { completed_at: "started" },
+    pause: {
+      snapshot_id: "e".repeat(32),
+      checkpoint_sha256: "c".repeat(64),
+      completed_at: "paused",
+    },
+    delete: undefined as { attempted: boolean; completed_at: string } | undefined,
+  };
+  const actions: string[] = [];
+  let retained: unknown, completed: unknown;
+  const fixture = cleanupFixture(undefined, {
+    async retired() {
+      return false;
+    },
+    async release() {
+      actions.push("release");
+      return { version: 1, released: true };
+    },
+    async execute(_request, _identity, operation) {
+      actions.push(operation.action);
+      if (operation.action === "delete") {
+        record.phase = "deleted";
+        record.delete = { attempted: true, completed_at: "deleted" };
+      }
+      if (operation.action === "retire-checkpoint" || operation.action === "retire-sandbox") {
+        expect(retained).toBeDefined();
+        return {
+          confirmed: true,
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({
+            version: 1,
+            ...(operation.action === "retire-sandbox" ? { payload_kind: "sandbox-backing" } : {}),
+            request:
+              operation.action === "retire-sandbox"
+                ? {
+                    sandbox_id: sandboxID,
+                    sandbox_owner: record.owner,
+                    input_sha256: record.input_sha256,
+                  }
+                : {
+                    source_id: sandboxID,
+                    source_owner: record.owner,
+                    snapshot_id: record.pause.snapshot_id,
+                    checkpoint_sha256: record.pause.checkpoint_sha256,
+                  },
+            intent_sha256: "f".repeat(64),
+            completed_at: "retired",
+            before: { root, filesystem_available_bytes: 1024 },
+            after: { root, filesystem_available_bytes: 2048 },
+          }),
+        };
+      }
+      return { confirmed: true, exitCode: 0, stderr: "", stdout: JSON.stringify({ record }) };
+    },
+  });
+  const identity: FactoryboxWorkerIdentity = {
+    version: 1,
+    namespaceUID: fixture.slot.namespaceUID!,
+    podUID: fixture.slot.podUID!,
+    claimUID: fixture.slot.claimUID!,
+    storeID: slot.workerID.replaceAll("-", ""),
+    epoch: "d".repeat(32),
+    bootID: "boot",
+    nodeBootID: "node-boot",
+    executableSHA256: "3".repeat(64),
+    controllerRoot: root,
+  };
+  const callbacks = {
+    async intendDelete() {
+      return true;
+    },
+    async intendRetirement(value: unknown) {
+      expect(record.phase).toBe("deleted");
+      retained = value;
+    },
+    async completeRetirement(value: unknown) {
+      completed = value;
+    },
+  };
+  await fixture.adapter.retire(
+    {
+      ...fixture.slot,
+      state: "retiring",
+      factoryboxIdentity: identity,
+      factoryboxPreparation: {},
+      factoryboxStartAttempted: true,
+    },
+    callbacks,
+  );
+  expect(actions).toEqual(["state", "delete", "retire-checkpoint", "release", "retire-sandbox"]);
+  expect(completed).toBeDefined();
+  expect(fixture.deleted).toEqual([factoryboxAssignmentSecret(slot.id)]);
+});
+
+test.each(["delete", "retire-checkpoint", "retire-resume", "retire-sandbox"] as const)(
+  "slot cleanup observes lost %s output and continues only its original retirement request",
+  async (lostAction) => {
+    const sandboxID = factoryboxSandboxID(slot.id),
+      owner = "a".repeat(32);
+    const root = `/var/lib/sysbox/fixed-store/data/store/epochs/${"d".repeat(32)}/controller`;
+    const pause = {
+      snapshot_id: "e".repeat(32),
+      checkpoint_sha256: "c".repeat(64),
+      completed_at: "paused",
+      resume: { completed_at: "resumed" },
+    };
+    const record = {
+      version: 1,
+      id: sandboxID,
+      owner,
+      input_sha256: "b".repeat(64),
+      phase: "running",
+      start: { completed_at: "started" },
+      pause,
+      delete: undefined as { attempted: true; completed_at: string } | undefined,
+    };
+    const actions: string[] = [],
+      requests: unknown[] = [];
+    let lost = false,
+      journal: unknown,
+      outcome: unknown,
+      deleteIntended = false;
+    const fixture = cleanupFixture(undefined, {
+      async retired() {
+        return false;
+      },
+      async release() {
+        actions.push("release");
+        return { version: 1, released: true };
+      },
+      async execute(_request, _identity, operation) {
+        actions.push(operation.action);
+        if (operation.action === "delete") {
+          expect(deleteIntended).toBe(true);
+          record.phase = "deleted";
+          record.delete = { attempted: true, completed_at: "deleted" };
+        }
+        if (operation.action !== "state" && operation.action === lostAction && !lost) {
+          lost = true;
+          return {
+            confirmed: false,
+            exitCode: 1,
+            stdout: "",
+            stderr: "reply lost after native completion",
+          };
+        }
+        if (
+          operation.action === "retire-checkpoint" ||
+          operation.action === "retire-resume" ||
+          operation.action === "retire-sandbox"
+        ) {
+          expect(journal).toBeDefined();
+          requests.push(operation);
+          const backing = operation.action === "retire-sandbox";
+          return {
+            confirmed: true,
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              version: 1,
+              ...(backing
+                ? { payload_kind: "sandbox-backing" }
+                : operation.action === "retire-resume"
+                  ? { payload_kind: "resume-images" }
+                  : {}),
+              request: backing
+                ? { sandbox_id: sandboxID, sandbox_owner: owner, input_sha256: record.input_sha256 }
+                : {
+                    source_id: sandboxID,
+                    source_owner: owner,
+                    snapshot_id: pause.snapshot_id,
+                    checkpoint_sha256: pause.checkpoint_sha256,
+                  },
+              intent_sha256: "f".repeat(64),
+              completed_at: "retired",
+              before: { root, filesystem_available_bytes: 1024 },
+              after: { root, filesystem_available_bytes: 2048 },
+            }),
+          };
+        }
+        return { confirmed: true, exitCode: 0, stderr: "", stdout: JSON.stringify({ record }) };
+      },
+    });
+    const identity: FactoryboxWorkerIdentity = {
+      version: 1,
+      namespaceUID: fixture.slot.namespaceUID!,
+      podUID: fixture.slot.podUID!,
+      claimUID: fixture.slot.claimUID!,
+      storeID: slot.workerID.replaceAll("-", ""),
+      epoch: "d".repeat(32),
+      bootID: "boot",
+      nodeBootID: "node-boot",
+      executableSHA256: "3".repeat(64),
+      controllerRoot: root,
+    };
+    const owned: ExecutionSlot = {
+      ...fixture.slot,
+      state: "retiring",
+      factoryboxIdentity: identity,
+      factoryboxPreparation: {},
+      factoryboxStartAttempted: true,
+    };
+    const callbacks = {
+      async intendDelete() {
+        if (deleteIntended) return false;
+        deleteIntended = true;
+        return true;
+      },
+      async intendRetirement(value: unknown) {
+        if (journal !== undefined) expect(value).toEqual(journal);
+        journal = value;
+      },
+      async completeRetirement(value: unknown) {
+        outcome = value;
+      },
+    };
+    await expect(fixture.adapter.retire(owned, callbacks)).rejects.toThrow("unconfirmed");
+    expect(outcome).toBeUndefined();
+    expect(fixture.deleted).toEqual([]);
+    await fixture.adapter.retire({ ...owned, factoryboxDeleteAttempted: true }, callbacks);
+    expect(actions.filter((action) => action === "delete")).toHaveLength(1);
+    expect(outcome).toBeDefined();
+    expect(fixture.deleted).toEqual([factoryboxAssignmentSecret(slot.id)]);
+    for (const request of requests) expect(request).toMatchObject({ sandboxID });
+  },
+);
 
 test("retiring an unused slot deletes only its private assignment and preserves the shared worker", async () => {
   const fixture = cleanupFixture();

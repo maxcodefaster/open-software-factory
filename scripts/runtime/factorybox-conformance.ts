@@ -6,6 +6,7 @@ import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config"
 import {
   factoryboxAssignmentSecret,
   factoryboxLocation,
+  factoryboxSharedLabels,
 } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import {
   createFactoryboxMetrics,
@@ -61,7 +62,11 @@ export function conformanceResources(
     {
       apiVersion: "v1",
       kind: "Secret",
-      metadata: { name: "registry-ca", namespace: input.namespace },
+      metadata: {
+        name: "registry-ca",
+        namespace: input.namespace,
+        labels: factoryboxSharedLabels(input.workerID),
+      },
       stringData: { "ca.crt": certificate },
     },
     {

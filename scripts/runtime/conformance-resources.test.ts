@@ -35,6 +35,14 @@ test.each(["arm64", "amd64"] as const)(
     expect(
       resources.items.every((resource) => resource.metadata.labels[conformanceLabel] === owner),
     ).toBe(true);
+    expect(
+      resources.items.find(
+        (resource) => resource.kind === "Secret" && resource.metadata.name === "registry-ca",
+      )?.metadata.labels,
+    ).toMatchObject({
+      "factory.dev/factorybox-worker": owner,
+      "factory.dev/shared-resource": "true",
+    });
     const assignment = resources.items.find(
       (resource) => resource.kind === "Secret" && resource.metadata.name.startsWith("assignment-"),
     );

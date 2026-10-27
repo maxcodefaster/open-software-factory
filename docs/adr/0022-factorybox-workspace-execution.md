@@ -135,6 +135,13 @@ entries remain deletion guards. The shared worker and canonical Source claim are
 to reclaim one Sandbox. Incomplete preparation and unresolved native outcomes remain retained
 for inspection.
 
+Unassigned slots retain their own immutable retirement plan and compact completion on the
+execution slot, because they have no Runtime Attempt. Confirmed native Delete makes their
+unused Pause eligible for checkpoint retirement, followed by exact input mount release and
+private backing retirement. A lost retirement reply keeps the assignment Secret and slot
+pending; reconciliation continues the same native inventories without repeating Delete.
+The same rule applies when an assigned slot's original native owner is cleaned up.
+
 Native runtime evidence on one Linux profile establishes only that profile. Before installation,
 admit the actual cluster's node, kernel, CNI and storage with the pinned worker. A provider-neutral
 manifest does not prove support for every Kubernetes cluster, cross-node RAM migration or recovery

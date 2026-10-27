@@ -10,6 +10,13 @@ import {
   factoryboxSharedLabels,
 } from "./factorybox-location";
 import {
+  factoryboxBackingRequest,
+  factoryboxObsoleteCheckpoints,
+  factoryboxObsoleteResumeImages,
+  readFactoryboxBackingRetirement,
+  readFactoryboxCheckpointRetirement,
+} from "./factorybox-retention";
+import {
   type FactoryboxRuntimeInput,
   factoryboxOriginalWorkerRetired,
   factoryboxRuntimeDeclaration,
@@ -44,6 +51,8 @@ interface StandbyIntent {
 }
 interface DeleteIntent {
   intendDelete(): Promise<boolean>;
+  intendRetirement(request: unknown): Promise<void>;
+  completeRetirement(observation: unknown): Promise<void>;
 }
 export interface ReserveClient {
   prepare(
@@ -400,6 +409,11 @@ sys.exit(result.returncode)
 export function createReserveClient(
   run: typeof command = command,
   kubernetes = createKubernetesClient(),
+  native = {
+    execute: executeFactoryboxOperation,
+    release: releaseFactoryboxRuntime,
+    retired: factoryboxOriginalWorkerRetired,
+  },
 ): ReserveClient {
   async function read(slot: ExecutionSlot) {
     const resources: ObservedObject[] = [];
@@ -433,9 +447,9 @@ export function createReserveClient(
     if (pod.metadata.uid !== identity.podUID)
       throw new Error("Execution slot worker UID changed before native cleanup");
     const input = factoryboxReserveInput(slot);
-    if (await factoryboxOriginalWorkerRetired(input, identity)) return;
+    if (await native.retired(input, identity)) return;
     if (slot.factoryboxStartAttempted) {
-      const observation = await executeFactoryboxOperation(
+      const observation = await native.execute(
         factoryboxRuntimeRequest(input),
         identity,
         { action: "state", sandboxID: input.sandboxID },
@@ -443,13 +457,13 @@ export function createReserveClient(
         factoryboxRuntimeDeclaration(input),
       );
       if (!observation.confirmed) throw new Error("Execution slot native state is unconfirmed");
-      const state = z
-        .object({ record: z.object({ phase: z.string() }) })
+      let state = z
+        .object({ record: z.object({ phase: z.string() }).passthrough() })
         .parse(JSON.parse(observation.stdout));
       if (state.record.phase !== "deleted") {
         if (slot.factoryboxDeleteAttempted || !options || !(await options.intendDelete()))
           throw new Error("Execution slot Delete is unconfirmed; observe its original outcome");
-        const result = await executeFactoryboxOperation(
+        const result = await native.execute(
           factoryboxRuntimeRequest(input),
           identity,
           { action: "delete", sandboxID: input.sandboxID },
@@ -457,9 +471,112 @@ export function createReserveClient(
           factoryboxRuntimeDeclaration(input),
         );
         if (!result.confirmed) throw new Error("Execution slot native Delete is unconfirmed");
+        state = z
+          .object({ record: z.object({ phase: z.literal("deleted") }).passthrough() })
+          .parse(JSON.parse(result.stdout));
       }
+      const deleted = z
+        .object({
+          id: z.literal(input.sandboxID),
+          owner: z.string().regex(/^[a-f0-9]{32}$/),
+          phase: z.literal("deleted"),
+          input_sha256: z.string(),
+          start: z.object({ completed_at: z.string().min(1) }),
+          delete: z
+            .object({
+              attempted: z.literal(true),
+              completed_at: z.string().min(1),
+              error: z.string().optional(),
+            })
+            .refine((value) => !value.error, "Native Delete did not complete successfully"),
+        })
+        .parse(state.record);
+      if (!options) throw new Error("Execution slot retirement requires durable request ownership");
+      const checkpoints = factoryboxObsoleteCheckpoints(input.sandboxID, state.record);
+      const resumes = factoryboxObsoleteResumeImages(input.sandboxID, state.record);
+      const backing = factoryboxBackingRequest.parse({
+        sandbox_id: input.sandboxID,
+        sandbox_owner: deleted.owner,
+        input_sha256: deleted.input_sha256,
+      });
+      const request = {
+        version: 1,
+        storeID: identity.storeID,
+        epoch: identity.epoch,
+        sandboxID: input.sandboxID,
+        checkpoints,
+        resumes,
+        backing,
+      };
+      await options.intendRetirement(request);
+      const receipts = [];
+      for (const [action, generations] of [
+        ["retire-checkpoint", checkpoints],
+        ["retire-resume", resumes],
+      ] as const) {
+        for (const generation of generations) {
+          const result = await native.execute(
+            factoryboxRuntimeRequest(input),
+            identity,
+            {
+              action,
+              sandboxID: input.sandboxID,
+              snapshotID: generation.snapshot_id,
+              sourceOwner: generation.source_owner,
+              checkpointSHA256: generation.checkpoint_sha256,
+            },
+            runFactoryboxKubernetes,
+            factoryboxRuntimeDeclaration(input),
+          );
+          if (!result.confirmed) throw new Error(`Execution slot ${action} remains unconfirmed`);
+          const receipt = readFactoryboxCheckpointRetirement(
+            generation,
+            identity.controllerRoot,
+            JSON.parse(result.stdout),
+            action === "retire-resume" ? "resume-images" : undefined,
+          );
+          receipts.push({
+            action,
+            request: generation,
+            intentSHA256: receipt.intent_sha256,
+            completedAt: receipt.completed_at,
+            availableBytesBefore: receipt.before.filesystem_available_bytes,
+            availableBytesAfter: receipt.after.filesystem_available_bytes,
+          });
+        }
+      }
+      await native.release(input, identity, false);
+      const result = await native.execute(
+        factoryboxRuntimeRequest(input),
+        identity,
+        {
+          action: "retire-sandbox",
+          sandboxID: input.sandboxID,
+          sandboxOwner: backing.sandbox_owner,
+          inputSHA256: backing.input_sha256,
+        },
+        runFactoryboxKubernetes,
+        factoryboxRuntimeDeclaration(input),
+      );
+      if (!result.confirmed)
+        throw new Error("Execution slot private backing retirement remains unconfirmed");
+      const receipt = readFactoryboxBackingRetirement(
+        backing,
+        identity.controllerRoot,
+        JSON.parse(result.stdout),
+      );
+      receipts.push({
+        action: "retire-sandbox",
+        request: backing,
+        intentSHA256: receipt.intent_sha256,
+        completedAt: receipt.completed_at,
+        availableBytesBefore: receipt.before.filesystem_available_bytes,
+        availableBytesAfter: receipt.after.filesystem_available_bytes,
+      });
+      await options.completeRetirement({ version: 1, request, receipts });
+      return;
     }
-    await releaseFactoryboxRuntime(input, identity, !slot.factoryboxStartAttempted);
+    await native.release(input, identity, true);
   }
   async function cleanup(slot: ExecutionSlot, options?: DeleteIntent) {
     if (slot.namespace !== factoryboxLocation(slot.workerID).namespace)

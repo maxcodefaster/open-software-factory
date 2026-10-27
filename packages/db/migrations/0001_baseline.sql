@@ -936,6 +936,10 @@ BEGIN
     OR (OLD.factorybox_delete_attempted AND NOT NEW.factorybox_delete_attempted) THEN
     RAISE EXCEPTION 'Factorybox execution slot artifacts and admitted identity are immutable';
   END IF;
+  IF (OLD.factorybox_retirement_request IS NOT NULL AND NEW.factorybox_retirement_request IS DISTINCT FROM OLD.factorybox_retirement_request)
+    OR (OLD.factorybox_retirement_observation IS NOT NULL AND NEW.factorybox_retirement_observation IS DISTINCT FROM OLD.factorybox_retirement_observation) THEN
+    RAISE EXCEPTION 'Factorybox slot retirement request and completed observation are immutable';
+  END IF;
   RETURN NEW;
 END $$;
 
@@ -2104,6 +2108,13 @@ CREATE TABLE factory.execution_slot (
     factorybox_pause_attempted boolean DEFAULT false NOT NULL,
     factorybox_resume_attempted boolean DEFAULT false NOT NULL,
     factorybox_delete_attempted boolean DEFAULT false NOT NULL,
+    factorybox_retirement_request jsonb,
+    factorybox_retirement_observation jsonb,
+    CONSTRAINT execution_slot_retirement_request_check CHECK ((factorybox_retirement_request IS NULL) OR
+      ((jsonb_typeof(factorybox_retirement_request)='object') AND (state IN ('retiring','assigned','deleted')) AND factorybox_start_attempted)),
+    CONSTRAINT execution_slot_retirement_observation_check CHECK ((factorybox_retirement_observation IS NULL) OR
+      ((jsonb_typeof(factorybox_retirement_observation)='object') AND
+       (factorybox_retirement_observation->'request') IS NOT DISTINCT FROM factorybox_retirement_request AND factorybox_retirement_request IS NOT NULL)),
     CONSTRAINT execution_slot_check CHECK (((assigned_attempt_id IS NULL) = (assigned_at IS NULL))),
     CONSTRAINT execution_slot_check1 CHECK (((state <> 'assigned'::text) OR (assigned_attempt_id IS NOT NULL))),
     CONSTRAINT execution_slot_check2 CHECK (((state <> 'ready'::text) OR ((namespace_uid IS NOT NULL) AND (pod_uid IS NOT NULL) AND (claim_uid IS NOT NULL)))),

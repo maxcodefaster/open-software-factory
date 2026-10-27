@@ -179,6 +179,26 @@ export function createReserveStore(
         WHERE id=${id} AND state IN ('retiring','assigned') AND NOT factorybox_delete_attempted`;
       return result.count === 1;
     },
+    async intendRetirement(sql: SQL, id: string, request: unknown) {
+      const result = await sql`UPDATE factory.execution_slot
+        SET factorybox_retirement_request=coalesce(factorybox_retirement_request,${JSON.stringify(request)}::text::jsonb)
+        WHERE id=${id} AND state IN ('retiring','assigned') AND factorybox_start_attempted
+        AND (factorybox_retirement_request IS NULL OR factorybox_retirement_request=${JSON.stringify(request)}::text::jsonb)`;
+      if (result.count !== 1)
+        throw new Error("Execution slot retirement differs from its durable original request");
+    },
+    async completeRetirement(sql: SQL, id: string, observation: unknown) {
+      const result = await sql`UPDATE factory.execution_slot
+        SET factorybox_retirement_observation=coalesce(factorybox_retirement_observation,${JSON.stringify(observation)}::text::jsonb)
+        WHERE id=${id} AND state IN ('retiring','assigned')
+        AND factorybox_retirement_request IS NOT NULL
+        AND factorybox_retirement_request=${JSON.stringify(observation)}::text::jsonb->'request'
+        AND (factorybox_retirement_observation IS NULL OR factorybox_retirement_observation=${JSON.stringify(observation)}::text::jsonb)`;
+      if (result.count !== 1)
+        throw new Error(
+          "Execution slot retirement observation differs from its original request or outcome",
+        );
+    },
     async defer(sql: SQL, id: string) {
       await sql`UPDATE factory.execution_slot SET reconcile_after=now()+${policy.retryMS}*interval '1 millisecond'
         WHERE id=${id} AND state IN ('creating','retiring')`;
