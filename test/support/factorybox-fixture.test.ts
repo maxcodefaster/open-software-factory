@@ -220,3 +220,27 @@ test("fixture native exec refuses paused slots, foreign runtime owners and repla
     expect(f.calls.some((args) => args.includes("python3"))).toBe(false);
   }
 });
+
+test("fixture activation sends bounded private input on stdin, never in process arguments", async () => {
+  const f = fixture();
+  const payload = JSON.stringify({ token: "fresh-private-fixture-capability" });
+  let delivered: string | undefined;
+  const run: typeof runFactoryboxKubernetes = async (args, body, limits) => {
+    if (args.includes("python3")) delivered = body;
+    return f.run(args, body, limits);
+  };
+  await factoryboxFixtureCommand(f.target, ["sh", "-ec", "cat >/private"], 30_000, run, payload);
+  expect(delivered).toBe(payload);
+  const command = f.calls.at(-1);
+  expect(command?.slice(0, 3)).toEqual(["exec", "-i", "-n"]);
+  expect(command?.join(" ")).not.toContain("fresh-private-fixture-capability");
+  expect(command?.join(" ")).toContain("os.execv");
+});
+
+test("fixture rejects oversized private input before touching the worker", async () => {
+  const f = fixture();
+  await expect(
+    factoryboxFixtureCommand(f.target, ["cat"], 30_000, f.run, "x".repeat(1024 ** 2 + 1)),
+  ).rejects.toThrow("private input exceeds");
+  expect(f.calls).toEqual([]);
+});

@@ -165,9 +165,12 @@ export async function factoryboxFixtureCommand(
   args: string[],
   timeoutMS = 30_000,
   run = runFactoryboxKubernetes,
+  inputBody?: string,
 ) {
   if (!args.length || !Number.isInteger(timeoutMS) || timeoutMS < 1000 || timeoutMS > 300_000)
     throw new Error("Fixture Sandbox command is outside its bounds");
+  if (inputBody !== undefined && Buffer.byteLength(inputBody) > 1024 ** 2)
+    throw new Error("Fixture Sandbox private input exceeds its bound");
   const view = await observeFactoryboxFixture(target, run);
   if (view.record.phase !== "running" || view.runtime?.status !== "running")
     throw new Error("Fixture exec requires its running Sandbox, not a paused standby");
@@ -175,6 +178,7 @@ export async function factoryboxFixtureCommand(
   const result = await run(
     [
       "exec",
+      ...(inputBody === undefined ? [] : ["-i"]),
       "-n",
       input.namespace,
       input.podName,
@@ -193,7 +197,7 @@ export async function factoryboxFixtureCommand(
       }),
       ...args,
     ],
-    undefined,
+    inputBody,
     { timeoutMS, outputBytes: 4 * 1024 ** 2 },
   );
   if (result.exitCode !== 0)
