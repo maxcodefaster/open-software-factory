@@ -363,7 +363,7 @@ func handleParentOperation(ctx context.Context, assignment Assignment, message M
 		}
 	case "skills-install":
 		response.Error = errorText(installAdmittedSkills(ctx, assignment, message.Data))
-	case "git-prepare-commit", "git-observe-commit":
+	case "git-prepare-commit", "git-observe-commit", "git-prepare-integration":
 		commit, err := prepareCommit(ctx, assignment.WorkspaceFolder, message)
 		if err != nil {
 			response.Error = err.Error()
@@ -409,10 +409,17 @@ func prepareCommit(ctx context.Context, workspace string, message Message) (stri
 		return "", err
 	}
 	commitMessage := message.CommitMessage + "\n\nFactory-Operation: " + message.OperationID
+	expectedParents := message.ExpectedSHA
+	if message.MergeParentSHA != "" {
+		if !validCommitSHA(message.MergeParentSHA) || message.MergeParentSHA == message.ExpectedSHA {
+			return "", errors.New("integration parent is invalid")
+		}
+		expectedParents += " " + message.MergeParentSHA
+	}
 	if head != message.ExpectedSHA {
 		body, bodyErr := gitOutput(ctx, workspace, "show", "-s", "--format=%B", "HEAD")
 		parents, parentErr := gitOutput(ctx, workspace, "show", "-s", "--format=%P", "HEAD")
-		if bodyErr == nil && parentErr == nil && body == strings.TrimSpace(commitMessage) && parents == message.ExpectedSHA {
+		if bodyErr == nil && parentErr == nil && body == strings.TrimSpace(commitMessage) && parents == expectedParents {
 			return head, nil
 		}
 		return "", errors.New("workspace HEAD no longer matches the commit intent")
@@ -420,11 +427,48 @@ func prepareCommit(ctx context.Context, workspace string, message Message) (stri
 	if message.Action == "git-observe-commit" {
 		return "", errors.New("the exact prepared commit was not found; current files were not committed")
 	}
+	if message.Action == "git-prepare-integration" {
+		if message.MergeParentSHA == "" || message.RepositoryURL == "" {
+			return "", errors.New("integration intent is incomplete")
+		}
+		status, err := gitOutput(ctx, workspace, "status", "--porcelain")
+		if err != nil || status != "" {
+			return "", errors.New("integration requires a clean checkout")
+		}
+		if _, err := gitOutput(ctx, workspace, "rev-parse", "--verify", "MERGE_HEAD"); err == nil {
+			return "", errors.New("another integration is already in progress")
+		}
+		environment, cleanup, err := commitGitEnvironment(message)
+		if err != nil {
+			return "", err
+		}
+		defer cleanup()
+		if _, err := gitOutputWithEnv(ctx, workspace, environment, "fetch", "--no-tags", message.RepositoryURL, message.MergeParentSHA); err != nil {
+			return "", errors.New("integration source could not be fetched")
+		}
+		if _, err := gitOutput(ctx, workspace, "-c", "core.hooksPath=/dev/null",
+			"-c", "user.name="+message.AuthorName, "-c", "user.email="+message.AuthorEmail,
+			"merge", "--no-ff", "--no-commit", message.MergeParentSHA); err != nil {
+			unmerged, observationErr := gitOutput(ctx, workspace, "ls-files", "--unmerged")
+			if observationErr == nil && unmerged != "" {
+				return "", errors.New("integration has conflicts")
+			}
+			return "", errors.New("integration outcome is unconfirmed")
+		}
+	}
+	mergeHead, mergeErr := gitOutput(ctx, workspace, "rev-parse", "--verify", "MERGE_HEAD")
+	if message.MergeParentSHA != "" {
+		if mergeErr != nil || mergeHead != message.MergeParentSHA {
+			return "", errors.New("workspace merge no longer matches the integration intent")
+		}
+	} else if mergeErr == nil {
+		return "", errors.New("an ordinary commit cannot accept an unadmitted merge")
+	}
 	status, err := gitOutput(ctx, workspace, "status", "--porcelain")
 	if err != nil {
 		return "", err
 	}
-	if status == "" {
+	if status == "" && message.MergeParentSHA == "" {
 		return "", errors.New("workspace has no changes to commit")
 	}
 	if _, err := gitOutput(ctx, workspace, "add", "-A"); err != nil {
@@ -441,6 +485,45 @@ func prepareCommit(ctx context.Context, workspace string, message Message) (stri
 	return gitOutput(ctx, workspace, "rev-parse", "HEAD")
 }
 
+func validCommitSHA(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func commitGitEnvironment(message Message) ([]string, func(), error) {
+	environment := os.Environ()
+	if message.Username == "" && message.Password == "" {
+		return environment, func() {}, nil
+	}
+	askpass, err := os.CreateTemp("", "factory-git-askpass-*")
+	if err != nil {
+		return nil, nil, err
+	}
+	path := askpass.Name()
+	cleanup := func() { os.Remove(path) }
+	if _, err := askpass.WriteString("#!/bin/sh\ncase \"$1\" in *Username*) printf %s \"$FACTORY_GIT_USERNAME\";; *) printf %s \"$FACTORY_GIT_PASSWORD\";; esac\n"); err != nil {
+		askpass.Close()
+		cleanup()
+		return nil, nil, err
+	}
+	if err := askpass.Close(); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return append(environment, "GIT_ASKPASS="+path, "GIT_TERMINAL_PROMPT=0", "FACTORY_GIT_USERNAME="+message.Username, "FACTORY_GIT_PASSWORD="+message.Password), cleanup, nil
+}
+
 func pushCommit(ctx context.Context, workspace string, message Message) (string, error) {
 	if message.Branch == "" || message.ExpectedSHA == "" || message.CommitSHA == "" {
 		return "", errors.New("push operation is incomplete")
@@ -452,26 +535,11 @@ func pushCommit(ctx context.Context, workspace string, message Message) (string,
 	if head != message.CommitSHA {
 		return "", errors.New("workspace HEAD no longer matches the push intent")
 	}
-	environment := os.Environ()
-	if message.Username != "" || message.Password != "" {
-		askpass, err := os.CreateTemp("", "factory-git-askpass-*")
-		if err != nil {
-			return "", err
-		}
-		askpassPath := askpass.Name()
-		defer os.Remove(askpassPath)
-		if _, err := askpass.WriteString("#!/bin/sh\ncase \"$1\" in *Username*) printf %s \"$FACTORY_GIT_USERNAME\";; *) printf %s \"$FACTORY_GIT_PASSWORD\";; esac\n"); err != nil {
-			askpass.Close()
-			return "", err
-		}
-		if err := askpass.Close(); err != nil {
-			return "", err
-		}
-		if err := os.Chmod(askpassPath, 0700); err != nil {
-			return "", err
-		}
-		environment = append(environment, "GIT_ASKPASS="+askpassPath, "GIT_TERMINAL_PROMPT=0", "FACTORY_GIT_USERNAME="+message.Username, "FACTORY_GIT_PASSWORD="+message.Password)
+	environment, cleanup, err := commitGitEnvironment(message)
+	if err != nil {
+		return "", err
 	}
+	defer cleanup()
 	ref := "refs/heads/" + message.Branch
 	destination := message.RepositoryURL
 	if destination == "" {

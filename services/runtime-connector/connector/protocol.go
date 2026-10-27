@@ -41,6 +41,7 @@ type Message struct {
 	Action               string            `json:"action,omitempty"`
 	Branch               string            `json:"branch,omitempty"`
 	ExpectedSHA          string            `json:"expectedSha,omitempty"`
+	MergeParentSHA       string            `json:"mergeParentSha,omitempty"`
 	CommitSHA            string            `json:"commitSha,omitempty"`
 	RepositoryURL        string            `json:"repositoryURL,omitempty"`
 	RemoteSHA            string            `json:"remoteSha,omitempty"`
