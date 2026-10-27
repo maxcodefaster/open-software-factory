@@ -616,6 +616,10 @@ Integration lanes also build the client and Server Function handler before start
 Factory processes. Each lane uses its own build directory and removes it during cleanup;
 parallel proofs do not replace each other's assets or the source-development `dist`.
 Those handlers use the same application services as the installed Bun host.
+Playwright prepares one separate production build for direct browser runs and removes it
+afterward. A browser run nested in an integration proof reuses that proof's immutable build
+without rebuilding or deleting it. Isolated component journeys belong to `test:browser`;
+the controller lane does not launch duplicate browser-only wrappers.
 The owned desktop browser group shares one immutable build and one empty migrated PostgreSQL
 daemon per invocation. Every journey still owns its database, application process and Zero cache.
 Playwright's dependent teardown removes only that invocation's resources after the journeys finish.

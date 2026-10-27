@@ -33,9 +33,7 @@ const compiledProtocolTests = new Set([
   "server-function-settings.test.ts",
   "server-function-setup.test.ts",
   "server-function-skills.test.ts",
-  "server-function-ui-fixtures.test.ts",
   "server-function-mcp-inputs.test.ts",
-  "server-function-library-ui.test.ts",
   "server-function-writer-review.test.ts",
 ]);
 

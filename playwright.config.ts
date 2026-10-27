@@ -15,6 +15,7 @@ const ownedFactoryFiles = [
 process.env["FACTORY_BROWSER_RUN_ID"] ??= crypto.randomUUID();
 
 export default defineConfig({
+  globalSetup: "./test/fixtures/browser-build.ts",
   testDir: "test/browser",
   testMatch:
     lane === "ui"

@@ -47,10 +47,6 @@ test("owned UI hosts and compiled-function browser runners disable implicit work
     );
   }
   for (const file of [
-    "test/integration/server-function-attachments.test.ts",
-    "test/integration/server-function-library-ui.test.ts",
-    "test/integration/server-function-ui-fixtures.test.ts",
-    "test/integration/server-function-workspaces.test.ts",
     "test/integration/server-functions.test.ts",
     "test/integration/chat-factory-browser.test.ts",
   ]) {

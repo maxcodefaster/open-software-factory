@@ -33,17 +33,11 @@ test("compiled native protocol proofs do not acquire a database they never use",
   expect(controllerNeedsDatabase("test/integration/server-function-writer-review.test.ts")).toBe(
     false,
   );
-  expect(controllerNeedsDatabase("test/integration/server-function-library-ui.test.ts")).toBe(
-    false,
-  );
   expect(controllerNeedsDatabase("test/integration/server-function-mcp-inputs.test.ts")).toBe(
     false,
   );
   expect(controllerNeedsDatabase("test/integration/server-function-setup.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-skills.test.ts")).toBe(false);
-  expect(controllerNeedsDatabase("test/integration/server-function-ui-fixtures.test.ts")).toBe(
-    false,
-  );
   expect(controllerNeedsDatabase("test/integration/server-function-settings.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-access.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-functions.test.ts")).toBe(true);
