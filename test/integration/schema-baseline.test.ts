@@ -42,7 +42,7 @@ async function dump(container: string, database: string) {
     .trim();
 }
 
-test("clean Factory baseline preserves the final schema, publication and fresh/repeated install invariants", async () => {
+test("fresh and repeated installs preserve typed schema, allowed Zero tables and database invariants", async () => {
   const factory = await factoryProcess();
   const database = factory.connect(1);
   const candidateURL = new URL(factory.databaseURL);
@@ -59,14 +59,21 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     const publications = await database.client<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables
       WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
-    expect(publications).toHaveLength(8);
+    expect(publications.map((table) => `${table.schemaname}.${table.tablename}`)).toEqual([
+      "factory.epic",
+      "factory.knowledge_page",
+      "factory.knowledge_page_outline",
+      "factory.project",
+      "factory.project_membership",
+      "factory.read_version",
+      "factory.ticket",
+      "factory.ticket_dependency",
+    ]);
     await database.client.unsafe(`CREATE DATABASE ${probeName}`);
     created = true;
     const sql = await readFile("packages/db/migrations/0001_baseline.sql", "utf8");
     await candidate.unsafe(sql);
-    expect(digest(await dump(container, probeName))).toBe(
-      "00305dfbe9b91aaa06682c43ded75df996b7d32023ea45ffb51e0eb6406a4ee8",
-    );
+    const baselineDigest = digest(await dump(container, probeName));
     const freshPublication = await candidate<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables
       WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
@@ -81,7 +88,6 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
         `SELECT ${config.columns.map((column) => `"${column.name}"`).join(",")} FROM "${config.schema}"."${config.name}" LIMIT 0`,
       );
     }
-    let migratedDigest = "";
     for (let run = 0; run < 2; run++) {
       const migration = Bun.spawn(
         [process.execPath, "--no-env-file", "packages/db/src/migrate.ts"],
@@ -96,12 +102,9 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
         migration.exited,
       ]);
       if (status !== 0) throw new Error(`Repeated owned migration failed: ${error}`);
-      const currentDigest = digest(await dump(container, probeName));
-      if (run === 0) migratedDigest = currentDigest;
-      else expect(currentDigest).toBe(migratedDigest);
+      expect(digest(await dump(container, probeName))).toBe(baselineDigest);
     }
-    expect(digest(await dump(container, probeName))).toBe(migratedDigest);
-    expect(migratedDigest).toBe(digest(original));
+    expect(baselineDigest).toBe(digest(original));
     const versions = (await readdir("packages/db/migrations"))
       .filter((file) => /^\d{4}_.+\.sql$/.test(file))
       .map((file) => ({ version: Number(file.slice(0, 4)) }))
