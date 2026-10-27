@@ -1,20 +1,24 @@
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
-import { callFactoryFunction } from "../fixtures/server-functions";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { createDatabase } from "../../packages/db/src/client";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { createDatabase } from "../../packages/db/src/client";
 import { localOpenBao } from "../../scripts/factory/openbao";
-import { privateRegistryFixture } from "../fixtures/private-registry";
-import { factoryProcess, eventually } from "../fixtures/factory-process";
-import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
 import {
   editorFixtureKubectl,
   editorFixtureNamespaces,
   finishedPrebuildNamespace,
   removeOwnedProjectSources,
 } from "../fixtures/editor-source-resources";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
+import {
+  factoryboxFixtureCommand,
+  readFactoryboxFixtureTarget,
+} from "../fixtures/factorybox-runtime";
+import { privateRegistryFixture } from "../fixtures/private-registry";
+import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
+import { callFactoryFunction } from "../fixtures/server-functions";
 
 test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
   "registered Project automatically prebuilds and uses exact secure Development/Main-Preview values in hooks, app and PTY",
@@ -317,21 +321,16 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
           "return (await fetch('http://127.0.0.1:4300/health').then(r=>r.json())).token",
         ),
       ).toBe("owned-development-sentinel");
-      const inspection = await editorFixtureKubectl([
-        "exec",
-        "-n",
-        current.namespace,
-        current.podName,
-        "--",
-        "docker",
-        "exec",
-        "workspace_cvm",
-        "sh",
-        "-c",
-        "docker inspect $(docker ps -q --filter label=factory.dev/runtime-attempt=" +
-          attemptID +
-          ")",
-      ]);
+      const inspection = await factoryboxFixtureCommand(
+        await readFactoryboxFixtureTarget(database, attemptID),
+        [
+          "sh",
+          "-ec",
+          "containers=$(docker ps -q --filter label=factory.dev/runtime-attempt=" +
+            attemptID +
+            '); test -n "$containers"; docker inspect $containers',
+        ],
+      );
       expect(inspection).not.toContain("owned-development-sentinel");
       expect(inspection).not.toContain("owned-build-sentinel");
       expect(inspection).not.toContain(registry.password);

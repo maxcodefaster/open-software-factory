@@ -11,16 +11,21 @@ import { createForgejoAccess, forgeUsername } from "../../packages/forge/src/acc
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import {
-  editorFixtureKubectl,
   editorFixtureNamespaces,
   recordedEditorIdentity,
   removeOwnedProjectSources,
   removeStoppedEditorSourceNamespace,
 } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { removeOwnedFactoryboxFixture } from "../fixtures/factorybox-cleanup";
+import {
+  factoryboxFixtureCommand,
+  readFactoryboxFixtureTarget,
+} from "../fixtures/factorybox-runtime";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 import { ownedRuntimeTerminal } from "../fixtures/runtime-access";
 import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
+import { startupMeasurements } from "./runtime-startup";
 
 const nativeProofTimeout = 900_000;
 
@@ -464,37 +469,17 @@ test.skipIf(process.env["FACTORY_RUN_CHANGE_WRITER_RUNTIME_PROOF"] !== "1")(
         : [];
       let timings: unknown[] = [];
       if (resource?.uid) {
-        const observedUID = await editorFixtureKubectl([
-          "get",
-          "pod",
-          resource.pod,
-          "-n",
-          resource.namespace,
-          "--ignore-not-found",
-          "-o",
-          "jsonpath={.metadata.uid}",
-        ]).catch(() => "");
-        if (observedUID === resource.uid) {
+        const target = await readFactoryboxFixtureTarget(database, currentAttempt).catch(
+          () => null,
+        );
+        if (target) {
           // The pinned Connector writes only fixed phase names and clocks here,
           // never commands, assignments, provider data or credentials.
-          const output = await editorFixtureKubectl([
-            "exec",
-            "-n",
-            resource.namespace,
-            resource.pod,
-            "-c",
-            "envbox",
-            "--",
-            "docker",
-            "exec",
-            "workspace_cvm",
+          const output = await factoryboxFixtureCommand(target, [
             "cat",
             "/tmp/factory-startup-timings.jsonl",
           ]).catch(() => "");
-          timings = output
-            .split("\n")
-            .filter((line) => line.startsWith("factory-startup "))
-            .map((line) => JSON.parse(line.slice("factory-startup ".length)));
+          timings = startupMeasurements(output);
         }
       }
       await writeFile(
@@ -571,6 +556,7 @@ test.skipIf(process.env["FACTORY_RUN_CHANGE_WRITER_RUNTIME_PROOF"] !== "1")(
           ).toBe(true);
         }
         if (nativeUserCreated) await nativeUser("delete");
+        await removeOwnedFactoryboxFixture(owned, artifacts);
         const remaining = await editorFixtureNamespaces();
         expect(
           before.filter(

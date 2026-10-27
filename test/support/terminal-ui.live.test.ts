@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
-import { chromium, expect as browserExpect } from "@playwright/test";
+import { expect as browserExpect, chromium } from "@playwright/test";
 import type { ServerWebSocket } from "bun";
 
 // Real pinned Theia and xterm, with owned Linux PTYs. Source/authority responses
-// are controlled; this tests terminal UI, not Envbox admission or Connector routing.
+// are controlled; this tests terminal UI, not Factorybox admission or Connector routing.
 const enabled = process.env["FACTORY_TERMINAL_UI_PROOF"] === "1";
 type Socket =
   | { kind: "theia"; target: WebSocket; pending: Array<string | Buffer> }

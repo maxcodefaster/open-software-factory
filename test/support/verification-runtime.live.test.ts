@@ -11,13 +11,13 @@ import {
 } from "../../packages/requirement-domain/src/requirement";
 import { runtimeIdentity } from "../../packages/runtime-domain/src/identity";
 import { ticketWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
-import { editorFixtureKubectl } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { removeOwnedFactoryboxFixture } from "../fixtures/factorybox-cleanup";
 import { callFactoryFunction } from "../fixtures/server-functions";
 
 // No inference: isolate real exact-commit CI from editor/Agent/second-Ticket startup.
 test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
-  "fresh exact-commit Verification runs its actual Forgejo job in Envbox",
+  "fresh exact-commit Verification runs its actual Forgejo job in Factorybox",
   async () => {
     const forgeToken = (await readFile(".factory/forgejo-token", "utf8")).trim();
     const processFixture = await factoryProcess({
@@ -79,15 +79,6 @@ test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
     let cookie = "";
     let candidate: string | undefined;
     let safeToDispose = false;
-    async function command(path: string) {
-      const response = await fetch(`${processFixture.base}${path}`, {
-        method: "POST",
-        headers: { cookie, origin: processFixture.base, "content-type": "application/json" },
-        body: "{}",
-        signal: AbortSignal.timeout(90_000),
-      });
-      if (!response.ok) throw new Error(`Owned native command failed: ${response.status}`);
-    }
     try {
       await database.client`INSERT INTO factory.branch_create_operation(id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key)
         VALUES(${identity.branchOperationID},${owned.changeID},${repository.owner},${repository.name},${change.branch},${base},${`change:${owned.changeID}:create-branch`})`;
@@ -203,21 +194,6 @@ test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
               120_000,
             );
           }
-          const namespaces = z
-            .object({ items: z.array(z.unknown()) })
-            .parse(
-              JSON.parse(
-                await editorFixtureKubectl([
-                  "get",
-                  "namespaces",
-                  "-l",
-                  `factory.dev/project=${owned.projectID}`,
-                  "-o",
-                  "json",
-                ]),
-              ),
-            );
-          expect(namespaces.items).toHaveLength(0);
           const pull = await forge.getPullRequest(repository, "main", change.branch);
           if (pull && !pull.merged && pull.state === "open") {
             if (pull.headSha !== candidate) throw new Error("Owned native PR head changed");
@@ -240,6 +216,7 @@ test.skipIf(process.env["FACTORY_RUN_NATIVE_VERIFICATION_PROOF"] !== "1")(
               throw new Error("Owned native branch head changed");
             await forge.deleteBranch(repository, change.branch);
           }
+          await removeOwnedFactoryboxFixture(processFixture, directory);
           await writeFile(
             resolve(directory, "cleanup.json"),
             JSON.stringify({ ownedRuntimesRemoved: true, ownedBranchRemoved: true }),

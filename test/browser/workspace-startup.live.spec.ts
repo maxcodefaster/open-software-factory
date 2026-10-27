@@ -1,12 +1,9 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { browserBootstrap } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { expect, type FrameLocator, type Page, test } from "@playwright/test";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
@@ -14,7 +11,14 @@ import {
   canonicalRequirementContent,
   requirementDigest,
 } from "../../packages/requirement-domain/src/requirement";
+import { startEditorCompute } from "../fixtures/developer-ide-desktop-runtime";
+import {
+  factoryboxFixtureCommand,
+  observeFactoryboxFixture,
+  readFactoryboxFixtureTarget,
+} from "../fixtures/factorybox-runtime";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, requestFunction } from "../fixtures/server-functions";
 import { signIn, teardownFactoryProject } from "../support/factory-fixture";
 import { type StartupMeasurement, startupMeasurements } from "../support/runtime-startup";
 
@@ -25,37 +29,12 @@ const origin = "http://127.0.0.1:3000";
 // and bounded timing artifacts instead of retaining their response bodies in a trace.
 test.use({ trace: "off" });
 
-async function readStartupPhases(namespace: string, pod: string) {
-  const { stdout: containerRuntime } = await execute("kubectl", [
-    "--context",
-    "orbstack",
-    "exec",
-    pod,
-    "-n",
-    namespace,
-    "--",
-    "docker",
-    "inspect",
-    "workspace_cvm",
-    "--format",
-    "{{.HostConfig.Runtime}}",
-  ]);
-  expect(containerRuntime.trim()).toBe("sysbox-runc");
-  const { stdout } = await execute("kubectl", [
-    "--context",
-    "orbstack",
-    "exec",
-    pod,
-    "-n",
-    namespace,
-    "--",
-    "docker",
-    "exec",
-    "workspace_cvm",
-    "cat",
-    "/tmp/factory-startup-timings.jsonl",
-  ]);
-  return startupMeasurements(stdout);
+async function readStartupPhases(database: ReturnType<typeof createDatabase>, attemptID: string) {
+  const target = await readFactoryboxFixtureTarget(database, attemptID);
+  expect((await observeFactoryboxFixture(target)).runtime?.status).toBe("running");
+  return startupMeasurements(
+    await factoryboxFixtureCommand(target, ["cat", "/tmp/factory-startup-timings.jsonl"]),
+  );
 }
 
 async function openSource(ide: FrameLocator) {
@@ -234,7 +213,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
         computeMS,
         editorMS,
         terminalMS,
-        phases: await readStartupPhases(pod.namespace, pod.pod),
+        phases: await readStartupPhases(database, runtime.id),
         podCreatedAt: observed.metadata.creationTimestamp,
         podStartedAt: observed.status.startTime,
       };
@@ -314,7 +293,7 @@ test("measures cold, retained and stopped Ticket Workspace source and PTY readin
             Array<{ namespace: string; pod: string }>
           >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS pod FROM factory.runtime_attempt WHERE id=${cold.id}`;
           if (!pod || !measurements.cold) throw new Error("Missing cold timing context");
-          measurements.cold.phases = await readStartupPhases(pod.namespace, pod.pod);
+          measurements.cold.phases = await readStartupPhases(database, cold.id);
           return measurements.cold.phases.some((phase) => phase.phase === "browser-image");
         },
         { timeout: 180_000, intervals: [1_000] },

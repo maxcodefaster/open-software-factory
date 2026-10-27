@@ -211,11 +211,13 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
       factoryboxPreparation: { bundle: "owned" },
     });
     expect(await reserve.intendStart(database.client, slot.id)).toBe(true);
+    expect(await reserve.intendStandby(database.client, slot.id, "pause")).toBe(true);
     await reserve.observe(database.client, slot.id, {
       namespaceUID: "owned-ns",
       podUID: "owned-pod",
       claimUID: "owned-pvc",
       ready: true,
+      factoryboxPaused: true,
     });
     const attemptID = crypto.randomUUID();
     await database.client.begin(async (sql) => {

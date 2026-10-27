@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import {
+  type StartupMeasurement,
   slice20StartupTargetFailures,
   startupMeasurements,
-  type StartupMeasurement,
 } from "./runtime-startup";
 
 test("Slice 20 targets reject real slow desktop measurements rather than accepting readiness", () => {
@@ -64,7 +64,7 @@ test("extracts bounded startup clocks without retaining runtime output", () => {
   ).toEqual([]);
 });
 
-test("decodes adjacent Docker-framed records in one Envbox output envelope", () => {
+test("decodes adjacent Docker-framed records in one runtime output envelope", () => {
   const first: StartupMeasurement = {
     phase: "devcontainer-start",
     startedAt: "2026-10-09T12:00:00Z",

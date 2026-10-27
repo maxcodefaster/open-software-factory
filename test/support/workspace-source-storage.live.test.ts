@@ -10,6 +10,11 @@ import { createDatabase } from "../../packages/db/src/client";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { publishedRuntimeArtifacts, runtimeArtifactsSchema } from "../../scripts/factory/artifacts";
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import {
+  factoryboxFixtureCommand,
+  readFactoryboxFixtureTarget,
+  requireFixtureWorkerPod,
+} from "../fixtures/factorybox-runtime";
 import { browserBootstrap, requestFunction } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn, stopProjectRuntimes } from "../support/factory-fixture";
 
@@ -167,12 +172,16 @@ test.skipIf(!enabled)(
       runtime = { ...row, id: attempt.id, generation: Number(row.generation) };
       const namespace = await kubernetes.getNamespace(runtime.namespace);
       expect(namespace?.uid).toBe(runtime.namespaceUID);
-      expect(namespace?.labels["factory.dev/runtime-owner"]).toBe(runtime.workspaceID);
-      const outer = JSON.parse(
-        await kubectl(["get", "pod", runtime.pod, "-n", runtime.namespace, "-o", "json"]),
+      const target = await readFactoryboxFixtureTarget(database, runtime.id);
+      expect(namespace?.labels["factory.dev/runtime-owner"]).toBe(target.input.workerID);
+      const outer = requireFixtureWorkerPod(
+        JSON.parse(
+          await kubectl(["get", "pod", runtime.pod, "-n", runtime.namespace, "-o", "json"]),
+        ),
+        target,
       );
-      const node = outer.spec.nodeName as string;
-      expect(outer.metadata.labels["factory.dev/runtime-attempt"]).toBe(runtime.id);
+      const node = outer.spec.nodeName;
+      expect(outer.metadata.labels["factory.dev/factorybox-worker"]).toBe(target.input.workerID);
       expect(node).toBeTruthy();
       const claim = JSON.parse(
         await kubectl(["get", "pvc", "runtime-data", "-n", runtime.namespace, "-o", "json"]),
@@ -240,7 +249,11 @@ test.skipIf(!enabled)(
                 capabilities: { drop: ["ALL"] },
               },
               volumeMounts: [
-                { name: "source", mountPath: "/source", subPath: "home/project" },
+                {
+                  name: "source",
+                  mountPath: "/source",
+                  subPath: `workspaces/${runtime.workspaceID.replaceAll("-", "")}/home/project`,
+                },
                 { name: "assignment", mountPath: "/assignment", readOnly: true },
               ],
             },
@@ -306,19 +319,8 @@ test.skipIf(!enabled)(
           signal: AbortSignal.timeout(10_000),
         });
       expect((await call("read", { path: "src/server.mjs" })).status).toBe(200);
-      const active = runtime;
       const inner = async (...args: string[]) =>
-        kubectl([
-          "exec",
-          active.pod,
-          "-n",
-          active.namespace,
-          "--",
-          "docker",
-          "exec",
-          "workspace_cvm",
-          ...args,
-        ]);
+        (await factoryboxFixtureCommand(target, args)).trim();
       expect(await inner("cat", "/proc/self/uid_map")).toMatch(/0\s+100000\s+65536/);
       expect(
         await kubectl([
@@ -326,11 +328,13 @@ test.skipIf(!enabled)(
           runtime.pod,
           "-n",
           runtime.namespace,
+          "-c",
+          "worker",
           "--",
           "stat",
           "-c",
           "%u:%g",
-          "/home/coder/project",
+          `/factory-source/workspaces/${runtime.workspaceID.replaceAll("-", "")}/home/project`,
         ]),
       ).toBe("101000:101000");
       const containerIDs = await inner(
@@ -419,12 +423,19 @@ test.skipIf(!enabled)(
             (
               await database.client<
                 Array<{ state: string }>
-              >`SELECT state FROM factory.runtime_attempt WHERE id=${active.id}`
+              >`SELECT state FROM factory.runtime_attempt WHERE id=${target.input.attemptID}`
             )[0]?.state,
           { timeout: 120_000, intervals: [1000] },
         )
         .toBe("stopped");
-      expect(await kubernetes.getPod(runtime.namespace, runtime.pod)).toBeNull();
+      expect((await kubernetes.getPod(runtime.namespace, runtime.pod))?.uid).toBe(
+        target.identity.podUID,
+      );
+      const [deleted] = await database.client<Array<{ phase: string; sandboxID: string }>>`
+        SELECT observation->>'phase' AS phase,observation->>'id' AS "sandboxID"
+        FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${runtime.id} AND action='delete' AND completed_at IS NOT NULL`;
+      expect(deleted).toEqual({ phase: "deleted", sandboxID: target.input.sandboxID });
       expect(
         (
           await call("write", {
@@ -549,8 +560,8 @@ test.skipIf(!enabled)(
             .toBe(true);
         }
         if (created) {
-          // Compute Stop deliberately retains the canonical source and PVC.
-          // Stop that source before the owned fixture removes its storage.
+          // Stop only this Project's Source epochs. Never remove the retained
+          // installation's shared worker, Namespace or canonical Source claim.
           await removeOwnedProjectSources(database, projectID, (workspaceID) =>
             serverCall(requestFunction(page.request, "stopWorkspaceSource", [workspaceID])),
           );
@@ -561,7 +572,8 @@ test.skipIf(!enabled)(
           JSON.stringify({
             proofID,
             projectID,
-            sourceNamespaceRemoved: runtime?.namespace ?? null,
+            sharedNamespaceRetained: runtime?.namespace ?? null,
+            ownedSourceEpochsStopped: true,
           }),
         );
       } catch (error) {
