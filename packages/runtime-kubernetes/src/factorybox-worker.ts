@@ -80,6 +80,18 @@ export const factoryboxOperation = z.discriminatedUnion("action", [
   }),
   z.strictObject({ action: z.literal("pause"), sandboxID: sandbox, snapshotID: token }),
   z.strictObject({ action: z.literal("resume"), sandboxID: sandbox, snapshotID: token }),
+  z
+    .strictObject({
+      action: z.literal("fork"),
+      sandboxID: sandbox,
+      sourceSandboxID: sandbox,
+      snapshotID: token,
+      sourceOwner: token,
+      checkpointSHA256: digest,
+    })
+    .refine((value) => value.sandboxID !== value.sourceSandboxID, {
+      message: "Fork source and target must be distinct",
+    }),
   z.strictObject({
     action: z.enum(["retire-checkpoint", "retire-resume"]),
     sandboxID: sandbox,
@@ -398,7 +410,7 @@ export async function executeFactoryboxOperation(
   const admitted = factoryboxWorkerIdentity.parse(identity);
   const op = factoryboxOperation.parse(operation);
   await inspectFactoryboxWorker(input, admitted, run, declaration);
-  const args = [
+  const command = [
     binary,
     "--worker-run-root",
     "/run/factorybox",
@@ -406,12 +418,68 @@ export async function executeFactoryboxOperation(
     admitted.storeID,
     "--worker-epoch",
     admitted.epoch,
-    op.action,
   ];
+  if (op.action === "fork") {
+    const source = await run(
+      [
+        "exec",
+        input.podName,
+        "-n",
+        input.namespace,
+        "-c",
+        "worker",
+        "--",
+        ...command,
+        "state",
+        op.sourceSandboxID,
+      ],
+      undefined,
+      {
+        timeoutMS: Math.max(1, Math.min(deadline - performance.now(), 15_000)),
+        outputBytes: 4 * 1024 ** 2,
+      },
+    );
+    if (source.exitCode !== 0)
+      throw new Error(`Fork source observation is unconfirmed: ${source.stderr}`);
+    const published = z.object({
+      snapshot_id: token,
+      checkpoint_sha256: digest.optional(),
+      completed_at: z.string().optional(),
+    });
+    const selected = z
+      .object({
+        record: z.object({
+          version: z.literal(1),
+          id: z.literal(op.sourceSandboxID),
+          owner: token,
+          phase: z.enum(["running", "paused"]),
+          shared_source: z.unknown().optional(),
+          pause: published.optional(),
+          pause_history: z.array(published).optional(),
+        }),
+      })
+      .parse(JSON.parse(source.stdout)).record;
+    const snapshots = [
+      ...(selected.pause_history ?? []),
+      ...(selected.pause ? [selected.pause] : []),
+    ].filter((pause) => pause.snapshot_id === op.snapshotID);
+    if (
+      selected.owner !== op.sourceOwner ||
+      selected.shared_source != null ||
+      !snapshots.length ||
+      snapshots.some(
+        (pause) => !pause.completed_at || pause.checkpoint_sha256 !== op.checkpointSHA256,
+      )
+    )
+      throw new Error("Fork source differs from its owned published private checkpoint");
+  }
+  const args = [...command, op.action];
   if (op.action === "start") args.push("--bundle", op.bundle);
+  if (op.action === "fork") args.push("--source", op.sourceSandboxID);
   if (
     op.action === "pause" ||
     op.action === "resume" ||
+    op.action === "fork" ||
     op.action === "retire-checkpoint" ||
     op.action === "retire-resume"
   )
@@ -436,6 +504,9 @@ export async function executeFactoryboxOperation(
       version?: number;
       id?: string;
       phase?: string;
+      owner?: string;
+      runtime_id?: string;
+      fork?: { source_id?: string; checkpoint_id?: string; checkpoint_sha256?: string };
       pause?: { snapshot_id?: string; completed_at?: string; resume?: { completed_at?: string } };
     };
     root?: string;
@@ -465,6 +536,7 @@ export async function executeFactoryboxOperation(
     const record = output.record;
     const expectedPhase = {
       start: "running",
+      fork: "running",
       pause: "paused",
       resume: "running",
       delete: "deleted",
@@ -476,6 +548,17 @@ export async function executeFactoryboxOperation(
       (expectedPhase && record.phase !== expectedPhase)
     )
       throw new Error("Factorybox response does not confirm the requested Sandbox state");
+    if (
+      op.action === "fork" &&
+      (!record.owner ||
+        !token.safeParse(record.owner).success ||
+        record.owner === op.sourceOwner ||
+        record.runtime_id !== `fbx-${record.owner}` ||
+        record.fork?.source_id !== op.sourceSandboxID ||
+        record.fork.checkpoint_id !== op.snapshotID ||
+        record.fork.checkpoint_sha256 !== op.checkpointSHA256)
+    )
+      throw new Error("Fork response does not confirm its independent owner and exact checkpoint");
     if (
       (op.action === "pause" || op.action === "resume") &&
       (record.pause?.snapshot_id !== op.snapshotID ||

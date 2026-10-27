@@ -17,6 +17,7 @@ import {
   factoryboxObsoleteResumeImages,
 } from "../../packages/runtime-kubernetes/src/factorybox-retention";
 import {
+  type FactoryboxRuntimeInput,
   type FactoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
   factoryboxSandboxID,
@@ -141,6 +142,8 @@ export function createConformanceRuntime(
   const deadline = performance.now() + 420_000;
   let identity: FactoryboxWorkerIdentity | undefined;
   let record: { id: string; owner: string; input_sha256: string; runtime_id: string } | undefined;
+  type ForkRecord = NonNullable<typeof record>;
+  const forks = new Map<string, ForkRecord | null>();
   let started = false,
     succeeded = false;
   let sequence = 0;
@@ -178,6 +181,46 @@ export function createConformanceRuntime(
       throw new Error(`Native ${value.action} remains unconfirmed: ${result.stderr}`);
     return JSON.parse(result.stdout);
   };
+  const owned = (sandboxID: string) => {
+    if (sandboxID !== input.sandboxID && !forks.get(sandboxID))
+      throw new Error("Conformance lifecycle cannot address an unowned Sandbox");
+  };
+  const pause = async (sandboxID = input.sandboxID) => {
+    owned(sandboxID);
+    const snapshotID = crypto.randomUUID().replaceAll("-", "");
+    const paused = await operation({ action: "pause", sandboxID, snapshotID });
+    if (
+      paused.record.pause?.after?.anon !== 0 ||
+      paused.record.pause?.snapshot?.resident_bytes_after !== 0
+    )
+      throw new Error("Cluster Pause did not release its Sandbox RAM and snapshot pages");
+    return { snapshotID, paused };
+  };
+  const retire = async (saved: ForkRecord, prepared: boolean) => {
+    const deleted = await operation({ action: "delete", sandboxID: saved.id });
+    for (const [action, generations] of [
+      ["retire-checkpoint", factoryboxObsoleteCheckpoints(saved.id, deleted.record)],
+      ["retire-resume", factoryboxObsoleteResumeImages(saved.id, deleted.record)],
+    ] as const)
+      for (const generation of generations)
+        await operation({
+          action,
+          sandboxID: saved.id,
+          snapshotID: generation.snapshot_id,
+          sourceOwner: generation.source_owner,
+          checkpointSHA256: generation.checkpoint_sha256,
+        });
+    if (prepared) {
+      if (!identity) throw new Error("Conformance preparation lost its original worker");
+      await releaseFactoryboxRuntime(input, identity, false, run);
+    }
+    await operation({
+      action: "retire-sandbox",
+      sandboxID: saved.id,
+      sandboxOwner: saved.owner,
+      inputSHA256: saved.input_sha256,
+    });
+  };
   return {
     namespace: input.namespace,
     pod: input.podName,
@@ -185,6 +228,55 @@ export function createConformanceRuntime(
     target() {
       if (!identity || !record) throw new Error("Conformance has no admitted native Sandbox");
       return { input, identity };
+    },
+    pause,
+    async resume(sandboxID: string, snapshotID: string) {
+      owned(sandboxID);
+      return operation({ action: "resume", sandboxID, snapshotID });
+    },
+    async fork(executionID: string, snapshotID: string) {
+      if (!identity || !record) throw new Error("Fork requires the original admitted template");
+      const sandboxID = factoryboxSandboxID(executionID);
+      if (sandboxID === input.sandboxID || forks.has(sandboxID))
+        throw new Error("Fork target must have a new immutable conformance identity");
+      const source = await operation({ action: "state", sandboxID: input.sandboxID });
+      const checkpoint = z
+        .object({
+          snapshot_id: z.literal(snapshotID),
+          checkpoint_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+          completed_at: z.string().min(1),
+        })
+        .parse(source.record.pause);
+      forks.set(sandboxID, null);
+      const created = await operation({
+        action: "fork",
+        sandboxID,
+        sourceSandboxID: input.sandboxID,
+        sourceOwner: record.owner,
+        snapshotID,
+        checkpointSHA256: checkpoint.checkpoint_sha256,
+      });
+      const saved = z
+        .object({
+          id: z.literal(sandboxID),
+          owner: z.string().regex(/^[a-f0-9]{32}$/),
+          input_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+          runtime_id: z.string(),
+        })
+        .parse(created.record);
+      forks.set(sandboxID, saved);
+      const target: FactoryboxRuntimeInput = {
+        ...input,
+        attemptID: executionID,
+        sandboxID,
+        runtimeOwnerID: executionID,
+        labels: {
+          ...input.labels,
+          "factory.dev/runtime-owner": executionID,
+          "factory.dev/execution-slot": executionID,
+        },
+      };
+      return { input: target, identity };
     },
     async prepare() {
       await save("intent.json", { owner, input, resources: resources.items });
@@ -290,19 +382,19 @@ export function createConformanceRuntime(
       return metrics({ input, identity });
     },
     async pauseResume() {
-      const snapshotID = crypto.randomUUID().replaceAll("-", "");
-      const paused = await operation({ action: "pause", sandboxID: input.sandboxID, snapshotID });
-      if (
-        paused.record.pause?.after?.anon !== 0 ||
-        paused.record.pause?.snapshot?.resident_bytes_after !== 0
-      )
-        throw new Error("Cluster Pause did not release its Sandbox RAM and snapshot pages");
-      await operation({ action: "resume", sandboxID: input.sandboxID, snapshotID });
-      return { snapshotID, paused };
+      const paused = await pause();
+      await operation({
+        action: "resume",
+        sandboxID: input.sandboxID,
+        snapshotID: paused.snapshotID,
+      });
+      return paused;
     },
     async passed() {
       if (performance.now() > deadline)
         throw new Error("Conformance workload exceeded its 420-second deadline");
+      if ([...forks.values()].some((value) => value === null))
+        throw new Error("Conformance retains an unconfirmed Fork outcome");
       await save("workload-complete.json", {
         owner,
         passed: true,
@@ -310,7 +402,7 @@ export function createConformanceRuntime(
       });
       succeeded = true;
     },
-    async cleanup() {
+    async cleanup(): Promise<void> {
       if (started && !succeeded) {
         await save("retained-failure.json", {
           owner,
@@ -384,26 +476,21 @@ export function createConformanceRuntime(
         return;
       }
       if (identity && record) {
-        const deleted = await operation({ action: "delete", sandboxID: input.sandboxID });
-        for (const [action, generations] of [
-          ["retire-checkpoint", factoryboxObsoleteCheckpoints(input.sandboxID, deleted.record)],
-          ["retire-resume", factoryboxObsoleteResumeImages(input.sandboxID, deleted.record)],
-        ] as const)
-          for (const generation of generations)
-            await operation({
-              action,
-              sandboxID: input.sandboxID,
-              snapshotID: generation.snapshot_id,
-              sourceOwner: generation.source_owner,
-              checkpointSHA256: generation.checkpoint_sha256,
-            });
-        await releaseFactoryboxRuntime(input, identity, false, run);
-        await operation({
-          action: "retire-sandbox",
-          sandboxID: input.sandboxID,
-          sandboxOwner: record.owner,
-          inputSHA256: record.input_sha256,
-        });
+        // A fork depends on its source checkpoint until its backing retires.
+        // Drain children first, never erase a live child's shared base.
+        try {
+          for (const fork of [...forks.values()].reverse()) {
+            if (!fork) throw new Error("Unconfirmed Fork backing must remain retained");
+            await retire(fork, false);
+          }
+          await retire(record, true);
+        } catch (cause) {
+          // A retirement refusal must not leave the fixture using RAM.
+          // Fence only its original Pod and retain the complete private store.
+          succeeded = false;
+          await this.cleanup();
+          throw cause;
+        }
       }
       // Only a uniquely owned namespace can be removed, never the shared
       // Registry or retained installation. The API server checks its UID.

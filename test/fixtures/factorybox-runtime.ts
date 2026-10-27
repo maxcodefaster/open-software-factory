@@ -138,7 +138,10 @@ export async function observeFactoryboxFixture(
     run,
     factoryboxRuntimeDeclaration(input),
   );
-  if (!result.confirmed) throw new Error("Fixture native Sandbox observation is unavailable");
+  if (!result.confirmed)
+    throw new Error(
+      `Fixture native Sandbox observation is unavailable: ${result.stderr.slice(-2000)}`,
+    );
   const view = z
     .object({
       record: z

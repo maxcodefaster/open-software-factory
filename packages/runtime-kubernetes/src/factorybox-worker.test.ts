@@ -132,6 +132,183 @@ test("worker admission preserves the complete private store and finite worker ce
   ).toThrow();
 });
 
+test("Fork pins its source owner and published checkpoint before creating a distinct target", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  const snapshotID = "1".repeat(32);
+  const sourceOwner = "2".repeat(32);
+  const checkpointSHA256 = "3".repeat(64);
+  f.result({
+    exitCode: 0,
+    stderr: "",
+    stdout: JSON.stringify({
+      record: {
+        version: 1,
+        id: "target",
+        phase: "running",
+        owner: "4".repeat(32),
+        runtime_id: `fbx-${"4".repeat(32)}`,
+        fork: {
+          source_id: "source",
+          checkpoint_id: snapshotID,
+          checkpoint_sha256: checkpointSHA256,
+        },
+      },
+    }),
+  });
+  const run: typeof f.run = async (...args) => {
+    const result = await f.run(...args);
+    if (args[0].includes("state"))
+      return {
+        ...result,
+        stdout: JSON.stringify({
+          record: {
+            version: 1,
+            id: "source",
+            phase: "paused",
+            owner: sourceOwner,
+            pause: {
+              snapshot_id: snapshotID,
+              checkpoint_sha256: checkpointSHA256,
+              completed_at: "now",
+            },
+          },
+        }),
+      };
+    return result;
+  };
+  const result = await executeFactoryboxOperation(
+    request,
+    identity,
+    {
+      action: "fork",
+      sandboxID: "target",
+      sourceSandboxID: "source",
+      snapshotID,
+      sourceOwner,
+      checkpointSHA256,
+    },
+    run,
+  );
+  expect(result.confirmed).toBe(true);
+  const call = f.calls.find((args) => args.includes("fork"));
+  expect(call?.slice(-6)).toEqual([
+    "fork",
+    "--source",
+    "source",
+    "--snapshot-id",
+    snapshotID,
+    "target",
+  ]);
+});
+
+test("Fork refuses a different source owner, hash, unpublished snapshot or canonical Source before target creation", async () => {
+  for (const changed of ["owner", "hash", "unpublished", "shared-source"] as const) {
+    const f = fixture();
+    const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+    const sourceOwner = "2".repeat(32);
+    const checkpointSHA256 = "3".repeat(64);
+    const snapshotID = "1".repeat(32);
+    const run: typeof f.run = async (...args) => {
+      const result = await f.run(...args);
+      if (args[0].includes("state"))
+        return {
+          ...result,
+          stdout: JSON.stringify({
+            record: {
+              version: 1,
+              id: "source",
+              phase: "paused",
+              owner: changed === "owner" ? "5".repeat(32) : sourceOwner,
+              ...(changed === "shared-source" ? { shared_source: { source: "/canonical" } } : {}),
+              pause: {
+                snapshot_id: snapshotID,
+                checkpoint_sha256: changed === "hash" ? "6".repeat(64) : checkpointSHA256,
+                ...(changed === "unpublished" ? {} : { completed_at: "now" }),
+              },
+            },
+          }),
+        };
+      return result;
+    };
+    await expect(
+      executeFactoryboxOperation(
+        request,
+        identity,
+        {
+          action: "fork",
+          sandboxID: "target",
+          sourceSandboxID: "source",
+          snapshotID,
+          sourceOwner,
+          checkpointSHA256,
+        },
+        run,
+      ),
+    ).rejects.toThrow("Fork source");
+    expect(f.calls.some((args) => args.includes("fork"))).toBe(false);
+  }
+});
+
+test("Fork never accepts a receipt from another immutable checkpoint", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  const sourceOwner = "2".repeat(32),
+    checkpointSHA256 = "3".repeat(64),
+    snapshotID = "1".repeat(32);
+  f.result({
+    exitCode: 0,
+    stderr: "",
+    stdout: JSON.stringify({
+      record: {
+        version: 1,
+        id: "target",
+        phase: "running",
+        owner: "4".repeat(32),
+        runtime_id: `fbx-${"4".repeat(32)}`,
+        fork: { source_id: "source", checkpoint_id: snapshotID, checkpoint_sha256: "5".repeat(64) },
+      },
+    }),
+  });
+  const run: typeof f.run = async (...args) => {
+    const result = await f.run(...args);
+    if (args[0].includes("state"))
+      return {
+        ...result,
+        stdout: JSON.stringify({
+          record: {
+            version: 1,
+            id: "source",
+            phase: "paused",
+            owner: sourceOwner,
+            pause: {
+              snapshot_id: snapshotID,
+              checkpoint_sha256: checkpointSHA256,
+              completed_at: "now",
+            },
+          },
+        }),
+      };
+    return result;
+  };
+  await expect(
+    executeFactoryboxOperation(
+      request,
+      identity,
+      {
+        action: "fork",
+        sandboxID: "target",
+        sourceSandboxID: "source",
+        snapshotID,
+        sourceOwner,
+        checkpointSHA256,
+      },
+      run,
+    ),
+  ).rejects.toThrow("Fork response");
+  expect(f.calls.filter((args) => args.includes("fork"))).toHaveLength(1);
+});
+
 test("no exec is admitted until exact Kubernetes resources and HTTP readiness agree", async () => {
   const f = fixture();
   f.pod.status.conditions = [{ type: "Ready", status: "False" }];
