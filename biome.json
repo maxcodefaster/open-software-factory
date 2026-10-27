@@ -7,6 +7,11 @@
       "!**/coverage",
       "!**/node_modules",
       "!**/.factory",
+      "!templates/starter-app/.output",
+      "!templates/starter-app/.tanstack",
+      "!templates/starter-app/src/routeTree.gen.ts",
+      "!apps/factory/src/routeTree.gen.ts",
+      "!apps/factory/.tanstack",
       "!**/.impeccable",
       "!deploy/theia-ide/factory-ide-extension/lib",
       "!deploy/theia-ide/browser-app/lib",
@@ -26,7 +31,10 @@
   },
   "linter": {
     "enabled": true,
-    "rules": { "preset": "recommended" }
+    "rules": {
+      "preset": "recommended",
+      "complexity": { "useLiteralKeys": "off" }
+    }
   },
   "assist": {
     "enabled": true,
