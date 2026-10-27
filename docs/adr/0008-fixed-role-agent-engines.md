@@ -36,6 +36,12 @@ shared copies. Sharing proposals and work admissions expose only the specific im
 never the author's other private versions. Personal choices remain per Project. Each library
 identity has its own Inherit, Enable or Disable choice; required inherited revisions are locked.
 Untouched identities receive later defaults, while revision updates require explicit adoption.
+An owner or Project manager may separately delegate future plain Planning Skill instruction
+updates at the owning scope. A fixed, calibrated text comparison must reproduce two retained
+failures, correct both and preserve a later healthy control before version adoption. This does
+not cover Factory guidance, required rules, packages or Build. Admitted work remains pinned.
+Every paid comparison step, delegated adoption and version-protected recovery retains its exact
+intent and outcome; a model's recommendation alone grants no publication authority.
 
 Use native discovery and on-demand loading in both engines. Project admission retains required
 versus optional revision choices. Applicable required rules, explicitly invoked Skills and the

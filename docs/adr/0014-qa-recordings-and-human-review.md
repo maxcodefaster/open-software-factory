@@ -1,13 +1,14 @@
 # Keep QA recordings separate from review decisions
 
 Factory records the existing independent review browser, with scenario chapters in one video.
-Protected media uses the installation's existing state volume, not another Sandbox or storage
-service. A missing recording is not a failed QA result. A newer complete recording replaces
+Protected media shares the installation-owned private object store with human attachments,
+as defined in [ADR 0027](0027-chart-managed-private-file-storage.md), not another Sandbox or
+a separate media store. A missing recording is not a failed QA result. A newer complete recording replaces
 older videos, including annotated ones; annotation stills and comments remain. The remaining
 video expires thirty days after the Change is delivered or cancelled.
 
-Factory persists media intent before private, atomic, fsynced file staging. Final publication
-rechecks execution authority in a separate short transaction, so state-volume I/O does not hold
+Factory persists media intent before an immutable, verified object write. Final publication
+rechecks execution authority in a separate short transaction, so object storage I/O does not hold
 the turn lease lock. Still uploads are idempotent by client UUID, content hash and original source
 context. Video deletion retains the original recording metadata, so an earlier captured frame
 can still be saved with its reviewed commit and timestamp without restoring the video.

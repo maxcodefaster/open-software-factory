@@ -37,6 +37,14 @@ read-only MCP connection. Background work does not inherit personal configuratio
 context creates no Ticket; disabling the delegation fences further automatic work. See
 [the monitoring decision](../../docs/adr/0016-delegated-monitoring-autofix.md).
 
+Developers can commission full Planning or a technical design of saved Product Requirements.
+Product confirmation durably starts the technical continuation only for an explicit full Planning
+request. The Ticket is one document with chapter navigation for Product, Technical design,
+optional Architecture and Validation. Technical Designs, inspected source references and PlantUML
+diagrams remain development-only. Implement approves the exact product and technical revisions;
+reading and ordinary saving never start Planning. See
+[Ticket technical planning](../../docs/adr/0024-ticket-technical-planning.md).
+
 Project Inputs automatically clarify external JSON requests and prepare requirements through the
 Project Agent. The creator asks for a name, task and Connected sources. Selected shared MCP sources
 must be consulted; an empty selection inherits shared Project defaults. Prepared Tickets require
@@ -52,6 +60,34 @@ Skills use portrait book covers in the gallery and detail view. The MCP library 
 controls and illustrated print style, but uses landscape connection covers. Source endpoints and connection states
 identify services. Definitions, account authorization, Project grants and activation are separate
 decisions.
+New custom entries receive a saved cover automatically from thirty bundled illustrations.
+Owners and authorized managers can change it through a compact image picker in the detail view.
+Cover changes leave Skill versions, activation choices and MCP authorization unchanged. The
+application does not generate images or require an image-model connection.
+
+Monitoring opens with a schematic learning stream of recent retained decisions. Each record shows
+its current state and opens its existing proposal, applied revision, comparison or source review
+for inspection. Unchanged and uncertain outcomes remain distinct from adoption. The stream uses
+the already authorized history, not additional inference. Hover and keyboard focus preview a
+record without changing selection; touch selection exposes the same details. Brief interaction
+feedback respects reduced motion and does not imply active Agent work.
+Work outcomes, sampled quality, avoidable rework and model costs precede
+usage limits. Its graphs show denominators, unknown evidence and daily UTC observations. Shared and
+owner-private learning are separate contexts. Retrospective AI review is automatic, sampled and
+batched; a fixed judge calibration precedes real work review. Improvement proposals expose their
+evidence and validation before preparing an unapproved Ticket. Exact edits to observed Skill, Wiki
+and Input revisions can be deliberately applied at their owning scope. The review shows the before
+and after passage, scope, version and any required private release. Applied changes keeps the edit
+and revision; Undo creates a new revision only if newer writing or activation choices do not block it.
+Publication and measured effect are distinct. Reading Monitoring commissions no work, and private
+source packets do not accompany an explicitly shared proposal.
+An optional scoped permission allows future plain Planning Skill instruction edits after two
+reproduced failures and a later healthy control pass an isolated, blinded text comparison. It does
+not authorize Factory guidance, required rules, packages, Build, Wiki, Inputs or repository changes.
+Compared changes exposes actual responses and verdicts. Later sampled uses identify the exact
+adopted revision; counts are not a causal score. Repeated problems can commission one compared,
+version-protected recovery, while newer human choices and writing remain authoritative.
+See [work review and monitoring](../../README.md#work-review-and-monitoring).
 
 Desktop navigation puts the Project selector beside the Assistant toggle and a compact
 New ticket action on the right, with matching control heights. Phones keep the single dock row,
@@ -63,7 +99,8 @@ Document and library headers put the title before right-aligned text actions in 
 space permits. Narrow headers wrap actions after the title; status and document metadata sit below.
 Search/filter controls and form-specific save actions remain with their content.
 The current chat title opens conversation history, with New chat inside that menu rather than in
-the header. History identifies private Project chats, shared Ticket chats and active Coding. Tool
+the header. Long histories can be filtered by name without changing active Coding. History
+identifies private Project chats, shared Ticket chats and active Coding. Tool
 activity uses compact command rows, with running calls and failures visible outside the collapsed
 completed history. Message Copy actions appear on hover or keyboard focus, and stay available on
 touch devices without hover.
@@ -79,6 +116,16 @@ spacing use shared tokens; reduced transparency keeps
 the content surfaces opaque. Lane headings have no creation buttons or visible
 counters; collapsed Epics and History retain their useful totals. New ticket opens the retained
 personal draft with Requirements emphasized; creating an Idea remains a choice inside that draft.
+Ticket quick-find searches the current Project by title or reference, including Tickets inside
+Epics and completed work. Opening a document hands keyboard focus to its content; minimizing or
+closing the workspace returns focus to its opener without trapping navigation in the window.
+
+Projects, Tickets, Wiki pages, Settings and Inbox have shareable resource URLs. Document windows
+offer an icon-only Copy link action with a tooltip and copy feedback. Links preserve their
+destination through sign-in and reload, but never grant access or include private draft content.
+Back and Forward restore resources while the desktop retains other tabs and local drafts.
+Missing and inaccessible resources show the same unavailable
+message with a read-only retry. Navigation does not start Agent work or runtime compute.
 
 Personal Project Chat can create planning Tickets on an explicit human request through Factory MCP,
 defaulting to Requirements. The same creation command serves the UI. A saved chat receipt links to
@@ -101,6 +148,24 @@ Commit and Pull. Ticket commits and Delivery remain in Factory's reviewed workfl
 Each Project has one shared background from six curated public-domain paintings. Creation picks
 an artwork automatically, preferring less-used choices, and retains it on later visits. Project
 managers can change it in the desktop Settings menu; other members see the same saved choice.
+
+The personal Inbox spans authorized Projects, separating Needs you from discussion Activity.
+Its dock badge counts open requests and unread activity once per item. Reading never resolves
+a decision; source state does. Activity groups by discussion and supports personal read and archive
+choices. New replies become unread again. Each entry opens its source before a person acts.
+Tickets can name one optional human Responsible for coordinating the outcome, independently of
+Agent execution, the current writer and approval rights. Eligible responsible people receive
+requests; otherwise the required capability determines recipients. Following and structured
+Project-member mentions control personal activity without granting access or starting work.
+See [human responsibility and the Inbox](../../docs/adr/0025-human-ticket-responsibility-and-inbox.md).
+
+Independently commissioned Tickets implement in parallel. An explicit queued implementation waits
+for delivered prerequisites, then starts without another commission when its saved scope and
+authority remain valid. Epics group work; Ticket dependencies determine ordering. Delivery reuses
+the Ticket Workspace and serializes integration through Staging per Project. Settings → Inputs
+also offers explicit, revocable delegation of eligible Ticket Delivery. Operational, migration,
+dependency and access-policy decisions remain human. See
+[parallel Tickets and serialized Delivery](../../docs/adr/0026-parallel-tickets-and-serialized-delivery.md).
 
 ## Capabilities and constraints
 
@@ -135,7 +200,7 @@ managers can change it in the desktop Settings menu; other members see the same 
   does not expose the author's other private revisions.
 - Enabled Skills are eligible when relevant, not guaranteed to load. Manual-only guidance needs
   explicit invocation. Required inherited guidance identifies its source and cannot be disabled.
-- Version adoption is explicit. Existing work retains its admitted configuration and exact Skill
+- Version adoption is explicit or authorized by the scoped comparison permission above. Existing work retains its admitted configuration and exact Skill
   revisions. Editing a Skill or changing a default does not reconfigure running work.
 - MCP connections use public remote HTTPS endpoints and reviewed read-only tools. Sharing copies
   a definition without credentials. Account reconnect and access revocation fence older work;
@@ -144,6 +209,9 @@ managers can change it in the desktop Settings menu; other members see the same 
 - Board/history navigation, inspection and reconnect do not commission AI or replay an external
   operation. Opening a Workspace for editing starts its compute as described above; failed work
   still needs explicit Retry. Actions state their target and consequences before commitment.
+- The Ticket explains current work and the next action from saved state. It distinguishes an
+  automatic correction from unavailable checks, incomplete review and a human Delivery decision.
+  Progress explanations use no additional model calls and never turn uncertainty into success.
 - Persist intent before external creates. Preserve retained source, history, approvals and runtime
   identities. Show uncertainty and recovery honestly rather than claiming success.
 
@@ -155,6 +223,24 @@ managers can change it in the desktop Settings menu; other members see the same 
 The product is Factory. Use its established interface typography, colors, materials, icons and
 workspace conventions. Write direct, task-specific copy. Do not invent capability claims,
 marketplace activity, popularity, ratings or endorsements.
+
+## Interface consistency
+
+Ordinary buttons and form controls share geometry, interface typography and the active Project
+palette across Tickets, Settings and other workspaces. A new feature extends that vocabulary
+instead of introducing another visual variant. Native selects, checkboxes and text fields retain
+their keyboard and platform behavior.
+
+Document actions remain quiet text controls with one emphasized next step per decision.
+Standalone primary and destructive actions keep their existing meanings. Related actions stay
+together; form actions stay with their fields. Labels, help, validation and pending outcomes
+remain distinguishable without relying on color alone.
+
+Controls have consistent hover, keyboard focus, disabled, pending and invalid states.
+Touch targets remain usable on phones, while desktop controls stay compact. A feature looks
+the same when opened alone or after another workspace. Shared changes are checked in the
+control fixture and the affected product flows; implementation and verification rules belong
+in [AGENTS.md](../../AGENTS.md).
 
 ## Product principles
 

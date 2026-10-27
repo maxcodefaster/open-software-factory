@@ -6,7 +6,8 @@ installation prerequisite for this work. Cluster and VM provisioning remain the 
 responsibility. Local validation may use OrbStack's Kubernetes without making OrbStack a product
 dependency or claiming an unperformed AKS acceptance.
 
-The application and its standard PostgreSQL, Forgejo, Zero and encrypted OpenBao services run
+The application and its standard PostgreSQL, Forgejo, Zero, encrypted OpenBao and private
+Garage object storage services run
 inside Kubernetes. Internal Services carry callbacks and server-to-server traffic; browser-facing
 origins remain explicit and independent. Factory uses its ServiceAccount rather than a person's
 administrator kubeconfig or the node's Docker socket. Execution uses an admitted, pinned

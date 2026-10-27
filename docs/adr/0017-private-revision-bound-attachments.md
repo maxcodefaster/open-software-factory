@@ -1,10 +1,10 @@
 # Keep human attachments private and bound to immutable work
 
-Wiki, Tickets, conversations and review discussions reference immutable files in an operator-owned
-private S3-compatible bucket. PostgreSQL owns their identities, hashes, publication intent, byte
+Wiki, Tickets, conversations and review discussions reference immutable files in the chart-managed
+private object store shared with QA media. PostgreSQL owns their identities, hashes, publication intent, byte
 reservations and authored references. File bytes and page images do not enter Zero, Markdown or
-the product database. This adds an explicit storage dependency instead of growing the existing
-installation-state volume or introducing a Factory-managed storage cluster.
+the product database. [ADR 0027](0027-chart-managed-private-file-storage.md) replaces the former
+external bucket prerequisite and separate state-volume media storage with one bundled service.
 
 Upload intent and all object keys are recorded before external writes. Publication checks the
 same content and current authority. Unconfirmed uploads can reconcile only their exact identity.
@@ -21,7 +21,7 @@ Wiki attachments are discovered through authorized source reads, not injected Pr
 File content never grants instructions, tools or execution authority.
 
 Factory limits each original file and the total original bytes in one message, not cumulative
-Project or installation storage. The operator owns bucket capacity and costs; an arbitrary total
+Project or installation storage. The operator manages Kubernetes storage capacity; an arbitrary total
 cap must not block accumulated Project history. Originals, rendered pages and extracted text
 remain accounted for, with write intent retained before storage I/O. Referenced history does not
 expire to make room. Unassigned uploads expire after one day, with accounted bytes released only

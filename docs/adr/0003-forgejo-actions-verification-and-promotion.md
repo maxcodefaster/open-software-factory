@@ -30,3 +30,7 @@ ends at the healthy Staging Preview, with Forgejo Actions providing exact-commit
 
 [Independent Release publication](0023-independent-project-releases.md) is a separate explicit
 action after Delivery. It does not extend Promotion into production or require a release per Ticket.
+
+[Parallel Tickets and serialized Delivery](0026-parallel-tickets-and-serialized-delivery.md)
+retains the original Change basis while binding each integrated candidate to the current
+default-branch commit. It also retains failed merge attempts instead of reusing their decisions.

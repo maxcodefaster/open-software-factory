@@ -31,6 +31,22 @@
 - Persist product state, external intent/outcome, human decisions, Verification/merge results and
   compact Evidence. Logs, heartbeats and resource samples stay ephemeral.
 
+## Interface
+
+- Before UI changes, read `apps/factory/PRODUCT.md` and the existing control owners. Preserve
+  the visual system in ADR 0005 rather than inventing a new skin for each feature.
+- `apps/factory/src/style.css` loads `ui/controls.css` once. Use native buttons, selects,
+  inputs and textareas with those shared defaults. `workspace-action` and `data-primary`
+  own quiet document actions; `quiet-button`, `primary-button` and `danger-button` cover
+  standalone actions. `control-field`, `control-check` and `control-actions` own form groups.
+  Keep page/header actions in the existing `WorkspaceActionBar`.
+- Feature CSS owns layout and genuine domain-specific variations, not copies of control
+  typography, borders, radii, focus or disabled styles. Extend the shared owner when needed.
+  An isolated feature must not depend on another feature being mounted to load its controls.
+- Check shared changes with `test/browser/ui-controls.spec.ts` and affected feature journeys.
+  Inspect desktop, narrow and touch states. Compare actual production CSS and compressed
+  transfer sizes before claiming a performance improvement; a preprocessor is not evidence.
+
 ## Verification
 
 - Use `mise exec --` for pinned tools. Run the relevant commands from the README and fix regressions

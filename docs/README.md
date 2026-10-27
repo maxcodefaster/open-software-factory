@@ -6,14 +6,20 @@ were chosen. Exact dependency versions live in manifests, lockfiles, `mise.toml`
 ## Client and application server
 
 Factory has one application backend, written in TypeScript and running on Bun. Its
-[composition root](../apps/factory/src/server.ts) creates the authenticated HTTP routes,
-application services, controllers and background reconciliation in that process. The HTTP
-listener uses native `Bun.serve`, not another web framework. Vite provides client development
-and builds; it is not a second production application backend.
+[entrypoint](../apps/factory/src/server.ts) composes the
+[application services](../apps/factory/src/server/application.ts),
+[protocol routes](../apps/factory/src/server/protocols.ts),
+[HTTP/WebSocket transport](../apps/factory/src/server/transport.ts) and
+[background lifecycle](../apps/factory/src/server/lifecycle.ts) in that process.
+The native `Bun.serve` listener supplies the WebSocket upgrade and socket callbacks. TanStack
+Start handles both pages and HTTP integration routes on that host. Its file routes bind the
+API, webhooks, internal callbacks, Runtime, editor and Health protocols to their existing services.
+Start owns the document shell, typed routing, Server Function resolution and Vite client/server
+build. It does not create a second backend, service container or reconciliation loop.
 
-The Solid 2 SPA renders in the browser. Zero synchronizes authorized planning mutations and cached
-read projections. Solid Server Functions replace hand-written UI transport, not Factory's
-application services. The SPA's Bootstrap, settings, planning command adapters, lifecycle commands,
+The Solid 2 desktop renders in the browser. Zero synchronizes authorized planning mutations and cached
+read projections. Start's `createServerFn` functions replace hand-written UI transport, not Factory's
+application services. Bootstrap, settings, planning command adapters, lifecycle commands,
 Review, Writer, IDE admission and conversation observations use named compiled functions. Agent
 activity and Project answers use native typed streams rather than a second JSON/SSE API.
 PostgreSQL retains product state, intent and outcomes. The Go Runtime Connector is a separate
@@ -25,14 +31,42 @@ saves retain fresh-authentication and installation-maintenance gates, command id
 explicit exact retries. A disconnected client, stale deployment or lost response never authorizes
 automatic replay. The compiled adapter delegates error classification to the host so bundling
 cannot change the identity of Factory command errors. The Usage read uses Solid's native async
-memo without making the editable form state or writes reactive.
+memo without making the editable form state or writes reactive. Bootstrap also uses an async
+memo with Solid's native Loading and Errored boundaries rather than copied read/loading/error signals.
+The client uses Solid's native request hook to keep private draft Attachment retention alive
+during page exit. Other calls retain their normal cancellation behavior and never gain a retry.
 
-The production build emits separate client assets and a server-function handler. The server build
-does not enable page SSR. Source development proxies function calls to the same backend instead
+The production build emits client assets and one Start server entry. Start compiles and resolves
+the functions using Solid 2's native wire and typed streams, without a separate Factory manifest
+plugin or native-function dispatcher. The host injects the authenticated actor and existing
+services. Request middleware prevents serialized client context from replacing that authority.
+Scoped Start serialization options cover optional argument tuples and DTOs with open JSON
+metadata in the pinned RC. They do not bypass the command schemas, service authorization or
+native stream codec.
+Start renders the HTML shell; the retained desktop uses `ssr: false`
+because Zero, browser storage and editors are client-owned. Source development proxies native function calls to the same backend instead
 of creating application services inside Vite. Connector protocols, webhooks, authentication,
 uploads, protected media and WebSockets retain their HTTP boundaries. Backend-language migration
 is not part of this decision. Solid's browser reactivity does not make server commands reactive:
 reading, reopening a panel and reconnecting an observer cannot commission work.
+
+The persistent root desktop stays mounted across resource navigation. Project planning queries,
+per-Project workspace tabs, conversation selection and Wiki state have separate feature owners.
+The desktop's Topbar, Board, Assistant and document window are separate components. Project,
+Ticket, Coding and conversation commands, runtime navigation, read observations and presentation
+derivations have their own modules under `apps/factory/src/desktop`.
+Composer drafts have a separate owner. Ticket editors are keyed by Ticket identity, retaining
+the same editor through server revisions without rebinding an old editor to another Ticket.
+Review controls read the panel's live action accessor rather than copying derived actions through
+an effect. Settings categories load on first use; draft-bearing categories stay mounted when hidden.
+Input activity and shared source configuration use separate content-free read versions. Idle Input
+panels do not poll or reload the MCP catalogue when only an incoming request changes.
+Release metadata uses the same scoped invalidation rather than a five-second browser poll.
+Routes select Projects, Tickets, Wiki pages, Settings or Inbox. They do not serialize drafts,
+conversation bodies or runtime capabilities. Direct entry and reload retain the sign-in destination;
+Back and Forward restore authorized selections without deleting other tabs or local drafts.
+Malformed, missing and inaccessible links show the same unavailable state. Ticket reads also
+verify that the linked Project owns the Ticket. No navigation action starts inference or compute.
 
 The browser protocol exceptions have specific owners and authorization:
 
@@ -45,10 +79,17 @@ The browser protocol exceptions have specific owners and authorization:
 | IDE and App navigation | One-use access grants redeem into separately scoped editor/runtime cookies. The embedded Theia client uses its grant-bound source/file-watch, Writer, runtime, Terminal and language-tool protocols. It cannot substitute its scoped cookie for a central Factory session or invoke unscoped UI commands. |
 | External and execution traffic | Connector WebSockets, native OpenCode streams, callbacks, webhooks, Git and OAuth discovery are integration protocols, not alternate SPA command APIs. |
 
-The SPA import-graph guard rejects unclassified raw network calls, including aliased helpers.
+The browser import-graph guard follows Start's authored router and rejects unclassified raw network calls, including aliased helpers.
 The remaining JSON helper accepts only the exact authentication and multipart-still paths.
 The compiled-handler and real-host tests check authority, native stream cancellation and retired
 logical routes. These checks do not replace owned runtime, editor and physical recovery proofs.
+
+Recurring backend observations do not overlap or accumulate skipped ticks. Shutdown stops their
+timers and awaits in-flight observations before closing the services and database.
+Delivery and Monitoring use that process-owned schedule too. Monitoring aborts and joins admitted
+diagnoses; Delivery joins already admitted observations without replaying an uncertain merge.
+Project research recovery is joined too, and Learning is cancelled before the process waits for
+its active sweep. Lease renewals finish before their owning work settles.
 
 Hashed public assets use build-time Brotli/gzip variants and immutable caching. HTML stays
 non-cached; private media, commands and Server Function responses do not enter that asset cache.
@@ -67,6 +108,24 @@ Solid 2 interface
 
 Zero -> planning mutations and cached read projections
 ```
+
+Zero also synchronizes content-free read versions for lifecycle, Ticket, conversation, Review,
+Inbox and Wiki observations. Deferred PostgreSQL triggers update those versions in the same
+transaction as retained product changes. Project membership, development access and exact personal
+ownership filter them before sync. They contain no prompts, source bodies, credentials or runtime
+samples. A version change, reconnect, visibility return or explicit Retry refreshes the existing
+authenticated read, without polling unchanged durable state or replaying a command. Invalidations
+received during a read cause a following read rather than disappearing into the in-flight request.
+Native agent activity and ephemeral Writer/Connector observations keep their separate protocols.
+
+Board reads separate active work, requested History and Trash batches. Quick-find runs a bounded
+authorized query across retained Tickets, independently of which History batches are open.
+Epic folders identify partially loaded counts and can request further pages without closing.
+The Wiki tree syncs a body-free metadata projection; only the selected page subscribes to its body.
+Solid 2 query stores reconcile rows by their primary keys, and equivalent query builders reuse one
+materialized subscription. Project hover/focus preloads one bounded Board query; the current
+Project preloads only the Wiki outline. Query completeness, connection failures and expired
+authentication have distinct UI states. Cached work and local drafts remain visible during recovery.
 
 Factory owns authority, admission, Stop, recovery, requirements and human decisions. PostgreSQL
 owns durable product state and compact Evidence. Forgejo owns repositories, branches, commits,
@@ -130,6 +189,15 @@ directly to Implement, which approves its exact saved revision and durably admit
 Interview starts only with an explicit conversation command. Historical automatic-entry records
 remain retained but are not a dispatch queue; already admitted Agent Turns keep their normal
 recovery and outcomes.
+
+Developers can explicitly request full Planning or a technical design of complete saved
+requirements. Full Planning confirmation atomically saves the Product Requirements and admits
+one technical continuation. The existing Mastra Project Agent researches a single pinned source
+commit, records decisions and assumptions, and maps each product criterion to a verification step.
+Technical Design revisions and their optional validated PlantUML diagrams remain developer-only.
+Implement freezes the exact product and technical revisions and refuses stale product/source
+scope. Build and independent review receive that approved design. Ordinary manual Requirements
+retain their direct Implement path. See [Ticket technical planning](adr/0024-ticket-technical-planning.md).
 
 The Interview uses the frozen selected Ticket without rereading it solely for attribution. Explicitly
 invoked Skills, applicable required rules and the assigned Interview Skill load through Mastra's native `getSkill` API before
@@ -295,9 +363,15 @@ Approved requirements -> commissioned Change -> OpenCode edits and local checks
 ```
 
 Verification runs the protected default-branch workflow against the exact Change commit in a fresh
-Sandbox, with a repository-scoped one-job Forgejo runner. The Change and recorded default-branch
-heads must still match the approved values; movement invalidates Delivery. A correction needs a
+Sandbox, with a repository-scoped one-job Forgejo runner. The candidate and its recorded integration
+basis must still match the approved values; movement invalidates Delivery. A correction needs a
 new commit and Verification. Staging retains its previous healthy Preview until replacement is ready.
+The pinned Forgejo 17 API supplies exact-run job/attempt/step diagnoses and bounded sanitized
+log excerpts. Only an observed failed workflow step commissions automatic correction. Cancelled,
+skipped, setup-failed and unavailable diagnoses retain an unverified outcome without asking the
+implementer to invent a code fix. Compact diagnosis survives recovery; full logs stay in Forgejo.
+Additional log reads are restricted to the failed steps admitted for that correction and recheck
+execution authority before and after the external read.
 After successful Verification, a fresh OpenCode Session reviews the exact candidate with the same
 admitted Coding model and reasoning, without implementation history.
 Fixed session permissions deny native execution,
@@ -306,6 +380,17 @@ immutable base/candidate file reads and diffs, App inspection and a review-repor
 agent registry, extra model-default role or second orchestration engine is introduced.
 Factory retains the implementation Session separately for corrections. The current execution Session
 continues to bind Stop, model relay, usage and browser authority. Both histories remain readable.
+One reviewer remains the normal path. A proposed blocking report alone cannot commission repair:
+Factory admits one fresh, focused check of its complete blocker batch. The original report stays
+immutable. Each check confirms, dismisses or leaves a claim unresolved with its own source/App
+evidence. Only confirmed defects enter automatic correction; material unresolved claims or missing
+required coverage stay incomplete. No extra reviewer runs for an already passing candidate.
+Both phases use the same admission, Stop, allowance, native settlement and explicit retry rules.
+Retrying a finding check retains its original claim batch instead of repeating the full review.
+Source search uses literal matches at pinned revisions, bounded pages and source-only caches.
+After corrections, fresh reviews receive the prior findings and can compare the previous candidate
+with the new commit. They inspect affected behavior and current source for unaffected criteria;
+no previous verdict is reused. Fresh exact-commit Verification remains mandatory.
 Only a settled review with accepted coverage and no blocking findings can pass. Frontend file changes
 require actual App inspection and an exact-candidate screenshot; dirty or different-commit browser
 observations cannot be accepted. The prompt also requires relevant UI behavior beyond that file
@@ -319,9 +404,14 @@ There is no Project-level recording preference. The pinned MCP and
 Chromium remain unchanged; a fixed adapter invokes the pinned FFmpeg with bounded worker threads.
 Recording availability is separate from QA outcome and cannot replay inference or App mutations.
 The video is published through bounded internal chunks, never included in model context.
-Ordinary tool screenshots remain ephemeral. Explicit human annotation stills and QA recordings use
-the existing installation state volume. Reads recheck Project access, use no-store responses and
+Ordinary tool screenshots remain ephemeral. Explicit human annotation stills, QA recordings and
+human attachments share the chart-managed private object store. PostgreSQL retains identities,
+publication intent, permissions and references, not file bytes. The chart supplies the bucket,
+retained credentials and persistent claim without external S3 setup. Reads recheck Project access, use no-store responses and
 support video byte ranges.
+The Ticket header explains completed work, the current blocker and the next action from existing
+saved execution, Verification, review and Delivery state. It adds no inference or work admission.
+An uncertain outcome never becomes a reassuring progress message.
 The Ticket is the shared human review surface: one QA player with scenario chips, open Threads,
 comments and folded resolved Threads. General feedback needs no image anchor. Its Open Live Preview
 action reuses the matching Factory tab; only ticket-bound Previews expose the comment affordance.
@@ -349,6 +439,16 @@ Delivery Approval records the exact settled review as well as the commit and Ver
 Eligible monitoring fixes can instead use an active Project delegation, recorded as the approval
 basis and rechecked before merge. Operational file changes and human editing require human Delivery.
 Delivery ends at Staging, rather than a production application deployment.
+Independently commissioned Tickets implement in parallel. The existing Delivery controller
+serializes integration and Promotion per Project, reusing each Ticket Workspace rather than
+creating an integration Sandbox. Original Change bases remain immutable; commits retain their
+exact integration bases and merge parents. Explicit implementation orders wait for delivered
+Ticket prerequisites and automatically pass admission again, without selecting Backlog work.
+Epics alone impose no serialization. A Project manager with development authority can explicitly
+delegate eligible Ticket Delivery, including features. The existing independent reviewer and
+application-source gate keep operational, dependency, migration and access-policy decisions human.
+Unconfirmed merges and unsuccessful Promotion fence later Delivery. See
+[parallel Tickets and serialized Delivery](adr/0026-parallel-tickets-and-serialized-delivery.md).
 Cleanup confirms no writers on the delivered Change branch while retaining its protected source
 ref and history. It does not temporarily remove protection to force branch deletion.
 
@@ -361,6 +461,27 @@ code-derived reads and provenance require development authority. Signed forge ev
 intent, and missed-event reconciliation confirms current source without a second code database.
 
 Native agent observations feed a compact deduplicated usage journal with immutable pricing inputs.
+Retrospective work review indexes settled operations without observing live runtimes. Selected
+cases retain bounded immutable evidence, exact configuration identities and private/development
+visibility. A separately admitted Planning-model judge must pass fixed calibration before batched
+work review. Review intent, results, improvement proposals and human decisions remain distinct
+from independent Candidate Review and Delivery. Unknown paid outcomes are not requeued.
+Monitoring reads only retained projections. Proposals prepare unapproved Tickets; private
+promotion requires the owner's explicit release of the displayed proposal, not its evidence packet.
+Exact observed Skill, Knowledge and Input text edits may be accepted through authenticated commands.
+They share the existing versioned write boundaries, retain an immutable application and preserve
+current owning-scope authority, private release and admission snapshots. Skill adoption and its
+application receipt are atomic; Undo creates a revision only when both the resource and affected
+choices still match. Input task edits preserve the original delegation and source contracts and wait
+for admitted work to settle. Model output does not grant any of these writes.
+Separate saved, scope-bound permission can authorize future plain Planning Skill instruction
+updates. Two retained method failures plus a later healthy control qualify a matched, tool-free
+text replay. Exact request intent precedes each isolated arm and blinded judge call. Unknown paid
+outcomes do not retry. Only reproduced baseline problems, supported candidate results and a preserved
+healthy control permit atomic version adoption. Factory/required/package/Build guidance and private
+promotion cannot use that permission. Subsequent sampled use stays separate from comparison results.
+Repeated observed method failures may commission one reverse comparison; recovery never overwrites
+newer human revisions or choices. The fixed text-replay rubric is not a live tool or runtime benchmark.
 Session totals reconcile usage rather than adding it again; inherited fork history is not new usage.
 Missing consumption stays unknown. Optional Coding budgets prevent new starts, with a shared finish
 reserve for commissioned work; in-flight calls can overshoot. Project research is measured separately.
@@ -377,7 +498,7 @@ Build observations; a fifteen-second reconciliation check covers missed events w
 inference. Independent ownership/browser renewal, ordered Stop and durable usage settlement remain
 required. Closed-panel lifecycle reads omit native history, and command-result fences reject older
 streams or reads. Native tool identities survive history updates without deduplicating legitimate
-repeated text. Wiki bodies subscribe only while a Wiki
+repeated text. The selected Wiki body subscribes only while a Wiki
 tab exists, including minimized tabs with retained drafts. Repository inventory refreshes on the
 generation identity/state rather than every status tick. The signed-out entry and authenticated
 Board load no document editor. The document engine loads when an editor opens; retained drafts
@@ -411,17 +532,26 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Project Setup Proposal | Exact source-grounded configuration edits confirmed before preparation |
 | Ticket | Shared planning record for one intended Project change |
 | Ticket Draft | Human-owned, uncreated intent with no Interview or implementation authority |
+| Ticket Responsibility | Optional human coordination of a Ticket's outcome, independent of execution and approval rights |
+| Ticket Following | Personal choice to receive discussion activity, distinct from access and required decisions |
+| Mention | Structured address to an actual Project member, without granting access or commissioning work |
+| Inbox | Personal cross-Project projection of open human requests and grouped discussion activity |
 | Idea | A shared Ticket not yet selected for Requirements work |
 | Ticket Document | Human-authored intent refined through Requirements work |
 | Requirement Proposal | Suggested edits against an identified document state, accepted by a human |
 | Requirements Interview | Resumable clarification producing a proposal without granting implementation |
 | Interview Round | Independently answerable questions; confirmed answers determine what remains |
-| Requirement Revision | Immutable specification of one Ticket |
+| Requirement Revision | Immutable Product Requirements of one Ticket |
+| Technical Planning | Explicit source-grounded design work against confirmed Product Requirements |
+| Technical Design Revision | Immutable developer-only implementation proposal bound to one Requirement Revision and source commit |
+| Architecture Diagram | Optional explained PlantUML view of a Technical Design, retained with its validated render |
 | Epic | Project-local grouping; a Ticket has at most one Epic and an Epic at most one parent |
 | Epic Proposal | Proposed new/reused Ticket grouping, confirmed without commissioning implementation |
 | Ticket Dependency | Same-Project prerequisite satisfied by delivery, not cancellation |
+| Implementation Order | Retained human commission of exact approved Ticket scope, waiting for delivered prerequisites without inference |
 | Board Stage | Ideas, Requirements, Implementation or Review; Ready is a gate, not a stage |
-| Change | Isolated implementation of one approved Requirement Revision |
+| Change | Isolated implementation of one approved Requirement Revision and any exactly bound Technical Design Revision |
+| Integration Basis | Exact default-branch commit incorporated into one candidate, separate from the immutable Change starting revision |
 | Verification | Evaluation of one exact Change commit in a fresh runtime |
 | Candidate Review | Independent, read-only AI evaluation of one exact verified Change commit |
 | Review Scenario | A named expected/observed normal, error or boundary case bound to actual review evidence |
@@ -498,10 +628,10 @@ identities, grouped by concern rather than presented as twenty independent subsy
 | Concern | Decisions |
 | --- | --- |
 | Workspaces, runtime and installation | [0001 Workspaces and prepared compute](adr/0001-development-workspaces-and-staging.md), [0009 independent file access](adr/0009-independent-workspace-file-access.md), [0013 Kubernetes installation](adr/0013-kubernetes-native-installation.md) |
-| Identity and execution authority | [0007 durable admission and uncertain outcomes](adr/0007-durable-agent-admission-and-uncertain-outcomes.md), [0010 identity and exclusive writers](adr/0010-factory-identity-and-change-writers.md) |
-| Agents, conversations and planning actions | [0002 OpenCode](adr/0002-opencode-change-agent.md), [0006 Project Agent](adr/0006-project-agent-and-ticket-conversation.md), [0008 fixed engines and Skills](adr/0008-fixed-role-agent-engines.md), [0019 retained conversations and editing](adr/0019-conversation-contexts-and-shared-editing.md), [0020 Factory MCP](adr/0020-factory-actions-through-mcp.md) |
-| Verification, review and Delivery | [0003 Forgejo Verification and promotion](adr/0003-forgejo-actions-verification-and-promotion.md), [0011 protected delivered branches](adr/0011-delivered-branch-retention.md), [0012 independent review](adr/0012-independent-candidate-review.md), [0014 QA media and human feedback](adr/0014-qa-recordings-and-human-review.md) |
-| Knowledge and retained content | [0004 revisioned Knowledge](adr/0004-generated-project-knowledge.md), [0017 private attachments](adr/0017-private-revision-bound-attachments.md) |
+| Identity and execution authority | [0007 durable admission and uncertain outcomes](adr/0007-durable-agent-admission-and-uncertain-outcomes.md), [0010 identity and exclusive writers](adr/0010-factory-identity-and-change-writers.md), [0025 human responsibility and Inbox](adr/0025-human-ticket-responsibility-and-inbox.md) |
+| Agents, conversations and planning actions | [0002 OpenCode](adr/0002-opencode-change-agent.md), [0006 Project Agent](adr/0006-project-agent-and-ticket-conversation.md), [0008 fixed engines and Skills](adr/0008-fixed-role-agent-engines.md), [0019 retained conversations and editing](adr/0019-conversation-contexts-and-shared-editing.md), [0020 Factory MCP](adr/0020-factory-actions-through-mcp.md), [0024 Ticket technical planning](adr/0024-ticket-technical-planning.md) |
+| Verification, review and Delivery | [0003 Forgejo Verification and promotion](adr/0003-forgejo-actions-verification-and-promotion.md), [0011 protected delivered branches](adr/0011-delivered-branch-retention.md), [0012 independent review](adr/0012-independent-candidate-review.md), [0014 QA media and human feedback](adr/0014-qa-recordings-and-human-review.md), [0026 parallel Tickets and serialized Delivery](adr/0026-parallel-tickets-and-serialized-delivery.md) |
+| Knowledge and retained content | [0004 revisioned Knowledge](adr/0004-generated-project-knowledge.md), [0017 private attachments](adr/0017-private-revision-bound-attachments.md), [0027 one installation-owned file store](adr/0027-chart-managed-private-file-storage.md) |
 | External context and delegated Inputs | [0015 MCP library](adr/0015-managed-mcp-library.md), [0016 bounded monitoring Autofix](adr/0016-delegated-monitoring-autofix.md), [0018 Project Inputs](adr/0018-project-inputs.md) |
 | Visual system | [0005 desktop and shared UI](adr/0005-curated-desktop-visual-system.md) |
 

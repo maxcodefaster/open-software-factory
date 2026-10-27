@@ -6,11 +6,22 @@ People approve the requirements and the exact verified commit. A Project monitor
 commission eligible application-code fixes and Delivery under those same independent gates.
 Factory records the delegation rather than pretending a human reviewed generated results.
 
-The application uses Solid 2, Bun and PostgreSQL. Zero supplies planning mutations and cached read
+The application uses TanStack Start with Solid 2, Bun and PostgreSQL. Zero supplies planning mutations and cached read
 projections. Mastra handles Project research and Requirements Interviews; OpenCode 2 implements
 approved Changes. Forgejo owns Git and Verification runs. Every new execution Sandbox uses an
 admitted Factorybox worker, pinned Sysbox and CRIU, a private Docker daemon, the Dev Containers CLI
 and the Factory Runtime Connector.
+
+Shared updates are change-driven. Zero synchronizes permission-scoped read versions for the
+existing authenticated lifecycle, conversation, Review and Inbox reads rather than polling
+unchanged state. Board History and Trash load in explicit batches; Ticket quick-find searches
+retained work independently of those batches. Wiki navigation syncs metadata without every page
+body. Sync failures and expired sessions keep cached work and drafts visible with explicit recovery.
+
+Projects, Tickets, Wiki pages, Settings and Inbox have shareable URLs. Copy link in a document
+window copies its resource URL. Opening a link still requires sign-in and current access; it does
+not share a draft, start an Agent or grant runtime access. Back and Forward select resources
+without discarding the other open tabs and local drafts.
 
 ## Install into existing Kubernetes
 
@@ -19,7 +30,15 @@ Install it directly from this repository; a public chart repository and release 
 not required during development. Kubernetes is provided by the operator. Factory does not
 install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
 
-The chart runs Factory, PostgreSQL, Forgejo, Zero and encrypted OpenBao in Kubernetes. Internal
+The chart and owned Forgejo fixtures pin 17.0.0 by image digest. Its native job/step/log API
+supplies Verification diagnostics. Upgrading an existing Forgejo is an explicit operator action:
+back up its database, repositories, configuration and secrets, review the upstream 16/17 breaking
+changes, and verify the upgrade before normal work resumes. Changing the repository pin or running
+an owned proof never upgrades a retained installation.
+
+The chart runs Factory, PostgreSQL, Forgejo, Zero, encrypted OpenBao and one private Garage
+object store in Kubernetes. It creates the file bucket, credentials and persistent volume
+automatically; no separate S3 provisioning is required. Internal
 callbacks use Services and the application uses its ServiceAccount, without a personal kubeconfig
 or a mounted host Docker socket. Factorybox execution requires an admitted Linux node/kernel
 profile, permission for privileged outer Pods and usable persistent storage. Supply the exact
@@ -79,6 +98,115 @@ or expires Agent work. Handoff stops previous commands and fences old source and
 Save before releasing: unsaved buffers remain with their developer and are not transferred.
 See [the collaboration decision](docs/adr/0019-conversation-contexts-and-shared-editing.md).
 
+## Personal Inbox and Ticket responsibility
+
+Inbox collects your attention across authorized Projects. Needs you contains open Agent questions,
+Requirements proposals, blocked work, review rechecks, editing requests and ready Delivery decisions.
+Activity groups human discussions, mentions and responsibility notifications. The dock badge counts
+open requests plus unread activity. Reading an open request does not complete it; its source
+decision resolves it for everyone. Activity can be marked read, unread or archived. A new reply
+reactivates its discussion. Project filtering does not change the global badge.
+Terminal Project Input problems notify Project managers as activity; the Inbox does not invent
+a per-event retry or approval that the Input workflow does not provide.
+
+Tickets can name one optional human Responsible for coordinating their outcome. This is separate
+from the Agent or human currently performing the work. Responsibility grants no permissions and
+does not start, stop or transfer execution. Eligible responsible people receive their Ticket's
+requests; otherwise the required role receives them. Personally addressed requests stay with their
+addressee. Select an Inbox item to open its Ticket, question or review discussion before acting.
+
+Creating a Ticket, contributing or commissioning work establishes following. The Responsible
+person also follows automatically. Follow/Following lets each person override their own discussion
+subscription. Type `@` in shared Ticket chat or feedback to select an active Project member.
+Mentions reach that member even when they do not follow, but grant neither access nor approval.
+See [human responsibility and the Inbox](docs/adr/0025-human-ticket-responsibility-and-inbox.md).
+
+## Parallel Tickets and Delivery
+
+Implement can commission a Ticket while its prerequisites are still being delivered. The saved
+order shows what it is waiting for and can be cancelled. It starts automatically once prerequisites
+are delivered, after checking the same approved scope and current authority again. Epics group
+Tickets; explicit dependencies determine ordering, including across Epics. Factory does not
+automatically choose more Backlog work.
+
+Independent Tickets implement in their own existing Workspaces. Delivery integrates one candidate
+at a time against the current default branch. A clean merge needs no inference; a conflict returns
+to the existing implementer. Every new candidate receives fresh Verification and independent review.
+Work awaiting a human lets independent Tickets proceed. An unconfirmed merge or failed Staging
+Promotion pauses later Deliveries while the last healthy Preview stays available.
+
+Project Settings → Inputs → Automatic Ticket Delivery lets a manager with development authority
+explicitly delegate eligible application changes and tests, including features. Operational,
+migration, dependency and access-policy changes still require human Delivery. The delegation is
+revocable and never replaces an exact passing review or an open human Thread. See
+[the integration and authority decision](docs/adr/0026-parallel-tickets-and-serialized-delivery.md).
+
+## Work review and monitoring
+
+Settings → Monitoring shows 28-day UTC trends for settled model operations, sampled review
+outcomes, avoidable rework, known model costs and operation elapsed time. Completed operations
+are not a quality score. Review charts show their denominator and unknown evidence; elapsed time
+includes queueing and is not active model time. Existing monthly usage, compute, prices and limits
+remain below the overview.
+
+Retrospective learning is on by default. It reviews eligible failed work and a stable one-in-five
+sample of completed work in batches after six selected cases or 24 hours. The configured Planning
+model first checks fixed healthy, defect, false-alarm and missing-evidence cases. It reads bounded
+retained evidence, never wakes a Sandbox for logs, and never runs because Settings opened.
+Unknown or expired calls are retained without an automatic paid retry. Learning calls are separately
+attributed in the usage journal. Project managers can pause shared learning; personal learning
+cannot override a Project pause.
+
+Private conversations and personal Skill content stay in their owner's learning context.
+Developer-only evidence retains development access requirements. A proposal records source cases,
+exact evidence references, its expected effect and a validation plan. Shared proposals can prepare
+an unapproved improvement Ticket, including tests, CI scripts or repository instructions. The owner
+must explicitly release the displayed proposal to create a shared Ticket from private work.
+No source packet is shared with it. Preparing a Ticket grants no implementation or Delivery approval
+and does not change the protected Factory Verification workflow.
+
+When retained evidence identifies an editable exact revision, the reviewer can propose one
+before/after text edit to Skill instructions/descriptions, a Wiki passage or an Input task.
+Review exact edit shows the target scope and version. Apply requires current authority at the
+owning scope and confirmation of that exact edit. Inherited Factory guidance is not copied into
+Project defaults. Skills adopt the new version only for matching owning-scope choices; admitted
+work and other explicit choices stay pinned. Wiki edits preserve writing outside the exact passage.
+Input edits wait for admitted events and preserve sources, credentials, delegation and enabled state.
+Private edits need explicit release before changing shared guidance or entering a shared request
+Ticket. The private case packet is never included.
+
+Applied changes retains the accepted edit and resulting revision. Undo creates another revision
+only while the applied resource and affected choices are still exact; it never overwrites a newer
+human edit. A reverted edit cannot be applied again through learning without reassessing the cause.
+Check Knowledge against current sources rather than restoring a disproven fact. These are deliberate
+human settings decisions, not automatic adoption or a benchmark result. Comparison-based automatic
+application is separate from this explicit acceptance path.
+
+Automatic Skill updates are off until an owner or Project manager saves scoped permission in
+Monitoring. Permission covers future small instruction edits to enabled, plain Planning Skills
+owned by that scope. Factory guidance, required Skills, packages, Build, Wiki, Inputs and repository
+changes remain outside it. Private cases cannot publish shared guidance. Analysis stays default-on
+without this write permission.
+
+A candidate needs two observed method failures with complete retained tasks and source artifacts.
+A healthy control must come from a later review, unseen when the edit was proposed. Factory runs
+two isolated tool-free text replays under one frozen Planning model, then blinds their order for the
+calibrated judge. Both failures must reproduce in the baseline and disappear in the candidate;
+the healthy control must remain supported. An inconclusive, failed or uncertain comparison cannot
+authorize adoption or an automatic paid retry. Each exact candidate gets one comparison.
+
+Compared changes retains the exact tested instructions, tasks, actual responses, verdicts, model
+and fixed rubric. Applied changes separately counts subsequent sampled uses of the exact adopted
+revision and exposes the latest three cases with their evidence and verdicts. Those counts are
+not causal proof. Repeated method failures on that revision can trigger one reverse comparison
+against its predecessor. Only a demonstrated reverse win may create a protected rollback revision;
+changed human writing or activation choices block it. Pause, permission changes and lost authority
+fence new inference and publication. No comparison wakes a Sandbox or replays an external action.
+
+Selected completed research retains at most three bounded excerpts of sources actually read,
+within its existing private/development visibility. It does not retain a tool transcript or copy
+external MCP responses into analytics. Truncation remains explicit and cannot prove an absence.
+
 ## Human attachments
 
 Wiki and Ticket editors open file selection through `/image` and `/file`, without a separate
@@ -90,20 +218,21 @@ file references. Personal Project chat and uncreated Ticket drafts remain privat
 Upload and document saves do not start agent work. Sending an ordinary chat still commissions its
 normal Agent Turn; saving feedback does not.
 
-Configure the operator-owned private bucket through the `FACTORY_ATTACHMENT_S3_*` variables in
-[the environment example](.env.example), or the Helm chart's `attachments` values and
-`attachments.existingSecret`. The Secret contains `access-key-id` and `secret-access-key`.
-Factory does not install an object store. Use HTTPS, a dedicated non-versioned bucket, credentials
-restricted to that bucket, and no automatic expiry for retained attachment objects. Without this
-configuration, other Factory work remains available and uploads explain the missing storage.
+The Helm chart supplies one private Garage object store for attachments, derived content,
+QA recordings and annotation stills. Bucket creation and retained credentials are automatic.
+The service is internal only; browsers and agents read files through authenticated Factory
+routes, never public bucket URLs. `objectStorage.size` sets the persistent claim size, initially
+16 GiB. Normal Kubernetes storage provisioning is the only storage prerequisite.
 
 The defaults are 10 MiB per file and 20 MiB per message, configurable in environment bytes or
 Helm values. Factory imposes no cumulative storage limit per Project or installation.
 Original files, generated page images and extracted text remain accounted for. Actual capacity
-and costs belong to the operator's bucket; storage failures retain history and permit explicit retry.
+belong to the installation's persistent storage; storage failures retain history and permit explicit retry.
 Unassigned uploads expire after one
 day. Private drafts retain their current file references; removal or Ticket publication releases
-obsolete draft associations. Bucket-provider backups and object versioning are outside this accounting.
+obsolete draft associations. Backups are outside this accounting.
+Back up the object-store claim and Secret together with PostgreSQL and the other retained
+installation data. This single-node deployment does not claim high availability or automatic backups.
 
 Agents read actual images and rendered PDF pages through authenticated, task-bound tools.
 Text is paged rather than silently cut off. PDF processing is limited to 200 pages, extracted text
@@ -116,13 +245,16 @@ upload identity. File processing uses at most two conversion workers per Factory
 Focused proofs use separate databases and object-store resources:
 
 ```sh
-mise exec -- bun run test:controllers attachments.test
-mise exec -- bun run test:native attachment-s3 attachment-browser attachment-factory-browser opencode-attachments
+mise exec -- bun run test:controllers /attachments.test.ts /object-storage.test.ts
+mise exec -- bun run test:native object-storage.native attachment-s3 attachment-browser attachment-factory-browser opencode-attachments
 FACTORY_ATTACHMENT_MODEL_LIVE=1 mise exec -- bun run test:live attachment-model.live
 ```
 
 The last command uses the configured Planning connection and incurs model usage. The native
-storage proof uses digest-pinned Garage 2.3.0; it does not access or reset a retained installation.
+storage proofs use digest-pinned Garage 2.3.0; they do not access or reset a retained installation.
+The object-storage proof applies the actual chart-owned storage resources in a separately owned
+Kubernetes Namespace. It checks bucket provisioning, private attachment and video reads, byte
+ranges, Pod replacement, retained credentials and refusal to replace missing credentials.
 The full-Factory browser proof captures desktop and phone layouts, long file names, saved feedback
 and an oversized-file error against its own authenticated installation and private bucket.
 Admission freezes file identities, hashes and human context; replacing a reference never
@@ -176,6 +308,15 @@ Ask AI to clarify starts an optional Interview explicitly. Creating or moving Ti
 their documents and reconnecting do not start clarification. An Interview proposal still needs
 human confirmation, and neither path bypasses independent checks, review or Delivery approval.
 
+Developers can choose **Plan product & tech** to clarify product behavior and then research a
+technical design. **Confirm product spec** saves the Product Requirements and durably commissions
+the technical continuation. **Plan technical design** works from complete saved requirements
+without repeating the Product Interview. These are explicit model actions; reading and ordinary
+saving remain model-free. A continuous Ticket document provides Product, Technical design,
+optional Architecture and Validation chapters. Technical Designs and PlantUML diagrams retain
+development-only access. Implement approves both exact revisions and rejects a changed source
+commit. See [Ticket technical planning](docs/adr/0024-ticket-technical-planning.md).
+
 Factory's Models settings show separate Planning & knowledge and Coding choices. Each has a
 connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
 minimum. Save & check adopts the Coding model and reasoning together only after a successful
@@ -197,6 +338,14 @@ OpenBao; Coding receives a turn-bound Factory facade. Reconnect creates a new au
 and Disconnect blocks further lookups. Renew Project grants after reconnecting a Factory-owned
 account. Provider-side token revocation or rotation remains separate.
 Local MCP commands, stdio processes and external write tools are not supported.
+
+Skills and MCP connections share thirty bundled cover illustrations, with portrait and landscape
+crops. New custom entries receive a saved cover automatically. Open an entry and choose Change
+cover to select another illustration, then Save cover. The entry's owner or an authorized manager
+can change it. Cover changes do not publish Skill instructions, enable work or reconnect MCP.
+Starter Skills retain their existing covers until deliberately changed. Provider suggestions keep
+their provider artwork.
+No image-model connection or image upload is required.
 
 Project Settings → Inputs accepts feedback, monitoring alerts and other JSON requests through a
 named private webhook. Save its task and select Connected sources from reviewed shared MCP
@@ -227,11 +376,19 @@ available on demand. Each Change retains its original eligible and required revi
 corrections, even if defaults change later. Selected guidance also uses OpenCode's durable
 instruction entries so context compaction cannot silently discard it. Each new turn replaces only
 Factory's own instruction entries with its exact selection.
+Build includes only matching, bounded Project Knowledge excerpts. Other pages remain available
+through the existing Project search/read tools; an empty match does not mean the Project has no
+Knowledge. Approved requirements, required guidance and admitted input remain intact.
 An intended Session ID is not a resumable Coding session until OpenCode confirms its creation.
 Failed first preparation retains source and offers an explicit Retry.
 Build works toward the approved requirements and ends with an ordinary summary, without a required
 JSON checklist. A normal native finish submits changed source for independent Verification,
 not as proof of completion. Exact-commit checks and human Delivery approval remain separate.
+Failed Verification supplies the retained implementer with exact job/attempt/step identities and
+short sanitized output excerpts. The correction can read additional bounded pages through the
+same scoped Factory tool facade, without forge credentials or arbitrary URLs. Cancelled, skipped,
+setup-failed and undiagnosed runs do not commission code correction. Full logs stay in Forgejo;
+the compact diagnosis is saved so recovery cannot silently change a correction request.
 After successful checks, a fresh independent OpenCode Session reviews that exact candidate.
 It keeps the Change's Coding model and reasoning, with no additional model selector. The reviewer
 has only immutable Git reads, the existing restricted App browser and a bounded review-report tool.
@@ -239,8 +396,18 @@ Its frozen instructions identify the successful exact-commit Verification as Fac
 evidence. The reviewer still checks source, test relevance and actual App behavior independently.
 It cannot edit, run shell commands or delegate to a writing agent. A native finish without an
 accepted report remains incomplete. Passing checks alone no longer enables Delivery.
-Reproducible blocking findings return to the retained implementation Session for targeted correction;
-each changed commit needs new checks and a fresh review. Cosmetic suggestions do not expand scope.
+The normal path uses one reviewer. Only proposed blockers commission one fresh, focused
+counter-investigation of the complete finding batch, using the same admitted model and permissions.
+That checker confirms concrete defects, dismisses false alarms or leaves material uncertainty
+incomplete. Decisions cite its own immutable source or App observations; a source-level proof can
+suffice. Only confirmed blockers return to the retained implementation Session for targeted
+correction. Neither reviewer can repair code. Cosmetic suggestions and unrelated old problems do
+not expand scope.
+The focused check preserves the original QA recording and chapters rather than replacing them.
+Each changed commit needs new checks and a fresh review. After a correction, that review starts
+with the earlier findings and the correction diff, follows affected callers and repeats affected
+App cases instead of every old interaction. Every criterion still needs current-candidate evidence.
+Immutable source search and revision-scoped read caching avoid repeatedly loading the repository.
 An incomplete or failed review has an explicit Retry review action after active work
 and Stop have settled. That creates a fresh attempt, never replays the old inference. A successful
 review still requires deliberate human approval of the exact commit before Staging promotion,
@@ -281,7 +448,7 @@ Preview anchors retain their Runtime Attempt basis and view identity and are not
 onto another page or edited state. Only the independent QA recording claims an exact clean candidate.
 
 Independent QA browser runs always record automatically, without a Project-level switch. Media
-uses protected installation state, with authenticated, non-cached reads. A newer complete recording removes the
+uses the same private object store as attachments, with authenticated, non-cached reads. A newer complete recording removes the
 previous video even when it has comments. Comments and their saved frames remain. The final video
 expires thirty days after the Change is delivered or cancelled. Unattached frame uploads are
 removed after one day.
@@ -449,16 +616,30 @@ Integration lanes also build the client and Server Function handler before start
 Factory processes. Each lane uses its own build directory and removes it during cleanup;
 parallel proofs do not replace each other's assets or the source-development `dist`.
 Those handlers use the same application services as the installed Bun host.
+The owned desktop browser group shares one immutable build and one empty migrated PostgreSQL
+daemon per invocation. Every journey still owns its database, application process and Zero cache.
+Playwright's dependent teardown removes only that invocation's resources after the journeys finish.
+Browser checks reject structural Solid diagnostics as well as page errors. The controller lane
+also checks client-entry budgets, including deferred Settings code.
+
+TypeScript's `noPropertyAccessFromIndexSignature` requires bracket access for index signatures.
+The overlapping `useLiteralKeys` style rule is disabled rather than weakening that compiler check.
+Production code checks missing values at their owning boundary or keeps a narrowed snapshot.
+Tests use checked fixture values rather than unchecked non-null assertions.
 
 Start the backend with `factory:up`, then use `factory:dev` and open the Vite URL it prints.
 Development proxies authenticated API and planning-cache traffic to that backend without
 allowing foreign browser origins. `FACTORY_DEV_BACKEND_URL` selects a different loopback backend
 for an isolated installation. It does not start or reset that installation.
+Keep its compiled Start entry available locally at `FACTORY_BUILD_DIRECTORY`, or the default
+Factory build directory. The development proxy uses that entry's function identities to forward
+Start's development references to the existing backend. It does not instantiate application
+services in Vite or implement a second RPC encoder.
 
 | Command | Purpose |
 | --- | --- |
 | `bun run factory:dev` | Vite frontend development against the local Factory server |
-| `bun run factory:build` | Build the SPA, Server Function handler and precompressed public assets |
+| `bun run factory:build` | Build the Start client, server handler and precompressed public assets |
 | `bun run factory:image` | Build the local application image with the currently published runtime pins |
 | `bun run factorybox:build REQUEST_JSON` | Build a local ARM64 or AMD64 worker candidate, check its image/executable and retain an unselected Factory profile |
 | `bun run factory:connect` | Connect the browser to a local Helm installation and restore interrupted forwards |
@@ -483,6 +664,13 @@ Live proofs under `test/support` opt in through their documented environment fla
 model providers and incur usage. Test fixtures own separate databases, Projects and runtime
 identities; their cleanup must preserve unrelated work. Run the affected checks for a change rather
 than repeating every live journey after a documentation edit.
+
+Shared UI controls live in [controls.css](apps/factory/src/ui/controls.css), loaded by the
+application stylesheet. The [control fixture](test/fixtures/ui-controls-surface.tsx) covers
+native interaction, quiet/primary/destructive actions and field states without mounting
+another feature for its styles. Run `mise exec -- bun run test:browser test/browser/ui-controls.spec.ts`
+and the affected feature journeys after changing the shared controls. The
+[product brief](apps/factory/PRODUCT.md#interface-consistency) records their visual contract.
 
 The independent editor proof builds and uses separate local artifacts. It opens canonical source
 without Project compute or model inference, switches retained buffers, verifies original-Workspace
@@ -561,8 +749,10 @@ It keeps the real provider credential outside the fixture and removes its owned 
 The independent reviewer calibration uses an explicitly configured Azure Coding connection at medium
 reasoning. Set `FACTORY_REVIEW_MODEL_LIVE=1` and run
 `mise exec -- bun run test:live candidate-review-model.live`. It executes a healthy control and two
-seeded defects independently, then checks the fresh native reviewer's judgments. This is a bounded
-calibration, not the final application journey. `bun run test:controllers candidate-review` checks
+seeded defects independently, then checks the fresh native reviewer's judgments. It also gives
+fresh finding checkers a healthy false alarm and both real defects, requiring dismissal or confirmation.
+This is a bounded calibration, not the final application journey.
+`bun run test:controllers candidate-review` checks
 exact-candidate Delivery, targeted correction, explicit retry, Stop and allowance behavior without
 live models. `bun run test:native opencode-review-permissions` proves the pinned native tool boundary.
 
@@ -575,6 +765,10 @@ Exact-commit code research has its own paid proof. With the explicit Luna Planni
 set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.
 It checks native code discovery, inspected-file citations and visibility after a permission
 downgrade. It is not part of the ordinary controller lane.
+
+Retrospective work review has a separate configured Planning-model calibration. Set
+`FACTORY_LEARNING_MODEL_LIVE=1` and run `mise exec -- bun run test:live learning-model`.
+The default controller and browser lanes use isolated evidence and make no paid calls.
 
 Monitoring diagnosis has a separate configured Planning-model proof. Set
 `FACTORY_MONITORING_MODEL_LIVE=1` and run `mise exec -- bun run test:live monitoring-model.live`.
@@ -613,6 +807,15 @@ It never commissions a replacement for a blocked or uncertain incident. Successf
 their owned runtime storage, services and credentials.
 
 Filter a controller or native lane by filename, for example `bun run test:controllers agent-read`.
+
+Technical Planning has an owned, opt-in model proof:
+
+```sh
+FACTORY_TECHNICAL_PLANNING_LIVE=1 mise exec -- bun run test:live technical-planning.live
+```
+
+It exercises Product confirmation, exact-commit code reads and a rendered PlantUML diagram without
+starting implementation. The configured Planning connection incurs ordinary model usage.
 Use `--list` to inspect its selection. Ordinary unit/controller/native lanes discard inherited live
 model flags and provider credentials, and do not load `.env` in the test runner or owned Factory
 children. Native runtime

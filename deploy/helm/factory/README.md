@@ -94,6 +94,15 @@ overwrite each other's Factory login.
 The unseal material and AppRole login are retained in the private Factory state claim, separate
 from OpenBao's encrypted data claim. Protect and back up these installation resources together.
 
+The chart also starts one pinned Garage object store. It creates the private `factory` bucket,
+credentials and a retained 16 GiB persistent claim automatically. Attachments, derived pages/text,
+QA recordings and annotation stills use that same store. No external S3 account, endpoint or
+bucket setup is required. Set `objectStorage.size` to request more capacity using the cluster's
+normal storage rules. The internal-only service has no Ingress or workstation port forward.
+Public Factory readiness includes an authenticated object write/read, not just an open storage port.
+Back up the object-store claim and Secret with PostgreSQL and the installation state.
+The single-node store is not high availability and does not create backups.
+
 The planning cache starts with one sync worker, independent of the Kubernetes node's CPU count.
 Set `zeroSyncWorkers` to a larger positive integer when measured concurrent sync traffic requires
 it. This changes only Zero's native worker configuration, not its retained data or authorization.
@@ -189,7 +198,13 @@ changes. If startup or upgrade fails, retain the installation and inspect its ex
 bootstrap or maintenance Job; do not delete PVCs to make readiness pass.
 
 Uninstalling the chart is not consent to erase Project source. The installation credentials,
-OpenBao TLS identity, Factory state and StatefulSet claims are retained. Explicit deletion must
+OpenBao TLS identity, object-store credentials and claim, Factory state and StatefulSet claims are retained. Explicit deletion must
 account for the exact installation's Workspace resources and data, never unrelated Namespaces,
 volumes or another Helm release. High availability, automatic backups and migration from the
 disposable source-development installation are not part of this chart.
+
+The former `attachments.endpoint`, `attachments.bucket` and `attachments.existingSecret` settings
+are rejected rather than silently switching existing attachments to an empty bucket.
+Startup also refuses retained QA files in the former state-volume `review-media` directory.
+Transfer retained bytes and verify their exact identities before changing an existing installation;
+the chart does not migrate or erase them automatically.
