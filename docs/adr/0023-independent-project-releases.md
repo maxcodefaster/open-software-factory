@@ -16,7 +16,7 @@ Runtime and workflow cleanup cannot remove release artifacts. Explicitly ending 
 revokes its write access without pretending already published content or external deployments
 were rolled back.
 
-Publication uses the standard pinned Envbox/Sysbox/Dev Containers/Connector Sandbox and an
+Publication uses the standard pinned Factorybox/Sysbox/Dev Containers/Connector Sandbox and an
 unchanged ephemeral Forgejo runner bound to one job-attempt handle. Publication receives no
 Development/Main-Preview environment. Package-write credentials are issued only after native
 task observation confirms the expected run number, exact SHA, workflow and running job handle.

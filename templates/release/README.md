@@ -68,7 +68,7 @@ FACTORY_RUN_RELEASE_RUNTIME_PROOF=1 FACTORY_RUN_ARGO_RELEASE_PROOF=1 \
 The ordinary native proof checks Git/package isolation, read-only permissions, protected source
 and tags, native job attribution and revocation of an already-issued OCI bearer. The opt-in
 runtime proof needs the locally prepared immutable runtime image metadata. It runs a real
-Envbox publication against its own Forgejo, OpenBao and database without a consumer.
+Factorybox publication against its own Forgejo, OpenBao and database without a consumer.
 The separate Argo compatibility fixture uses a pinned repository server to resolve `1.4.*`
 to `1.4.3`, excluding `1.5.0`, and render a private chart containing the confirmed image digest.
 It also rejects invalid credentials. It installs no CRDs, deploys no workloads and is not an
