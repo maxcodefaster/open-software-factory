@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { CommandError } from "../command-error";
-import { createServerFunctionEndpoint } from "./endpoint";
-import type { FactoryFunctionContext, FactoryServices } from "./context";
 import { z } from "zod";
+import { CommandError } from "../command-error";
+import type { FactoryFunctionContext, FactoryServices } from "./context";
+import { createServerFunctionEndpoint } from "./endpoint";
+import { fixtureValue } from "../../../../test/fixtures/value";
 
 const origin = "https://factory.test";
 const usage = {} as FactoryFunctionContext["usage"];
@@ -21,21 +22,27 @@ test("server functions bind authenticated request actors and canonical origins w
     origin,
     services,
     session: async (request) =>
-      request.headers.get("cookie") ? { user: { id: request.headers.get("cookie")! } } : null,
+      request.headers.get("cookie")
+        ? {
+            user: {
+              id: fixtureValue(request.headers.get("cookie"), 'request.headers.get("cookie")'),
+            },
+          }
+        : null,
     maintenance: async () => false,
     requireFresh: async () => {},
-    async handle(request, { event }) {
+    async handle(request, { context }) {
       handled++;
-      if (event.locals.factory.actorID === "one") await Bun.sleep(5);
+      if (context.factory.actorID === "one") await Bun.sleep(5);
       expect(request.url.startsWith(origin)).toBe(true);
-      expect(event.locals.factory.usage).toBe(usage);
-      expect(event.locals.factory.signal).toBeInstanceOf(AbortSignal);
-      return Response.json({ actorID: event.locals.factory.actorID });
+      expect(context.factory.usage).toBe(usage);
+      expect(context.factory.signal).toBeInstanceOf(AbortSignal);
+      return Response.json({ actorID: context.factory.actorID });
     },
   });
   const values = await Promise.all([endpoint(request("one")), endpoint(request("two"))]);
-  expect(await values[0]!.json()).toEqual({ actorID: "one" });
-  expect(await values[1]!.json()).toEqual({ actorID: "two" });
+  expect(await values[0]?.json()).toEqual({ actorID: "one" });
+  expect(await values[1]?.json()).toEqual({ actorID: "two" });
   expect(
     values.every((value) => value.headers.get("cache-control") === "no-store, no-transform"),
   ).toBe(true);
@@ -58,8 +65,7 @@ test("writes retain maintenance and fresh-authentication gates and host error id
     requireFresh: async () => {
       if (!fresh) throw new Error("stale session");
     },
-    async handle(_request, { event }) {
-      const context = event.locals.factory;
+    async handle(_request, { context: { factory: context } }) {
       return Response.json(
         await context.run(async () => {
           await context.beforeWrite(true);
@@ -91,8 +97,8 @@ test("server-side schema rejection stays a safe invalid-command result", async (
     session: async () => ({ user: { id: "actor" } }),
     maintenance: async () => false,
     requireFresh: async () => {},
-    async handle(_request, { event }) {
-      return Response.json(await event.locals.factory.run(async () => z.uuid().parse("bad")));
+    async handle(_request, { context }) {
+      return Response.json(await context.factory.run(async () => z.uuid().parse("bad")));
     },
   });
   expect(await (await endpoint(request())).json()).toEqual({
@@ -112,10 +118,10 @@ test("long-lived observations revalidate the same request session rather than re
     session: async () => (actor ? { user: { id: actor } } : null),
     maintenance: async () => false,
     requireFresh: async () => {},
-    async handle(_request, { event }) {
-      assertSession = event.locals.factory.assertSession;
-      classify = event.locals.factory.run;
-      return Response.json({ actor: event.locals.factory.actorID });
+    async handle(_request, { context }) {
+      assertSession = context.factory.assertSession;
+      classify = context.factory.run;
+      return Response.json({ actor: context.factory.actorID });
     },
   });
   await endpoint(request("one"));
@@ -138,9 +144,8 @@ test("anonymous dispatch is limited to exact compiled public IDs and has neither
     requireFresh: async () => {
       throw new Error("Anonymous requests cannot confirm identity");
     },
-    async handle(input, { event }) {
+    async handle(input, { context: { factory: context } }) {
       attempted++;
-      const context = event.locals.factory;
       return Response.json(
         await context.run(async () => {
           if (input.headers.get("x-owned-probe") === "write") await context.beforeWrite(false);

@@ -57,6 +57,7 @@ type ChangeContext = {
   title: string;
   description: string;
   canonicalContent: string;
+  technicalDesign: string | null;
   conversationID: string | null;
   conversationVersion: number | null;
   mode: string | null;
@@ -94,6 +95,8 @@ export function createChangeAdmission(
       SELECT change.project_id AS "projectID", change.ticket_id AS "ticketID",
         revision.id AS "revisionID", approval.monitoring_incident_id AS "monitoringIncidentID",ticket.title, ticket.description,
         revision.canonical_content AS "canonicalContent", conversation.id AS "conversationID",
+        (SELECT json_build_object('sourceCommit',source_commit,'content',canonical_content::jsonb,'sources',citations)::text
+          FROM factory.technical_design_revision WHERE id=approval.technical_design_revision_id) AS "technicalDesign",
         conversation.mode, conversation.version::float8 AS "conversationVersion",
         CASE WHEN COALESCE(session.implementation_session_confirmed_at, session.native_session_confirmed_at) IS NOT NULL
           THEN COALESCE(session.implementation_session_id, session.opencode_session_id) END AS "sessionID", session.state AS "sessionState",
@@ -389,12 +392,25 @@ export function createChangeAdmission(
             : record.command.kind === "change-prompt" || record.command.kind === "change-repair"
               ? record.command.text
               : "";
-        const knowledge = await buildKnowledgeContext(transaction, current.projectID, userPrompt);
-        const criteria = z
-          .object({ acceptanceCriteria: z.array(z.string()).min(1) })
-          .parse(JSON.parse(current.canonicalContent)).acceptanceCriteria;
+        const specification = z
+          .object({ summary: z.string(), acceptanceCriteria: z.array(z.string()).min(1) })
+          .parse(JSON.parse(current.canonicalContent));
+        const criteria = specification.acceptanceCriteria;
+        // Retrieve from the human task, not repeated Factory boilerplate.
+        const knowledgeQuery =
+          input.kind === "change-start"
+            ? [current.title, current.description, specification.summary, ...criteria].join("\n")
+            : userPrompt;
+        const knowledge = await buildKnowledgeContext(
+          transaction,
+          current.projectID,
+          knowledgeQuery,
+        );
         const instructions = [
           userPrompt,
+          ...(current.technicalDesign
+            ? ["Approved technical design:", current.technicalDesign]
+            : []),
           "Preserve existing human edits in this checkout. Inspect the current diff before making changes; do not discard unrelated work.",
           ...(input.kind === "change-start"
             ? []

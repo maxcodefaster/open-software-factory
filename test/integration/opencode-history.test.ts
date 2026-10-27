@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { classifyAgentTurn } from "../../apps/factory/src/agent/controller";
+import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import {
   ensureOpenCodeMessageBoundary,
   observeOpenCodeWork,

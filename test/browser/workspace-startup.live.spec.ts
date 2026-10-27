@@ -23,7 +23,7 @@ import { signIn, teardownFactoryProject } from "../support/factory-fixture";
 import { type StartupMeasurement, startupMeasurements } from "../support/runtime-startup";
 
 const execute = promisify(execFile);
-const origin = "http://127.0.0.1:3000";
+const _origin = "http://127.0.0.1:3000";
 
 // Native PTY/Preview streams are intentionally long-lived. Keep explicit captures
 // and bounded timing artifacts instead of retaining their response bodies in a trace.

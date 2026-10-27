@@ -103,14 +103,4 @@ export function WindowHeading(props: {
   );
 }
 
-export function InboxWorkspace() {
-  return (
-    <div class="inbox-workspace">
-      <WindowHeading eyebrow="Factory" title="Inbox" />
-      <div class="empty-workspace">
-        <Icon name="inbox" />
-        <p>No decisions need your attention.</p>
-      </div>
-    </div>
-  );
-}
+export { InboxWorkspace } from "./inbox/workspace";

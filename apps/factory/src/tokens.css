@@ -8,6 +8,7 @@
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
+  --touch-target: 44px;
 
   --color-ink: #1d211d;
   --color-ink-muted: #343c34;
@@ -172,6 +173,8 @@
   --menu-project-width: 24rem;
   --menu-project-max-height: 34rem;
   --menu-settings-width: 22rem;
+  --notice-max-width: 32rem;
+  --notice-text-min-width: 15rem;
   --window-control-size: 28px;
   --window-control-icon-size: 14px;
   --window-control-inset: 5px;

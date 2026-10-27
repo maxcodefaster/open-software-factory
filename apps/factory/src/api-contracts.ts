@@ -8,12 +8,14 @@ import {
 import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
 import { desktopBackgroundKeys } from "../../../packages/interface-domain/src/background";
 import { requirementContentInput } from "../../../packages/requirement-domain/src/content";
+import { technicalDesignContentInput } from "../../../packages/requirement-domain/src/technical-design";
 import type { FactoryZeroSchema } from "../../../packages/zero-schema/src";
 
 export const requirementProposalSchema = z.object({
   id: z.uuid(),
   ticket: z.object({ title: z.string(), description: z.string() }),
   requirement: requirementContentInput,
+  fullPlanning: z.boolean().optional(),
   base: z.object({
     version: z.number(),
     documentId: z.uuid().nullable(),
@@ -68,6 +70,8 @@ export type KnowledgePage = Pick<
   | "currentRevisionId"
   | "currentBody"
 >;
+
+export type KnowledgePageOutline = Omit<KnowledgePage, "currentBody">;
 
 export const knowledgeSaveSchema = z.object({
   id: z.uuid(),
@@ -373,6 +377,7 @@ export const conversationStreamEventSchema = z.discriminatedUnion("type", [
 export type ConversationStreamEvent = z.infer<typeof conversationStreamEventSchema>;
 
 export const deliveryViewSchema = z.object({
+  deliveryPolicyId: optionalString,
   monitoringIncidentId: optionalString,
   monitoringState: optionalString,
   monitoringReason: optionalString,
@@ -402,6 +407,15 @@ export const deliveryViewSchema = z.object({
   verificationCommitSha: optionalString,
   verificationState: optionalString,
   verificationSummary: optionalString,
+  verificationFailureKind: optionalEnum([
+    "check-failed",
+    "execution-failed",
+    "cancelled",
+    "skipped",
+    "unavailable",
+    "pending",
+  ]),
+  correctionState: optionalString,
   actionRunUrl: optionalString,
   approvedAt: optionalString,
   mergeState: optionalString,
@@ -455,6 +469,15 @@ export const knowledgeSourcesSchema = z.object({
 });
 
 export const ticketDetailSchema = z.object({
+  implementationOrder: z
+    .object({
+      commandId: z.uuid(),
+      state: z.enum(["waiting", "started", "blocked", "cancelled"]),
+      reason: z.string().nullable(),
+      canCancel: z.boolean().optional(),
+    })
+    .nullable()
+    .optional(),
   ticket: z.object({
     id: z.string(),
     projectId: z.string(),
@@ -473,8 +496,28 @@ export const ticketDetailSchema = z.object({
   proposal: requirementProposalSchema.nullable().default(null),
   origin: z.object({ id: z.uuid(), title: z.string() }).nullable().default(null),
   followUps: z.array(z.object({ id: z.uuid(), title: z.string() })).default([]),
+  technicalDesigns: z
+    .array(
+      z.object({
+        id: z.uuid(),
+        ordinal: z.number().int().positive(),
+        requirementRevisionId: z.uuid(),
+        sourceCommit: z.string(),
+        content: technicalDesignContentInput,
+        citations: z.array(sourceCitationInput),
+        diagramRenders: z.array(z.string()),
+        rendererVersion: z.string(),
+        authorKind: z.enum(["human", "ai"]),
+        createdAt: z.string(),
+        approved: z.boolean(),
+      }),
+    )
+    .optional(),
+  technicalDesignPresent: z.boolean().optional(),
+  technicalPlanningPending: z.boolean().optional(),
 });
 export type TicketDetail = z.infer<typeof ticketDetailSchema>;
+export type TechnicalDesignRevision = NonNullable<TicketDetail["technicalDesigns"]>[number];
 
 export const changesResponseSchema = z.object({ changes: z.array(changeSchema) });
 export const attemptsResponseSchema = z.object({ attempts: z.array(runtimeAttemptSchema) });

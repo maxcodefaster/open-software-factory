@@ -193,7 +193,7 @@ test("shared Board materials stay readable on all six Project backgrounds", asyn
     VALUES(${crypto.randomUUID()},${projectID},'Group related onboarding improvements',
       'inbox',${epicID},${session.user.id})`;
   const board = page.getByRole("region", { name: "Ticket board", exact: true });
-  const stages = board.locator(".board");
+  const _stages = board.locator(".board");
   const desktop = page.locator(".factory-desktop");
   const card = board.locator(".ticket-card").first();
   const epic = board.locator(".epic-stack").first();

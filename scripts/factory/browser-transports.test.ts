@@ -88,7 +88,7 @@ test("the separately granted embedded IDE has only explicitly classified native 
     const file = `${prefix}/${name}`;
     calls.push(...browserNetworkCalls(file, await readFile(resolve(root, file), "utf8")));
   }
-  expect(calls).toHaveLength(9);
+  expect(calls).toHaveLength(10);
   expect(calls.filter((call) => !editorProtocolDecision(call))).toEqual([]);
   const context = await readFile(resolve(root, prefix, "factory-runtime-context.ts"), "utf8");
   expect(context).toContain("__factory/workspaces/${workspaceID}/runtime");

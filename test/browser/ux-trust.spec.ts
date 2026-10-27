@@ -21,6 +21,7 @@ import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
   completedConversation,
+  factoryFunctionMatches,
   factoryFunctionRequest,
   mockAgentView,
   mockBootstrap,
@@ -220,7 +221,7 @@ test("IDE retains its document during compute reconnect without restarting compu
   let recoveredReads = 0;
   await mockFactoryFunctions(page, {
     runtime: {
-      attempts: async (_actor, factoryTargetID) => {
+      attempts: async (_actor, _factoryTargetID) => {
         if (reconnecting) reconnectReads++;
         else if (reconnectReads) recoveredReads++;
         return attemptsResponseSchema.parse({
@@ -382,7 +383,7 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   await mockAgentView(page, change.id, async () => view(), { activity: true });
   await mockFactoryFunctions(page, {
     agent: {
-      start: async (_actor, factoryTargetID, factoryCommand) => {
+      start: async (_actor, _factoryTargetID, _factoryCommand) => {
         state = "working";
         sessionAvailable = true;
         return agentViewSchema.parse(view());
@@ -391,7 +392,7 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   });
   await mockFactoryFunctions(page, {
     agent: {
-      stop: async (_actor, factoryTargetID) => {
+      stop: async (_actor, _factoryTargetID) => {
         state = "stopped";
         return agentViewSchema.parse(view());
       },
@@ -399,7 +400,7 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, factoryCommand) => {
         projectMessages.push(factoryCommand);
         return (() => {
           throw new CommandError("invalid", String("Controlled response, no model request"));
@@ -548,7 +549,7 @@ test("Review keeps updating when the PR number is a PostgreSQL bigint", async ({
   const detail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
   expect(ticketDetailSchema.parse(detail).ticket.id).toBe(ticketID);
   const browserDetail = page.waitForResponse(
-    (response) => response.url().includes("/_server/data/getTicketDetail-"),
+    async (response) => await factoryFunctionMatches(response.url(), "getTicketDetail"),
     { timeout: 5_000 },
   );
   await page
@@ -1012,7 +1013,7 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
   await mockAgentView(
     page,
     change.id,
-    async (factoryTargetID, factoryHistory) => {
+    async (_factoryTargetID, _factoryHistory) => {
       reads++;
       return agentViewSchema.parse({
         state,
@@ -1143,7 +1144,7 @@ test("explicit Stop confirmation preserves the draft and sends only the displaye
   await mockAgentView(page, change.id, async () => view(), { activity: true });
   await mockFactoryFunctions(page, {
     agent: {
-      checkStop: async (_actor, factoryTargetID, factoryCommand) => {
+      checkStop: async (_actor, _factoryTargetID, factoryCommand) => {
         confirmations.push(factoryCommand);
         if (canConfirm) stopPending = false;
         return agentViewSchema.parse(view());
@@ -1288,7 +1289,7 @@ test("pending commit recovery blocks new Build without consuming the draft", asy
   await mockAgentView(
     page,
     change.id,
-    async (factoryTargetID, factoryHistory) => {
+    async (_factoryTargetID, _factoryHistory) => {
       observedPhase = phase;
       return agentViewSchema.parse({
         state,
@@ -1381,7 +1382,7 @@ test("restores an unacknowledged message and its command identity after browser 
   const submissions: Array<{ commandId: string; text: string }> = [];
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, factoryCommand) => {
         submissions.push(factoryCommand);
         if (submissions.length === 1)
           return (() => {
@@ -1564,7 +1565,7 @@ for (const type of ["free-text", "single-select", "multi-select"] as const) {
     });
     await mockFactoryFunctions(page, {
       conversations: {
-        answer: async (_actor, factoryTargetID, factoryCommand) => {
+        answer: async (_actor, _factoryTargetID, factoryCommand) => {
           submissions.push(factoryCommand);
           return submissions.length === 1
             ? (() => {
@@ -1635,7 +1636,7 @@ test("only exact admitted command identity clears a recovered draft on read-only
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, factoryCommand) => {
         submissions.push(factoryCommand);
         return (() => {
           throw new Error("Controlled lost response");
@@ -1682,7 +1683,7 @@ test("blocked browser recovery storage prevents agent mutation", async ({ page }
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, factoryCommand) => {
         submissions.push(factoryCommand);
         return (() => {
           throw new Error("Controlled lost response");
@@ -2803,7 +2804,7 @@ for (const existingConversation of [true, false]) {
     const message = "Explain the delivery process";
     await mockFactoryFunctions(page, {
       conversations: {
-        message: async (_actor, factoryTargetID, factoryCommand) => {
+        message: async (_actor, _factoryTargetID, factoryCommand) => {
           conversationID ??= await insertConversation();
           await insertUserMessage(conversationID, message, factoryCommand.commandId);
           return (() => {
@@ -2834,7 +2835,7 @@ test("preserves a rejected draft when an older message has identical text", asyn
   await insertUserMessage(conversationID, message);
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) =>
+      message: async (_actor, _factoryTargetID, _factoryCommand) =>
         (() => {
           throw new CommandError("conflict", String("Request was not accepted"));
         })(),
@@ -2878,7 +2879,7 @@ test("preserves a new draft typed while saved-message recovery is loading", asyn
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, factoryCommand) => {
         await insertUserMessage(conversationID, "Accepted question", factoryCommand.commandId);
         recovering = true;
         return (() => {
@@ -2912,7 +2913,7 @@ for (const outcome of ["success", "failure"] as const) {
     });
     await mockFactoryFunctions(page, {
       conversations: {
-        message: async (_actor, factoryTargetID, factoryCommand) => {
+        message: async (_actor, _factoryTargetID, factoryCommand) => {
           await insertUserMessage(
             oldConversationID,
             "Old Project request",
@@ -2970,7 +2971,7 @@ test("ignores an older History read after a Project switch", async ({ page }) =>
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      get: async (_actor, factoryTargetID, factoryCommand) => {
+      get: async (_actor, _factoryTargetID, _factoryCommand) => {
         const response = await requestFunction(page.request, "getConversation", [projectID, {}]);
         historyRequested();
         await responseGate;
@@ -3009,8 +3010,8 @@ test("does not apply a delayed mode change to another Project", async ({ page })
   });
 
   const panel = await openConversation(page);
-  const modeRequested = page.waitForRequest((request) =>
-    request.url().includes("/_server/data/setConversationMode-"),
+  const modeRequested = page.waitForRequest(
+    async (request) => await factoryFunctionMatches(request.url(), "setConversationMode"),
   );
   await panel.getByLabel("Message conversation").fill("Clarify this Project's requirements");
   await panel.getByRole("button", { name: "Send message", exact: true }).click();

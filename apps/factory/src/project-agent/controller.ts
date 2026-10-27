@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { setTimeout as wait } from "node:timers/promises";
 import {
   type AgentTurnCommand,
   agentTurnCommandInput,
@@ -6,6 +7,7 @@ import {
 import {
   assertModeAuthority,
   type ConversationMode,
+  type PlanningIntent,
   type InterviewAnswer,
   interviewQuestionInput,
   normalizeInterviewAnswer,
@@ -15,7 +17,11 @@ import {
 import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { ProjectAgentProgress } from "../../../../packages/conversation-domain/src/turn-observation";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { createAccessController, projectAuthorityIn } from "../access/controller";
+import {
+  createAccessController,
+  projectAuthorityIn,
+  projectDevelopmentAuthorityIn,
+} from "../access/controller";
 import { readTurnObservation } from "../agent/turn-observation";
 import {
   type AgentTurnRecord,
@@ -51,7 +57,9 @@ import {
 import { persistProjectOutput } from "./effects";
 import { createEpicConfirmation } from "./epic-confirmation";
 import { canAdvanceInterviewRound } from "./interview-round";
-import { isRequirementsInterview } from "./interview-intent";
+import { isRequirementsInterview, planningRequest } from "./interview-intent";
+import { technicalPlanningBaseInput } from "../../../../packages/requirement-domain/src/technical-design";
+import { renderArchitectureDiagrams } from "../technical-design/diagrams";
 import { readResearch, searchResearch } from "./research";
 import { ProjectAgentOutputError } from "./structured-output";
 import { admittedProjectContext, admittedTicketContext } from "./ticket-context";
@@ -60,6 +68,7 @@ import { mcpSourceTools } from "../mcp/sources";
 import { mcpDigest } from "../mcp/controller";
 import { contextIn, contextsIn } from "./conversation-contexts";
 import { connectFactoryMCP } from "../mcp/factory";
+import { retainLearningArtifactsIn, type LearningSourceArtifact } from "../learning/artifacts";
 
 export { projectAgentStructuredOutput, projectAgentStructuredOutputFor } from "./adapter";
 
@@ -134,6 +143,19 @@ export function createProjectAgentController(
   const usage = createUsageObservations();
   const progress = new Map<string, ProjectAgentProgress>();
   const recovering = new Set<string>();
+  const pending = new Set<Promise<void>>();
+  const responses = new Set<AbortController>();
+  const lifetime = new AbortController();
+  let closed = false;
+  let closing: Promise<void> | undefined;
+  function track(work: Promise<void>) {
+    pending.add(work);
+    const settled = () => {
+      pending.delete(work);
+    };
+    void work.then(settled, settled);
+    return work;
+  }
 
   async function conversation(projectID: string, ticketID: string | undefined, userID: string) {
     const rows = await database.client<ConversationRow[]>`
@@ -318,8 +340,8 @@ export function createProjectAgentController(
     | Omit<Extract<AgentTurnCommand, { kind: "project-message" }>, "conversationId">
     | Omit<Extract<AgentTurnCommand, { kind: "project-answer" }>, "conversationId">;
 
-  async function admitProject(request: ProjectRequest) {
-    return database.client.begin(async (transaction) => {
+  async function admitProject(request: ProjectRequest, transaction?: AgentTurnTransaction) {
+    const admit = async (transaction: AgentTurnTransaction) => {
       await transaction`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${request.commandId}`}))`;
       // A proposal can bind a draft to a Ticket. Resolve replay before looking for a new draft.
       const previous = await turns.getByCommand(request.commandId, transaction);
@@ -353,6 +375,17 @@ export function createProjectAgentController(
       if (current.mode === "build")
         throw new CommandError("conflict", "Build messages belong to the Change Agent");
       const command = agentTurnCommandInput.parse({ ...request, conversationId: current.id });
+      if (
+        command.kind === "project-message" &&
+        ["full-planning", "technical-planning"].includes(command.intent ?? "")
+      ) {
+        await projectDevelopmentAuthorityIn(transaction, command.createdBy, command.projectId);
+        if (!command.ticketId || !command.sourceCommit || current.mode !== "plan")
+          throw new CommandError(
+            "conflict",
+            "Technical Planning needs a selected Ticket and pinned source.",
+          );
+      }
       const modelId = await modelSettings.resolve("planning", transaction, {
         projectID: request.projectId,
         userID: request.createdBy,
@@ -386,6 +419,25 @@ export function createProjectAgentController(
           command.ticketId,
         );
         if (command.kind === "project-message") {
+          let technicalBase: z.infer<typeof technicalPlanningBaseInput> | undefined;
+          if (command.intent === "technical-planning") {
+            const [latest] = await transaction<{ id: string }[]>`
+              SELECT id FROM factory.technical_design_revision WHERE ticket_id=${command.ticketId} ORDER BY ordinal DESC LIMIT 1`;
+            const [scope] =
+              await transaction`SELECT id FROM factory.requirement_approval WHERE ticket_id=${command.ticketId}`;
+            if (!ticketContext?.revisionId || ticketContext.implementationAdmitted || scope)
+              throw new CommandError(
+                "conflict",
+                "Save complete product requirements before Technical Planning.",
+              );
+            technicalBase = technicalPlanningBaseInput.parse({
+              requestId: record.id,
+              requirementRevisionId: ticketContext.revisionId,
+              documentId: ticketContext.documentId,
+              previousDesignId: latest?.id ?? null,
+              sourceCommit: command.sourceCommit,
+            });
+          }
           await appendConversationEntry(transaction, current.id, {
             kind: "user-message",
             actor: "user",
@@ -396,6 +448,10 @@ export function createProjectAgentController(
               turnId: record.id,
               projectContext,
               ...(command.intent ? { intent: command.intent } : {}),
+              ...(command.sourceCommit
+                ? { sourceCommit: command.sourceCommit, visibility: "developer" }
+                : {}),
+              ...(technicalBase ? { technicalBase } : {}),
               ...(ticketContext ? { ticketContext } : {}),
             },
             citations: [],
@@ -464,12 +520,22 @@ export function createProjectAgentController(
           ...(command.contextId ? { contextId: command.contextId } : {}),
         });
       });
-    });
+    };
+    return transaction ? admit(transaction) : database.client.begin(admit);
   }
 
-  async function respond(record: AgentTurnRecord, observer?: ProjectResponseObserver) {
+  function respond(record: AgentTurnRecord, observer?: ProjectResponseObserver) {
+    if (closed) return Promise.resolve();
+    return track(respondOwned(record, observer));
+  }
+
+  async function respondOwned(record: AgentTurnRecord, observer?: ProjectResponseObserver) {
     const owner = await turns.claimPending(record.id);
     if (!owner?.ownerToken) return;
+    if (closed) {
+      await turns.releasePending(owner.id, owner.ownerToken);
+      return;
+    }
     const token = owner.ownerToken;
     const { command, authority } = owner;
     if (
@@ -566,6 +632,11 @@ export function createProjectAgentController(
       await turns.failPending(owner.id, token, "The admitted Project input could not be found.");
       throw new Error("Admitted Project input missing");
     }
+    const request = planningRequest(command, history);
+    const technicalPlanning =
+      request?.payload["intent"] === "technical-planning"
+        ? technicalPlanningBaseInput.parse(request.payload["technicalBase"])
+        : undefined;
     if (!(await turns.beginDispatch(owner.id, token))) {
       await turns.failPending(
         owner.id,
@@ -575,11 +646,19 @@ export function createProjectAgentController(
       throw new CommandError("conflict", "The conversation changed before Agent dispatch");
     }
     const abort = new AbortController();
+    responses.add(abort);
+    if (closed) abort.abort();
     const authorizeExecution = async () => {
+      abort.signal.throwIfAborted();
       // Turn validation already checks live account and Project access inside
       // the same transaction as conversation ownership. Do not repeat it per token.
       if (!(await turns.validateExecution(owner.id, token)))
         throw new CommandError("conflict", "The Agent no longer owns this conversation authority");
+      if (technicalPlanning)
+        await createAccessController(database).requireDevelopment(
+          command.createdBy,
+          command.projectId,
+        );
     };
     let renewal: Promise<void> | undefined;
     const timer = setInterval(() => {
@@ -598,6 +677,7 @@ export function createProjectAgentController(
     timer.unref();
     try {
       let output: ProjectAgentOutput;
+      const learningArtifacts: LearningSourceArtifact[] = [];
       let codeRead = history.some(
         (entry) =>
           entry.payload["visibility"] === "developer" ||
@@ -645,6 +725,12 @@ export function createProjectAgentController(
             expectedVersion,
           );
           projectSources.add(`${source}:${id}`);
+          if (learningArtifacts.length < 3)
+            learningArtifacts.push({
+              reference: `${source}:${id}:v${result.version}`,
+              body: result.body,
+              truncated: result.truncated || (offset ?? 0) > 0,
+            });
           await attachmentTools.discover(
             owner.id,
             token,
@@ -675,6 +761,7 @@ export function createProjectAgentController(
             return result;
           },
           requirementsInterview: isRequirementsInterview(command, history),
+          ...(technicalPlanning ? { technicalPlanning } : {}),
           mode:
             command.kind === "project-message" && command.intent === "project-research"
               ? "investigate"
@@ -773,12 +860,18 @@ export function createProjectAgentController(
                         command.projectId,
                         query,
                         command.createdBy,
+                        technicalPlanning?.sourceCommit,
                       );
                       codeRead = true;
                       return result;
                     },
                     read: async (value: Parameters<typeof knowledge.code>[1]) => {
                       const parsed = codeReadInput.parse(value);
+                      if (technicalPlanning && parsed.commitSha !== technicalPlanning.sourceCommit)
+                        throw new CommandError(
+                          "conflict",
+                          "Read the source pinned to this Technical Planning task.",
+                        );
                       const result = await knowledge.code(
                         command.projectId,
                         parsed,
@@ -786,6 +879,12 @@ export function createProjectAgentController(
                       );
                       codeRead = true;
                       readCodeSources.add(`${parsed.commitSha}:${parsed.path}`);
+                      if (learningArtifacts.length < 3)
+                        learningArtifacts.push({
+                          reference: `code:${parsed.commitSha}:${parsed.path}:${parsed.startLine}`,
+                          body: result.body,
+                          truncated: result.truncated,
+                        });
                       return result;
                     },
                   },
@@ -825,6 +924,20 @@ export function createProjectAgentController(
           readCodeSources,
           projectSources,
         );
+        if (
+          output.kind === "technical-design" &&
+          (!technicalPlanning ||
+            !output.citations.some((citation) => citation.source === "code") ||
+            output.citations.some(
+              (citation) =>
+                citation.source === "code" && citation.commitSha !== technicalPlanning.sourceCommit,
+            ))
+        )
+          throw new ProjectAgentOutputError();
+        const technical =
+          output.kind === "technical-design" && technicalPlanning
+            ? { base: technicalPlanning, renders: await renderArchitectureDiagrams(output.design) }
+            : undefined;
         const supported = new Set(output.citations.map((citation) => citation.reference));
         if (
           [...output.message.matchAll(/\[\^(\d+)\]/g)].some(
@@ -837,7 +950,19 @@ export function createProjectAgentController(
           token,
           "completed",
           "Project Agent response saved.",
-          (transaction) => persistProjectOutput(transaction, owner, output, codeRead),
+          async (transaction) => {
+            await persistProjectOutput(
+              transaction,
+              owner,
+              output,
+              codeRead || Boolean(technicalPlanning),
+              technical,
+              request?.payload["intent"] === "full-planning"
+                ? String(request.payload["sourceCommit"])
+                : undefined,
+            );
+            await retainLearningArtifactsIn(transaction, owner, learningArtifacts);
+          },
         );
         if (!settled)
           throw new CommandError("conflict", "The Agent turn no longer owns this response");
@@ -852,6 +977,7 @@ export function createProjectAgentController(
       }
     } finally {
       progress.delete(owner.id);
+      responses.delete(abort);
       clearInterval(timer);
       await renewal;
     }
@@ -864,7 +990,7 @@ export function createProjectAgentController(
       // A live owner may outlast the first observation window. Recheck at its
       // lease boundary until terminal, without stealing work or polling each second.
       // SQL remains authoritative if clocks drift or another owner renews the lease.
-      for (;;) {
+      while (!closed) {
         const record = await turns.get(id);
         if (!record || record.authority.mode === "build" || "changeId" in record.command) return;
         if (record.state === "pending") {
@@ -879,7 +1005,11 @@ export function createProjectAgentController(
         const expiry = record.ownerExpiresAt
           ? new Date(record.ownerExpiresAt).getTime()
           : Date.now();
-        await Bun.sleep(Math.max(25, Math.min(30_000, expiry - Date.now() + 25)));
+        await wait(Math.max(25, Math.min(30_000, expiry - Date.now() + 25)), undefined, {
+          signal: lifetime.signal,
+        }).catch((cause) => {
+          if (!closed) throw cause;
+        });
       }
     } finally {
       recovering.delete(id);
@@ -887,14 +1017,50 @@ export function createProjectAgentController(
   }
 
   return {
+    shutdown() {
+      closed = true;
+      lifetime.abort();
+      for (const response of responses) response.abort();
+      closing ??= (async () => {
+        while (pending.size) await Promise.allSettled([...pending]);
+      })();
+      return closing;
+    },
+    async admitTechnicalIn(
+      sql: AgentTurnTransaction,
+      input: {
+        commandID: string;
+        projectID: string;
+        ticketID: string;
+        userID: string;
+        sourceCommit: string;
+        contextID?: string;
+      },
+    ) {
+      return admitProject(
+        {
+          kind: "project-message",
+          commandId: input.commandID,
+          projectId: input.projectID,
+          ticketId: input.ticketID,
+          createdBy: input.userID,
+          intent: "technical-planning",
+          sourceCommit: input.sourceCommit,
+          text: "Prepare the technical design for the confirmed product specification.",
+          ...(input.contextID ? { contextId: input.contextID } : {}),
+        },
+        sql,
+      );
+    },
     confirmEpic: createEpicConfirmation(database),
     async recover() {
+      if (closed) return;
       const pending = await database.client<Array<{ id: string }>>`SELECT id FROM factory.agent_turn
         WHERE change_id IS NULL AND state IN ('pending', 'dispatching', 'running') ORDER BY created_at`;
       for (const record of pending) {
         // respond records unavailable/failed/uncertain outcomes itself. A DB
         // failure leaves durable intent for the next startup, not a paid retry.
-        void recoverTurn(record.id).catch(() => {});
+        if (!closed) void track(recoverTurn(record.id)).catch(() => {});
       }
     },
     async get(projectID: string, ticketID: string | undefined, userID: string, contextID?: string) {
@@ -950,10 +1116,22 @@ export function createProjectAgentController(
       text: string,
       userID: string,
       commandID: string,
-      intent?: "requirements-interview" | "project-research",
+      intent?: PlanningIntent,
       observer?: ProjectResponseObserver,
       contextID?: string,
     ) {
+      let sourceCommit: string | undefined;
+      if (intent === "full-planning" || intent === "technical-planning") {
+        await createAccessController(database).requireDevelopment(userID, projectID);
+        const previous = await turns.getByCommand(commandID);
+        sourceCommit =
+          previous?.command.kind === "project-message" ? previous.command.sourceCommit : undefined;
+        if (!sourceCommit) {
+          if (!knowledge)
+            throw new CommandError("unavailable", "Project code research is unavailable.");
+          sourceCommit = (await knowledge.codePaths(projectID, "", userID)).commitSha;
+        }
+      }
       const { turn } = await admitProject({
         kind: "project-message",
         commandId: commandID,
@@ -962,6 +1140,7 @@ export function createProjectAgentController(
         createdBy: userID,
         text,
         ...(intent ? { intent } : {}),
+        ...(sourceCommit ? { sourceCommit } : {}),
         ...(contextID ? { contextId: contextID } : {}),
       });
       observer?.admitted(turn.id);

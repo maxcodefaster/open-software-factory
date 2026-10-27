@@ -1,24 +1,27 @@
-import { browserFunction } from "../fixtures/server-functions";
-import { changesResponseSchema } from "../../apps/factory/src/api-contracts";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { mockAgentView } from "../fixtures/server-functions";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import {
-  sourceWorkspaceViewSchema,
-  type ConversationView,
   type ConversationStreamEvent,
+  type ConversationView,
+  changesResponseSchema,
   conversationViewSchema,
+  sourceWorkspaceViewSchema,
 } from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import {
   type InterviewQuestion,
   interviewAnswerCommandInput,
 } from "../../packages/conversation-domain/src/conversation";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserFunction,
+  factoryFunctionMatches,
+  mockAgentView,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
@@ -306,7 +309,7 @@ async function captureAnswer(page: Page) {
   let submitted: unknown;
   await mockFactoryFunctions(page, {
     conversations: {
-      answer: async (_actor, factoryTargetID, factoryCommand) => {
+      answer: async (_actor, _factoryTargetID, factoryCommand) => {
         const parsed = interviewAnswerCommandInput.parse(factoryCommand);
         submitted = {
           ticketId: parsed.ticketId,
@@ -378,7 +381,7 @@ for (const buildState of ["stopped", "failed"] as const)
     let buildPrompt: unknown;
     await mockFactoryFunctions(page, {
       agent: {
-        prompt: async (_actor, factoryTargetID, factoryCommand) => {
+        prompt: async (_actor, _factoryTargetID, factoryCommand) => {
           buildPrompt = factoryCommand;
           return (() => {
             throw new CommandError("unavailable", String("Owned Build dispatch interrupted"));
@@ -506,7 +509,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      answer: async (_actor, factoryTargetID, factoryCommand) => {
+      answer: async (_actor, _factoryTargetID, _factoryCommand) => {
         showProgress = true;
         await waiting;
         return (() => {
@@ -596,8 +599,8 @@ test("offers one single-select answer path and reveals custom input only when se
   await question.getByLabel("Custom answer").fill("Support engineers");
   await expect(next).toBeEnabled();
   const element = await question.elementHandle();
-  await page.waitForResponse((response) =>
-    new URL(response.url()).pathname.startsWith("/_server/data/getChanges-"),
+  await page.waitForResponse(
+    async (response) => await factoryFunctionMatches(response.url(), "getChanges"),
   );
   await expect(question.getByLabel("Custom answer")).toHaveValue("Support engineers");
   expect(await element?.evaluate((node) => node.isConnected)).toBe(true);

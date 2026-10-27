@@ -1,5 +1,12 @@
 import { factoryProcess } from "./factory-process";
-const fixture = await factoryProcess();
+import { ownedPostgresServer } from "./postgres-server";
+
+const postgres = process.env["FACTORY_TEST_POSTGRES"] ? undefined : await ownedPostgresServer();
+if (postgres) process.env["FACTORY_TEST_POSTGRES"] = JSON.stringify(postgres.identity);
+const fixture = await factoryProcess().catch(async (cause) => {
+  await postgres?.dispose();
+  throw cause;
+});
 try {
   await fixture.startPlanningCache();
   await fixture.start();
@@ -11,5 +18,9 @@ try {
     process.once("SIGINT", resolve);
   });
 } finally {
-  await fixture.dispose();
+  try {
+    await fixture.dispose();
+  } finally {
+    await postgres?.dispose();
+  }
 }

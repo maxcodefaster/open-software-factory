@@ -15,6 +15,7 @@ import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { monitoringNativeSource, ownedMonitoringForge } from "../fixtures/monitoring-native";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
+import { fixtureValue } from "../fixtures/value";
 
 const stateInput = z
   .object({
@@ -52,14 +53,14 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
     const directory = continuation
       ? resolve(continuation, "..")
       : resolve(root, crypto.randomUUID());
-    if (!directory.startsWith(root + "/"))
+    if (!directory.startsWith(`${root}/`))
       throw new Error("An exact owned monitoring proof is required");
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const stateFile = resolve(directory, "state.json");
     const state: State = continuation
       ? stateInput.parse(JSON.parse(await readFile(stateFile, "utf8")))
       : {
-          id: directory.split("/").at(-1)!,
+          id: fixtureValue(directory.split("/").at(-1), 'directory.split("/").at(-1)'),
           sourceId: crypto.randomUUID(),
           sourceRevisionId: crypto.randomUUID(),
           connectCommandId: crypto.randomUUID(),
@@ -127,7 +128,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         signal: AbortSignal.timeout(180_000),
       });
     }
-    async function api(path: string, method = "GET", body?: unknown, cookie = adminCookie) {
+    async function _api(path: string, method = "GET", body?: unknown, cookie = adminCookie) {
       const response = await request(path, method, body, cookie);
       if (!response.ok) {
         const value = await response.json().catch(() => null);
@@ -403,9 +404,9 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         );
         entry = (await library()).entries.find((entry) => entry.id === state.sourceId);
       }
-      if (!entry?.connection || entry.connection.state !== "ready")
+      if (entry?.connection?.state !== "ready")
         throw new Error("The exact owned MCP connection is not ready; no reconnect is automatic");
-      if (!entry.connection.projectGrants.includes(state.projectId!))
+      if (!entry.connection.projectGrants.includes(state.projectId))
         await serverCall(
           callFactoryFunction(
             factory.base,
@@ -428,7 +429,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         async () =>
           (
             await database.client<{ confirmed: boolean }[]>`
-          SELECT confirmed FROM factory.forge_branch_intent WHERE project_id=${state.projectId!} AND branch='release'`
+          SELECT confirmed FROM factory.forge_branch_intent WHERE project_id=${fixtureValue(state.projectId, "state.projectId")} AND branch='release'`
           )[0]?.confirmed,
         (confirmed) => confirmed === true,
         "Owned Project protection did not become ready",
@@ -465,7 +466,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         console.info("Monitoring native: submitting owned duplicate alert deliveries");
         const receipts = await Promise.all(
           Array.from({ length: 8 }, (_, index) =>
-            fetch(webhook!, {
+            fetch(webhook, {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({
@@ -525,7 +526,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       expect(delivered?.occurrences).toBe(8);
       const [change] = await database.client<
         { id: string }[]
-      >`SELECT id FROM factory.change WHERE ticket_id=${delivered!.ticketId}`;
+      >`SELECT id FROM factory.change WHERE ticket_id=${delivered.ticketId}`;
       if (!change) throw new Error("The delivered Change is missing");
       const delivery = deliveryViewSchema.parse(
         await serverCall(
@@ -549,8 +550,11 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         review: delivery.reviewId,
       });
       const [requirements] = await database.client<{ incident: string; policy: string }[]>`
-        SELECT monitoring_incident_id AS incident,monitoring_policy_id AS policy FROM factory.requirement_approval WHERE ticket_id=${delivered!.ticketId}`;
-      expect(requirements).toEqual({ incident: state.incidentId, policy: approval!.policy });
+        SELECT monitoring_incident_id AS incident,monitoring_policy_id AS policy FROM factory.requirement_approval WHERE ticket_id=${delivered.ticketId}`;
+      expect(requirements).toEqual({
+        incident: state.incidentId,
+        policy: fixtureValue(approval, "approval").policy,
+      });
       const branch = await forge.getDefaultBranch(repository);
       expect(branch.name).toBe("release");
       expect(branch.headSha).toBe(delivery.verificationCommitSha);
@@ -579,8 +583,8 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
         SELECT attempt.id,preview.revision AS sha,attempt.state FROM factory.staging_preview preview
           JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id WHERE preview.project_id=${state.projectId}`;
       expect(preview).toMatchObject({ sha: branch.headSha, state: "ready" });
-      const missing = await app(preview!.id, "/invoices/missing");
-      const known = await app(preview!.id, "/invoices/known");
+      const missing = await app(fixtureValue(preview, "preview").id, "/invoices/missing");
+      const known = await app(fixtureValue(preview, "preview").id, "/invoices/known");
       expect(missing).toEqual({ status: 404, body: { total: null } });
       expect(known).toEqual({ status: 200, body: { total: 12 } });
       const reviews = await database.client<{ id: string; sourceCount: number }[]>`
@@ -628,7 +632,7 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
       } else {
         for (const attempt of await database.client<
           { id: string; state: string }[]
-        >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${state.projectId!}`) {
+        >`SELECT id,state FROM factory.runtime_attempt WHERE project_id=${fixtureValue(state.projectId, "state.projectId")}`) {
           if (attempt.state === "stopped") continue;
           await serverCall(
             callFactoryFunction(
@@ -654,15 +658,19 @@ test.skipIf(process.env["FACTORY_RUN_MONITORING_AUTOFIX_PROOF"] !== "1")(
           "owned-process-auth-secret-not-a-production-credential",
         );
         try {
-          await removeOwnedProjectSources(database, state.projectId!, async (id) => {
-            const [workspace] = await database.client<
-              { owner: string | null; createdBy: string }[]
-            >`
+          await removeOwnedProjectSources(
+            database,
+            fixtureValue(state.projectId, "state.projectId"),
+            async (id) => {
+              const [workspace] = await database.client<
+                { owner: string | null; createdBy: string }[]
+              >`
               SELECT workspace.owner_user_id AS owner,project.created_by AS "createdBy"
-              FROM factory.development_workspace workspace JOIN factory.project project ON project.id=workspace.project_id WHERE workspace.id=${id} AND workspace.project_id=${state.projectId!}`;
-            if (!workspace) throw new Error("Owned monitoring source identity disappeared");
-            return sources.stop(id, workspace.owner ?? workspace.createdBy);
-          });
+              FROM factory.development_workspace workspace JOIN factory.project project ON project.id=workspace.project_id WHERE workspace.id=${id} AND workspace.project_id=${fixtureValue(state.projectId, "state.projectId")}`;
+              if (!workspace) throw new Error("Owned monitoring source identity disappeared");
+              return sources.stop(id, workspace.owner ?? workspace.createdBy);
+            },
+          );
         } finally {
           await sources.close();
         }

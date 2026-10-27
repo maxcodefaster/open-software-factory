@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { classifyAgentTurn, projectMessages, navigationMessages } from "./controller";
+import { classifyAgentTurn } from "./turn-outcome";
+import { projectMessages, navigationMessages } from "./message-projection";
 import { agentMessageSchema } from "../api-contracts";
 
 describe("Change Agent turn state", () => {

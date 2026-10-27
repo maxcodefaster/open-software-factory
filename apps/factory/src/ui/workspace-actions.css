@@ -10,19 +10,9 @@
   margin: 0;
   overflow-wrap: anywhere;
 }
-.workspace-heading > .workspace-action-bar {
-  flex: 0 1 auto;
-  width: auto;
-  margin-inline-start: auto;
-  padding: 0;
-}
 .workspace-heading-meta {
   flex: 1 0 100%;
   min-width: 0;
-}
-.workspace-heading-meta:has(> .save-feedback:only-child > span:last-child:empty),
-.workspace-heading-meta > .save-feedback:has(> span:last-child:empty) {
-  display: none;
 }
 .workspace-action-bar {
   display: flex;
@@ -46,44 +36,16 @@
   font-size: var(--text-sm);
   overflow-wrap: anywhere;
 }
-.workspace-action {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-  min-height: var(--control-height);
-  padding: var(--space-1) var(--space-2);
-  border: 0;
-  border-radius: var(--radius-control);
-  background: transparent;
-  color: var(--color-ink-muted);
-  box-shadow: none;
-  font: var(--weight-regular) var(--text-sm) / var(--leading-label) var(--font-interface);
-  text-decoration: none;
-  white-space: nowrap;
-  transition: background var(--duration-fast) var(--ease-standard);
-}
-.workspace-action[data-primary="true"] {
-  color: var(--color-river-deep);
-  font-weight: var(--weight-semibold);
-}
-.workspace-action:hover:not(:disabled) {
-  background: var(--material-chrome-hover);
-  color: var(--color-ink);
-  translate: none;
-}
-.workspace-action:focus-visible {
-  outline: 2px solid var(--color-focus);
-  outline-offset: 2px;
-}
-.workspace-action:disabled {
-  cursor: not-allowed;
-}
 .workspace-menu-trigger {
   width: var(--space-8);
   padding: var(--space-1);
   list-style: none;
   cursor: pointer;
+}
+@media (pointer: coarse) {
+  .workspace-menu-trigger {
+    min-width: var(--touch-target);
+  }
 }
 .workspace-menu-trigger::-webkit-details-marker {
   display: none;
@@ -93,11 +55,15 @@
   height: var(--space-4);
   flex: none;
 }
-@media (pointer: coarse) {
-  .workspace-action {
-    min-height: 44px;
-  }
-  .workspace-menu-trigger {
-    min-width: 44px;
-  }
+.workspace-heading > .workspace-action-bar {
+  flex: 0 1 auto;
+  width: auto;
+  margin-inline-start: auto;
+  padding: 0;
+}
+.workspace-heading-meta > .save-feedback:has(> span:last-child:empty) {
+  display: none;
+}
+.workspace-heading-meta:has(> .save-feedback:only-child > span:last-child:empty) {
+  display: none;
 }

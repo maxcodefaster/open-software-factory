@@ -10,6 +10,13 @@
   line-height: var(--leading-body);
   margin: 0;
 }
+.usage-section-title {
+  margin: var(--space-4) 0 0;
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--line-subtle);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-medium);
+}
 .usage-totals {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -71,17 +78,6 @@
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-.usage-fields input {
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-sm);
-  background: var(--material-input);
-  color: var(--color-ink);
-  font: inherit;
 }
 .usage-settings button {
   justify-self: start;

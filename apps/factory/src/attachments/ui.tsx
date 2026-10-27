@@ -10,21 +10,21 @@ import {
   useContext,
 } from "solid-js";
 import {
-  type AttachmentSummary,
   type AttachmentInput,
+  type AttachmentSummary,
   attachmentIDs,
   attachmentMarkdown,
   attachmentSummary,
   attachmentURL,
 } from "../../../../packages/conversation-domain/src/attachments";
 import { apiUpload } from "../api-client";
+import { Icon } from "../icon";
 import {
   beginAttachment,
   getAttachmentMetadata,
   getAttachmentUsage,
 } from "../server-functions/attachments";
-import { serverCall, type ServerValue } from "../server-functions/result";
-import { Icon } from "../icon";
+import { type ServerValue, serverCall } from "../server-functions/result";
 import { Feedback } from "../ui/feedback";
 import {
   readAttachmentContent,
@@ -261,7 +261,7 @@ export function AttachmentPicker(props: {
       setLimitsFailed(false);
       let active = true;
       if (id)
-        void serverCall(getAttachmentUsage(id))
+        void serverCall(getAttachmentUsage({ data: [id] }))
           .then((usage) => {
             if (active) setLimits(usage.limits);
           })
@@ -302,18 +302,18 @@ export function AttachmentPicker(props: {
     const rejected: string[] = [];
     drafts.update(key, { busy: true, status: "", error: "", retryFiles: [], attempts, transfers });
     try {
-      const usage = await serverCall(getAttachmentUsage(projectId));
+      const usage = await serverCall(getAttachmentUsage({ data: [projectId] }));
       if (!disposed && identity() === key) setLimits(usage.limits);
       if (!usage.configured)
         throw new Error(
-          "File storage is not configured. Ask your Factory administrator to configure the private attachment bucket.",
+          "Factory file storage is unavailable. Ask your administrator to check the installation's storage service.",
         );
       const existing = message
         ? await Promise.all(
             referenceIDs.map(
               (id) =>
                 drafts.get(key).files.find((item) => item.id === id) ??
-                serverCall(getAttachmentMetadata(id)),
+                serverCall(getAttachmentMetadata({ data: [id] })),
             ),
           )
         : [];
@@ -355,13 +355,17 @@ export function AttachmentPicker(props: {
         attempts.set(attemptKey, id);
         const initial = await serverCall(
           beginAttachment({
-            id,
-            projectId,
-            name: file.name,
-            mediaType,
-            bytes: file.size,
-            sha256,
-            ...(draftId ? { draftId } : {}),
+            data: [
+              {
+                id,
+                projectId,
+                name: file.name,
+                mediaType,
+                bytes: file.size,
+                sha256,
+                ...(draftId ? { draftId } : {}),
+              },
+            ],
           }),
         );
         transfer(index, { state: "uploading" });
@@ -470,7 +474,7 @@ export function AttachmentPicker(props: {
         )
           continue;
         requestedMetadata.add(request);
-        void serverCall(getAttachmentMetadata(id))
+        void serverCall(getAttachmentMetadata({ data: [id] }))
           .then((file) => {
             const current = drafts.get(key);
             if (!current.files.some((item) => item.id === id))

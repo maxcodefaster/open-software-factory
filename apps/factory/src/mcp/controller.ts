@@ -18,6 +18,15 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import {
+  defaultLibraryCover,
+  libraryCoverInput,
+} from "../../../../packages/conversation-domain/src/library-covers";
+import {
+  initializeLibraryCoverIn,
+  libraryCoversIn,
+  saveLibraryCoverIn,
+} from "../library-covers/store";
 
 export function canonicalMCPJSON(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalMCPJSON).join(",")}]`;
@@ -104,6 +113,11 @@ export function createMCPLibrary(database: Database) {
       FROM factory.mcp_library WHERE scope='system' OR owner_id=${userId} OR project_id=${projectId ?? null}
       ORDER BY scope,id`;
     const result = [];
+    const covers = await libraryCoversIn(
+      sql,
+      "mcp",
+      entries.map((entry) => entry.id),
+    );
     for (const entry of entries) {
       const editable = await canEditIn(sql, entry, userId);
       const revisions =
@@ -120,6 +134,7 @@ export function createMCPLibrary(database: Database) {
         editable || entry.projectId === projectId || grants.some((grant) => grant.id === projectId);
       result.push({
         ...entry,
+        cover: covers.get(entry.id) ?? null,
         editable,
         revisions: revisions.map((revision) => mcpRevision.parse(revision)),
         connection:
@@ -219,7 +234,15 @@ export function createMCPLibrary(database: Database) {
         } else {
           await sql`INSERT INTO factory.mcp_library(id,scope,owner_id,project_id)
             VALUES(${input.libraryId},${input.scope},${input.scope === "personal" ? userId : null},
-              ${input.scope === "project" ? input.projectId! : null})`;
+              ${input.scope === "project" ? (input.projectId ?? null) : null})`;
+          if (input.content.provider === "custom")
+            await initializeLibraryCoverIn(
+              sql,
+              "mcp",
+              input.libraryId,
+              defaultLibraryCover(input.libraryId),
+              userId,
+            );
         }
         const content = mcpDefinition.parse(input.content);
         const digest = mcpDigest(content);
@@ -242,6 +265,14 @@ export function createMCPLibrary(database: Database) {
         return { saved: true };
       });
     },
+    async cover(value: unknown, userId: string) {
+      const input = libraryCoverInput.parse(value);
+      return database.client.begin(async (sql) => {
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`mcp-entry:${input.libraryId}`}))`;
+        await authorizeIn(sql, input.libraryId, userId);
+        return saveLibraryCoverIn(sql, "mcp", input, userId);
+      });
+    },
     async choose(value: unknown, userId: string) {
       const input = mcpChoiceInput.parse(value);
       return database.client.begin(async (sql) => {
@@ -256,8 +287,8 @@ export function createMCPLibrary(database: Database) {
           throw new CommandError("forbidden", "You cannot change these MCP defaults");
         const view = await viewIn(sql, userId, input.projectId);
         const entry = view.entries.find((entry) => entry.id === input.libraryId);
-        if (!entry || !entry.revisions.some((revision) => revision.id === input.revisionId))
-          throw new CommandError("not-found", "MCP revision not found");
+        const revision = entry?.revisions.find((revision) => revision.id === input.revisionId);
+        if (!entry || !revision) throw new CommandError("not-found", "MCP revision not found");
         if (input.scope !== "personal" && entry.scope === "personal")
           throw new CommandError(
             "conflict",
@@ -265,7 +296,6 @@ export function createMCPLibrary(database: Database) {
           );
         if (input.scope === "system" && entry.scope !== "system")
           throw new CommandError("conflict", "Factory defaults require a Factory-owned entry");
-        const revision = entry.revisions.find((revision) => revision.id === input.revisionId)!;
         if (!revision.content.roles.includes(input.role))
           throw new CommandError("conflict", "MCP entry is unavailable for this work type");
         if (input.state === "enable" || input.state === "required") {
@@ -277,7 +307,8 @@ export function createMCPLibrary(database: Database) {
             );
           if (input.projectId) await usableIn(sql, connection, input.projectId, userId);
         }
-        const contextId = input.scope === "system" ? nil : input.projectId!;
+        const contextId = input.scope === "system" ? nil : input.projectId;
+        if (!contextId) throw new CommandError("conflict", "MCP choices require a Project context");
         const ownerId = input.scope === "personal" ? userId : nil;
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`mcp-choice:${input.libraryId}:${contextId}:${ownerId}:${input.role}:${input.scope}`}))`;
         const [current] = await sql`SELECT version::float8 AS version FROM factory.mcp_choice
@@ -321,7 +352,7 @@ export function createMCPLibrary(database: Database) {
           return;
         }
         await sql`INSERT INTO factory.mcp_share_proposal(id,revision_id,proposed_by,target,project_id)
-          VALUES(${id},${revisionId},${userId},${target},${target === "project" ? projectId! : null})`;
+          VALUES(${id},${revisionId},${userId},${target},${target === "project" ? (projectId ?? null) : null})`;
       });
       return { saved: true };
     },
@@ -348,6 +379,17 @@ export function createMCPLibrary(database: Database) {
         const revision = await revisionIn(sql, proposal.revisionId);
         const libraryId = crypto.randomUUID();
         await sql`INSERT INTO factory.mcp_library(id,scope,project_id) VALUES(${libraryId},${proposal.target},${proposal.projectId})`;
+        const cover = (await libraryCoversIn(sql, "mcp", [revision.libraryId])).get(
+          revision.libraryId,
+        );
+        if (cover || revision.content.provider === "custom")
+          await initializeLibraryCoverIn(
+            sql,
+            "mcp",
+            libraryId,
+            cover?.key ?? defaultLibraryCover(libraryId),
+            userId,
+          );
         await sql`INSERT INTO factory.mcp_revision(id,library_id,revision,content,digest,created_by)
           VALUES(${crypto.randomUUID()},${libraryId},1,${JSON.stringify(revision.content)}::jsonb,${revision.digest},${userId})`;
         await sql`UPDATE factory.mcp_share_proposal SET accepted_library_id=${libraryId},accepted_by=${userId},accepted_at=now() WHERE id=${id}`;

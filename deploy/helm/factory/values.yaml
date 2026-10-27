@@ -29,13 +29,11 @@ zeroSize: 2Gi
 # Explicit rather than scaling Node processes to every CPU on the Kubernetes node.
 zeroSyncWorkers: 1
 
-# Operator-owned, private S3-compatible storage. Factory does not provision a bucket.
+# One chart-managed private store for attachments, QA recordings and annotation stills.
+objectStorage:
+  size: 16Gi
+
 attachments:
-  endpoint: ""
-  bucket: ""
-  region: us-east-1
-  # Secret keys: access-key-id, secret-access-key.
-  existingSecret: ""
   fileBytes: 10485760
   messageBytes: 20971520
 

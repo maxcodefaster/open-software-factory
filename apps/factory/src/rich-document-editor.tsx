@@ -1,8 +1,8 @@
-import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import { createDocumentEditor } from "./document-editor";
-import type { DocumentEditor, DocumentBlockState } from "./document-model";
-import { DocumentBlockControls } from "./document-block-controls";
+import { createEffect, createSignal, onSettled, Show, untrack } from "solid-js";
 import { AttachmentPicker, type AttachmentPickerHandle } from "./attachments/ui";
+import { DocumentBlockControls } from "./document-block-controls";
+import { createDocumentEditor } from "./document-editor";
+import type { DocumentBlockState, DocumentEditor } from "./document-model";
 
 export type RichDocumentSurfaceProps = {
   value: string;
@@ -22,56 +22,74 @@ export type RichDocumentSurfaceProps = {
 };
 
 export default function RichDocumentEditor(props: RichDocumentSurfaceProps) {
-  let editor: DocumentEditor | undefined;
+  const [editor, setEditor] = createSignal<DocumentEditor>();
   let root: HTMLDivElement | undefined;
+  let host: HTMLDivElement | undefined;
   let attachments: AttachmentPickerHandle | undefined;
   const [block, setBlock] = createSignal<DocumentBlockState>();
   createEffect(
-    () => props.value,
-    (value) => {
-      editor?.value(value);
-    },
+    () => ({ instance: editor(), value: props.value }),
+    ({ instance, value }) => instance?.value(value),
   );
   createEffect(
-    () => props.editable,
-    (editable) => editor?.editable(editable),
+    () => ({ instance: editor(), editable: props.editable }),
+    ({ instance, editable }) => instance?.editable(editable),
   );
-  onCleanup(() => editor?.destroy());
+  createEffect(
+    () => ({
+      instance: editor(),
+      label: props.label,
+      field: props.field,
+      placeholder: props.placeholder,
+      onElement: props.onElement,
+      onEditor: props.onEditor,
+    }),
+    ({ instance, label, field, placeholder, onElement, onEditor }) => {
+      if (!instance) return;
+      instance.element.setAttribute("aria-label", label);
+      instance.element.dataset["field"] = field;
+      instance.element.dataset["placeholder"] = placeholder ?? "";
+      onElement?.(instance.element);
+      onEditor?.(instance.element, instance);
+    },
+  );
+  onSettled(() => {
+    if (!host || !root) return;
+    // The engine is mounted once. Value, permissions and accessibility metadata
+    // above remain reactive; event callbacks read their current handlers.
+    const initial = untrack(() => ({
+      value: props.value,
+      editable: props.editable,
+      label: props.label,
+      className: `${props.class}${props.editable ? " inline-editor-surface" : ""}`,
+      field: props.field,
+      ...(props.placeholder ? { placeholder: props.placeholder } : {}),
+    }));
+    const instance = createDocumentEditor({
+      host,
+      ...initial,
+      onFocus: (element) => props.onFocus(element),
+      onInput: (value, element) => props.onInput(value, element),
+      onKeyDown: (event, element) => props.onKeyDown(event, element),
+      onSelection: (element) => props.onSelection(element),
+      onBlock: setBlock,
+    });
+    const element = root;
+    const choose = (event: Event) => attachments?.choose((event as CustomEvent).detail === "image");
+    element.addEventListener("factory-choose-attachment", choose);
+    setEditor(instance);
+    return () => {
+      element.removeEventListener("factory-choose-attachment", choose);
+      instance.destroy();
+    };
+  });
   return (
-    <div
-      class="rich-editor-host"
-      ref={(element) => {
-        root = element;
-        const choose = (event: Event) =>
-          attachments?.choose((event as CustomEvent).detail === "image");
-        element.addEventListener("factory-choose-attachment", choose);
-        onCleanup(() => element.removeEventListener("factory-choose-attachment", choose));
-      }}
-    >
-      <div
-        ref={(host) => {
-          editor = createDocumentEditor({
-            host,
-            value: props.value,
-            editable: props.editable,
-            label: props.label,
-            className: `${props.class}${props.editable ? " inline-editor-surface" : ""}`,
-            field: props.field,
-            ...(props.placeholder ? { placeholder: props.placeholder } : {}),
-            onFocus: props.onFocus,
-            onInput: props.onInput,
-            onKeyDown: props.onKeyDown,
-            onSelection: props.onSelection,
-            onBlock: setBlock,
-          });
-          props.onElement?.(editor.element);
-          props.onEditor?.(editor.element, editor);
-        }}
-      />
+    <div class="rich-editor-host" ref={root}>
+      <div ref={host} />
       <DocumentBlockControls
         state={block()}
-        editor={editor}
-        host={root}
+        editor={editor()}
+        host={editor() ? root : undefined}
         editable={props.editable}
       />
       <Show when={props.editable}>
@@ -86,8 +104,8 @@ export default function RichDocumentEditor(props: RichDocumentSurfaceProps) {
           privacy={
             props.attachmentDraftId ? "create" : props.field === "knowledge" ? "autosave" : "save"
           }
-          target={() => editor?.element}
-          prepare={() => editor?.prepareAttachment() ?? (() => {})}
+          target={() => editor()?.element}
+          prepare={() => editor()?.prepareAttachment() ?? (() => {})}
           ref={(handle) => {
             attachments = handle;
           }}

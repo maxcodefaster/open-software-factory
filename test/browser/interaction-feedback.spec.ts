@@ -1,17 +1,20 @@
 import { mkdir, rm } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { resolve } from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { feedbackAcknowledgementMs } from "../../apps/factory/src/ui/feedback-state";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import {
+  type AttachmentSummary,
   attachmentInput,
   attachmentSummary,
-  type AttachmentSummary,
 } from "../../packages/conversation-domain/src/attachments";
-import { CommandError } from "../../apps/factory/src/command-error";
+import { test } from "../fixtures/browser-test";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 const directory = ".factory/test-results/interaction-feedback";
 const cacheDirectory = resolve(
@@ -44,7 +47,7 @@ test.beforeAll(async () => {
     };
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
-    const id = path.split("/")[3]!;
+    const id = fixtureValue(path.split("/")[3], 'path.split("/")[3]');
     if (request.method === "PUT" && files.has(id)) {
       uploads++;
       uploadReceived?.resolve();
@@ -67,13 +70,8 @@ test.beforeAll(async () => {
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["interaction-feedback.html"] },
     plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
+      factoryFixtureStart(),
+      solid({ ssr: false }),
       {
         name: "owned-feedback-uploads",
         configureServer(server) {
@@ -84,7 +82,10 @@ test.beforeAll(async () => {
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
-  origin = frontend.resolvedUrls!.local[0]!.replace(/\/$/, "");
+  origin = fixtureValue(
+    fixtureValue(frontend.resolvedUrls, "frontend.resolvedUrls").local[0],
+    "frontend.resolvedUrls!.local[0]",
+  ).replace(/\/$/, "");
   await mkdir(directory, { recursive: true });
 });
 
@@ -158,7 +159,7 @@ async function open(page: Page, surface: string) {
 async function capture(page: Page, name: string) {
   await page.screenshot({ path: `${directory}/${name}.png`, fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
-    (await page.viewportSize())!.width,
+    fixtureValue(await page.viewportSize(), "(await page.viewportSize())").width,
   );
   const content = await page.locator(".feedback-proof").evaluate((element) => ({
     width: element.clientWidth,
@@ -166,6 +167,72 @@ async function capture(page: Page, name: string) {
   }));
   expect(content.scroll).toBeLessThanOrEqual(content.width);
 }
+
+for (const width of [1440, 390, 320]) {
+  test(`the workspace Copy link action stays quiet and icon-only at ${width}px`, async ({
+    page,
+    context,
+  }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.setViewportSize({ width, height: 900 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await open(page, "copy");
+    const workspace = page.getByRole("region", { name: "Linked workspace", exact: true });
+    const button = workspace.getByRole("button", { name: "Copy link", exact: true });
+    await expect(button).toHaveText("");
+    await expect(button).toHaveAttribute("title", "Copy link");
+    await expect(button.locator(".feedback-mark")).toBeVisible();
+    await expect(button).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await expect(button).toHaveCSS("border-top-width", "0px");
+    const before = await button.boundingBox();
+    if (!before) throw new Error("Copy link button is not visible");
+    expect(before.width).toBe(32);
+    expect(before.height).toBe(32);
+    await button.hover();
+    await expect(button).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    await button.focus();
+    await expect(button).toHaveCSS("outline-width", "2px");
+    await capture(page, `copy-link-${width}`);
+    await button.press("Enter");
+    await expect(button).toHaveAttribute("data-feedback", "success");
+    await expect(button).toHaveAttribute("title", "Copied");
+    await expect(button).toHaveText("");
+    await expect(button).toBeFocused();
+    await expect(workspace.getByRole("status")).toHaveText("Copied");
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      `${origin}/projects/10000000-0000-4000-8000-000000000001/wiki/reference-0`,
+    );
+    expect((await button.boundingBox())?.width).toBe(before.width);
+    await capture(page, `copy-link-success-${width}`);
+    await expect(button).toHaveAttribute("data-feedback", "idle", {
+      timeout: feedbackAcknowledgementMs + 1_000,
+    });
+    await expect(button).toHaveAttribute("title", "Copy link");
+  });
+}
+
+test("the icon-only Copy link action keeps a touch target on phones", async ({ browser }) => {
+  const context = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+    permissions: ["clipboard-read", "clipboard-write"],
+  });
+  try {
+    const page = await context.newPage();
+    await open(page, "copy");
+    const button = page.getByRole("button", { name: "Copy link", exact: true });
+    const box = await button.boundingBox();
+    if (!box) throw new Error("Copy link button is not visible on touch");
+    expect(box.width).toBeGreaterThanOrEqual(44);
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    await button.tap();
+    await expect(button).toHaveAttribute("data-feedback", "success");
+    await capture(page, "copy-link-touch");
+  } finally {
+    await context.close();
+  }
+});
 
 test("copy feedback confirms actual clipboard content, preserves geometry and resets after reuse", async ({
   page,
@@ -181,7 +248,9 @@ test("copy feedback confirms actual clipboard content, preserves geometry and re
   await expect(button).toHaveAttribute("data-feedback", "success");
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("Factory reference");
   await expect(button).toBeFocused();
-  expect((await button.boundingBox())!.width).toBe(before!.width);
+  expect(fixtureValue(await button.boundingBox(), "(await button.boundingBox())").width).toBe(
+    fixtureValue(before, "before").width,
+  );
   await capture(page, "copy-wide");
   await expect(button).toHaveAttribute("data-feedback", "idle", {
     timeout: feedbackAcknowledgementMs + 1_000,
@@ -221,6 +290,59 @@ async function controlledClipboard(page: Page) {
     });
   });
 }
+
+test("icon-only Copy link shows pending, rejection and retry without widening the header", async ({
+  page,
+}) => {
+  await controlledClipboard(page);
+  await page.setViewportSize({ width: 320, height: 844 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const release = Promise.withResolvers<void>();
+  const received = Promise.withResolvers<void>();
+  let calls = 0;
+  await page.route("**/fixture/clipboard", async (route) => {
+    const first = ++calls === 1;
+    received.resolve();
+    if (first) await release.promise;
+    await route.fulfill({ status: first ? 403 : 200, body: "" });
+  });
+  await open(page, "copy");
+  const workspace = page.getByRole("region", { name: "Linked workspace", exact: true });
+  const button = workspace.getByRole("button", { name: "Copy link", exact: true });
+  const before = await button.boundingBox();
+  if (!before) throw new Error("Copy link button is not visible");
+  try {
+    await button.click();
+    await received.promise;
+    await expect(button).toHaveAttribute("aria-busy", "true");
+    await expect(button).toHaveAttribute("title", "Copying…");
+    await button.click();
+    expect(calls).toBe(1);
+    expect((await button.boundingBox())?.width).toBe(before.width);
+    await capture(page, "copy-link-pending-320");
+    release.resolve();
+    const alert = workspace.getByRole("alert");
+    await expect(alert).toHaveText(
+      "Could not copy link. Copy the URL from your browser's address bar.",
+    );
+    await expect(button).toHaveAttribute("data-feedback", "error");
+    await expect(button).toHaveAttribute("title", "Copy failed");
+    await expect(button).toHaveText("");
+    expect((await button.boundingBox())?.width).toBe(before.width);
+    const errorBox = await alert.boundingBox();
+    if (!errorBox) throw new Error("Copy rejection is not visible");
+    expect(errorBox.x).toBeGreaterThanOrEqual(0);
+    expect(errorBox.x + errorBox.width).toBeLessThanOrEqual(320);
+    await capture(page, "copy-link-error-320");
+    await button.press("Space");
+    await expect(button).toHaveAttribute("data-feedback", "success");
+    await expect(alert).toHaveCount(0);
+    expect(calls).toBe(2);
+    expect((await button.boundingBox())?.width).toBe(before.width);
+  } finally {
+    release.resolve();
+  }
+});
 
 test("clipboard rejection stays actionable and late clipboard results cannot cross context or unmount", async ({
   page,
@@ -516,7 +638,10 @@ test("slash Skill insertion preserves already prepared file references", async (
   });
   const file = page.getByRole("link", { name: "Download Reference.txt", exact: true });
   await expect(file).toBeVisible();
-  const reference = (await file.getAttribute("href"))!;
+  const reference = fixtureValue(
+    await file.getAttribute("href"),
+    '(await file.getAttribute("href"))',
+  );
   const draft = page.getByRole("textbox", { name: "Message with references", exact: true });
   await draft.fill("Please /rev");
   await expect(page.getByRole("option", { name: /Review the reference/ })).toBeVisible();
@@ -572,14 +697,16 @@ test("five attachments stay in one row above the input and remain accessible whe
     mimeType: index ? "text/plain" : "text/markdown",
     buffer: Buffer.from(`Reference ${index + 1}\n`.repeat(12_000)),
   }));
-  await picker.setInputFiles(files[0]!);
+  await picker.setInputFiles(fixtureValue(files[0], "files[0]"));
   const list = page.getByRole("list", { name: "Prepared attachments", exact: true });
   await expect(list.locator("li")).toHaveCount(1);
-  const firstHeight = (await list.boundingBox())!.height;
+  const firstHeight = fixtureValue(await list.boundingBox(), "(await list.boundingBox())").height;
   await picker.setInputFiles(files.slice(1));
   await expect(list.locator("li")).toHaveCount(5);
   await expect(page.locator(".attachment-count")).toContainText("5 files");
-  expect((await list.boundingBox())!.height).toBeLessThanOrEqual(firstHeight + 2);
+  expect(
+    fixtureValue(await list.boundingBox(), "(await list.boundingBox())").height,
+  ).toBeLessThanOrEqual(firstHeight + 2);
   await page.getByRole("button", { name: "Scroll attachments right", exact: true }).click();
   await expect.poll(() => list.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
   await list.focus();
@@ -598,45 +725,73 @@ test("five attachments stay in one row above the input and remain accessible whe
     .locator("li")
     .evaluateAll((elements) => elements.map((element) => element.getBoundingClientRect().top));
   expect(Math.max(...top) - Math.min(...top)).toBeLessThan(1);
-  expect((await list.boundingBox())!.y + (await list.boundingBox())!.height).toBeLessThanOrEqual(
-    (await input.boundingBox())!.y,
-  );
+  expect(
+    fixtureValue(await list.boundingBox(), "(await list.boundingBox())").y +
+      fixtureValue(await list.boundingBox(), "(await list.boundingBox())").height,
+  ).toBeLessThanOrEqual(fixtureValue(await input.boundingBox(), "(await input.boundingBox())").y);
   await capture(page, "five-files-narrow");
   const attach = page.getByRole("button", { name: "Add image or file", exact: true });
   const send = page.getByRole("button", { name: "Send message", exact: true });
-  const attachBox = (await attach.boundingBox())!;
-  const sendBox = (await send.boundingBox())!;
+  const attachBox = fixtureValue(await attach.boundingBox(), "(await attach.boundingBox())");
+  const sendBox = fixtureValue(await send.boundingBox(), "(await send.boundingBox())");
   expect(
     Math.abs(attachBox.y + attachBox.height / 2 - sendBox.y - sendBox.height / 2),
   ).toBeLessThan(1);
   expect(attachBox.x).toBeLessThan(sendBox.x);
-  const attachIcon = (await attach.locator("svg").boundingBox())!;
-  const sendIcon = (await send.locator("svg").boundingBox())!;
-  expect(attachIcon.width).toBeLessThan(sendIcon.width);
-  const metadataOverlap = await list.locator("li").evaluateAll((items) =>
-    items.map((item) => {
-      const ready = item.querySelector(".attachment-file-ready")!.getBoundingClientRect();
-      const remove = item.querySelector(".attachment-file-remove")!.getBoundingClientRect();
-      return ready.right - remove.left;
-    }),
+  const attachIcon = fixtureValue(
+    await attach.locator("svg").boundingBox(),
+    '(await attach.locator("svg").boundingBox())',
   );
+  const sendIcon = fixtureValue(
+    await send.locator("svg").boundingBox(),
+    '(await send.locator("svg").boundingBox())',
+  );
+  expect(attachIcon.width).toBeLessThan(sendIcon.width);
+  const metadataOverlap = await list.locator("li").evaluateAll((items) => {
+    function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+      if (value === undefined || value === null)
+        throw new Error(`Missing fixture value: ${description}`);
+      return value;
+    }
+    return items.map((item) => {
+      const ready = fixtureValue(
+        item.querySelector(".attachment-file-ready"),
+        'item.querySelector(".attachment-file-ready")',
+      ).getBoundingClientRect();
+      const remove = fixtureValue(
+        item.querySelector(".attachment-file-remove"),
+        'item.querySelector(".attachment-file-remove")',
+      ).getBoundingClientRect();
+      return ready.right - remove.left;
+    });
+  });
   expect(Math.max(...metadataOverlap)).toBeLessThanOrEqual(0);
-  const shell = (await page.locator("form").boundingBox())!;
-  const topPadding = (await list.locator("li").first().boundingBox())!.y - shell.y;
+  const shell = fixtureValue(
+    await page.locator("form").boundingBox(),
+    '(await page.locator("form").boundingBox())',
+  );
+  const topPadding =
+    fixtureValue(
+      await list.locator("li").first().boundingBox(),
+      '(await list.locator("li").first().boundingBox())',
+    ).y - shell.y;
   const bottomPadding = shell.y + shell.height - sendBox.y - sendBox.height;
   expect(Math.abs(topPadding - bottomPadding)).toBeLessThanOrEqual(4);
   await page.locator("form").screenshot({ path: `${directory}/five-files-composer-narrow.png` });
-  const lastLink = list.getByRole("link", { name: `Download ${files[4]!.name}`, exact: true });
+  const lastLink = list.getByRole("link", {
+    name: `Download ${fixtureValue(files[4], "files[4]").name}`,
+    exact: true,
+  });
   await lastLink.focus();
   await expect(lastLink).toBeFocused();
   await expect.poll(() => list.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
   const remove = list.getByRole("button", {
-    name: `Remove attachment ${files[4]!.name}`,
+    name: `Remove attachment ${fixtureValue(files[4], "files[4]").name}`,
     exact: true,
   });
   const target = await remove.boundingBox();
-  expect(target!.width).toBeGreaterThanOrEqual(44);
-  expect(target!.height).toBeGreaterThanOrEqual(44);
+  expect(fixtureValue(target, "target").width).toBeGreaterThanOrEqual(44);
+  expect(fixtureValue(target, "target").height).toBeGreaterThanOrEqual(44);
   await remove.press("Enter");
   await expect(list.locator("li")).toHaveCount(4);
   await expect(input).toHaveValue("Keep the draft while browsing attachments.");
@@ -647,7 +802,7 @@ test("five attachments stay in one row above the input and remain accessible whe
   await expect(page.locator(".attachment-restrictions")).toContainText("DOCX");
   const panel = page.locator(".attachment-help-content");
   await expect(panel).toBeInViewport();
-  const bounds = (await panel.boundingBox())!;
+  const bounds = fixtureValue(await panel.boundingBox(), "(await panel.boundingBox())");
   expect(bounds.x).toBeGreaterThanOrEqual(0);
   expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
   expect(bounds.y).toBeGreaterThanOrEqual(0);

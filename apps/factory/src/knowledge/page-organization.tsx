@@ -4,13 +4,13 @@ import {
   pageParentWouldCycle,
   pageSiblings,
 } from "../../../../packages/knowledge-domain/src/page-tree";
-import type { KnowledgePage } from "../api-contracts";
+import type { KnowledgePage, KnowledgePageOutline } from "../api-contracts";
 import { Icon } from "../icon";
 import type { PageMove } from "./page-tree";
 
 export function PageOrganization(props: {
   page: KnowledgePage;
-  pages: KnowledgePage[];
+  pages: KnowledgePageOutline[];
   onMove(move: PageMove): Promise<void>;
   onIcon(icon: (typeof knowledgeIcons)[number]): Promise<void>;
 }) {

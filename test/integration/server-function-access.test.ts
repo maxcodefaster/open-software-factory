@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
@@ -18,9 +18,7 @@ test("compiled Access commands bind actors, retain Fresh Auth and maintenance, a
     maintenance = false;
   const effects: Array<{ method: string; args: unknown[] }> = [];
   const entryURL = pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href;
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
-    entryURL
-  );
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(entryURL);
   const observe = (method: string, args: unknown[]) => {
     effects.push({ method, args });
   };
@@ -67,7 +65,7 @@ test("compiled Access commands bind actors, retain Fresh Auth and maintenance, a
     requireFresh: async () => {
       if (!fresh) throw new Error("Stale fixture session");
     },
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
   });
   const call = async (name: string, args: unknown[]) =>
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));

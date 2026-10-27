@@ -120,7 +120,7 @@ test("Enter sends, Shift+Enter preserves a line and navigation selects context a
   const captured: { body?: { text: string; ticketId?: string | undefined } } = {};
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, factoryCommand) => {
         captured.body = factoryCommand;
         return (() => {
           throw new CommandError("invalid", String("Controlled response, no model request"));
@@ -324,7 +324,7 @@ test("new answers respect a reader's scroll position and pending feedback is imm
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, _factoryCommand) => {
         await ready;
         return completedConversation(
           conversationViewSchema.parse({
@@ -380,14 +380,14 @@ test("an Epic stack retains expansion through fresh board projections", async ({
     const folder = page.getByRole("dialog", { name: "First developer experience", exact: true });
     const card = folder.locator(".ticket-card-body");
     await expect(card).toBeVisible();
-    await database.client`UPDATE factory.ticket SET title = ${title + " updated"}, version = version + 1 WHERE id = ${ticketID}`;
+    await database.client`UPDATE factory.ticket SET title = ${`${title} updated`}, version = version + 1 WHERE id = ${ticketID}`;
     await expect(card).toContainText("updated");
     await expect(folder).toBeVisible();
     await mkdir(".factory/test-results/epic-folders", { recursive: true });
     await page.screenshot({ path: ".factory/test-results/epic-folders/live-folder-update.png" });
     await card.click();
     await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
-      title + " updated",
+      `${title} updated`,
     );
   } finally {
     await database.client.end();

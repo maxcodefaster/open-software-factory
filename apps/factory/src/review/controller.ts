@@ -198,7 +198,9 @@ export function createVisualReviewController(
           SELECT id,state,commit_sha AS "commitSha",duration_ms AS "durationMs",reason,review_id AS "reviewId"
           FROM factory.review_media WHERE change_id=${changeID} AND kind='recording'
           ORDER BY CASE WHEN state='complete' THEN 0 ELSE 1 END,created_at DESC,id DESC LIMIT 1`;
-        const [review] = await sql<{ id: string }[]>`SELECT id FROM factory.candidate_review
+        const [review] = await sql<
+          { id: string }[]
+        >`SELECT COALESCE(finding_source_id,id) AS id FROM factory.candidate_review
           WHERE change_id=${changeID} ORDER BY created_at DESC,ordinal DESC LIMIT 1`;
         const [busy] = await sql`SELECT id FROM factory.agent_turn WHERE change_id=${changeID}
           AND state IN ('pending','dispatching','running','uncertain') LIMIT 1`;
@@ -263,7 +265,7 @@ export function createVisualReviewController(
           if (media?.context?.["source"] && media.context["source"] !== input.annotation.source)
             throw new CommandError("conflict", "Annotation changed its original frame source");
           if (input.annotation.source === "recording") {
-            if (!media || media.context?.["source"] !== "recording")
+            if (media?.context?.["source"] !== "recording")
               throw new CommandError(
                 "conflict",
                 "Video annotations need their original recording frame",

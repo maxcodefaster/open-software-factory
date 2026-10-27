@@ -4,35 +4,8 @@ import { expect, test } from "bun:test";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
-import { createDatabase } from "../../packages/db/src/client";
-import { factoryProcessCommand } from "../fixtures/factory-process";
-
-const postgresImage =
-  "docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8";
-const runtimeImage =
-  "registry.localhost:5443/open-factory/runtime-host@sha256:f1197f0228478aa4d3876b8adfd5961776775f79d37d49839cf411c0e28e997a";
-
-async function docker(...args: string[]) {
-  const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [output, error, status] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  if (status !== 0) throw new Error(`Owned process database ${args[0]} failed: ${error}`);
-  return output.trim();
-}
-
-async function removeOwnedDatabase(container: string, id: string) {
-  const owner = await docker(
-    "inspect",
-    "--format",
-    '{{index .Config.Labels "factory.owned-project-process"}}',
-    container,
-  );
-  if (owner !== id) throw new Error("Owned process database cleanup refused");
-  await docker("rm", "--force", container);
-}
+import type { createDatabase } from "../../packages/db/src/client";
+import { factoryProcess } from "../fixtures/factory-process";
 
 async function until<T>(observe: () => Promise<T>, accepts: (value: T) => boolean) {
   const deadline = Date.now() + 45_000;
@@ -49,20 +22,10 @@ async function until<T>(observe: () => Promise<T>, accepts: (value: T) => boolea
   throw new Error("Owned Factory-process recovery timed out", { cause });
 }
 
-async function diagnosticTail(stream: ReadableStream<Uint8Array>) {
-  const decoder = new TextDecoder();
-  let tail = "";
-  for await (const chunk of stream)
-    tail = (tail + decoder.decode(chunk, { stream: true })).slice(-4000);
-  return (tail + decoder.decode()).slice(-4000);
-}
-
 test("actual Factory startup recovers Project input and never replays dispatched inference after SIGKILL", async () => {
-  const id = crypto.randomUUID();
-  const container = `factory-owned-project-process-${id}`;
-  let created = false;
+  let isolated: Awaited<ReturnType<typeof factoryProcess>> | undefined;
   let database: ReturnType<typeof createDatabase> | undefined;
-  const processes: ReturnType<typeof Bun.spawn>[] = [];
+  let controller: ReturnType<typeof createProjectAgentController> | undefined;
   const requests: string[] = [];
   const release = Promise.withResolvers<void>();
   let holdNext = false;
@@ -106,137 +69,33 @@ test("actual Factory startup recovers Project input and never replays dispatched
   });
 
   try {
-    await docker(
-      "run",
-      "--detach",
-      "--name",
-      container,
-      "--label",
-      `factory.owned-project-process=${id}`,
-      "--env",
-      "POSTGRES_USER=factory",
-      "--env",
-      "POSTGRES_PASSWORD=owned-process-not-a-secret",
-      "--env",
-      "POSTGRES_DB=factory",
-      "--tmpfs",
-      "/var/lib/postgresql/data",
-      "--publish",
-      "127.0.0.1::5432",
-      postgresImage,
-      "postgres",
-      "-c",
-      "wal_level=logical",
-    );
-    created = true;
-    const databasePort = (await docker("port", container, "5432/tcp")).split(":").at(-1);
-    if (!databasePort || !/^\d+$/.test(databasePort))
-      throw new Error("Owned database port missing");
-    const databaseURL = `postgresql://factory:owned-process-not-a-secret@127.0.0.1:${databasePort}/factory`;
-    const migration = Bun.spawn(factoryProcessCommand("packages/db/src/migrate.ts"), {
-      env: { ...process.env, DATABASE_URL: databaseURL },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const migrationOutput = new Response(migration.stdout).text();
-    const migrationError = new Response(migration.stderr).text();
-    expect(await migration.exited).toBe(0);
-    await Promise.all([migrationOutput, migrationError]);
-
-    const previousURL = process.env["DATABASE_URL"];
-    try {
-      process.env["DATABASE_URL"] = databaseURL;
-      database = createDatabase();
-    } finally {
-      if (previousURL === undefined) delete process.env["DATABASE_URL"];
-      else process.env["DATABASE_URL"] = previousURL;
-    }
-    const ownedDatabase = database;
-    // Reserve a loopback port, then release it for the real Factory listener.
-    const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-    const port = reservation.port;
-    await reservation.stop(true);
-    const base = `http://127.0.0.1:${port}`;
-    const environment = {
-      ...process.env,
-      DATABASE_URL: databaseURL,
-      FACTORY_HOST: "127.0.0.1",
-      FACTORY_PORT: String(port),
-      FACTORY_BASE_URL: base,
-      FACTORY_ADMIN_EMAIL: `owned-${id}@factory.local`,
-      FACTORY_ADMIN_PASSWORD: "owned-process-password-not-a-secret",
-      FACTORY_AUTH_SECRET: "owned-process-auth-secret-not-a-production-credential",
-      FACTORY_FORGEJO_API_URL: "http://127.0.0.1:9/api/v1",
-      FACTORY_FORGEJO_TOKEN: "owned-unused-forge-token",
-      FACTORY_FORGEJO_OWNER: "owned-process-fixture",
-      FACTORY_RUNTIME_HOST_IMAGE: runtimeImage,
-      FACTORY_EXECUTION_RESERVE_TARGET: "0",
-      FACTORY_PLANNING_MODEL_BASE_URL: "",
-      FACTORY_PLANNING_MODEL_API_KEY: "",
-      FACTORY_ZERO_CACHE_URL: "",
+    isolated = await factoryProcess(undefined, {
       FACTORY_MODEL_BASE_URL: `http://127.0.0.1:${model.port}/v1`,
       FACTORY_MODEL_API_KEY: "owned-process-model-not-a-secret",
       FACTORY_PROJECT_AGENT_MODEL: "changed-process-default",
-    };
-    async function start() {
-      const child = Bun.spawn(factoryProcessCommand("apps/factory/src/server.ts"), {
-        env: environment,
-        stdout: "ignore",
-        stderr: "pipe",
-      });
-      processes.push(child);
-      // Bound stderr while live; redact credentials before reporting an early exit.
-      const diagnostics = diagnosticTail(child.stderr);
-      await until(
-        async () => {
-          if (child.exitCode !== null) {
-            let output = await diagnostics;
-            for (const [key, value] of Object.entries(environment)) {
-              if (value && /KEY|TOKEN|PASSWORD|SECRET|DATABASE_URL/.test(key)) {
-                output = output.replaceAll(value, "<redacted>");
-              }
-            }
-            throw new Error(`Owned Factory exited: ${child.exitCode}\n${output.slice(-4000)}`);
-          }
-          return fetch(`${base}/health/ready`, { signal: AbortSignal.timeout(1_000) });
-        },
-        (response) => response.ok,
-      );
-      return child;
-    }
+    });
+    const owned = isolated;
+    const { id, base, processes } = owned;
+    database = owned.connect();
+    const ownedDatabase = database;
+    const start = () => owned.start();
     async function kill(child: ReturnType<typeof Bun.spawn>) {
-      child.kill("SIGKILL");
-      await child.exited;
+      await owned.kill(child);
       expect(child.signalCode).toBe("SIGKILL");
     }
     const initial = await start();
-    const signIn = await fetch(`${base}/api/auth/sign-in/email`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: base },
-      body: JSON.stringify({
-        email: environment.FACTORY_ADMIN_EMAIL,
-        password: environment.FACTORY_ADMIN_PASSWORD,
-      }),
-    });
-    expect(signIn.status).toBe(200);
-    const signedIn = (await signIn.json()) as { user: { id: string } };
-    const cookie = signIn.headers
-      .getSetCookie()
-      .map((value) => value.split(";")[0])
-      .join("; ");
+    const cookie = await owned.signIn();
+    const [actor] = await database.client<{ id: string }[]>`
+      SELECT id FROM auth."user" WHERE email=${`owned-${id}@factory.local`}`;
+    if (!actor) throw new Error("Owned process actor missing");
     expect(cookie.length).toBeGreaterThan(0);
     const projectID = crypto.randomUUID();
     await ownedDatabase.client`INSERT INTO factory.project (
       id, slug, name, repository_url, default_branch, devcontainer_path, created_by
     ) VALUES (${projectID}, ${`owned-${id}`}, 'Owned process Project',
-      'https://example.invalid/owned-process.git', 'main', '.devcontainer/devcontainer.json', ${signedIn.user.id})`;
-    const controller = createProjectAgentController(ownedDatabase, { start: async () => null });
-    const conversation = await controller.setMode(
-      projectID,
-      undefined,
-      "investigate",
-      signedIn.user.id,
-    );
+      'https://example.invalid/owned-process.git', 'main', '.devcontainer/devcontainer.json', ${actor.id})`;
+    controller = createProjectAgentController(ownedDatabase, { start: async () => null });
+    const conversation = await controller.setMode(projectID, undefined, "investigate", actor.id);
     if (!conversation) throw new Error("Owned process Conversation missing");
     await kill(initial);
     // Seed the admitted-before-dispatch crash window through the real atomic store.
@@ -248,7 +107,7 @@ test("actual Factory startup recovers Project input and never replays dispatched
       projectId: projectID,
       ticketId: null,
       conversationId: conversation.id,
-      createdBy: signedIn.user.id,
+      createdBy: actor.id,
       text: "Recover this saved process input",
     };
     const admitted = await store.admit(
@@ -268,7 +127,7 @@ test("actual Factory startup recovers Project input and never replays dispatched
           citations: [],
           inReplyToEntryId: null,
           requirementRevisionId: null,
-          createdBy: signedIn.user.id,
+          createdBy: actor.id,
         });
       },
     );
@@ -361,20 +220,15 @@ test("actual Factory startup recovers Project input and never replays dispatched
       generations: processes.length,
       providerRequests: requests.length,
       naturalLeaseExpiry: true,
-      postgresImage,
       fullRuntime: false,
       genuineInference: false,
     });
   } finally {
     release.resolve();
-    for (const child of processes) {
-      if (child.exitCode === null) {
-        child.kill("SIGKILL");
-        await child.exited;
-      }
-    }
+    await controller?.shutdown();
+    await isolated?.shutdown();
     await model.stop(true);
     await database?.client.end();
-    if (created) await removeOwnedDatabase(container, id);
+    await isolated?.dispose();
   }
 }, 90_000);

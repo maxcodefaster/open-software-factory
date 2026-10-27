@@ -1,14 +1,53 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { planningDesign } from "../../../../test/fixtures/technical-planning";
 import {
   isStructuredOutputFailure,
   parseProjectAgentOutput,
   projectAgentProviderOutputFor,
+  ProjectAgentOutputError,
 } from "./structured-output";
 
 const id = crypto.randomUUID();
 const answer = (citation: unknown) => ({
   output: { kind: "answer", message: "An observed fact.[^1]", citations: [citation] },
+});
+
+test("generated choice questions retain their type and always admit a custom answer", () => {
+  const choices = ["single-select", "multi-select"].map((type) => ({
+    type,
+    prompt: "Who should receive the summary?",
+    options: [
+      { id: "developer", label: "Developer" },
+      { id: "manager", label: "Project manager" },
+    ],
+    allowCustom: false,
+  }));
+  const free = {
+    type: "free-text",
+    prompt: "What stays out of scope?",
+    placeholder: "Describe it",
+  };
+  for (const question of choices) {
+    const result = parseProjectAgentOutput({ output: { kind: "question", question } }, "plan");
+    expect(result.kind).toBe("question");
+    if (result.kind === "question") {
+      expect(result.question).toMatchObject({ ...question, allowCustom: true });
+    }
+  }
+  const result = parseProjectAgentOutput(
+    { output: { kind: "round", questions: [...choices, free] } },
+    "plan",
+  );
+  expect(result.kind).toBe("round");
+  if (result.kind === "round") {
+    expect(result.questions).toMatchObject([
+      { ...choices[0], allowCustom: true },
+      { ...choices[1], allowCustom: true },
+      free,
+    ]);
+    expect(result.questions[2]).not.toHaveProperty("allowCustom");
+  }
 });
 
 test.each(["ticket", "epic", "knowledge"])(
@@ -91,4 +130,34 @@ test("known structured-output rejection is distinct from transport and provider 
   expect(isStructuredOutputFailure(z.string().safeParse(1).error)).toBe(true);
   expect(isStructuredOutputFailure(new Error("Connection lost"))).toBe(false);
   expect(isStructuredOutputFailure({ id: "API_CALL_ERROR", statusCode: 503 })).toBe(false);
+});
+
+test("only the explicit technical task admits a Technical Design output", () => {
+  const technical = {
+    output: {
+      kind: "technical-design",
+      message: "Review the design.",
+      design: planningDesign,
+      citations: [],
+    },
+  };
+  expect(projectAgentProviderOutputFor("plan").safeParse(technical).success).toBe(false);
+  expect(
+    projectAgentProviderOutputFor("investigate", false, false, true).safeParse(technical).success,
+  ).toBe(false);
+  expect(parseProjectAgentOutput(technical, "plan", true).kind).toBe("technical-design");
+});
+
+test("validation diagnostics retain only schema paths and codes, never provider data", () => {
+  const failure = z.object({ design: z.string() }).safeParse({ design: 1 });
+  const error = new ProjectAgentOutputError({
+    id: "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
+    cause: failure.error,
+    request: { authorization: "private-provider-token", body: "private model input" },
+  });
+  expect(error.diagnostic).toBe("design: invalid_type");
+  expect(JSON.stringify(error)).not.toContain("private");
+  expect(error.message).toBe(
+    "The Project Agent returned an invalid response. Your input is saved.",
+  );
 });

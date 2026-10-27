@@ -1,15 +1,33 @@
-import { createSignal, For, Show } from "solid-js";
-import { SecuritySettings } from "./access/security-settings";
-import { AccessSettings } from "./access/settings";
+import { createSignal, For, lazy, Loading, Show, untrack } from "solid-js";
 import { rememberSettingsReturn } from "./access/settings-return";
-import { EnvironmentSettings } from "./environments/settings";
-import { MCPLibrary } from "./mcp/library";
-import { ModelSettings } from "./models/settings";
-import { MonitoringSettings } from "./monitoring/settings";
-import { ReleaseSettings } from "./releases/settings";
 import { createWorkspaceNavigation, WorkspaceNavigationToggle } from "./ui/workspace-navigation";
-import { UsageSettings } from "./usage/settings";
 import "./settings-workspace.css";
+
+const SecuritySettings = lazy(async () => ({
+  default: (await import("./access/security-settings")).SecuritySettings,
+}));
+const AccessSettings = lazy(async () => ({
+  default: (await import("./access/settings")).AccessSettings,
+}));
+const EnvironmentSettings = lazy(async () => ({
+  default: (await import("./environments/settings")).EnvironmentSettings,
+}));
+const MCPLibrary = lazy(async () => ({ default: (await import("./mcp/library")).MCPLibrary }));
+const ModelSettings = lazy(async () => ({
+  default: (await import("./models/settings")).ModelSettings,
+}));
+const SkillLibrary = lazy(async () => ({
+  default: (await import("./skills/library")).SkillLibrary,
+}));
+const MonitoringSettings = lazy(async () => ({
+  default: (await import("./monitoring/settings")).MonitoringSettings,
+}));
+const ReleaseSettings = lazy(async () => ({
+  default: (await import("./releases/settings")).ReleaseSettings,
+}));
+const UsageSettings = lazy(async () => ({
+  default: (await import("./usage/settings")).UsageSettings,
+}));
 
 type Scope = "personal" | "project" | "system";
 type Category =
@@ -32,7 +50,7 @@ export function SettingsWorkspace(props: {
   developer: boolean;
   onModelsChanged?: (() => Promise<void>) | undefined;
   onOpenTicket?: ((id: string, projectId: string) => void) | undefined;
-  initialSelection?: { scope: Scope; category: "people" | "security" } | undefined;
+  initialSelection?: { scope: Scope; category: "people" | "security" | "monitoring" } | undefined;
 }) {
   let root: HTMLElement | undefined;
   let sidebar: HTMLElement | undefined;
@@ -42,24 +60,35 @@ export function SettingsWorkspace(props: {
     breakpoint: 760,
     active: () => props.active !== false,
   });
-  const [selection, setSelection] = createSignal<{ scope: Scope; category: Category }>(
-    props.initialSelection ?? {
-      scope:
-        props.project && (props.developer || props.projectManager)
-          ? props.developer
-            ? "personal"
-            : "project"
-          : props.systemManager
-            ? "system"
-            : "personal",
-      category:
-        props.systemManager || props.developer
-          ? "models"
-          : props.projectManager && props.project
-            ? "people"
-            : "security",
-    },
+  const initialSelection = untrack<{ scope: Scope; category: Category }>(
+    () =>
+      props.initialSelection ?? {
+        scope:
+          props.project && (props.developer || props.projectManager)
+            ? props.developer
+              ? "personal"
+              : "project"
+            : props.systemManager
+              ? "system"
+              : "personal",
+        category:
+          props.systemManager || props.developer
+            ? "models"
+            : props.projectManager && props.project
+              ? "people"
+              : "security",
+      },
   );
+  const [selection, select] = createSignal<{ scope: Scope; category: Category }>(initialSelection);
+  const [visited, setVisited] = createSignal<ReadonlySet<Category>>(
+    new Set([initialSelection.category]),
+  );
+  function setSelection(next: { scope: Scope; category: Category }) {
+    setVisited((previous) =>
+      previous.has(next.category) ? previous : new Set([...previous, next.category]),
+    );
+    select(next);
+  }
   const category = () => selection().category;
   const [monitoringSetup, setMonitoringSetup] = createSignal<{
     id: string;
@@ -131,7 +160,7 @@ export function SettingsWorkspace(props: {
       releases: "Releases",
       people: "People & access",
       environment: "Environments",
-      usage: "Usage & limits",
+      usage: "Monitoring",
       security: scope === "system" ? "Company sign-in" : "Login & security",
     })[value];
   const navigationTitle = () => (
@@ -211,97 +240,119 @@ export function SettingsWorkspace(props: {
               </small>
             </header>
           </Show>
-          <div
-            class="settings-configuration-host"
-            hidden={
-              category() === "security" ||
-              category() === "usage" ||
-              category() === "environment" ||
-              category() === "mcp" ||
-              category() === "monitoring" ||
-              category() === "releases" ||
-              (category() === "people" && canManage())
-            }
-          >
-            <ModelSettings
-              navigation={navigationTitle()}
-              active={
-                props.active !== false && (category() === "models" || category() === "skills")
+          <Loading on={category()} fallback={<p role="status">Opening settings…</p>}>
+            <Show when={visited().has("models")}>
+              <div class="settings-configuration-host" hidden={category() !== "models"}>
+                <ModelSettings
+                  navigation={navigationTitle()}
+                  active={props.active !== false && category() === "models"}
+                  project={props.project}
+                  systemManager={props.systemManager}
+                  projectManager={canManage()}
+                  scope={selection().scope}
+                  onModelsChanged={props.onModelsChanged}
+                />
+              </div>
+            </Show>
+            <Show when={visited().has("skills")}>
+              <div class="settings-configuration-host" hidden={category() !== "skills"}>
+                <SkillLibrary
+                  navigation={navigationTitle()}
+                  projectId={props.project?.id}
+                  projectName={props.project?.name}
+                  active={props.active !== false && category() === "skills"}
+                />
+              </div>
+            </Show>
+            <Show when={visited().has("releases") && props.project}>
+              {(project) => (
+                <div hidden={category() !== "releases"}>
+                  <ReleaseSettings
+                    projectID={project().id}
+                    active={props.active !== false && category() === "releases"}
+                  />
+                </div>
+              )}
+            </Show>
+            <Show when={visited().has("mcp")}>
+              <div class="settings-configuration-host" hidden={category() !== "mcp"}>
+                <MCPLibrary
+                  navigation={navigationTitle()}
+                  active={props.active !== false && category() === "mcp"}
+                  projectId={props.project?.id}
+                  projectName={props.project?.name}
+                  monitoringSetup={monitoringSetup()}
+                  onMonitoringReturn={(connectionId) => {
+                    const setup = monitoringSetup();
+                    if (setup && setup.projectId === props.project?.id && connectionId)
+                      setMonitoringSource({
+                        id: crypto.randomUUID(),
+                        projectId: setup.projectId,
+                        connectionId,
+                      });
+                    setMonitoringSetup(undefined);
+                    setSelection({ scope: "project", category: "monitoring" });
+                  }}
+                />
+              </div>
+            </Show>
+            <Show when={visited().has("monitoring")}>
+              <div class="settings-configuration-host" hidden={category() !== "monitoring"}>
+                <MonitoringSettings
+                  navigation={navigationTitle()}
+                  active={props.active !== false && category() === "monitoring"}
+                  project={props.project}
+                  sourceRequest={monitoringSource()}
+                  onOpenMCP={() => {
+                    if (!props.project) return;
+                    setMonitoringSetup({
+                      id: crypto.randomUUID(),
+                      projectId: props.project.id,
+                      projectName: props.project.name,
+                    });
+                    setSelection({ scope: "project", category: "mcp" });
+                  }}
+                  onOpenTicket={props.onOpenTicket}
+                />
+              </div>
+            </Show>
+            <Show when={category() === "security"}>
+              <div hidden={category() !== "security"}>
+                <SecuritySettings
+                  company={selection().scope === "system"}
+                  beforeCompanySignIn={beforeCompanySignIn}
+                />
+              </div>
+            </Show>
+            <Show when={category() === "usage"}>
+              <div hidden={category() !== "usage"}>
+                <UsageSettings
+                  projectID={selection().scope === "project" ? props.project?.id : undefined}
+                  onOpenTicket={props.onOpenTicket}
+                />
+              </div>
+            </Show>
+            <Show
+              when={
+                visited().has("environment") && (props.developer || canManage()) && props.project
               }
-              project={props.project}
-              systemManager={props.systemManager}
-              projectManager={canManage()}
-              category={category() === "skills" ? "skills" : "models"}
-              scope={selection().scope}
-              onModelsChanged={props.onModelsChanged}
-            />
-          </div>
-          <Show when={props.project && category() === "releases"}>
-            <ReleaseSettings projectID={props.project!.id} active={props.active !== false} />
-          </Show>
-          <div class="settings-configuration-host" hidden={category() !== "mcp"}>
-            <MCPLibrary
-              navigation={navigationTitle()}
-              active={props.active !== false && category() === "mcp"}
-              projectId={props.project?.id}
-              projectName={props.project?.name}
-              monitoringSetup={monitoringSetup()}
-              onMonitoringReturn={(connectionId) => {
-                const setup = monitoringSetup();
-                if (setup && setup.projectId === props.project?.id && connectionId)
-                  setMonitoringSource({
-                    id: crypto.randomUUID(),
-                    projectId: setup.projectId,
-                    connectionId,
-                  });
-                setMonitoringSetup(undefined);
-                setSelection({ scope: "project", category: "monitoring" });
-              }}
-            />
-          </div>
-          <div class="settings-configuration-host" hidden={category() !== "monitoring"}>
-            <MonitoringSettings
-              navigation={navigationTitle()}
-              active={props.active !== false && category() === "monitoring"}
-              project={props.project}
-              sourceRequest={monitoringSource()}
-              onOpenMCP={() => {
-                if (!props.project) return;
-                setMonitoringSetup({
-                  id: crypto.randomUUID(),
-                  projectId: props.project.id,
-                  projectName: props.project.name,
-                });
-                setSelection({ scope: "project", category: "mcp" });
-              }}
-              onOpenTicket={props.onOpenTicket}
-            />
-          </div>
-          <Show when={category() === "security"}>
-            <SecuritySettings
-              company={selection().scope === "system"}
-              beforeCompanySignIn={beforeCompanySignIn}
-            />
-          </Show>
-          <Show when={category() === "usage"}>
-            <UsageSettings
-              projectID={selection().scope === "project" ? props.project?.id : undefined}
-            />
-          </Show>
-          <Show
-            when={category() === "environment" && (props.developer || canManage()) && props.project}
-          >
-            {(project) => (
-              <EnvironmentSettings projectID={project().id} navigation={navigationTitle()} />
-            )}
-          </Show>
-          <Show when={category() === "people" && canManage()}>
-            <AccessSettings
-              project={selection().scope === "project" ? props.project : undefined}
-              systemManager={props.systemManager}
-              beforeCompanySignIn={beforeCompanySignIn}
-            />
-          </Show>
+            >
+              {(project) => (
+                <div hidden={category() !== "environment"}>
+                  <EnvironmentSettings projectID={project().id} navigation={navigationTitle()} />
+                </div>
+              )}
+            </Show>
+            <Show when={category() === "people" && canManage()}>
+              <div hidden={category() !== "people"}>
+                <AccessSettings
+                  project={selection().scope === "project" ? props.project : undefined}
+                  systemManager={props.systemManager}
+                  beforeCompanySignIn={beforeCompanySignIn}
+                />
+              </div>
+            </Show>
+          </Loading>
         </div>
       </div>
     </section>

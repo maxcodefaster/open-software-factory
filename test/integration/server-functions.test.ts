@@ -2,9 +2,14 @@ import { expect, test } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
-import { decodeResponse } from "@solidjs/web/server-functions/server";
 import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
 import { factoryProcess } from "../fixtures/factory-process";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionMatches,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 test("production Server Functions use real sessions, durable exact saves and no HTTP usage routes", async () => {
   const owned = await factoryProcess();
@@ -39,35 +44,48 @@ test("production Server Functions use real sessions, durable exact saves and no 
       .getByRole("navigation", { name: "Settings navigation" })
       .locator("section")
       .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-      .getByRole("button", { name: "Usage & limits", exact: true })
+      .getByRole("button", { name: "Monitoring", exact: true })
       .click();
     const usage = page.getByRole("region", { name: "Usage & limits", exact: true });
     await browserExpect(usage.getByLabel("Monthly Coding allowance")).toHaveValue("");
     await usage.getByLabel("Monthly Coding allowance").fill("7");
-    const saveRequest = page.waitForRequest((request) =>
-      new URL(request.url()).pathname.startsWith("/_server/data/saveUsage-"),
+    const saveRequest = page.waitForRequest(
+      async (request) => await factoryFunctionMatches(request.url(), "saveUsage"),
     );
     await usage.getByRole("button", { name: "Save limits", exact: true }).click();
     const save = await saveRequest;
     await browserExpect(usage.getByText("Saved. Existing work is retained.")).toBeVisible();
     const originalHeaders = await save.allHeaders();
     const headers = {
-      "content-type": save.headers()["content-type"]!,
-      "x-server-function-format": originalHeaders["x-server-function-format"]!,
+      "content-type": fixtureValue(
+        save.headers()["content-type"],
+        'save.headers()["content-type"]',
+      ),
+      "x-server-function-format": fixtureValue(
+        originalHeaders["x-server-function-format"],
+        'originalHeaders["x-server-function-format"]',
+      ),
       origin: owned.base,
       cookie,
     };
-    const repeat = () => fetch(save.url(), { method: "POST", headers, body: save.postData()! });
+    const repeat = () =>
+      fetch(save.url(), {
+        method: "POST",
+        headers,
+        body: fixtureValue(save.postData(), "save.postData()"),
+      });
     // Exact replay acknowledges the same persisted intent, without another version increment.
     const replay = await repeat();
     expect(replay.status).toBe(200);
     expect(await decodeResponse(replay)).toMatchObject({ ok: true });
-    const invalidRead = new URL(save.url().replace("/saveUsage-", "/getUsage-"));
-    invalidRead.searchParams.set("args", JSON.stringify(["not-a-project-id"]));
-    const invalid = await fetch(invalidRead, {
-      method: "POST",
-      headers: { origin: owned.base, cookie },
-    });
+    const invalid = await fetch(
+      await factoryFunctionRequest(
+        owned.base,
+        "getEnvironment",
+        ["not-a-project-id", "development"],
+        { origin: owned.base, cookie },
+      ),
+    );
     expect(await decodeResponse(invalid)).toMatchObject({ ok: false, status: 400 });
     const oldDeployment = await fetch(`${owned.base}/_server/data/removed-old-deployment`, {
       method: "POST",
@@ -87,7 +105,7 @@ test("production Server Functions use real sessions, durable exact saves and no 
         await fetch(save.url(), {
           method: "POST",
           headers: { ...headers, origin: "https://foreign.invalid" },
-          body: save.postData()!,
+          body: fixtureValue(save.postData(), "save.postData()"),
         })
       ).status,
     ).toBe(403);
@@ -96,7 +114,7 @@ test("production Server Functions use real sessions, durable exact saves and no 
         await fetch(save.url(), {
           method: "POST",
           headers: { origin: owned.base },
-          body: save.postData()!,
+          body: fixtureValue(save.postData(), "save.postData()"),
         })
       ).status,
     ).toBe(401);

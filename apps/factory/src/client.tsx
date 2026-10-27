@@ -1,14 +1,8 @@
-import { render } from "@solidjs/web";
-import "@fontsource-variable/inter";
-import "@fontsource/sansita/400-italic.css";
-import "@fontsource/ibm-plex-mono/400.css";
-import "@fontsource/ibm-plex-mono/500.css";
-import { Factory } from "./factory-entry";
-import "./tokens.css";
-import "./knowledge-workspace.css";
-import "./runtime-workspace.css";
-import "./style.css";
+import { hydrate } from "@solidjs/web";
+import { hydrateStart, StartClient } from "@tanstack/solid-start/client";
+import { retainAttachmentDraft } from "./server-functions/attachments";
+import { configureFactoryFunctionClient } from "./server-functions/client-transport";
 
-const root = document.querySelector("#root");
-if (!root) throw new Error("Factory root element is missing");
-render(() => <Factory />, root);
+configureFactoryFunctionClient(retainAttachmentDraft);
+const router = await hydrateStart();
+hydrate(() => <StartClient router={router} />, document);

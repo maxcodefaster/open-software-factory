@@ -19,8 +19,9 @@ import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { createAttachmentRoutes } from "../../apps/factory/src/attachments/routes";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 function memoryObjects() {
   const blobs = new Map<string, Uint8Array>();
@@ -100,7 +101,7 @@ test("native Attachment functions preserve private upload identity, draft sequen
       }),
       f.userID,
     );
-    expect(await upload!.json()).toMatchObject({ id, state: "ready" });
+    expect(await fixtureValue(upload, "upload").json()).toMatchObject({ id, state: "ready" });
     await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 3, ids: [id] }]);
     await native("retainAttachmentDraft", [f.projectID, draft, { sequence: 2, ids: [] }]);
     const [retained] = await f.database.client<{ sequence: number; ids: string[] }[]>`
@@ -294,7 +295,12 @@ test("feedback files and their human meaning reach only the selected correction 
       f.userID,
       {
         commandId: crypto.randomUUID(),
-        feedback: [{ id: thread.feedbackId!, version: view.feedback[0]!.version }],
+        feedback: [
+          {
+            id: fixtureValue(thread.feedbackId, "thread.feedbackId"),
+            version: fixtureValue(view.feedback[0], "view.feedback[0]").version,
+          },
+        ],
       },
       async (sql, text, commandId) =>
         (
@@ -305,7 +311,7 @@ test("feedback files and their human meaning reach only the selected correction 
           })
         ).turn.id,
     );
-    const owner = await f.turns.claimPending(correction.turnId!);
+    const owner = await f.turns.claimPending(fixtureValue(correction.turnId, "correction.turnId"));
     if (!owner?.ownerToken) throw new Error("Owned correction lease missing");
     await f.writers.prepareAgent(f.changeID, owner.id);
     await f.database
@@ -620,7 +626,10 @@ test("feedback enforces the per-message attachment limit on the server, not the 
       kind: "thread",
       body: files[0],
     });
-    const thread = (await review.get(f.changeID, f.userID)).feedback[0]!;
+    const thread = fixtureValue(
+      (await review.get(f.changeID, f.userID)).feedback[0],
+      "(await review.get(f.changeID, f.userID)).feedback[0]",
+    );
     await expect(
       review.update(f.changeID, f.userID, {
         commandId: crypto.randomUUID(),
@@ -630,7 +639,12 @@ test("feedback enforces the per-message attachment limit on the server, not the 
         body: files.join("\n\n"),
       }),
     ).rejects.toMatchObject({ status: 409 });
-    expect((await review.get(f.changeID, f.userID)).feedback[0]!.messages).toHaveLength(1);
+    expect(
+      fixtureValue(
+        (await review.get(f.changeID, f.userID)).feedback[0],
+        "(await review.get(f.changeID, f.userID)).feedback[0]",
+      ).messages,
+    ).toHaveLength(1);
     await review.update(f.changeID, f.userID, {
       commandId: crypto.randomUUID(),
       feedbackId: created.feedbackId,
@@ -638,7 +652,12 @@ test("feedback enforces the per-message attachment limit on the server, not the 
       action: "reply",
       body: files[1],
     });
-    expect((await review.get(f.changeID, f.userID)).feedback[0]!.messages).toHaveLength(2);
+    expect(
+      fixtureValue(
+        (await review.get(f.changeID, f.userID)).feedback[0],
+        "(await review.get(f.changeID, f.userID)).feedback[0]",
+      ).messages,
+    ).toHaveLength(2);
   } finally {
     if (previous === undefined) delete process.env["FACTORY_ATTACHMENT_MESSAGE_BYTES"];
     else process.env["FACTORY_ATTACHMENT_MESSAGE_BYTES"] = previous;

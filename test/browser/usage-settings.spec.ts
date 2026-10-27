@@ -7,6 +7,7 @@ import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions, mockUsageFunctions } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { fixtureValue } from "../fixtures/value";
 
 test.use({ trace: "off" });
 
@@ -179,7 +180,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
           tiers: input.tiers,
         },
       });
-      return rates.at(-1)!;
+      return fixtureValue(rates.at(-1), "rates.at(-1)");
     },
     async rates() {
       return { rates };
@@ -203,7 +204,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
     .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-    .getByRole("button", { name: "Usage & limits", exact: true })
+    .getByRole("button", { name: "Monitoring", exact: true })
     .click();
   const usage = page.getByRole("region", { name: "Usage & limits" });
   await expect(usage.getByLabel("Monthly Coding allowance")).toHaveValue("", { timeout: 5000 });
@@ -268,7 +269,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
     .filter({ has: page.getByRole("heading", { name: /^Project · / }) });
-  await projectNavigation.getByRole("button", { name: "Usage & limits", exact: true }).click();
+  await projectNavigation.getByRole("button", { name: "Monitoring", exact: true }).click();
   await expect(usage.getByLabel("Monthly Coding allowance")).toBeDisabled();
   await expect(usage.getByText("Effective: 5 USD")).toBeVisible();
   await expect(usage.getByRole("button", { name: "Save limits" })).toHaveCount(0);

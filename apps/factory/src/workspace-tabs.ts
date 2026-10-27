@@ -19,7 +19,10 @@ export type WorkspaceTab = {
   appChannel?: string;
   changeID?: string;
   settingsProject?: { id: string; name: string };
-  settingsSelection?: { scope: "personal" | "project" | "system"; category: "people" | "security" };
+  settingsSelection?: {
+    scope: "personal" | "project" | "system";
+    category: "people" | "security" | "monitoring";
+  };
   proposalID?: string;
 };
 

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createTicketService } from "../../apps/factory/src/change/service";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";

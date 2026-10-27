@@ -389,6 +389,7 @@ export function createBuildBrowserController(
           SELECT ${session.id},review.change_id,review.id,${session.id},'recording',review.commit_sha,
             ${session.attemptID},'intended'
           FROM factory.candidate_review review WHERE review.turn_id=${session.turnID}
+            AND review.finding_source_id IS NULL
           ON CONFLICT DO NOTHING RETURNING id,state`;
         if (intent?.state === "intended") id = intent.id;
       });

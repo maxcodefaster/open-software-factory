@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
-import { resolve } from "node:path";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
 import { reviewChangeIn } from "./controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
+import { createPrivateObjects, type PrivateObjects } from "../storage/objects";
 
 export const maximumRecordingBytes = 96 * 1024 * 1024;
 export const stillContextInput = z.discriminatedUnion("source", [
@@ -41,19 +40,21 @@ export function jpegDimensions(data: Uint8Array) {
   return null;
 }
 
-export function createReviewMedia(database: ReturnType<typeof createDatabase>, directory?: string) {
-  const root = resolve(
-    directory ?? process.env["FACTORY_STATE_DIRECTORY"] ?? ".factory",
-    "review-media",
-  );
-  function path(id: string) {
-    return resolve(root, z.uuid().parse(id).toLowerCase());
+export function createReviewMedia(
+  database: ReturnType<typeof createDatabase>,
+  objects: PrivateObjects = createPrivateObjects(),
+) {
+  async function key(id: string) {
+    const [storage] = await database.client<{ id: string }[]>`
+      SELECT id FROM factory.attachment_storage WHERE singleton`;
+    if (!storage) throw new Error("Installation storage identity is unavailable");
+    return `factory-review/${storage.id}/${z.uuid().parse(id).toLowerCase()}`;
   }
   async function stage(id: string, data: Uint8Array) {
     const sha = createHash("sha256").update(data).digest("hex");
     const proof = { id, sha, bytes: data.byteLength };
-    const [intent] = await database.client<{ state: string; sha: string | null }[]>`
-        SELECT state,sha256 AS sha FROM factory.review_media WHERE id=${id}`;
+    const [intent] = await database.client<{ state: string; sha: string | null; kind: string }[]>`
+        SELECT state,sha256 AS sha,kind FROM factory.review_media WHERE id=${id}`;
     if (intent?.sha && intent.sha !== sha)
       throw new CommandError("conflict", "Media identity changed its original content");
     if (intent?.state === "complete" && intent.sha === sha) return proof;
@@ -61,26 +62,13 @@ export function createReviewMedia(database: ReturnType<typeof createDatabase>, d
       throw new CommandError("conflict", "Media publication is no longer current");
     if (data.byteLength < 1 || data.byteLength > maximumRecordingBytes)
       throw new CommandError("conflict", "Media publication exceeds its size bound");
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    const temporary = `${path(id)}.${crypto.randomUUID()}.part`;
-    try {
-      const file = await open(temporary, "wx", 0o600);
-      try {
-        await file.writeFile(data);
-        await file.sync();
-      } finally {
-        await file.close();
-      }
-      await rename(temporary, path(id));
-      const directory = await open(root, "r");
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
-    } finally {
-      await rm(temporary, { force: true });
-    }
+    const [claimed] = await database.client`UPDATE factory.review_media
+      SET sha256=${sha},byte_length=${data.byteLength}
+      WHERE id=${id} AND state IN ('intended','recording') AND (sha256 IS NULL OR sha256=${sha})
+      RETURNING id`;
+    if (!claimed)
+      throw new CommandError("conflict", "Media publication changed its original content");
+    await objects.put(await key(id), data, intent.kind === "still" ? "image/jpeg" : "video/webm");
     return proof;
   }
   async function complete(
@@ -236,14 +224,13 @@ export function createReviewMedia(database: ReturnType<typeof createDatabase>, d
         return media;
       });
       if (!media) return new Response(null, { status: 404 });
-      const file = Bun.file(path(id));
-      if (!(await file.exists())) return new Response(null, { status: 404 });
       const headers = new Headers({
         "content-type": media.kind === "still" ? "image/jpeg" : "video/webm",
         "cache-control": "private, no-store",
         "x-content-type-options": "nosniff",
         "accept-ranges": "bytes",
       });
+      let requested: { start: number; end: number } | undefined;
       if (range) {
         const match = /^bytes=(\d+)-(\d*)$/.exec(range);
         const start = Number(match?.[1]);
@@ -251,6 +238,7 @@ export function createReviewMedia(database: ReturnType<typeof createDatabase>, d
         if (
           !match ||
           !Number.isSafeInteger(start) ||
+          !Number.isSafeInteger(end) ||
           start < 0 ||
           end < start ||
           end >= media.bytes
@@ -261,16 +249,52 @@ export function createReviewMedia(database: ReturnType<typeof createDatabase>, d
           });
         headers.set("content-range", `bytes ${start}-${end}/${media.bytes}`);
         headers.set("content-length", String(end - start + 1));
-        return new Response(file.slice(start, end + 1), { status: 206, headers });
+        requested = { start, end };
+      } else {
+        headers.set("content-length", String(media.bytes));
       }
-      headers.set("content-length", String(media.bytes));
-      return new Response(file, { headers });
+      const response = await objects.open(await key(id), requested);
+      if (response.status === 404) {
+        await response.body?.cancel();
+        return new Response(null, { status: 404 });
+      }
+      if (
+        response.status !== (requested ? 206 : 200) ||
+        response.headers.get("content-length") !== headers.get("content-length") ||
+        (requested && response.headers.get("content-range") !== headers.get("content-range"))
+      ) {
+        await response.body?.cancel();
+        throw new CommandError("unavailable", "Stored review media could not be verified.");
+      }
+      try {
+        await database.client.begin(async (sql) => {
+          await reviewChangeIn(sql, changeID, userID);
+          const [current] = await sql`SELECT id FROM factory.review_media
+            WHERE id=${id} AND change_id=${changeID} AND state='complete'`;
+          if (!current)
+            throw new CommandError("unavailable", "Review media is no longer available.");
+        });
+      } catch (cause) {
+        await response.body?.cancel();
+        throw cause;
+      }
+      return new Response(response.body, { status: requested ? 206 : 200, headers });
     },
     async bytes(id: string) {
-      return readFile(path(id));
+      const [media] = await database.client<{ sha: string; bytes: number }[]>`
+        SELECT sha256 AS sha,byte_length AS bytes FROM factory.review_media
+        WHERE id=${z.uuid().parse(id)} AND state='complete'`;
+      if (!media) throw new CommandError("unavailable", "Review media is unavailable.");
+      const data = await objects.read(await key(id));
+      if (
+        data.byteLength !== media.bytes ||
+        createHash("sha256").update(data).digest("hex") !== media.sha
+      )
+        throw new CommandError("unavailable", "Stored review media could not be verified.");
+      return data;
     },
     async sweep() {
-      // Mark first, unlink second. A crash repeats deletion, never resurrects
+      // Mark first, delete the exact object second. A crash repeats deletion, never resurrects
       // expired media or removes annotation stills.
       await database.client`UPDATE factory.review_media media SET state='deleted',deleted_at=now()
         WHERE kind='recording' AND state='complete' AND (
@@ -305,16 +329,7 @@ export function createReviewMedia(database: ReturnType<typeof createDatabase>, d
       const deleted = await database.client<
         { id: string }[]
       >`SELECT id FROM factory.review_media WHERE state IN ('deleted','unavailable')`;
-      for (const item of deleted) await rm(path(item.id), { force: true });
-      const tombstones = new Set(deleted.map((item) => item.id));
-      const files = await readdir(root).catch((cause: NodeJS.ErrnoException) => {
-        if (cause.code === "ENOENT") return [];
-        throw cause;
-      });
-      for (const file of files) {
-        const id = /^([a-f0-9-]{36})\.[a-f0-9-]{36}\.part$/.exec(file)?.[1];
-        if (id && tombstones.has(id)) await rm(resolve(root, file), { force: true });
-      }
+      for (const item of deleted) await objects.remove(await key(item.id));
     },
   };
 }

@@ -21,6 +21,7 @@ import { wikiGenerationFailureMessage } from "./generation-failure";
 import { publishWikiPackage, WikiPublicationConflict } from "./publication";
 import { createRepositoryKnowledgeCache } from "./repository-cache";
 import { searchSnippet } from "./search-snippet";
+import { editKnowledgeIn } from "./edit";
 
 type Database = ReturnType<typeof createDatabase>;
 type KnowledgeEdit = typeof knowledgeEditInput._output;
@@ -441,9 +442,9 @@ export function createKnowledgeController(
   }
 
   const controller = {
-    async codePaths(projectID: string, query: string, userID: string) {
+    async codePaths(projectID: string, query: string, userID: string, commitSha?: string) {
       await createAccessController(database).requireDevelopment(userID, projectID);
-      const current = await inventory(projectID);
+      const current = await inventory(projectID, commitSha);
       const terms = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
       const matches = current.files.filter(
         (file) =>
@@ -566,68 +567,7 @@ export function createKnowledgeController(
       return rows[0] ?? null;
     },
     async edit(pageID: string, input: KnowledgeEdit, userID: string, restoring = false) {
-      return database.client.begin(async (transaction) => {
-        const [scope] = await transaction<
-          Array<{ projectId: string }>
-        >`SELECT project_id AS "projectId" FROM factory.knowledge_page WHERE id=${pageID} AND state='active'`;
-        if (!scope) throw new CommandError("not-found", "Wiki page not found");
-        await projectAuthorityIn(transaction, userID, scope.projectId);
-        const pages = await transaction<
-          Array<{
-            id: string;
-            title: string;
-            body: string;
-            revisionId: string | null;
-            version: number;
-            generatedBody: string;
-            commitSha: string;
-            citations: Array<{ path: string; commitSha: string }>;
-          }>
-        >`
-          SELECT id, title, current_body AS body, current_revision_id AS "revisionId", version::integer AS version, generated_body AS "generatedBody",
-            source_commit_sha AS "commitSha", citations
-          FROM factory.knowledge_page WHERE id = ${pageID} AND state='active' FOR UPDATE
-        `;
-        const page = pages[0];
-        if (!page) throw new CommandError("not-found", "Wiki page not found");
-        if (!restoring && page.title === input.title && page.body === input.body)
-          return {
-            id: pageID,
-            version: page.version,
-            title: page.title,
-            body: page.body,
-            revisionId: page.revisionId,
-          };
-        if (page.version !== input.expectedVersion)
-          throw new CommandError("conflict", "Knowledge Page changed. Reload it before saving.");
-        const revisionID = crypto.randomUUID();
-        const ordinals = await transaction<Array<{ ordinal: number }>>`
-          SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal
-          FROM factory.knowledge_revision WHERE page_id = ${pageID}
-        `;
-        const ordinal = Number(ordinals[0]?.ordinal ?? 1);
-        await transaction`
-          INSERT INTO factory.knowledge_revision(
-            id, page_id, ordinal, kind, title, body, generated_body,
-            source_commit_sha, citations, created_by
-          ) VALUES (
-            ${revisionID}, ${pageID}, ${ordinal}, 'human', ${input.title}, ${input.body},
-            ${page.generatedBody}, ${page.commitSha}, ${JSON.stringify(page.citations)}::jsonb, ${userID}
-          )
-        `;
-        await transaction`
-          UPDATE factory.knowledge_page SET title = ${input.title}, current_body = ${input.body},
-            current_revision_id = ${revisionID}, version = version + 1, updated_at = now()
-          WHERE id = ${pageID} AND version = ${input.expectedVersion}
-        `;
-        return {
-          id: pageID,
-          version: page.version + 1,
-          title: input.title,
-          body: input.body,
-          revisionId: revisionID,
-        };
-      });
+      return database.client.begin((sql) => editKnowledgeIn(sql, pageID, input, userID, restoring));
     },
     async archive(pageID: string, expectedVersion: number, userID: string) {
       return database.client.begin(async (transaction) => {

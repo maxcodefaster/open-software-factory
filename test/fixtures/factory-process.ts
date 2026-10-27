@@ -254,12 +254,13 @@ export async function factoryProcess(
           else process.env["DATABASE_URL"] = previousURL;
         }
       },
-      async startPlanningCache(observeWhileRunning = false, syncWorkers = 1) {
+      async startPlanningCache(observeWhileRunning = false, syncWorkers = 1, network?: string) {
         planningCache ??= await ownedPlanningCache(
           databaseURL,
           base,
           observeWhileRunning,
           syncWorkers,
+          network ?? shared?.network,
         );
         environment.FACTORY_ZERO_CACHE_URL = planningCache.url;
         return planningCache;

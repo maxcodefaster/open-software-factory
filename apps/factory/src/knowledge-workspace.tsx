@@ -1,9 +1,10 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, onCleanup, Show, untrack } from "solid-js";
 import { withoutRepeatedTitle } from "../../../packages/knowledge-domain/src/document-merge";
 import type { knowledgeIcons } from "../../../packages/knowledge-domain/src/page-tree";
 import type {
   KnowledgeGeneration,
   KnowledgePage,
+  KnowledgePageOutline,
   KnowledgeRevision,
   KnowledgeSave,
   KnowledgeSearchResult,
@@ -35,7 +36,7 @@ import { VersionHistory } from "./version-history";
 export type { KnowledgeDraft } from "./knowledge/draft";
 
 export function KnowledgeWorkspace(props: {
-  pages: KnowledgePage[];
+  pages: KnowledgePageOutline[];
   selectedPage?: KnowledgePage | undefined;
   documents: RepositoryDocument[];
   openDocument?: OpenRepositoryDocument | undefined;
@@ -67,6 +68,7 @@ export function KnowledgeWorkspace(props: {
   onOpenIDE(): void;
   onRestore(pageID: string, revisionID: string, expectedVersion: number): Promise<KnowledgeSave>;
 }) {
+  const draftStore = untrack(() => props.drafts);
   const [editing, setEditing] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [sources, setSources] = createSignal<Array<{ path: string; commitSha: string }>>();
@@ -168,18 +170,17 @@ export function KnowledgeWorkspace(props: {
     }
   }
   let draftKey: string | undefined;
-  function retainDraft() {
+  function retainDraft(current = untrack(draft)) {
     if (!draftKey) return;
-    const current = draft();
     if (current && draftDirty(current)) {
-      props.drafts.set(draftKey, current);
+      draftStore.set(draftKey, current);
       try {
         localStorage.setItem(`wiki-draft:${draftKey}`, JSON.stringify(current));
       } catch {
         setSaveError("Browser storage is unavailable. Keep this page open until it saves.");
       }
     } else {
-      props.drafts.delete(draftKey);
+      draftStore.delete(draftKey);
       try {
         localStorage.removeItem(`wiki-draft:${draftKey}`);
       } catch {
@@ -192,22 +193,24 @@ export function KnowledgeWorkspace(props: {
     retainDraft();
   });
   createEffect(
-    () =>
-      `${props.userID}:${props.projectID}:${props.openDocument ? `document:${props.openDocument.path}` : `page:${props.selectedPage?.id ?? "none"}`}`,
-    (key) => {
+    () => ({
+      key: `${props.userID}:${props.projectID}:${props.openDocument ? `document:${props.openDocument.path}` : `page:${props.selectedPage?.id ?? "none"}`}`,
+      incoming:
+        props.selectedPage && !props.openDocument ? pageSnapshot(props.selectedPage) : undefined,
+    }),
+    ({ key, incoming }) => {
       if (key === draftKey) return;
       clearTimeout(autosaveTimer);
       retainDraft();
       closeHistory();
       draftKey = key;
-      let retained = props.drafts.get(key);
+      let retained = draftStore.get(key);
       try {
         retained ??= readDraft(key, localStorage);
       } catch {
         /* In-memory drafts remain available. */
       }
-      const page = props.selectedPage;
-      const next = page && !props.openDocument ? pageSnapshot(page) : undefined;
+      const next = incoming;
       setDraft(next ? (retained ? reconcileDraft(retained, next) : draftFrom(next)) : undefined);
       setEditing(!!retained);
       setSaveState("idle");
@@ -218,7 +221,6 @@ export function KnowledgeWorkspace(props: {
       setSources(undefined);
       setSourcesError("");
       setSourcesLoading(false);
-      if (retained) scheduleSave();
     },
   );
   createEffect(
@@ -232,11 +234,12 @@ export function KnowledgeWorkspace(props: {
     },
   );
   createEffect(
-    () => props.selectedPage,
-    (page) => {
-      const current = draft();
-      if (!page || props.openDocument || current?.base.id !== page.id) return;
-      const incoming = pageSnapshot(page);
+    () =>
+      props.selectedPage && !props.openDocument ? pageSnapshot(props.selectedPage) : undefined,
+    (incoming) => {
+      // Reconcile an observed server revision against one snapshot of local work.
+      const current = untrack(draft);
+      if (!incoming || current?.base.id !== incoming.id) return;
       const submitted = draftKey ? submissions.get(draftKey) : undefined;
       const ownSave =
         submitted &&
@@ -246,8 +249,6 @@ export function KnowledgeWorkspace(props: {
       const next = ownSave ? { ...current, base: incoming } : reconcileDraft(current, incoming);
       if (next !== current) {
         setDraft(next);
-        retainDraft();
-        if (!next.conflict) scheduleSave();
       }
     },
   );
@@ -278,14 +279,15 @@ export function KnowledgeWorkspace(props: {
   }
   createEffect(
     () => draft(),
-    () => {
-      retainDraft();
-      if (saveState() !== "failed") scheduleSave();
+    (current) => {
+      if (!current) return;
+      retainDraft(current);
+      // A failure requires explicit retry, not another observer-driven save.
+      if (untrack(saveState) !== "failed") scheduleSave(current);
     },
   );
-  function scheduleSave() {
+  function scheduleSave(current = untrack(draft)) {
     clearTimeout(autosaveTimer);
-    const current = draft();
     if (
       !current ||
       current.conflict ||
@@ -316,6 +318,7 @@ export function KnowledgeWorkspace(props: {
     submissions.set(key, submitted);
     setSaveState("saving");
     setSaveError("");
+    let failed = false;
     try {
       const saved = await props.onSavePage(
         submitted.base.id,
@@ -323,7 +326,7 @@ export function KnowledgeWorkspace(props: {
         submitted.title,
         submitted.body,
       );
-      const current = draftKey === key ? draft() : props.drafts.get(key);
+      const current = draftKey === key ? draft() : draftStore.get(key);
       if (current) {
         if (current.base.version > saved.version) {
           if (draftKey === key) setSaveState("idle");
@@ -342,10 +345,10 @@ export function KnowledgeWorkspace(props: {
         if (draftKey === key) {
           setDraft(acknowledged);
           setSaveState("saved");
-          retainDraft();
+          retainDraft(acknowledged);
         } else {
-          if (draftDirty(acknowledged)) props.drafts.set(key, acknowledged);
-          else props.drafts.delete(key);
+          if (draftDirty(acknowledged)) draftStore.set(key, acknowledged);
+          else draftStore.delete(key);
           try {
             if (draftDirty(acknowledged))
               localStorage.setItem(`wiki-draft:${key}`, JSON.stringify(acknowledged));
@@ -356,6 +359,7 @@ export function KnowledgeWorkspace(props: {
         }
       }
     } catch (cause) {
+      failed = true;
       if (draftKey === key) {
         setSaveState("failed");
         setSaveError(
@@ -371,7 +375,9 @@ export function KnowledgeWorkspace(props: {
     } finally {
       savingKeys.delete(key);
       submissions.delete(key);
-      if (draftKey === key && saveState() !== "failed") scheduleSave();
+      // Solid commits setters after this continuation. Do not inspect the old
+      // "saving" snapshot and accidentally retry an unconfirmed write.
+      if (draftKey === key && !failed) scheduleSave();
     }
   }
   return (
@@ -611,6 +617,26 @@ export function KnowledgeWorkspace(props: {
                       </button>
                       <Show when={pageMenuOpen()}>
                         <div class="knowledge-page-menu" role="menu" aria-label="Page options">
+                          <Show when={!editing()}>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setPageMenuOpen(false);
+                                beginEdit();
+                                requestAnimationFrame(() =>
+                                  workspace
+                                    ?.querySelector<HTMLTextAreaElement>(
+                                      'textarea[aria-label="Knowledge page title"]',
+                                    )
+                                    ?.focus({ preventScroll: true }),
+                                );
+                              }}
+                            >
+                              <Icon name="file" />
+                              Edit page
+                            </button>
+                          </Show>
                           <button
                             type="button"
                             role="menuitem"

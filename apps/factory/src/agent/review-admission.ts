@@ -1,6 +1,11 @@
 import { agentTurnAuthorityInput } from "../../../../packages/conversation-domain/src/agent-turn";
 import { buildBrowserInstructions } from "../../../../packages/conversation-domain/src/browser-tools";
-import { candidateReviewInstructions } from "../../../../packages/conversation-domain/src/candidate-review";
+import {
+  candidateReviewInstructions,
+  candidateReviewResultInput,
+  correctionReviewInstructions,
+  findingCheckInstructions,
+} from "../../../../packages/conversation-domain/src/candidate-review";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { claimAgentWriterIn, lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn } from "../access/controller";
@@ -31,6 +36,7 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           ticketID: string;
           revisionID: string;
           specification: string;
+          technicalDesign: string | null;
           title: string;
           conversationID: string | null;
           conversationVersion: number | null;
@@ -39,20 +45,30 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           verificationID: string;
           supersedesID: string | null;
           contextID: string | null;
+          proposal: unknown;
+          focus: { reviewId: string; commit: string; report: unknown } | null;
         }[]
       >`
         SELECT change.project_id AS "projectID",change.ticket_id AS "ticketID",
           revision.id AS "revisionID",revision.canonical_content AS specification,ticket.title,
+          (SELECT json_build_object('sourceCommit',source_commit,'content',canonical_content::jsonb,'sources',citations)::text
+            FROM factory.technical_design_revision WHERE id=approval.technical_design_revision_id) AS "technicalDesign",
           conversation.id AS "conversationID",conversation.version::float8 AS "conversationVersion",
           conversation.active_coding_context_id AS "contextID",
           review.base_sha AS "baseSHA",review.commit_sha AS "commitSHA",review.verification_id AS "verificationID",
-          review.supersedes_id AS "supersedesID"
+          review.supersedes_id AS "supersedesID",source.result AS proposal,
+          CASE WHEN focus.id IS NOT NULL THEN json_build_object(
+            'reviewId',focus.id,'commit',focus.commit_sha,'report',focus.result) END AS focus
         FROM factory.change change
         JOIN factory.ticket ticket ON ticket.id=change.ticket_id
         JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
         JOIN factory.requirement_revision revision ON revision.id=approval.requirement_revision_id
         JOIN factory.candidate_review review ON review.change_id=change.id AND review.id=${reviewID}
         JOIN factory.verification verification ON verification.id=review.verification_id
+        LEFT JOIN factory.candidate_review source ON source.id=review.finding_source_id
+          AND source.state='changes-requested'
+        LEFT JOIN factory.candidate_review focus ON focus.id=review.focus_review_id
+          AND focus.change_id=change.id AND focus.state IN ('passed','changes-requested')
         LEFT JOIN factory.ticket_conversation conversation ON conversation.ticket_id=ticket.id
         WHERE change.id=${changeID} AND review.created_by=${userID}
           AND (change.state='active' OR (change.state='starting' AND review.supersedes_id IS NOT NULL
@@ -60,7 +76,11 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
               WHERE attempt.id=change.runtime_attempt_id AND attempt.state IN ('stopped','failed'))))
           AND change.cancel_requested_at IS NULL
           AND ticket.trashed_at IS NULL AND verification.state='succeeded'
-          AND review.base_sha=change.base_sha
+          AND (review.finding_source_id IS NULL OR (source.result IS NOT NULL AND source.finding_source_id IS NULL
+            AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=source.turn_id AND state='completed')))
+          AND (review.focus_review_id IS NULL OR focus.id IS NOT NULL)
+          AND review.base_sha=COALESCE((SELECT integration_base_sha FROM factory.change_commit_operation
+            WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),change.base_sha)
           AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
             WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
           AND revision.id=(SELECT id FROM factory.requirement_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1)
@@ -121,7 +141,22 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
             WHERE previous.id=${change.supersedesID} AND previous.change_id=${changeID}
               AND previous.turn_id=previous_turn.id AND previous_turn.state IN ('failed','stopped')
               AND pause.turn_id=previous.turn_id AND pause.resumed_by_turn_id IS NULL`;
-          const policy = candidateReviewInstructions(change);
+          const policy =
+            (change.proposal
+              ? findingCheckInstructions({
+                  ...change,
+                  proposal: candidateReviewResultInput.parse(change.proposal),
+                })
+              : candidateReviewInstructions(change) +
+                (change.focus
+                  ? `\n\n${correctionReviewInstructions({
+                      ...change.focus,
+                      report: candidateReviewResultInput.parse(change.focus.report),
+                    })}`
+                  : "")) +
+            (change.technicalDesign
+              ? `\n\nApproved technical design. Check the implementation and evidence against these commitments as well:\n${change.technicalDesign}`
+              : "");
           await transaction`INSERT INTO factory.change_agent_turn_intent(
             turn_id,change_id,session_id,prompt_id,prompt_text,bootstrap,session_title,skill_loading
           ) VALUES(${record.id},${changeID},${`ses_factory_review_${reviewID.replaceAll("-", "")}`},

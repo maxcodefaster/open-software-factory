@@ -15,12 +15,13 @@ import "../../apps/factory/src/style.css";
 import "../../apps/factory/src/review/review.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
+import { fixtureValue } from "./value";
 
 const query = new URLSearchParams(location.search);
-const projectId = query.get("project")!;
-const changeID = query.get("change")!;
-const userID = query.get("user")!;
-const draftId = query.get("draft")!;
+const projectId = fixtureValue(query.get("project"), 'query.get("project")');
+const changeID = fixtureValue(query.get("change"), 'query.get("change")');
+const userID = fixtureValue(query.get("user"), 'query.get("user")');
+const draftId = fixtureValue(query.get("draft"), 'query.get("draft")');
 
 function Surface() {
   const [mode, setMode] = createSignal("Wiki");
@@ -33,7 +34,8 @@ function Surface() {
   const chatDrafts = new Map<boolean, string>();
   const [messages, setMessages] = createSignal<string[]>([]);
   const [interviewAnswer, setInterviewAnswer] = createSignal("");
-  const [actions, setActions] = createSignal<ReviewActions>();
+  const [actionSource, setActionSource] = createSignal<() => ReviewActions | undefined>();
+  const actions = () => actionSource()?.();
   const key = `attachment-proof-draft:${draftId}`;
   const draft = { ...readPersonalTicketDraft(key), id: draftId };
   async function request(path: string, input?: unknown) {
@@ -193,7 +195,10 @@ function Surface() {
               onAnswer={(event) => {
                 event.preventDefault();
                 const body = readAttachmentContent(
-                  (event.currentTarget as HTMLFormElement).querySelector("textarea")!,
+                  fixtureValue(
+                    (event.currentTarget as HTMLFormElement).querySelector("textarea"),
+                    '(event.currentTarget as HTMLFormElement).querySelector("textarea")',
+                  ),
                 );
                 void request("/fixture/chat", { body, ticket: true })
                   .then(() => setInterviewAnswer(body))
@@ -215,11 +220,14 @@ function Surface() {
             changeID={changeID}
             userID={userID}
             canDevelop={true}
-            onActions={setActions}
+            onActions={(read) => setActionSource(() => read)}
           />
         </Show>
       </main>
     </AttachmentProvider>
   );
 }
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

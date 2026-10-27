@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { libraryCoverState } from "./library-covers";
 
 export const mcpScope = z.enum(["personal", "project", "system"]);
 export const mcpRole = z.enum(["planning", "build"]);
@@ -98,6 +99,7 @@ export const mcpLibraryView = z.object({
       ownerId: z.uuid().nullable(),
       projectId: z.uuid().nullable(),
       editable: z.boolean(),
+      cover: libraryCoverState.nullable().optional(),
       revisions: z.array(mcpRevision),
       connection: mcpConnectionView.nullable(),
     }),

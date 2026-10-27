@@ -10,6 +10,7 @@ import { createForgeAccessReconciliation } from "../../apps/factory/src/access/f
 import { ensureLocalForgeIdentity } from "../../scripts/factory/forge-identity";
 import { installForgeBrowserLogout } from "../../scripts/factory/forge-logout";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 test("pinned Forgejo recovers passwordless identity creation and confirms private grants and exact branch writers", async () => {
   const id = crypto.randomUUID();
@@ -62,7 +63,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       "FORGEJO__oauth2__DEFAULT_APPLICATIONS=git-credential-oauth",
       "--publish",
       `127.0.0.1:${forgePort}:3000`,
-      "codeberg.org/forgejo/forgejo:15.0.10-rootless@sha256:6ffebd9ab9ee9f6677e3523fa60debd9de630ff2a226fa681d6cc0c7ba541d77",
+      "codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8",
     ]);
     created = true;
     await eventually(
@@ -299,7 +300,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       execute: (args: string[]) => command(["docker", "exec", container, "forgejo", ...args]),
       installLogout: () =>
         installForgeBrowserLogout({
-          factoryURL: wiredFactory!.base,
+          factoryURL: fixtureValue(wiredFactory, "wiredFactory").base,
           execute: (args) => command(["docker", "exec", container, ...args]),
           copy: (source, destination) =>
             command(["docker", "cp", source, `${container}:${destination}`]),

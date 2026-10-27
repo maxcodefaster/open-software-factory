@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
+import * as timers from "node:timers/promises";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
@@ -137,10 +138,12 @@ async function fixture(
     (key) => [key, process.env[key]] as const,
   );
   for (const [key, value] of Object.entries(controlledEnvironment)) process.env[key] = value;
+  const controllers = new Set<ReturnType<typeof createProjectAgentController>>();
 
   async function dispose() {
     release.resolve();
     tail.resolve();
+    await Promise.all([...controllers].map((controller) => controller.shutdown()));
     await model.stop(true);
     for (const [key, value] of previousEnvironment) {
       if (value === undefined) delete process.env[key];
@@ -182,7 +185,11 @@ async function fixture(
     database,
     projectID,
     userID,
-    controller: () => createProjectAgentController(database, { start: async () => null }),
+    controller() {
+      const controller = createProjectAgentController(database, { start: async () => null });
+      controllers.add(controller);
+      return controller;
+    },
     requested: requested.promise,
     secondRequest: secondRequest.promise,
     release: () => release.resolve(),
@@ -812,7 +819,7 @@ test("Project startup recovery waits for a pending lease instead of stealing or 
 
 test("Project startup recovery retains pending intent beyond its first observation window", async () => {
   const owned = await fixture(answer);
-  const sleep = Bun.sleep;
+  const sleep = timers.setTimeout;
   const leaseBoundary = Promise.withResolvers<void>();
   let simulatedWait = 0;
   let waiting: ReturnType<typeof spyOn> | undefined;
@@ -822,7 +829,8 @@ test("Project startup recovery retains pending intent beyond its first observati
     if (!owner) throw new Error("Owned pending lease required");
     // Exercise the real SQL/claim path across a whole ownership window without
     // waiting a minute. SQL expiry remains authoritative, not the test's clock.
-    waiting = spyOn(Bun, "sleep").mockImplementation(async (duration) => {
+    waiting = spyOn(timers, "setTimeout").mockImplementation(async (duration, value, options) => {
+      options?.signal?.throwIfAborted();
       if (typeof duration === "number" && duration >= 1_000) {
         simulatedWait += duration;
         if (simulatedWait >= 60_000) {
@@ -830,13 +838,19 @@ test("Project startup recovery retains pending intent beyond its first observati
             SET owner_expires_at = clock_timestamp() - interval '1 second' WHERE id = ${turn.id}`;
           leaseBoundary.resolve();
         }
-        await sleep(0);
-      } else await sleep(duration);
+        return sleep(0, value, options);
+      } else return sleep(duration, value, options);
     });
     owned.release();
     await owned.controller().recover();
-    await leaseBoundary.promise;
+    await Promise.race([
+      leaseBoundary.promise,
+      sleep(5_000, undefined, { ref: false }).then(() => {
+        throw new Error("Owned recovery did not observe the simulated lease boundary");
+      }),
+    ]);
     await until(async () => (await owned.turns())[0]?.state === "completed");
+    expect(simulatedWait).toBeGreaterThanOrEqual(60_000);
     expect(owned.requests()).toBe(1);
     expect((await owned.turns())[0]?.id).toBe(turn.id);
   } finally {

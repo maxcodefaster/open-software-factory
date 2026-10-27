@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { observeAgentStream } from "./agent-activity-stream";
+import { observeAgentStream } from "./agent/observe-stream";
 import type { AgentView } from "./api-contracts";
 import type { ActivityEvent } from "./agent/activity-stream";
 

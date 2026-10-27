@@ -5,6 +5,7 @@ import {
   ownedFactoryboxProfile,
 } from "../../../test/fixtures/runtime-configuration";
 import { renderRuntimeResources } from "./manifest";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 test("publication is a bound one-job Sandbox without development apps or publication credentials", () => {
   const resources = renderRuntimeResources({
@@ -60,8 +61,11 @@ test("publication is a bound one-job Sandbox without development apps or publica
   expect(jobEnvironment.FACTORY_RELEASE_CREDENTIAL_TOKEN).toBe("synthetic-task-attestation-token");
   expect(jobEnvironment).not.toHaveProperty("FACTORY_RUNNER_CONFIG");
   expect(assignment.processes[0].command.join(" ")).toContain("--handle");
-  const pod = resources.find((value) => value.kind === "Pod")!;
-  expect(pod.spec!.automountServiceAccountToken).toBe(false);
+  const pod = fixtureValue(
+    resources.find((value) => value.kind === "Pod"),
+    'resources.find((value) => value.kind === "Pod")',
+  );
+  expect(pod.spec.automountServiceAccountToken).toBe(false);
   expect(JSON.stringify(resources)).not.toContain("FACTORY_AUTH_SECRET");
   expect(JSON.stringify(resources)).not.toContain("PROJECT_ENVIRONMENT_SECRET");
 });

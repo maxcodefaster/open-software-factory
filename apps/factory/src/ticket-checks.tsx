@@ -2,10 +2,13 @@ import { For, Show } from "solid-js";
 import type { CandidateReviewResult } from "../../../packages/conversation-domain/src/candidate-review";
 
 export type TicketCheckDetails = {
+  deliveryPolicyId?: string | undefined;
   openReviewThreads?: number | undefined;
   checksStopId?: string | undefined;
   verificationState?: string | undefined;
   verificationSummary?: string | undefined;
+  verificationFailureKind?: string | undefined;
+  correctionState?: string | undefined;
   actionRunUrl?: string | undefined;
   reviewState?: string | undefined;
   reviewCurrent?: boolean | undefined;
@@ -19,6 +22,7 @@ export function TicketChecks(props: {
   details: TicketCheckDetails | undefined;
   building: boolean;
   preparing?: boolean | undefined;
+  paused?: boolean | undefined;
   unsubmitted?: boolean | undefined;
   fallback?: string | undefined;
 }) {
@@ -33,6 +37,9 @@ export function TicketChecks(props: {
     props.details?.reviewState === "passed";
   const label = () => {
     if (props.details?.checksStopId) return "Checks paused";
+    if (props.paused) return "Coding paused";
+    if (["pending", "dispatching", "running"].includes(props.details?.correctionState ?? ""))
+      return "Automatic correction in progress";
     if (!unsubmitted() && ["pending", "running"].includes(props.details?.reviewState ?? ""))
       return "Independent review in progress";
     if (props.building)
@@ -63,8 +70,10 @@ export function TicketChecks(props: {
     }
   };
   const busy = () =>
+    !props.paused &&
     !props.details?.checksStopId &&
-    (props.building ||
+    (["pending", "dispatching", "running"].includes(props.details?.correctionState ?? "") ||
+      props.building ||
       (!unsubmitted() &&
         (["pending", "runner-starting", "running"].includes(
           props.details?.verificationState ?? "",
@@ -118,6 +127,11 @@ export function TicketChecks(props: {
           </Show>
           <Show when={props.details?.reviewSummary}>
             <p>{props.details?.reviewSummary}</p>
+          </Show>
+          <Show when={props.details?.deliveryPolicyId}>
+            <p>
+              Delivery was authorized by the Project delegation, not an individual human review.
+            </p>
           </Show>
           <For each={props.details?.reviewFindings}>
             {(finding) => (

@@ -6,9 +6,11 @@ import {
   factoryboxOriginalWorkerRetired,
   factoryboxPreparationAssignment,
   factoryboxPreparationRequest,
+  prepareFactoryboxRuntime,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
 import type { runFactoryboxKubernetes } from "./factorybox-worker";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 const input: FactoryboxRuntimeInput = {
   attemptID: "01234567-89ab-5def-8123-456789abcdef",
@@ -65,12 +67,14 @@ test("shared workers receive only the selected Sandbox assignment, never an ambi
   const request = factoryboxPreparationRequest(input, identity, assignment);
   expect(request.version).toBe(3);
   expect(request.assignment).toEqual(assignment);
-  expect(request.sourceWorkspaceID).toBe(input.runtimeOwnerID!.replaceAll("-", ""));
+  expect(request.sourceWorkspaceID).toBe(input.runtimeOwnerID.replaceAll("-", ""));
   const pod = renderFactoryboxRuntime(input).pod;
   expect(pod.spec.volumes.some((volume) => volume.name === "assignment")).toBe(false);
-  expect(pod.spec.containers[0]!.volumeMounts.some((mount) => mount.name === "assignment")).toBe(
-    false,
-  );
+  expect(
+    fixtureValue(pod.spec.containers[0], "pod.spec.containers[0]").volumeMounts.some(
+      (mount) => mount.name === "assignment",
+    ),
+  ).toBe(false);
   expect(JSON.stringify(pod)).not.toContain("parent-private");
   expect(JSON.stringify(input)).not.toContain("parent-private");
 });
@@ -111,7 +115,9 @@ test("assignment reads reject another owner and keep assigned credentials out of
     },
     data: {
       ...secret.data,
-      "slot.json": Buffer.from(slot["slot.json"]!).toString("base64"),
+      "slot.json": Buffer.from(fixtureValue(slot["slot.json"], 'slot["slot.json"]')).toString(
+        "base64",
+      ),
     },
   });
   expect(seed).toEqual(slot);
@@ -155,11 +161,37 @@ test("two executions on one worker retain distinct Sandbox and preparation ident
 });
 
 test("missing, changed and another execution's Sandbox identities fail before worker effects", () => {
-  for (const sandboxID of [undefined, "runtime", "runtime-" + "a".repeat(32)]) {
+  for (const sandboxID of [undefined, "runtime", `runtime-${"a".repeat(32)}`]) {
     expect(() =>
       renderFactoryboxRuntime({ ...input, sandboxID } as FactoryboxRuntimeInput),
     ).toThrow("Sandbox identity");
   }
+});
+
+test("reserve preparation rejects a missing assignment identity before observing any worker", async () => {
+  let commands = 0;
+  await expect(
+    prepareFactoryboxRuntime(
+      { ...input, reserve: true },
+      {
+        version: 1,
+        namespaceUID: "namespace",
+        claimUID: "claim",
+        podUID: "pod",
+        storeID: input.attemptID.replaceAll("-", ""),
+        epoch: "e".repeat(32),
+        bootID: "boot",
+        nodeBootID: "node-boot",
+        executableSHA256: input.profile.executableSHA256,
+        controllerRoot: "/controller",
+      },
+      async () => {
+        commands++;
+        throw new Error("Missing assignment must not reach Kubernetes");
+      },
+    ),
+  ).rejects.toThrow("Sandbox assignment identity is missing");
+  expect(commands).toBe(0);
 });
 
 test("assigning a never-used reserve keeps its original Sandbox independently of the worker ID", () => {
@@ -316,23 +348,33 @@ test("consumer image exports before PID 1 starts, with source and credentials co
   expect(pod.spec.restartPolicy).toBe("Never");
   expect(pod.spec.hostNetwork).toBe(false);
   expect(pod.spec.automountServiceAccountToken).toBe(false);
-  expect(pod.spec.containers[0]!.resources.limits).toEqual({ cpu: "3", memory: "3Gi" });
+  expect(fixtureValue(pod.spec.containers[0], "pod.spec.containers[0]").resources.limits).toEqual({
+    cpu: "3",
+    memory: "3Gi",
+  });
   expect(pod.spec.initContainers.map((container) => container.name)).toEqual([
     "store-initialize",
     "runtime-image",
   ]);
-  expect(pod.spec.initContainers[0]!.image).toBe(input.profile.image);
-  expect(pod.spec.initContainers[0]!.volumeMounts).toEqual([
-    { name: "store", mountPath: "/factory-store" },
-  ]);
-  expect(pod.spec.initContainers[0]!.securityContext.capabilities.drop).toEqual(["ALL"]);
+  expect(fixtureValue(pod.spec.initContainers[0], "pod.spec.initContainers[0]").image).toBe(
+    input.profile.image,
+  );
+  expect(
+    fixtureValue(pod.spec.initContainers[0], "pod.spec.initContainers[0]").volumeMounts,
+  ).toEqual([{ name: "store", mountPath: "/factory-store" }]);
+  expect(
+    fixtureValue(pod.spec.initContainers[0], "pod.spec.initContainers[0]").securityContext
+      .capabilities.drop,
+  ).toEqual(["ALL"]);
   expect(
     pod.spec.initContainers.find((container) => container.name === "runtime-image")?.image,
   ).toBe(input.runtimeHostImage);
   expect(
     pod.spec.initContainers.find((container) => container.name === "runtime-image")?.volumeMounts,
   ).toEqual([{ name: "store", mountPath: "/factory-seed", subPath: "seed" }]);
-  expect(pod.spec.containers[0]!.volumeMounts).toContainEqual({
+  expect(
+    fixtureValue(pod.spec.containers[0], "pod.spec.containers[0]").volumeMounts,
+  ).toContainEqual({
     name: "runtime-data",
     mountPath: "/factory-source",
   });

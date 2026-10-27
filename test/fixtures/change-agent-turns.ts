@@ -7,6 +7,7 @@ import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import type { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { factoryProcess } from "./factory-process";
+import { fixtureValue } from "./value";
 
 const { FACTORY_AGENT_MODEL_ID } = process.env;
 export const buildModelID = FACTORY_AGENT_MODEL_ID ?? "factory-coding-model";
@@ -27,7 +28,7 @@ export async function fixture(
   ) => Promise<{ incidentID: string; policyID: string }>,
 ) {
   const host = externalDatabase ? undefined : await factoryProcess();
-  const database = externalDatabase ?? host!.connect();
+  const database = externalDatabase ?? fixtureValue(host, "host").connect();
   const userID = crypto.randomUUID();
   const projectID = crypto.randomUUID();
   const ticketID = crypto.randomUUID();
@@ -209,7 +210,9 @@ export async function fixture(
       });
     }
     if (request.method === "DELETE" && path.includes("/inbox/")) {
-      cancelledInputs.add(decodeURIComponent(path.split("/").at(-1)!));
+      cancelledInputs.add(
+        decodeURIComponent(fixtureValue(path.split("/").at(-1), 'path.split("/").at(-1)')),
+      );
       return new Response(null, { status: 204 });
     }
     if (path.endsWith("/inbox")) {
@@ -410,6 +413,8 @@ export async function fixture(
             WHERE scope=${`checks-resume:${changeID}`} AND actor_id=${userID}`;
           await sql`DELETE FROM factory.usage_operation WHERE project_id=${projectID} AND user_id=${userID}`;
           await sql`SET LOCAL session_replication_role = replica`;
+          await sql`DELETE FROM factory.implementation_order WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.project_delivery_queue WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.change_editing_request WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_editing_decision WHERE change_id=${changeID}`;
           await sql`UPDATE factory.ticket_conversation SET active_coding_context_id=NULL WHERE project_id=${projectID}`;
@@ -432,6 +437,7 @@ export async function fixture(
           await sql`DELETE FROM factory.promotion_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.merge_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.delivery_approval WHERE change_id=${changeID}`;
+          await sql`DELETE FROM factory.project_delivery_policy WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.pull_request_operation WHERE change_id=${changeID}`;
           await sql`DELETE FROM factory.change_agent_session WHERE change_id = ${changeID}`;
           await sql`DELETE FROM factory.candidate_review WHERE change_id=${changeID}`;

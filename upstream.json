@@ -15,6 +15,10 @@
     "image": "registry.k8s.io/metrics-server/metrics-server:v0.9.0@sha256:d9862115e7c7881280d3d75ca26bda8ffc0fc213315979575bf23ce9826205c0",
     "source": "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.9.0/components.yaml"
   },
+  "garage": {
+    "version": "2.3.0",
+    "image": "docker.io/dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690"
+  },
   "openbao": {
     "version": "2.7.1",
     "image": "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"

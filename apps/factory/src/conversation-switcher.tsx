@@ -20,6 +20,7 @@ export function ConversationSwitcher(props: {
 }) {
   const [confirm, setConfirm] = createSignal(false);
   const [open, setOpen] = createSignal(false);
+  const [query, setQuery] = createSignal("");
   const id = `conversation-history-${crypto.randomUUID()}`;
   let trigger: HTMLButtonElement | undefined;
   let menu: HTMLDivElement | undefined;
@@ -43,6 +44,15 @@ export function ConversationSwitcher(props: {
       })) ?? []),
   ];
   const current = () => options().find((option) => option.id === selected());
+  const searchable = () => options().length > 8;
+  const filteredOptions = () => {
+    const terms = query().trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    return options().filter((option) => {
+      const text =
+        `${option.title} ${option.kind} ${option.active ? "Active Coding" : ""}`.toLocaleLowerCase();
+      return terms.every((term) => text.includes(term));
+    });
+  };
   const dismiss = () => menu?.hidePopover();
   const position = () => {
     if (!menu || !trigger) return;
@@ -57,6 +67,7 @@ export function ConversationSwitcher(props: {
     });
   };
   const showHistory = () => {
+    setQuery("");
     position();
     menu?.showPopover();
   };
@@ -139,70 +150,93 @@ export function ConversationSwitcher(props: {
         id={id}
         class="conversation-menu"
         popover="auto"
-        role="menu"
+        role="dialog"
         aria-label="Conversation history"
         onToggle={(event) => setOpen(event.newState === "open")}
       >
-        <button
-          type="button"
-          role="menuitem"
-          class="conversation-new"
-          disabled={props.busy}
-          onClick={() => {
-            dismiss();
-            trigger?.focus({ preventScroll: true });
-            if (props.coding) setConfirm(true);
-            else props.onResearch();
-          }}
-        >
-          New chat
-        </button>
-        <p class="conversation-menu-label">
-          {props.ticket ? "Ticket chats" : "Your Project chats"}
-        </p>
-        <Show when={!props.conversation && props.busy}>
-          <p class="conversation-visibility" role="status">
-            Loading chats…
-          </p>
+        <Show when={searchable()}>
+          <label class="conversation-history-search">
+            <Icon name="search" />
+            <input
+              type="search"
+              data-popover-search
+              aria-label="Find conversation"
+              placeholder="Find a conversation…"
+              value={query()}
+              onInput={(event) => setQuery(event.currentTarget.value)}
+            />
+          </label>
+          <Show when={query().trim()}>
+            <p class="conversation-visibility" role="status">
+              {filteredOptions().length
+                ? `${filteredOptions().length} matching ${filteredOptions().length === 1 ? "conversation" : "conversations"}`
+                : "No matching conversations. Try another name."}
+            </p>
+          </Show>
         </Show>
-        <For each={options()} keyed={(option) => option.id}>
-          {(option) => (
-            <button
-              type="button"
-              role="menuitemradio"
-              aria-checked={option().id === selected() ? "true" : "false"}
-              aria-current={option().id === selected() ? "true" : undefined}
-              data-conversation-id={option().id}
-              onClick={() => {
-                props.onSelect(option().id);
-                dismiss();
-                trigger?.focus({ preventScroll: true });
-              }}
-            >
-              <span>{option().title}</span>
-              <small>{option().active ? "Active Coding" : option().kind}</small>
-            </button>
-          )}
-        </For>
-        <Show when={props.coding}>
+        <div role="menu" aria-label="Conversation history">
           <button
             type="button"
             role="menuitem"
-            class="conversation-research"
+            class="conversation-new"
             disabled={props.busy}
             onClick={() => {
               dismiss();
-              props.onResearch();
+              trigger?.focus({ preventScroll: true });
+              if (props.coding) setConfirm(true);
+              else props.onResearch();
             }}
           >
-            Ask about this Project
+            New chat
           </button>
-        </Show>
-        <p class="conversation-visibility">
-          {props.ticket
-            ? "Conversation history is shared with this Ticket."
-            : "Project conversations are private to you."}
-        </p>
+          <p class="conversation-menu-label">
+            {props.ticket ? "Ticket chats" : "Your Project chats"}
+          </p>
+          <Show when={!props.conversation && props.busy}>
+            <p class="conversation-visibility" role="status">
+              Loading chats…
+            </p>
+          </Show>
+          <For each={filteredOptions()} keyed={(option) => option.id}>
+            {(option) => (
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={option().id === selected() ? "true" : "false"}
+                aria-current={option().id === selected() ? "true" : undefined}
+                data-conversation-id={option().id}
+                data-popover-option
+                onClick={() => {
+                  props.onSelect(option().id);
+                  dismiss();
+                  trigger?.focus({ preventScroll: true });
+                }}
+              >
+                <span>{option().title}</span>
+                <small>{option().active ? "Active Coding" : option().kind}</small>
+              </button>
+            )}
+          </For>
+          <Show when={props.coding}>
+            <button
+              type="button"
+              role="menuitem"
+              class="conversation-research"
+              disabled={props.busy}
+              onClick={() => {
+                dismiss();
+                props.onResearch();
+              }}
+            >
+              Ask about this Project
+            </button>
+          </Show>
+          <p class="conversation-visibility">
+            {props.ticket
+              ? "Conversation history is shared with this Ticket."
+              : "Project conversations are private to you."}
+          </p>
+        </div>
       </div>
       <Show when={confirm()}>
         <fieldset class="conversation-restart-confirmation" aria-label="Fresh Coding conversation">

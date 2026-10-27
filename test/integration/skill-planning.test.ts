@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { factoryFunctionRequest } from "../fixtures/server-functions";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -13,6 +13,7 @@ import { requirementsInterviewSkill } from "../../apps/factory/src/skills/review
 import { skillRevisionInput } from "../../packages/conversation-domain/src/skills";
 import { fixture as buildFixture, buildModelID } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 const providerRequest = z
@@ -724,7 +725,7 @@ test("Build installs exact native packages, records actual loading and keeps the
     owned.finish();
     owned.release();
     await eventually(
-      () => controller.get(owned!.changeID),
+      () => controller.get(fixtureValue(owned, "owned").changeID),
       (view) => view.state === "committed" && view.turn?.state === "completed",
       "Owned Build did not commit with its admitted Skills",
     );

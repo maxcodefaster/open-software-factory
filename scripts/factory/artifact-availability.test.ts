@@ -173,7 +173,10 @@ test("startup observes all six role manifests, and a missing role stops the chec
       return { ...result, code: args.at(-1)?.includes("/browser-tools@") ? 1 : 0 };
     }),
   ).rejects.toThrow("browser-tools artifact manifest could not be read");
-  expect(calls.map((args) => args.at(-1))).toEqual(Object.values(references).slice(0, 4));
+  const failedIndex = Object.keys(references).indexOf("browser-tools");
+  expect(calls.map((args) => args.at(-1))).toEqual(
+    Object.values(references).slice(0, failedIndex + 1),
+  );
 });
 
 test("an invalid remote manifest is refused without including provider output in the error", async () => {

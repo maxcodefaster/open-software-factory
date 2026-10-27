@@ -6,7 +6,6 @@ import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { localOpenBao } from "../../scripts/factory/openbao";
 import {
-  editorFixtureKubectl,
   editorFixtureNamespaces,
   finishedPrebuildNamespace,
   removeOwnedProjectSources,
@@ -19,6 +18,7 @@ import {
 import { privateRegistryFixture } from "../fixtures/private-registry";
 import { ownedRuntimeTerminal, runtimeAccessCookie } from "../fixtures/runtime-access";
 import { callFactoryFunction } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
   "registered Project automatically prebuilds and uses exact secure Development/Main-Preview values in hooks, app and PTY",
@@ -55,7 +55,7 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
     let created = false;
     let terminal: Awaited<ReturnType<typeof ownedRuntimeTerminal>> | undefined;
     const before = await editorFixtureNamespaces();
-    const api = (path: string, method = "GET", body?: unknown) =>
+    const _api = (path: string, method = "GET", body?: unknown) =>
       fetch(factory.base + path, {
         method,
         headers: { cookie, origin: factory.base, "content-type": "application/json" },
@@ -83,7 +83,7 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
           kind: string | null;
         }>
       >`SELECT id,state,failure,kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",isolated_kind::text AS kind FROM factory.runtime_attempt WHERE project_id=${projectID}`;
-    async function stop(id: string) {
+    async function _stop(id: string) {
       expect(
         (
           await callFactoryFunction(
@@ -121,7 +121,7 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
             options: ["--secret", "id=BUILD_TOKEN,src=/run/factory-build-secrets/BUILD_TOKEN"],
           },
           workspaceFolder: "/workspace/project",
-          workspaceMount: "source=${localWorkspaceFolder},target=/workspace/project,type=bind",
+          workspaceMount: `source=\${localWorkspaceFolder},target=/workspace/project,type=bind`,
           remoteUser: "node",
           runArgs: ["--cap-drop=ALL"],
           features: { "./feature": {}, [`${registry.host}/owned/feature:1`]: {} },
@@ -148,7 +148,10 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
         "app.mjs":
           "import{createServer}from'node:http';createServer((q,r)=>{r.setHeader('content-type','application/json');r.end(JSON.stringify({configured:!!process.env.APP_TOKEN,token:process.env.APP_TOKEN,multiline:process.env.MULTILINE}));}).listen(4300,'0.0.0.0');\n",
       };
-      files[".devcontainer/Dockerfile"] = files[".devcontainer/Dockerfile"]!.replace(
+      files[".devcontainer/Dockerfile"] = fixtureValue(
+        files[".devcontainer/Dockerfile"],
+        'files[".devcontainer/Dockerfile"]',
+      ).replace(
         localImages.development,
         localImages.development
           .replace(/^[^/]+/, registry.host)
@@ -162,10 +165,10 @@ test.skipIf(process.env["FACTORY_RUN_ENVIRONMENT_PROOF"] !== "1")(
       });
       files[".devcontainer/feature/install.sh"] =
         "#!/bin/sh\nset -eu\nprintf prepared > /opt/owned-feature\n";
-      files[".devcontainer/devcontainer.json"] = files[".devcontainer/devcontainer.json"]!.replace(
-        /}$/,
-        ", // authored JSONC\n}",
-      );
+      files[".devcontainer/devcontainer.json"] = fixtureValue(
+        files[".devcontainer/devcontainer.json"],
+        'files[".devcontainer/devcontainer.json"]',
+      ).replace(/}$/, ", // authored JSONC\n}");
       for (const [path, content] of Object.entries(files))
         await forge(`repos/${owner}/${name}/contents/${path}`, "POST", {
           branch: "main",

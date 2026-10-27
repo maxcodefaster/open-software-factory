@@ -13,6 +13,8 @@ import { feedbackToolCallInput } from "../../../../packages/conversation-domain/
 import type { createVisualReviewController } from "../review/controller";
 import { attachmentToolCallInput } from "../../../../packages/conversation-domain/src/attachments";
 import type { createAttachmentTools } from "../attachments/tools";
+import { verificationToolCallInput } from "../../../../packages/conversation-domain/src/verification";
+import type { createVerificationTools } from "./verification-tools";
 
 const rpcInput = z.strictObject({
   jsonrpc: z.literal("2.0"),
@@ -109,6 +111,7 @@ export function createBuildBrowserEndpoint(
   review?: ReturnType<typeof createCandidateReviewController>,
   feedback?: ReturnType<typeof createVisualReviewController>,
   attachments?: ReturnType<typeof createAttachmentTools>,
+  verification?: ReturnType<typeof createVerificationTools>,
 ) {
   return async (request: Request, target: string | { attemptID: string; turnID: string }) => {
     if (request.headers.has("origin"))
@@ -160,6 +163,7 @@ export function createBuildBrowserEndpoint(
             ...((await review?.tools(authorized.session.turnID)) ?? []),
             ...((await feedback?.tools(authorized.session.turnID)) ?? []),
             ...(attachments?.tools() ?? []),
+            ...((await verification?.tools(authorized.session.turnID)) ?? []),
           ],
         });
       }
@@ -184,14 +188,29 @@ export function createBuildBrowserEndpoint(
               arguments: envelope.data.arguments,
             })
           : undefined;
+        const verificationCall = envelope.success
+          ? verificationToolCallInput.safeParse({
+              name: envelope.data.name,
+              arguments: envelope.data.arguments,
+            })
+          : undefined;
         if (
           !call &&
           (!review || !reviewCall?.success) &&
           (!feedback || !feedbackCall?.success) &&
-          (!attachments || !attachmentCall?.success)
+          (!attachments || !attachmentCall?.success) &&
+          (!verification || !verificationCall?.success)
         )
           return fail(-32602, "Unsupported browser tool or arguments");
         try {
+          if (verification && verificationCall?.success)
+            return reply(
+              await verification.call(
+                authorized.session.turnID,
+                authorized.ownerToken,
+                verificationCall.data,
+              ),
+            );
           if (attachments && attachmentCall?.success)
             return reply(
               await attachments.call(

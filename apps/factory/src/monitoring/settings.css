@@ -5,11 +5,19 @@
   caret-color: var(--color-focus);
   scrollbar-color: var(--line-strong) transparent;
 }
+.input-delivery-settings {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-3);
+  margin-bottom: var(--space-6);
+  padding-bottom: var(--space-6);
+  border-bottom: 1px solid var(--line-subtle);
+}
 .input-settings ::selection {
   background: var(--material-accent-strong);
   color: var(--color-ink);
 }
-.input-settings :is(button, input, textarea, summary, [tabindex]):focus-visible {
+.input-settings :is(summary, [tabindex]):focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 3px;
 }
@@ -261,36 +269,8 @@
   padding: 0;
   margin: 0;
 }
-.input-settings label {
-  display: grid;
-  min-width: 0;
-  gap: var(--space-2);
-  font: var(--weight-medium) var(--text-sm) / var(--leading-body) var(--font-interface);
-  text-transform: none;
-  letter-spacing: normal;
-}
-.input-settings :is(input, textarea) {
-  min-width: 0;
-  width: 100%;
-  min-height: 44px;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-sm);
-  background: var(--material-input);
-  color: var(--color-ink);
-  font: var(--weight-regular) var(--text-sm) / var(--leading-body) var(--font-interface);
-}
-.input-settings input::placeholder,
-.input-settings textarea::placeholder {
-  color: var(--color-ink-muted);
-  opacity: 1;
-}
-.input-settings :is(input, textarea):disabled {
-  opacity: 0.6;
-}
 .input-settings textarea {
   min-height: 156px;
-  resize: vertical;
 }
 .input-sources legend {
   font-weight: var(--weight-medium);
@@ -333,8 +313,7 @@
   border: 1px solid var(--line-subtle);
   border-radius: var(--radius-sm);
 }
-.input-source-picker > label,
-.input-settings .input-checkbox {
+.input-source-picker > label {
   display: flex;
   align-items: start;
   gap: var(--space-3);
@@ -356,14 +335,6 @@
   display: block;
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
-}
-.input-settings input[type="checkbox"] {
-  width: 18px;
-  min-height: 18px;
-  height: 18px;
-  flex: 0 0 18px;
-  margin-top: calc(var(--space-1-5) / 2);
-  accent-color: var(--color-river-deep);
 }
 .input-advanced {
   border-top: 1px solid var(--line-subtle);

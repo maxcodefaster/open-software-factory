@@ -149,7 +149,10 @@ test("open terminals block automatic Pause even when the shell reports an idle p
 
 test("automatic Pause requires a fresh and consistent empty terminal observation", () => {
   let now = 0;
-  const hub = new RuntimeHub(async () => {}, () => now);
+  const hub = new RuntimeHub(
+    async () => {},
+    () => now,
+  );
   hub.open(connectorSocket("parent"));
   const child = connectorSocket("child");
   hub.open(child);

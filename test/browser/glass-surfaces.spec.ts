@@ -1,8 +1,10 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect, type Locator, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
 
 const directory = ".factory/test-results/glass-surfaces";
 const cache = resolve(".factory/test-results/vite", `glass-surfaces-${crypto.randomUUID()}`);
@@ -16,15 +18,7 @@ test.beforeAll(async () => {
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["glass-surfaces.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0, hmr: false },
   });
   await server.listen();
@@ -80,6 +74,22 @@ for (const width of [1440, 768, 390]) {
     const menu = page.getByRole("menu", { name: "Page options", exact: true });
     await expect(menu).toBeVisible();
     await expect(menu).toHaveCSS("background-color", "rgb(252, 252, 248)");
+    const edit = menu.getByRole("menuitem", { name: "Edit page", exact: true });
+    await expect(edit).toBeVisible();
+    await expect(menu.getByRole("menuitem", { name: "Sources", exact: true })).toHaveCount(0);
+    await expect(edit).toBeFocused();
+    await capture(page, `wiki-edit-menu-${width}`);
+    await edit.press("Enter");
+    const pageTitle = page.getByRole("textbox", { name: "Knowledge page title", exact: true });
+    await expect(menu).toBeHidden();
+    await expect(pageTitle).toBeFocused();
+    await expect(pageTitle).toHaveValue("Billing rules");
+    await expect(page.getByRole("textbox", { name: "Knowledge body", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Page options", exact: true }).click();
+    await expect(menu.getByRole("menuitem", { name: "Edit page", exact: true })).toHaveCount(0);
+    await menu.getByRole("menuitem", { name: "Read page", exact: true }).click();
+    await expect(title).toHaveText("Billing rules");
+    await page.getByRole("button", { name: "Page options", exact: true }).click();
     await page.keyboard.press("Escape");
     await expect(menu).toBeHidden();
 
@@ -103,6 +113,61 @@ for (const width of [1440, 768, 390]) {
     expect(errors).toEqual([]);
   });
 }
+
+test("Wiki keeps body and title editing while repository documents stay read-only", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
+  const body = page.getByRole("article", { name: "Edit Knowledge body", exact: true });
+  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  await body.focus();
+  await body.press("Enter");
+  await expect(editor).toBeVisible();
+  await page.getByRole("button", { name: "Page options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
+  await page.getByRole("button", { name: "Edit Knowledge title", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Knowledge page title" })).toBeVisible();
+  await page.getByRole("button", { name: "Page options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
+  await body.click();
+  await expect(editor).toBeVisible();
+  await page.goto(`${origin}/glass-surfaces.html?surface=wiki&document`);
+  await expect(
+    page.getByRole("article", { name: "Repository document", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Page options", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Edit Knowledge title" })).toHaveCount(0);
+  await expect(editor).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open Project IDE", exact: true })).toHaveCount(0);
+});
+
+test("a failed Wiki autosave retains the draft and retries only after an explicit decision", async ({
+  page,
+}) => {
+  await page.clock.install();
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto(`${origin}/glass-surfaces.html?surface=wiki`);
+  const body = page.getByRole("article", { name: "Edit Knowledge body", exact: true });
+  await body.focus();
+  await body.press("Enter");
+  const editor = page.getByRole("textbox", { name: "Knowledge body", exact: true });
+  await editor.fill("A deliberately retained Wiki draft.");
+  await page.clock.runFor(800);
+  const attempts = () =>
+    page.evaluate(async () => {
+      const source = "/glass-surfaces.tsx";
+      return (await import(source)).wikiSaveAttempts.length as number;
+    });
+  await expect(page.getByRole("alert")).toContainText("Your draft is retained");
+  expect(await attempts()).toBe(1);
+  await page.clock.runFor(3_000);
+  expect(await attempts()).toBe(1);
+  await expect(editor).toContainText("A deliberately retained Wiki draft.");
+  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await expect.poll(attempts).toBe(2);
+  await page.clock.runFor(3_000);
+  expect(await attempts()).toBe(2);
+});
 
 test("standalone glass panels become opaque when reduced transparency is requested", async ({
   page,
@@ -240,12 +305,13 @@ async function selectFirstWord(page: Page, editor: Locator, length: number, text
       const range = document.createRange();
       range.setStart(node, 0);
       range.setEnd(node, count);
+      // Pointer drags are covered above. Keep link validation independent of native drag state.
+      const selection = getSelection();
+      if (!selection) throw new Error("Missing document selection");
+      selection.removeAllRanges();
+      selection.addRange(range);
       return range.getBoundingClientRect().toJSON();
     }, length);
-  await page.mouse.move(box.left + 0.5, (box.top + box.bottom) / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.right - 0.5, (box.top + box.bottom) / 2, { steps: 8 });
-  await page.mouse.up();
   await expect.poll(() => editor.evaluate(() => getSelection()?.toString())).toBe(text);
   return box;
 }

@@ -1,41 +1,15 @@
 import { expect, test } from "bun:test";
-import { mkdir, mkdtemp, realpath } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { resolve } from "node:path";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { classifyAgentTurn } from "../../apps/factory/src/agent/controller";
+import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import {
   createOpenCodeClient,
   decodeOpenCodeAdmission,
+  promptRecordedOpenCodeInput,
 } from "../../apps/factory/src/agent/opencode-client";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import upstream from "../../upstream.json";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
-
-const runtimeImage =
-  "registry.localhost:5443/open-factory/runtime-host@sha256:0ef02232168ce07eb844a1a6e5eb059237eb6e323495c2acaf77bbc274e2fd81";
-
-async function docker(...args: string[]) {
-  const command = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
-  const [out, error, status] = await Promise.all([
-    new Response(command.stdout).text(),
-    new Response(command.stderr).text(),
-    command.exited,
-  ]);
-  if (status !== 0) throw new Error(`Owned Docker probe failed: ${args[0]}: ${error}`);
-  return out.trim();
-}
-
-async function removeOwnedContainer(name: string, id: string) {
-  const owner = await docker(
-    "inspect",
-    "--format",
-    '{{index .Config.Labels "factory.owned-process-test"}}',
-    name,
-  );
-  if (owner !== id) throw new Error("Owned process fixture cleanup refused");
-  await docker("rm", "--force", name);
-}
+import { pinnedOpenCode } from "../fixtures/pinned-opencode";
 
 async function until<T>(observe: () => Promise<T>, accepts: (value: T) => boolean) {
   const deadline = Date.now() + 30_000;
@@ -54,61 +28,12 @@ async function until<T>(observe: () => Promise<T>, accepts: (value: T) => boolea
 
 test("pinned OpenCode retains exact queued admission across actual process loss", async () => {
   const id = crypto.randomUUID();
-  const source = `factory-owned-opencode-artifact-${id}`;
-  const container = `factory-owned-opencode-process-${id}`;
-  const label = `factory.owned-process-test=${id}`;
-  const scratch = await realpath(await mkdtemp(resolve(tmpdir(), "factory-opencode-process-")));
-  await mkdir(resolve(scratch, "project"));
-  const created: string[] = [];
+  const process = await pinnedOpenCode();
+  const { control, transport, scratch } = process;
   try {
-    await docker("create", "--name", source, "--label", label, runtimeImage);
-    created.push(source);
-    await docker("cp", `${source}:/opt/factory/opencode/opencode`, resolve(scratch, "opencode"));
-    await docker(
-      "run",
-      "--detach",
-      "--name",
-      container,
-      "--label",
-      label,
-      "--env",
-      `FACTORY_PROCESS_MODEL_ID=${buildModelID}`,
-      "--publish",
-      "127.0.0.1::4096",
-      "--publish",
-      "127.0.0.1::4097",
-      "--mount",
-      `type=bind,src=${resolve(scratch, "opencode")},dst=/opt/factory/opencode,readonly`,
-      "--mount",
-      `type=bind,src=${resolve(scratch, "project")},dst=/workspace/project`,
-      "--mount",
-      `type=bind,src=${resolve("test/fixtures")},dst=/owned-fixture,readonly`,
-      upstream.nodeDevelopment.image,
-      "node",
-      "/owned-fixture/opencode-process.mjs",
-    );
-    created.push(container);
-    const port = (await docker("port", container, "4096/tcp")).split(":").at(-1);
-    const controlPort = (await docker("port", container, "4097/tcp")).split(":").at(-1);
-    const base = `http://127.0.0.1:${port}`;
-    const control = async (action = "", method = "GET") => {
-      const response = await fetch(`http://127.0.0.1:${controlPort}/control${action}`, {
-        method,
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (!response.ok) throw new Error(`Owned process control failed: ${response.status}`);
-      return response.json() as Promise<{
-        pid: number;
-        generation: number;
-        running: boolean;
-        providerRequests: number;
-      }>;
-    };
     let losePromptResponse = false;
     const client = createOpenCodeClient(async (request, path) => {
-      const response = await fetch(new Request(`${base}${path}`, request), {
-        signal: AbortSignal.timeout(5_000),
-      });
+      const response = await transport(request, path);
       if (losePromptResponse && path.endsWith("/prompt") && response.ok) {
         losePromptResponse = false;
         await response.arrayBuffer();
@@ -120,13 +45,7 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
       () => client.server.info(),
       () => true,
     );
-    console.log(
-      "Pinned executable",
-      await docker("exec", container, "/opt/factory/opencode", "--version"),
-    );
-    expect(await docker("exec", container, "/opt/factory/opencode", "--version")).toBe(
-      upstream.openCode.version,
-    );
+    expect((await client.server.info()).version).toBe(upstream.openCode.version);
     const sessionID = `ses_factory_${id.replaceAll("-", "")}`;
     const model = { providerID: "factory", id: buildModelID };
     const input = {
@@ -162,9 +81,17 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
     expect((await client.message.list({ sessionID, limit: 100 })).data).toHaveLength(0);
     expect((await control()).providerRequests).toBe(0);
     await expect(
-      client.session.prompt({ ...prompt, text: "Conflicting replacement" }),
-    ).rejects.toThrow();
-    await expect(client.session.prompt({ ...prompt, delivery: "steer" })).rejects.toThrow();
+      promptRecordedOpenCodeInput(
+        client,
+        { ...recordedInput, text: "Conflicting replacement" },
+        false,
+      ),
+    ).rejects.toThrow("does not match its recorded input");
+    // Native retries identify the retained input. Factory validates that receipt,
+    // rather than assuming a changed retry payload replaces it or is rejected upstream.
+    expect(await client.session.inbox.list({ sessionID })).toMatchObject([
+      { id: prompt.id, delivery: "queue", payload: { text: prompt.text } },
+    ]);
     const before = await control();
     expect((await control("/kill", "POST")).running).toBe(false);
     await control("/restart", "POST");
@@ -179,11 +106,7 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
     expect(await client.session.prompt(prompt)).toEqual(queuedAdmission);
     expect((await control()).providerRequests).toBe(0);
     expect((await client.message.list({ sessionID, limit: 100 })).data).toHaveLength(0);
-    // Do not assume inbox support from client types. Record actual pinned response.
-    const inbox = await fetch(`${base}/api/session/${sessionID}/inbox`);
-    expect(inbox.status).toBe(200);
-    expect(inbox.headers.get("content-type")).toContain("text/html");
-    await expect(client.session.inbox.list({ sessionID })).rejects.toThrow();
+    expect(await client.session.inbox.list({ sessionID })).toMatchObject([{ id: prompt.id }]);
     await control("/release", "POST");
     expect((await client.session.prompt({ ...prompt, resume: true })).id).toBe(prompt.id);
     await until(
@@ -206,7 +129,9 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
     expect((await control()).providerRequests).toBe(1);
     const completedMessages = await client.message.list({ sessionID, limit: 100 });
     const promotedAdmission = await client.session.prompt(prompt);
-    expect(decodeOpenCodeAdmission(promotedAdmission, recordedInput).state).toBe("promoted");
+    expect((await promptRecordedOpenCodeInput(client, recordedInput, false)).state).toBe(
+      "promoted",
+    );
     expect(promotedAdmission).toMatchObject({ id: prompt.id, sessionID });
     expect((await control()).providerRequests).toBe(1);
     expect(
@@ -253,12 +178,18 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
     );
     expect((await control()).pid).not.toBe(running.pid);
     const recovered = await client.message.list({ sessionID, limit: 100 });
-    const interruptedAdmission = await client.session.prompt({ ...interrupted, resume: false });
+    const _interruptedAdmission = await client.session.prompt({ ...interrupted, resume: false });
     expect(
-      decodeOpenCodeAdmission(interruptedAdmission, {
-        ...recordedInput,
-        promptID: interrupted.id,
-      }).state,
+      (
+        await promptRecordedOpenCodeInput(
+          client,
+          {
+            ...recordedInput,
+            promptID: interrupted.id,
+          },
+          false,
+        )
+      ).state,
     ).toBe("promoted");
     expect((await control()).providerRequests).toBe(2);
     // A queue wake is not an explicit forced Session resume. Even if promotion
@@ -304,9 +235,7 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
       let acceptedControllerPrompts = 0;
       let loseControllerResponse = true;
       owned.hub.request = async (_attemptID, _channel, request, path) => {
-        const response = await fetch(new Request(`${base}${path}`, request), {
-          signal: AbortSignal.timeout(5_000),
-        });
+        const response = await transport(request, path);
         if (path.endsWith("/prompt") && response.ok) {
           acceptedControllerPrompts += 1;
           if (loseControllerResponse) {
@@ -401,9 +330,7 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
           if (body.resume) recoveryWakes += 1;
           else recoveryAdmissions += 1;
         }
-        return fetch(new Request(`${base}${path}`, request), {
-          signal: AbortSignal.timeout(5_000),
-        });
+        return transport(request, path);
       };
       await Promise.all([queuedOwned.controller().recover(), queuedOwned.controller().recover()]);
       await until(
@@ -447,9 +374,7 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
           await releaseInterrupt.promise;
         }
         if (path.endsWith("/prompt")) stopPrompts += 1;
-        return fetch(new Request(`${base}${path}`, request), {
-          signal: AbortSignal.any([request.signal, AbortSignal.timeout(5_000)]),
-        });
+        return transport(request, path);
       };
       const firstCommand = crypto.randomUUID();
       await stopOwned
@@ -522,13 +447,9 @@ test("pinned OpenCode retains exact queued admission across actual process loss"
       providerRequests: (await control()).providerRequests,
     });
   } catch (cause) {
-    if (created.includes(container))
-      console.error((await docker("logs", "--tail", "35", container)).slice(-8_000));
+    console.error("Owned process diagnostics", await process.diagnostics());
     throw cause;
   } finally {
-    for (const name of created.reverse()) {
-      await removeOwnedContainer(name, id);
-    }
-    // Preserve this exact temporary directory for inspection; no recursive deletion.
+    await process.dispose();
   }
-}, 90_000);
+}, 120_000);

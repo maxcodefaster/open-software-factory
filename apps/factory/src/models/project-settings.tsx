@@ -1,15 +1,15 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, Show, untrack } from "solid-js";
 import {
   type InheritedModelSettingsView,
   type ModelRole,
   modelRoles,
-  type ProjectModelSettings as ProjectSettings,
   type PersonalModelSettings,
+  type ProjectModelSettings as ProjectSettings,
 } from "../../../../packages/conversation-domain/src/model-inheritance";
 import {
   getProjectModels,
-  saveProjectModels,
   savePersonalModels,
+  saveProjectModels,
 } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
 
@@ -38,7 +38,7 @@ export function ProjectModelSettings(props: {
     setBusy(true);
     setError("");
     try {
-      const value = await serverCall(getProjectModels(projectID));
+      const value = await serverCall(getProjectModels({ data: [projectID] }));
       if (!disposed && projectID === props.projectID) publish(value);
     } catch (cause) {
       if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
@@ -58,8 +58,8 @@ export function ProjectModelSettings(props: {
       if (!projectInput || !personalInput) return;
       const value = await serverCall(
         management()
-          ? saveProjectModels(props.projectID, projectInput)
-          : savePersonalModels(props.projectID, personalInput),
+          ? saveProjectModels({ data: [props.projectID, projectInput] })
+          : savePersonalModels({ data: [props.projectID, personalInput] }),
       );
       if (!disposed) {
         publish(value);
@@ -94,8 +94,11 @@ export function ProjectModelSettings(props: {
   createEffect(
     () => ({ active: props.active, management: props.management, projectID: props.projectID }),
     ({ active, management, projectID }) => {
-      if (active && view() && !busy() && !dirty(management && view()?.canManageProject === true))
-        void load(projectID);
+      // Reopening may refresh a clean form, not subscribe the read to its own result.
+      const clean = untrack(
+        () => view() && !busy() && !dirty(management && view()?.canManageProject === true),
+      );
+      if (active && clean) void load(projectID);
     },
   );
   createEffect(

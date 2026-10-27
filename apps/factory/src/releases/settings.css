@@ -18,13 +18,6 @@
 .release-settings section {
   gap: var(--space-4);
 }
-.settings-content .release-settings label {
-  font-family: var(--font-interface);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  text-transform: none;
-  letter-spacing: normal;
-}
 .release-settings h3,
 .release-settings h4,
 .release-settings p {
@@ -52,36 +45,11 @@
 .release-settings textarea,
 .release-settings select {
   width: 100%;
-  min-width: 0;
-  min-height: var(--space-10);
-  padding: var(--space-2) var(--space-3);
-  color: var(--color-ink);
-  background: var(--material-input);
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-xs);
-  font: var(--text-md) / var(--leading-body) var(--font-interface);
-  caret-color: var(--color-focus);
-}
-.release-settings input::placeholder {
-  color: var(--color-ink-muted);
-}
-.release-settings input[aria-invalid="true"] {
-  border-color: var(--color-danger);
-}
-.release-settings textarea {
-  resize: vertical;
 }
 .release-settings button {
   justify-self: start;
   min-height: var(--space-10);
   cursor: pointer;
-}
-.release-settings .primary-button {
-  border: 1px solid transparent;
-}
-.release-settings button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 .release-settings a {
   color: inherit;
@@ -91,7 +59,7 @@
 .release-settings a:hover {
   text-decoration-thickness: 2px;
 }
-.release-settings :is(button, input, textarea, select, summary, h4):focus-visible {
+.release-settings :is(summary, h4):focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 3px;
 }

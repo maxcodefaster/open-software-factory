@@ -6,13 +6,17 @@ export interface ZeroLifecycleIdentity {
   readonly auth?: string;
 }
 export interface ZeroLifecycleClient {
-  readonly connection: { readonly state: { readonly current: ConnectionState } };
+  readonly connection: {
+    readonly state: { readonly current: ConnectionState };
+    connect?(options: { auth: string }): Promise<void>;
+  };
   close(): Promise<void>;
 }
 
 export class ZeroClientLifecycle<T extends ZeroLifecycleClient> {
   #key: string | undefined;
   #client: T | undefined;
+  #auth: string | undefined;
 
   select(identity: ZeroLifecycleIdentity | null, create: (identity: ZeroLifecycleIdentity) => T) {
     const key = identity ? `${identity.userId}:${identity.schemaVersion}` : undefined;
@@ -20,9 +24,15 @@ export class ZeroClientLifecycle<T extends ZeroLifecycleClient> {
       this.dispose();
       return undefined;
     }
-    if (this.#key === key) return this.#client;
+    if (this.#key === key) {
+      if (identity.auth !== undefined && identity.auth !== this.#auth)
+        void this.#client?.connection.connect?.({ auth: identity.auth }).catch(() => {});
+      this.#auth = identity.auth;
+      return this.#client;
+    }
     this.dispose();
     this.#key = key;
+    this.#auth = identity.auth;
     this.#client = create(identity);
     return this.#client;
   }
@@ -31,6 +41,7 @@ export class ZeroClientLifecycle<T extends ZeroLifecycleClient> {
     void this.#client?.close();
     this.#client = undefined;
     this.#key = undefined;
+    this.#auth = undefined;
   }
 }
 

@@ -3,11 +3,15 @@ import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer } from "vite";
-import { monitoringSave, monitoringView } from "../../packages/conversation-domain/src/monitoring";
-import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
-import { chooseSettingsPage } from "../fixtures/settings-navigation";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { observeBrowserErrors } from "../fixtures/browser-errors";
+import { invalidateFixtureRead } from "../fixtures/read-invalidation";
+import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
+import { monitoringSave, monitoringView } from "../../packages/conversation-domain/src/monitoring";
+import { factoryFunctionMatches, mockFactoryFunctions } from "../fixtures/server-functions";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 // Real settings components with native compiled function I/O. Controller/live proofs own
 // authentication, durable policies, source transport and actual inference.
@@ -18,24 +22,15 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
   const source = "10000000-0000-4000-8000-000000000003";
   const revision = "10000000-0000-4000-8000-000000000004";
   const evidence = ".factory/test-results/inputs-polish/component-ui";
-  const errors: string[] = [];
+  const errors = observeBrowserErrors(page);
   const cache = resolve(".factory/test-results/vite", `input-ui-${crypto.randomUUID()}`);
-  page.on("pageerror", (error) => errors.push(error.message));
   const frontend = await createServer({
     configFile: false,
     root: resolve("test/fixtures"),
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["project-inputs.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
@@ -103,6 +98,15 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
   await mockFactoryFunctions(
     page,
     {
+      delivery: {
+        settings: async () => ({
+          policyId: null,
+          enabled: false,
+          delegatedBy: null,
+          canManage: false,
+          canDelegate: false,
+        }),
+      },
       mcp: { get: async () => sources },
       inputs: {
         get: async () => view,
@@ -125,9 +129,11 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
           return { url: `${origin}/hooks/inputs/${input.id}/owned-private-key` };
         },
         async rotate() {
-          view.hooks[0]!.enabled = false;
-          view.hooks[0]!.version++;
-          return { url: `${origin}/hooks/inputs/${view.hooks[0]!.id}/rotated-private-key` };
+          fixtureValue(view.hooks[0], "view.hooks[0]").enabled = false;
+          fixtureValue(view.hooks[0], "view.hooks[0]").version++;
+          return {
+            url: `${origin}/hooks/inputs/${fixtureValue(view.hooks[0], "view.hooks[0]").id}/rotated-private-key`,
+          };
         },
       },
     },
@@ -222,7 +228,7 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     await secret.getByRole("button", { name: "Back to inputs", exact: true }).click();
     view.incidents.push({
       id: crypto.randomUUID(),
-      hookId: view.hooks[0]!.id,
+      hookId: fixtureValue(view.hooks[0], "view.hooks[0]").id,
       title: "Make invoice exports easier to find",
       state: "prepared",
       occurrences: 4,
@@ -231,6 +237,7 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
       receivedAt: "2026-10-23T10:00:00Z",
       lastSeenAt: "2026-10-23T10:02:00Z",
     });
+    await invalidateFixtureRead(page, "inputs");
     await expect(inputs.getByRole("region", { name: "Recent input activity" })).toContainText(
       "Ticket prepared",
     );
@@ -241,8 +248,10 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     const eventSummary = eventDetails.locator(":scope > summary");
     await eventSummary.click();
     await eventSummary.focus();
-    view.incidents[0]!.occurrences = 5;
-    view.incidents[0]!.reason = "Prepared from the incoming request and connected source.";
+    fixtureValue(view.incidents[0], "view.incidents[0]").occurrences = 5;
+    fixtureValue(view.incidents[0], "view.incidents[0]").reason =
+      "Prepared from the incoming request and connected source.";
+    await invalidateFixtureRead(page, "inputs");
     await expect(eventDetails).toContainText("5 deliveries");
     await expect(eventDetails).toHaveAttribute("open", "");
     await expect(eventSummary).toBeFocused();
@@ -251,8 +260,9 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     await row.getByLabel("Actions for Product feedback").click();
     const edit = row.getByRole("button", { name: "Edit input", exact: true });
     await edit.focus();
-    view.hooks[0]!.version++;
-    view.hooks[0]!.enabled = false;
+    fixtureValue(view.hooks[0], "view.hooks[0]").version++;
+    fixtureValue(view.hooks[0], "view.hooks[0]").enabled = false;
+    await invalidateFixtureRead(page, "inputs");
     await expect(row).toContainText("Disabled");
     await expect(edit).toBeFocused();
     await expect(row.locator(".input-row-details")).toHaveAttribute("open", "");
@@ -283,7 +293,7 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
   browser,
 }) => {
   test.setTimeout(120_000);
-  const project = "10000000-0000-4000-8000-000000000001";
+  const _project = "10000000-0000-4000-8000-000000000001";
   const cache = resolve(".factory/test-results/vite", `input-states-${crypto.randomUUID()}`);
   const frontend = await createServer({
     configFile: false,
@@ -291,15 +301,7 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["project-inputs.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
@@ -321,9 +323,8 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
       });
       try {
         const page = await context.newPage();
-        const errors: string[] = [];
+        const errors = observeBrowserErrors(page);
         const writes: string[] = [];
-        page.on("pageerror", (error) => errors.push(error.message));
         const hook = {
           id: crypto.randomUUID(),
           name: "Product feedback",
@@ -386,6 +387,15 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         });
         let failRead = true;
         await mockFactoryFunctions(page, {
+          delivery: {
+            settings: async () => ({
+              policyId: null,
+              enabled: false,
+              delegatedBy: null,
+              canManage: false,
+              canDelegate: false,
+            }),
+          },
           mcp: {
             get: async () =>
               mcpLibraryView.parse({
@@ -434,10 +444,30 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         await expect(inputs).toContainText("Autofix & Delivery delegated");
         await expect(inputs).toContainText("Source access or authority changed.");
         const noOverflow = async () => {
-          for (const element of [page.locator("html"), page.locator(".settings-content"), inputs])
-            expect(
-              await element.evaluate((node) => node.scrollWidth - node.clientWidth),
-            ).toBeLessThanOrEqual(1);
+          for (const element of [page.locator("html"), page.locator(".settings-content"), inputs]) {
+            const size = await element.evaluate((node) => {
+              const edge = node.getBoundingClientRect().right;
+              return {
+                overflow: node.scrollWidth - node.clientWidth,
+                elements: [...node.querySelectorAll("*")]
+                  .filter((child) => child.getBoundingClientRect().right > edge + 1)
+                  .slice(0, 10)
+                  .map((child) => ({
+                    tag: child.tagName,
+                    class: child.className,
+                    width: child.getBoundingClientRect().width,
+                    minWidth: getComputedStyle(child).minWidth,
+                    boxSizing: getComputedStyle(child).boxSizing,
+                  })),
+              };
+            });
+            if (size.overflow > 1)
+              await page.screenshot({
+                path: `${evidence}/overflow-${device.name}.png`,
+                fullPage: true,
+              });
+            expect(size.overflow, JSON.stringify(size)).toBeLessThanOrEqual(1);
+          }
         };
         await noOverflow();
         expect(
@@ -453,9 +483,11 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         await opener.click();
         const disable = row.getByRole("button", { name: "Disable input", exact: true });
         await disable.focus();
-        await page.waitForResponse((response) =>
-          new URL(response.url()).pathname.startsWith("/_server/data/getProjectInputs-"),
+        const refreshed = page.waitForResponse(
+          async (response) => await factoryFunctionMatches(response.url(), "getProjectInputs"),
         );
+        await invalidateFixtureRead(page, "inputs");
+        await refreshed;
         await expect(disable).toBeFocused();
         await page.keyboard.press("Escape");
         await opener.focus();
@@ -528,6 +560,7 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         await editor.getByRole("button", { name: "Cancel", exact: true }).click();
         await expect(inputs.getByRole("button", { name: "Add input" })).toBeFocused();
         view.canManage = view.canDelegate = view.canDisable = false;
+        await invalidateFixtureRead(page, "inputs");
         await expect(inputs.getByRole("button", { name: "Add input" })).toHaveCount(0);
         await expect(inputs.locator(".input-row-menu")).toHaveCount(0);
         await noOverflow();

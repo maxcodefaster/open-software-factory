@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -16,6 +16,7 @@ import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-libra
 import { monitoringView } from "../../packages/conversation-domain/src/monitoring";
 import { factoryProcess } from "../fixtures/factory-process";
 import { factoryFunctionRequest } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 test("compiled MCP and Input commands enforce current SQL authority, exact revisions, CAS and no inference on settings changes", async () => {
   const owned = await factoryProcess();
@@ -45,7 +46,7 @@ test("compiled MCP and Input commands enforce current SQL authority, exact revis
   const monitoring = createMonitoringController(database, "owned-native-input-key", origin, (id) =>
     wake.push(id),
   );
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(
     pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
   );
   const actors: readonly string[] = [manager, member, outsider];
@@ -61,7 +62,7 @@ test("compiled MCP and Input commands enforce current SQL authority, exact revis
     },
     maintenance: async () => false,
     requireFresh: async () => {},
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
   });
   async function call(
     actor: string,
@@ -150,7 +151,7 @@ test("compiled MCP and Input commands enforce current SQL authority, exact revis
     const review = {
       expectedVersion: 1,
       confirmReadOnlyAccess: true,
-      tools: [{ name: "read_issue", digest: tools[0]!.digest }],
+      tools: [{ name: "read_issue", digest: fixtureValue(tools[0], "tools[0]").digest }],
     };
     expect(await call(member, "reviewMCPAccess", [sharedID, review])).toMatchObject({
       ok: false,

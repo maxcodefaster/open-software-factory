@@ -1,5 +1,5 @@
-import { createSignal, For, Show, onSettled } from "solid-js";
-import { usageRate, type UsageRate } from "../../../../packages/conversation-domain/src/usage";
+import { createSignal, For, onSettled, Show } from "solid-js";
+import { type UsageRate, usageRate } from "../../../../packages/conversation-domain/src/usage";
 import { serverCall } from "../server-functions/result";
 import { getContractPrices, saveContractPrices } from "../server-functions/usage";
 
@@ -35,7 +35,7 @@ export function ContractPrices() {
     | { commandID: string; version: number; provider: string; model: string; tiers: Tier[] | null }
     | undefined;
   onSettled(() => {
-    void serverCall(getContractPrices())
+    void serverCall(getContractPrices({ data: [] }))
       .then((value) => {
         if (!disposed) setRates(value.rates);
       })
@@ -81,8 +81,8 @@ export function ContractPrices() {
       }
       setBusy(true);
       setError("");
-      await serverCall(saveContractPrices(retry));
-      const value = await serverCall(getContractPrices());
+      await serverCall(saveContractPrices({ data: [retry] }));
+      const value = await serverCall(getContractPrices({ data: [] }));
       if (disposed) return;
       setRates(value.rates);
       retry = undefined;

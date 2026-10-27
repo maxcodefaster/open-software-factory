@@ -10,6 +10,7 @@ import {
   invokedSkills,
   observedNativeSkillIds,
 } from "../../../apps/factory/src/skills/native";
+import { fixtureValue } from "../../../test/fixtures/value";
 
 test("per-skill choices inherit later defaults, lock required versions, and reset one override", () => {
   const id = crypto.randomUUID();
@@ -35,11 +36,11 @@ test("per-skill choices inherit later defaults, lock required versions, and rese
     version: 1,
   });
   expect(resolveLibraryChoice(choices, id, "planning")?.state).toBe("disable");
-  choices[1] = { ...choices[1]!, state: "inherit", version: 2 };
-  choices[0] = { ...choices[0]!, revisionId: next };
+  choices[1] = { ...fixtureValue(choices[1], "choices[1]"), state: "inherit", version: 2 };
+  choices[0] = { ...fixtureValue(choices[0], "choices[0]"), revisionId: next };
   expect(resolveLibraryChoice(choices, id, "planning")?.revisionId).toBe(next);
-  choices[0] = { ...choices[0]!, state: "required" };
-  choices[1] = { ...choices[1]!, state: "enable", revisionId: revision };
+  choices[0] = { ...choices[0], state: "required" };
+  choices[1] = { ...choices[1], state: "enable", revisionId: revision };
   expect(resolveLibraryChoice(choices, id, "planning")?.revisionId).toBe(next);
   const second = crypto.randomUUID();
   choices.push({
@@ -121,9 +122,9 @@ test("native packages have exact digests, slash invocation is bounded, and obser
     published: true,
   };
   const manifest = nativeSkillManifest([revision]);
-  expect(Buffer.from(manifest.files[0]!.body, "base64").toString()).toContain(
-    "disable-model-invocation: true",
-  );
+  expect(
+    Buffer.from(fixtureValue(manifest.files[0], "manifest.files[0]").body, "base64").toString(),
+  ).toContain("disable-model-invocation: true");
   expect(invokedSkills("Please /requirements-interview now", [revision])).toEqual([revision]);
   expect(invokedSkills("Read https://example.test/requirements-interview", [revision])).toEqual([]);
   expect(() =>

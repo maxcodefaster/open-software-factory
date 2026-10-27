@@ -15,6 +15,16 @@ test("does not interpret Markdown or HTML inside code", () => {
   );
   expect(markdownHTML("[unsafe](javascript:alert(1))")).not.toContain("href=");
 });
+test("structured human mentions render as inert labels, never executable or external links", () => {
+  const id = "10000000-0000-4000-8000-000000000001";
+  expect(markdownHTML(`[@Lisa](factory-person:${id})`)).toContain(
+    '<span class="factory-mention">@Lisa</span>',
+  );
+  expect(markdownHTML(`[@<script>](factory-person:${id})`)).not.toContain("<script>");
+  expect(markdownHTML(`\`[@Lisa](factory-person:${id})\``)).not.toContain(
+    'class="factory-mention"',
+  );
+});
 test("renders tables, nested lists and disabled tasks consistently in read views", () => {
   const rendered = markdownHTML(
     "| Name | Status |\n| --- | --- |\n| Counter | Ready |\n\n- outer\n  - inner\n\n- [x] done",

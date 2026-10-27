@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
@@ -15,6 +16,8 @@ import {
 } from "../../packages/project-domain/src/environment";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { factoryFunctionMatcher, factoryFunctionMatches } from "../fixtures/server-functions";
 
 const evidence = ".factory/test-results/environment-configurator";
 const cache = resolve(".factory/test-results/vite", `environment-ui-${crypto.randomUUID()}`);
@@ -28,15 +31,7 @@ test.beforeAll(async () => {
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["environment-settings.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
@@ -80,6 +75,129 @@ function initialBundle(): EnvironmentBundle {
       },
     ],
   };
+}
+
+test("initial environment errors retry only the read and leave save decisions explicit", async ({
+  page,
+}) => {
+  let reads = 0;
+  let release!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const commands: string[] = [];
+  const saves = await factoryFunctionMatcher("saveEnvironment");
+  const discards = await factoryFunctionMatcher("discardEnvironmentSave");
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (saves(url) || discards(url)) commands.push(url.pathname);
+  });
+  await mockFactoryFunctions(page, {
+    environments: {
+      get: async (_project, _actor, environment) => {
+        reads++;
+        if (reads === 1) throw new CommandError("unavailable", "Environment could not load.");
+        await ready;
+        return {
+          ...environmentMetadata(initialBundle()),
+          environment,
+          version: 0,
+          canManage: true,
+          storeConfigured: true,
+          pending: false,
+          pendingCommandID: null,
+          preparation: null,
+        };
+      },
+    },
+  });
+  await page.goto(`${origin}/environment-settings.html`);
+  await chooseSettingsPage(page, "Environments");
+  const area = page.getByRole("region", { name: "Project environment", exact: true });
+  await expect(area.getByRole("alert")).toHaveText("Environment could not load.");
+  await page.screenshot({ path: `${evidence}/read-retry.png` });
+  expect(reads).toBe(1);
+  const retry = area.getByRole("button", { name: "Retry loading", exact: true });
+  await retry.click();
+  await expect(retry).toBeDisabled();
+  await expect(area.getByRole("status")).toHaveText("Loading environment…");
+  release();
+  await expect(area.getByRole("alert")).toHaveCount(0);
+  await expect(area.locator(".environment-variable")).toHaveCount(3);
+  await expect(retry).toHaveCount(0);
+  await area.getByRole("button", { name: "Add variable", exact: true }).click();
+  await area.getByRole("textbox", { name: "Variable 4 name" }).fill("RETAINED_DRAFT");
+  await area.getByRole("textbox", { name: "Value for RETAINED_DRAFT" }).fill("draft-value");
+  await expect(area.getByRole("button", { name: "Save environment", exact: true })).toBeEnabled();
+  await expect(retry).toHaveCount(0);
+  expect(reads).toBe(2);
+  expect(commands).toEqual([]);
+});
+
+for (const outcome of ["success", "failure"] as const) {
+  test(`an environment read retry ignores a late ${outcome} after switching Projects`, async ({
+    page,
+  }) => {
+    let reads = 0;
+    let release!: () => void;
+    const previous = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await mockFactoryFunctions(page, {
+      environments: {
+        get: async (projectID, _actor, environment) => {
+          reads++;
+          if (reads === 1) throw new CommandError("unavailable", "Environment could not load.");
+          if (projectID.endsWith("001")) {
+            await previous;
+            if (outcome === "failure")
+              throw new CommandError("unavailable", "Previous Project failed.");
+          }
+          return {
+            ...environmentMetadata({
+              variables: [
+                {
+                  name: projectID.endsWith("003") ? "NEXT_PROJECT" : "PREVIOUS_PROJECT",
+                  value: "protected",
+                  runtime: true,
+                  build: false,
+                  verification: false,
+                },
+              ],
+              registries: [],
+            }),
+            environment,
+            version: 0,
+            canManage: false,
+            storeConfigured: true,
+            pending: false,
+            pendingCommandID: null,
+            preparation: null,
+          };
+        },
+      },
+    });
+    await page.goto(`${origin}/environment-settings.html?switch-project`);
+    await chooseSettingsPage(page, "Environments");
+    const area = page.getByRole("region", { name: "Project environment", exact: true });
+    await area.getByRole("button", { name: "Retry loading", exact: true }).click();
+    await expect.poll(() => reads).toBe(2);
+    await page.getByRole("button", { name: "Switch fixture Project" }).click();
+    await expect(area.locator(".environment-variable-name")).toHaveText(["NEXT_PROJECT"]);
+    const settled = page.waitForResponse((response) =>
+      factoryFunctionMatches(response.url(), "getEnvironment"),
+    );
+    release();
+    await settled;
+    await page.evaluate(
+      () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())),
+    );
+    await expect(area.locator(".environment-variable-name")).toHaveText(["NEXT_PROJECT"]);
+    await expect(area.getByRole("alert")).toHaveCount(0);
+    await expect(area.getByRole("button", { name: "Add variable", exact: true })).toHaveCount(0);
+    await expect(area.getByRole("button", { name: "Retry loading", exact: true })).toHaveCount(0);
+    expect(reads).toBe(3);
+  });
 }
 
 test("variable rows support search, filters, sorting, focused editing, imports and isolated environments", async ({
@@ -468,6 +586,7 @@ test("pending saves lock draft actions, retry the same command, and preserve rea
     .fill("retry-value");
   await area.getByRole("button", { name: "Save environment", exact: true }).click();
   await expect(area.getByRole("alert")).toHaveText("Protected store did not confirm this save.");
+  await expect(area.getByRole("button", { name: "Retry loading", exact: true })).toHaveCount(0);
   await expect(area.getByRole("button", { name: "Add variable", exact: true })).toBeDisabled();
   await expect(area.getByRole("textbox", { name: "Variable 4 name" })).toBeDisabled();
   await expect(

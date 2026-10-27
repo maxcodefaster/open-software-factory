@@ -6,8 +6,9 @@ import { createAccessController } from "../../apps/factory/src/access/controller
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { knowledgeHistorySchema, knowledgeSaveSchema } from "../../apps/factory/src/api-contracts";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { fixtureValue } from "../fixtures/value";
 
 test("Wiki saves deduplicate retry, reject stale writes and restore immutably with current authority", async () => {
   const owned = await factoryProcess();
@@ -102,10 +103,12 @@ test("Wiki saves deduplicate retry, reject stale writes and restore immutably wi
     const originalDate = (await knowledge.history(pageId, userId))[0]?.["createdAt"];
     if (!(originalDate instanceof Date) && typeof originalDate !== "string")
       throw new Error("Owned revision timestamp is missing");
-    expect(revisions[0]!.createdAt).toBe(
+    expect(fixtureValue(revisions[0], "revisions[0]").createdAt).toBe(
       originalDate instanceof Date ? originalDate.toISOString() : originalDate,
     );
-    expect(Number.isFinite(new Date(revisions[0]!.createdAt).getTime())).toBe(true);
+    expect(
+      Number.isFinite(new Date(fixtureValue(revisions[0], "revisions[0]").createdAt).getTime()),
+    ).toBe(true);
     await expect(native("getKnowledgeSources", [pageId])).rejects.toMatchObject({ status: 403 });
     await expect(native("getKnowledgeHistory", [pageId], outsider)).rejects.toMatchObject({
       status: 404,

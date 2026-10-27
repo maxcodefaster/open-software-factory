@@ -19,13 +19,17 @@ import { visualReviewSchema } from "../../packages/conversation-domain/src/visua
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { compiledFactoryEndpoint } from "../fixtures/server-functions";
+import { memoryPrivateObjects } from "../fixtures/private-objects";
+import { fixtureValue } from "../fixtures/value";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 test("Ticket video, shared feedback and permission-free Preview comments work in the Factory shell", async () => {
   const f = await candidateReviewFixture();
   const directory = resolve(".factory/test-results/visual-review-browser", f.projectID);
   await mkdir(directory, { recursive: true });
-  const frontend = resolve(directory, "frontend");
-  const media = createReviewMedia(f.database, directory);
+  const buildDirectory = resolve(directory, "frontend");
+  const frontend = resolve(buildDirectory, "client");
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const review = createVisualReviewController(f.database, media.bytes);
   const recordingID = crypto.randomUUID();
   let base = "";
@@ -67,13 +71,15 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
       "--config",
       resolve("test/fixtures/visual-review-vite.config.ts"),
       "--outDir",
-      frontend,
+      buildDirectory,
     ],
-    { stdout: "ignore", stderr: "pipe" },
+    { env: productionBuildEnvironment(process.env), stdout: "ignore", stderr: "pipe" },
   );
   const buildError = await new Response(build.stderr).text();
   if (await build.exited)
     throw new Error(`Owned review UI build failed: ${buildError.slice(-1000)}`);
+  if (!(await Bun.file(resolve(frontend, "visual-review.html")).exists()))
+    throw new Error("Owned review UI build did not emit its component entry");
   const server = Bun.serve({
     hostname: "0.0.0.0",
     port: 0,
@@ -128,7 +134,7 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
           return media.read(
             f.changeID,
             f.userID,
-            url.pathname.split("/").at(-1)!,
+            fixtureValue(url.pathname.split("/").at(-1), 'url.pathname.split("/").at(-1)'),
             request.headers.get("range"),
           );
         }
@@ -163,63 +169,66 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     },
   });
   base = `http://127.0.0.1:${server.port}`;
-  functions = await compiledFactoryEndpoint({
-    origin: base,
-    services: {
-      review: {
-        ...service,
-        async get(userID, changeID) {
-          if (failReview) throw new CommandError("unavailable", "Owned review read unavailable");
-          const value = await service.get(userID, changeID);
-          return visualReviewSchema.parse(
-            !unavailable
-              ? value
-              : {
-                  ...value,
-                  recording:
-                    unavailable === "missing"
-                      ? null
-                      : {
-                          ...value.recording,
-                          state: unavailable,
-                          reason: "Owned video unavailable",
-                        },
-                },
-          );
+  functions = await compiledFactoryEndpoint(
+    {
+      origin: base,
+      services: {
+        review: {
+          ...service,
+          async get(userID, changeID) {
+            if (failReview) throw new CommandError("unavailable", "Owned review read unavailable");
+            const value = await service.get(userID, changeID);
+            return visualReviewSchema.parse(
+              !unavailable
+                ? value
+                : {
+                    ...value,
+                    recording:
+                      unavailable === "missing"
+                        ? null
+                        : {
+                            ...value.recording,
+                            state: unavailable,
+                            reason: "Owned video unavailable",
+                          },
+                  },
+            );
+          },
+          async create(userID, changeID, input) {
+            saves++;
+            const result = await service.create(userID, changeID, input);
+            if (loseFeedbackResponse) {
+              loseFeedbackResponse = false;
+              throw new CommandError("unavailable", "Owned response loss after save");
+            }
+            return result;
+          },
+          async update(userID, changeID, input) {
+            const delay = delayedReply;
+            const result = await service.update(userID, changeID, input);
+            if (delay) {
+              delay.saved.resolve();
+              await delay.release.promise;
+            }
+            return result;
+          },
+          async send(userID, changeID, input) {
+            revisionRequests++;
+            const result = await service.send(userID, changeID, input);
+            if (loseRevisionResponse) {
+              loseRevisionResponse = false;
+              throw new CommandError("unavailable", "Owned revision response loss");
+            }
+            return result;
+          },
         },
-        async create(userID, changeID, input) {
-          saves++;
-          const result = await service.create(userID, changeID, input);
-          if (loseFeedbackResponse) {
-            loseFeedbackResponse = false;
-            throw new CommandError("unavailable", "Owned response loss after save");
-          }
-          return result;
-        },
-        async update(userID, changeID, input) {
-          const delay = delayedReply;
-          const result = await service.update(userID, changeID, input);
-          if (delay) {
-            delay.saved.resolve();
-            await delay.release.promise;
-          }
-          return result;
-        },
-        async send(userID, changeID, input) {
-          revisionRequests++;
-          const result = await service.send(userID, changeID, input);
-          if (loseRevisionResponse) {
-            loseRevisionResponse = false;
-            throw new CommandError("unavailable", "Owned revision response loss");
-          }
-          return result;
-        },
-      },
-    } as FactoryServices,
-    session: async () => ({ user: { id: f.userID } }),
-    maintenance: async () => false,
-    requireFresh: async () => {},
-  });
+      } as FactoryServices,
+      session: async () => ({ user: { id: f.userID } }),
+      maintenance: async () => false,
+      requireFresh: async () => {},
+    },
+    resolve(buildDirectory, "server/start-server.js"),
+  );
   // No tab-capture or auto-consent launch flags.
   const browser = await chromium.launch({ headless: true });
   const errors: string[] = [];
@@ -254,7 +263,7 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
       recordVideo: { dir: resolve(directory, "fixture-video"), size: { width: 1280, height: 720 } },
     });
     const capturePage = await captureContext.newPage();
-    const recordedVideo = capturePage.video()!;
+    const recordedVideo = fixtureValue(capturePage.video(), "capturePage.video()");
     await capturePage.setContent(
       '<style>body{font:20px sans-serif;padding:40px;background:#f7f5ef}input,button{font:inherit;padding:8px}</style><h1>Delivery form · QA browser fixture</h1><label>Project title <input value="Retained draft"></label><button>Save draft</button><p>Scripted fixture, not a model QA run.</p>',
     );
@@ -294,7 +303,7 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     ])
       await f.database
         .client`INSERT INTO factory.review_scenario(review_id,id,title,category,criterion,expected,status,ended_at,media_started_ms,observed)
-        VALUES(${f.reviewID},${id!},${title!},${category!},1,'Form state is retained','passed',now(),${id === "save" ? 0 : 1000},'Draft remains visible after the interaction.')`;
+        VALUES(${f.reviewID},${fixtureValue(id, "id")},${fixtureValue(title, "title")},${fixtureValue(category, "category")},1,'Form state is retained','passed',now(),${id === "save" ? 0 : 1000},'Draft remains visible after the interaction.')`;
     await f.database.client`INSERT INTO factory.review_scenario(
       review_id,id,title,category,criterion,expected,status,ended_at,observed)
       VALUES(${f.reviewID},'untimed','Missing recording position','boundary',1,
@@ -309,9 +318,13 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     const app = () => page.frameLocator('iframe[title="Factory Preview"]');
     const popup = () => page.locator(".preview-comment-popover");
     const ticketTab = () => page.getByRole("tab", { name: "Validation review", exact: true });
-    const previewTab = () => page.getByRole("tab", { name: "Development · Form", exact: true });
+    const _previewTab = () => page.getByRole("tab", { name: "Development · Form", exact: true });
     const initial = page.getByRole("region", { name: "Visual review", exact: true });
-    await visible(initial.getByText("Review is unavailable.", { exact: true })).toBeVisible();
+    await visible(
+      initial.getByText("Review is unavailable. Reload review before adding feedback.", {
+        exact: true,
+      }),
+    ).toBeVisible();
     await visible(initial.getByText("Loading review…", { exact: true })).toHaveCount(0);
     await page.screenshot({ path: resolve(directory, "review-load-error.png"), fullPage: true });
     failReview = false;
@@ -482,6 +495,10 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
       .locator("video")
       .evaluate((element) => (element as HTMLVideoElement).currentTime);
     await panel().getByRole("button", { name: "Open Live Preview" }).click();
+    expect(errors).toEqual([]);
+    await visible(page.locator('iframe[title="Factory Preview"]')).toBeVisible({
+      timeout: 5_000,
+    });
     await app().getByRole("textbox").fill("Unsaved live input");
     await page.screenshot({ path: resolve(directory, "preview-clean.png"), fullPage: true });
     await page.getByRole("button", { name: "Comment", exact: true }).click();
@@ -543,9 +560,12 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await visible(panel().getByText("Saved. No agent work has started.")).toBeVisible();
     expect((await review.get(f.changeID, f.userID)).feedback).toHaveLength(3);
     expect(saves).toBe(4);
-    const previewFeedback = (await review.get(f.changeID, f.userID)).feedback.find(
-      (item) => item.annotation?.source === "preview",
-    )!;
+    const previewFeedback = fixtureValue(
+      (await review.get(f.changeID, f.userID)).feedback.find(
+        (item) => item.annotation?.source === "preview",
+      ),
+      '(await review.get(f.changeID, f.userID)).feedback.find( (item) => item.annotation?.source === "preview", )',
+    );
     expect(previewFeedback.annotation).toMatchObject({
       source: "preview",
       attemptId: f.attemptID,
@@ -570,7 +590,10 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await visible
       .poll(async () => (await review.get(f.changeID, f.userID)).feedback.length)
       .toBe(4);
-    const withoutImage = (await review.get(f.changeID, f.userID)).feedback.at(-1)!;
+    const withoutImage = fixtureValue(
+      (await review.get(f.changeID, f.userID)).feedback.at(-1),
+      "(await review.get(f.changeID, f.userID)).feedback.at(-1)",
+    );
     expect(withoutImage.annotation).toMatchObject({
       source: "preview",
       representation: "unavailable",
@@ -710,7 +733,9 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await ticketTab().click();
     await visible(panel().getByRole("checkbox")).toHaveCount(0);
     loseRevisionResponse = true;
-    await panel().getByRole("button", { name: "Request revision", exact: true }).click();
+    await panel()
+      .getByRole("button", { name: /^Request revision · \d+ Threads?$/ })
+      .click();
     await visible(panel().getByRole("alert")).toContainText("Owned revision response loss");
     await page.reload();
     await panel().getByRole("button", { name: "Retry correction request", exact: true }).click();
@@ -722,7 +747,7 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
       SELECT count(*)::int AS count FROM factory.agent_turn WHERE change_id=${f.changeID}`;
     expect(after?.count).toBe(2);
     await visible(
-      panel().getByRole("button", { name: "Request revision", exact: true }),
+      panel().getByRole("button", { name: /^Request revision · \d+ Threads?$/ }),
     ).toHaveCount(0);
   } catch (cause) {
     if (failedPage) {
@@ -747,6 +772,6 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await browser.close();
     server.stop(true);
     await f.dispose();
-    await rm(frontend, { recursive: true, force: true });
+    await rm(buildDirectory, { recursive: true, force: true });
   }
 }, 120_000);

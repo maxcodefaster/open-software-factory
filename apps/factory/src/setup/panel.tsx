@@ -4,17 +4,16 @@ import {
   type ProjectSetupView,
   projectSetupFields,
 } from "../../../../packages/project-domain/src/setup";
-import { invoke } from "@solidjs/web/server-functions/client";
-import {
-  getSetupDraft,
-  beginSetupDraft,
-  saveSetupDraft,
-  createSetupProject,
-  checkSetupProject,
-  retrySetupProject,
-} from "../server-functions/setup";
-import { serverCall } from "../server-functions/result";
 import { Icon } from "../icon";
+import { serverCall } from "../server-functions/result";
+import {
+  beginSetupDraft,
+  checkSetupProject,
+  createSetupProject,
+  getSetupDraft,
+  retrySetupProject,
+  saveSetupDraft,
+} from "../server-functions/setup";
 import "./setup.css";
 import { SetupInspection } from "./inspection-panel";
 import { SetupReadiness } from "./readiness-panel";
@@ -55,7 +54,7 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     () => undefined,
     () => {
       const loadedNavigation = navigation;
-      void serverCall(getSetupDraft())
+      void serverCall(getSetupDraft({ data: [] }))
         .then((value) => {
           if (loadedNavigation !== navigation) return;
           if (value) setDraft(value);
@@ -80,7 +79,7 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
       let timer: ReturnType<typeof setTimeout>;
       const observe = async () => {
         try {
-          const value = await serverCall(invoke(getSetupDraft, { signal: abort.signal }));
+          const value = await serverCall(getSetupDraft({ ...{ signal: abort.signal }, data: [] }));
           if (
             !disposed &&
             navigation === admittedNavigation &&
@@ -107,14 +106,14 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     if (pending()) return;
     navigation++;
     commandID = undefined;
-    await action(() => serverCall(beginSetupDraft()));
+    await action(() => serverCall(beginSetupDraft({ data: [] })));
   }
   async function save(fields: ProjectSetupFields, setupID: string) {
     const value = draft();
     if (!value || value.id !== setupID || value.state !== "draft")
       throw new Error("This setup has changed. Your draft is retained locally.");
     const next = await serverCall(
-      saveSetupDraft({ id: value.id, version: value.version, ...fields }),
+      saveSetupDraft({ data: [{ id: value.id, version: value.version, ...fields }] }),
     );
     if (draft()?.id === next.id) setDraft(next);
   }
@@ -127,10 +126,14 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     await action(() =>
       serverCall(
         createSetupProject({
-          id: value.id,
-          version: value.version,
-          commandID: submittedCommandID,
-          ...(token ? { importToken: token } : {}),
+          data: [
+            {
+              id: value.id,
+              version: value.version,
+              commandID: submittedCommandID,
+              ...(token ? { importToken: token } : {}),
+            },
+          ],
         }),
       ),
     );
@@ -140,7 +143,9 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     if (value)
       await action(() =>
         serverCall(
-          value.state === "failed" ? retrySetupProject(value.id) : checkSetupProject(value.id),
+          value.state === "failed"
+            ? retrySetupProject({ data: [value.id] })
+            : checkSetupProject({ data: [value.id] }),
         ),
       );
   }
@@ -254,7 +259,7 @@ export function ProjectSetupPanel(props: {
   }
   function remember(value = fields()) {
     const draft = setup.draft();
-    if (!draft || draft.state !== "draft") return;
+    if (draft?.state !== "draft") return;
     // Persist only validated nonsecret fields, never the token DOM input or a
     // pasted URL containing credentials. Partial URLs are not retained.
     const parsed = projectSetupFields.safeParse(value);

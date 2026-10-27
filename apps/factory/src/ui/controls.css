@@ -1,0 +1,189 @@
+/* Loaded once by style.css, including in isolated feature fixtures.
+   Native controls keep their semantics; feature styles own layout, not a second skin. */
+button,
+input,
+textarea,
+select,
+.workspace-action {
+  font: var(--weight-regular) var(--text-sm) / var(--leading-label) var(--font-interface);
+}
+label {
+  font: var(--weight-medium) var(--text-sm) / var(--leading-body) var(--font-interface);
+  letter-spacing: normal;
+  text-transform: none;
+}
+button {
+  min-height: var(--control-height);
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-control);
+  background: var(--material-chrome);
+  color: var(--color-ink);
+  font-weight: var(--weight-medium);
+  cursor: pointer;
+}
+/* Unclassified desktop chrome stays quiet. Named action variants below
+   retain the same appearance inside and outside the desktop. */
+:where(.factory-desktop)
+button:where(
+  :not(.workspace-action, .quiet-button, .primary-button, .danger-button, .new-ticket-button)
+) {
+  border: 0;
+  color: inherit;
+  background: none;
+  padding: 0;
+}
+button:where(
+  :not(
+    :disabled,
+    .workspace-action,
+    .quiet-button,
+    .primary-button,
+    .danger-button,
+    .new-ticket-button
+  )
+):hover {
+  background: var(--material-chrome-hover);
+}
+input:where(
+  :not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])
+),
+textarea,
+select {
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height);
+  padding: var(--space-1-5) var(--space-3);
+  border: 1px solid var(--line-default);
+  border-radius: var(--radius-control);
+  background: var(--material-input);
+  color: var(--color-ink);
+  caret-color: var(--color-focus);
+}
+input:where(
+  :not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])
+),
+textarea {
+  width: 100%;
+}
+textarea {
+  min-height: 6rem;
+  line-height: var(--leading-body);
+  resize: vertical;
+}
+:where(input, textarea)::placeholder {
+  color: var(--color-ink-muted);
+  opacity: 1;
+}
+input:where([type="checkbox"], [type="radio"]) {
+  width: var(--control-icon-size);
+  height: var(--control-icon-size);
+  flex: none;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--color-river-deep);
+}
+:where(button, input, textarea, select, .workspace-action):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+:where(input, textarea, select)[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+:where(button, input, textarea, select):disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.control-field {
+  display: grid;
+  align-content: start;
+  min-width: 0;
+  gap: var(--space-2);
+}
+.control-check {
+  display: flex;
+  align-items: start;
+  gap: var(--space-2);
+  font-weight: var(--weight-regular);
+}
+.control-check > input {
+  margin-block-start: var(--space-0-5);
+}
+.control-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+.workspace-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-height: var(--control-height);
+  padding: var(--space-1) var(--space-2);
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--color-ink-muted);
+  box-shadow: none;
+  font-weight: var(--weight-regular);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.workspace-action[data-primary="true"] {
+  color: var(--color-river-deep);
+  font-weight: var(--weight-semibold);
+}
+.workspace-action[data-icon-only="true"] {
+  min-width: var(--control-height);
+  padding-inline: var(--space-2);
+}
+.workspace-action:hover:not(:disabled) {
+  background: var(--material-chrome-hover);
+  color: var(--color-ink);
+  translate: none;
+}
+.quiet-button,
+.primary-button,
+.danger-button,
+.new-ticket-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1-5);
+}
+.quiet-button {
+  background: var(--material-card);
+}
+.primary-button {
+  border-color: transparent;
+  color: var(--color-ink-inverse);
+  background: var(--color-river-deep);
+}
+.danger-button {
+  border-color: var(--line-danger);
+  color: var(--color-danger);
+  background: var(--material-card);
+}
+@media (pointer: coarse) {
+  button,
+  select,
+  .workspace-action,
+  .control-check {
+    min-height: var(--touch-target);
+  }
+  .workspace-action[data-icon-only="true"] {
+    min-width: var(--touch-target);
+  }
+  input:where(
+    :not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="hidden"])
+  ),
+  textarea,
+  select {
+    min-height: var(--touch-target);
+    font-size: var(--text-lg);
+  }
+}

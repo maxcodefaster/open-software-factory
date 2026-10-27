@@ -1,7 +1,5 @@
 import { changeIdentity } from "../../../../packages/change-domain/src/change";
-import { CommandError } from "../command-error";
-import { projectAuthorityIn } from "../access/controller";
-import { requireDeliveredPrerequisites } from "./dependencies";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createForgejoClient,
@@ -9,15 +7,18 @@ import {
   ForgeConflictError,
   type ForgeRepository,
 } from "../../../../packages/forge/src/forge";
-import type { ChangeView, RequirementApprovalView, RequirementRevisionView } from "./types";
-import type { RuntimeAttemptView } from "../runtime/types";
-import type { AgentTurnTransaction } from "../agent/turn-store";
-import { codingBudgetIn } from "../usage/policy";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
 import {
   createRequirementRevision,
   type RequirementContent,
 } from "../../../../packages/requirement-domain/src/requirement";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
+import type { RuntimeAttemptView } from "../runtime/types";
+import { technicalPlanningOutstandingIn } from "../technical-design/store";
+import { codingBudgetIn } from "../usage/policy";
+import { requireDeliveredPrerequisites } from "./dependencies";
+import type { ChangeView, RequirementApprovalView, RequirementRevisionView } from "./types";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -26,6 +27,7 @@ type RuntimeController = {
 type ImplementationAdmission = {
   commandID: string;
   revisionID: string;
+  technicalDesignRevisionID?: string;
   codingReasoning?: CodingReasoning;
   expectedBaseSHA?: string;
   admitBuild(sql: AgentTurnTransaction, changeID: string): Promise<unknown>;
@@ -48,15 +50,18 @@ export function createChangeController(
   runtime: RuntimeController,
   onReady?: (changeID: string) => Promise<void>,
   protectNewBranch?: (changeID: string) => Promise<void>,
+  forgeOverride?: ReturnType<typeof createForgejoClient>,
 ) {
   const { FACTORY_FORGEJO_API_URL, FACTORY_FORGEJO_TOKEN, FACTORY_FORGEJO_OWNER } = process.env;
   if (!FACTORY_FORGEJO_API_URL || !FACTORY_FORGEJO_TOKEN || !FACTORY_FORGEJO_OWNER) {
     throw new Error("Forgejo configuration is required");
   }
-  const forge = createForgejoClient({
-    apiURL: FACTORY_FORGEJO_API_URL,
-    token: FACTORY_FORGEJO_TOKEN,
-  });
+  const forge =
+    forgeOverride ??
+    createForgejoClient({
+      apiURL: FACTORY_FORGEJO_API_URL,
+      token: FACTORY_FORGEJO_TOKEN,
+    });
   const running = new Set<string>();
   const cancellationObservers = new Set<string>();
   const retries = new Map<string, ReturnType<typeof setTimeout>>();
@@ -323,6 +328,15 @@ export function createChangeController(
       const lock = await database.client.reserve();
       await lock`SELECT pg_advisory_lock(hashtext(${`ticket:${ticketID}`}))`;
       try {
+        const [technical] = await lock`
+          SELECT id FROM factory.technical_design_revision WHERE ticket_id=${ticketID}
+          UNION ALL SELECT id FROM factory.agent_turn WHERE ticket_id=${ticketID}
+            AND input->>'intent'='technical-planning' LIMIT 1`;
+        if (technical)
+          throw new CommandError(
+            "conflict",
+            "Use Implement to approve the exact product and technical design together.",
+          );
         const latest = await lock<Array<{ id: string }>>`
           SELECT id FROM factory.requirement_revision
           WHERE ticket_id = ${ticketID}
@@ -405,18 +419,42 @@ export function createChangeController(
               "conflict",
               "Finish the current specification before implementing.",
             );
+          if (await technicalPlanningOutstandingIn(sql, ticketID, implementation.revisionID))
+            throw new CommandError(
+              "conflict",
+              "Finish Technical Planning before implementing this Ticket.",
+            );
+          const [technical] = await sql<{ id: string; requirementRevisionID: string }[]>`
+            SELECT id,requirement_revision_id AS "requirementRevisionID" FROM factory.technical_design_revision
+            WHERE ticket_id=${ticketID} ORDER BY ordinal DESC LIMIT 1`;
+          if (technical || implementation.technicalDesignRevisionID) {
+            await projectDevelopmentAuthorityIn(sql, userID, ticket.projectID);
+            if (
+              technical?.id !== implementation.technicalDesignRevisionID ||
+              technical?.requirementRevisionID !== implementation.revisionID
+            )
+              throw new CommandError(
+                "conflict",
+                "Review the current technical design for these exact requirements before implementing.",
+              );
+          }
           const [approval] = await sql<
-            Array<{ revisionID: string }>
-          >`SELECT requirement_revision_id AS "revisionID"
+            Array<{ revisionID: string; technicalID: string | null }>
+          >`SELECT requirement_revision_id AS "revisionID",technical_design_revision_id AS "technicalID"
             FROM factory.requirement_approval WHERE ticket_id = ${ticketID}`;
           if (approval && approval.revisionID !== implementation.revisionID)
             throw new CommandError(
               "conflict",
               "This Ticket already implements different requirements.",
             );
+          if (
+            approval &&
+            approval.technicalID !== (implementation.technicalDesignRevisionID ?? null)
+          )
+            throw new CommandError("conflict", "This Ticket keeps its approved technical design.");
           if (!approval)
-            await sql`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by)
-            VALUES (${crypto.randomUUID()}, ${ticketID}, ${implementation.revisionID}, ${userID})`;
+            await sql`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, technical_design_revision_id, approved_by)
+            VALUES (${crypto.randomUUID()}, ${ticketID}, ${implementation.revisionID}, ${implementation.technicalDesignRevisionID ?? null}, ${userID})`;
           const [busy] = await sql`SELECT id FROM factory.agent_turn WHERE ticket_id = ${ticketID}
             AND change_id IS NULL AND state IN ('pending', 'dispatching', 'running')`;
           if (busy)
@@ -453,6 +491,9 @@ export function createChangeController(
         `;
         if (existing[0]) {
           await admitBuild(existing[0].id);
+          if (implementation)
+            await sql`UPDATE factory.implementation_order SET state='started',change_id=${existing[0].id},last_error=NULL,updated_at=now()
+              WHERE command_id=${implementation.commandID} AND state='waiting'`;
           return existing[0].id;
         }
         const budget = await codingBudgetIn(sql, ticket.projectID, false);
@@ -468,7 +509,7 @@ export function createChangeController(
             "conflict",
             "Completed or cancelled Tickets cannot start implementation",
           );
-        await requireDeliveredPrerequisites(sql, ticket.projectID, ticketID);
+        if (!implementation) await requireDeliveredPrerequisites(sql, ticket.projectID, ticketID);
         const [input] = await sql<
           Array<{
             repositoryURL: string;
@@ -494,11 +535,74 @@ export function createChangeController(
         const base = await forge.getDefaultBranch(repository);
         if (base.name !== input.defaultBranch)
           throw new Error("Project default branch does not match Forge");
+        const [technicalScope] = await sql<{ sourceCommit: string }[]>`
+          SELECT design.source_commit AS "sourceCommit" FROM factory.requirement_approval approval
+          JOIN factory.technical_design_revision design ON design.id=approval.technical_design_revision_id
+          WHERE approval.id=${input.approvalID}`;
+        const [order] = implementation
+          ? await sql<
+              {
+                commandID: string;
+                ticketID: string;
+                userID: string;
+                revisionID: string;
+                technicalID: string | null;
+                reasoning: string | null;
+                sourceSHA: string;
+                state: string;
+              }[]
+            >`SELECT command_id AS "commandID",ticket_id AS "ticketID",created_by AS "userID",requirement_revision_id AS "revisionID",
+              technical_design_revision_id AS "technicalID",coding_reasoning AS reasoning,source_sha AS "sourceSHA",state
+              FROM factory.implementation_order WHERE command_id=${implementation.commandID}
+                OR (ticket_id=${ticketID} AND state='waiting') FOR UPDATE`
+          : [];
+        if (
+          order &&
+          implementation &&
+          (order.commandID !== implementation.commandID ||
+            order.ticketID !== ticketID ||
+            order.userID !== userID ||
+            order.revisionID !== implementation.revisionID ||
+            order.technicalID !== (implementation.technicalDesignRevisionID ?? null) ||
+            order.reasoning !== (implementation.codingReasoning ?? null))
+        )
+          throw new CommandError(
+            "conflict",
+            "This Ticket already has a different implementation order.",
+          );
+        if (order && order.state !== "waiting")
+          throw new CommandError(
+            "conflict",
+            "This implementation order is no longer waiting. Commission it explicitly again.",
+          );
+        if (
+          technicalScope &&
+          technicalScope.sourceCommit !== base.headSha &&
+          technicalScope.sourceCommit !== order?.sourceSHA
+        )
+          throw new CommandError(
+            "conflict",
+            "The source changed since Technical Planning. Review a new design before implementing.",
+          );
         if (implementation?.expectedBaseSHA && base.headSha !== implementation.expectedBaseSHA)
           throw new CommandError(
             "conflict",
             "The default branch changed after monitoring diagnosis. Review the incident against the current source.",
           );
+        if (implementation) {
+          const [blocked] =
+            await sql`SELECT prerequisite_id FROM factory.ticket_prerequisites(${ticket.projectID}::uuid,${ticketID}::uuid)
+            WHERE NOT delivered LIMIT 1`;
+          if (blocked) {
+            await sql`INSERT INTO factory.implementation_order(command_id,project_id,ticket_id,created_by,
+              requirement_revision_id,technical_design_revision_id,coding_reasoning,source_sha)
+              VALUES(${implementation.commandID},${ticket.projectID},${ticketID},${userID},
+                ${implementation.revisionID},${implementation.technicalDesignRevisionID ?? null},
+                ${implementation.codingReasoning ?? null},${base.headSha}) ON CONFLICT(command_id) DO NOTHING`;
+            return null;
+          }
+        }
+        await requireDeliveredPrerequisites(sql, ticket.projectID, ticketID);
         const identity = changeIdentity(ticketID, input.approvalID);
         await sql`
             INSERT INTO factory.change(
@@ -524,8 +628,12 @@ export function createChangeController(
             WHERE id = ${ticketID} AND state IN ('inbox', 'backlog', 'ready')
           `;
         await admitBuild(identity.changeID);
+        if (implementation)
+          await sql`UPDATE factory.implementation_order SET state='started',change_id=${identity.changeID},last_error=NULL,updated_at=now()
+            WHERE command_id=${implementation.commandID} AND state='waiting'`;
         return identity.changeID;
       });
+      if (!changeID) return null;
       void reconcile(changeID);
       const change = await this.get(changeID);
       if (change?.state === "active") await onReady?.(changeID);
@@ -588,8 +696,15 @@ export function createChangeController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
-        LEFT JOIN factory.delivery_approval approval ON approval.verification_id = verification.id
-        LEFT JOIN factory.merge_operation merge ON merge.change_id = change.id
+        LEFT JOIN LATERAL (
+          SELECT * FROM factory.merge_operation WHERE change_id=change.id AND commit_sha=verification.commit_sha
+          ORDER BY (state<>'failed') DESC,requested_at DESC,id DESC LIMIT 1
+        ) merge ON true
+        LEFT JOIN LATERAL (
+          SELECT * FROM factory.delivery_approval WHERE verification_id=verification.id
+            AND (merge.delivery_approval_id IS NULL OR id=merge.delivery_approval_id)
+          ORDER BY approved_at DESC,id DESC LIMIT 1
+        ) approval ON true
         LEFT JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
         WHERE change.id = ${changeID}
       `;
@@ -621,8 +736,15 @@ export function createChangeController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
-        LEFT JOIN factory.delivery_approval approval ON approval.verification_id = verification.id
-        LEFT JOIN factory.merge_operation merge ON merge.change_id = change.id
+        LEFT JOIN LATERAL (
+          SELECT * FROM factory.merge_operation WHERE change_id=change.id AND commit_sha=verification.commit_sha
+          ORDER BY (state<>'failed') DESC,requested_at DESC,id DESC LIMIT 1
+        ) merge ON true
+        LEFT JOIN LATERAL (
+          SELECT * FROM factory.delivery_approval WHERE verification_id=verification.id
+            AND (merge.delivery_approval_id IS NULL OR id=merge.delivery_approval_id)
+          ORDER BY approved_at DESC,id DESC LIMIT 1
+        ) approval ON true
         LEFT JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
         WHERE (${projectID ?? null}::uuid IS NULL OR change.project_id = ${projectID ?? null})
           AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id = ${userID})

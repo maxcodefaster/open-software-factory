@@ -1,29 +1,17 @@
+import { createComposerState } from "./desktop/composer-state";
+import { createConversationState } from "./desktop/conversation-state";
 import {
   createEffect,
   createMemo,
   createSignal,
-  For,
-  Loading,
   lazy,
-  Match,
   onCleanup,
   onSettled,
   Show,
-  Switch,
+  untrack,
 } from "solid-js";
 import { z } from "zod";
-import {
-  clarificationAction,
-  unansweredClarification,
-} from "../../../packages/conversation-domain/src/clarification";
-import type {
-  ConversationMode,
-  InterviewQuestion,
-} from "../../../packages/conversation-domain/src/conversation";
-import {
-  interviewAnswerInput,
-  normalizeInterviewAnswer,
-} from "../../../packages/conversation-domain/src/conversation";
+import { interviewAnswerInput } from "../../../packages/conversation-domain/src/conversation";
 import {
   type EpicProposal,
   epicProposalInput,
@@ -32,23 +20,7 @@ import {
   type CodingReasoning,
   codingReasoningInput,
 } from "../../../packages/conversation-domain/src/model-settings";
-import { assistantContext } from "../../../packages/interface-domain/src/assistant-context";
 import type { DesktopBackgroundKey } from "../../../packages/interface-domain/src/background";
-import {
-  type BoardStage,
-  ticketBoardStage,
-  ticketBoardStatus,
-} from "../../../packages/interface-domain/src/ticket-board";
-import { workspacePresence } from "../../../packages/interface-domain/src/workspace-presence";
-import {
-  type RequirementContent,
-  requirementContentInput,
-} from "../../../packages/requirement-domain/src/content";
-import {
-  dependencyWouldCycle,
-  type PrerequisiteView,
-  prerequisiteIsDelivered,
-} from "../../../packages/ticket-domain/src/dependency";
 import {
   type FactoryZeroContext,
   type FactoryZeroSchema,
@@ -58,184 +30,80 @@ import {
 } from "../../../packages/zero-schema/src";
 import { useZero, useZeroQuery, ZeroProvider } from "../../../packages/zero-solid/src";
 import { takeSettingsReturn } from "./access/settings-return";
-import { BuildModelControls } from "./agent/build-model-controls";
-import { AgentBlockers } from "./agent/configuration";
-import { observeAgentActivity } from "./agent-activity-stream";
 import { createAgentCommandIds } from "./agent-command-ids";
-import {
-  type AgentSnapshot,
-  buildAgentActivityNotice,
-  buildAgentEmptyMessage,
-  buildAgentHint,
-  buildAgentNeedsStart,
-  buildAgentStatus,
-  createAgentReadFence,
-  retainAgentActivity,
-} from "./agent-view-state";
-import { getModelAvailability } from "./server-functions/bootstrap";
-import { ensureChangeSource, ensurePersonalSource } from "./server-functions/workspaces";
-import { serverCall } from "./server-functions/result";
-import { registerProject } from "./server-functions/projects";
-import {
-  getChanges,
-  getRuntimeAttempts,
-  getProjectPreviews,
-  ensureStaging,
-} from "./server-functions/runtime";
-import {
-  getAgentView,
-  startCoding,
-  resumeCoding as requestCodingResume,
-  stopCoding,
-  checkCodingStop,
-  newCodingConversation,
-  sendCodingPrompt,
-  requestCodingChanges,
-} from "./server-functions/agent";
-import {
-  getConversation,
-  newProjectConversation,
-  sendConversationMessage as commissionConversationMessage,
-  setConversationMode,
-  answerConversationQuestion,
-  confirmEpicProposal,
-} from "./server-functions/conversations";
-import {
-  getDelivery,
-  approveDelivery as requestDeliveryApproval,
-  retryCandidateReview,
-  resumeVerification,
-} from "./server-functions/delivery";
-import {
-  getTicketDetail,
-  saveTicketDocument as saveTicket,
-  createTicketFollowUp,
-  trashTicket,
-  restoreTicket,
-  implementTicket as requestImplementation,
-} from "./server-functions/tickets";
-import { invoke } from "@solidjs/web/server-functions";
-import {
-  archiveKnowledgePage as archiveSavedKnowledgePage,
-  generateKnowledge as requestKnowledgeGeneration,
-  getKnowledgeGeneration,
-  getKnowledgeHistory,
-  getKnowledgeSources,
-  getRepositoryDocument,
-  getRepositoryDocuments,
-  restoreKnowledgePage,
-  saveKnowledgePage,
-  searchKnowledge,
-} from "./server-functions/knowledge";
-import type { Epic } from "./api-contracts";
-import {
-  type AgentMessage,
-  type WriterView,
-  type AgentView,
-  type AppPreview,
-  type Bootstrap,
-  type Change,
-  type ConversationView,
-  type DeliveryView,
-  type KnowledgeGeneration,
-  type KnowledgeRevision,
-  type KnowledgeSearchResult,
-  type OpenRepositoryDocument,
-  type RepositoryDocument,
-  type RequirementRevision,
-  type RuntimeAttempt,
-  type RuntimeDockTarget,
-  type Session,
-  type Ticket,
-  type TicketDocumentRevision,
-  type UIPreference,
+import { type AgentSnapshot, createAgentReadFence, retainAgentActivity } from "./agent-view-state";
+import type {
+  AgentView,
+  AppPreview,
+  Bootstrap,
+  Change,
+  ConversationView,
+  DeliveryView,
+  RuntimeAttempt,
+  RuntimeDockTarget,
+  Session,
+  WriterView,
 } from "./api-contracts";
 import { orderedDesktopBackgrounds } from "./artworks";
-import { composerKeyDown, followConversation, resizeComposer } from "./assistant-interaction";
-import { readAttachmentContent, restoreAttachmentContent } from "./attachments/composer";
-import { AttachmentProvider, TextareaAttachments } from "./attachments/ui";
-import { groupConversationActivities } from "./conversation-activity";
-import {
-  ChangeAgentActivityGroup,
-  ChangeAgentMessage,
-  ConversationEntryCard,
-  conversationQuestion,
-} from "./conversation-components";
-import { streamConversation } from "./conversation-stream";
-import { ConversationSwitcher } from "./conversation-switcher";
-import { CopyButton } from "./ui/feedback";
-import { conversationTimeline } from "./conversation-timeline";
-import { DockAppButton, DockButton } from "./dock";
-import type { EpicEdit } from "./epic-controls";
-import { EpicProposalWorkspace } from "./epic-proposal-workspace";
-import { Icon } from "./icon";
+import type { followConversation } from "./assistant-interaction";
+import { AttachmentProvider } from "./attachments/ui";
+import { AssistantPanel, type AssistantPanelModel } from "./desktop/assistant-panel";
+import { createAssistantPresentation } from "./desktop/assistant-presentation";
+import { createBoardProjection } from "./desktop/board-projection";
+import { createCodingCommands } from "./desktop/coding-commands";
+import type { FactoryDesktopProps, TicketDetail } from "./desktop/contracts";
+import { createConversationCommands } from "./desktop/conversation-commands";
+import { DocumentWindow, type DocumentWindowModel } from "./desktop/document-window";
+import { ProjectBoard, type ProjectBoardModel } from "./desktop/project-board";
+import { createProjectCommands } from "./desktop/project-commands";
+import { createDesktopReads } from "./desktop/reads";
+import { createRuntimeNavigation } from "./desktop/runtime-navigation";
+import { createTicketCommands } from "./desktop/ticket-commands";
+import { DesktopTopbar, type DesktopTopbarModel } from "./desktop/topbar";
 import type { ActivityNavigationRequest } from "./ide-messages";
-import { repositoryBrowserURL, repositoryLink } from "./knowledge/source-link";
-import type { KnowledgeDraft } from "./knowledge-workspace";
-import { createLifecyclePoller } from "./lifecycle-poller";
-import { markdownHTML } from "./markdown";
+import { createInboxClient, revealInboxSource } from "./inbox/client";
+import type { InboxItem } from "./inbox/contracts";
+import { MentionSupport } from "./inbox/mentions";
+import { type InboxQueue, initialInboxPosition, nextInboxQueueItem } from "./inbox/navigation";
+import { repositoryBrowserURL } from "./knowledge/source-link";
+import { createKnowledgeState } from "./knowledge/state";
+import { createDesktopNavigation, unavailableLink } from "./navigation/desktop";
+import { type FactoryLocation, factoryPath } from "./navigation/location";
+import { useFactoryNavigation } from "./navigation/router";
 import { bindPopoverKeyboard } from "./popover-keyboard";
-import { createProjectSetupInteraction, ProjectSetupPanel, SetupEmptyBoard } from "./setup/panel";
-import { ChatSkillPicker } from "./skills/chat-picker";
-import { TicketBoardContents } from "./ticket-board";
-import {
-  type PersonalTicketDraft,
-  readPersonalTicketDraft,
-  TicketDraftWorkspace,
-} from "./ticket-draft-workspace";
+import { createConversationSelection } from "./project-agent/selection";
+import { createProjectPlanning } from "./projects/planning";
+import { ticketReference } from "./projects/ticket-content";
+import { getModelAvailability } from "./server-functions/bootstrap";
+import { serverCall } from "./server-functions/result";
+import { createProjectSetupInteraction } from "./setup/panel";
+import type { PersonalTicketDraft } from "./ticket-draft-workspace";
 import type { TicketDraft } from "./ticket-workspace";
-import { TicketWorkspace } from "./ticket-workspace";
-import { TrashWorkspace } from "./trash-workspace";
 import { createWindowPresence } from "./window-presence";
-import {
-  DesktopEmpty,
-  InboxWorkspace,
-  ProjectRegistration,
-  WindowHeading,
-} from "./workspace-chrome";
-import { WorkspaceTabbar, workspacePanelID, workspaceTabElementID } from "./workspace-tabbar";
-import {
-  closeWorkspaceTabState,
-  followStagingPromotion,
-  openWorkspaceTabState,
-  type ProjectWorkspaceState,
-  selectedWorkspaceTab,
-  updateWorkspaceTabState,
-  type WorkspaceTab,
-} from "./workspace-tabs";
-import { ChangeWriterStatus } from "./writer-status";
+import { createWorkspaceState } from "./workspace/state";
+import { ProjectRegistration } from "./workspace-chrome";
+import { workspacePanelID, workspaceTabElementID } from "./workspace-tabbar";
+import { selectedWorkspaceTab, type WorkspaceTab } from "./workspace-tabs";
+import { FactoryReadProvider } from "./zero/reads";
+import { PlanningSyncStatus } from "./zero/sync-status";
 
-const KnowledgeWorkspace = lazy(async () => ({
+const _KnowledgeWorkspace = lazy(async () => ({
   default: (await import("./knowledge-workspace")).KnowledgeWorkspace,
 }));
-const RuntimeWorkspaceTabs = lazy(async () => ({
+const _RuntimeWorkspaceTabs = lazy(async () => ({
   default: (await import("./runtime-workspace")).RuntimeWorkspaceTabs,
 }));
-const DeveloperIDEWorkspace = lazy(async () => ({
+const _DeveloperIDEWorkspace = lazy(async () => ({
   default: (await import("./developer-ide-workspace")).DeveloperIDEWorkspace,
 }));
-const SettingsWorkspace = lazy(async () => ({
+const _SettingsWorkspace = lazy(async () => ({
   default: (await import("./settings-workspace")).SettingsWorkspace,
 }));
-
-function requirementContent(revision?: RequirementRevision): RequirementContent | undefined {
-  if (!revision) return undefined;
-  try {
-    const parsed = requirementContentInput.safeParse(JSON.parse(revision.canonicalContent));
-    return parsed.success ? parsed.data : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function ticketReference(ticketID: string) {
-  return `TCK-${ticketID.replaceAll("-", "").slice(0, 6).toUpperCase()}`;
-}
 
 export function AuthenticatedFactory(props: Bootstrap & { session: Session }) {
   return (
     <ZeroProvider
-      identity={{ userId: props.session.user.id, schemaVersion: "slice-11b-access" }}
+      identity={{ userId: props.session.user.id, schemaVersion: "factory-read-projections-v1" }}
       cacheURL={props.zeroCacheURL}
       schema={zeroSchema}
       mutators={zeroMutators}
@@ -244,47 +112,67 @@ export function AuthenticatedFactory(props: Bootstrap & { session: Session }) {
         systemManager: props.session.systemManager,
       }}
     >
-      <FactoryWorkspace
-        session={props.session}
-        uiPreference={props.uiPreference}
-        modelRelayConfigured={props.modelRelayConfigured}
-        forgeOrigins={props.forgeOrigins}
-      />
+      <FactoryReadProvider>
+        <FactoryWorkspace
+          session={props.session}
+          uiPreference={props.uiPreference}
+          modelRelayConfigured={props.modelRelayConfigured}
+          forgeOrigins={props.forgeOrigins}
+        />
+      </FactoryReadProvider>
     </ZeroProvider>
   );
 }
 
-function FactoryWorkspace(props: {
-  session: Session;
-  uiPreference: UIPreference;
-  modelRelayConfigured: boolean;
-  forgeOrigins?: Bootstrap["forgeOrigins"];
-}) {
-  const [modelRelayConfigured, setModelRelayConfigured] = createSignal(props.modelRelayConfigured);
+function FactoryWorkspace(props: FactoryDesktopProps) {
+  // Session-bound recovery identities are fixed for this authenticated desktop.
+  const initialSession = untrack(() => props.session);
+  const navigation = useFactoryNavigation();
+  let publishLocation: ReturnType<typeof createDesktopNavigation>["publish"] = () => {};
+  const inbox = createInboxClient();
+  const [inboxPosition, setInboxPosition] = createSignal(initialInboxPosition());
+  const [inboxRestoreKey, setInboxRestoreKey] = createSignal(0);
+  const [inboxQueue, setInboxQueue] = createSignal<InboxQueue>();
+  const [inboxSourceOpening, setInboxSourceOpening] = createSignal(false);
+  const [inboxFeedbackID, setInboxFeedbackID] = createSignal<string>();
+  let inboxNavigation: AbortController | undefined;
+  onCleanup(() => inboxNavigation?.abort());
+  const [modelRelayConfigured, setModelRelayConfigured] = createSignal(
+    untrack(() => props.modelRelayConfigured),
+  );
   const zero = useZero<FactoryZeroSchema, undefined, FactoryZeroContext>();
-  const projects = useZeroQuery(() => zeroQueries.projects.list());
+  const [selectedProjectID, setSelectedProjectID] = createSignal<string>();
+  const planning = createProjectPlanning(selectedProjectID);
+  const {
+    projects,
+    memberships,
+    tickets,
+    history,
+    prerequisiteTickets,
+    foundTickets,
+    epics,
+    dependencies,
+    ticketLimit,
+    setTicketLimit,
+    historyLimit,
+    setHistoryLimit,
+    trashLimit,
+    setTrashLimit,
+    setFind,
+    setPreloadProjectID,
+    projectMenuOpen,
+    setProjectMenuOpen,
+    selectedEpicID,
+    setSelectedEpicID,
+  } = planning;
+  const workspaces = createWorkspaceState(selectedProjectID);
+  const projectWorkspaces = workspaces.states;
+  const currentWorkspaceState = workspaces.current;
+  const workspaceTabs = workspaces.tabs;
   const browserRepository = () =>
     repositoryBrowserURL(selectedProject()?.repositoryUrl ?? "", props.forgeOrigins);
-  const memberships = useZeroQuery(() => zeroQueries.memberships.list());
-  const [selectedProjectID, setSelectedProjectID] = createSignal<string>();
-  const securityReturn = takeSettingsReturn(props.session.user.id);
+  const securityReturn = takeSettingsReturn(initialSession.user.id);
   let securityReturnRestored = false;
-  const tickets = useZeroQuery(() => {
-    const projectId = selectedProjectID();
-    return projectId ? zeroQueries.tickets.list({ projectId }) : null;
-  });
-  const epics = useZeroQuery(() => {
-    const projectId = selectedProjectID();
-    return projectId ? zeroQueries.epics.list({ projectId }) : null;
-  });
-  const dependencies = useZeroQuery(() => {
-    const projectId = selectedProjectID();
-    return projectId ? zeroQueries.dependencies.list({ projectId }) : null;
-  });
-  const [selectedEpicID, setSelectedEpicID] = createSignal("");
-  createEffect(selectedProjectID, () => {
-    setSelectedEpicID("");
-  });
   const [selectedTicketID, setSelectedTicketID] = createSignal<string>();
   const [epicProposals, setEpicProposals] = createSignal<Record<string, EpicProposal>>({});
   const clarificationOrigins = new Set<string>();
@@ -294,41 +182,20 @@ function FactoryWorkspace(props: {
       ? tab.ticketID
       : undefined;
   };
-  const [pausedClarifications, setPausedClarifications] = createSignal<Record<string, boolean>>({});
-  const clarificationPaused = () => pausedClarifications()[assistantKey()] ?? false;
-  function pauseClarification(paused: boolean) {
-    const key = assistantKey();
-    setPausedClarifications((current) => ({ ...current, [key]: paused }));
-    try {
-      sessionStorage.setItem(`clarification-paused:${key}`, String(paused));
-    } catch {
-      /* Visible state remains usable. */
-    }
-  }
-  const conversationScope = () =>
-    `${selectedProjectID() ?? "none"}:${assistantTicketID() ?? "none"}`;
-  const [conversationSelections, setConversationSelections] = createSignal<Record<string, string>>(
-    (() => {
-      try {
-        return z
-          .record(z.string(), z.string())
-          .parse(
-            JSON.parse(sessionStorage.getItem(`chat-contexts:${props.session.user.id}`) ?? "{}"),
-          );
-      } catch {
-        return {};
-      }
-    })(),
+  const conversationSelection = createConversationSelection(
+    initialSession.user.id,
+    selectedProjectID,
+    assistantTicketID,
   );
-  createEffect(conversationSelections, (selections) => {
-    try {
-      sessionStorage.setItem(`chat-contexts:${props.session.user.id}`, JSON.stringify(selections));
-    } catch {
-      /* Context selection still works for this page. */
-    }
-  });
-  const selectedConversation = () => conversationSelections()[conversationScope()];
-  const [conversationReadyKey, setConversationReadyKey] = createSignal<string>();
+  const {
+    scope: conversationScope,
+    selected: selectedConversation,
+    key: assistantKey,
+    readyKey: conversationReadyKey,
+    setSelections: setConversationSelections,
+    paused: clarificationPaused,
+    pause: pauseClarification,
+  } = conversationSelection;
   const assistantContextLoading = () =>
     Boolean(selectedProjectID() && conversationReadyKey() !== assistantKey());
   const [ideNavigation, setIDENavigation] = createSignal<ActivityNavigationRequest>();
@@ -336,8 +203,6 @@ function FactoryWorkspace(props: {
     changeID: string;
     view: WriterView | undefined;
   }>();
-  const assistantKey = () =>
-    `assistant:${conversationScope()}:${selectedConversation() ?? "original"}`;
   const assistantPending = () =>
     (pendingContexts()[assistantKey()] ?? 0) > 0 ||
     ["pending", "dispatching", "running"].includes(conversation()?.turn?.state ?? "");
@@ -346,14 +211,7 @@ function FactoryWorkspace(props: {
     questionID: string;
     text: string;
   }>();
-  const [detail, setDetail] = createSignal<{
-    ticket: Ticket;
-    revisions: RequirementRevision[];
-    documentRevisions: TicketDocumentRevision[];
-    proposal?: import("./api-contracts").RequirementProposal | null;
-    origin: { id: string; title: string } | null;
-    followUps: Array<{ id: string; title: string }>;
-  }>();
+  const [detail, setDetail] = createSignal<TicketDetail>();
   const [changes, setChanges] = createSignal<Change[]>([]);
   const [attempts, setAttempts] = createSignal<RuntimeAttempt[]>([]);
   const [appPreviews, setAppPreviews] = createSignal<AppPreview[]>([]);
@@ -366,21 +224,48 @@ function FactoryWorkspace(props: {
   const ticketDrafts = new Map<string, TicketDraft>();
   const personalDrafts = new Map<string, PersonalTicketDraft>();
   const personalDraftKey = () => `ticket-draft:${props.session.user.id}:${selectedProjectID()}`;
-  const knowledgeDrafts = new Map<string, KnowledgeDraft>();
-  const [projectWorkspaces, setProjectWorkspaces] = createSignal<
-    Record<string, ProjectWorkspaceState>
-  >({});
   const workspaceWindow = createWindowPresence();
-  const { visible: workspaceVisible, setVisible: setWorkspaceVisible } = workspaceWindow;
+  const { visible: workspaceVisible } = workspaceWindow;
+  const [workspaceFocusTarget, setWorkspaceFocusTarget] = createSignal<string>();
+  let workspaceElement: HTMLElement | undefined;
+  let workspaceOpener: HTMLElement | undefined;
+  function setWorkspaceVisible(value: boolean) {
+    const restore =
+      !value &&
+      untrack(workspaceVisible) &&
+      (workspaceElement?.contains(document.activeElement) ||
+        document.activeElement === document.body);
+    workspaceWindow.setVisible(value);
+    if (!value) setWorkspaceFocusTarget(undefined);
+    if (restore)
+      requestAnimationFrame(() => {
+        if (workspaceVisible()) return;
+        const available = (element: HTMLElement | undefined) =>
+          element?.isConnected &&
+          !element.closest("[inert]") &&
+          element.getClientRects().length > 0;
+        // Cached Board updates and responsive navigation can replace the original button.
+        const label = workspaceOpener?.getAttribute("aria-label");
+        const replacement = label
+          ? Array.from(
+              document.querySelectorAll<HTMLElement>(`button[aria-label="${CSS.escape(label)}"]`),
+            ).find(available)
+          : undefined;
+        const target = available(workspaceOpener)
+          ? workspaceOpener
+          : (replacement ??
+            document.querySelector<HTMLElement>('.workspace-dock button[aria-label="Desktop"]'));
+        target?.focus({ preventScroll: true });
+      });
+  }
   const agentPresence = createWindowPresence();
   const { visible: agentOpen, setVisible: setAgentOpen } = agentPresence;
-  const projectSetup = props.session.systemManager
-    ? createProjectSetupInteraction(props.session.user.id, () => setAgentOpen(true))
+  const projectSetup = initialSession.systemManager
+    ? createProjectSetupInteraction(initialSession.user.id, () => setAgentOpen(true))
     : undefined;
   const setupVisible = () => projectSetup?.visible() === true;
   const [narrowViewport, setNarrowViewport] = createSignal(false);
   const agentOverlay = () => agentOpen() && narrowViewport();
-  const [projectMenuOpen, setProjectMenuOpen] = createSignal(false);
   const [projectSearchQuery, setProjectSearchQuery] = createSignal("");
   const [registrationOpen, setRegistrationOpen] = createSignal(false);
   const [boardHistoryOpen, setBoardHistoryOpen] = createSignal(false);
@@ -410,14 +295,14 @@ function FactoryWorkspace(props: {
   const [backgroundSaves, setBackgroundSaves] = createSignal<Record<string, boolean>>({});
   const [backgroundPickerExpanded, setBackgroundPickerExpanded] = createSignal(false);
   const [backgroundPickerFirstKey, setBackgroundPickerFirstKey] =
-    createSignal<DesktopBackgroundKey>(props.uiPreference.desktopBackgroundKey);
+    createSignal<DesktopBackgroundKey>(untrack(() => props.uiPreference.desktopBackgroundKey));
   const backgroundChoices = createMemo(() => orderedDesktopBackgrounds(backgroundPickerFirstKey()));
   createEffect(
     () => [settingsOpen(), selectedProjectID()] as const,
     ([open]) => {
       if (!open) return;
       // Snapshot on open, not on selection, so saving never moves the focused choice.
-      setBackgroundPickerFirstKey(desktopBackgroundKey());
+      setBackgroundPickerFirstKey(untrack(desktopBackgroundKey));
       setBackgroundPickerExpanded(false);
     },
   );
@@ -494,64 +379,34 @@ function FactoryWorkspace(props: {
       stopId: null,
     });
   }
-  const [storedConversation, setConversation] = createSignal<ConversationView>();
-  let conversationReadGeneration = 0;
+  const conversationState = createConversationState({
+    projectID: selectedProjectID,
+    ticketID: assistantTicketID,
+    selection: conversationSelection,
+    onEntry(entry) {
+      const parsed = epicProposalInput.safeParse(entry.payload["epicProposal"]);
+      if (parsed.success && !epicProposals()[entry.id])
+        setEpicProposals((current) => ({ ...current, [entry.id]: parsed.data }));
+    },
+  });
+  const conversation = conversationState.current;
+  const setConversation = conversationState.replace;
+  const publishConversation = conversationState.publish;
+  const streamedAnswer = conversationState.provisional;
   let ticketReadGeneration = 0;
   let workspaceDisposed = false;
   let modelAvailabilityReadGeneration = 0;
   async function refreshModelAvailability() {
     const generation = ++modelAvailabilityReadGeneration;
-    const value = await serverCall(getModelAvailability());
+    const value = await serverCall(getModelAvailability({ data: [] }));
     if (!workspaceDisposed && generation === modelAvailabilityReadGeneration)
       setModelRelayConfigured(value.modelRelayConfigured);
   }
-  const projectStreams = new Set<AbortController>();
   onCleanup(() => {
     workspaceDisposed = true;
-    for (const controller of projectStreams) controller.abort();
-    projectStreams.clear();
   });
-  const [streamedAnswers, setStreamedAnswers] = createSignal<
-    Record<string, { turnId: string; text: string }>
-  >({});
-  const streamedAnswer = () => {
-    const answer = streamedAnswers()[assistantKey()];
-    if (!answer?.text) return undefined;
-    const turn = conversation()?.turn;
-    if (turn?.id === answer.turnId && !["pending", "dispatching", "running"].includes(turn.state))
-      return undefined;
-    return answer;
-  };
-  const conversation = () => {
-    const value = storedConversation();
-    return value &&
-      value.projectId === selectedProjectID() &&
-      (value.ticketId ?? undefined) === assistantTicketID() &&
-      (!selectedConversation() || (value.contextId ?? "original") === selectedConversation())
-      ? value
-      : undefined;
-  };
-  function publishConversation(value: ConversationView | undefined) {
-    // A command result supersedes GETs already in flight, even when their
-    // captured turn state has the same document version.
-    conversationReadGeneration++;
-    setConversation(value);
-    if (value && !selectedConversation())
-      setConversationSelections((previous) => ({
-        ...previous,
-        [conversationScope()]: value.contextId ?? "original",
-      }));
-    setConversationReadyKey(
-      `assistant:${conversationScope()}:${value?.contextId ?? selectedConversation() ?? "original"}`,
-    );
-    for (const entry of value?.entries ?? []) {
-      const parsed = epicProposalInput.safeParse(entry.payload["epicProposal"]);
-      if (parsed.success && !epicProposals()[entry.id])
-        setEpicProposals((current) => ({ ...current, [entry.id]: parsed.data }));
-    }
-  }
   const agentCommandIds = createAgentCommandIds({
-    userId: props.session.user.id,
+    userId: initialSession.user.id,
     storage: {
       getItem: (key) => window.sessionStorage.getItem(key),
       setItem: (key, value) => window.sessionStorage.setItem(key, value),
@@ -559,7 +414,16 @@ function FactoryWorkspace(props: {
     },
   });
   const [commandAcknowledgements, setCommandAcknowledgements] = createSignal(0);
-  const [restoredMessageScope, setRestoredMessageScope] = createSignal<string>();
+  const {
+    drafts: messageDrafts,
+    restored: restoredMessageScope,
+    bind: restoreMessageDraft,
+  } = createComposerState({
+    userID: initialSession.user.id,
+    commands: agentCommandIds,
+    acknowledgements: commandAcknowledgements,
+    onError: setError,
+  });
   function agentCommandScope(
     kind: string,
     identity: string | null | undefined = assistantTicketID(),
@@ -629,76 +493,33 @@ function FactoryWorkspace(props: {
       return undefined;
     }
   }
-  const messageDrafts = new Map<string, string>();
-  function restoreMessageDraft(element: HTMLTextAreaElement, scope: () => string) {
-    let previousScope: string | undefined;
-    let restoredCommand: ReturnType<typeof agentCommandIds.latest>;
-    const retain = () => {
-      const key = previousScope ?? scope();
-      if (readAttachmentContent(element)) messageDrafts.set(key, readAttachmentContent(element));
-      else messageDrafts.delete(key);
-      try {
-        const storageKey = `chat-draft:${props.session.user.id}:${key}`;
-        if (readAttachmentContent(element))
-          sessionStorage.setItem(storageKey, readAttachmentContent(element));
-        else sessionStorage.removeItem(storageKey);
-      } catch {
-        /* Keep the visible draft when browser storage is unavailable. */
-      }
-    };
-    const reset = () => queueMicrotask(retain);
-    element.addEventListener("input", retain);
-    element.form?.addEventListener("reset", reset);
-    onCleanup(() => {
-      retain();
-      element.removeEventListener("input", retain);
-      element.form?.removeEventListener("reset", reset);
-    });
-    createEffect(
-      () => [scope(), commandAcknowledgements()] as const,
-      ([key]) => {
-        try {
-          if (previousScope === key) {
-            if (
-              restoredCommand &&
-              agentCommandIds.latest(key)?.commandId !== restoredCommand.commandId
-            ) {
-              if (readAttachmentContent(element) === restoredCommand.draft) {
-                restoreAttachmentContent(element, "");
-                messageDrafts.delete(key);
-              }
-              restoredCommand = undefined;
-              setRestoredMessageScope(undefined);
-            }
-            return;
-          }
-          if (previousScope) retain();
-          previousScope = key;
-          restoredCommand = agentCommandIds.latest(key);
-          restoreAttachmentContent(
-            element,
-            messageDrafts.get(key) ??
-              sessionStorage.getItem(`chat-draft:${props.session.user.id}:${key}`) ??
-              restoredCommand?.draft ??
-              "",
-          );
-          queueMicrotask(() => resizeComposer(element));
-          setRestoredMessageScope(restoredCommand?.draft ? key : undefined);
-        } catch (cause) {
-          setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
-        }
-      },
-    );
-  }
   const [delivery, setDelivery] = createSignal<DeliveryView>();
-  const [selectedKnowledgePageID, setSelectedKnowledgePageID] = createSignal<string>();
-  const [repositoryDocuments, setRepositoryDocuments] = createSignal<RepositoryDocument[]>([]);
-  const [openRepositoryDocument, setOpenRepositoryDocument] =
-    createSignal<OpenRepositoryDocument>();
-  const [knowledgeGeneration, setKnowledgeGeneration] = createSignal<KnowledgeGeneration>();
-  const [knowledgeHistory, setKnowledgeHistory] = createSignal<KnowledgeRevision[]>([]);
-  const [knowledgeSearch, setKnowledgeSearch] = createSignal<KnowledgeSearchResult[]>([]);
-  const [knowledgeSearchQuery, setKnowledgeSearchQuery] = createSignal("");
+  const knowledge = createKnowledgeState({
+    projectID: selectedProjectID,
+    canDevelop: canDevelopProject,
+    tabs: workspaces.tabs,
+    openTab: openWorkspaceTab,
+    mutate,
+    onError: setError,
+  });
+  const {
+    drafts: knowledgeDrafts,
+    pages: knowledgePages,
+    page: knowledgePage,
+    selectedPageID: selectedKnowledgePageID,
+    documents: repositoryDocuments,
+    document: openRepositoryDocument,
+    generation: knowledgeGeneration,
+    history: knowledgeHistory,
+    results: knowledgeSearch,
+    query: knowledgeSearchQuery,
+    refresh: refreshKnowledge,
+    open: openKnowledge,
+    generate: generateKnowledge,
+    save: editKnowledgePage,
+    loadHistory: loadKnowledgeHistory,
+    search: searchProjectKnowledge,
+  } = knowledge;
   let projectControlElement: HTMLDivElement | undefined;
   let settingsControlElement: HTMLDivElement | undefined;
   let projectPopover: HTMLElement | undefined;
@@ -726,21 +547,18 @@ function FactoryWorkspace(props: {
       ? button
       : (settingsControlElement?.querySelector<HTMLButtonElement>("button") ?? undefined);
   };
-  createEffect(
-    () => true,
-    () => {
-      const query = window.matchMedia("(max-width: 900px)");
-      const update = () => {
-        if (query.matches && agentOpen()) rememberAgentOpener();
-        setProjectMenuOpen(false);
-        setSettingsOpen(false);
-        setNarrowViewport(query.matches);
-      };
-      update();
-      query.addEventListener("change", update);
-      return () => query.removeEventListener("change", update);
-    },
-  );
+  onSettled(() => {
+    const query = window.matchMedia("(max-width: 900px)");
+    const update = () => {
+      if (query.matches && agentOpen()) rememberAgentOpener();
+      setProjectMenuOpen(false);
+      setSettingsOpen(false);
+      setNarrowViewport(query.matches);
+    };
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  });
   createEffect(
     () => agentOverlay(),
     (overlay) => {
@@ -780,63 +598,39 @@ function FactoryWorkspace(props: {
       };
     },
   );
-  let knowledgeSearchRequest = 0;
-  let documentRequest = 0;
-  let knowledgeAccessEpoch = 0;
-  let knowledgeAccessKey: string | undefined;
-  createEffect(
-    () => `${selectedProjectID()}:${canDevelopProject()}`,
-    (key) => {
-      if (knowledgeAccessKey === key) return;
-      knowledgeAccessKey = key;
-      const develop = canDevelopProject();
-      knowledgeAccessEpoch += 1;
-      documentRequest += 1;
-      knowledgeSearchRequest += 1;
-      setKnowledgeHistory([]);
-      setKnowledgeSearch([]);
-      if (!develop) {
-        setRepositoryDocuments([]);
-        setOpenRepositoryDocument(undefined);
-      }
-    },
-  );
   let conversationScroll: ReturnType<typeof followConversation> | undefined;
   onCleanup(() => conversationScroll?.dispose());
 
-  createEffect(
-    () => true,
-    () => {
-      const closeTransientMenus = (event: PointerEvent) => {
-        const target = event.target as Node | null;
-        if (projectMenuOpen() && target && !projectControlElement?.contains(target)) {
-          setProjectMenuOpen(false);
-        }
-        if (settingsOpen() && target && !settingsControlElement?.contains(target)) {
-          setSettingsOpen(false);
-        }
-      };
-      const closeOnEscape = (event: KeyboardEvent) => {
-        if (event.key !== "Escape") return;
-        const opener = projectMenuOpen()
-          ? projectMenuOpener()
-          : settingsOpen()
-            ? settingsControlElement?.querySelector<HTMLButtonElement>("button")
-            : undefined;
-        if (!opener) return;
-        event.preventDefault();
+  onSettled(() => {
+    const closeTransientMenus = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (projectMenuOpen() && target && !projectControlElement?.contains(target)) {
         setProjectMenuOpen(false);
+      }
+      if (settingsOpen() && target && !settingsControlElement?.contains(target)) {
         setSettingsOpen(false);
-        opener.focus({ preventScroll: true });
-      };
-      document.addEventListener("pointerdown", closeTransientMenus, true);
-      document.addEventListener("keydown", closeOnEscape);
-      return () => {
-        document.removeEventListener("pointerdown", closeTransientMenus, true);
-        document.removeEventListener("keydown", closeOnEscape);
-      };
-    },
-  );
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const opener = projectMenuOpen()
+        ? projectMenuOpener()
+        : settingsOpen()
+          ? settingsControlElement?.querySelector<HTMLButtonElement>("button")
+          : undefined;
+      if (!opener) return;
+      event.preventDefault();
+      setProjectMenuOpen(false);
+      setSettingsOpen(false);
+      opener.focus({ preventScroll: true });
+    };
+    document.addEventListener("pointerdown", closeTransientMenus, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeTransientMenus, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  });
 
   createEffect(
     () => [projectMenuOpen(), settingsOpen()] as const,
@@ -869,21 +663,56 @@ function FactoryWorkspace(props: {
     },
   );
 
-  const currentWorkspaceState = () => {
-    return projectWorkspaces()[selectedProjectID() ?? "factory"];
-  };
-  const workspaceTabs = () => currentWorkspaceState()?.tabs ?? [];
-  const knowledgePages = useZeroQuery(() => {
-    const projectId = selectedProjectID();
-    return projectId && workspaceTabs().some((tab) => tab.view === "knowledge")
-      ? zeroQueries.knowledge.list({ projectId })
-      : null;
-  });
+  const trashTickets = useZeroQuery(
+    () => {
+      const projectId = selectedProjectID();
+      return projectId && workspaceTabs().some((tab) => tab.view === "trash")
+        ? zeroQueries.tickets.trash({ projectId, limit: trashLimit() + 1 })
+        : null;
+    },
+    { ttl: "none" },
+  );
   const activeWorkspaceTab = () => {
     if (!workspaceWindow.present()) return undefined;
     return selectedWorkspaceTab(currentWorkspaceState());
   };
   const workspaceView = () => activeWorkspaceTab()?.view;
+  createEffect(
+    () => [workspaceVisible(), activeWorkspaceTab()?.id, workspaceFocusTarget()] as const,
+    ([visible, id, requested]) => {
+      if (!visible || !id || requested !== id) return;
+      let disposed = false;
+      let observer: MutationObserver | undefined;
+      onSettled(() => {
+        const panel = document.getElementById(workspacePanelID);
+        if (disposed || !panel) return;
+        const handoff = () => {
+          if (disposed || !workspaceVisible() || activeWorkspaceTab()?.id !== id) return;
+          if (panel.contains(document.activeElement)) {
+            setWorkspaceFocusTarget(undefined);
+            return;
+          }
+          const view = activeWorkspaceTab()?.view;
+          const target =
+            view === "ticket-draft"
+              ? panel.querySelector<HTMLElement>('[aria-label="Ticket title"]')
+              : view === "ticket"
+                ? panel.querySelector<HTMLElement>("article.ticket-document:not([hidden])")
+                : panel;
+          if (!target || target.closest("[inert]")) return;
+          target.focus({ preventScroll: true });
+          setWorkspaceFocusTarget(undefined);
+        };
+        observer = new MutationObserver(handoff);
+        observer.observe(panel, { childList: true, subtree: true });
+        handoff();
+      });
+      return () => {
+        disposed = true;
+        observer?.disconnect();
+      };
+    },
+  );
   createEffect(
     () => activeWorkspaceTab()?.proposalID,
     (proposalID) => {
@@ -895,20 +724,23 @@ function FactoryWorkspace(props: {
     return tab ? workspaceTabElementID(tab.id) : undefined;
   };
 
-  function updateCurrentWorkspace(update: (state: ProjectWorkspaceState) => ProjectWorkspaceState) {
-    const projectID = selectedProjectID() ?? "factory";
-    setProjectWorkspaces((states) => ({
-      ...states,
-      [projectID]: update(states[projectID] ?? { tabs: [] }),
-    }));
-  }
-
-  function openWorkspaceTab(tab: WorkspaceTab) {
-    updateCurrentWorkspace((state) => openWorkspaceTabState(state, tab));
+  function openWorkspaceTab(tab: WorkspaceTab, publish = true) {
+    if (
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement !== document.body &&
+      !workspaceElement?.contains(document.activeElement)
+    )
+      workspaceOpener = document.activeElement;
+    workspaces.open(tab);
     setWorkspaceVisible(true);
+    setWorkspaceFocusTarget(tab.id);
+    if (publish) publishWorkspaceLocation(tab);
   }
 
   function openSettings() {
+    if (settingsControlElement?.contains(document.activeElement))
+      workspaceOpener =
+        settingsControlElement.querySelector<HTMLButtonElement>("button") ?? workspaceOpener;
     setSettingsOpen(false);
     if (narrowViewport()) setAgentOpen(false);
     const setupProject = projectSetup?.draft();
@@ -942,42 +774,68 @@ function FactoryWorkspace(props: {
     );
   }
 
-  function updateWorkspaceTab(tab: WorkspaceTab, projectID = selectedProjectID()) {
-    if (!projectID) return;
-    setProjectWorkspaces((states) => ({
-      ...states,
-      [projectID]: updateWorkspaceTabState(states[projectID] ?? { tabs: [] }, tab),
-    }));
-  }
+  const updateWorkspaceTab = workspaces.update;
 
   function activateWorkspaceTab(tab: WorkspaceTab) {
-    updateCurrentWorkspace((state) => ({ ...state, activeTabID: tab.id }));
+    const reopening = !workspaceVisible();
+    if (reopening && document.activeElement instanceof HTMLElement)
+      workspaceOpener = document.activeElement;
+    inboxNavigation?.abort();
+    setInboxQueue(undefined);
+    setInboxSourceOpening(false);
+    workspaces.activate(tab);
     setWorkspaceVisible(true);
+    if (reopening) setWorkspaceFocusTarget(tab.id);
     if (tab.ticketID && tab.ticketID !== selectedTicketID()) {
       loadTicketContext(tab.ticketID);
     }
+    publishWorkspaceLocation(tab);
   }
 
   function closeWorkspaceTab(tabID: string) {
-    const state = currentWorkspaceState();
-    if (!state) return;
-    const result = closeWorkspaceTabState(state, tabID);
-    if (!result.closed) return;
-    updateCurrentWorkspace(() => result.state);
+    const result = workspaces.close(tabID);
+    if (!result?.closed) return;
     if (!result.state.tabs.length) setWorkspaceVisible(false);
     if (result.next) activateWorkspaceTab(result.next);
+    else publishWorkspaceLocation();
   }
 
   createEffect(
-    () => projects.data(),
-    (list) => {
+    () => ({
+      list: projects.data()?.map((project) => ({ ...project })),
+      completeness: projects.completeness(),
+      // Reconcile external availability, not an optimistic local selection.
+      selected: untrack(selectedProjectID),
+      home: untrack(() => !navigation || navigation.location().view === "home"),
+      factoryTabs: untrack(() => Boolean(projectWorkspaces()["factory"]?.tabs.length)),
+      manager: initialSession.systemManager,
+    }),
+    ({ list, completeness, selected, home, factoryTabs, manager }) => {
+      if (
+        completeness === "complete" &&
+        selected &&
+        !list?.some((project) => project.id === selected)
+      ) {
+        ticketReadGeneration++;
+        conversationState.invalidate();
+        setSelectedProjectID(undefined);
+        setSelectedTicketID(undefined);
+        setDetail(undefined);
+        setConversation(undefined);
+        setChanges([]);
+        setAttempts([]);
+        setAppPreviews([]);
+        setDelivery(undefined);
+        resetAgentView();
+        setWorkspaceVisible(false);
+      }
       if (list && securityReturn && !securityReturnRestored) {
         securityReturnRestored = true;
         const project =
           securityReturn.project && list.find((item) => item.id === securityReturn.project?.id);
         if (
           (!securityReturn.project || project) &&
-          (securityReturn.scope !== "system" || props.session.systemManager)
+          (securityReturn.scope !== "system" || manager)
         ) {
           setSelectedProjectID(project?.id);
           openWorkspaceTab({
@@ -991,287 +849,141 @@ function FactoryWorkspace(props: {
         }
       }
       // A slow planning projection must not replace Settings already opened at Factory scope.
-      if (!selectedProjectID() && !projectWorkspaces()["factory"]?.tabs.length && list?.[0])
-        setSelectedProjectID(list[0].id);
+      if (home && !selected && !factoryTabs && list?.[0]) setSelectedProjectID(list[0].id);
     },
   );
 
-  createEffect(
-    () => ({
-      pages: knowledgePages.data() ?? [],
-      selectedID: selectedKnowledgePageID(),
-      document: openRepositoryDocument(),
-    }),
-    ({ pages, selectedID, document }) => {
-      if (!document && pages[0] && !pages.some((page) => page.id === selectedID)) {
-        setSelectedKnowledgePageID(pages[0].id);
-      }
-    },
-  );
-
-  async function readLifecycleState(signal: AbortSignal) {
-    const projectID = selectedProjectID();
-    if (!projectID) return;
-    const [changeBody, attemptBody, previewBody] = await Promise.all([
-      serverCall(invoke(getChanges, { signal }, projectID)),
-      serverCall(invoke(getRuntimeAttempts, { signal }, projectID)),
-      serverCall(invoke(getProjectPreviews, { signal }, projectID)),
-    ]);
-    if (selectedProjectID() !== projectID) return;
-    setChanges(changeBody.changes);
-    setAttempts(attemptBody.attempts);
-    setAppPreviews(previewBody.previews);
-    const staging = attemptBody.attempts.find(
-      (attempt) =>
-        attempt.projectId === projectID &&
-        attempt.runtimeKind === "staging" &&
-        attempt.currentStaging &&
-        attempt.state === "ready",
-    );
-    setProjectWorkspaces((states) => {
-      const state = states[projectID];
-      if (!state) return states;
-      const next = followStagingPromotion(state, projectID, staging?.id);
-      return next === state ? states : { ...states, [projectID]: next };
-    });
-    setLifecycleProjectID(projectID);
-    if (detail()?.ticket.trashedAt && detail()?.ticket.id === selectedTicketID()) {
-      await refreshTicketDetail();
-    }
-    const changeID = selectedChange()?.id;
-    if (changeID) {
-      const observeStatus = !agentOpen();
-      const read = observeStatus ? agentReadFence.beginRead() : undefined;
-      const [agentView, deliveryView] = await Promise.all([
-        observeStatus
-          ? serverCall(invoke(getAgentView, { signal }, changeID, false))
-          : Promise.resolve(undefined),
-        serverCall(invoke(getDelivery, { signal }, changeID)),
-      ]);
-      if (selectedChange()?.id !== changeID) return;
-      if (agentView && read && agentReadFence.current(read)) {
-        publishAgentView(changeID, agentView, read, false);
-      }
-      setDelivery(deliveryView);
-    } else if (!changeID) {
-      resetAgentView();
-      setDelivery(undefined);
-    }
-    if (projectID && workspaceView() === "knowledge") {
-      await refreshKnowledge(signal);
-    }
-  }
-  const lifecyclePoller = createLifecyclePoller({
-    read: readLifecycleState,
-    visible: () => !document.hidden,
-    onError: setSyncError,
-  });
-  const refreshLifecycleState = lifecyclePoller.refresh;
-
-  const agentActivityTarget = createMemo(() =>
-    agentOpen() && selectedChange()?.id ? `${selectedChange()?.id}:${agentActivityRevision()}` : "",
-  );
-  createEffect(
-    () => agentActivityTarget(),
-    (target) => {
-      const changeID = target.split(":")[0];
-      if (!changeID) return;
-      const observedChangeID = changeID;
-      const controller = new AbortController();
-      let detach: (() => void) | undefined;
-      function synchronize() {
-        detach?.();
-        detach = undefined;
-        if (document.hidden || controller.signal.aborted) return;
-        const read = agentReadFence.beginRead();
-        detach = observeAgentActivity({
-          changeID: observedChangeID,
-          signal: controller.signal,
-          snapshot: (view) => {
-            if (selectedChange()?.id === changeID && agentOpen())
-              publishAgentView(observedChangeID, view, read);
-          },
-          disconnected: () => {
-            if (selectedChange()?.id === changeID && agentReadFence.current(read))
-              setAgent((view) => ({ ...view, messagesAvailable: false }));
-          },
-        });
-      }
-      synchronize();
-      document.addEventListener("visibilitychange", synchronize);
-      return () => {
-        controller.abort();
-        detach?.();
-        document.removeEventListener("visibilitychange", synchronize);
-      };
-    },
-  );
-
-  async function refreshTicketDetail(ticketID = selectedTicketID()) {
-    const generation = ++ticketReadGeneration;
-    const projectID = selectedProjectID();
-    if (ticketID) {
-      const body = await serverCall(getTicketDetail(ticketID));
-      if (
-        workspaceDisposed ||
-        generation !== ticketReadGeneration ||
-        selectedProjectID() !== projectID ||
-        selectedTicketID() !== ticketID ||
-        (detail()?.ticket.id === ticketID && body.ticket.version < (detail()?.ticket.version ?? 0))
-      )
-        return;
-      setDetail(body);
-    }
-  }
-  async function refreshConversation(
-    projectID = selectedProjectID(),
-    ticketID = assistantTicketID(),
-  ) {
-    const generation = ++conversationReadGeneration;
-    const selection = selectedConversation();
-    if (!projectID) {
-      setConversation(undefined);
-      return;
-    }
-    const value = await serverCall(
-      getConversation(projectID, {
-        ...(ticketID ? { ticketId: ticketID } : {}),
-        ...(selection ? { contextId: selection } : {}),
-      }),
-    );
-    if (
-      workspaceDisposed ||
-      generation !== conversationReadGeneration ||
-      selectedProjectID() !== projectID ||
-      assistantTicketID() !== ticketID ||
-      selectedConversation() !== selection
-    )
-      return;
-    try {
-      if (value) acknowledgeConversation(value);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
-    }
-    publishConversation(value ?? undefined);
-  }
-  async function refreshServerState() {
-    await Promise.all([refreshLifecycleState(), refreshTicketDetail(), refreshConversation()]);
-  }
-  createEffect(
-    () => [agentOpen(), selectedProjectID(), assistantTicketID(), selectedConversation()] as const,
-    ([open, projectID, ticketID]) => {
-      if (!open || !projectID) return;
-      void refreshLifecycleState();
-      let stopped = false;
-      let timer: ReturnType<typeof setTimeout>;
-      async function refresh() {
-        try {
-          if (!document.hidden)
-            await Promise.all([
-              refreshConversation(projectID, ticketID),
-              ticketID ? refreshTicketDetail(ticketID) : Promise.resolve(),
-            ]);
-        } catch {
-          /* Existing input remains visible while connectivity returns. */
-        }
-        if (!stopped) timer = setTimeout(() => void refresh(), 1500);
-      }
-      void refresh();
-      return () => {
-        stopped = true;
-        clearTimeout(timer);
-      };
-    },
-  );
-  void refreshServerState().catch(() => undefined);
-  const visibleAgain = () => {
-    if (!document.hidden) void refreshLifecycleState();
-  };
-  document.addEventListener("visibilitychange", visibleAgain);
-  onCleanup(() => {
-    lifecyclePoller.stop();
-    document.removeEventListener("visibilitychange", visibleAgain);
+  const {
+    selectedProject,
+    ticketList,
+    changeFor,
+    stagingRuntimeFor,
+    epicList,
+    prerequisitesFor,
+    dependencyCandidates,
+    blockersFor,
+    historyTickets,
+    boardHasMore,
+    boardPageLoading,
+    boardPageLabel,
+    boardStatus,
+    scopedTickets,
+    lane,
+    filteredProjects,
+  } = createBoardProjection({
+    changes,
+    dependencies,
+    attempts,
+    projects,
+    selectedProjectID,
+    projectSearchQuery,
+    tickets,
+    ticketLimit,
+    history,
+    historyLimit,
+    prerequisiteTickets,
+    foundTickets,
+    trashTickets,
+    detail,
+    epics,
+    boardHistoryOpen,
   });
 
-  const changesByTicket = createMemo(
-    () => new Map(changes().map((change) => [change.ticketId, change])),
-  );
-  function changeFor(ticketID: string) {
-    return changesByTicket().get(ticketID);
-  }
-  const prerequisitesByTicket = createMemo(() => {
-    const byId = new Map(ticketList().map((ticket) => [ticket.id, ticket]));
-    const result = new Map<string, PrerequisiteView[]>();
-    for (const edge of dependencies.data() ?? []) {
-      const ticket = byId.get(edge.prerequisiteId);
-      if (!ticket) continue;
-      const change = changeFor(ticket.id);
-      const prerequisite = {
-        id: ticket.id,
-        title: ticket.title,
-        state: ticket.state,
-        delivered: prerequisiteIsDelivered({
-          ticketState: ticket.state,
-          changeState: change?.state,
-          verificationState: change?.verificationState,
-          mergeState: change?.mergeState,
-          promotionState: change?.promotionState,
-        }),
-      };
-      result.set(edge.ticketId, [...(result.get(edge.ticketId) ?? []), prerequisite]);
-    }
-    return result;
+  const {
+    selectedChange,
+    latestRevision,
+    preparingImplementation,
+    codingWriterBlocked,
+    conversationMode,
+    historicalCoding,
+    canPromptBuild,
+    pendingInterview,
+    ticketClarificationAction,
+    latestRequirement,
+    agentTurnBusy,
+    agentViewLoaded,
+    agentCanRun,
+    agentNeedsResolution,
+    ticketWorkspaceReady,
+    ticketWorkspaceStatus,
+    visibleConversation,
+    answeredQuestionIDs,
+    answerSummary,
+    currentInterviewQuestion,
+    retainedCodingDraft,
+    interviewOwnsComposer,
+    conversationPlaceholder,
+  } = createAssistantPresentation({
+    selectedTicketID,
+    changeFor,
+    observedAgentChangeID,
+    implementationPreparation,
+    selectedProjectID,
+    assistantTicketID,
+    detail,
+    canDevelopProject,
+    conversation,
+    correctionTarget,
+    workspaceView,
+    activeWorkspaceTab,
+    pendingInterviewAnswer,
+    assistantKey,
+    clarificationPaused,
+    assistantPending,
+    clarificationOrigins,
+    agentOpen,
+    agent,
+    codingWriter,
+    agentCommandScope,
+    messageDrafts,
+    props,
+    agentCommandIds,
   });
-  function prerequisitesFor(ticketID: string) {
-    return prerequisitesByTicket().get(ticketID) ?? [];
-  }
-  function blockersFor(ticketID: string) {
-    return prerequisitesFor(ticketID).filter((prerequisite) => !prerequisite.delivered);
-  }
-  function dependencyCandidates(ticketID: string) {
-    const edges = dependencies.data() ?? [];
-    const linked = new Set(prerequisitesFor(ticketID).map((prerequisite) => prerequisite.id));
-    return ticketList()
-      .filter(
-        (ticket) =>
-          ticket.id !== ticketID &&
-          !linked.has(ticket.id) &&
-          !dependencyWouldCycle(edges, ticketID, ticket.id),
-      )
-      .sort((a, b) => a.title.localeCompare(b.title));
-  }
-  function stagingRuntimeFor(projectID: string) {
-    return attempts().find(
-      (attempt) =>
-        attempt.projectId === projectID &&
-        attempt.runtimeKind === "staging" &&
-        attempt.currentStaging === true &&
-        !["stopped", "failed"].includes(attempt.state),
-    );
-  }
-  function lane(ticket: Ticket): BoardStage | "history" {
-    const change = changeFor(ticket.id);
-    return ticketBoardStage({
-      ticketState: ticket.state,
-      changeState: change?.state,
-      verificationState: change?.verificationState,
-      buildTurnState: change?.buildTurnState,
-      buildTurnPurpose: change?.buildTurnPurpose,
-      implementationState: change?.implementationState,
-    });
-  }
 
-  function boardStatus(ticket: Ticket) {
-    const change = changeFor(ticket.id);
-    return ticketBoardStatus({
-      ticketState: ticket.state,
-      changeState: change?.state,
-      verificationState: change?.verificationState,
-      buildTurnState: change?.buildTurnState,
-      buildTurnPurpose: change?.buildTurnPurpose,
-      implementationState: change?.implementationState,
+  const { refreshConversation, refreshTicketDetail, refreshServerState, refreshLifecycleState } =
+    createDesktopReads({
+      selectedProjectID,
+      setChanges,
+      setAttempts,
+      setAppPreviews,
+      workspaces,
+      setLifecycleProjectID,
+      detail,
+      selectedTicketID,
+      get selectedChange() {
+        return selectedChange;
+      },
+      agentOpen,
+      agentReadFence,
+      publishAgentView,
+      setDelivery,
+      resetAgentView,
+      setSyncError,
+      assistantTicketID,
+      workspaceTabs,
+      refreshKnowledge,
+      agentActivityRevision,
+      setAgent,
+      get ticketReadGeneration() {
+        return ticketReadGeneration;
+      },
+      set ticketReadGeneration(value) {
+        ticketReadGeneration = value;
+      },
+      get workspaceDisposed() {
+        return workspaceDisposed;
+      },
+      set workspaceDisposed(value) {
+        workspaceDisposed = value;
+      },
+      setDetail,
+      conversationReadFence: conversationState,
+      selectedConversation,
+      setConversation,
+      acknowledgeConversation,
+      setError,
+      publishConversation,
     });
-  }
 
   async function mutate<T>(
     operation: () => Promise<T>,
@@ -1342,835 +1054,184 @@ function FactoryWorkspace(props: {
     }
   }
 
-  async function register(event: SubmitEvent) {
-    event.preventDefault();
-    const form = event.currentTarget as HTMLFormElement;
-    const data = new FormData(form);
-    await mutate(async () => {
-      const project = await serverCall(
-        registerProject({
-          name: String(data.get("name") ?? ""),
-          slug: String(data.get("slug") ?? ""),
-          repositoryUrl: String(data.get("repositoryUrl") ?? ""),
-          defaultBranch: String(data.get("defaultBranch") ?? ""),
-          devcontainerPath: String(data.get("devcontainerPath") ?? ""),
-        }),
-      );
-      setSelectedProjectID(project.id);
-      setProjectMenuOpen(false);
-      setRegistrationOpen(false);
-      form.reset();
-    });
-  }
+  const {
+    register,
+    saveEpic,
+    assignTicketEpic,
+    editDependency,
+    openTicketDraft,
+    publishTicketDraft,
+    moveTicket,
+  } = createProjectCommands({
+    mutate,
+    setSelectedProjectID,
+    setProjectMenuOpen,
+    setRegistrationOpen,
+    zero,
+    selectedProjectID,
+    commitZeroMutation,
+    setSelectedEpicID,
+    error,
+    detail,
+    refreshTicketDetail,
+    personalDrafts,
+    personalDraftKey,
+    setSelectedTicketID,
+    setDetail,
+    openWorkspaceTab,
+    props,
+    workspaces,
+    selectTicket,
+  });
 
-  async function saveEpic(input: EpicEdit, current?: Epic) {
-    const client = zero();
-    const projectId = selectedProjectID();
-    if (!client || !projectId) return false;
-    const id = current?.id ?? crypto.randomUUID();
-    const result = await mutate(async () => {
-      await commitZeroMutation(
-        client.mutate(
-          current
-            ? zeroMutators.epics.update({
-                projectId,
-                epicId: id,
-                expectedVersion: current.version,
-                ...input,
-              })
-            : zeroMutators.epics.create({ projectId, id, ...input }),
-        ).server,
-      );
-      if (selectedProjectID() === projectId) setSelectedEpicID(id);
-    });
-    if (!result.ok)
-      throw new Error(
-        error() || "Epic could not be saved. Check Project access and refresh before retrying.",
-      );
-    return true;
-  }
+  const {
+    saveTicketDocument,
+    confirmRequirements,
+    saveTechnicalDesign,
+    confirmEpicWork,
+    createFollowUp,
+    ticketTrashCommand,
+    openCodingOptions,
+    implementTicket,
+    approveDelivery,
+    retryReview,
+    resumeChecks,
+  } = createTicketCommands({
+    detail,
+    get latestRevision() {
+      return latestRevision;
+    },
+    mutate,
+    agentCommandIds,
+    acknowledgeCommand,
+    refreshTicketDetail,
+    setAgentOpen,
+    refreshConversation,
+    canDevelopProject,
+    selectedProjectID,
+    setSelectedEpicID,
+    closeWorkspaceTab,
+    selectTicket,
+    refreshServerState,
+    selectedTicketID,
+    setSelectedTicketID,
+    setDetail,
+    openWorkspaceTab,
+    ticketList,
+    get selectedChange() {
+      return selectedChange;
+    },
+    implementationPreparation,
+    setError,
+    setImplementationPreparation,
+    get preparingImplementation() {
+      return preparingImplementation;
+    },
+    assistantTicketID,
+    changeFor,
+    setCorrectionTarget,
+    setDelivery,
+    refreshLifecycleState,
+    delivery,
+    agentCommandScope,
+  });
 
-  async function assignTicketEpic(epicId: string | null) {
-    const client = zero();
-    const current = detail()?.ticket;
-    if (!client || !current) return;
-    await mutate(async () => {
-      await commitZeroMutation(
-        client.mutate(
-          zeroMutators.tickets.assignEpic({
-            projectId: current.projectId,
-            ticketId: current.id,
-            expectedVersion: current.version,
-            epicId,
-          }),
-        ).server,
-      );
-      await refreshTicketDetail(current.id);
-    });
-  }
+  const {
+    newConversation,
+    startAgent,
+    resumeCoding,
+    stopAgent,
+    checkStopStatus,
+    recheckStopConfirmation,
+    promptAgent,
+  } = createCodingCommands({
+    assistantContextLoading,
+    selectedProjectID,
+    assistantTicketID,
+    get selectedChange() {
+      return selectedChange;
+    },
+    assistantKey,
+    agentCommandScope,
+    mutate,
+    agentCommandIds,
+    conversation,
+    acknowledgeCommand,
+    setConversationSelections,
+    conversationScope,
+    refreshServerState,
+    publishConversation,
+    get codingWriterBlocked() {
+      return codingWriterBlocked;
+    },
+    setError,
+    agent,
+    chosenCodingReasoning,
+    publishAgentView,
+    refreshLifecycleState,
+    delivery,
+    retryReview,
+    selectedTicketID,
+    selectedConversation,
+    get conversationMode() {
+      return conversationMode;
+    },
+    setConversation,
+    agentReadFence,
+    get historicalCoding() {
+      return historicalCoding;
+    },
+    correctionTarget,
+  });
 
-  async function editDependency(kind: "add" | "remove", prerequisiteId: string) {
-    const client = zero();
-    const current = detail()?.ticket;
-    if (!client || !current) return false;
-    const result = await mutate(async () => {
-      await commitZeroMutation(
-        client.mutate(
-          zeroMutators.dependencies[kind]({
-            projectId: current.projectId,
-            ticketId: current.id,
-            prerequisiteId,
-            expectedVersion: current.version,
-          }),
-        ).server,
-      );
-      await refreshTicketDetail(current.id);
-    });
-    return result.ok;
-  }
-
-  function openTicketDraft(proposed?: PersonalTicketDraft, stage?: "inbox" | "ready") {
-    const projectID = selectedProjectID();
-    if (!projectID) return;
-    const retained = personalDrafts.get(projectID) ?? readPersonalTicketDraft(personalDraftKey());
-    const previous =
-      retained.title.trim() || retained.description.trim() ? retained : (proposed ?? retained);
-    const draft = stage ? { ...previous, stage } : previous;
-    personalDrafts.set(projectID, draft);
-    if (proposed || stage) {
-      try {
-        localStorage.setItem(personalDraftKey(), JSON.stringify(draft));
-      } catch {
-        /* Memory retains the proposed draft. */
-      }
-    }
-    setSelectedTicketID(undefined);
-    setDetail(undefined);
-    openWorkspaceTab({
-      id: `ticket-draft:${projectID}`,
-      view: "ticket-draft",
-      label: draft.title || "New ticket",
-    });
-  }
-
-  async function publishTicketDraft(draft: PersonalTicketDraft, state: "inbox" | "ready") {
-    const projectID = selectedProjectID();
-    const client = zero();
-    if (!projectID || !client) return false;
-    const result = await mutate(async () => {
-      await commitZeroMutation(
-        client.mutate(
-          zeroMutators.tickets.create({
-            id: draft.id,
-            projectId: projectID,
-            title: draft.title,
-            description: draft.description,
-            state,
-          }),
-        ).server,
-      );
-      personalDrafts.delete(projectID);
-      try {
-        localStorage.removeItem(`ticket-draft:${props.session.user.id}:${projectID}`);
-      } catch {
-        /* Created work is authoritative even without browser storage. */
-      }
-      updateCurrentWorkspace(
-        (current) => closeWorkspaceTabState(current, `ticket-draft:${projectID}`).state,
-      );
-      selectTicket(draft.id);
-      await refreshTicketDetail(draft.id);
-    });
-    return result.ok;
-  }
-
-  async function moveTicket(ticket: Ticket, state: "inbox" | "ready") {
-    const client = zero();
-    if (!client) return false;
-    const result = await mutate(async () => {
-      await commitZeroMutation(
-        client.mutate(
-          zeroMutators.tickets.move({
-            projectId: ticket.projectId,
-            ticketId: ticket.id,
-            expectedVersion: ticket.version,
-            state,
-          }),
-        ).server,
-      );
-      await refreshTicketDetail(ticket.id);
-    });
-    return result.ok;
-  }
-
-  async function saveTicketDocument(input: TicketDraft) {
-    const current = detail();
-    const revision = latestRevision();
-    if (!current) return undefined;
-    const scope = `document:${current.ticket.id}`;
-    const payload = {
-      expectedVersion: input.expectedVersion ?? current.ticket.version,
-      expectedDocumentId:
-        input.expectedDocumentId === undefined
-          ? (current.documentRevisions[0]?.id ?? null)
-          : input.expectedDocumentId,
-      requirementRevisionId:
-        input.requirementRevisionId === undefined
-          ? (revision?.id ?? null)
-          : input.requirementRevisionId,
-      title: input.title,
-      description: input.description,
-      requirement: input.requirement,
-    };
-    const result = await mutate(async () => {
-      const commandId = agentCommandIds.forInput(scope, JSON.stringify(payload));
-      const saved = await serverCall(saveTicket(current.ticket.id, { commandId, ...payload }));
-      acknowledgeCommand(scope, commandId);
-      // A competing read may supersede this refresh. The write's exact base
-      // comes from its acknowledgement, never whichever projection arrives first.
-      await refreshTicketDetail(current.ticket.id).catch(() => undefined);
-      return saved;
-    });
-    return result.ok ? result.value : undefined;
-  }
-
-  async function confirmRequirements(draft: TicketDraft) {
-    const current = detail();
-    const proposal = current?.proposal;
-    if (!current || !proposal) return undefined;
-    const result = await mutate(async () => {
-      const payload = {
-        expectedVersion: proposal.base.version,
-        expectedDocumentId: proposal.base.documentId,
-        requirementRevisionId: proposal.base.revisionId,
-        proposalEntryId: proposal.id,
-        title: draft.title,
-        description: draft.description,
-        requirement: draft.requirement,
-      };
-      const scope = `confirm:${current.ticket.id}`;
-      const commandId = agentCommandIds.forInput(scope, JSON.stringify(payload));
-      const saved = await serverCall(saveTicket(current.ticket.id, { commandId, ...payload }));
-      acknowledgeCommand(scope, commandId);
-      await refreshTicketDetail(current.ticket.id).catch(() => undefined);
-      return saved;
-    });
-    return result.ok ? result.value : undefined;
-  }
-
-  async function confirmEpicWork(entryID: string, proposal: EpicProposal) {
-    const projectID = selectedProjectID();
-    if (!projectID) return false;
-    const result = await mutate(async () => {
-      const scope = `epic-confirm:${entryID}`;
-      const commandId = agentCommandIds.forInput(scope, JSON.stringify(proposal));
-      const value = await serverCall(
-        confirmEpicProposal(projectID, entryID, { commandId, proposal }),
-      );
-      acknowledgeCommand(scope, commandId);
-      if (selectedProjectID() !== projectID) return;
-      setSelectedEpicID(value.epicId);
-      setAgentOpen(false);
-      closeWorkspaceTab(`epic-proposal:${entryID}`);
-      const first = value.ticketIds[0];
-      if (first) selectTicket(first);
-      await refreshServerState();
-    });
-    return result.ok;
-  }
-
-  async function createFollowUp() {
-    const current = detail();
-    const revision = latestRevision();
-    if (!current || !revision) return;
-    const projectID = selectedProjectID();
-    const stillSelected = () =>
-      selectedProjectID() === projectID && selectedTicketID() === current.ticket.id;
-    const scope = `follow-up:${current.ticket.id}`;
-    const input = {
-      requirementRevisionId: revision.id,
-      expectedDocumentId: current.documentRevisions[0]?.id ?? null,
-    };
-    await mutate(async () => {
-      const commandId = agentCommandIds.forInput(scope, JSON.stringify(input));
-      const result = await serverCall(
-        createTicketFollowUp(current.ticket.id, { commandId, ...input }),
-      );
-      acknowledgeCommand(scope, commandId);
-      if (!stillSelected()) return;
-      await refreshTicketDetail(current.ticket.id);
-      const next = await serverCall(getTicketDetail(result.ticketId));
-      if (!stillSelected()) return;
-      setSelectedTicketID(result.ticketId);
-      setDetail(next);
-      openWorkspaceTab({
-        id: `ticket:${result.ticketId}`,
-        view: "ticket",
-        label: next.ticket.title,
-        ticketID: result.ticketId,
-      });
-    });
-  }
-
-  async function ticketTrashCommand(ticketID: string, action: "trash" | "restore") {
-    const ticket =
-      detail()?.ticket.id === ticketID
-        ? detail()?.ticket
-        : ticketList().find((item) => item.id === ticketID);
-    if (action === "restore" && !ticket) return;
-    await mutate(async () => {
-      if (action === "restore" && ticket) await serverCall(restoreTicket(ticketID, ticket.version));
-      else await serverCall(trashTicket(ticketID));
-      await refreshServerState();
-    });
-  }
-
-  function openCodingOptions(revisionID: string) {
-    const projectID = selectedProjectID();
-    const ticket = detail()?.ticket;
-    if (!projectID || !ticket || !canDevelopProject() || selectedChange()) return;
-    const previous = implementationPreparation();
-    let reasoning =
-      previous?.projectID === projectID &&
-      previous.ticketID === ticket.id &&
-      previous.revisionID === revisionID
-        ? previous.reasoning
-        : undefined;
-    try {
-      const saved = agentCommandIds.latest(`implement:${ticket.id}`);
-      if (saved) {
-        const input = z
-          .object({
-            ticketID: z.literal(ticket.id),
-            revisionID: z.literal(revisionID),
-            codingReasoning: codingReasoningInput.optional(),
-          })
-          .safeParse(JSON.parse(saved.input));
-        if (input.success) reasoning = input.data.codingReasoning;
-      }
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
-      return;
-    }
-    setImplementationPreparation({
-      projectID,
-      ticketID: ticket.id,
-      revisionID,
-      reasoning,
-      failure: undefined,
-    });
-    setAgentOpen(true);
-  }
-
-  async function implementTicket(revisionID: string, codingReasoning?: CodingReasoning) {
-    const projectID = selectedProjectID();
-    const ticket = detail()?.ticket;
-    if (!ticket || !projectID) return;
-    const prepared = preparingImplementation();
-    const scope = `implement:${ticket.id}`;
-    await mutate(async () => {
-      const options = codingReasoning ? { codingReasoning } : {};
-      const commandId = agentCommandIds.forInput(
-        scope,
-        JSON.stringify({ ticketID: ticket.id, revisionID, ...options }),
-      );
-      try {
-        await serverCall(
-          requestImplementation(ticket.id, { commandId, revisionId: revisionID, ...options }),
-        );
-      } catch (cause) {
-        if (!prepared) throw cause;
-        setImplementationPreparation((current) =>
-          current?.projectID === projectID &&
-          current.ticketID === ticket.id &&
-          current.revisionID === revisionID
-            ? {
-                ...current,
-                failure:
-                  cause instanceof Error ? cause.message : "Implementation response unavailable.",
-              }
-            : current,
-        );
-        return;
-      }
-      acknowledgeCommand(scope, commandId);
-      await refreshServerState();
-      if (
-        prepared &&
-        implementationPreparation() === prepared &&
-        selectedProjectID() === projectID &&
-        selectedTicketID() === ticket.id &&
-        assistantTicketID() === ticket.id
-      ) {
-        setImplementationPreparation(undefined);
-        const change = changeFor(ticket.id);
-        if (change) setCorrectionTarget(change.id);
-      }
-    });
-  }
-
-  async function approveDelivery(changeID: string) {
-    await mutate(async () => {
-      const value = await serverCall(requestDeliveryApproval(changeID));
-      if (selectedChange()?.id === changeID) setDelivery(value);
-      await refreshLifecycleState();
-    });
-  }
-
-  async function retryReview(changeID: string) {
-    const reviewId = selectedChange()?.id === changeID ? delivery()?.reviewId : undefined;
-    if (!reviewId) return;
-    const scope = agentCommandScope("retry-review", changeID);
-    await mutate(async () => {
-      const commandId = agentCommandIds.forInput(scope, JSON.stringify({ changeID, reviewId }));
-      const value = await serverCall(retryCandidateReview(changeID, { commandId, reviewId }));
-      acknowledgeCommand(scope, commandId);
-      if (selectedChange()?.id === changeID) setDelivery(value);
-      await refreshLifecycleState();
-    });
-  }
-
-  async function resumeChecks(changeID: string) {
-    const target = selectedChange()?.id === changeID ? delivery() : undefined;
-    const verificationId = target?.verificationId;
-    const stopId = target?.checksStopId;
-    if (!verificationId || !stopId) return;
-    const scope = `checks-resume:${changeID}`;
-    await mutate(async () => {
-      const input = { verificationId, stopId };
-      const commandId = agentCommandIds.forInput(scope, JSON.stringify(input));
-      const value = await serverCall(resumeVerification(changeID, { commandId, ...input }));
-      acknowledgeCommand(scope, commandId);
-      if (selectedChange()?.id === changeID) setDelivery(value);
-      await refreshLifecycleState();
-    });
-  }
-
-  async function newConversation(coding: boolean) {
-    if (assistantContextLoading()) return;
-    const projectID = selectedProjectID();
-    const ticketID = assistantTicketID();
-    const changeID = selectedChange()?.id;
-    const key = assistantKey();
-    const scope = agentCommandScope(coding ? "new-coding-conversation" : "new-conversation");
-    if (!projectID || (coding && !changeID)) return;
-    await mutate(async () => {
-      const previous = agentCommandIds.latest(scope);
-      const retained = previous
-        ? z
-            .object({
-              projectID: z.uuid(),
-              ticketID: z.uuid().optional(),
-              contextId: z.uuid().nullable(),
-            })
-            .parse(JSON.parse(previous.input))
-        : undefined;
-      if (retained && (retained.projectID !== projectID || retained.ticketID !== ticketID))
-        throw new Error("Recover the existing conversation request before creating another one.");
-      const contextId = retained
-        ? retained.contextId
-        : (conversation()?.activeCodingContextId ?? null);
-      const commandId =
-        previous?.commandId ??
-        agentCommandIds.forInput(scope, JSON.stringify({ projectID, ticketID, contextId }));
-      if (coding && changeID) {
-        const result = await serverCall(newCodingConversation(changeID, { commandId, contextId }));
-        acknowledgeCommand(scope, commandId);
-        if (assistantKey() !== key) return;
-        setConversationSelections((previous) => ({
-          ...previous,
-          [conversationScope()]: result.contextId,
-        }));
-        await refreshServerState();
-      } else {
-        const result = await serverCall(
-          newProjectConversation(projectID, {
-            commandId,
-            ...(ticketID ? { ticketId: ticketID } : {}),
-          }),
-        );
-        acknowledgeCommand(scope, commandId);
-        if (assistantKey() !== key) return;
-        setConversationSelections((previous) => ({
-          ...previous,
-          [conversationScope()]: result.contextId ?? "original",
-        }));
-        publishConversation(result);
-      }
-    });
-  }
-
-  async function startAgent() {
-    if (assistantContextLoading()) return;
-    const change = selectedChange();
-    if (!change) return;
-    if (codingWriterBlocked()) {
-      setError(
-        "Request editing or wait for release before starting Coding. Your draft is retained.",
-      );
-      return;
-    }
-    const scope = agentCommandScope("change-start", change.id);
-    await mutate(async () => {
-      if (!(await prepareBuildConversation(change.id))) return;
-      const codingReasoning = agent().turn ? undefined : chosenCodingReasoning();
-      const contextId = conversation()?.contextId;
-      const input = {
-        ...(codingReasoning ? { codingReasoning } : {}),
-        ...(contextId ? { contextId } : {}),
-      };
-      const commandId = agentCommandIds.forInput(
-        scope,
-        codingReasoning ? JSON.stringify({ changeID: change.id, ...input }) : change.id,
-      );
-      const value = await serverCall(startCoding(change.id, { commandId, ...input }));
-      acknowledgeCommand(scope, commandId);
-      if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
-      await refreshLifecycleState();
-    });
-  }
-  async function resumeCoding() {
-    const change = selectedChange(),
-      pause = agent().codingPause;
-    if (!change || !pause) return;
-    if (
-      agent().turn?.id === pause.turnID &&
-      agent().turn?.purpose === "review" &&
-      agent().turn?.state === "failed" &&
-      delivery()?.reviewId
-    )
-      return retryReview(change.id);
-    const scope = `coding-resume:${change.id}:${pause.turnID}`;
-    await mutate(async () => {
-      const commandId = agentCommandIds.forInput(scope, pause.turnID);
-      const result = await serverCall(
-        requestCodingResume(change.id, { commandId, pausedTurnId: pause.turnID }),
-      );
-      acknowledgeCommand(scope, commandId);
-      if (selectedChange()?.id === change.id) publishAgentView(change.id, result);
-      await refreshLifecycleState();
-    });
-  }
-
-  async function prepareBuildConversation(changeID: string) {
-    const projectID = selectedProjectID();
-    const ticketID = selectedTicketID();
-    const selected = selectedConversation();
-    const current = () =>
-      selectedProjectID() === projectID &&
-      selectedTicketID() === ticketID &&
-      selectedConversation() === selected &&
-      selectedChange()?.id === changeID &&
-      conversationMode() === "build";
-    if (!projectID || !ticketID || !current()) return false;
-    if (conversation()?.mode !== "build") {
-      const value = await serverCall(
-        setConversationMode(projectID, { ticketId: ticketID, mode: "build" }),
-      );
-      if (!current()) return false;
-      setConversation(value);
-    }
-    return current();
-  }
-
-  async function stopAgent() {
-    const change = selectedChange();
-    if (!change) return;
-    await mutate(async () => {
-      const value = await serverCall(stopCoding(change.id));
-      if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
-    });
-  }
-
-  async function checkStopStatus() {
-    const change = selectedChange();
-    if (!change) return;
-    const read = agentReadFence.beginRead();
-    await mutate(async () => {
-      const value = await serverCall(getAgentView(change.id));
-      if (selectedChange()?.id === change.id) publishAgentView(change.id, value, read);
-    });
-  }
-
-  async function recheckStopConfirmation() {
-    const change = selectedChange();
-    const stopId = agent().stopId;
-    if (!change || !stopId) return;
-    await mutate(async () => {
-      const value = await serverCall(checkCodingStop(change.id, { stopId }));
-      if (selectedChange()?.id === change.id) publishAgentView(change.id, value);
-    });
-  }
-
-  async function promptAgent(event: SubmitEvent) {
-    event.preventDefault();
-    if (assistantContextLoading()) return;
-    const change = selectedChange();
-    if (!change) return;
-    if (codingWriterBlocked()) {
-      setError(
-        "Request editing or wait for release before sending Coding instructions. Your draft is retained.",
-      );
-      return;
-    }
-    const form = event.currentTarget as HTMLFormElement;
-    const input = form.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
-    const text = input ? readAttachmentContent(input).trim() : "";
-    if (!text) return;
-    const scope = agentCommandScope("change-prompt", change.id);
-    const contextId = conversation()?.contextId ?? undefined;
-    const targetKey = assistantKey();
-    await mutate(async () => {
-      if (!(await prepareBuildConversation(change.id))) return;
-      if (assistantKey() !== targetKey || historicalCoding()) return;
-      const commandId = agentCommandIds.forInput(
-        scope,
-        JSON.stringify({ changeID: change.id, text }),
-        text,
-      );
-      const action = correctionTarget() === change.id ? "request-changes" : "prompt";
-      const value = await serverCall(
-        (action === "request-changes" ? requestCodingChanges : sendCodingPrompt)(change.id, {
-          commandId,
-          text,
-          ...(contextId ? { contextId } : {}),
-        }),
-      );
-      acknowledgeCommand(scope, commandId);
-      if (selectedChange()?.id === change.id && assistantKey() === targetKey) {
-        publishAgentView(change.id, value);
-        // Pending disables the composer, so FormData omits its submitted value.
-        const input = form.elements.namedItem("message") as HTMLTextAreaElement | null;
-        if (input && readAttachmentContent(input).trim() === text) form.reset();
-      }
-    });
-  }
-
-  async function sendConversationMessage(event: SubmitEvent) {
-    event.preventDefault();
-    if (assistantContextLoading()) return;
-    if (assistantPending()) return;
-    if (canPromptBuild()) {
-      await promptAgent(event);
-      return;
-    }
-    const form = event.currentTarget as HTMLFormElement;
-    const input = form.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
-    const text = input ? readAttachmentContent(input).trim() : "";
-    if (!text) return;
-    await sendProjectMessage(text, form);
-  }
-
-  async function beginRequirementsInterview() {
-    const projectID = selectedProjectID();
-    const ticketID = assistantTicketID();
-    if (!projectID || !ticketID || detail()?.ticket.id !== ticketID) return;
-    setAgentOpen(true);
-    if (assistantPending()) return;
-    pauseClarification(false);
-    if (!assistantTicketID() || assistantPending()) return;
-    if (pendingInterview()) return;
-    clarificationOrigins.add(assistantKey());
-    const ticket = detail()?.ticket;
-    if (ticket && ticket.state !== "ready" && !selectedChange()) {
-      if (!(await moveTicket(ticket, "ready"))) return;
-    }
-    // Moving the Ticket is planning only. Start this explicit request only if
-    // the user is still in the same Project/Ticket after that acknowledgement.
-    if (selectedProjectID() !== projectID || assistantTicketID() !== ticketID) return;
-    await sendProjectMessage(
-      "Start a requirements interview for this Ticket.",
-      undefined,
-      "requirements-interview",
-    );
-  }
-
-  async function sendProjectMessage(
-    text: string,
-    form?: HTMLFormElement,
-    intent?: "requirements-interview" | "project-research",
-  ) {
-    const projectID = selectedProjectID();
-    if (!projectID) return;
-    const ticketID = assistantTicketID();
-    const contextID = conversation()?.contextId ?? undefined;
-    if (!intent && clarificationPaused() && unansweredClarification(conversation()?.entries ?? []))
-      intent = "project-research";
-    const scope = agentCommandScope("project-message");
-    const streamKey = assistantKey();
-    let streamTurnId: string | undefined;
-    const clearStreamedAnswer = () =>
-      setStreamedAnswers((current) => {
-        if (current[streamKey]?.turnId !== streamTurnId) return current;
-        const next = { ...current };
-        delete next[streamKey];
-        return next;
-      });
-    let commandId: string | undefined;
-    const contextIsCurrent = () =>
-      !workspaceDisposed &&
-      selectedProjectID() === projectID &&
-      assistantTicketID() === ticketID &&
-      (conversation()?.contextId ?? undefined) === contextID;
-    const clearSubmittedDraft = () => {
-      if (commandId) acknowledgeCommand(scope, commandId);
-      if (
-        form &&
-        contextIsCurrent() &&
-        (() => {
-          const input = form.querySelector<HTMLTextAreaElement>('textarea[name="message"]');
-          return input && readAttachmentContent(input).trim() === text;
-        })()
-      )
-        form.reset();
-    };
-    const result = await mutate(
-      async () => {
-        if (!contextIsCurrent()) return;
-        const mode = ticketID && selectedChange() ? "investigate" : "plan";
-        if (!contextID && conversation()?.mode !== mode) {
-          const contextualConversation = await serverCall(
-            setConversationMode(projectID, { ...(ticketID ? { ticketId: ticketID } : {}), mode }),
-          );
-          if (!contextIsCurrent()) return;
-          publishConversation(contextualConversation);
-        }
-        commandId = agentCommandIds.forInput(
-          scope,
-          JSON.stringify({ projectID, ticketID, text, intent }),
-          text,
-        );
-        const streamController = new AbortController();
-        projectStreams.add(streamController);
-        const message = {
-          ...(ticketID ? { ticketId: ticketID } : {}),
-          text,
-          commandId,
-          ...(intent ? { intent } : {}),
-          ...(contextID ? { contextId: contextID } : {}),
-        };
-        const value = await streamConversation(
-          (signal) =>
-            serverCall(invoke(commissionConversationMessage, { signal }, projectID, message)),
-          { signal: streamController.signal },
-          (event) => {
-            if (workspaceDisposed) return;
-            if (event.type === "admitted") {
-              streamTurnId = event.turnId;
-              clearSubmittedDraft();
-              if (contextIsCurrent()) void refreshConversation().catch(() => {});
-            } else if (event.type === "answer" && event.turnId === streamTurnId) {
-              setStreamedAnswers((current) => ({
-                ...current,
-                [streamKey]: { turnId: event.turnId, text: event.text },
-              }));
-            } else if (event.type === "complete") {
-              clearStreamedAnswer();
-            }
-          },
-        ).finally(() => projectStreams.delete(streamController));
-        clearSubmittedDraft();
-        if (!contextIsCurrent()) return;
-        publishConversation(value);
-        if (value.ticketId) {
-          if (value.ticketId !== selectedTicketID()) setSelectedTicketID(value.ticketId);
-          await refreshTicketDetail(value.ticketId);
-        }
+  const { sendConversationMessage, beginRequirementsInterview, answerInterview } =
+    createConversationCommands({
+      assistantContextLoading,
+      assistantPending,
+      get canPromptBuild() {
+        return canPromptBuild;
       },
-      contextIsCurrent,
-      assistantKey(),
-    );
-    clearStreamedAnswer();
-    if (result.ok || !contextIsCurrent()) return;
+      promptAgent,
+      selectedProjectID,
+      assistantTicketID,
+      detail,
+      setAgentOpen,
+      pauseClarification,
+      get pendingInterview() {
+        return pendingInterview;
+      },
+      clarificationOrigins,
+      assistantKey,
+      get selectedChange() {
+        return selectedChange;
+      },
+      moveTicket,
+      conversation,
+      clarificationPaused,
+      agentCommandScope,
+      publishProvisionalAnswer: conversationState.publishProvisional,
+      clearProvisionalAnswer: conversationState.clearProvisional,
+      get workspaceDisposed() {
+        return workspaceDisposed;
+      },
+      set workspaceDisposed(value) {
+        workspaceDisposed = value;
+      },
+      acknowledgeCommand,
+      mutate,
+      publishConversation,
+      agentCommandIds,
+      trackConversationStream: conversationState.trackStream,
+      refreshConversation,
+      selectedTicketID,
+      setSelectedTicketID,
+      refreshTicketDetail,
+      setError,
+      setPendingInterviewAnswer,
+      pendingInterviewAnswer,
+    });
 
-    const refreshed = await serverCall(
-      getConversation(projectID, {
-        ...(ticketID ? { ticketId: ticketID } : {}),
-        ...(contextID ? { contextId: contextID } : {}),
-      }),
-    ).catch(() => null);
-    if (!refreshed || !contextIsCurrent()) return;
-    publishConversation(refreshed);
-    const admitted =
-      commandId &&
-      refreshed.entries.some(
-        (entry) => entry.kind === "user-message" && entry.payload["commandId"] === commandId,
-      );
-    if (!admitted) return;
-    try {
-      clearSubmittedDraft();
-      setError("Your message was saved, but the Project Agent could not finish its response.");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Browser recovery is unavailable.");
-    }
-  }
-
-  async function answerInterview(
-    event: SubmitEvent,
-    questionEntryID: string,
-    question: InterviewQuestion,
-  ) {
-    event.preventDefault();
-    clarificationOrigins.add(assistantKey());
-    if (assistantPending()) return;
-    const projectID = selectedProjectID();
-    if (!projectID) return;
-    const ticketID = assistantTicketID();
-    const contextKey = assistantKey();
-    const contextID = conversation()?.contextId ?? undefined;
-    const contextIsCurrent = () =>
-      selectedProjectID() === projectID &&
-      assistantTicketID() === ticketID &&
-      assistantKey() === contextKey;
-    const form = event.currentTarget as HTMLFormElement;
-    const data = new FormData(form);
-    const customInput = form.querySelector<HTMLTextAreaElement>('textarea[name="custom"]');
-    const customText = customInput ? readAttachmentContent(customInput).trim() : "";
-    const answer = {
-      selectedOptionIds:
-        question.type === "single-select" && customText ? [] : data.getAll("option").map(String),
-      customText,
-    };
-    const scope = agentCommandScope("project-answer", questionEntryID);
-    const pendingAnswer = {
-      key: assistantKey(),
-      questionID: questionEntryID,
-      text: normalizeInterviewAnswer(question, answer).labels.join(", "),
-    };
-    setPendingInterviewAnswer(pendingAnswer);
-    try {
-      await mutate(
-        async () => {
-          const commandId = agentCommandIds.forInput(
-            scope,
-            JSON.stringify({ projectID, ticketID, questionEntryID, answer }),
-          );
-          const value = await serverCall(
-            answerConversationQuestion(projectID, {
-              ...(ticketID ? { ticketId: ticketID } : {}),
-              questionEntryId: questionEntryID,
-              commandId,
-              answer,
-              ...(contextID ? { contextId: contextID } : {}),
-            }),
-          );
-          acknowledgeCommand(scope, commandId);
-          if (!contextIsCurrent()) return;
-          publishConversation(value);
-          if (value.ticketId) {
-            if (value.ticketId !== selectedTicketID()) setSelectedTicketID(value.ticketId);
-            await refreshTicketDetail(value.ticketId);
-          }
-        },
-        contextIsCurrent,
-        assistantKey(),
-      );
-    } finally {
-      if (pendingInterviewAnswer() === pendingAnswer) setPendingInterviewAnswer(undefined);
-    }
-  }
-
-  function loadTicketContext(ticketID: string) {
+  function loadTicketContext(ticketID: string, read = true) {
     const projectID = selectedProjectID();
     ticketReadGeneration++;
     setSelectedTicketID(ticketID);
@@ -2178,198 +1239,326 @@ function FactoryWorkspace(props: {
     resetAgentView();
     setDelivery(undefined);
     setConversation(undefined);
+    if (!read) return;
     onSettled(() => {
       if (selectedProjectID() !== projectID || selectedTicketID() !== ticketID) return;
-      void refreshTicketDetail(ticketID);
-      void refreshConversation(projectID, ticketID);
+      void refreshTicketDetail(ticketID).catch((cause) =>
+        setSyncError(cause instanceof Error ? cause.message : "The Ticket could not load"),
+      );
+      void refreshConversation(projectID, ticketID).catch((cause) =>
+        setSyncError(cause instanceof Error ? cause.message : "The conversation could not load"),
+      );
     });
   }
 
-  function selectTicket(ticketID: string) {
+  function selectTicket(ticketID: string, fromInbox = false, read = true, publish = true) {
+    inboxNavigation?.abort();
+    if (!fromInbox) {
+      setInboxQueue(undefined);
+      setInboxSourceOpening(false);
+    }
+    setInboxFeedbackID(undefined);
     const ticket = ticketList().find((candidate) => candidate.id === ticketID);
-    loadTicketContext(ticketID);
-    openWorkspaceTab({
-      id: `ticket:${ticketID}`,
-      view: "ticket",
-      label: ticket?.title ?? ticketReference(ticketID),
-      ticketID,
-    });
+    loadTicketContext(ticketID, read);
+    openWorkspaceTab(
+      {
+        id: `ticket:${ticketID}`,
+        view: "ticket",
+        label: ticket?.title ?? ticketReference(ticketID),
+        ticketID,
+      },
+      publish,
+    );
   }
 
-  function selectProject(projectID: string) {
+  function selectProject(projectID: string, fromInbox = false, publish = true) {
+    inboxNavigation?.abort();
+    if (!fromInbox) {
+      setInboxQueue(undefined);
+      setInboxSourceOpening(false);
+    }
     projectSetup?.show(false);
     resetAgentView();
     setSelectedProjectID(projectID);
     setSelectedTicketID(undefined);
     setDetail(undefined);
     setWorkspaceVisible(false);
-    setSelectedKnowledgePageID(undefined);
-    setOpenRepositoryDocument(undefined);
-    setRepositoryDocuments([]);
-    repositoryInventory = "";
-    setKnowledgeGeneration(undefined);
-    setKnowledgeHistory([]);
-    setKnowledgeSearch([]);
-    setKnowledgeSearchQuery("");
+    knowledge.reset();
     setConversation(undefined);
-    void refreshConversation(projectID, undefined);
+    onSettled(() => {
+      if (selectedProjectID() !== projectID) return;
+      void refreshConversation(projectID, undefined).catch((cause) =>
+        setSyncError(cause instanceof Error ? cause.message : "The conversation could not load"),
+      );
+    });
     setProjectMenuOpen(false);
+    if (publish) publishLocation({ view: "project", projectID });
   }
 
-  const selectedProject = () =>
-    projects.data()?.find((project) => project.id === selectedProjectID());
-  const filteredProjects = () => {
-    const list = projects.data() ?? [];
-    const query = projectSearchQuery().trim().toLocaleLowerCase();
-    if (!query) return list;
-    return list.filter((project) =>
-      `${project.name} ${project.slug}`.toLocaleLowerCase().includes(query),
+  function returnToInbox(publish = true) {
+    inboxNavigation?.abort();
+    setInboxQueue(undefined);
+    setInboxSourceOpening(false);
+    setInboxRestoreKey((key) => key + 1);
+    if (narrowViewport()) setAgentOpen(false);
+    openWorkspaceTab({ id: "inbox", view: "inbox", label: "Inbox" }, publish);
+  }
+
+  const inboxSourceActive = () => {
+    const item = inboxQueue()?.current;
+    if (!item || item.projectId !== selectedProjectID()) return false;
+    const tabID =
+      item.target === "inputs"
+        ? `inbox-inputs:${item.projectId}:${item.targetId}`
+        : item.ticketId
+          ? `ticket:${item.ticketId}`
+          : "inbox";
+    return activeWorkspaceTab()?.id === tabID;
+  };
+  const nextInboxItem = () => {
+    const queue = inboxQueue();
+    return queue ? nextInboxQueueItem(queue, inbox.view()?.items ?? []) : undefined;
+  };
+  async function startInboxItem(item: InboxItem, ids?: readonly string[]) {
+    if (inboxSourceOpening()) return;
+    const previous = inboxQueue();
+    const queue: InboxQueue = {
+      ids: ids ?? previous?.ids ?? [item.id],
+      current: item,
+      section: ids ? inboxPosition().section : (previous?.section ?? inboxPosition().section),
+      project: ids ? inboxPosition().project : (previous?.project ?? inboxPosition().project),
+    };
+    setInboxQueue(queue);
+    setInboxSourceOpening(true);
+    setInboxPosition((position) => ({
+      ...position,
+      selectedId: item.id,
+      index: queue.ids.indexOf(item.id),
+    }));
+    try {
+      await openInboxItem(item);
+    } finally {
+      if (inboxQueue() === queue) setInboxSourceOpening(false);
+    }
+  }
+
+  async function openInboxItem(item: InboxItem) {
+    inboxNavigation?.abort();
+    if (narrowViewport() && item.target !== "conversation" && item.target !== "coding")
+      setAgentOpen(false);
+    if (selectedProjectID() !== item.projectId) {
+      selectProject(item.projectId, true, false);
+      const switching = new AbortController();
+      inboxNavigation = switching;
+      // Solid 2 event handlers read the pre-write snapshot until the switch settles.
+      // Otherwise the Ticket tab can be added to the previous Project's workspace.
+      await new Promise<void>((resolve) => onSettled(resolve));
+      if (switching.signal.aborted || selectedProjectID() !== item.projectId) return;
+    }
+    if (item.target === "inputs")
+      openWorkspaceTab({
+        id: `inbox-inputs:${item.projectId}:${item.targetId}`,
+        view: "settings",
+        label: "Inputs",
+        settingsProject: { id: item.projectId, name: item.projectName },
+        settingsSelection: { scope: "project", category: "monitoring" },
+      });
+    else if (item.ticketId) selectTicket(item.ticketId, true);
+    else openWorkspaceTab({ id: "inbox", view: "inbox", label: "Inbox" });
+    const navigation = new AbortController();
+    inboxNavigation = navigation;
+    try {
+      const conversationTarget = item.target === "conversation" || item.target === "coding";
+      if (conversationTarget) {
+        setConversationSelections((previous) => ({
+          ...previous,
+          [`${item.projectId}:${item.ticketId ?? "none"}`]: item.contextId ?? "original",
+        }));
+        setAgentOpen(true);
+      }
+      await new Promise<void>((resolve) => onSettled(resolve));
+      if (navigation.signal.aborted || selectedProjectID() !== item.projectId) return;
+      if (conversationTarget) {
+        pauseClarification(false);
+        await refreshConversation(item.projectId, item.ticketId ?? undefined);
+      } else if (item.target === "review") {
+        setInboxFeedbackID(item.targetId ?? undefined);
+      }
+      if (item.ticketId && item.target !== "inputs") await refreshTicketDetail(item.ticketId);
+      if (navigation.signal.aborted) return;
+      // Inbox navigation owns focus, including sources in the Assistant.
+      // A late document mount must not steal it back into the workspace.
+      setWorkspaceFocusTarget(undefined);
+      await new Promise<void>((resolve) => onSettled(resolve));
+      if (navigation.signal.aborted) return;
+      const selector =
+        item.target === "inputs"
+          ? `#input-event-${item.targetId}`
+          : item.target === "coding" && item.targetId
+            ? `#coding-message-${CSS.escape(item.targetId)}`
+            : item.target === "conversation"
+              ? item.targetId
+                ? `#conversation-entry-${item.targetId}`
+                : ".agent-panel"
+              : item.target === "review" && item.targetId
+                ? `#review-feedback-${item.targetId}`
+                : ".ticket-document:not([hidden])";
+      await revealInboxSource(selector, navigation.signal);
+      if (item.unread) await inbox.mark(item, "read");
+    } catch (cause) {
+      if (!navigation.signal.aborted)
+        setError(cause instanceof Error ? cause.message : "The Inbox source could not be opened.");
+    }
+  }
+
+  const knowledgePageList = () => knowledgePages.data() ?? [];
+  const selectedKnowledgePage = () => knowledgePage.data();
+  function workspaceLocation(
+    tab?: WorkspaceTab,
+  ): Exclude<FactoryLocation, { view: "unavailable" }> {
+    const projectID = selectedProjectID();
+    if (tab?.view === "inbox") return { view: "inbox" };
+    if (tab?.view === "settings")
+      return {
+        view: "settings",
+        ...(tab.settingsProject ? { projectID: tab.settingsProject.id } : {}),
+      };
+    if (projectID && tab?.view === "ticket" && tab.ticketID)
+      return { view: "ticket", projectID, ticketID: tab.ticketID };
+    if (projectID && tab?.view === "knowledge") {
+      const pageID = selectedKnowledgePageID();
+      return { view: "knowledge", projectID, ...(pageID ? { pageID } : {}) };
+    }
+    return projectID ? { view: "project", projectID } : { view: "home" };
+  }
+  function publishWorkspaceLocation(tab?: WorkspaceTab) {
+    publishLocation(workspaceLocation(tab));
+  }
+  function selectKnowledgePage(pageID: string) {
+    const projectID = selectedProjectID();
+    if (!projectID) return;
+    knowledge.select(pageID);
+    publishLocation({
+      view: "knowledge",
+      projectID,
+      pageID,
+    });
+  }
+  async function archiveKnowledgePage() {
+    const projectID = selectedProjectID();
+    if (
+      (await knowledge.archive()) &&
+      projectID &&
+      selectedProjectID() === projectID &&
+      workspaceView() === "knowledge"
+    )
+      publishLocation({ view: "knowledge", projectID });
+  }
+  async function openDocument(path: string) {
+    const projectID = selectedProjectID();
+    if (
+      (await knowledge.openDocument(path)) &&
+      projectID &&
+      selectedProjectID() === projectID &&
+      workspaceView() === "knowledge"
+    )
+      publishLocation({ view: "knowledge", projectID });
+  }
+  const desktopNavigation = createDesktopNavigation({
+    navigation,
+    ready: () =>
+      projects.completeness() === "complete" && (!securityReturn || securityReturnRestored),
+    accessKey: () => {
+      const destination = navigation?.location();
+      return destination && "projectID" in destination && destination.projectID
+        ? String(projects.data()?.some((project) => project.id === destination.projectID))
+        : "personal";
+    },
+    async apply(destination, current) {
+      if (destination.view === "unavailable") throw new Error(unavailableLink);
+      if ("projectID" in destination && destination.projectID) {
+        if (!projects.data()?.some((project) => project.id === destination.projectID))
+          throw new Error(unavailableLink);
+        if (selectedProjectID() !== destination.projectID) {
+          selectProject(destination.projectID, false, false);
+          // Solid 2 batches writes. Commit the Project before reading scoped
+          // state or opening a tab, without publishing an intermediate URL.
+          await Promise.resolve();
+          if (!current()) return;
+        }
+      }
+      if (destination.view === "ticket") {
+        if (
+          selectedTicketID() === destination.ticketID &&
+          detail()?.ticket.id === destination.ticketID &&
+          workspaceView() === "ticket"
+        ) {
+          setWorkspaceVisible(true);
+          return;
+        }
+        selectTicket(destination.ticketID, false, false, false);
+        await Promise.resolve();
+        if (!current()) return;
+        const loaded = await refreshTicketDetail(destination.ticketID);
+        if (!current()) return;
+        if (!loaded) throw new Error(unavailableLink);
+        updateWorkspaceTab({
+          id: `ticket:${destination.ticketID}`,
+          view: "ticket",
+          label: loaded.ticket.title,
+          ticketID: destination.ticketID,
+        });
+        await refreshConversation(destination.projectID, destination.ticketID);
+      } else if (destination.view === "knowledge") {
+        knowledge.select(destination.pageID);
+        await openKnowledge(false);
+      } else if (destination.view === "settings") {
+        const project = destination.projectID
+          ? projects.data()?.find((project) => project.id === destination.projectID)
+          : undefined;
+        openWorkspaceTab(
+          {
+            id: `settings:${destination.projectID ?? "factory"}`,
+            view: "settings",
+            label: "Settings",
+            ...(project ? { settingsProject: { id: project.id, name: project.name } } : {}),
+          },
+          false,
+        );
+      } else if (destination.view === "inbox") returnToInbox(false);
+      else {
+        // Home uses the normal default-Project selection. Do not replay a
+        // Project switch when its initial projection completes under an open
+        // menu, or discard the retained tabs when returning to the Board.
+        setWorkspaceVisible(false);
+      }
+    },
+  });
+  publishLocation = desktopNavigation.publish;
+  const missingWikiLink = () => {
+    const destination = navigation?.location();
+    return (
+      destination?.view === "knowledge" &&
+      destination.pageID &&
+      selectedKnowledgePageID() === destination.pageID &&
+      knowledgePage.completeness() === "complete" &&
+      !knowledgePage.data()
     );
   };
-  const ticketList = () => (tickets.data() as Ticket[] | undefined) ?? [];
-  const epicList = () => epics.data() ?? [];
-  const scopedTickets = () => {
-    return ticketList().filter((ticket) => !ticket.trashedAt && !ticket.convertedToEpicId);
-  };
-  const historyTickets = () => scopedTickets().filter((ticket) => lane(ticket) === "history");
-  const knowledgePageList = () => knowledgePages.data() ?? [];
-  const selectedKnowledgePage = () =>
-    knowledgePageList().find((page) => page.id === selectedKnowledgePageID());
-  const selectedChange = () => {
-    const ticketID = selectedTicketID();
-    return ticketID ? changeFor(ticketID) : undefined;
-  };
-  const agentViewLoaded = () =>
-    Boolean(selectedChange()?.id && observedAgentChangeID() === selectedChange()?.id);
-  const preparingImplementation = () => {
-    const prepared = implementationPreparation();
-    return prepared &&
-      prepared.projectID === selectedProjectID() &&
-      prepared.ticketID === selectedTicketID() &&
-      prepared.ticketID === assistantTicketID() &&
-      prepared.revisionID === detail()?.revisions[0]?.id &&
-      detail()?.ticket.state === "ready" &&
-      !detail()?.ticket.trashedAt &&
-      !detail()?.ticket.convertedToEpicId &&
-      canDevelopProject() &&
-      !selectedChange()
-      ? prepared
+  const shareableURL = () => {
+    const tab = activeWorkspaceTab();
+    return navigation &&
+      tab &&
+      ["ticket", "knowledge", "settings", "inbox"].includes(tab.view) &&
+      !(tab.view === "knowledge" && openRepositoryDocument()) &&
+      !desktopNavigation.pending() &&
+      !desktopNavigation.failure() &&
+      !navigation.failure() &&
+      !missingWikiLink()
+      ? new URL(factoryPath(workspaceLocation(tab)), location.origin).href
       : undefined;
   };
-  const conversationMode = (): ConversationMode =>
-    conversation()?.contexts.find((context) => context.id === conversation()?.contextId)?.kind ===
-    "research"
-      ? conversation()!.mode
-      : conversation()?.mode === "build" ||
-          preparingImplementation() ||
-          (correctionTarget() && assistantTicketID() && correctionTarget() === selectedChange()?.id)
-        ? "build"
-        : assistantContext({
-            view: workspaceView(),
-            ideChangeId:
-              activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.changeID : undefined,
-            ticketChangeId: assistantTicketID() ? selectedChange()?.id : undefined,
-          });
-  const interviewAnswers = createMemo(() => {
-    const answers = new Map<string, string>();
-    for (const entry of conversation()?.entries ?? [])
-      if (entry.kind === "answer" && entry.inReplyToEntryId && !answers.has(entry.inReplyToEntryId))
-        answers.set(entry.inReplyToEntryId, entry.body);
-    return answers;
-  });
-  const answeredQuestionIDs = () => interviewAnswers();
-  const currentInterviewQuestion = createMemo(() =>
-    unansweredClarification(conversation()?.entries ?? []),
-  );
-  const pendingInterview = () =>
-    pendingInterviewAnswer()?.key !== assistantKey() &&
-    conversationMode() === "plan" &&
-    !clarificationPaused() &&
-    !!currentInterviewQuestion();
-  const interviewOwnsComposer = () =>
-    !clarificationPaused() &&
-    conversationMode() === "plan" &&
-    (pendingInterview() || (assistantPending() && clarificationOrigins.has(assistantKey())));
-  const ticketClarificationAction = () =>
-    clarificationAction({
-      question: !!currentInterviewQuestion(),
-      working: assistantPending(),
-      open: agentOpen(),
-      paused: clarificationPaused(),
-      started: Boolean(
-        conversation()?.entries.some(
-          (entry) => entry.kind === "question" || entry.kind === "requirement",
-        ),
-      ),
-    });
-  const conversationPlaceholder = () =>
-    conversationMode() === "plan"
-      ? assistantTicketID()
-        ? "Clarify this Ticket's requirements…"
-        : "Describe the change you want to plan…"
-      : assistantTicketID()
-        ? "Ask about this Ticket…"
-        : "Ask about this Project…";
-  const answerSummary = (questionID: string) => {
-    const pendingAnswer = pendingInterviewAnswer();
-    return (
-      interviewAnswers().get(questionID) ??
-      (pendingAnswer?.key === assistantKey() && pendingAnswer.questionID === questionID
-        ? pendingAnswer.text
-        : undefined)
-    );
-  };
-  const ticketWorkspaceReady = () =>
-    selectedChange()?.runtimeState === "ready" &&
-    !(agent().state === "working" && !agent().runtimeConnected);
-  const ticketWorkspaceStatus = () =>
-    workspacePresence({
-      changeState: selectedChange()?.state,
-      runtimeState: agent().runtimeState ?? selectedChange()?.runtimeState,
-      implementationState: agent().state,
-      connectionInterrupted: agent().state === "working" && !agent().runtimeConnected,
-    });
-  const agentCanRun = () =>
-    !detail()?.ticket.trashedAt &&
-    (["active", "starting"].includes(selectedChange()?.state ?? "") ||
-      (selectedChange()?.state === "failed" &&
-        ["failed", "stopped"].includes(selectedChange()?.runtimeState ?? "") &&
-        ["failed", "stopped"].includes(agent().state)));
-  const canPromptBuild = () =>
-    conversationMode() === "build" &&
-    agentCanRun() &&
-    !historicalCoding() &&
-    (Boolean(conversation()?.contextId) ||
-      correctionTarget() === selectedChange()?.id ||
-      !buildAgentNeedsStart(agent()));
-  const codingWriterBlocked = () => {
-    const current = codingWriter();
-    return (
-      current?.changeID === selectedChange()?.id &&
-      (current?.view?.state === "handoff" ||
-        (current?.view?.state === "human" && !current.view.canWrite))
-    );
-  };
-  const historicalCoding = () =>
-    conversation()?.mode === "build" && !conversation()?.isActiveCoding;
-  const retainedCodingDraft = () => {
-    if (!historicalCoding()) return "";
-    const scope = agentCommandScope("change-prompt", selectedChange()?.id);
-    try {
-      return (
-        messageDrafts.get(scope) ??
-        sessionStorage.getItem(`chat-draft:${props.session.user.id}:${scope}`) ??
-        agentCommandIds.latest(scope)?.draft ??
-        ""
-      );
-    } catch {
-      return messageDrafts.get(scope) ?? "";
-    }
-  };
-  const agentTurnBusy = () =>
-    ["starting", "working"].includes(agent().state) ||
-    ["pending", "dispatching", "running"].includes(agent().turn?.state ?? "");
-  const agentNeedsResolution = () => agent().turn?.state === "uncertain";
+
   const ideTargets = (): RuntimeDockTarget[] => {
     const project = selectedProject();
     if (!project || !canDevelopProject() || lifecycleProjectID() !== project.id) return [];
@@ -2463,287 +1652,37 @@ function FactoryWorkspace(props: {
           },
         ];
   };
-  const selectedIDEAttempt = () => {
-    const tab = activeWorkspaceTab();
-    if (tab?.view !== "ide") return undefined;
-    const selected = attempts().find(
-      (attempt) =>
-        (attempt.id === tab.attemptID || attempt.workspaceId === tab.workspaceID) &&
-        attempt.state === "ready" &&
-        attempt.projectId === selectedProjectID(),
-    );
-    if (selected) return { id: selected.id, owner: selected.workspaceKind ?? "ticket" };
-    return undefined;
-  };
-  async function openIDETarget(target: RuntimeDockTarget) {
-    if (!canDevelopProject()) return;
-    const projectID = selectedProjectID();
-    if (!projectID) return;
-    const tabID = `ide:${target.id}`;
-    const change = target.changeId
-      ? changes().find((candidate) => candidate.id === target.changeId)
-      : undefined;
-    if (change) loadTicketContext(change.ticketId);
-    else {
-      setSelectedTicketID(undefined);
-      setDetail(undefined);
-      resetAgentView();
-      setConversation(undefined);
-    }
-    openWorkspaceTab({
-      id: tabID,
-      view: "ide",
-      label: `IDE · ${target.label}`,
-      ...(target.attemptId ? { attemptID: target.attemptId } : {}),
-      ...(target.changeId ? { changeID: target.changeId } : {}),
-      ...(change ? { ticketID: change.ticketId } : {}),
-    });
-    await mutate(async () => {
-      const source = await serverCall(
-        target.changeId ? ensureChangeSource(target.changeId) : ensurePersonalSource(projectID),
-      );
-      updateWorkspaceTab(
-        {
-          id: tabID,
-          view: "ide",
-          label: `IDE · ${target.label}`,
-          workspaceID: source.workspaceID,
-          ...(target.attemptId ? { attemptID: target.attemptId } : {}),
-          ...(target.changeId ? { changeID: target.changeId } : {}),
-          ...(change ? { ticketID: change.ticketId } : {}),
-        },
-        projectID,
-      );
-      await refreshServerState();
-    });
-  }
-  async function openChatActivity(message: AgentMessage, kind: "file" | "diff") {
-    const navigation = message.activity?.navigation;
-    const projectID = selectedProjectID();
-    const changeID = selectedChange()?.id;
-    const target = ideTargets().find((candidate) => candidate.changeId === changeID);
-    if (!navigation || !projectID || !changeID || !target || !canDevelopProject()) return;
-    await openIDETarget(target);
-    const tab = activeWorkspaceTab();
-    if (
-      selectedProjectID() !== projectID ||
-      tab?.changeID !== changeID ||
-      tab.view !== "ide" ||
-      !tab.workspaceID
-    )
-      return;
-    setIDENavigation({
-      id: crypto.randomUUID(),
-      workspaceID: tab.workspaceID,
-      path: navigation.path,
-      kind,
-      ...(navigation.diff ? { diff: navigation.diff } : {}),
-      ...(navigation.truncated ? { truncated: true } : {}),
-    });
-  }
-  async function openPreviewTarget(target: RuntimeDockTarget) {
-    const existing = workspaceTabs().find(
-      (tab) =>
-        tab.view === "preview" &&
-        (tab.id === `preview:${target.id}` ||
-          Boolean(
-            target.attemptId &&
-              tab.attemptID === target.attemptId &&
-              tab.appChannel === target.appChannel,
-          )),
-    );
-    if (existing && (existing.attemptID || existing.appChannel)) {
-      activateWorkspaceTab(existing);
-      return;
-    }
-    const projectID = selectedProjectID();
-    const tabID = `preview:${target.id}`;
-    openWorkspaceTab({
-      id: tabID,
-      view: "preview",
-      label: `Preview · ${target.label}`,
-      ...(target.attemptId ? { attemptID: target.attemptId } : {}),
-      ...(target.appChannel ? { appChannel: target.appChannel } : {}),
-    });
-    if (target.attemptId) {
-      return;
-    }
-    const stagingProjectID = target.projectId;
-    if (!stagingProjectID) return;
-    await mutate(async () => {
-      const attempt = await serverCall(ensureStaging(stagingProjectID));
-      updateWorkspaceTab(
-        {
-          id: tabID,
-          view: "preview",
-          label: `Preview · ${target.label}`,
-          attemptID: attempt.id,
-        },
-        projectID,
-      );
-      await refreshServerState();
-    });
-  }
-  function ticketPreviewTarget(changeID: string) {
-    const owned = new Set(
-      attempts()
-        .filter(
-          (attempt) =>
-            attempt.projectId === selectedProjectID() &&
-            attempt.changeId === changeID &&
-            attempt.state === "ready",
-        )
-        .map((attempt) => attempt.id),
-    );
-    return previewTargets().find(
-      (target) => target.attemptId && owned.has(target.attemptId) && target.appChannel,
-    );
-  }
-  function openDevelopmentPreview(attemptID: string, process: string, label: string) {
-    const attempt = attempts().find(
-      (candidate) =>
-        candidate.id === attemptID &&
-        candidate.projectId === selectedProjectID() &&
-        candidate.state === "ready" &&
-        candidate.workspaceId !== null,
-    );
-    if (!attempt) return;
-    openWorkspaceTab({
-      id: `preview:workspace:${attempt.workspaceId}:${process}`,
-      view: "preview",
-      label: `Development · ${label}`,
-      attemptID,
-      appChannel: process,
-    });
-  }
-
-  let repositoryInventory = "";
-  async function refreshKnowledge(signal?: AbortSignal) {
-    const project = selectedProject();
-    if (!project) return;
-    const generation = await serverCall(
-      invoke(getKnowledgeGeneration, signal ? { signal } : {}, project.id),
-    );
-    if (selectedProjectID() !== project.id) return;
-    setKnowledgeGeneration(generation ?? undefined);
-    const inventory = `${project.id}:${canDevelopProject()}:${generation?.id ?? ""}:${generation?.state ?? ""}`;
-    if (inventory === repositoryInventory) return;
-    const documents = canDevelopProject()
-      ? await serverCall(invoke(getRepositoryDocuments, signal ? { signal } : {}, project.id))
-      : { documents: [] };
-    if (selectedProjectID() !== project.id) return;
-    setRepositoryDocuments(canDevelopProject() ? documents.documents : []);
-    repositoryInventory = inventory;
-  }
-  async function openKnowledge() {
-    const project = selectedProject();
-    if (!project) return;
-    knowledgeSearchRequest += 1;
-    setKnowledgeSearchQuery("");
-    setKnowledgeSearch([]);
-    openWorkspaceTab({
-      id: `knowledge:${project.id}`,
-      view: "knowledge",
-      label: "Knowledge",
-    });
-    await mutate(async () => {
-      await refreshKnowledge();
-      if (!knowledgeGeneration() && knowledgePageList().length === 0) await generateKnowledge();
-    });
-  }
-  async function generateKnowledge() {
-    const project = selectedProject();
-    if (!project) return;
-    const generation = await serverCall(requestKnowledgeGeneration(project.id));
-    if (selectedProjectID() === project.id) setKnowledgeGeneration(generation ?? undefined);
-  }
-  async function editKnowledgePage(
-    pageId: string,
-    expectedVersion: number,
-    title: string,
-    body: string,
-  ) {
-    const saved = await serverCall(saveKnowledgePage(pageId, { expectedVersion, title, body }));
-    if (selectedKnowledgePageID() === pageId) setKnowledgeHistory([]);
-    return saved;
-  }
-  async function archiveKnowledgePage() {
-    const page = selectedKnowledgePage();
-    if (!page) return;
-    await mutate(async () => {
-      await serverCall(archiveSavedKnowledgePage(page.id, page.version));
-      if (selectedKnowledgePageID() === page.id) {
-        setSelectedKnowledgePageID(undefined);
-        setKnowledgeHistory([]);
-      }
-    });
-  }
-  async function loadKnowledgeHistory(pageID: string) {
-    const epoch = knowledgeAccessEpoch;
-    const body = await serverCall(getKnowledgeHistory(pageID));
-    if (selectedKnowledgePageID() === pageID && epoch === knowledgeAccessEpoch)
-      setKnowledgeHistory(body.revisions);
-  }
-  async function openDocument(path: string) {
-    const requestID = ++documentRequest;
-    const project = selectedProject();
-    if (!project || !canDevelopProject()) return;
-    const value = await serverCall(getRepositoryDocument(project.id, path));
-    if (selectedProjectID() !== project.id || documentRequest !== requestID || !canDevelopProject())
-      return;
-    setOpenRepositoryDocument(value);
-    setSelectedKnowledgePageID(undefined);
-    setKnowledgeHistory([]);
-  }
-  async function searchProjectKnowledge(query: string) {
-    const project = selectedProject();
-    const text = query.trim();
-    const requestID = ++knowledgeSearchRequest;
-    setKnowledgeSearchQuery(query);
-    if (!project || !text) {
-      setKnowledgeSearch([]);
-      return;
-    }
-    try {
-      const body = await serverCall(searchKnowledge(project.id, text));
-      if (requestID === knowledgeSearchRequest && selectedProjectID() === project.id)
-        setKnowledgeSearch(body.results);
-    } catch (cause) {
-      if (requestID === knowledgeSearchRequest && selectedProjectID() === project.id)
-        setError(cause instanceof Error ? cause.message : "Knowledge search could not be loaded.");
-    }
-  }
-  const latestRevision = () => detail()?.revisions[0];
-  const latestRequirement = () =>
-    requirementContent(detail()?.documentRevisions[0] ?? latestRevision());
-  const visibleConversation = createMemo(() =>
-    groupConversationActivities(
-      conversationTimeline(
-        conversation()?.entries ?? [],
-        assistantTicketID() && selectedChange() && conversationMode() === "build"
-          ? historicalCoding()
-            ? [
-                ...(conversation()?.codingHistory?.messages ?? []),
-                ...(conversation()?.codingHistory?.admittedMessages ?? []),
-              ]
-            : [...agent().messages, ...(agent().admittedMessages ?? [])]
-          : [],
-      ),
-    ),
-  );
+  const {
+    openIDETarget,
+    openChatActivity,
+    openPreviewTarget,
+    ticketPreviewTarget,
+    openDevelopmentPreview,
+  } = createRuntimeNavigation({
+    canDevelopProject,
+    selectedProjectID,
+    changes,
+    loadTicketContext,
+    setSelectedTicketID,
+    setDetail,
+    resetAgentView,
+    setConversation,
+    openWorkspaceTab,
+    mutate,
+    updateWorkspaceTab,
+    refreshServerState,
+    selectedChange,
+    ideTargets,
+    activeWorkspaceTab,
+    setIDENavigation,
+    workspaceTabs,
+    activateWorkspaceTab,
+    attempts,
+    previewTargets,
+  });
 
   createEffect(assistantKey, () => conversationScroll?.reset());
 
-  createEffect(assistantKey, (key) => {
-    try {
-      setPausedClarifications((current) => ({
-        ...current,
-        [key]: sessionStorage.getItem(`clarification-paused:${key}`) === "true",
-      }));
-    } catch {
-      /* Pause does not depend on storage. */
-    }
-  });
   let observedProposalContext = "";
   let observedProposalID: string | undefined;
   createEffect(
@@ -2767,6 +1706,344 @@ function FactoryWorkspace(props: {
     },
   );
 
+  const documentWindowModel: DocumentWindowModel = {
+    get workspaceElement() {
+      return workspaceElement;
+    },
+    set workspaceElement(value) {
+      workspaceElement = value;
+    },
+    workspaceView,
+    workspaceWindow,
+    workspaceVisible,
+    workspaceTabs,
+    agentOverlay,
+    registrationOpen,
+    activeWorkspaceTab,
+    shareableURL,
+    activateWorkspaceTab,
+    closeWorkspaceTab,
+    setWorkspaceVisible,
+    inboxSourceActive,
+    nextInboxItem,
+    inboxSourceOpening,
+    inbox,
+    returnToInbox,
+    startInboxItem,
+    activeWorkspaceLabelID,
+    epicProposals,
+    bootstrap: props,
+    pending,
+    confirmEpicWork,
+    personalDraftKey,
+    personalDrafts,
+    selectedProjectID,
+    publishTicketDraft,
+    updateWorkspaceTab,
+    detail,
+    inboxFeedbackID,
+    ticketDrafts,
+    confirmRequirements,
+    ticketClarificationAction,
+    selectedChange,
+    delivery,
+    latestRevision,
+    latestRequirement,
+    agentTurnBusy,
+    epicList,
+    prerequisitesFor,
+    dependencyCandidates,
+    selectTicket,
+    editDependency,
+    assignTicketEpic,
+    beginRequirementsInterview,
+    saveTechnicalDesign,
+    assistantPending,
+    assistantTicketID,
+    moveTicket,
+    saveTicketDocument,
+    createFollowUp,
+    setSelectedEpicID,
+    ticketTrashCommand,
+    implementTicket,
+    preparingImplementation,
+    openCodingOptions,
+    agentOpen,
+    modelRelayConfigured,
+    agent,
+    resumeCoding,
+    stopAgent,
+    ideTargets,
+    openIDETarget,
+    ticketPreviewTarget,
+    openPreviewTarget,
+    approveDelivery,
+    retryReview,
+    resumeChecks,
+    canDevelopProject,
+    browserRepository,
+    knowledgeDrafts,
+    knowledgePageList,
+    selectedKnowledgePage,
+    repositoryDocuments,
+    openRepositoryDocument,
+    knowledgeGeneration,
+    knowledgeHistory,
+    knowledgeSearch,
+    knowledgeSearchQuery,
+    selectKnowledgePage,
+    openDocument,
+    mutate,
+    generateKnowledge,
+    searchProjectKnowledge,
+    editKnowledgePage,
+    loadKnowledgeHistory,
+    archiveKnowledgePage,
+    zero,
+    commitZeroMutation,
+    inboxPosition,
+    inboxRestoreKey,
+    setInboxPosition,
+    trashTickets,
+    trashLimit,
+    setTrashLimit,
+    canManageSettingsProject,
+    refreshModelAvailability,
+    selectProject,
+    memberships,
+    attempts,
+    appPreviews,
+    changes,
+    projectMenuOpen,
+    ideNavigation,
+    setIDENavigation,
+    setError,
+    refreshServerState,
+    openDevelopmentPreview,
+  };
+
+  const assistantPanelModel: AssistantPanelModel = {
+    agentPresence,
+    agentOpen,
+    agentOverlay,
+    registrationOpen,
+    get agentPanelElement() {
+      return agentPanelElement;
+    },
+    set agentPanelElement(value) {
+      agentPanelElement = value;
+    },
+    inboxSourceActive,
+    nextInboxItem,
+    inboxSourceOpening,
+    inbox,
+    returnToInbox,
+    startInboxItem,
+    setupVisible,
+    preparingImplementation,
+    detail,
+    dismissAgent,
+    projectSetup,
+    openSettings,
+    selectProject,
+    conversationScope,
+    assistantTicketID,
+    ticketList,
+    selectedProject,
+    conversation,
+    canDevelopProject,
+    conversationMode,
+    assistantPending,
+    assistantContextLoading,
+    codingWriterBlocked,
+    agentViewLoaded,
+    agentCanRun,
+    agentTurnBusy,
+    agent,
+    agentNeedsResolution,
+    setConversationSelections,
+    newConversation,
+    setImplementationPreparation,
+    selectedChange,
+    ticketWorkspaceReady,
+    ticketWorkspaceStatus,
+    pending,
+    recheckStopConfirmation,
+    checkStopStatus,
+    get conversationScroll() {
+      return conversationScroll;
+    },
+    set conversationScroll(value) {
+      conversationScroll = value;
+    },
+    visibleConversation,
+    openChatActivity,
+    answeredQuestionIDs,
+    answerSummary,
+    latestRevision,
+    workspaceView,
+    restoredInterviewAnswer,
+    bootstrap: props,
+    pendingInterview,
+    currentInterviewQuestion,
+    pauseClarification,
+    setAgentOpen,
+    answerInterview,
+    epicProposals,
+    openWorkspaceTab,
+    selectTicket,
+    setError,
+    openTicketDraft,
+    setSelectedEpicID,
+    browserRepository,
+    selectKnowledgePage,
+    openKnowledge,
+    streamedAnswer,
+    setCodingWriter,
+    historicalCoding,
+    retainedCodingDraft,
+    assistantKey,
+    selectedProjectID,
+    stopAgent,
+    restoredMessageScope,
+    agentCommandScope,
+    implementTicket,
+    canPromptBuild,
+    startAgent,
+    promptAgent,
+    restoreMessageDraft,
+    chosenCodingReasoning,
+    setCodingReasoningChoices,
+    modelRelayConfigured,
+    blockersFor,
+    selectedTicketID,
+    interviewOwnsComposer,
+    sendConversationMessage,
+    conversationPlaceholder,
+  };
+
+  const projectBoardModel: ProjectBoardModel = {
+    workspaceVisible,
+    agentOverlay,
+    registrationOpen,
+    setupVisible,
+    selectedProject,
+    setProjectMenuOpen,
+    narrowViewport,
+    historyTickets,
+    boardHasMore,
+    ticketLimit,
+    boardHistoryOpen,
+    setBoardHistoryOpen,
+    history,
+    historyLimit,
+    boardPageLoading,
+    setHistoryLimit,
+    setTicketLimit,
+    boardPageLabel,
+    foundTickets,
+    setFind,
+    boardStatus,
+    selectTicket,
+    pending,
+    openTicketDraft,
+    scopedTickets,
+    epicList,
+    lane,
+    selectedTicketID,
+    blockersFor,
+    selectedEpicID,
+    setSelectedEpicID,
+    saveEpic,
+    tickets,
+  };
+
+  const desktopTopbarModel: DesktopTopbarModel = {
+    registrationOpen,
+    agentOpen,
+    get agentToggleElement() {
+      return agentToggleElement;
+    },
+    set agentToggleElement(value) {
+      agentToggleElement = value;
+    },
+    rememberAgentOpener,
+    setAgentOpen,
+    get projectControlElement() {
+      return projectControlElement;
+    },
+    set projectControlElement(value) {
+      projectControlElement = value;
+    },
+    narrowViewport,
+    projectMenuOpen,
+    selectedProject,
+    setSettingsOpen,
+    setProjectMenuOpen,
+    get projectPopover() {
+      return projectPopover;
+    },
+    set projectPopover(value) {
+      projectPopover = value;
+    },
+    bootstrap: props,
+    setError,
+    setWorkspaceVisible,
+    projectSetup,
+    projects,
+    projectSearchQuery,
+    setProjectSearchQuery,
+    filteredProjects,
+    selectedProjectID,
+    setPreloadProjectID,
+    selectProject,
+    workspaceVisible,
+    setupVisible,
+    workspaceView,
+    workspaceTabs,
+    openKnowledge,
+    detail,
+    selectedTicketID,
+    activateWorkspaceTab,
+    selectTicket,
+    ideTargets,
+    activeWorkspaceTab,
+    selectedChange,
+    openIDETarget,
+    previewTargets,
+    openPreviewTarget,
+    inbox,
+    returnToInbox,
+    agentOverlay,
+    foundTickets,
+    setFind,
+    boardStatus,
+    pending,
+    openTicketDraft,
+    get settingsControlElement() {
+      return settingsControlElement;
+    },
+    set settingsControlElement(value) {
+      settingsControlElement = value;
+    },
+    settingsOpen,
+    get settingsPopover() {
+      return settingsPopover;
+    },
+    set settingsPopover(value) {
+      settingsPopover = value;
+    },
+    openSettings,
+    openWorkspaceTab,
+    backgroundSaves,
+    canManageProject,
+    backgroundChoices,
+    backgroundPickerExpanded,
+    desktopBackgroundKey,
+    chooseDesktopBackground,
+    setBackgroundPickerExpanded,
+  };
+
   return (
     <AttachmentProvider
       projectId={selectedProjectID()}
@@ -2777,6 +2054,10 @@ function FactoryWorkspace(props: {
         data-background={desktopBackgroundKey()}
       >
         <h1 class="sr-only">Delivery floor</h1>
+        <MentionSupport
+          projectID={selectedProjectID()}
+          sharedTicket={Boolean(assistantTicketID())}
+        />
 
         <Show when={projectMenuOpen() || settingsOpen()}>
           <button
@@ -2791,452 +2072,47 @@ function FactoryWorkspace(props: {
           />
         </Show>
 
-        <header class="factory-topbar" inert={registrationOpen()}>
-          <div class="topbar-start">
-            <button
-              type="button"
-              class={agentOpen() ? "icon-button agent-toggle open" : "icon-button agent-toggle"}
-              aria-label="Toggle Agent panel"
-              ref={agentToggleElement}
-              aria-expanded={agentOpen() ? "true" : "false"}
-              data-state={agentOpen() ? "open" : "closed"}
-              data-tooltip="Agent"
-              onPointerDown={() => {
-                if (!agentOpen()) rememberAgentOpener();
-              }}
-              onClick={(event) => {
-                if (!agentOpen() && event.detail === 0) rememberAgentOpener();
-                setAgentOpen((open) => !open);
-              }}
-            >
-              <Icon name={agentOpen() ? "agent-panel" : "agent"} />
-            </button>
-            <div class="context-control" ref={projectControlElement}>
-              <Show when={!narrowViewport()}>
-                <button
-                  type="button"
-                  class="context-button project-selector"
-                  aria-label="Open project menu"
-                  aria-expanded={projectMenuOpen() ? "true" : "false"}
-                  aria-controls="project-popover"
-                  title={selectedProject()?.name ?? "Choose project"}
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    setProjectMenuOpen((open) => !open);
-                  }}
-                >
-                  <span>{selectedProject()?.name ?? "Choose project"}</span>
-                  <Icon name="chevron" />
-                </button>
-              </Show>
-              <Show when={projectMenuOpen()}>
-                <section
-                  class="floating-menu project-menu"
-                  id="project-popover"
-                  aria-label="Projects"
-                  ref={projectPopover}
-                >
-                  <div class="menu-heading">
-                    <strong>Projects</strong>
-                    <Show when={props.session.systemManager}>
-                      <button
-                        type="button"
-                        class="quiet-button"
-                        onClick={() => {
-                          setProjectMenuOpen(false);
-                          setError("");
-                          setWorkspaceVisible(false);
-                          void projectSetup?.open();
-                        }}
-                      >
-                        {projectSetup?.draft() && projectSetup.draft()?.state !== "created"
-                          ? "Continue setup"
-                          : "Create project"}
-                      </button>
-                    </Show>
-                  </div>
-                  <Show when={(projects.data() ?? []).length > 6}>
-                    <div class="project-search">
-                      <input
-                        type="search"
-                        aria-label="Search projects"
-                        placeholder="Find a project"
-                        value={projectSearchQuery()}
-                        onInput={(event) => setProjectSearchQuery(event.currentTarget.value)}
-                      />
-                    </div>
-                  </Show>
-                  <div class="project-list">
-                    <For each={filteredProjects()}>
-                      {(project) => (
-                        <article
-                          class={
-                            selectedProjectID() === project.id
-                              ? "project-row selected"
-                              : "project-row"
-                          }
-                        >
-                          <button
-                            type="button"
-                            class="project-choice"
-                            aria-current={selectedProjectID() === project.id ? "true" : undefined}
-                            onClick={() => selectProject(project.id)}
-                          >
-                            <span>
-                              <strong>{project.name}</strong>
-                              <small>{project.slug}</small>
-                            </span>
-                            <Show when={selectedProjectID() === project.id}>
-                              <span class="selection-dot" />
-                            </Show>
-                          </button>
-                        </article>
-                      )}
-                    </For>
-                  </div>
-                </section>
-              </Show>
-            </div>
-          </div>
-
-          {/* biome-ignore lint/a11y/useKeyWithClickEvents: Native dock buttons also delegate keyboard-generated clicks to this navigation handler. */}
-          <nav
-            class="workspace-dock"
-            aria-label="Workspace dock"
-            onClick={(event) => {
-              if (
-                narrowViewport() &&
-                event.target instanceof Element &&
-                event.target.closest("button")
-              )
-                setAgentOpen(false);
-            }}
-          >
-            <DockButton
-              label="Desktop"
-              icon="home"
-              active={!workspaceVisible()}
-              onClick={() => setWorkspaceVisible(false)}
-            />
-            <Show when={!setupVisible() && selectedProject()}>
-              <DockButton
-                label="Knowledge"
-                icon="knowledge"
-                active={workspaceVisible() && workspaceView() === "knowledge"}
-                open={workspaceTabs().some((tab) => tab.view === "knowledge")}
-                onClick={() => void openKnowledge()}
-                onMinimize={() => setWorkspaceVisible(false)}
-              />
-            </Show>
-            <Show when={!setupVisible() && detail()}>
-              <DockButton
-                label="Ticket"
-                icon="ticket"
-                active={workspaceVisible() && workspaceView() === "ticket"}
-                open={workspaceTabs().some((tab) => tab.view === "ticket")}
-                onMinimize={() => setWorkspaceVisible(false)}
-                onClick={() => {
-                  const openTicket = workspaceTabs().find(
-                    (tab) => tab.view === "ticket" && tab.ticketID === selectedTicketID(),
-                  );
-                  if (openTicket) activateWorkspaceTab(openTicket);
-                  else {
-                    const ticketID = selectedTicketID();
-                    if (ticketID) selectTicket(ticketID);
-                  }
-                }}
-              />
-            </Show>
-            <Show when={!setupVisible() && ideTargets().length > 0}>
-              <DockAppButton
-                label="IDE"
-                icon="ide"
-                active={workspaceVisible() && workspaceView() === "ide"}
-                open={workspaceTabs().some((tab) => tab.view === "ide")}
-                targets={ideTargets()}
-                selectedID={
-                  activeWorkspaceTab()?.view === "ide"
-                    ? activeWorkspaceTab()?.id.slice(4)
-                    : undefined
-                }
-                preferredID={
-                  ideTargets().find((target) => target.changeId === selectedChange()?.id)?.id
-                }
-                onSelect={(target) => void openIDETarget(target)}
-                onMinimize={() => setWorkspaceVisible(false)}
-              />
-            </Show>
-            <Show when={!setupVisible() && previewTargets().length > 0}>
-              <DockAppButton
-                label="Preview"
-                icon="preview"
-                active={workspaceVisible() && workspaceView() === "preview"}
-                open={workspaceTabs().some((tab) => tab.view === "preview")}
-                targets={previewTargets()}
-                selectedID={
-                  activeWorkspaceTab()?.view === "preview"
-                    ? activeWorkspaceTab()?.appChannel
-                      ? activeWorkspaceTab()?.id
-                      : activeWorkspaceTab()?.id.slice(8)
-                    : undefined
-                }
-                onSelect={(target) => void openPreviewTarget(target)}
-                onMinimize={() => setWorkspaceVisible(false)}
-              />
-            </Show>
-            <DockButton
-              label="Inbox"
-              icon="inbox"
-              active={workspaceVisible() && workspaceView() === "inbox"}
-              open={workspaceTabs().some((tab) => tab.view === "inbox")}
-              onClick={() => openWorkspaceTab({ id: "inbox", view: "inbox", label: "Inbox" })}
-              onMinimize={() => setWorkspaceVisible(false)}
-            />
-          </nav>
-
-          <div class="topbar-end">
-            <Show when={!narrowViewport() && !setupVisible() && selectedProject()}>
-              <button
-                type="button"
-                class="new-ticket-button topbar-new-ticket"
-                aria-label="New Ticket"
-                onClick={() => openTicketDraft(undefined, "ready")}
-              >
-                New ticket
-              </button>
-            </Show>
-            <div class="settings-control" ref={settingsControlElement}>
-              <button
-                type="button"
-                class="icon-button"
-                aria-label="Settings"
-                aria-expanded={settingsOpen() ? "true" : "false"}
-                aria-controls="settings-popover"
-                data-tooltip="Settings"
-                onClick={() => {
-                  setSettingsOpen((open) => !open);
-                  setProjectMenuOpen(false);
-                }}
-              >
-                <Icon name="settings" />
-              </button>
-              <Show when={settingsOpen()}>
-                <section
-                  class="floating-menu settings-menu"
-                  id="settings-popover"
-                  aria-label="Settings"
-                  ref={settingsPopover}
-                >
-                  <div class="settings-identity">
-                    <small>Signed in as</small>
-                    <strong>{props.session.user.name}</strong>
-                    <span>{props.session.user.email}</span>
-                  </div>
-                  <Show when={narrowViewport()}>
-                    <button
-                      type="button"
-                      class="settings-model-link settings-project-link"
-                      aria-label="Open project menu"
-                      aria-controls="project-popover"
-                      onClick={() => {
-                        setSettingsOpen(false);
-                        setProjectMenuOpen(true);
-                      }}
-                    >
-                      <Icon name="home" />
-                      <span>{selectedProject()?.name ?? "Choose project"}</span>
-                      <small>Switch project</small>
-                    </button>
-                  </Show>
-                  <button
-                    type="button"
-                    class="settings-model-link"
-                    aria-label="Open settings"
-                    onClick={openSettings}
-                  >
-                    <Icon name="settings" />
-                    <span>Open settings</span>
-                    <small>
-                      Account{selectedProject() ? ", Project" : ""}
-                      {props.session.systemManager ? ", Factory" : ""}
-                    </small>
-                  </button>
-                  <Show when={selectedProject()}>
-                    <button
-                      type="button"
-                      class="settings-model-link"
-                      onClick={() => {
-                        setSettingsOpen(false);
-                        openWorkspaceTab({ id: "trash", view: "trash", label: "Trash" });
-                      }}
-                    >
-                      <Icon name="inbox" />
-                      <span>Trash</span>
-                    </button>
-                  </Show>
-                  <Show when={!setupVisible() && selectedProject()}>
-                    <fieldset
-                      class="background-picker"
-                      aria-busy={backgroundSaves()[selectedProjectID() ?? ""] ? "true" : "false"}
-                    >
-                      <legend>Project background</legend>
-                      <p class="background-hint">
-                        Shared with everyone in {selectedProject()?.name}.
-                        <Show when={!canManageProject()}>
-                          {" "}
-                          Only project managers can change it.
-                        </Show>
-                      </p>
-                      <div class="background-options" id="background-options">
-                        <For each={backgroundChoices()}>
-                          {(background, index) => (
-                            <button
-                              type="button"
-                              class={`background-option background-${background.key}`}
-                              hidden={!backgroundPickerExpanded() && index() >= 2}
-                              aria-pressed={
-                                desktopBackgroundKey() === background.key ? "true" : "false"
-                              }
-                              disabled={!canManageProject()}
-                              aria-disabled={
-                                backgroundSaves()[selectedProjectID() ?? ""] ? "true" : undefined
-                              }
-                              onClick={() => void chooseDesktopBackground(background.key)}
-                            >
-                              <span class="background-preview" aria-hidden="true" />
-                              <span class="background-copy">
-                                <strong>{background.title}</strong>
-                                <small>
-                                  {background.artist}, {background.date}
-                                </small>
-                              </span>
-                              <span class="background-selection" aria-hidden="true" />
-                            </button>
-                          )}
-                        </For>
-                      </div>
-                      <button
-                        type="button"
-                        class="background-expand"
-                        aria-expanded={backgroundPickerExpanded() ? "true" : "false"}
-                        aria-controls="background-options"
-                        onClick={() => setBackgroundPickerExpanded((expanded) => !expanded)}
-                      >
-                        <Show when={!backgroundPickerExpanded()}>
-                          <span class="background-peek" aria-hidden="true">
-                            <span
-                              class={`background-option background-${backgroundChoices()[2]?.key}`}
-                            >
-                              <span class="background-preview" />
-                              <span class="background-copy">
-                                <strong>{backgroundChoices()[2]?.title}</strong>
-                                <small>
-                                  {backgroundChoices()[2]?.artist}, {backgroundChoices()[2]?.date}
-                                </small>
-                              </span>
-                            </span>
-                          </span>
-                        </Show>
-                        <span class="background-expand-label">
-                          {backgroundPickerExpanded()
-                            ? "Show fewer backgrounds"
-                            : `Show all ${backgroundChoices().length} backgrounds`}
-                          <Icon name="chevron" />
-                        </span>
-                      </button>
-                      <Show when={backgroundSaves()[selectedProjectID() ?? ""]}>
-                        <p class="background-hint" role="status">
-                          Saving project background…
-                        </p>
-                      </Show>
-                    </fieldset>
-                  </Show>
-                </section>
-              </Show>
-            </div>
-          </div>
-        </header>
+        <DesktopTopbar model={desktopTopbarModel} />
 
         <div class="desktop-notices">
+          <Show when={desktopNavigation.pending()}>
+            <div class="sync-notice" role="status">
+              <span>Opening linked view…</span>
+            </div>
+          </Show>
+          <Show when={desktopNavigation.failure() || navigation?.failure() || missingWikiLink()}>
+            <div class="sync-notice" role="alert">
+              <span>{desktopNavigation.failure() || navigation?.failure() || unavailableLink}</span>
+              <button type="button" class="quiet-button" onClick={() => desktopNavigation.retry()}>
+                Retry link
+              </button>
+            </div>
+          </Show>
           <Show when={error() && !registrationOpen()}>
             <p class="error-toast" role="alert">
               {error()}
             </p>
           </Show>
-          <Show when={syncError()}>
-            <div class="sync-notice" role="status">
-              Updates paused. Showing the last known state.
-              <button
-                type="button"
-                class="quiet-button"
-                onClick={() => void refreshLifecycleState()}
-              >
-                Retry
-              </button>
-            </div>
-          </Show>
+          <PlanningSyncStatus
+            queries={[
+              projects,
+              memberships,
+              ...(selectedProjectID()
+                ? [tickets, history, epics, dependencies, prerequisiteTickets]
+                : []),
+              ...(workspaceTabs().some((tab) => tab.view === "knowledge") ? [knowledgePages] : []),
+              ...(workspaceTabs().some((tab) => tab.view === "trash") ? [trashTickets] : []),
+              ...(selectedKnowledgePageID() &&
+              workspaceTabs().some((tab) => tab.view === "knowledge")
+                ? [knowledgePage]
+                : []),
+            ]}
+            readError={syncError()}
+            onRetry={refreshServerState}
+          />
         </div>
 
-        <section
-          class={workspaceVisible() ? "kanban-desktop obscured" : "kanban-desktop"}
-          aria-label="Ticket board"
-          inert={agentOverlay() || registrationOpen()}
-        >
-          <Show
-            when={!setupVisible() && selectedProject()}
-            fallback={
-              setupVisible() ? (
-                <SetupEmptyBoard />
-              ) : (
-                <DesktopEmpty onChoose={() => setProjectMenuOpen(true)} />
-              )
-            }
-          >
-            <Show when={narrowViewport() || historyTickets().length > 0}>
-              <div class="board-toolbar">
-                <Show when={historyTickets().length > 0}>
-                  <button
-                    type="button"
-                    class="board-history-button"
-                    aria-pressed={boardHistoryOpen() ? "true" : "false"}
-                    onClick={() => setBoardHistoryOpen((open) => !open)}
-                  >
-                    <span>{boardHistoryOpen() ? "Active work" : "History"}</span>
-                    <Show when={!boardHistoryOpen()}>
-                      <span class="history-count">{historyTickets().length}</span>
-                    </Show>
-                  </button>
-                </Show>
-                <Show when={narrowViewport()}>
-                  <button
-                    type="button"
-                    class="new-ticket-button board-new-ticket"
-                    aria-label="New Ticket"
-                    onClick={() => openTicketDraft(undefined, "ready")}
-                  >
-                    New ticket
-                  </button>
-                </Show>
-              </div>
-            </Show>
-            <TicketBoardContents
-              tickets={scopedTickets()}
-              epics={epicList()}
-              archivedTickets={scopedTickets().filter((ticket) => lane(ticket) === "history")}
-              historyOpen={boardHistoryOpen()}
-              pending={pending()}
-              selectedTicketID={selectedTicketID()}
-              stage={lane}
-              status={boardStatus}
-              blockers={blockersFor}
-              reference={ticketReference}
-              onSelect={selectTicket}
-              epicID={selectedEpicID()}
-              onEpic={setSelectedEpicID}
-              onSaveEpic={saveEpic}
-            />
-          </Show>
-        </section>
+        <ProjectBoard model={projectBoardModel} />
 
         <Show when={registrationOpen()}>
           <ProjectRegistration
@@ -3256,1146 +2132,9 @@ function FactoryWorkspace(props: {
             onClick={dismissAgent}
           />
         </Show>
-        <Show when={agentPresence.present()}>
-          <aside
-            class="agent-panel"
-            data-closing={agentPresence.closing() ? "true" : "false"}
-            onAnimationEnd={(event) => {
-              if (event.target === event.currentTarget && event.animationName === "panel-out")
-                agentPresence.finishExit();
-            }}
-            aria-hidden={agentOpen() ? "false" : "true"}
-            {...(agentOverlay()
-              ? { role: "dialog" as const, "aria-modal": "false" as const }
-              : { role: "complementary" as const })}
-            aria-label="Agent panel"
-            inert={!agentOpen() || registrationOpen()}
-            ref={agentPanelElement}
-          >
-            <Show when={setupVisible() || preparingImplementation()}>
-              <header>
-                <Show
-                  when={preparingImplementation()}
-                  fallback={<span class="sr-only">Assistant</span>}
-                >
-                  <span class="agent-implementation-title" title={detail()?.ticket.title}>
-                    {detail()?.ticket.title}
-                  </span>
-                </Show>
-                <button
-                  type="button"
-                  class="bare-icon window-minimize-control"
-                  aria-label="Minimize Agent panel"
-                  onClick={dismissAgent}
-                >
-                  <Icon name="minimize" />
-                </button>
-              </header>
-            </Show>
-            <Show when={setupVisible() && projectSetup}>
-              {(setup) => (
-                <ProjectSetupPanel
-                  setup={setup()}
-                  onSettings={openSettings}
-                  onProject={selectProject}
-                />
-              )}
-            </Show>
-            <Show when={!setupVisible()}>
-              <ConversationSwitcher
-                scopeKey={conversationScope()}
-                title={
-                  assistantTicketID()
-                    ? (ticketList().find((ticket) => ticket.id === assistantTicketID())?.title ??
-                      "Ticket chat")
-                    : (selectedProject()?.name ?? "Project chat")
-                }
-                onMinimize={preparingImplementation() ? undefined : dismissAgent}
-                conversation={conversation()}
-                ticket={Boolean(assistantTicketID())}
-                coding={Boolean(
-                  assistantTicketID() && canDevelopProject() && conversationMode() === "build",
-                )}
-                busy={assistantPending() || assistantContextLoading()}
-                restartReason={
-                  codingWriterBlocked()
-                    ? "Editing is held or being transferred. Request editing or wait for release."
-                    : !agentViewLoaded()
-                      ? "Loading the shared implementation status. Wait for confirmation."
-                      : !agentCanRun()
-                        ? "This implementation is not active. Create a follow-up Ticket or ask about the Project."
-                        : undefined
-                }
-                canRestart={
-                  agentCanRun() &&
-                  !codingWriterBlocked() &&
-                  !agentTurnBusy() &&
-                  !agent().stopPending &&
-                  !agentNeedsResolution() &&
-                  ["committed", "stopped"].includes(agent().state)
-                }
-                onSelect={(id) =>
-                  setConversationSelections((previous) => ({
-                    ...previous,
-                    [conversationScope()]: id,
-                  }))
-                }
-                onResearch={() => void newConversation(false)}
-                onCoding={() => void newConversation(true)}
-              />
-              <Show when={preparingImplementation()}>
-                <div class="agent-status">
-                  <span class="agent-state">Ready to build</span>
-                  <button
-                    type="button"
-                    class="quiet-button"
-                    onClick={() => setImplementationPreparation(undefined)}
-                  >
-                    Back to conversation
-                  </button>
-                </div>
-              </Show>
-              <Show when={conversationMode() === "build" && selectedChange()}>
-                <div class="agent-status">
-                  <span class="agent-state">
-                    {!agentViewLoaded()
-                      ? "Loading implementation…"
-                      : agent().state === "idle" && !agentCanRun()
-                        ? "Build unavailable"
-                        : buildAgentStatus(agent())}
-                  </span>
-                  <span class={`runtime-presence ${ticketWorkspaceReady() ? "ready" : ""}`}>
-                    <i />
-                    {ticketWorkspaceStatus()}
-                  </span>
-                </div>
-              </Show>
-              <Show
-                when={conversationMode() === "build" && selectedChange() && agent().stopPending}
-              >
-                <section class="agent-stop-notice" aria-label="Stop recovery">
-                  <p class="agent-stop-copy" role="status">
-                    Stop saved. OpenCode confirmation is still missing. New Build work is blocked.
-                  </p>
-                  <details>
-                    <summary class="agent-stop-explanation">Why is Build blocked?</summary>
-                    <p class="agent-stop-detail">
-                      {agent().lastError?.startsWith("Stop remains unconfirmed.")
-                        ? agent().lastError
-                        : "Factory cannot yet prove that execution and queued input are settled."}
-                    </p>
-                    <p class="agent-stop-detail">
-                      Factory will not resend uncertain commands. Stop does not roll back workspace
-                      edits.
-                    </p>
-                    <Show when={agent().runtimeState !== "ready" || !agent().messagesAvailable}>
-                      <p class="agent-stop-detail">
-                        Live workspace status is unavailable. Queued input may survive a restart;
-                        reconnecting alone does not confirm Stop.
-                      </p>
-                    </Show>
-                    <p class="agent-stop-detail">
-                      Checking status only reads the current outcome. It does not restart work.
-                    </p>
-                    <Show when={agent().stopId}>
-                      <p class="agent-stop-detail">
-                        Recheck confirmation checks OpenCode and saves confirmation only when it can
-                        prove this Stop. It will not resend interruption, cancel input or start
-                        compute.
-                      </p>
-                      <button
-                        type="button"
-                        class="agent-control agent-stop-check"
-                        disabled={pending()}
-                        onClick={() => void recheckStopConfirmation()}
-                      >
-                        Recheck confirmation
-                      </button>
-                    </Show>
-                  </details>
-                  <button
-                    type="button"
-                    class="agent-control agent-stop-check"
-                    disabled={pending()}
-                    onClick={() => void checkStopStatus()}
-                  >
-                    Check Stop status
-                  </button>
-                </section>
-              </Show>
-              <Show
-                when={
-                  conversationMode() === "build" &&
-                  selectedChange() &&
-                  agent().commitOperation &&
-                  !agent().stopPending
-                }
-              >
-                <p class="agent-activity-notice" role="status" aria-label="Commit recovery">
-                  {buildAgentHint(agent())}
-                </p>
-              </Show>
-              <Show
-                when={
-                  conversationMode() === "build" &&
-                  selectedChange() &&
-                  buildAgentActivityNotice(agent())
-                }
-              >
-                <p class="agent-activity-notice" role="status">
-                  {buildAgentActivityNotice(agent())}
-                </p>
-              </Show>
-              <Show
-                when={
-                  conversationMode() === "build" &&
-                  selectedChange() &&
-                  agent().state === "working" &&
-                  !agent().runtimeConnected &&
-                  !agent().stopPending &&
-                  !agent().commitOperation
-                }
-              >
-                <p class="agent-activity-notice" role="status" aria-label="Build connection">
-                  {buildAgentHint(agent())}
-                </p>
-              </Show>
-              <div
-                class="agent-messages conversation-history"
-                aria-live="polite"
-                ref={(element) => {
-                  conversationScroll?.dispose();
-                  conversationScroll = followConversation(element);
-                }}
-              >
-                <For each={visibleConversation()} keyed={(item) => item.id}>
-                  {(item) => {
-                    const conversationEntry = () => {
-                      const current = item();
-                      return current.kind === "conversation" ? current.entry : undefined;
-                    };
-                    const agentMessage = () => {
-                      const current = item();
-                      return current.kind === "change-agent" ? current.message : undefined;
-                    };
-                    const activityMessages = () => {
-                      const current = item();
-                      return current.kind === "activity-group" ? current.messages : undefined;
-                    };
-                    return (
-                      <Show
-                        when={conversationEntry()}
-                        fallback={
-                          <Show
-                            when={activityMessages()}
-                            fallback={
-                              <Show when={agentMessage()}>
-                                {(message) => (
-                                  <ChangeAgentMessage
-                                    message={message()}
-                                    onNavigate={
-                                      canDevelopProject()
-                                        ? (message, kind) => void openChatActivity(message, kind)
-                                        : undefined
-                                    }
-                                  />
-                                )}
-                              </Show>
-                            }
-                          >
-                            {(messages) => (
-                              <ChangeAgentActivityGroup
-                                messages={messages()}
-                                onNavigate={
-                                  canDevelopProject()
-                                    ? (message, kind) => void openChatActivity(message, kind)
-                                    : undefined
-                                }
-                              />
-                            )}
-                          </Show>
-                        }
-                      >
-                        {(entry) => (
-                          <ConversationEntryCard
-                            entry={entry()}
-                            answered={
-                              answeredQuestionIDs().has(entry().id) ||
-                              Boolean(answerSummary(entry().id))
-                            }
-                            answerSummary={answerSummary(entry().id)}
-                            requirementCurrent={
-                              latestRevision()?.id === entry().requirementRevisionId
-                            }
-                            requirementApproved={Boolean(
-                              detail()?.revisions.find(
-                                (revision) => revision.id === entry().requirementRevisionId,
-                              )?.approvalId,
-                            )}
-                            requirementVisible={
-                              workspaceView() === "ticket" && Boolean(assistantTicketID())
-                            }
-                            pending={assistantPending()}
-                            initialAnswer={restoredInterviewAnswer(entry().id)}
-                            answerStorageKey={`interview-answer:${props.session.user.id}:${entry().id}`}
-                            canAnswer={
-                              pendingInterview() && currentInterviewQuestion()?.id === entry().id
-                            }
-                            onPause={() => pauseClarification(true)}
-                            onResume={() => {
-                              pauseClarification(false);
-                              setAgentOpen(true);
-                            }}
-                            onAnswer={(event, question) =>
-                              void answerInterview(event, entry().id, question)
-                            }
-                            onReviewRequirements={() => {
-                              const epic = epicProposals()[entry().id];
-                              if (epic) {
-                                const ticketID = assistantTicketID();
-                                openWorkspaceTab({
-                                  id: `epic-proposal:${entry().id}`,
-                                  view: "epic-proposal",
-                                  label: epic.epic.title,
-                                  proposalID: entry().id,
-                                  ...(ticketID ? { ticketID } : {}),
-                                });
-                                setAgentOpen(false);
-                                return;
-                              }
-                              const ticketID = assistantTicketID();
-                              if (ticketID) {
-                                selectTicket(ticketID);
-                                return;
-                              }
-                              const ticket = z
-                                .object({
-                                  title: z.string().max(200),
-                                  description: z.string().max(10_000),
-                                })
-                                .safeParse(entry().payload["ticket"]);
-                              const requirement = requirementContentInput.safeParse(
-                                entry().payload["requirement"],
-                              );
-                              if (!ticket.success || !requirement.success) return;
-                              const description = [
-                                ticket.data.description,
-                                requirement.data.summary,
-                                "## Acceptance criteria",
-                                ...requirement.data.acceptanceCriteria.map(
-                                  (value) => `- [ ] ${value}`,
-                                ),
-                                ...(requirement.data.nonGoals.length
-                                  ? [
-                                      "## Out of scope",
-                                      ...requirement.data.nonGoals.map((value) => `- ${value}`),
-                                    ]
-                                  : []),
-                              ].join("\n\n");
-                              if (description.length > 10_000) {
-                                setError(
-                                  "This proposal is too long for a Ticket draft. Ask for a more concise version.",
-                                );
-                                return;
-                              }
-                              openTicketDraft({
-                                id: entry().id,
-                                title: ticket.data.title,
-                                description,
-                              });
-                            }}
-                            onCitation={({ source, id, commitSha, path }) => {
-                              if (source === "ticket") {
-                                const ticket = ticketList().find(
-                                  (candidate) => candidate.id === id,
-                                );
-                                if (ticket) selectTicket(id);
-                              } else if (source === "epic") {
-                                setSelectedEpicID(id);
-                              } else if (source === "attachment") {
-                                window.open(
-                                  `/api/attachments/${encodeURIComponent(id)}`,
-                                  "_blank",
-                                  "noopener,noreferrer",
-                                );
-                              } else if (source === "code") {
-                                const repository = browserRepository();
-                                const link =
-                                  repository && commitSha && path
-                                    ? repositoryLink(repository, commitSha, path)
-                                    : undefined;
-                                if (link) window.open(link, "_blank", "noopener,noreferrer");
-                              } else {
-                                setOpenRepositoryDocument(undefined);
-                                setSelectedKnowledgePageID(id);
-                                setKnowledgeHistory([]);
-                                void openKnowledge();
-                              }
-                            }}
-                          />
-                        )}
-                      </Show>
-                    );
-                  }}
-                </For>
-                <Show when={streamedAnswer()}>
-                  <article
-                    class="agent-message assistant"
-                    aria-label="Assistant streaming response"
-                    aria-busy="true"
-                  >
-                    <div
-                      class="markdown-body"
-                      innerHTML={markdownHTML(streamedAnswer()?.text ?? "")}
-                    />
-                  </article>
-                </Show>
-                <Show when={assistantPending() && !streamedAnswer()}>
-                  <section
-                    class="assistant-reply-placeholder"
-                    role="status"
-                    aria-label="Assistant responding"
-                    aria-busy="true"
-                  >
-                    <span>
-                      {(() => {
-                        const progress = conversation()?.turn?.progress;
-                        if (!progress) return "Preparing a response…";
-                        const label = {
-                          guidance: "Loading Project guidance…",
-                          thinking: "Preparing a response…",
-                          searching: "Searching the Project…",
-                          reading: "Reading Project sources…",
-                          validating: "Checking the response…",
-                        }[progress.phase];
-                        return `${label}${progress.completedLookups ? ` · ${progress.completedLookups} research steps completed` : ""}`;
-                      })()}
-                    </span>
-                    <div class="assistant-skeleton" aria-hidden="true">
-                      <span />
-                      <span />
-                      <span />
-                    </div>
-                  </section>
-                </Show>
-                <Show
-                  when={
-                    visibleConversation().length === 0 &&
-                    !assistantPending() &&
-                    !["uncertain", "failed", "stopped"].includes(conversation()?.turn?.state ?? "")
-                  }
-                >
-                  <div class="agent-empty compact">
-                    <Icon name="agent" />
-                    <p>
-                      {conversationMode() === "build"
-                        ? preparingImplementation()
-                          ? "Choose reasoning for this Ticket's first Build."
-                          : !agentViewLoaded()
-                            ? "Loading implementation…"
-                            : selectedChange()
-                              ? buildAgentEmptyMessage(agent())
-                              : "Approve the latest Requirement Revision to start Build."
-                        : assistantTicketID()
-                          ? "Ask about this Ticket, or tell me what needs clarifying."
-                          : "Ask about the Project, or describe a change you want to work on."}
-                    </p>
-                  </div>
-                </Show>
-              </div>
-              <Show when={canDevelopProject()}>
-                <ChangeWriterStatus
-                  changeID={assistantTicketID() ? selectedChange()?.id : undefined}
-                  active={agentOpen()}
-                  onStatus={(changeID, view) => {
-                    setCodingWriter({ changeID, view });
-                  }}
-                />
-              </Show>
-              <div class={`agent-input-shell${pendingInterview() ? " interview-active" : ""}`}>
-                <Show when={historicalCoding()}>
-                  <div class="agent-activity-notice" role="status">
-                    <p>
-                      Previous conversation. Viewing it does not change the shared active Coding
-                      context. Your drafts stay with their conversation.
-                    </p>
-                    <Show
-                      when={
-                        conversation()?.codingHistory &&
-                        !conversation()?.codingHistory?.messagesAvailable
-                      }
-                    >
-                      <p>
-                        Live history is unavailable. Saved prompts and snapshots are retained.
-                        Viewing history does not start compute.
-                      </p>
-                    </Show>
-                    <Show when={retainedCodingDraft()}>
-                      {(draft) => (
-                        <details class="conversation-retained-draft">
-                          <summary>Unsent draft</summary>
-                          <p>{draft()}</p>
-                          <CopyButton
-                            class="quiet-button"
-                            value={draft()}
-                            scope={assistantKey()}
-                            accessibleLabel="Copy retained draft"
-                          />
-                        </details>
-                      )}
-                    </Show>
-                    <button
-                      type="button"
-                      class="quiet-button"
-                      onClick={() =>
-                        setConversationSelections((previous) => ({
-                          ...previous,
-                          [conversationScope()]:
-                            conversation()?.activeCodingContextId ?? "original",
-                        }))
-                      }
-                    >
-                      Return to active Coding
-                    </button>
-                  </div>
-                </Show>
-                <Show when={!historicalCoding()}>
-                  <div class="assistant-context-row">
-                    <AgentBlockers
-                      projectID={selectedProjectID()}
-                      mode={conversationMode()}
-                      settingsOpen={workspaceView() === "settings"}
-                      onSettings={openSettings}
-                      turn={
-                        preparingImplementation()
-                          ? undefined
-                          : conversationMode() === "build" && selectedChange()
-                            ? agent().turn
-                            : conversation()?.turn
-                      }
-                    />
-                  </div>
-                  <Show when={conversationMode() !== "build" && agentTurnBusy()}>
-                    <div class="agent-activity-notice" role="status">
-                      <span>Implementation continues in its Workspace.</span>
-                      <button
-                        type="button"
-                        class="agent-control"
-                        aria-label="Stop OpenCode"
-                        onClick={() => void stopAgent()}
-                      >
-                        <Icon name="stop" /> Stop
-                      </button>
-                    </div>
-                  </Show>
-                  <Show
-                    when={
-                      restoredMessageScope() ===
-                      agentCommandScope(
-                        conversationMode() === "build" ? "change-prompt" : "project-message",
-                        conversationMode() === "build" ? selectedChange()?.id : assistantTicketID(),
-                      )
-                    }
-                  >
-                    <p class="agent-activity-notice" role="status" aria-label="Message recovery">
-                      Previous send unconfirmed. Re-send unchanged text to check it.
-                    </p>
-                  </Show>
-                  <Show when={conversationMode() === "build"}>
-                    <Show
-                      when={
-                        !preparingImplementation() &&
-                        agent().lastError &&
-                        !agent().codingPause &&
-                        !(
-                          agent().stopPending &&
-                          agent().lastError?.startsWith("Stop remains unconfirmed.")
-                        )
-                      }
-                    >
-                      <p class="inline-error">{agent().lastError}</p>
-                    </Show>
-                    <Show when={!preparingImplementation() && agent().codingPause}>
-                      <p class="agent-activity-notice" role="status">
-                        Coding is paused. Existing code is retained. Resume from the Ticket after
-                        its allowance is available.
-                      </p>
-                    </Show>
-                    <Show when={!preparingImplementation() && agentViewLoaded() && !agentCanRun()}>
-                      <p class="agent-unavailable">
-                        {selectedChange()?.state === "branch-pending"
-                          ? "Preparing the Change branch. Implementation will be available when it is ready."
-                          : `This Change is ${selectedChange()?.state ?? "unavailable"}. OpenCode is read-only.`}
-                      </p>
-                    </Show>
-                    <Show when={preparingImplementation()}>
-                      <Show when={preparingImplementation()?.failure}>
-                        <p class="inline-error" role="alert">
-                          {preparingImplementation()?.failure}
-                        </p>
-                      </Show>
-                      <p class="agent-activity-notice">
-                        Start approves this specification and begins implementation.
-                      </p>
-                    </Show>
-                    <Show
-                      when={preparingImplementation() || (agentCanRun() && !agent().codingPause)}
-                    >
-                      <form
-                        class="agent-composer build-composer"
-                        onSubmit={(event) => {
-                          const prepared = preparingImplementation();
-                          if (prepared) {
-                            event.preventDefault();
-                            void implementTicket(prepared.revisionID, prepared.reasoning);
-                          } else if (!canPromptBuild()) {
-                            event.preventDefault();
-                            void startAgent();
-                          } else void promptAgent(event);
-                        }}
-                        onReset={(event) => {
-                          const input = event.currentTarget.querySelector("textarea");
-                          queueMicrotask(() => {
-                            if (input) resizeComposer(input);
-                          });
-                        }}
-                      >
-                        <Show when={canPromptBuild()}>
-                          <TextareaAttachments
-                            disabled={pending() || assistantContextLoading()}
-                            scopeKey={agentCommandScope("change-prompt", selectedChange()?.id)}
-                          >
-                            <textarea
-                              rows={1}
-                              onKeyDown={composerKeyDown}
-                              onInput={(event) => resizeComposer(event.currentTarget)}
-                              ref={(element) =>
-                                restoreMessageDraft(element, () =>
-                                  agentCommandScope("change-prompt", selectedChange()?.id),
-                                )
-                              }
-                              name="message"
-                              aria-label="Message conversation"
-                              placeholder={
-                                codingWriterBlocked()
-                                  ? "Editing is held or being transferred. You can keep drafting…"
-                                  : agent().state === "failed"
-                                    ? "Describe what to fix in the retained code…"
-                                    : agent().state === "stopped"
-                                      ? "Ask a question or describe the next change…"
-                                      : agentTurnBusy()
-                                        ? "Prepare your next instructions, or Stop to change direction…"
-                                        : "Ask a question or describe the next change…"
-                              }
-                              disabled={pending() || assistantContextLoading()}
-                            />
-                          </TextareaAttachments>
-                        </Show>
-                        <div class="agent-compose-toolbar">
-                          <Show when={canPromptBuild()}>
-                            <ChatSkillPicker
-                              projectID={selectedProjectID()}
-                              workType="build"
-                              changeID={selectedChange()?.id}
-                              scope={agentCommandScope("change-prompt", selectedChange()?.id)}
-                              disabled={pending() || assistantContextLoading()}
-                            />
-                          </Show>
-                          <Show when={canDevelopProject()}>
-                            <Show
-                              when={preparingImplementation() || agentViewLoaded()}
-                              fallback={
-                                <span class="agent-model-controls">Loading implementation…</span>
-                              }
-                            >
-                              <BuildModelControls
-                                projectID={selectedProjectID()}
-                                changeID={selectedChange()?.id}
-                                turn={preparingImplementation() ? undefined : agent().turn}
-                                sessionAvailable={
-                                  !preparingImplementation() && agent().sessionAvailable
-                                }
-                                disabled={
-                                  pending() ||
-                                  (!preparingImplementation() &&
-                                    (agentTurnBusy() ||
-                                      agentNeedsResolution() ||
-                                      Boolean(agent().commitOperation) ||
-                                      agent().stopPending))
-                                }
-                                reasoning={
-                                  preparingImplementation()?.reasoning ?? chosenCodingReasoning()
-                                }
-                                onChange={(value) => {
-                                  if (preparingImplementation()) {
-                                    setImplementationPreparation((previous) =>
-                                      previous ? { ...previous, reasoning: value } : previous,
-                                    );
-                                    return;
-                                  }
-                                  const changeID = selectedChange()?.id;
-                                  if (changeID)
-                                    setCodingReasoningChoices((previous) => ({
-                                      ...previous,
-                                      [changeID]: value,
-                                    }));
-                                }}
-                              />
-                            </Show>
-                          </Show>
-                          <div class="composer-actions">
-                            <Show
-                              when={
-                                !preparingImplementation() &&
-                                (agentNeedsResolution() || agentTurnBusy())
-                              }
-                              fallback={
-                                <button
-                                  type="submit"
-                                  class="agent-control primary"
-                                  aria-label={
-                                    preparingImplementation()
-                                      ? "Start implementation"
-                                      : !canPromptBuild()
-                                        ? agent().state === "failed"
-                                          ? "Retry implementation"
-                                          : "Start implementation"
-                                        : "Send message"
-                                  }
-                                  disabled={
-                                    pending() ||
-                                    assistantContextLoading() ||
-                                    codingWriterBlocked() ||
-                                    (!preparingImplementation() &&
-                                      (!agentViewLoaded() ||
-                                        agentNeedsResolution() ||
-                                        Boolean(agent().commitOperation) ||
-                                        agent().stopPending)) ||
-                                    (!canPromptBuild() && !modelRelayConfigured()) ||
-                                    blockersFor(selectedTicketID() ?? "").length > 0
-                                  }
-                                  title={
-                                    !modelRelayConfigured()
-                                      ? "Connect a Factory model before starting implementation"
-                                      : preparingImplementation()
-                                        ? "Start this specification with the selected reasoning"
-                                        : buildAgentHint(agent())
-                                  }
-                                >
-                                  <Icon name={canPromptBuild() ? "send" : "play"} />
-                                  <Show
-                                    when={!canPromptBuild()}
-                                    fallback={
-                                      <span class="sr-only">
-                                        {agent().state === "stopped" ? "Resume" : "Send"}
-                                      </span>
-                                    }
-                                  >
-                                    {!preparingImplementation() && agent().state === "failed"
-                                      ? "Retry"
-                                      : "Start"}
-                                  </Show>
-                                </button>
-                              }
-                            >
-                              <button
-                                type="button"
-                                class="agent-control"
-                                aria-label={
-                                  agentNeedsResolution() ? "Stop unresolved turn" : "Stop OpenCode"
-                                }
-                                disabled={pending() || agent().stopPending}
-                                onClick={() => void stopAgent()}
-                              >
-                                <Icon name="stop" />
-                                <span class="sr-only">
-                                  {agentNeedsResolution() ? "Stop unresolved turn" : "Stop"}
-                                </span>
-                              </button>
-                            </Show>
-                          </div>
-                        </div>
-                      </form>
-                      <Show when={!modelRelayConfigured()}>
-                        <p class="agent-configuration-note">
-                          Model connection required before implementation can start.
-                        </p>
-                      </Show>
-                    </Show>
-                  </Show>
-                  <Show when={conversationMode() !== "build" && !interviewOwnsComposer()}>
-                    <form
-                      class="agent-composer conversation-composer"
-                      onSubmit={sendConversationMessage}
-                      onReset={(event) => {
-                        const input = event.currentTarget.querySelector("textarea");
-                        queueMicrotask(() => {
-                          if (input) resizeComposer(input);
-                        });
-                      }}
-                    >
-                      <TextareaAttachments
-                        disabled={
-                          assistantPending() || assistantContextLoading() || !selectedProject()
-                        }
-                        scopeKey={agentCommandScope("project-message")}
-                        privacy={assistantTicketID() ? "send" : "personal"}
-                      >
-                        <textarea
-                          rows={1}
-                          onKeyDown={composerKeyDown}
-                          onInput={(event) => resizeComposer(event.currentTarget)}
-                          ref={(element) =>
-                            restoreMessageDraft(element, () => agentCommandScope("project-message"))
-                          }
-                          name="message"
-                          aria-label="Message conversation"
-                          placeholder={conversationPlaceholder()}
-                          disabled={
-                            assistantPending() || assistantContextLoading() || !selectedProject()
-                          }
-                        />
-                      </TextareaAttachments>
-                      <div class="agent-compose-toolbar">
-                        <ChatSkillPicker
-                          projectID={selectedProjectID()}
-                          workType="planning"
-                          scope={agentCommandScope("project-message")}
-                          disabled={assistantPending()}
-                        />
-                        <button
-                          type="submit"
-                          class="agent-control primary"
-                          aria-label="Send message"
-                          disabled={
-                            assistantPending() || assistantContextLoading() || !selectedProject()
-                          }
-                        >
-                          <Icon name="send" />
-                          <span class="sr-only">Send</span>
-                        </button>
-                      </div>
-                    </form>
-                  </Show>
-                </Show>
-              </div>
-            </Show>
-          </aside>
-        </Show>
+        <AssistantPanel model={assistantPanelModel} />
 
-        <section
-          class={`workspace-window workspace-window-${workspaceView() ?? "minimized"}`}
-          aria-label={`${workspaceView() ?? "minimized"} workspace`}
-          data-closing={workspaceWindow.closing() ? "true" : "false"}
-          onAnimationEnd={(event) => {
-            if (event.target === event.currentTarget && event.animationName === "window-out")
-              workspaceWindow.finishExit();
-          }}
-          aria-hidden={workspaceVisible() ? "false" : "true"}
-          hidden={!workspaceWindow.present() || workspaceTabs().length === 0}
-          inert={!workspaceVisible() || agentOverlay() || registrationOpen()}
-        >
-          <WorkspaceTabbar
-            tabs={workspaceTabs()}
-            activeTabID={activeWorkspaceTab()?.id}
-            onActivate={activateWorkspaceTab}
-            onClose={closeWorkspaceTab}
-            onMinimize={() => setWorkspaceVisible(false)}
-          />
-          <div
-            class="workspace-view-body"
-            role="tabpanel"
-            id={workspacePanelID}
-            aria-labelledby={activeWorkspaceLabelID()}
-          >
-            <Loading
-              on={activeWorkspaceTab()?.id}
-              fallback={
-                <p class="muted" role="status">
-                  Opening workspace…
-                </p>
-              }
-            >
-              <Switch>
-                <Match
-                  when={workspaceView() === "epic-proposal" && activeWorkspaceTab()?.proposalID}
-                >
-                  <Show when={epicProposals()[activeWorkspaceTab()?.proposalID ?? ""]} keyed>
-                    {(proposal) => (
-                      <EpicProposalWorkspace
-                        id={activeWorkspaceTab()?.proposalID ?? ""}
-                        initial={proposal}
-                        storageKey={`epic-proposal:${props.session.user.id}:${activeWorkspaceTab()?.proposalID}`}
-                        pending={pending()}
-                        onConfirm={(value) =>
-                          confirmEpicWork(activeWorkspaceTab()?.proposalID ?? "", value)
-                        }
-                      />
-                    )}
-                  </Show>
-                </Match>
-                <Match when={workspaceView() === "ticket-draft"}>
-                  <TicketDraftWorkspace
-                    storageKey={personalDraftKey()}
-                    initial={
-                      personalDrafts.get(selectedProjectID() ?? "") ??
-                      readPersonalTicketDraft(personalDraftKey())
-                    }
-                    pending={pending()}
-                    onCreate={publishTicketDraft}
-                    onChange={(draft) => {
-                      const projectID = selectedProjectID();
-                      if (projectID) personalDrafts.set(projectID, draft);
-                      updateWorkspaceTab({
-                        id: `ticket-draft:${projectID}`,
-                        view: "ticket-draft",
-                        label: draft.title || "New ticket",
-                      });
-                    }}
-                  />
-                </Match>
-                <Match when={workspaceView() === "ticket" && detail()}>
-                  <Show when={detail()}>
-                    {(current) => (
-                      <TicketWorkspace
-                        drafts={ticketDrafts}
-                        current={current()}
-                        storageKey={`ticket-edit:${props.session.user.id}:${current().ticket.id}`}
-                        onConfirmRequirements={confirmRequirements}
-                        clarificationAction={ticketClarificationAction()}
-                        ticketReference={ticketReference(current().ticket.id)}
-                        change={selectedChange()}
-                        delivery={delivery()}
-                        latestRevision={latestRevision()}
-                        latestRequirement={latestRequirement()}
-                        pending={pending()}
-                        buildInProgress={agentTurnBusy()}
-                        epics={epicList()}
-                        dependencies={{
-                          prerequisites: prerequisitesFor(current().ticket.id),
-                          candidates: dependencyCandidates(current().ticket.id),
-                          admitted: Boolean(selectedChange()),
-                          pending: pending(),
-                          onOpen: selectTicket,
-                          onAdd: (id) => editDependency("add", id),
-                          onRemove: (id) => void editDependency("remove", id),
-                        }}
-                        onAssignEpic={(epicId) => void assignTicketEpic(epicId)}
-                        onInterview={() => void beginRequirementsInterview()}
-                        onWriteRequirements={() => void moveTicket(current().ticket, "ready")}
-                        onSaveDocument={saveTicketDocument}
-                        onFollowUp={() => void createFollowUp()}
-                        onOpenTicket={selectTicket}
-                        onOpenEpic={(id) => {
-                          setSelectedEpicID(id);
-                          setWorkspaceVisible(false);
-                        }}
-                        onTrash={() => void ticketTrashCommand(current().ticket.id, "trash")}
-                        onRestore={() => void ticketTrashCommand(current().ticket.id, "restore")}
-                        onImplement={(revisionID) =>
-                          void implementTicket(revisionID, preparingImplementation()?.reasoning)
-                        }
-                        onCodingOptions={openCodingOptions}
-                        codingOptionsOpen={Boolean(preparingImplementation() && agentOpen())}
-                        implementationAvailable={modelRelayConfigured()}
-                        codingPause={agent().codingPause}
-                        computeWait={agent().computeWait}
-                        onResumeCoding={() => void resumeCoding()}
-                        onStopImplementation={() => void stopAgent()}
-                        onOpenIDE={() => {
-                          const target = ideTargets().find(
-                            (candidate) => candidate.changeId === selectedChange()?.id,
-                          );
-                          if (target) void openIDETarget(target);
-                        }}
-                        onOpenPreview={
-                          selectedChange() && ticketPreviewTarget(selectedChange()!.id)
-                            ? () => {
-                                const target = ticketPreviewTarget(selectedChange()!.id);
-                                if (target) void openPreviewTarget(target);
-                              }
-                            : undefined
-                        }
-                        active={workspaceVisible() && workspaceView() === "ticket"}
-                        onApproveDelivery={(changeID) => void approveDelivery(changeID)}
-                        onRetryReview={(changeID) => void retryReview(changeID)}
-                        onResumeChecks={(changeID) => void resumeChecks(changeID)}
-                        canDevelop={canDevelopProject()}
-                        userID={props.session.user.id}
-                      />
-                    )}
-                  </Show>
-                </Match>
-                <Match when={workspaceView() === "knowledge"}>
-                  <KnowledgeWorkspace
-                    projectID={selectedProjectID() ?? ""}
-                    userID={props.session.user.id}
-                    repositoryURL={browserRepository() ?? ""}
-                    canDevelop={canDevelopProject()}
-                    onOpenIDE={() => {
-                      const target = ideTargets().find((entry) => !entry.changeId);
-                      if (target) void openIDETarget(target);
-                    }}
-                    onRestore={(pageID, revisionID, expectedVersion) =>
-                      serverCall(restoreKnowledgePage(pageID, revisionID, expectedVersion))
-                    }
-                    drafts={knowledgeDrafts}
-                    pages={knowledgePageList()}
-                    selectedPage={selectedKnowledgePage()}
-                    documents={repositoryDocuments()}
-                    openDocument={openRepositoryDocument()}
-                    generation={knowledgeGeneration()}
-                    revisions={knowledgeHistory()}
-                    searchResults={knowledgeSearch()}
-                    searchQuery={knowledgeSearchQuery()}
-                    pending={pending()}
-                    onSelectPage={(pageID) => {
-                      setSelectedKnowledgePageID(pageID);
-                      setOpenRepositoryDocument(undefined);
-                      setKnowledgeHistory([]);
-                    }}
-                    onOpenDocument={(path) => void openDocument(path)}
-                    onGenerate={() => void mutate(generateKnowledge)}
-                    onSearch={(query) => void searchProjectKnowledge(query)}
-                    onSavePage={editKnowledgePage}
-                    onHistory={loadKnowledgeHistory}
-                    onSources={async (pageID) =>
-                      (await serverCall(getKnowledgeSources(pageID))).citations
-                    }
-                    onArchive={() => void archiveKnowledgePage()}
-                    onMove={async ({ pageId, parentId, beforeId }) => {
-                      const page = knowledgePageList().find((entry) => entry.id === pageId);
-                      const projectId = selectedProjectID();
-                      const client = zero();
-                      if (!page || !projectId || !client) throw new Error("Wiki page not found");
-                      await commitZeroMutation(
-                        client.mutate(
-                          zeroMutators.knowledge.move({
-                            projectId,
-                            pageId,
-                            parentId,
-                            beforeId,
-                            expectedMetadataVersion: page.metadataVersion,
-                          }),
-                        ).server,
-                      );
-                    }}
-                    onIcon={async (icon) => {
-                      const page = selectedKnowledgePage();
-                      const client = zero();
-                      if (!page || !client) throw new Error("Wiki page not found");
-                      await commitZeroMutation(
-                        client.mutate(
-                          zeroMutators.knowledge.setIcon({
-                            projectId: page.projectId,
-                            pageId: page.id,
-                            expectedMetadataVersion: page.metadataVersion,
-                            icon,
-                          }),
-                        ).server,
-                      );
-                    }}
-                  />
-                </Match>
-                <Match when={workspaceView() === "inbox"}>
-                  <InboxWorkspace />
-                </Match>
-                <Match when={workspaceView() === "trash"}>
-                  <TrashWorkspace
-                    tickets={ticketList().filter((ticket) => ticket.trashedAt)}
-                    pending={pending()}
-                    onOpen={selectTicket}
-                    onRestore={(id) => void ticketTrashCommand(id, "restore")}
-                    onRetry={(id) => void ticketTrashCommand(id, "trash")}
-                  />
-                </Match>
-              </Switch>
-            </Loading>
-            <For each={workspaceTabs().filter((tab) => tab.view === "settings")}>
-              {(tab) => (
-                <div
-                  class="settings-tab-panel"
-                  hidden={workspaceView() !== "settings" || activeWorkspaceTab()?.id !== tab.id}
-                >
-                  <SettingsWorkspace
-                    active={workspaceView() === "settings" && activeWorkspaceTab()?.id === tab.id}
-                    userID={props.session.user.id}
-                    initialSelection={tab.settingsSelection}
-                    project={tab.settingsProject}
-                    systemManager={props.session.systemManager}
-                    projectManager={canManageSettingsProject(tab.settingsProject?.id)}
-                    onModelsChanged={refreshModelAvailability}
-                    onOpenTicket={(ticketID, projectID) => {
-                      if (selectedProjectID() !== projectID) selectProject(projectID);
-                      selectTicket(ticketID);
-                    }}
-                    developer={
-                      props.session.systemManager ||
-                      memberships
-                        .data()
-                        ?.some(
-                          (member) =>
-                            member.projectId === tab.settingsProject?.id &&
-                            member.role === "developer",
-                        ) === true
-                    }
-                  />
-                </div>
-              )}
-            </For>
-            <RuntimeWorkspaceTabs
-              projectID={selectedProjectID() ?? ""}
-              tabs={workspaceTabs()}
-              activeTabID={workspaceVisible() ? activeWorkspaceTab()?.id : undefined}
-              attempts={attempts()}
-              previews={appPreviews()}
-              pending={pending()}
-              userID={props.session.user.id}
-              canDevelop={canDevelopProject()}
-              onOpenTicket={(changeID) => {
-                const change = changes().find(
-                  (candidate) =>
-                    candidate.id === changeID && candidate.projectId === selectedProjectID(),
-                );
-                if (change) selectTicket(change.ticketId);
-              }}
-            />
-            <DeveloperIDEWorkspace
-              userID={props.session.user.id}
-              projectID={selectedProjectID()}
-              allowed={canDevelopProject()}
-              preparingSelection={projectMenuOpen()}
-              workspaceID={
-                activeWorkspaceTab()?.view === "ide" ? activeWorkspaceTab()?.workspaceID : undefined
-              }
-              active={workspaceView() === "ide"}
-              navigation={ideNavigation()}
-              onNavigationOutcome={(id, error) => {
-                if (ideNavigation()?.id !== id) return;
-                setIDENavigation(undefined);
-                if (error) setError(error);
-              }}
-              onDevelopmentPreview={(message) => {
-                const projectID = selectedProjectID();
-                void refreshServerState()
-                  .then(() => {
-                    if (selectedProjectID() !== projectID) return;
-                    if (
-                      attempts().some(
-                        (attempt) =>
-                          attempt.id === message.attemptID &&
-                          attempt.workspaceId === message.workspaceID,
-                      )
-                    )
-                      openDevelopmentPreview(message.attemptID, message.process, message.label);
-                  })
-                  .catch((cause: unknown) =>
-                    setError(cause instanceof Error ? cause.message : "Preview is unavailable."),
-                  );
-              }}
-            />
-          </div>
-        </section>
+        <DocumentWindow model={documentWindowModel} />
       </main>
     </AttachmentProvider>
   );

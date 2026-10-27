@@ -3,9 +3,11 @@ import { resolve } from "node:path";
 import { expect, type Page, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { WorkspaceSourceState } from "../../packages/workspace-domain/src/source";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 const cache = resolve(".factory/test-results/vite", `workspace-transport-${crypto.randomUUID()}`);
 const directory = ".factory/test-results/workspace-transport";
@@ -18,19 +20,14 @@ test.beforeAll(async () => {
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["workspace-transport.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await server.listen();
-  origin = server.resolvedUrls!.local[0]!.replace(/\/$/, "");
+  origin = fixtureValue(
+    fixtureValue(server.resolvedUrls, "server.resolvedUrls").local[0],
+    "server.resolvedUrls!.local[0]",
+  ).replace(/\/$/, "");
   await mkdir(directory, { recursive: true });
 });
 test.afterAll(async () => {

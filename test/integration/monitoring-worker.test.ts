@@ -7,6 +7,7 @@ import { createSkillController } from "../../apps/factory/src/skills/controller"
 import { monitoringFixture } from "../fixtures/monitoring";
 import type { diagnoseMonitoringIncident } from "../../apps/factory/src/monitoring/diagnosis";
 import type { clarifyProjectInput } from "../../apps/factory/src/project-agent/input";
+import { fixtureValue } from "../fixtures/value";
 
 const codeCommit = "a".repeat(40);
 const diagnosis = {
@@ -102,7 +103,7 @@ test("Inputs prepare one unapproved Ticket automatically without development aut
     });
     const receive = () =>
       f.routes.intake(
-        new Request(saved.url!, {
+        new Request(fixtureValue(saved.url, "saved.url"), {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -120,7 +121,10 @@ test("Inputs prepare one unapproved Ticket automatically without development aut
     const view = await f.controller.view(f.projectId, f.userId);
     expect(view).toMatchObject({ canManage: true, canDelegate: false });
     expect(view.incidents[0]).toMatchObject({ state: "prepared", occurrences: 2 });
-    const ticketId = view.incidents[0]!.ticketId!;
+    const ticketId = fixtureValue(
+      fixtureValue(view.incidents[0], "view.incidents[0]").ticketId,
+      "view.incidents[0]!.ticketId",
+    );
     expect(
       await f.database
         .client`SELECT id FROM factory.requirement_revision WHERE ticket_id=${ticketId}`,
@@ -150,7 +154,7 @@ test("Inputs prepare one unapproved Ticket automatically without development aut
       }),
     ).rejects.toThrow("Developer");
   } finally {
-    worker?.close();
+    await worker?.close();
     await f.dispose();
     restore();
   }
@@ -199,8 +203,8 @@ test("Input policies freeze explicit shared sources and inherited defaults, excl
       );
       expect(response?.status).toBe(202);
     };
-    await deliver(inherited.url!);
-    await deliver(explicit.url!);
+    await deliver(fixtureValue(inherited.url, "inherited.url"));
+    await deliver(fixtureValue(explicit.url, "explicit.url"));
     const events = (await f.controller.view(f.projectId, f.userId)).incidents;
     const authorities = await Promise.all(events.map((event) => f.controller.authorize(event.id)));
     expect(
@@ -229,7 +233,12 @@ test("Input policies freeze explicit shared sources and inherited defaults, excl
     await f.database
       .client`UPDATE factory.mcp_connection SET state='revoked' WHERE id=${second.id}`;
     await expect(
-      f.controller.authorize(authorities.find((authority) => authority.sourceIds.length)!.id),
+      f.controller.authorize(
+        fixtureValue(
+          authorities.find((authority) => authority.sourceIds.length),
+          "authorities.find((authority) => authority.sourceIds.length)",
+        ).id,
+      ),
     ).rejects.toThrow("Reconnect");
   } finally {
     await f.dispose();
@@ -355,8 +364,7 @@ test("Autofix freezes shared configuration, creates one delegated scope and fenc
     await one.project(f.projectId);
     expect(commissioned).toBe(1);
     const initial = await turns.getByCommand(incidentId);
-    if (!initial || initial.authority.mode !== "build")
-      throw new Error("Missing admitted Autofix Build");
+    if (initial?.authority.mode !== "build") throw new Error("Missing admitted Autofix Build");
     expect(initial.authority.modelId).toBe("owned-shared-model");
     expect(initial.authority.monitoringIncidentId).toBe(incidentId);
     expect(initial.authority.skillRevisionIds).not.toContain(privateSkill.revisionId);
@@ -387,11 +395,79 @@ test("Autofix freezes shared configuration, creates one delegated scope and fenc
     expect(view.incidents[0]?.reason).toContain("disabled");
     expect(view.incidents[0]?.occurrences).toBe(2);
   } finally {
-    for (const worker of workers) worker.close();
+    await Promise.all(workers.map((worker) => worker.close()));
     await f.dispose();
     restore();
   }
 });
+
+test("Monitoring shutdown aborts and joins an admitted diagnosis before its database is closed", async () => {
+  const restore = configureModels();
+  const f = await monitoringFixture();
+  const entered = Promise.withResolvers<AbortSignal>();
+  const finish = Promise.withResolvers<void>();
+  let calls = 0;
+  const worker = createMonitoringWorker(f.database, {
+    mcp: f.mcp,
+    code: {
+      codePaths: async () => {
+        throw new Error("Unused owned inventory");
+      },
+      code: async () => {
+        throw new Error("Unused owned source");
+      },
+    },
+    changes: {
+      start: async () => {
+        throw new Error("Shutdown cannot commission implementation");
+      },
+    },
+    agent: {
+      admitStartIn: async () => {
+        throw new Error("Shutdown cannot admit Build");
+      },
+    },
+    delivery: {
+      get: async () => null,
+      approve: async () => {
+        throw new Error("Shutdown cannot deliver");
+      },
+    },
+    signingKey: "owned-shutdown-key",
+    diagnose: async (input) => {
+      calls++;
+      if (!input.signal) throw new Error("Owned diagnosis cancellation signal missing");
+      entered.resolve(input.signal);
+      await finish.promise;
+      throw new Error("Owned interrupted diagnosis");
+    },
+  });
+  try {
+    await f.receive("owned-shutdown");
+    const work = worker.project(f.projectId);
+    const signal = await entered.promise;
+    let drained = false;
+    const closing = worker.close().then(() => {
+      drained = true;
+    });
+    expect(signal.aborted).toBe(true);
+    await Bun.sleep(5);
+    expect(drained).toBe(false);
+    await worker.project(f.projectId);
+    expect(calls).toBe(1);
+    finish.resolve();
+    await Promise.all([work, closing]);
+    expect(drained).toBe(true);
+    expect(
+      await f.database.client`SELECT id FROM factory.change WHERE project_id=${f.projectId}`,
+    ).toHaveLength(0);
+  } finally {
+    finish.resolve();
+    await worker.close();
+    await f.dispose();
+    restore();
+  }
+}, 60_000);
 
 test("insufficient and uncertain diagnoses never create Tickets or repeat paid inference after expiry", async () => {
   const restore = configureModels();
@@ -453,7 +529,7 @@ test("insufficient and uncertain diagnoses never create Tickets or repeat paid i
       await f.database.client`SELECT id FROM factory.ticket WHERE project_id=${f.projectId}`,
     ).toHaveLength(0);
   } finally {
-    worker?.close();
+    await worker?.close();
     await f.dispose();
     restore();
   }

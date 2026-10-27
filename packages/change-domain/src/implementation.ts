@@ -5,6 +5,7 @@ export const implementationInput = z
   .object({
     commandId: z.uuid(),
     revisionId: z.uuid(),
+    technicalDesignRevisionId: z.uuid().optional(),
     codingReasoning: codingReasoningInput.optional(),
   })
   .strict();

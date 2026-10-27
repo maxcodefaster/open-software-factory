@@ -83,7 +83,7 @@ test.skipIf(!name)(
       ),
     );
     if (process.env["FACTORY_MODEL_API_KEY"]) secrets.push(process.env["FACTORY_MODEL_API_KEY"]);
-    async function command(path: string, method = "GET", body?: unknown) {
+    async function _command(path: string, method = "GET", body?: unknown) {
       const response = await fetch(`${base}${path}`, {
         method,
         headers: { cookie, origin: base, "content-type": "application/json" },

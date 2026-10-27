@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { classifyAgentTurn } from "../../apps/factory/src/agent/controller";
+import { classifyAgentTurn } from "../../apps/factory/src/agent/turn-outcome";
 import { nativeInputSkills, nativeSkillManifest } from "../../apps/factory/src/skills/native";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import {

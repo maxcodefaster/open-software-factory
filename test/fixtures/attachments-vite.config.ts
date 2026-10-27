@@ -1,24 +1,10 @@
 import solid from "@solidjs/vite-plugin";
 import { defineConfig } from "vite";
-import { resolve } from "node:path";
+import { factoryFixtureStart } from "./start-plugins";
 export default defineConfig({
   root: import.meta.dirname,
-  plugins: [
-    solid({
-      ssr: false,
-      serverFunctions: {
-        devMiddleware: false,
-        filter: {
-          include: resolve(
-            import.meta.dirname,
-            "../../apps/factory/src/server-functions/**/*.{ts,tsx}",
-          ),
-        },
-      },
-    }),
-  ],
+  plugins: [factoryFixtureStart(`${import.meta.dirname}/attachments.html`), solid({ ssr: false })],
   build: {
     target: "esnext",
-    rolldownOptions: { input: `${import.meta.dirname}/attachments.html` },
   },
 });

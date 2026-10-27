@@ -1,24 +1,25 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import {
-  type SkillLibraryEntry,
-  type SkillLibraryView,
-  type SkillScope,
+import { createEffect, createSignal, For, Show } from "solid-js";
+import type {
+  SkillLibraryEntry,
+  SkillLibraryView,
+  SkillScope,
 } from "../../../../packages/conversation-domain/src/skill-library";
-import {
-  type SkillContent,
-  type SkillRevision,
+import type {
+  SkillContent,
+  SkillRevision,
 } from "../../../../packages/conversation-domain/src/skills";
+import { Icon } from "../icon";
 import { serverCall } from "../server-functions/result";
 import {
-  getSkillLibrary,
-  saveSkillChoice,
-  checkSkillSourceUpdate,
-  proposeSkillSharing,
-  getSkillRevision,
   acceptSkillSharing,
+  checkSkillSourceUpdate,
+  getSkillLibrary,
+  getSkillRevision,
+  proposeSkillSharing,
+  saveSkillChoice,
+  saveSkillCover,
 } from "../server-functions/skills";
-import { Icon } from "../icon";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import type { ChooseSkill } from "./choice-controls";
 import { skillCover, skillSummary } from "./cover";
@@ -88,12 +89,12 @@ export function SkillLibrary(props: {
   }
   const report = (cause: unknown) =>
     setError(cause instanceof Error ? cause.message : "Could not load library. Try reloading.");
-  async function load() {
+  async function load(projectId: string | undefined) {
     const request = ++sequence;
     setLoading(true);
     try {
       const next = await serverCall(
-        props.projectId ? getSkillLibrary(props.projectId) : getSkillLibrary(),
+        projectId ? getSkillLibrary({ data: [projectId] }) : getSkillLibrary({ data: [] }),
       );
       if (request !== sequence) return;
       setView(next);
@@ -105,8 +106,8 @@ export function SkillLibrary(props: {
   }
   createEffect(
     () => ({ projectId: props.projectId, active: props.active }),
-    ({ active }) => {
-      if (active !== false) void load().catch(report);
+    ({ projectId, active }) => {
+      if (active !== false) void load(projectId).catch(report);
       return () => {
         sequence++;
       };
@@ -177,7 +178,7 @@ export function SkillLibrary(props: {
     });
   }
   async function mutate(action: () => Promise<unknown>, message: string) {
-    if (busy()) return;
+    if (busy()) return false;
     setBusy(true);
     setError("");
     setStatus("");
@@ -185,12 +186,14 @@ export function SkillLibrary(props: {
       const result = await action();
       setStatus(typeof result === "string" ? result : message);
       try {
-        await load();
+        await load(props.projectId);
       } catch {
         setError("The action completed, but the library could not refresh. Reload to see it.");
       }
+      return true;
     } catch (cause) {
       report(cause);
+      return false;
     } finally {
       setBusy(false);
     }
@@ -202,13 +205,17 @@ export function SkillLibrary(props: {
       () =>
         serverCall(
           saveSkillChoice({
-            libraryId: entry.id,
-            scope: target,
-            ...(props.projectId ? { projectId: props.projectId } : {}),
-            role: selectedRole,
-            state,
-            ...(selectedRevision ? { revisionId: selectedRevision } : {}),
-            expectedVersion: current.own?.version ?? 0,
+            data: [
+              {
+                libraryId: entry.id,
+                scope: target,
+                ...(props.projectId ? { projectId: props.projectId } : {}),
+                role: selectedRole,
+                state,
+                ...(selectedRevision ? { revisionId: selectedRevision } : {}),
+                expectedVersion: current.own?.version ?? 0,
+              },
+            ],
           }),
         ),
       target === "personal"
@@ -240,8 +247,8 @@ export function SkillLibrary(props: {
       if (!revision) return;
       const result = await serverCall(
         props.projectId
-          ? checkSkillSourceUpdate(revision.id, props.projectId)
-          : checkSkillSourceUpdate(revision.id),
+          ? checkSkillSourceUpdate({ data: [revision.id, props.projectId] })
+          : checkSkillSourceUpdate({ data: [revision.id] }),
       );
       if (result.current) return "The pinned source is current";
       setEditing({
@@ -263,10 +270,14 @@ export function SkillLibrary(props: {
       () =>
         serverCall(
           proposeSkillSharing({
-            id: crypto.randomUUID(),
-            revisionId: revision.id,
-            target,
-            ...(target === "project" ? { projectId: props.projectId } : {}),
+            data: [
+              {
+                id: crypto.randomUUID(),
+                revisionId: revision.id,
+                target,
+                ...(target === "project" ? { projectId: props.projectId } : {}),
+              },
+            ],
           }),
         ),
       "Exact version proposed for sharing",
@@ -349,7 +360,7 @@ export function SkillLibrary(props: {
                     setManaging(true);
                     setOwner("all");
                     setSelected(undefined);
-                    void load().catch(report);
+                    void load(props.projectId).catch(report);
                   }}
                 >
                   Manage
@@ -364,6 +375,7 @@ export function SkillLibrary(props: {
             type="button"
             class="workspace-action"
             data-primary="true"
+            hidden={editorOpen()}
             disabled={busy() || importing()}
             onClick={() => edit()}
           >
@@ -584,8 +596,8 @@ export function SkillLibrary(props: {
                           void mutate(async () => {
                             const revision = await serverCall(
                               props.projectId
-                                ? getSkillRevision(proposal.revisionId, props.projectId)
-                                : getSkillRevision(proposal.revisionId),
+                                ? getSkillRevision({ data: [proposal.revisionId, props.projectId] })
+                                : getSkillRevision({ data: [proposal.revisionId] }),
                             );
                             setInspected({ proposalId: proposal.id, revision });
                           }, "Proposed version opened")
@@ -604,7 +616,9 @@ export function SkillLibrary(props: {
                         disabled={busy() || inspected()?.proposalId !== proposal.id}
                         onClick={() =>
                           void mutate(async () => {
-                            const result = await serverCall(acceptSkillSharing(proposal.id));
+                            const result = await serverCall(
+                              acceptSkillSharing({ data: [proposal.id] }),
+                            );
                             setSelected(result.libraryId);
                             setInspected(undefined);
                           }, "Version added to the shared library. Enable it for new work.")
@@ -641,7 +655,7 @@ export function SkillLibrary(props: {
                       >
                         <img
                           class="skill-cover"
-                          src={skillCover(entry.id)}
+                          src={skillCover(entry.id, entry.cover)}
                           width="384"
                           height="512"
                           alt=""
@@ -709,6 +723,17 @@ export function SkillLibrary(props: {
                     onEdit={edit}
                     onShare={share}
                     onCheckSource={checkSource}
+                    onCover={(key, expectedVersion) =>
+                      mutate(
+                        () =>
+                          serverCall(
+                            saveSkillCover({
+                              data: [{ libraryId: entry().id, key, expectedVersion }],
+                            }),
+                          ),
+                        "Cover saved.",
+                      )
+                    }
                     onHeading={(element) => {
                       detailHeading = element;
                     }}
@@ -731,7 +756,7 @@ export function SkillLibrary(props: {
             disabled={busy() || loading()}
             onClick={() => {
               setError("");
-              void load().catch(report);
+              void load(props.projectId).catch(report);
             }}
           >
             Reload library

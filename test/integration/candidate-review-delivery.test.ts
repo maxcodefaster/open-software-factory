@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
+import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import {
   type CandidateReviewResult,
@@ -19,7 +20,8 @@ import { createDeliveryService } from "../../apps/factory/src/delivery/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 async function setup(autofix = false) {
   const f = await candidateReviewFixture(undefined, undefined, autofix);
@@ -51,6 +53,7 @@ async function setup(autofix = false) {
         size: 10,
       })),
     listActionRuns: async () => [],
+    getFile: async () => "export const owned = true;\n",
     mergeFastForward: async () => {
       merges++;
       base = head;
@@ -101,6 +104,60 @@ async function setup(autofix = false) {
       },
     );
   }
+  async function completeCheck(status: "confirmed" | "dismissed" | "unresolved" = "confirmed") {
+    const [latest] = await f.database.client<{ id: string; source: string }[]>`
+      SELECT id,finding_source_id AS source FROM factory.candidate_review
+      WHERE change_id=${f.changeID} ORDER BY ordinal DESC LIMIT 1`;
+    if (!latest?.source) throw new Error("No focused finding check was admitted");
+    const [source] = await f.database.client<{ result: CandidateReviewResult }[]>`
+      SELECT result FROM factory.candidate_review WHERE id=${latest.source}`;
+    if (!source) throw new Error("Missing original claim batch");
+    const turn = await f.activeReview(latest.id);
+    const reviewer = createCandidateReviewController(f.database, forge);
+    await reviewer.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_read",
+        arguments: { path: changedFiles[0] },
+      },
+      "own-check",
+    );
+    await reviewer.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_finding_report",
+        arguments: {
+          summary: `Independent finding check: ${status}.`,
+          checks: source.result.findings.flatMap((finding, index) =>
+            finding.severity === "blocking"
+              ? [
+                  {
+                    finding: index + 1,
+                    status,
+                    evidence: "Inspected the exact candidate and triggering conditions.",
+                    evidenceIds: ["source:string:own-check"],
+                  },
+                ]
+              : [],
+          ),
+        },
+      },
+      "checked",
+    );
+    await f.turns.settle(
+      turn.id,
+      turn.ownerToken,
+      "completed",
+      "Owned check settled",
+      async (sql) => {
+        await sql`UPDATE factory.candidate_review SET state=result->>'verdict',completed_at=now() WHERE id=${latest.id}`;
+        await sql`UPDATE factory.change_agent_session SET state='committed' WHERE change_id=${f.changeID}`;
+      },
+    );
+    return latest.id;
+  }
   const origin = "https://owned-candidate-delivery.test";
   const endpoint = await compiledFactoryEndpoint({
     origin,
@@ -127,6 +184,7 @@ async function setup(autofix = false) {
     reviews,
     corrections,
     complete,
+    completeCheck,
     merges: () => merges,
     base: () => base,
     setFiles: (files: string[]) => {
@@ -330,7 +388,7 @@ test("ordinary comments do not block Delivery, but open and implemented Threads 
     expect((await f.controller.get(f.changeID))?.["openReviewThreads"]).toBe(1);
     await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow("open review Threads");
     await f.database
-      .client`UPDATE factory.review_feedback SET state='implemented' WHERE id=${thread.feedbackId!}`;
+      .client`UPDATE factory.review_feedback SET state='implemented' WHERE id=${fixtureValue(thread.feedbackId, "thread.feedbackId")}`;
     await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow("open review Threads");
     await human.update(f.changeID, f.userID, {
       commandId: crypto.randomUUID(),
@@ -556,6 +614,31 @@ test("a changed candidate needs new Verification and review, not the previous pa
     expect(replay.turn.state).toBe("completed");
     await f.controller.reconcile(f.changeID);
     expect(f.reviews).toHaveLength(1);
+    const [fresh] = await f.database.client<{ id: string; focus: string; prompt: string }[]>`
+      SELECT review.id,review.focus_review_id AS focus,intent.prompt_text AS prompt
+      FROM factory.candidate_review review JOIN factory.change_agent_turn_intent intent ON intent.turn_id=review.turn_id
+      WHERE review.change_id=${f.changeID} AND review.commit_sha=${newer}`;
+    expect(fresh?.focus).toBe(f.reviewID);
+    expect(fresh?.prompt).toContain("Focused correction review");
+    expect(fresh?.prompt).toContain(f.commit);
+    if (!fresh) throw new Error("Missing fresh correction review");
+    const turn = await f.activeReview(fresh.id);
+    const source = createCandidateReviewController(f.database, {
+      listFiles: async () => [{ path: "src/invoice.ts", sha: "c".repeat(40), size: 100 }],
+      getFile: async (_repo: unknown, _path: string, ref: string) =>
+        ref === f.commit ? "export const fixed = false;" : "export const fixed = true;",
+    } as unknown as ReturnType<typeof createForgejoClient>);
+    const diff = await source.call(
+      turn.id,
+      turn.ownerToken,
+      {
+        name: "review_diff",
+        arguments: { path: "src/invoice.ts", comparison: "previous" },
+      },
+      "correction-diff",
+    );
+    expect(JSON.stringify(diff)).toContain("-export const fixed = false;");
+    expect(JSON.stringify(diff)).toContain("+export const fixed = true;");
     expect(
       await f.database
         .client`SELECT id FROM factory.candidate_review WHERE change_id=${f.changeID}`,
@@ -617,6 +700,11 @@ test("only reproducible blocking review findings feed one targeted correction", 
     );
     await f.controller.reconcile(f.changeID);
     await f.controller.reconcile(f.changeID);
+    expect(f.corrections).toHaveLength(0);
+    expect(f.reviews).toHaveLength(1);
+    const checkedID = await f.completeCheck();
+    expect((await f.review(checkedID))?.state).toBe("changes-requested");
+    await f.controller.reconcile(f.changeID);
     expect(f.corrections).toHaveLength(1);
     expect(f.corrections[0]).toContain("Call sum(2,3)");
     expect(f.corrections[0]).toContain("sum.ts:1");
@@ -666,6 +754,49 @@ test("explicit incomplete-review retry gets a fresh identity and does not rewrit
     await expect(f.native("approveDelivery", [f.changeID])).rejects.toMatchObject({
       status: 403,
     });
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("an unresolved finding check requests no repair and explicit retry stays focused on the immutable claim batch", async () => {
+  const f = await setup();
+  try {
+    await f.complete(
+      candidateReviewResultInput.parse({
+        ...passed,
+        verdict: "changes-requested",
+        findings: [
+          {
+            severity: "blocking",
+            title: "Concrete concern",
+            explanation: "A material triggering condition needs investigation.",
+            reproduction: "Use the affected state.",
+          },
+        ],
+      }),
+    );
+    await f.controller.reconcile(f.changeID);
+    const checkID = await f.completeCheck("unresolved");
+    const before = await f.review(checkID);
+    await f.controller.reconcile(f.changeID);
+    expect(f.corrections).toEqual([]);
+    await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow("not eligible");
+    const commandID = crypto.randomUUID();
+    await f.controller.retryReview(f.changeID, f.userID, commandID, checkID);
+    await f.controller.retryReview(f.changeID, f.userID, commandID, checkID);
+    const [retry] = await f.database.client<
+      { source: string; supersedes: string; prompt: string }[]
+    >`
+      SELECT review.finding_source_id AS source,review.supersedes_id AS supersedes,intent.prompt_text AS prompt
+      FROM factory.candidate_review review JOIN factory.change_agent_turn_intent intent ON intent.turn_id=review.turn_id
+      WHERE review.id=${commandID}`;
+    expect(retry).toMatchObject({ source: f.reviewID, supersedes: checkID });
+    expect(retry?.prompt).toContain("fresh independent finding checker");
+    expect(retry?.prompt).not.toContain("Cover every approved criterion with a concrete case");
+    expect(await f.review(checkID)).toEqual(before);
+    expect(f.reviews).toHaveLength(2);
+    expect(f.corrections).toEqual([]);
   } finally {
     await f.dispose();
   }
@@ -729,8 +860,11 @@ test("automatic correction retains every compact finding rather than cutting fee
       }),
     );
     await f.controller.reconcile(f.changeID);
+    expect(f.corrections).toHaveLength(0);
+    await f.completeCheck();
+    await f.controller.reconcile(f.changeID);
     expect(f.corrections).toHaveLength(1);
-    expect(f.corrections[0]!.length).toBeGreaterThan(8_000);
+    expect(fixtureValue(f.corrections[0], "f.corrections[0]").length).toBeGreaterThan(8_000);
     expect(f.corrections[0]).toContain("Reproduce defect 5 using the approved action.");
     expect(f.corrections[0]).toEndWith(
       "Factory will submit the corrected candidate for new exact Verification and independent review.",
@@ -773,7 +907,7 @@ test.each(["failed", "stopped"] as const)(
         { resumed: string }[]
       >`SELECT resumed_by_turn_id AS resumed FROM factory.coding_pause WHERE turn_id=${turn.id}`;
       expect(pause?.resumed).toBe(f.reviews[0]);
-      const fresh = await f.turns.get(f.reviews[0]!);
+      const fresh = await f.turns.get(fixtureValue(f.reviews[0], "f.reviews[0]"));
       expect(fresh?.command.kind).toBe("change-review");
       expect(fresh?.authority).toMatchObject({ mode: "build", review: { commitSha: f.commit } });
       expect(f.requests()).toBe(0);

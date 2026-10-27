@@ -1,5 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { Icon } from "./icon";
+import { CopyButton } from "./ui/feedback";
 import { type WorkspaceTab, workspaceTabRuntimeURL } from "./workspace-tabs";
 
 export const workspacePanelID = "workspace-view-panel";
@@ -8,6 +9,7 @@ export const workspaceTabElementID = (id: string) => `workspace-tab-${encodeURIC
 export function WorkspaceTabbar(props: {
   tabs: readonly WorkspaceTab[];
   activeTabID: string | undefined;
+  shareURL?: string | undefined;
   onActivate: (tab: WorkspaceTab) => void;
   onClose: (id: string) => void;
   onMinimize: () => void;
@@ -198,6 +200,17 @@ export function WorkspaceTabbar(props: {
         </For>
       </div>
       <div class="workspace-tabbar-actions">
+        <Show when={props.shareURL}>
+          {(url) => (
+            <CopyButton
+              value={url()}
+              label="Copy link"
+              class="workspace-action"
+              iconOnly
+              errorMessage="Could not copy link. Copy the URL from your browser's address bar."
+            />
+          )}
+        </Show>
         <Show when={overflow()}>
           <button
             type="button"

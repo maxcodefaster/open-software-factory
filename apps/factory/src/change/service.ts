@@ -1,15 +1,21 @@
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
 import type { implementationInput } from "../../../../packages/change-domain/src/implementation";
+import { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import type { RequirementContent } from "../../../../packages/requirement-domain/src/content";
 import type {
   TicketDocumentInput,
   TicketFollowUpInput,
 } from "../../../../packages/requirement-domain/src/document";
+import type { saveTechnicalDesignInput } from "../../../../packages/requirement-domain/src/technical-design";
 import type { createAccessController } from "../access/controller";
+import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createAgentController } from "../agent/controller";
-import { ticketDetailSchema, requirementRevisionSchema, changeSchema } from "../api-contracts";
+import { changeSchema, requirementRevisionSchema, ticketDetailSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
+import type { createProjectAgentController } from "../project-agent/controller";
+import { renderArchitectureDiagrams } from "../technical-design/diagrams";
+import { saveTechnicalDesignIn, technicalPlanningOutstandingIn } from "../technical-design/store";
 import type { createChangeController } from "./controller";
 import type { createTicketDocumentController } from "./document";
 import type { createTicketTrashController } from "./trash";
@@ -24,6 +30,7 @@ export function createTicketService(options: {
   trash: Pick<ReturnType<typeof createTicketTrashController>, "trash" | "restore">;
   changes: Pick<ReturnType<typeof createChangeController>, "start" | "createRevision" | "approve">;
   agent: Pick<ReturnType<typeof createAgentController>, "admitStartIn">;
+  planning?: Pick<ReturnType<typeof createProjectAgentController>, "recover">;
 }) {
   const { database, access } = options;
   // JSON used to serialize SQL Dates at the HTTP boundary. Keep the same
@@ -105,6 +112,26 @@ export function createTicketService(options: {
         proposal?.payload["visibility"] !== "developer" ||
         (typeof ticket["projectId"] === "string" &&
           (await access.canDevelop(userID, ticket["projectId"])));
+      const developer = await access.canDevelop(userID, String(ticket["projectId"]));
+      const [technical] = await database.client<{ present: boolean }[]>`
+        SELECT EXISTS(SELECT 1 FROM factory.technical_design_revision WHERE ticket_id=${ticketID}) AS present`;
+      const technicalDesigns = developer
+        ? await database.client<Record<string, unknown>[]>`
+          SELECT design.id,design.ordinal,design.requirement_revision_id AS "requirementRevisionId",
+            design.source_commit AS "sourceCommit",design.canonical_content AS "canonicalContent",
+            design.citations,design.diagram_renders AS "diagramRenders",design.renderer_version AS "rendererVersion",
+            design.author_kind AS "authorKind",design.created_at AS "createdAt",
+            EXISTS(SELECT 1 FROM factory.requirement_approval WHERE technical_design_revision_id=design.id) AS approved
+          FROM factory.technical_design_revision design WHERE ticket_id=${ticketID} ORDER BY ordinal DESC`
+        : [];
+      const technicalPlanningPending = await database.client.begin((sql) =>
+        technicalPlanningOutstandingIn(sql, ticketID, String(revisions[0]?.["id"] ?? "") || null),
+      );
+      const [implementationOrder] = await database.client<
+        { commandId: string; state: string; reason: string | null; createdBy: string }[]
+      >`SELECT command_id AS "commandId",state,last_error AS reason,created_by AS "createdBy" FROM factory.implementation_order
+        WHERE ticket_id=${ticketID} ORDER BY created_at DESC LIMIT 1`;
+      if (developer) await access.requireDevelopment(userID, String(ticket["projectId"]));
       return ticketDetailSchema.parse({
         ticket: {
           ...ticket,
@@ -121,11 +148,89 @@ export function createTicketService(options: {
             : null,
         origin: origin ?? null,
         followUps,
+        technicalDesignPresent: technical?.present ?? false,
+        technicalPlanningPending,
+        technicalDesigns: technicalDesigns.map((design) => ({
+          ...revisionDTO(design),
+          content: JSON.parse(String(design["canonicalContent"])),
+        })),
+        implementationOrder: implementationOrder
+          ? {
+              ...implementationOrder,
+              canCancel: developer || implementationOrder.createdBy === userID,
+            }
+          : null,
       });
+    },
+    async cancelImplementation(userID: string, ticketID: string, commandID: string) {
+      await access.requireTicket(userID, ticketID);
+      await database.client.begin(async (sql) => {
+        await sql`SELECT id FROM factory.ticket WHERE id=${ticketID} FOR UPDATE`;
+        const [ticket] = await sql<
+          { projectID: string }[]
+        >`SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
+        if (!ticket) throw new CommandError("not-found", "Ticket not found.");
+        await projectAuthorityIn(sql, userID, ticket.projectID);
+        const [order] = await sql<
+          { userID: string }[]
+        >`SELECT created_by AS "userID" FROM factory.implementation_order
+          WHERE command_id=${commandID} AND ticket_id=${ticketID} AND state='waiting' FOR UPDATE`;
+        if (!order)
+          throw new CommandError("conflict", "This implementation order is no longer waiting.");
+        if (order.userID !== userID) {
+          await projectDevelopmentAuthorityIn(sql, userID, ticket.projectID);
+        }
+        await sql`UPDATE factory.implementation_order SET state='cancelled',cancelled_by=${userID},cancelled_at=now(),updated_at=now()
+          WHERE command_id=${commandID}`;
+      });
+    },
+    async saveTechnicalDesign(
+      userID: string,
+      ticketID: string,
+      input: z.output<typeof saveTechnicalDesignInput>,
+    ) {
+      await access.requireTicket(userID, ticketID);
+      const [ticket] = await database.client<{ projectID: string }[]>`
+        SELECT project_id AS "projectID" FROM factory.ticket WHERE id=${ticketID}`;
+      if (!ticket) throw new CommandError("not-found", "Ticket not found.");
+      await access.requireDevelopment(userID, ticket.projectID);
+      const [previous] = await database.client<
+        {
+          requirementRevisionId: string;
+          sourceCommit: string;
+          citations: unknown;
+          planningTurnID: string | null;
+        }[]
+      >`SELECT requirement_revision_id AS "requirementRevisionId",source_commit AS "sourceCommit",citations
+        ,planning_turn_id AS "planningTurnID" FROM factory.technical_design_revision WHERE id=${input.expectedRevisionId} AND ticket_id=${ticketID}`;
+      if (!previous) throw new CommandError("conflict", "The technical design is unavailable.");
+      const [document] = await database.client<{ id: string }[]>`
+        SELECT id FROM factory.ticket_document_revision WHERE ticket_id=${ticketID} ORDER BY ordinal DESC LIMIT 1`;
+      const renders = await renderArchitectureDiagrams(input.content);
+      await database.client.begin((sql) =>
+        saveTechnicalDesignIn(sql, {
+          id: input.commandId,
+          ticketID,
+          userID,
+          content: input.content,
+          renders,
+          citations: z.array(sourceCitationInput).parse(previous.citations),
+          base: {
+            requirementRevisionId: previous.requirementRevisionId,
+            sourceCommit: previous.sourceCommit,
+            previousDesignId: input.expectedRevisionId,
+            documentId: document?.id ?? null,
+            ...(previous.planningTurnID ? { requestId: previous.planningTurnID } : {}),
+          },
+        }),
+      );
+      return { id: input.commandId };
     },
     async save(userID: string, ticketID: string, input: TicketDocumentInput) {
       await access.requireTicket(userID, ticketID);
-      return options.documents.save(ticketID, userID, input);
+      const saved = await options.documents.save(ticketID, userID, input);
+      if (input.proposalEntryId) void options.planning?.recover().catch(() => {});
+      return saved;
     },
     async followUp(userID: string, ticketID: string, input: TicketFollowUpInput) {
       await access.requireTicket(userID, ticketID);
@@ -150,11 +255,14 @@ export function createTicketService(options: {
       const change = await options.changes.start(ticketID, userID, {
         commandID: input.commandId,
         revisionID: input.revisionId,
+        ...(input.technicalDesignRevisionId
+          ? { technicalDesignRevisionID: input.technicalDesignRevisionId }
+          : {}),
         ...(input.codingReasoning ? { codingReasoning: input.codingReasoning } : {}),
         admitBuild: (sql, changeID) =>
           options.agent.admitStartIn(sql, changeID, userID, input.commandId, input.codingReasoning),
       });
-      return { id: z.uuid().parse(change?.id) };
+      return { id: z.uuid().parse(change?.id ?? input.commandId) };
     },
   };
 }

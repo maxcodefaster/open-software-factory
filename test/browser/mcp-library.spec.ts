@@ -1,13 +1,15 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { fixtureValue } from "../fixtures/value";
 
 test("MCP library uses landscape connection covers, retains private drafts and keeps definitions separate from activation", async ({
   page,
@@ -48,7 +50,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     const covers = page.locator(".mcp-cover:visible");
     expect(await covers.count()).toBeGreaterThan(0);
     for (const cover of await covers.all()) {
-      await expect(cover).toHaveAttribute("src", /^\/art\/mcp\/.*\.webp$/);
+      await expect(cover).toHaveAttribute("src", /^\/art\/(?:mcp|library)\/.*\.webp$/);
       await expect(cover).toHaveJSProperty("naturalWidth", 768);
       await expect(cover).toHaveJSProperty("naturalHeight", 512);
       const size = await cover.boundingBox();
@@ -57,8 +59,12 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     }
   }
   async function open() {
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByRole("button", { name: "Open settings", exact: true }).click();
+    const workspace = page.getByRole("region", { name: "settings workspace", exact: true });
+    if (/\/settings\/?$/.test(new URL(page.url()).pathname)) await expect(workspace).toBeVisible();
+    else if (!(await workspace.isVisible())) {
+      await page.getByRole("button", { name: "Settings", exact: true }).click();
+      await page.getByRole("button", { name: "Open settings", exact: true }).click();
+    }
     const navigation = page.getByRole("navigation", { name: "Settings navigation" });
     await chooseSettingsPage(page, "MCP connections");
     await expect(page.getByRole("heading", { name: "MCP connections", exact: true })).toBeVisible();
@@ -70,7 +76,9 @@ test("MCP library uses landscape connection covers, retains private drafts and k
       await expect(page.getByRole("button", { name: "Choose settings page" })).toHaveText(
         "MCP connections",
       );
-    await expect(page.getByRole("status")).not.toContainText("Loading connections");
+    await expect(
+      page.locator(".mcp-library").getByRole("status").filter({ hasText: "Loading connections" }),
+    ).toHaveCount(0);
   }
   try {
     await mkdir(evidence, { recursive: true });
@@ -164,7 +172,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
     const view = await serverCall(browserFunction(page, "getMCPLibrary", []));
     expect(view.entries).toHaveLength(1);
     expect(view.choices).toHaveLength(0);
-    expect(view.entries[0]!.connection).toBeNull();
+    expect(fixtureValue(view.entries[0], "view.entries[0]").connection).toBeNull();
     await page.reload();
     await open();
     await expect(page.getByRole("button", { name: "Inspect Owned MCP source" })).toBeVisible();
@@ -338,7 +346,7 @@ test("MCP library uses landscape connection covers, retains private drafts and k
           expectedRevision: 1,
           scope: "system",
           content: {
-            ...currentEntry.revisions[0]!.content,
+            ...fixtureValue(currentEntry.revisions[0], "currentEntry.revisions[0]").content,
             description: "Synthetic replacement account.",
           },
         },

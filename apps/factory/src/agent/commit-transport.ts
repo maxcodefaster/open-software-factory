@@ -37,6 +37,7 @@ export function createAgentCommitTransport(
             AND session.runtime_attempt_id = ${attemptID} AND session.active_turn_id = operation.id
             AND session.opencode_session_id = intent.session_id AND session.state = 'waiting'
             AND NOT session.stop_pending AND operation.expected_parent_sha = ${operation.expectedSha ?? ""}
+            AND COALESCE(operation.merge_parent_sha,'') = ${operation["mergeParentSha"] ?? ""}
             AND operation.state = ${operation.action !== "git-push" ? "commit-intended" : "push-intended"}
             AND (${operation.action !== "git-push"} OR
               (operation.commit_sha = ${operation.commitSha ?? ""} AND operation.branch_name = ${operation.branch ?? ""}))`;
@@ -68,6 +69,7 @@ export function createAgentCommitTransport(
         operationId: string;
         action: "git-observe-commit";
         expectedSha: string;
+        mergeParentSha?: string;
         commitMessage: string;
         authorName: string;
         authorEmail: string;
@@ -97,6 +99,7 @@ export function createAgentCommitTransport(
             JOIN factory.runtime_attempt current ON current.id = change.runtime_attempt_id
             WHERE operation.id = ${operation.operationId} AND operation.runtime_attempt_id = ${attemptID}
               AND operation.source = 'agent' AND operation.state = 'commit-intended' AND operation.expected_parent_sha = ${operation.expectedSha}
+              AND COALESCE(operation.merge_parent_sha,'') = ${operation.mergeParentSha ?? ""}
               AND session.active_turn_id = operation.id AND session.state = 'waiting' AND NOT session.stop_pending
               AND session.runtime_attempt_id = original.id AND intent.runtime_attempt_id = original.id
               AND session.opencode_session_id = intent.session_id AND original.state IN ('stopped', 'failed')

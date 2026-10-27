@@ -12,13 +12,16 @@ export function DockButton(props: {
   open?: boolean;
   disabled?: boolean;
   notification?: boolean;
+  count?: number | undefined;
   onClick(): void;
   onMinimize?(): void;
 }) {
   return (
     <button
       type="button"
-      aria-label={props.label}
+      aria-label={
+        props.count ? `${props.label}, ${props.count} items need your attention` : props.label
+      }
       aria-pressed={props.active ? "true" : "false"}
       data-tooltip={props.disabled ? `${props.label} waits for a ready runtime` : props.label}
       disabled={props.disabled}
@@ -30,6 +33,13 @@ export function DockButton(props: {
       </Show>
       <Show when={props.notification}>
         <span class="notification-dot" />
+      </Show>
+      <Show when={props.count && props.count > 0 ? props.count : undefined}>
+        {(count) => (
+          <span class="inbox-count" aria-hidden="true">
+            {count() > 99 ? "99+" : count()}
+          </span>
+        )}
       </Show>
     </button>
   );

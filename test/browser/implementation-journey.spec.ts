@@ -25,6 +25,7 @@ import {
   browserBootstrap,
   browserFunction,
   completedConversation,
+  factoryFunctionMatches,
   mockAgentView,
   mockBootstrap,
   mockFactoryFunctions,
@@ -32,6 +33,7 @@ import {
 import { streamedAgentView } from "../support/agent-activity-route";
 import { serveChatAssets } from "../support/chat-assets";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { fixtureValue } from "../fixtures/value";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -239,7 +241,7 @@ for (const state of [
   { id: "coding", primary: "" },
   { id: "coding-paused", primary: "Resume implementation" },
   { id: "reviewing", primary: "" },
-  { id: "revision", primary: "Request revision" },
+  { id: "revision", primary: "Request revision · 1 Thread" },
   { id: "checks-paused", primary: "Resume checks" },
   { id: "review-retry", primary: "Retry review" },
   { id: "ready-to-deliver", primary: "Deliver" },
@@ -491,12 +493,16 @@ for (const state of [
         const menu = page.getByRole("menu", { name: "Ticket actions", exact: true });
         await expect(menu).toBeVisible();
         const bounds = await menu.boundingBox();
-        expect(bounds!.x).toBeGreaterThanOrEqual(0);
-        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
-        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(960);
+        expect(fixtureValue(bounds, "bounds").x).toBeGreaterThanOrEqual(0);
+        expect(
+          fixtureValue(bounds, "bounds").x + fixtureValue(bounds, "bounds").width,
+        ).toBeLessThanOrEqual(width);
+        expect(
+          fixtureValue(bounds, "bounds").y + fixtureValue(bounds, "bounds").height,
+        ).toBeLessThanOrEqual(960);
         if (state.id === "revision" && width === 430) {
-          const refreshed = page.waitForResponse((response) =>
-            new URL(response.url()).pathname.startsWith("/_server/data/getVisualReview-"),
+          const refreshed = page.waitForResponse(
+            async (response) => await factoryFunctionMatches(response.url(), "getVisualReview"),
           );
           await page.evaluate(
             (id) => window.dispatchEvent(new CustomEvent("factory-review-changed", { detail: id })),
@@ -518,7 +524,12 @@ for (const state of [
             .getByRole("menuitem", { name: "Reload review", exact: true })
             .locator("span")
             .boundingBox();
-          expect(Math.abs(feedbackLabel!.x - reloadLabel!.x)).toBeLessThanOrEqual(1);
+          expect(
+            Math.abs(
+              fixtureValue(feedbackLabel, "feedbackLabel").x -
+                fixtureValue(reloadLabel, "reloadLabel").x,
+            ),
+          ).toBeLessThanOrEqual(1);
           await page.screenshot({
             path: `${evidence}/revision-menu-430.png`,
             animations: "disabled",
@@ -626,7 +637,7 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
   });
   await mockFactoryFunctions(page, {
     agent: {
-      resume: async (_actor, factoryTargetID, factoryCommand) => {
+      resume: async (_actor, _factoryTargetID, factoryCommand) => {
         resumes.push(factoryCommand);
         return (() => {
           throw new Error("Controlled lost response");
@@ -1186,7 +1197,7 @@ test("an implementing Ticket never offers another Implement while its Change rea
     await db.client`UPDATE factory.ticket SET state='in-progress' WHERE id=${ticketID}`;
     await mockFactoryFunctions(page, {
       runtime: {
-        changes: async (_actor, factoryTargetID) => {
+        changes: async (_actor, _factoryTargetID) => {
           await release.promise;
           return changesResponseSchema.parse({ changes: [] });
         },
@@ -1384,7 +1395,7 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   await mockAgentView(
     page,
     changeID,
-    async (factoryTargetID, factoryHistory) => {
+    async (_factoryTargetID, _factoryHistory) => {
       agentReads++;
       if (holdingFirstObservation) await firstObservation.promise;
       return agentViewSchema.parse(view());
@@ -1430,7 +1441,7 @@ test("chat selects reasoning for the first Build, then shows the admitted value 
   });
   await mockFactoryFunctions(page, {
     agent: {
-      start: async (_actor, factoryTargetID, factoryCommand) => {
+      start: async (_actor, _factoryTargetID, factoryCommand) => {
         const input = factoryCommand;
         starts.push(input);
         if (starts.length === 1)
@@ -1987,7 +1998,7 @@ test("Coding uses one live read, reconciles reconnects without duplicates, and d
   await mockAgentView(
     page,
     changeID,
-    async (factoryTargetID, factoryHistory) => {
+    async (_factoryTargetID, _factoryHistory) => {
       statusReads++;
       return agentViewSchema.parse(view);
     },
@@ -2921,7 +2932,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      message: async (_actor, factoryTargetID, factoryCommand) => {
+      message: async (_actor, _factoryTargetID, _factoryCommand) => {
         researchRequests += 1;
         return completedConversation(conversationViewSchema.parse(conversation));
       },
@@ -2986,7 +2997,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   await expect(review.getByRole("checkbox")).toHaveCount(0);
   await page
     .locator(".ticket-header-actions")
-    .getByRole("button", { name: "Request revision", exact: true })
+    .getByRole("button", { name: /^Request revision · \d+ Threads?$/ })
     .click();
   await expect
     .poll(() => received?.feedback)
@@ -3000,7 +3011,9 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   // The command response arrives before the cached Change reflects the new turn.
   await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Request revision", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Request revision · \d+ Threads?$/ })).toHaveCount(
+    0,
+  );
   await mkdir(".factory/test-results/implementation-journey", { recursive: true });
   await page.screenshot({
     path: ".factory/test-results/implementation-journey/correction-composer-cleared.png",

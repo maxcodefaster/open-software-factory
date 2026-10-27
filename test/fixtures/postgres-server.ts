@@ -106,9 +106,7 @@ export async function ownedPostgresServer() {
     url: `postgresql://factory:owned-test-password@127.0.0.1:${port}/factory`,
   };
   async function dispose() {
-    await verify(identity);
-    await docker(["rm", "--force", name]);
-    await removeNetwork();
+    await closeOwnedPostgresServer(identity);
   }
   try {
     const migration = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {
@@ -122,6 +120,17 @@ export async function ownedPostgresServer() {
     await dispose();
     throw cause;
   }
+}
+export async function closeOwnedPostgresServer(identity: PostgresIdentity) {
+  await verify(identity);
+  const name = `factory-test-postgres-${identity.owner}`;
+  if (
+    (await docker(["network", "inspect", "--format", `{{index .Labels "${label}"}}`, name])) !==
+    identity.owner
+  )
+    throw new Error("Test PostgreSQL network ownership mismatch");
+  await docker(["rm", "--force", name]);
+  await docker(["network", "rm", name]);
 }
 export async function ownedTestDatabase(
   identity: PostgresIdentity,
@@ -146,6 +155,7 @@ export async function ownedTestDatabase(
   }
   return {
     url: identity.url.replace(/\/factory$/, `/${name}`),
+    network: `factory-test-postgres-${identity.owner}`,
     async dispose() {
       await verify(identity);
       const admin = postgres(identity.url.replace(/\/factory$/, "/postgres"), { max: 1 });

@@ -28,15 +28,15 @@ await Bun.sleep(60_000);
     process.env["FACTORY_KUBERNETES_CONTEXT"] = "owned-forward-context";
     forwards.push(
       startServiceForward("editor", `factory-editor-${"1".repeat(32)}`, "editor-1"),
-      startServiceForward("source", `factory-workspace-${"2".repeat(12)}`, "source-1"),
+      startServiceForward("source", `factory-box-${"2".repeat(32)}`, `source-${"3".repeat(32)}-1`),
     );
     expect(await Promise.all(forwards.map((forward) => forward.endpoint))).toEqual([
       "http://127.0.0.1:45001",
       "http://127.0.0.1:45002",
     ]);
-    for (const [role, namespace, port] of [
-      ["editor", `factory-editor-${"1".repeat(32)}`, "0:4400"],
-      ["source", `factory-workspace-${"2".repeat(12)}`, "0:4600"],
+    for (const [role, namespace, pod, port] of [
+      ["editor", `factory-editor-${"1".repeat(32)}`, "editor-1", "0:4400"],
+      ["source", `factory-box-${"2".repeat(32)}`, `source-${"3".repeat(32)}-1`, "0:4600"],
     ] as const) {
       expect(JSON.parse(await readFile(join(directory, `${role}.json`), "utf8"))).toEqual([
         "--context",
@@ -46,7 +46,7 @@ await Bun.sleep(60_000);
         "127.0.0.1",
         "-n",
         namespace,
-        `pod/${role}-1`,
+        `pod/${pod}`,
         port,
       ]);
     }

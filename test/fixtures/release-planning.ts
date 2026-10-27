@@ -1,19 +1,23 @@
 import { expect } from "bun:test";
 import { resolve } from "node:path";
-import { expect as visible, type Page, type Response } from "@playwright/test";
+import { type Page, type Response, expect as visible } from "@playwright/test";
 import {
-  conversationViewSchema,
-  type ConversationView,
   type ConversationStreamEvent,
+  type ConversationView,
+  conversationViewSchema,
   ticketDetailSchema,
 } from "../../apps/factory/src/api-contracts";
+import { streamConversation } from "../../apps/factory/src/conversation-stream";
 import { markdownHTML } from "../../apps/factory/src/markdown";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { interviewQuestionInput } from "../../packages/conversation-domain/src/conversation";
 import { requirementContentInput } from "../../packages/requirement-domain/src/content";
 import type { releaseInstallation } from "./release-installation";
-import { callFactoryFunction, decodeBrowserFunction } from "./server-functions";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { streamConversation } from "../../apps/factory/src/conversation-stream";
+import {
+  callFactoryFunction,
+  decodeBrowserFunction,
+  factoryFunctionMatches,
+} from "./server-functions";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 
@@ -65,8 +69,8 @@ export async function releasePlanning(fixture: Fixture) {
   async function message(text: string) {
     await page.getByRole("textbox", { name: "Message conversation", exact: true }).fill(text);
     const response = page.waitForResponse(
-      (value) =>
-        new URL(value.url()).pathname.startsWith("/_server/data/sendConversationMessage-") &&
+      async (value) =>
+        (await factoryFunctionMatches(value.url(), "sendConversationMessage")) &&
         value.request().method() === "POST",
       { timeout: 120_000 },
     );
@@ -121,8 +125,8 @@ export async function releasePlanning(fixture: Fixture) {
   }
   async function answer(form: ReturnType<Page["locator"]>) {
     const response = page.waitForResponse(
-      (value) =>
-        new URL(value.url()).pathname.startsWith("/_server/data/answerConversationQuestion-") &&
+      async (value) =>
+        (await factoryFunctionMatches(value.url(), "answerConversationQuestion")) &&
         value.request().method() === "POST",
       { timeout: 120_000 },
     );

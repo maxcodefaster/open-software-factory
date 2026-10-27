@@ -1,13 +1,12 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import { invoke } from "@solidjs/web/server-functions/client";
+import { APIRequestError } from "./api-client";
 import type { WriterView } from "./api-contracts";
 import { serverCall } from "./server-functions/result";
-import { APIRequestError } from "./api-client";
 import {
-  getChangeWriterStatus,
-  requestChangeEditing,
-  releaseChangeEditing,
   approveChangeEditing,
+  getChangeWriterStatus,
+  releaseChangeEditing,
+  requestChangeEditing,
   takeOverIdleEditing,
 } from "./server-functions/writer";
 
@@ -77,13 +76,10 @@ export function ChangeWriterStatus(props: {
         const fence = readFence;
         try {
           const current = await serverCall(
-            invoke(
-              getChangeWriterStatus,
-              {
-                signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(8_000)]),
-              },
-              id,
-            ),
+            getChangeWriterStatus({
+              signal: AbortSignal.any([cancellation.signal, AbortSignal.timeout(8_000)]),
+              data: [id],
+            }),
           );
           if (!cancellation.signal.aborted && scope === generation && fence === readFence) {
             setView(current);
@@ -129,10 +125,13 @@ export function ChangeWriterStatus(props: {
     try {
       const input = { epoch, commandID, ...(requestID ? { requestID } : {}) };
       let current: WriterView;
-      if (action === "request") current = await serverCall(requestChangeEditing(id, input));
-      else if (action === "release") current = await serverCall(releaseChangeEditing(id, input));
-      else if (action === "approve") current = await serverCall(approveChangeEditing(id, input));
-      else current = await serverCall(takeOverIdleEditing(id, input));
+      if (action === "request")
+        current = await serverCall(requestChangeEditing({ data: [id, input] }));
+      else if (action === "release")
+        current = await serverCall(releaseChangeEditing({ data: [id, input] }));
+      else if (action === "approve")
+        current = await serverCall(approveChangeEditing({ data: [id, input] }));
+      else current = await serverCall(takeOverIdleEditing({ data: [id, input] }));
       if (props.changeID === id && scope === generation) {
         readFence++;
         if (action === "request") pendingRequest = undefined;

@@ -1,13 +1,12 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createConversationService } from "../../apps/factory/src/project-agent/service";
 import { createAgentService } from "../../apps/factory/src/agent/service";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { ConversationView } from "../../apps/factory/src/api-contracts";
 import { agentViewSchema } from "../../apps/factory/src/api-contracts";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { streamConversation } from "../../apps/factory/src/conversation-stream";
 import {
   callFactoryFunction,

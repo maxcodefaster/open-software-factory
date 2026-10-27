@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
+import { createEffect, createSignal, For, Show, untrack } from "solid-js";
 import {
   type ModelRole,
   modelRoles,
@@ -36,7 +36,7 @@ export function SystemModelSettings(props: {
     setBusy(true);
     setError("");
     try {
-      const value = await serverCall(getModelSettings());
+      const value = await serverCall(getModelSettings({ data: [] }));
       if (!disposed) publish(value);
     } catch (cause) {
       if (!disposed) setError(cause instanceof Error ? cause.message : "Could not load models");
@@ -54,10 +54,14 @@ export function SystemModelSettings(props: {
     try {
       const value = await serverCall(
         saveModelSettings({
-          version: current.version,
-          planningModelId: planning(),
-          buildModelId: build(),
-          rules: rules(),
+          data: [
+            {
+              version: current.version,
+              planningModelId: planning(),
+              buildModelId: build(),
+              rules: rules(),
+            },
+          ],
         }),
       );
       if (!disposed) {
@@ -73,7 +77,8 @@ export function SystemModelSettings(props: {
   createEffect(
     () => props.active,
     (active) => {
-      if (active && settings() && !busy() && !dirty()) void load();
+      // Form edits and read results must not retrigger this reopen observation.
+      if (active && untrack(() => settings() && !busy() && !dirty())) void load();
     },
   );
   createEffect(

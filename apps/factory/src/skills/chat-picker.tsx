@@ -1,6 +1,5 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
 import type { SkillRole } from "../../../../packages/conversation-domain/src/skills";
-import { invoke } from "@solidjs/web/server-functions/client";
 import { serverCall, type ServerValue } from "../server-functions/result";
 import { getSkillInvocations } from "../server-functions/skills";
 import { insertSkillInvocation, skillInvocationQuery } from "./chat-invocation";
@@ -167,10 +166,13 @@ export function ChatSkillPicker(props: {
     setError("");
     setView(undefined);
     try {
-      const args: Parameters<typeof getSkillInvocations> = [projectID, props.workType];
+      const args: NonNullable<Parameters<typeof getSkillInvocations>[0]>["data"] = [
+        projectID,
+        props.workType,
+      ];
       if (props.changeID) args.push(props.changeID);
       const result = await serverCall(
-        invoke(getSkillInvocations, { signal: current.signal }, ...args),
+        getSkillInvocations({ ...{ signal: current.signal }, data: [...args] }),
       );
       if (!current.signal.aborted) setView(result);
     } catch (cause) {

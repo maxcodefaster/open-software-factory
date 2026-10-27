@@ -1,7 +1,7 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
-import { type SetupTask, type SetupTaskView } from "../../../../packages/project-domain/src/setup";
-import { getSetupReadiness, retrySetupTask } from "../server-functions/setup";
+import type { SetupTask, SetupTaskView } from "../../../../packages/project-domain/src/setup";
 import { serverCall } from "../server-functions/result";
+import { getSetupReadiness, retrySetupTask } from "../server-functions/setup";
 
 const labels = {
   configuration: "Project configuration",
@@ -27,7 +27,7 @@ export function SetupReadiness(props: { projectID: string }) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       async function load() {
         try {
-          const value = await serverCall(getSetupReadiness(projectID));
+          const value = await serverCall(getSetupReadiness({ data: [projectID] }));
           if (disposed) return;
           setRows(value);
           setError("");
@@ -52,7 +52,7 @@ export function SetupReadiness(props: { projectID: string }) {
     const projectID = props.projectID;
     setRetrying(task);
     try {
-      const value = await serverCall(retrySetupTask(projectID, task));
+      const value = await serverCall(retrySetupTask({ data: [projectID, task] }));
       if (props.projectID === projectID) {
         setRows(value);
         setRefresh((value) => value + 1);

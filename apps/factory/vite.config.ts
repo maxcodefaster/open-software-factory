@@ -1,28 +1,19 @@
 import solid from "@solidjs/vite-plugin";
+import { tanstackStart } from "@tanstack/solid-start/plugin/vite";
 import { defineConfig } from "vite";
 import { factoryDevelopmentProxy } from "../../scripts/factory/dev-proxy";
-import { resolve } from "node:path";
 import { factoryBuildDirectory } from "./src/build-directory";
-import {
-  factoryFunctionManifestID,
-  factoryServerFunctionManifest,
-} from "../../scripts/factory/server-function-manifest";
 
-export default defineConfig(({ isSsrBuild }) => ({
+export default defineConfig(() => ({
   root: import.meta.dirname,
   plugins: [
-    ...(isSsrBuild
-      ? [factoryServerFunctionManifest(import.meta.dirname, factoryBuildDirectory())]
-      : []),
-    solid({
-      ssr: false,
-      serverFunctions: { devMiddleware: false, manifest: factoryFunctionManifestID },
-    }),
+    tanstackStart({ server: { entry: "./start-server.ts" }, serverFns: { base: "/_server" } }),
+    solid({ ssr: true }),
     factoryDevelopmentProxy(),
   ],
   build: {
     target: "esnext",
-    outDir: resolve(factoryBuildDirectory(), isSsrBuild ? "server" : "client"),
+    outDir: factoryBuildDirectory(),
     emptyOutDir: true,
     rolldownOptions: {
       output: {
@@ -35,6 +26,13 @@ export default defineConfig(({ isSsrBuild }) => ({
             },
           ],
         },
+      },
+    },
+  },
+  environments: {
+    ssr: {
+      build: {
+        rolldownOptions: { output: { entryFileNames: "entry.js" } },
       },
     },
   },

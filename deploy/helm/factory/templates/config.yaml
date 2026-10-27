@@ -28,9 +28,9 @@ data:
   FACTORY_OPENBAO_CA_FILE: "/run/factory/openbao/ca.crt"
   FACTORY_REGISTRY_CA_FILE: {{ ternary "/run/factory/registry/ca.crt" "/etc/ssl/certs/ca-certificates.crt" (not (empty .Values.registryCASecret)) | quote }}
   FACTORY_STATE_DIRECTORY: "/var/lib/factory"
-  FACTORY_ATTACHMENT_S3_ENDPOINT: {{ .Values.attachments.endpoint | quote }}
-  FACTORY_ATTACHMENT_S3_BUCKET: {{ .Values.attachments.bucket | quote }}
-  FACTORY_ATTACHMENT_S3_REGION: {{ .Values.attachments.region | quote }}
+  FACTORY_OBJECT_S3_ENDPOINT: "http://{{ include "factory.name" . }}-objects.{{ .Release.Namespace }}.svc:3900"
+  FACTORY_OBJECT_S3_BUCKET: "factory"
+  FACTORY_OBJECT_S3_REGION: "garage"
   FACTORY_ATTACHMENT_FILE_BYTES: {{ .Values.attachments.fileBytes | quote }}
   FACTORY_ATTACHMENT_MESSAGE_BYTES: {{ .Values.attachments.messageBytes | quote }}
   FACTORY_STORAGE_CLASS: {{ .Values.storageClass | quote }}

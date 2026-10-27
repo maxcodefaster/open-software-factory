@@ -9,6 +9,7 @@ export const usagePurpose = z.enum([
   "wiki",
   "setup",
   "probe",
+  "learning",
 ]);
 export type UsagePurpose = z.infer<typeof usagePurpose>;
 

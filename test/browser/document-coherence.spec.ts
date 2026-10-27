@@ -1,22 +1,27 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { documentBlocks } from "../../apps/factory/src/document-model";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import {
-  repositoryDocumentsSchema,
   knowledgeGenerationSchema,
   knowledgeSearchSchema,
   openRepositoryDocumentSchema,
+  repositoryDocumentsSchema,
   ticketDetailSchema,
 } from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { documentBlocks } from "../../apps/factory/src/document-model";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserFunction,
+  factoryFunctionMatches,
+  mockFactoryFunctions,
+  requestFunction,
+} from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
+import { fixtureValue } from "../fixtures/value";
 
 let userID = "";
 const evidenceDirectory = ".factory/test-results/document-coherence";
@@ -602,7 +607,7 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
     release.resolve();
     await expect
       .poll(async () => {
-        const [row] = await database!.client<Array<{ body: string }>>`
+        const [row] = await fixtureValue(database, "database").client<Array<{ body: string }>>`
         SELECT current_body AS body FROM factory.knowledge_page WHERE id=${pageID}
       `;
         return row?.body;
@@ -612,7 +617,7 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
     await editor.pressSequentially("Replacement Wiki intent.");
     await expect
       .poll(async () => {
-        const [row] = await database!.client<Array<{ body: string }>>`
+        const [row] = await fixtureValue(database, "database").client<Array<{ body: string }>>`
         SELECT current_body AS body FROM factory.knowledge_page WHERE id=${pageID}
       `;
         return row?.body;
@@ -927,9 +932,9 @@ test("keeps long Ticket context inside the compact composer at desktop and phone
 
 test("keeps History open beside the wide Agent during browser capture", async ({ page }) => {
   let refreshes = 0;
-  page.on("response", (response) => {
+  page.on("response", async (response) => {
     if (
-      response.url().includes("/_server/data/getTicketDetail-") &&
+      (await factoryFunctionMatches(response.url(), "getTicketDetail")) &&
       response.request().method() === "POST"
     )
       refreshes++;

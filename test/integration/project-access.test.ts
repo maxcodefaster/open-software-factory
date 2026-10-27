@@ -313,7 +313,10 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     expect((await zero.run(projectsQuery)).map((project) => project.id)).toEqual([first.projectID]);
     expect(
       await zero.run(
-        zeroQueries.tickets.list.fn({ args: { projectId: second.projectID }, ctx: context }),
+        zeroQueries.tickets.active.fn({
+          args: { projectId: second.projectID, limit: 201 },
+          ctx: context,
+        }),
       ),
     ).toEqual([]);
     expect(
@@ -331,8 +334,8 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
         { id: "project-list", name: "projects.list", args: [] },
         {
           id: "other-tickets",
-          name: "tickets.list",
-          args: [{ projectId: second.projectID, systemManager: true }],
+          name: "tickets.active",
+          args: [{ projectId: second.projectID, limit: 201, systemManager: true }],
         },
       ],
     ]);
@@ -423,7 +426,7 @@ test("membership scopes Zero, entity commands and runtime grants including revoc
     expect((await command(`/runtime/${first.attemptID}/ide/`, runtimeCookie)).status).toBe(503);
     const personalWorkspaceID = crypto.randomUUID();
     const personalAttemptID = crypto.randomUUID();
-    const suffix = personalWorkspaceID.replaceAll("-", "").slice(0, 12);
+    const _suffix = personalWorkspaceID.replaceAll("-", "").slice(0, 12);
     await database.client`INSERT INTO factory.development_workspace(id, project_id, kind, owner_user_id,
       source_branch, source_revision, created_by)
       VALUES (${personalWorkspaceID}, ${first.projectID}, 'personal', ${administrator}, 'main', ${"a".repeat(40)}, ${administrator})`;

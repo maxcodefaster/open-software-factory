@@ -4,6 +4,7 @@ import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { executionPoolFixture } from "../fixtures/execution-pool";
 import { factoryProcess } from "../fixtures/factory-process";
+import { fixtureValue } from "../fixtures/value";
 
 const image = `registry.invalid/runtime@sha256:${"1".repeat(64)}`;
 const images = { staging: image, verification: image };
@@ -37,7 +38,7 @@ test("the production pool plans two Project-bound Forks from one healthy immutab
     expect(JSON.stringify(configuration)).not.toContain("do-not-capture");
     await expect(
       (async () => {
-        await database.client`UPDATE factory.staging_configuration SET declaration='{}'::jsonb WHERE runtime_attempt_id=${owned!.stagingID}`;
+        await database.client`UPDATE factory.staging_configuration SET declaration='{}'::jsonb WHERE runtime_attempt_id=${owned.stagingID}`;
       })(),
     ).rejects.toThrow("immutable");
     const [first] = await database.client.begin((sql) => store.plan(sql));
@@ -154,7 +155,7 @@ test("the production pool plans two Project-bound Forks from one healthy immutab
         expect(
           (
             await store.admit(sql, crypto.randomUUID(), "verification", {
-              projectID: owned!.projectID,
+              projectID: fixtureValue(owned, "owned").projectID,
               kind: "verification",
             })
           )?.id,
@@ -168,13 +169,17 @@ test("the production pool plans two Project-bound Forks from one healthy immutab
     const attemptID = crypto.randomUUID();
     await database.client.begin(async (sql) => {
       const selected = await store.admit(sql, attemptID, "staging", {
-        projectID: owned!.projectID,
+        projectID: fixtureValue(owned, "owned").projectID,
         kind: "staging",
       });
       expect(selected?.id).toBe(first.id);
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${attemptID},${owned!.projectID},'staging',2,${owned!.revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${owned!.userID})`;
-      await freezeRuntimeArtifacts(sql, attemptID, owned!.artifactConfiguration);
+        VALUES(${attemptID},${fixtureValue(owned, "owned").projectID},'staging',2,${fixtureValue(owned, "owned").revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+      await freezeRuntimeArtifacts(
+        sql,
+        attemptID,
+        fixtureValue(owned, "owned").artifactConfiguration,
+      );
     });
     expect(await store.intendStandby(database.client, first.id, "resume")).toBe(true);
     expect(await store.intendStandby(database.client, first.id, "resume")).toBe(false);

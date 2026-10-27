@@ -1,0 +1,52 @@
+.control-catalog {
+  max-width: 56rem;
+  min-height: 100dvh;
+  margin-inline: auto;
+  padding: var(--space-6);
+  color: var(--color-ink);
+  background: var(--color-paper-cool);
+}
+.control-catalog header,
+.control-catalog section {
+  display: grid;
+  gap: var(--space-4);
+  margin-block-end: var(--space-6);
+}
+/* Exercise desktop control inheritance without adding wallpaper to the catalog. */
+.control-catalog.factory-desktop::before,
+.control-catalog.factory-desktop::after {
+  display: none;
+}
+.control-catalog h1 {
+  margin: 0;
+  font: var(--text-title-mobile) / var(--leading-tight) var(--font-display);
+}
+.control-catalog h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+.control-catalog p,
+.control-catalog output {
+  margin: 0;
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+}
+.control-catalog .control-actions {
+  justify-content: start;
+}
+.control-catalog-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+.control-catalog-description {
+  grid-column: 1 / -1;
+}
+@media (max-width: 600px) {
+  .control-catalog {
+    padding: var(--space-4);
+  }
+  .control-catalog-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

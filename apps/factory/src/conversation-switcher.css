@@ -95,7 +95,7 @@
   margin: var(--space-1) var(--space-2) var(--space-2);
   font-weight: var(--weight-medium);
 }
-.conversation-menu > button {
+.conversation-menu [role="menu"] > button {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -110,25 +110,26 @@
   font: inherit;
   text-align: left;
 }
-.conversation-menu > button > span {
+.conversation-menu [role="menu"] > button > span {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.conversation-menu > button > small {
+.conversation-menu [role="menu"] > button > small {
   flex: none;
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
 }
-.conversation-menu > button[aria-checked="true"],
-.conversation-menu > button:hover:not(:disabled) {
+.conversation-menu [role="menu"] > button[aria-checked="true"],
+.conversation-menu [role="menu"] > button:hover:not(:disabled) {
   background: var(--material-accent);
 }
-.conversation-menu > .conversation-new {
+.conversation-menu .conversation-new {
   margin-bottom: var(--space-2);
   color: var(--color-river-deep);
   font-weight: var(--weight-medium);
 }
-.conversation-menu > button:focus-visible {
+.conversation-menu button:focus-visible,
+.conversation-history-search input:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: -2px;
 }
@@ -142,6 +143,41 @@
   color: var(--color-ink-muted);
   font-size: var(--text-xs);
   line-height: var(--leading-body);
+}
+.conversation-history-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  font: var(--text-sm) / var(--leading-body) var(--font-interface);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.conversation-history-search svg {
+  width: var(--space-4);
+  height: var(--space-4);
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+}
+.conversation-history-search input {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-height);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--line-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--material-input);
+  color: var(--color-ink);
+  caret-color: var(--color-focus);
+  font: inherit;
+}
+@media (max-width: 900px) {
+  .conversation-history-search input {
+    min-height: 44px;
+    font-size: var(--text-lg);
+  }
 }
 .conversation-restart-confirmation {
   min-inline-size: 0;

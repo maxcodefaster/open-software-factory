@@ -1,4 +1,6 @@
 import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
+import type { LibraryCover } from "../../../../packages/conversation-domain/src/library-covers";
+import { libraryCoverURL } from "../library-covers/catalog";
 
 const covers: Readonly<Record<string, string>> = {
   "faca0001-0000-4000-8000-000000000001": "requirements-interview",
@@ -44,8 +46,10 @@ const summaries: Readonly<Record<string, { original: string; short: string }>> =
   },
 };
 
-export const skillCover = (libraryId: string) =>
-  `/art/skills/${covers[libraryId] ?? "personal-fallback"}.webp`;
+export const skillCover = (libraryId: string, cover?: LibraryCover | null) =>
+  cover
+    ? libraryCoverURL(cover.key, "skill")
+    : `/art/skills/${covers[libraryId] ?? "personal-fallback"}.webp`;
 
 export function skillSummary(content: Pick<SkillContent, "key" | "description">) {
   const summary = summaries[content.key];

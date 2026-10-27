@@ -9,6 +9,7 @@ import {
 import { CommandError } from "../command-error";
 import { mcpGrantInput, mcpSharingInput } from "./commands";
 import type { createMCPConnections } from "./connections";
+import { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
 
 function command<T>(input: unknown, schema: z.ZodType<T>): T {
   let serialized: string | undefined;
@@ -34,6 +35,9 @@ export function createMCPService(
     },
     save(userID: string, input: z.input<typeof mcpSaveInput>) {
       return library.save(command(input, mcpSaveInput), userID);
+    },
+    cover(userID: string, input: z.input<typeof libraryCoverInput>) {
+      return library.cover(command(input, libraryCoverInput), userID);
     },
     choose(userID: string, input: z.input<typeof mcpChoiceInput>) {
       return library.choose(command(input, mcpChoiceInput), userID);

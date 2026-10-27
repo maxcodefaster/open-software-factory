@@ -1,6 +1,15 @@
 import { z } from "zod";
 import { requirementContentInput } from "../../requirement-domain/src/content";
 import { epicProposalInput } from "./epic-proposal";
+import { technicalDesignContentInput } from "../../requirement-domain/src/technical-design";
+
+export const planningIntentInput = z.enum([
+  "requirements-interview",
+  "full-planning",
+  "technical-planning",
+  "project-research",
+]);
+export type PlanningIntent = z.infer<typeof planningIntentInput>;
 
 export const conversationModes = ["investigate", "plan", "build"] as const;
 export const conversationModeInput = z.enum(conversationModes);
@@ -73,10 +82,10 @@ export const conversationMessageInput = z
     ticketId: z.uuid().optional(),
     contextId: z.uuid().optional(),
     text: z.string().trim().min(1).max(12_000),
-    intent: z.enum(["requirements-interview", "project-research"]).optional(),
+    intent: planningIntentInput.optional(),
   })
   .strict()
-  .refine((value) => value.intent !== "requirements-interview" || !!value.ticketId, {
+  .refine((value) => !value.intent || value.intent === "project-research" || !!value.ticketId, {
     message: "An Interview requires a Ticket",
   });
 
@@ -156,6 +165,12 @@ export const projectAgentOutput = z.discriminatedUnion("kind", [
       citations: z.array(sourceCitationInput).max(12).default([]),
     })
     .strict(),
+  z.strictObject({
+    kind: z.literal("technical-design"),
+    message: z.string().trim().min(1).max(2_000),
+    design: technicalDesignContentInput,
+    citations: z.array(sourceCitationInput).max(12).default([]),
+  }),
 ]);
 export type ProjectAgentOutput = z.infer<typeof projectAgentOutput>;
 

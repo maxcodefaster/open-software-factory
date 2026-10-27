@@ -18,7 +18,7 @@ import { monitoringAuthorityIn } from "./authority";
 import {
   clarifyProjectInput,
   inputClarification,
-  inputSkillAssignment,
+  type inputSkillAssignment,
   type InputClarification,
 } from "../project-agent/input";
 import { createSkillController } from "../skills/controller";
@@ -65,8 +65,9 @@ export function createMonitoringWorker(
       .filter(Boolean) ?? [],
   );
   const running = new Map<string, AbortController>();
-  let interval: ReturnType<typeof setInterval> | undefined;
+  const pending = new Set<Promise<void>>();
   let closed = false;
+  let closing: Promise<void> | undefined;
   let sweeping = false;
   const usageId = (id: string) => `monitoring:${id}`;
 
@@ -178,17 +179,16 @@ export function createMonitoringWorker(
         return authority;
       });
     };
-    let renewing = false;
-    const renewal = setInterval(() => {
-      if (renewing) return;
-      renewing = true;
-      void authorize()
+    let renewal: Promise<unknown> | undefined;
+    const renewalTimer = setInterval(() => {
+      if (renewal) return;
+      renewal = authorize()
         .catch(() => controller.abort())
         .finally(() => {
-          renewing = false;
+          renewal = undefined;
         });
     }, 15_000);
-    renewal.unref();
+    renewalTimer.unref();
     try {
       const authority = await authorize();
       const connection = admitted.reference
@@ -228,11 +228,14 @@ export function createMonitoringWorker(
             VALUES(${crypto.randomUUID()},${incident.id},${value.kind},${value.digest},${value.path ?? null},${value.commitSha ?? null})`;
           }),
       };
+      const [assignment] = authority.assignments;
+      if (authority.delegation === "application-fix-and-delivery" && !assignment)
+        throw new CommandError("conflict", "Delegated Autofix requires an admitted source");
       const result = inputClarification.parse(
-        authority.delegation === "application-fix-and-delivery"
+        authority.delegation === "application-fix-and-delivery" && assignment
           ? await (input.diagnose ?? diagnoseMonitoringIncident)({
               ...common,
-              assignment: authority.assignments[0]!,
+              assignment,
               assignments: authority.assignments,
             })
           : await (input.prepare ?? clarifyProjectInput)({
@@ -307,7 +310,8 @@ export function createMonitoringWorker(
         token,
       );
     } finally {
-      clearInterval(renewal);
+      clearInterval(renewalTimer);
+      await renewal;
     }
   }
 
@@ -368,7 +372,18 @@ export function createMonitoringWorker(
       );
   }
 
-  async function project(projectId: string) {
+  function project(projectId: string): Promise<void> {
+    if (closed) return Promise.resolve();
+    const task = runProject(projectId);
+    pending.add(task);
+    const settled = () => {
+      pending.delete(task);
+    };
+    void task.then(settled, settled);
+    return task;
+  }
+
+  async function runProject(projectId: string) {
     if (closed || running.has(projectId)) return;
     const controller = new AbortController();
     running.set(projectId, controller);
@@ -429,13 +444,12 @@ export function createMonitoringWorker(
     sweep,
     async recover() {
       await sweep();
-      interval = setInterval(() => void sweep().catch(() => {}), 2_000);
-      interval.unref();
     },
     close() {
       closed = true;
-      clearInterval(interval);
       for (const controller of running.values()) controller.abort();
+      closing ??= Promise.allSettled([...pending]).then(() => {});
+      return closing;
     },
   };
 }

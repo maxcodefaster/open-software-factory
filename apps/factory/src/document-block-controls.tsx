@@ -56,18 +56,18 @@ export function DocumentBlockControls(props: {
     },
   );
   createEffect(
-    () => props.state,
-    (state) => {
-      if (!state || !props.host) return;
+    () => ({ state: props.state, host: props.host }),
+    ({ state, host }) => {
+      if (!state || !host) return;
       const place = () => {
-        if (!controls || !props.host || !state.element.isConnected) return;
-        const root = props.host.getBoundingClientRect();
+        if (!controls || !state.element.isConnected) return;
+        const root = host.getBoundingClientRect();
         const block = state.element.getBoundingClientRect();
         controls.style.top = `${block.top - root.top}px`;
         controls.style.right = "0px";
       };
       const resize = new ResizeObserver(place);
-      resize.observe(props.host);
+      resize.observe(host);
       queueMicrotask(place);
       return () => resize.disconnect();
     },
@@ -147,7 +147,8 @@ export function DocumentBlockControls(props: {
                   const items = Array.from(
                     event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
                   );
-                  const index = items.findIndex((item) => item === document.activeElement);
+                  const active = document.activeElement;
+                  const index = active instanceof HTMLButtonElement ? items.indexOf(active) : -1;
                   if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
                   const next =

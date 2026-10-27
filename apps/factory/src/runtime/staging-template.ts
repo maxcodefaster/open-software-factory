@@ -106,7 +106,7 @@ export function createStagingTemplateProducer(
         sha256 = archive.sha256;
       }
       try {
-        const admitted = archive ? await intent(sha256!) : false;
+        const admitted = archive ? await intent(sha256) : false;
         if (archive && !admitted) throw new Error("Source import already has an original intent");
         const request = {
           storeID: identity.storeID,

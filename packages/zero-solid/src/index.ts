@@ -2,6 +2,7 @@ import {
   type BaseDefaultContext,
   type BaseDefaultSchema,
   type CustomMutatorDefs,
+  type ConnectionState,
   type DefaultContext,
   type DefaultSchema,
   type ErroredQuery,
@@ -12,7 +13,9 @@ import {
   type ResultType,
   Zero,
   type ZeroOptions,
+  type MaterializeOptions,
 } from "@rocicorp/zero";
+import { addContextToQuery, asQueryInternals } from "@rocicorp/zero/bindings";
 import {
   type Accessor,
   createContext,
@@ -25,8 +28,11 @@ import {
   useContext,
 } from "solid-js";
 import { listenToMaterializedView, ZeroClientLifecycle } from "./lifecycle";
+import { createQueryData } from "./query-data";
+import { createQuerySelection } from "./query-selection";
 
 type AnyZero = Zero<BaseDefaultSchema, CustomMutatorDefs | undefined, BaseDefaultContext>;
+type PreloadOptions = Parameters<AnyZero["preload"]>[1];
 const ZeroContext = createContext<Accessor<AnyZero | undefined>>();
 
 export function ZeroProvider<
@@ -44,6 +50,11 @@ export function ZeroProvider<
   const client = createMemo(() =>
     lifecycle.select(props.identity, (identity) => {
       return new Zero<S, MD, C>({
+        ...Object.fromEntries(
+          Object.keys(props)
+            .filter((key) => key !== "children" && key !== "identity")
+            .map((key) => [key, Reflect.get(props, key)]),
+        ),
         cacheURL: props.cacheURL,
         schema: props.schema,
         mutators: props.mutators,
@@ -81,29 +92,90 @@ export function useZeroQuery<
   TOutput extends ReadonlyJSONValue | undefined,
   TReturn = PullRow<TTable, S>,
   C extends BaseDefaultContext = BaseDefaultContext,
->(query: Accessor<QueryOrQueryRequest<TTable, TInput, TOutput, S, TReturn, C> | null>) {
+>(
+  query: Accessor<QueryOrQueryRequest<TTable, TInput, TOutput, S, TReturn, C> | null>,
+  options?: MaterializeOptions,
+) {
   const zero = useZero<S, undefined, C>();
-  const [data, setData] = createSignal<HumanReadable<TReturn>>();
+  const { data, clear, publish } = createQueryData<HumanReadable<TReturn>>();
   const [completeness, setCompleteness] = createSignal<ResultType>("unknown");
   const [error, setError] = createSignal<ErroredQuery>();
+  const [retry, setRetry] = createSignal(0);
+  const selected = createQuerySelection(() => {
+    const client = zero();
+    const current = query();
+    if (!client || !current) return undefined;
+    const resolved = addContextToQuery(current, client.context);
+    const internals = asQueryInternals(resolved);
+    return {
+      client,
+      query: resolved,
+      key: `${internals.hash()}:${JSON.stringify(internals.format)}`,
+    };
+  });
   createEffect(
-    () => ({ client: zero(), query: query() }),
-    ({ client, query: current }) => {
-      setData(undefined);
+    () => ({ selected: selected(), retry: retry() }),
+    ({ selected: current }) => {
+      clear();
       setCompleteness("unknown");
       setError(undefined);
-      if (!client || !current) return;
-      const view = client.materialize(current);
+      if (!current) return;
+      const primaryKey =
+        current.client.schema.tables[asQueryInternals(current.query).ast.table]?.primaryKey;
+      if (!primaryKey) throw new Error("Zero query table is missing from the client schema");
+      const view = current.client.materialize(current.query, options);
       const dispose = listenToMaterializedView(view, (next) => {
-        setData(() => next.data);
+        publish(next.data, primaryKey);
         setCompleteness(next.completeness);
         setError(next.error);
       });
-      if (untrack(data) === undefined) setData(() => view.data);
+      if (untrack(data) === undefined) publish(view.data, primaryKey);
       return dispose;
     },
   );
-  return { data, completeness, error };
+  return { data, completeness, error, retry: () => setRetry((value) => value + 1) };
+}
+
+export function useZeroConnection() {
+  const zero = useZero();
+  const [state, setState] = createSignal<ConnectionState>();
+  createEffect(zero, (client) => {
+    setState(client?.connection.state.current);
+    return client?.connection.state.subscribe(setState);
+  });
+  return { state, reconnect: () => zero()?.connection.connect() };
+}
+
+export function useZeroPreload<
+  S extends BaseDefaultSchema,
+  TTable extends keyof S["tables"] & string,
+  TInput extends ReadonlyJSONValue | undefined,
+  TOutput extends ReadonlyJSONValue | undefined,
+  TReturn = PullRow<TTable, S>,
+  C extends BaseDefaultContext = BaseDefaultContext,
+>(
+  query: Accessor<QueryOrQueryRequest<TTable, TInput, TOutput, S, TReturn, C> | null>,
+  options?: PreloadOptions,
+) {
+  const zero = useZero<S, undefined, C>();
+  const selected = createQuerySelection(() => {
+    const client = zero();
+    const current = query();
+    if (!client || !current) return undefined;
+    const resolved = addContextToQuery(current, client.context);
+    const internals = asQueryInternals(resolved);
+    return {
+      client,
+      query: resolved,
+      key: `${internals.hash()}:${JSON.stringify(internals.format)}`,
+    };
+  });
+  createEffect(selected, (current) => {
+    if (!current) return;
+    const preload = current.client.preload(current.query, options);
+    void preload.complete.catch(() => {});
+    return preload.cleanup;
+  });
 }
 
 export { ZeroClientLifecycle, listenToMaterializedView };

@@ -5,6 +5,7 @@ export async function ownedPlanningCache(
   base: string,
   observeWhileRunning = false,
   syncWorkers = 1,
+  network?: string,
 ) {
   if (!Number.isSafeInteger(syncWorkers) || syncWorkers < 1)
     throw new Error("Owned planning cache requires a positive worker count");
@@ -36,6 +37,7 @@ export async function ownedPlanningCache(
     "--detach",
     "--name",
     name,
+    ...(network ? ["--network", network] : []),
     "--label",
     `factory.owned-planning-cache=${owner}`,
     "--add-host",
@@ -44,6 +46,8 @@ export async function ownedPlanningCache(
     "/data",
     "--publish",
     "127.0.0.1::4848",
+    "--env",
+    `ZERO_APP_ID=owned_${owner.replaceAll("-", "")}`,
     "--env",
     `ZERO_UPSTREAM_DB=${database}`,
     "--env",

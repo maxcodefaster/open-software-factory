@@ -2,12 +2,16 @@ import type { ProjectAgentOutput } from "../../../../packages/conversation-domai
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { appendConversationEntry, lockConversation } from "./conversation-store";
+import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
+import { saveTechnicalDesignIn } from "../technical-design/store";
 
 export async function persistProjectOutput(
   transaction: AgentTurnTransaction,
   turn: AgentTurnRecord,
   output: ProjectAgentOutput,
   developerOnly = false,
+  technical?: { base: TechnicalPlanningBase; renders: string[] },
+  fullPlanningSource?: string,
 ) {
   const { command, authority } = turn;
   if (authority.mode === "build" || !command.conversationId)
@@ -24,6 +28,32 @@ export async function persistProjectOutput(
     );
   if (output.kind === "requirement" && current.mode !== "plan")
     throw new Error("Requirement proposals need Plan mode");
+  if (output.kind === "technical-design") {
+    if (!technical || !command.ticketId || current.mode !== "plan")
+      throw new Error("Technical designs require an admitted Technical Planning task.");
+    await saveTechnicalDesignIn(transaction, {
+      id: turn.id,
+      ticketID: command.ticketId,
+      userID: command.createdBy,
+      base: technical.base,
+      content: output.design,
+      citations: output.citations,
+      renders: technical.renders,
+      turnID: turn.id,
+    });
+    await appendConversationEntry(transaction, current.id, {
+      kind: "agent-message",
+      actor: "project-agent",
+      mode: "plan",
+      body: output.message,
+      payload: { visibility: "developer", technicalDesignRevisionId: turn.id },
+      citations: output.citations,
+      inReplyToEntryId: null,
+      requirementRevisionId: null,
+      ...(command.contextId ? { contextId: command.contextId } : {}),
+    });
+    return;
+  }
   const [input] = await transaction<Array<{ payload: Record<string, unknown> }>>`
     SELECT payload FROM factory.conversation_entry
     WHERE conversation_id=${current.id} AND payload->>'commandId'=${command.commandId}
@@ -94,6 +124,9 @@ export async function persistProjectOutput(
               ticket: output.ticket,
               requirement: output.requirement,
               base: input?.payload["ticketContext"] ?? null,
+              ...(fullPlanningSource
+                ? { fullPlanning: true, sourceCommit: fullPlanningSource }
+                : {}),
               ...(developerOnly ? { visibility: "developer" } : {}),
             }
           : developerOnly

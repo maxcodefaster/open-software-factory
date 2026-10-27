@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { chromium, expect as browserExpect, type Page } from "@playwright/test";
 import { languageToolsFixture } from "../fixtures/language-tools";
+import { fixtureValue } from "../fixtures/value";
 
 const enabled = process.env["FACTORY_RUN_INDEPENDENT_EDITOR_PROOF"] === "1";
 const root = resolve(import.meta.dir, "../..");
@@ -313,7 +314,7 @@ test.skipIf(!enabled)(
           image: await docker(
             "image",
             "inspect",
-            process.env["FACTORY_LANGUAGE_PROOF_IMAGE"]!,
+            process.env["FACTORY_LANGUAGE_PROOF_IMAGE"],
             "--format",
             "{{.Id}}",
           ),
@@ -437,12 +438,17 @@ test.skipIf(!enabled)(
             );
             if (
               url.pathname.startsWith("/__factory/") &&
-              (!language || !tools || tools.context(language[1]!).attemptID !== language[2])
+              (!language ||
+                !tools ||
+                tools.context(fixtureValue(language[1], "language[1]")).attemptID !== language[2])
             )
               return new Response(null, { status: 403 });
             const target = new WebSocket(
               language && tools
-                ? tools.target(language[1]!, language[3]!)
+                ? tools.target(
+                    fixtureValue(language[1], "language[1]"),
+                    fixtureValue(language[3], "language[3]"),
+                  )
                 : `${editorOrigin.replace("http:", "ws:")}${url.pathname}${url.search}`,
             );
             if (server.upgrade(request, { data: { target, pending: [], bytes: 0 } })) return;
@@ -452,10 +458,14 @@ test.skipIf(!enabled)(
           const processes = url.pathname.match(
             /^\/__factory\/workspaces\/([0-9a-f-]{36})\/runtime\/([0-9a-f-]{36})\/processes(\/events)?$/,
           );
-          if (processes && tools && tools.context(processes[1]!).attemptID === processes[2]) {
+          if (
+            processes &&
+            tools &&
+            tools.context(fixtureValue(processes[1], "processes[1]")).attemptID === processes[2]
+          ) {
             return processes[3]
-              ? tools.processEvents(processes[1]!, request.signal)
-              : Response.json(tools.processes(processes[1]!));
+              ? tools.processEvents(fixtureValue(processes[1], "processes[1]"), request.signal)
+              : Response.json(tools.processes(fixtureValue(processes[1], "processes[1]")));
           }
           const headers = new Headers(request.headers);
           headers.set("Accept-Encoding", "identity");
@@ -654,7 +664,17 @@ test.skipIf(!enabled)(
           ...(kind === "diff" ? { diff: "--- app.ts\n+++ app.ts\n@@ -1 +1 @@\n-old\n+new" } : {}),
         };
         await page.evaluate((message) => {
-          document.querySelector("iframe")!.contentWindow!.postMessage(message, location.origin);
+          function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+            if (value === undefined || value === null)
+              throw new Error(`Missing fixture value: ${description}`);
+            return value;
+          }
+
+          fixtureValue(
+            fixtureValue(document.querySelector("iframe"), 'document.querySelector("iframe")')
+              .contentWindow,
+            'document.querySelector("iframe")!.contentWindow',
+          ).postMessage(message, location.origin);
         }, target);
         return target.id;
       };
@@ -970,7 +990,10 @@ test.skipIf(!enabled)(
         await status.click();
         await browserExpect(status).toContainText("Start tools");
         await browserExpect
-          .poll(async () => (await tools!.processMetrics(workspaceA)).languageProcesses)
+          .poll(
+            async () =>
+              (await fixtureValue(tools, "tools").processMetrics(workspaceA)).languageProcesses,
+          )
           .toBe(0);
         await page.setViewportSize({ width: 1440, height: 950 });
         await browserExpect

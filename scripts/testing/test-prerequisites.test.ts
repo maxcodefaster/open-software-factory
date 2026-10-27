@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   appendOwnedTestCA,
   needsOIDCTestCA,
@@ -11,6 +12,34 @@ import {
   productionBuildEnvironment,
   verificationEnvironment,
 } from "./test-prerequisites";
+import { fixtureValue } from "../../test/fixtures/value";
+
+test("the Playwright Node host can use verification environments without initializing Bun-only build tools", async () => {
+  const moduleURL = pathToFileURL(join(import.meta.dirname, "test-prerequisites.ts")).href;
+  const child = Bun.spawn(
+    [
+      "node",
+      "--input-type=module",
+      "--eval",
+      `const {verificationEnvironment, productionBuildEnvironment} = await import(${JSON.stringify(moduleURL)});
+console.log(JSON.stringify(productionBuildEnvironment(verificationEnvironment({
+  FACTORY_AGENT_QUALITY_LIVE: "1", FACTORY_BUILD_DIRECTORY: "/owned/browser", NODE_ENV: "test"
+}))));`,
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  const [stdout, stderr, status] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(stderr).toBe("");
+  expect(status).toBe(0);
+  expect(JSON.parse(stdout)).toEqual({
+    FACTORY_BUILD_DIRECTORY: "/owned/browser",
+    NODE_ENV: "production",
+  });
+});
 
 test("owned frontend builds cannot inherit development transport from Bun's test environment", () => {
   for (const nodeEnvironment of [undefined, "test", "development", "production"]) {
@@ -43,7 +72,7 @@ test("only the real local TLS IdP fixture adds its CA to the child process", asy
   try {
     await writeFile(original, "existing-public-ca\n");
     await appendOwnedTestCA(env, certificate, directory);
-    const bundle = env["NODE_EXTRA_CA_CERTS"]!;
+    const bundle = fixtureValue(env["NODE_EXTRA_CA_CERTS"], 'env["NODE_EXTRA_CA_CERTS"]');
     expect(bundle).not.toBe(original);
     expect(await readFile(original, "utf8")).toBe("existing-public-ca\n");
     expect(await readFile(bundle, "utf8")).toContain("existing-public-ca\n");
@@ -113,9 +142,15 @@ test("test prerequisite fingerprints cover source content and names without depe
   ];
   expect(prerequisiteFingerprint(inputs)).toBe(prerequisiteFingerprint([...inputs].reverse()));
   expect(prerequisiteFingerprint(inputs)).not.toBe(
-    prerequisiteFingerprint([inputs[0]!, { path: "adapter.ts", content: "changed" }]),
+    prerequisiteFingerprint([
+      fixtureValue(inputs[0], "inputs[0]"),
+      { path: "adapter.ts", content: "changed" },
+    ]),
   );
   expect(prerequisiteFingerprint(inputs)).not.toBe(
-    prerequisiteFingerprint([inputs[0]!, { path: "other.ts", content: "source" }]),
+    prerequisiteFingerprint([
+      fixtureValue(inputs[0], "inputs[0]"),
+      { path: "other.ts", content: "source" },
+    ]),
   );
 });

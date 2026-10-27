@@ -1,4 +1,8 @@
 import type { z } from "zod";
+import {
+  type deliveryDelegationInput,
+  deliverySettingsView,
+} from "../../../../packages/change-domain/src/delivery";
 import type {
   candidateReviewRetryInput,
   verificationResumeInput,
@@ -12,7 +16,7 @@ export function createDeliveryService(options: {
   access: Pick<ReturnType<typeof createAccessController>, "requireChange" | "requireDevelopment">;
   controller: Pick<
     ReturnType<typeof createDeliveryController>,
-    "get" | "approve" | "retryReview" | "resumeChecks"
+    "get" | "approve" | "retryReview" | "resumeChecks" | "settings" | "configure"
   >;
 }) {
   const dto = (value: Record<string, unknown> | null) => {
@@ -26,6 +30,18 @@ export function createDeliveryService(options: {
     });
   };
   return {
+    async settings(userID: string, projectID: string) {
+      return deliverySettingsView.parse(await options.controller.settings(projectID, userID));
+    },
+    async configure(
+      userID: string,
+      projectID: string,
+      input: z.input<typeof deliveryDelegationInput>,
+    ) {
+      return deliverySettingsView.parse(
+        await options.controller.configure(projectID, userID, input),
+      );
+    },
     async get(userID: string, changeID: string) {
       await options.access.requireChange(userID, changeID);
       return dto(await options.controller.get(changeID));

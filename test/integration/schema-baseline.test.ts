@@ -59,13 +59,13 @@ test("clean Factory baseline preserves the final schema, publication and fresh/r
     const publications = await database.client<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables
       WHERE pubname='factory_zero_publication' ORDER BY schemaname,tablename`;
-    expect(publications).toHaveLength(6);
+    expect(publications).toHaveLength(8);
     await database.client.unsafe(`CREATE DATABASE ${probeName}`);
     created = true;
     const sql = await readFile("packages/db/migrations/0001_baseline.sql", "utf8");
     await candidate.unsafe(sql);
     expect(digest(await dump(container, probeName))).toBe(
-      "a76306d51b33b3e4ebaefcd22045e386717c724803b10494c10e8e657d4cad38",
+      "00305dfbe9b91aaa06682c43ded75df996b7d32023ea45ffb51e0eb6406a4ee8",
     );
     const freshPublication = await candidate<{ schemaname: string; tablename: string }[]>`
       SELECT schemaname,tablename FROM pg_publication_tables

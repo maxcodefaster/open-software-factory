@@ -61,10 +61,10 @@ export async function candidateReviewFixture(
   await owned.database
     .client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by)
     VALUES(${reviewID},${verificationID},${owned.changeID},${commit},${"a".repeat(40)},${owned.userID})`;
-  async function activeReview() {
+  async function activeReview(targetID: string = reviewID) {
     const accepted = await createReviewAdmission(owned.database)(
       owned.changeID,
-      reviewID,
+      targetID,
       owned.userID,
     );
     const turn = await turns.claimPending(accepted.turn.id);
@@ -80,7 +80,7 @@ export async function candidateReviewFixture(
     await turns.beginDispatch(turn.id, turn.ownerToken);
     await turns.markRunning(turn.id, turn.ownerToken, async (sql) => {
       await sql`UPDATE factory.change_agent_session SET state='working' WHERE change_id=${owned.changeID}`;
-      await sql`UPDATE factory.candidate_review SET state='running' WHERE id=${reviewID}`;
+      await sql`UPDATE factory.candidate_review SET state='running' WHERE id=${targetID}`;
     });
     return { ...turn, ownerToken: turn.ownerToken, sessionID: intent.session };
   }
@@ -93,12 +93,12 @@ export async function candidateReviewFixture(
     verificationID,
     reviewID,
     activeReview,
-    async review() {
+    async review(targetID: string = reviewID) {
       return (
         await owned.database.client<
           { state: string; result: unknown; evidence: unknown[]; turnID: string | null }[]
         >`
-        SELECT state,result,evidence,turn_id AS "turnID" FROM factory.candidate_review WHERE id=${reviewID}`
+        SELECT state,result,evidence,turn_id AS "turnID" FROM factory.candidate_review WHERE id=${targetID}`
       )[0];
     },
   };

@@ -10,14 +10,14 @@ import {
   assertAgentTurnAuthority,
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import { projectAuthorityIn } from "../access/controller";
-import { CommandError } from "../command-error";
 import { lockChangeWriterIn } from "../access/change-writer";
-import { codingBudgetIn } from "../usage/policy";
-import { createMCPLibrary } from "../mcp/controller";
-import { monitoringChangeAuthorityIn, inputTicketAssignmentsIn } from "../monitoring/authority";
+import { projectAuthorityIn } from "../access/controller";
 import { freezeAttachmentContextIn } from "../attachments/store";
+import { CommandError } from "../command-error";
+import { createMCPLibrary } from "../mcp/controller";
+import { inputTicketAssignmentsIn, monitoringChangeAuthorityIn } from "../monitoring/authority";
 import { lockConversation } from "../project-agent/conversation-store";
+import { codingBudgetIn } from "../usage/policy";
 
 type Database = ReturnType<typeof createDatabase>;
 type TurnRow = {
@@ -132,7 +132,9 @@ async function currentAuthorityIn(
       WHERE review.id=${authority.review.reviewId} AND review.turn_id=${record.id}
         AND review.change_id=${command.changeId} AND review.verification_id=${authority.review.verificationId}
         AND review.commit_sha=${authority.review.commitSha} AND review.base_sha=${authority.review.baseSha}
-        AND change.base_sha=review.base_sha AND verification.state='succeeded'
+        AND COALESCE((SELECT integration_base_sha FROM factory.change_commit_operation
+          WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),change.base_sha)=review.base_sha
+        AND verification.state='succeeded'
         AND review.state IN ('pending','running')
         AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
           WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)`;

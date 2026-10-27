@@ -1,8 +1,12 @@
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { attemptsResponseSchema, appPreviewsSchema } from "../../apps/factory/src/api-contracts";
+import {
+  attemptsResponseSchema,
+  appPreviewsSchema,
+  deliveryViewSchema,
+} from "../../apps/factory/src/api-contracts";
 import { expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
@@ -16,14 +20,18 @@ import { canonicalRequirementContent } from "../../packages/requirement-domain/s
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
+import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
+import { fixtureValue } from "../fixtures/value";
 
 // Real Factory entry, auth, planning cache, Ticket and review commands. Only the
 // runtime observation/transport is scripted; this test starts no Sandbox or model.
 test("review fits the actual Factory Ticket and retains human work in its existing Preview tab", async () => {
-  const owned = await factoryProcess();
+  const s3 = await ownedAttachmentS3();
+  const owned = await factoryProcess().catch(async (cause) => {
+    await s3.dispose();
+    throw cause;
+  });
   const directory = resolve(".factory/test-results/visual-review-factory", owned.id);
-  const frontend = resolve(directory, "frontend");
   await mkdir(directory, { recursive: true });
   const database = owned.connect();
   const browser = await chromium.launch({ headless: true });
@@ -33,21 +41,6 @@ test("review fits the actual Factory Ticket and retains human work in its existi
   const errors: string[] = [];
   const reviewWrites: Array<{ path: string; status: number; response: string }> = [];
   try {
-    const build = Bun.spawn(
-      [
-        "node",
-        resolve("node_modules/vite/bin/vite.js"),
-        "build",
-        "--config",
-        resolve("apps/factory/vite.config.ts"),
-        "--outDir",
-        frontend,
-      ],
-      { env: productionBuildEnvironment(process.env), stdout: "ignore", stderr: "pipe" },
-    );
-    const buildError = await new Response(build.stderr).text();
-    if (await build.exited)
-      throw new Error(`Owned Factory frontend build failed: ${buildError.slice(-1000)}`);
     await owned.startPlanningCache();
     await owned.start();
     f = await candidateReviewFixture(
@@ -79,7 +72,10 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     const login = await fetch(`${owned.base}/api/auth/sign-in/email`, {
       method: "POST",
       headers: { origin: owned.base, "content-type": "application/json" },
-      body: JSON.stringify({ email: user!.email, password: "owned-process-password-not-a-secret" }),
+      body: JSON.stringify({
+        email: fixtureValue(user, "user").email,
+        password: "owned-process-password-not-a-secret",
+      }),
     });
     expect(login.status).toBe(200);
     const context = await browser.newContext({
@@ -122,14 +118,6 @@ test("review fits the actual Factory Ticket and retains human work in its existi
           reviewWrites.push({ path, status: response.status(), response: text.slice(0, 1000) });
         })
         .catch(() => {});
-    });
-    await page.route(`${owned.base}/`, (route) =>
-      route.fulfill({ path: resolve(frontend, "index.html") }),
-    );
-    await page.route(`${owned.base}/assets/**`, (route) => {
-      const file = resolve(frontend, new URL(route.request().url()).pathname.slice(1));
-      if (!file.startsWith(frontend + sep)) throw new Error("Owned asset path escaped its build");
-      return route.fulfill({ path: file });
     });
     const runtimeOrigin = appRuntimeOrigin(owned.base, fixture.attemptID, "app");
     const runtimePath = `/runtime/${fixture.attemptID}/preview/app/`;
@@ -214,7 +202,7 @@ test("review fits the actual Factory Ticket and retains human work in its existi
       recordVideo: { dir: resolve(directory, "fixture-video"), size: { width: 1280, height: 720 } },
     });
     const appPage = await recorded.newPage();
-    const videoFile = appPage.video()!;
+    const videoFile = fixtureValue(appPage.video(), "appPage.video()");
     await appPage.setContent(
       '<style>body{font:22px sans-serif;padding:48px;background:#f7f5ef}input,button{font:inherit;padding:10px}</style><h1>Draft form</h1><p>Scripted QA recording fixture</p><label>Project title <input value="My draft"></label><button>Save draft</button>',
     );
@@ -227,10 +215,7 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     const recordingID = crypto.randomUUID();
     await database.client`INSERT INTO factory.review_media(id,change_id,review_id,kind,commit_sha,runtime_attempt_id,state)
       VALUES(${recordingID},${fixture.changeID},${fixture.reviewID},'recording',${fixture.commit},${fixture.attemptID},'intended')`;
-    const media = createReviewMedia(
-      database,
-      resolve(".factory/test-results/factory-process", owned.id),
-    );
+    const media = createReviewMedia(database);
     await media.publish(recordingID, video, 2000);
     for (const [id, name, category, position] of [
       ["save", "Save a draft", "normal", 0],
@@ -297,23 +282,28 @@ test("review fits the actual Factory Ticket and retains human work in its existi
       if (await button.isVisible()) await button.click();
       else {
         await toolbar.getByRole("button", { name: "Ticket actions", exact: true }).click();
-        await page!.getByRole("menuitem", { name, exact: true }).click();
+        await fixtureValue(page, "page").getByRole("menuitem", { name, exact: true }).click();
       }
     }
     const primary = toolbar.getByRole("button", {
-      name: "Request revision",
-      exact: true,
+      name: /^Request revision · \d+ Threads?$/,
     });
     await visible(primary).toBeVisible();
-    await visible(panel.getByRole("button", { name: "Request revision", exact: true })).toHaveCount(
-      0,
-    );
+    await visible(
+      panel.getByRole("button", { name: /^Request revision · \d+ Threads?$/ }),
+    ).toHaveCount(0);
     const buttonStyle = await primary.evaluate((node) => {
+      function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+        if (value === undefined || value === null)
+          throw new Error(`Missing fixture value: ${description}`);
+        return value;
+      }
+
       const reference = document.createElement("button");
       reference.className = "workspace-action ticket-header-action";
       reference.setAttribute("data-primary", "true");
       reference.textContent = "Implement";
-      node.parentElement!.append(reference);
+      fixtureValue(node.parentElement, "node.parentElement").append(reference);
       const values = (element: Element) => {
         const style = getComputedStyle(element);
         return [
@@ -338,9 +328,16 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     await visible(toolbar.locator("svg")).toHaveCount(1);
     const headerBounds = await page.locator(".ticket-status-row").boundingBox();
     const primaryBounds = await primary.boundingBox();
-    expect(primaryBounds!.y - headerBounds!.y).toBeLessThanOrEqual(4);
-    expect(primaryBounds!.x + primaryBounds!.width).toBeGreaterThan(
-      headerBounds!.x + headerBounds!.width - 60,
+    expect(
+      fixtureValue(primaryBounds, "primaryBounds").y - fixtureValue(headerBounds, "headerBounds").y,
+    ).toBeLessThanOrEqual(4);
+    expect(
+      fixtureValue(primaryBounds, "primaryBounds").x +
+        fixtureValue(primaryBounds, "primaryBounds").width,
+    ).toBeGreaterThan(
+      fixtureValue(headerBounds, "headerBounds").x +
+        fixtureValue(headerBounds, "headerBounds").width -
+        60,
     );
     expect(
       await page
@@ -359,10 +356,13 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     await visible(panel.locator(".ticket-header-actions")).toHaveCount(0);
     await visible(toolbar.getByRole("button", { name: "Add feedback", exact: true })).toBeVisible();
     await visible(toolbar.getByRole("button", { name: "Open Live Preview" })).toBeVisible();
+    await visible(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+      "Implementation passed its checks. Independent review",
+    );
     const requirements = page.getByRole("region", { name: "Ticket requirements", exact: true });
-    await visible(
-      requirements.getByRole("heading", { name: "Requirements", exact: true }),
-    ).toHaveCount(1);
+    await visible(requirements.getByRole("heading", { name: "Product", exact: true })).toHaveCount(
+      1,
+    );
     await visible(
       requirements.getByRole("textbox", { name: "Specification summary", exact: true }),
     ).toHaveText("Keep the user's draft when validation fails.");
@@ -371,8 +371,15 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     ).toHaveCount(1);
     const requirementsBounds = await requirements.boundingBox();
     const panelBounds = await panel.boundingBox();
-    expect(Math.abs(requirementsBounds!.x - panelBounds!.x)).toBeLessThanOrEqual(1);
-    expect(requirementsBounds!.y).toBeGreaterThanOrEqual(panelBounds!.y + panelBounds!.height);
+    expect(
+      Math.abs(
+        fixtureValue(requirementsBounds, "requirementsBounds").x -
+          fixtureValue(panelBounds, "panelBounds").x,
+      ),
+    ).toBeLessThanOrEqual(1);
+    expect(fixtureValue(requirementsBounds, "requirementsBounds").y).toBeGreaterThanOrEqual(
+      fixtureValue(panelBounds, "panelBounds").y + fixtureValue(panelBounds, "panelBounds").height,
+    );
     await visible(page.getByRole("button", { name: "Request changes", exact: true })).toHaveCount(
       0,
     );
@@ -399,13 +406,17 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     });
     await visible
       .poll(() =>
-        panel
-          .locator(".review-timeline-track > span")
-          .evaluate(
-            (node) =>
-              node.getBoundingClientRect().width /
-              node.parentElement!.getBoundingClientRect().width,
-          ),
+        panel.locator(".review-timeline-track > span").evaluate((node) => {
+          function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+            if (value === undefined || value === null)
+              throw new Error(`Missing fixture value: ${description}`);
+            return value;
+          }
+          return (
+            node.getBoundingClientRect().width /
+            fixtureValue(node.parentElement, "node.parentElement").getBoundingClientRect().width
+          );
+        }),
       )
       .toBeCloseTo(progress, 1);
     await visible(panel.locator(".review-reply-list .review-message")).toHaveCount(1);
@@ -493,17 +504,35 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     await page.screenshot({ path: resolve(directory, "ticket-context-narrow.png") });
     const contextBounds = await savedContext.boundingBox();
     const ticketBounds = await page.locator(".ticket-workspace").boundingBox();
-    expect(contextBounds!.y).toBeGreaterThanOrEqual(Math.max(0, ticketBounds!.y));
-    expect(contextBounds!.y + contextBounds!.height).toBeLessThanOrEqual(
-      Math.min(1000, ticketBounds!.y + ticketBounds!.height),
+    expect(fixtureValue(contextBounds, "contextBounds").y).toBeGreaterThanOrEqual(
+      Math.max(0, fixtureValue(ticketBounds, "ticketBounds").y),
+    );
+    expect(
+      fixtureValue(contextBounds, "contextBounds").y +
+        fixtureValue(contextBounds, "contextBounds").height,
+    ).toBeLessThanOrEqual(
+      Math.min(
+        1000,
+        fixtureValue(ticketBounds, "ticketBounds").y +
+          fixtureValue(ticketBounds, "ticketBounds").height,
+      ),
     );
     await page.setViewportSize({ width: 320, height: 640 });
     await panel.getByRole("button", { name: /^Live Preview ·/ }).scrollIntoViewIfNeeded();
     await visible
       .poll(() =>
         savedContext.evaluate((node) => {
+          function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+            if (value === undefined || value === null)
+              throw new Error(`Missing fixture value: ${description}`);
+            return value;
+          }
+
           const bounds = node.getBoundingClientRect();
-          const viewport = node.closest(".ticket-workspace")!.getBoundingClientRect();
+          const viewport = fixtureValue(
+            node.closest(".ticket-workspace"),
+            'node.closest(".ticket-workspace")',
+          ).getBoundingClientRect();
           return (
             bounds.top >= Math.max(0, viewport.top) &&
             bounds.bottom <= Math.min(innerHeight, viewport.bottom)
@@ -522,8 +551,11 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     await draft.fill("General narrow Ticket feedback");
     await visible(panel.getByRole("button", { name: "Save feedback", exact: true })).toBeEnabled();
     const generalBounds = await draft.boundingBox();
-    expect(generalBounds!.y).toBeGreaterThanOrEqual(0);
-    expect(generalBounds!.y + generalBounds!.height).toBeLessThanOrEqual(1000);
+    expect(fixtureValue(generalBounds, "generalBounds").y).toBeGreaterThanOrEqual(0);
+    expect(
+      fixtureValue(generalBounds, "generalBounds").y +
+        fixtureValue(generalBounds, "generalBounds").height,
+    ).toBeLessThanOrEqual(1000);
     await page.screenshot({ path: resolve(directory, "ticket-general-comment-narrow.png") });
     await panel.getByRole("button", { name: "Cancel feedback" }).click();
     const playhead = await panel
@@ -537,8 +569,10 @@ test("review fits the actual Factory Ticket and retains human work in its existi
     await draft.fill("Feedback on this exact QA moment.");
     await visible(panel.getByRole("button", { name: "Save feedback", exact: true })).toBeEnabled();
     const frameBounds = await draft.boundingBox();
-    expect(frameBounds!.y).toBeGreaterThanOrEqual(0);
-    expect(frameBounds!.y + frameBounds!.height).toBeLessThanOrEqual(1000);
+    expect(fixtureValue(frameBounds, "frameBounds").y).toBeGreaterThanOrEqual(0);
+    expect(
+      fixtureValue(frameBounds, "frameBounds").y + fixtureValue(frameBounds, "frameBounds").height,
+    ).toBeLessThanOrEqual(1000);
     await visible
       .poll(() => panel.locator("video").evaluate((node) => (node as HTMLVideoElement).currentTime))
       .toBeCloseTo(playhead, 1);
@@ -558,6 +592,51 @@ test("review fits the actual Factory Ticket and retains human work in its existi
         () => (window as unknown as { screenSharingRequests: number }).screenSharingRequests,
       ),
     ).toBe(0);
+    await page.getByRole("button", { name: "Feedback in Ticket" }).click();
+    let progressView = deliveryViewSchema.parse({
+      verificationState: "failed",
+      verificationFailureKind: "execution-failed",
+      verificationSummary: "The Verification runner could not execute its checks.",
+    });
+    await mockFactoryFunctions(page, { delivery: { get: async () => progressView } });
+    const progressStatus = page.getByRole("status", { name: "Ticket progress" });
+    for (const stage of [
+      {
+        name: "execution",
+        view: { verificationState: "failed", verificationFailureKind: "execution-failed" },
+        text: "application correctness remains unverified",
+      },
+      {
+        name: "correction",
+        view: {
+          verificationState: "failed",
+          verificationFailureKind: "check-failed",
+          verificationSummary: "Verification failed in Project checks: Validate invoice.",
+          correctionState: "running",
+        },
+        text: "Automatic correction is in progress",
+      },
+      {
+        name: "review",
+        view: { verificationState: "succeeded", reviewState: "passed", openReviewThreads: 1 },
+        text: "Recheck and resolve the open Threads",
+      },
+    ]) {
+      progressView = deliveryViewSchema.parse(stage.view);
+      await database.client`SELECT factory.touch_read_version(${fixture.projectID},'lifecycle',${fixture.projectID})`;
+      await visible(progressStatus).toContainText(stage.text, { timeout: 15_000 });
+      for (const width of [1440, 430]) {
+        await page.setViewportSize({ width, height: 1000 });
+        await progressStatus.scrollIntoViewIfNeeded();
+        await visible(progressStatus).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+          true,
+        );
+        await page.screenshot({
+          path: resolve(directory, `ticket-progress-${stage.name}-${width}.png`),
+        });
+      }
+    }
     expect(errors).toEqual([]);
     const [turns] = await database.client<
       { count: number }[]
@@ -590,13 +669,16 @@ test("review fits the actual Factory Ticket and retains human work in its existi
         ),
       );
     }
-    await browser.close();
-    await owned.shutdown();
-    if (f) {
-      await database.client`DELETE FROM factory.branch_create_operation WHERE change_id=${f.changeID}`;
-      await f.dispose();
-    } else await database.client.end();
-    await owned.dispose();
-    await rm(frontend, { recursive: true, force: true });
+    try {
+      await browser.close();
+      await owned.shutdown();
+      if (f) {
+        await database.client`DELETE FROM factory.branch_create_operation WHERE change_id=${f.changeID}`;
+        await f.dispose();
+      } else await database.client.end();
+      await owned.dispose();
+    } finally {
+      await s3.dispose();
+    }
   }
 }, 180_000);

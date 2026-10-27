@@ -311,9 +311,9 @@ test("unused paused slot retirement releases checkpoint and private backing befo
   });
   const identity: FactoryboxWorkerIdentity = {
     version: 1,
-    namespaceUID: fixture.slot.namespaceUID!,
-    podUID: fixture.slot.podUID!,
-    claimUID: fixture.slot.claimUID!,
+    namespaceUID: fixture.slot.namespaceUID,
+    podUID: fixture.slot.podUID,
+    claimUID: fixture.slot.claimUID,
     storeID: slot.workerID.replaceAll("-", ""),
     epoch: "d".repeat(32),
     bootID: "boot",
@@ -439,9 +439,9 @@ test.each(["delete", "retire-checkpoint", "retire-resume", "retire-sandbox"] as 
     });
     const identity: FactoryboxWorkerIdentity = {
       version: 1,
-      namespaceUID: fixture.slot.namespaceUID!,
-      podUID: fixture.slot.podUID!,
-      claimUID: fixture.slot.claimUID!,
+      namespaceUID: fixture.slot.namespaceUID,
+      podUID: fixture.slot.podUID,
+      claimUID: fixture.slot.claimUID,
       storeID: slot.workerID.replaceAll("-", ""),
       epoch: "d".repeat(32),
       bootID: "boot",

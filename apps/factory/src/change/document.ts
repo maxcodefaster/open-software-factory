@@ -9,6 +9,7 @@ import { projectAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
 import { z } from "zod";
 import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 
 const proposedDocument = z.object({
   ticket: z.object({ title: z.string(), description: z.string() }),
@@ -21,7 +22,20 @@ const proposedDocument = z.object({
   }),
 });
 
-export function createTicketDocumentController(database: ReturnType<typeof createDatabase>) {
+export function createTicketDocumentController(
+  database: ReturnType<typeof createDatabase>,
+  continuePlanning?: (
+    sql: AgentTurnTransaction,
+    input: {
+      commandID: string;
+      projectID: string;
+      ticketID: string;
+      userID: string;
+      sourceCommit: string;
+      contextID?: string;
+    },
+  ) => Promise<unknown>,
+) {
   return {
     async followUp(ticketID: string, userID: string, input: TicketFollowUpInput) {
       return database.client.begin(async (sql) => {
@@ -80,6 +94,7 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
       const digest = (value: string) => createHash("sha256").update(value).digest("hex");
       const inputDigest = digest(JSON.stringify(input));
       return database.client.begin(async (sql) => {
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`agent-command:${input.commandId}`}))`;
         await sql`SELECT pg_advisory_xact_lock(hashtext(${`ticket:${ticketID}`}))`;
         const tickets = await sql<Array<{ projectID: string; version: number; state: string }>>`
           SELECT project_id AS "projectID", version::integer, state FROM factory.ticket
@@ -134,6 +149,8 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
           );
         if (ticket.state === "cancelled")
           throw new CommandError("conflict", "Restore the Ticket before editing");
+        let fullPlanningSource: string | undefined;
+        let planningContextID: string | undefined;
         if (input.proposalEntryId) {
           if (approvals.length)
             throw new CommandError(
@@ -151,6 +168,18 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
           if (entry?.payload["visibility"] === "developer") {
             const { projectDevelopmentAuthorityIn } = await import("../access/controller");
             await projectDevelopmentAuthorityIn(sql, userID, ticket.projectID);
+          }
+          if (entry?.payload["fullPlanning"] === true) {
+            fullPlanningSource = z
+              .string()
+              .regex(/^[a-f0-9]{40}$/)
+              .parse(entry.payload["sourceCommit"]);
+            planningContextID = z.uuid().optional().parse(entry.payload["contextId"]);
+            if (!complete.success || !continuePlanning)
+              throw new CommandError(
+                "conflict",
+                "Complete the product specification before continuing Technical Planning.",
+              );
           }
           const proposal = proposedDocument.safeParse(entry?.payload);
           if (
@@ -179,6 +208,15 @@ export function createTicketDocumentController(database: ReturnType<typeof creat
           id, ticket_id, ordinal, title, description, canonical_content, content_digest, requirement_revision_id, input_digest, created_by, author_kind, proposal_entry_id)
           VALUES (${input.commandId}, ${ticketID}, ${ordinal}, ${input.title}, ${input.description}, ${canonical}, ${digest(canonical)}, ${revisionID}, ${inputDigest}, ${userID}, ${input.proposalEntryId ? "ai" : "human"}, ${input.proposalEntryId ?? null})`;
         await sql`UPDATE factory.ticket SET title = ${input.title}, description = ${input.description}, version = version + 1, updated_at = now() WHERE id = ${ticketID}`;
+        if (fullPlanningSource && revisionID)
+          await continuePlanning?.(sql, {
+            commandID: input.commandId,
+            projectID: ticket.projectID,
+            ticketID,
+            userID,
+            sourceCommit: fullPlanningSource,
+            ...(planningContextID ? { contextID: planningContextID } : {}),
+          });
         return {
           id: input.commandId,
           ticketVersion: ticket.version + 1,

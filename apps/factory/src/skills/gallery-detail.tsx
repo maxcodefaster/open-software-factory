@@ -10,6 +10,8 @@ import { type ChooseSkill, SkillChoiceControls } from "./choice-controls";
 import { skillCover } from "./cover";
 import { skillAvailability, skillRoleLabel, skillScopeLabel } from "./gallery-state";
 import { SkillRevisionDetails, SkillRevisionSource } from "./revision-details";
+import { LibraryCoverPicker } from "../library-covers/picker";
+import type { LibraryCoverKey } from "../../../../packages/conversation-domain/src/library-covers";
 
 export function SkillGalleryDetail(props: {
   entry: SkillLibraryEntry;
@@ -26,6 +28,7 @@ export function SkillGalleryDetail(props: {
   onCheckSource: (entry: SkillLibraryEntry) => void;
   onShare: (entry: SkillLibraryEntry, target: "project" | "system") => void;
   onHeading: (element: HTMLHeadingElement) => void;
+  onCover: (key: LibraryCoverKey, expectedVersion: number) => Promise<boolean>;
 }) {
   const [reading, setReading] = createSignal<SkillRole>(
     props.preferredRole === "build" ? "build" : "planning",
@@ -60,7 +63,7 @@ export function SkillGalleryDetail(props: {
       <header class="skill-detail-heading">
         <img
           class="skill-cover"
-          src={skillCover(props.entry.id)}
+          src={skillCover(props.entry.id, props.entry.cover)}
           width="384"
           height="512"
           alt=""
@@ -112,6 +115,14 @@ export function SkillGalleryDetail(props: {
           </For>
         </div>
       </header>
+      <Show when={canEdit()}>
+        <LibraryCoverPicker
+          kind="skill"
+          cover={props.entry.cover}
+          busy={props.busy}
+          onSave={props.onCover}
+        />
+      </Show>
       <Show
         when={
           new Set(

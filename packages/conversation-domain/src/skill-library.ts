@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { skillContentInput, skillRevisionInput, skillRoleInput } from "./skills";
+import { libraryCoverState } from "./library-covers";
 
 export const skillScopeInput = z.enum(["system", "project", "personal"]);
 export type SkillScope = z.infer<typeof skillScopeInput>;
@@ -40,6 +41,7 @@ export const libraryEntryInput = z.object({
   projectId: z.uuid().nullable(),
   revisions: z.array(skillRevisionInput),
   editable: z.boolean(),
+  cover: libraryCoverState.nullable().optional(),
 });
 export type SkillLibraryEntry = z.infer<typeof libraryEntryInput>;
 export const skillLibraryView = z.object({

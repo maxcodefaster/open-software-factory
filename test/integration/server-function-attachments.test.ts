@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
@@ -136,6 +136,8 @@ test("Attachment browser fixtures keep explicit upload retries, private drafts a
       "--reporter=line",
       "--workers=1",
       "--max-failures=1",
+      "--output",
+      `.factory/test-results/server-functions/attachment-browser-${crypto.randomUUID()}`,
     ],
     { env: { ...process.env, FACTORY_BROWSER_LANE: "ui" }, stdout: "pipe", stderr: "pipe" },
   );

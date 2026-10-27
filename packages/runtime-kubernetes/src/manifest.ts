@@ -77,10 +77,10 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
         FACTORY_RELEASE_SOURCE: "/workspace/project",
         FACTORY_RELEASE_CREDENTIAL_URL: publication.credentialURL,
         FACTORY_RELEASE_CREDENTIAL_TOKEN: publication.credentialToken,
-        FACTORY_RELEASE_REGISTRY: new URL(publication.registryURL ?? input.verification!.forgeURL)
+        FACTORY_RELEASE_REGISTRY: new URL(publication.registryURL ?? input.verification.forgeURL)
           .host,
         FACTORY_RELEASE_REGISTRY_URL: new URL(
-          publication.registryURL ?? input.verification!.forgeURL,
+          publication.registryURL ?? input.verification.forgeURL,
         ).origin,
       }
     : {};

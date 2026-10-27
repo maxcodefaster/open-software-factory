@@ -1,0 +1,89 @@
+.library-cover-picker {
+  margin-block: calc(-1 * var(--space-4)) var(--space-6);
+  min-width: 0;
+}
+.library-cover-panel {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-block: var(--space-4);
+  border-block: 1px solid var(--line-subtle);
+}
+.library-cover-panel fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.library-cover-panel legend {
+  margin-bottom: var(--space-3);
+  font-weight: var(--weight-medium);
+}
+.library-cover-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  align-items: start;
+  gap: var(--space-4);
+  max-height: 24rem;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+  padding: var(--space-1);
+}
+.skill-library .library-cover-option {
+  gap: var(--space-2);
+  cursor: pointer;
+  font-weight: var(--weight-regular);
+}
+.library-cover-option img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: var(--radius-xs);
+}
+.library-cover-option > span {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.skill-library .library-cover-option input[type="radio"] {
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  min-height: 14px;
+  margin: 0;
+  accent-color: var(--color-river-deep);
+}
+.library-cover-option:hover img {
+  outline: 1px solid var(--color-ink-muted);
+  outline-offset: 2px;
+}
+.library-cover-option:has(input:checked) img {
+  outline: 2px solid var(--color-river-deep);
+  outline-offset: 2px;
+}
+.library-cover-option:has(input:focus-visible) img {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+.library-cover-picker[data-kind="mcp"] .library-cover-option img {
+  aspect-ratio: 3 / 2;
+}
+.library-cover-option:has(input:disabled) {
+  cursor: default;
+}
+.library-cover-selection {
+  color: var(--color-ink-muted);
+  font-size: var(--text-xs);
+}
+@container skill-library (max-width: 440px) {
+  .library-cover-options {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-3);
+  }
+}

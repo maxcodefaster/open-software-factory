@@ -101,8 +101,57 @@ const knowledgePage = table("knowledgePage")
   })
   .primaryKey("id");
 
+const knowledgePageOutline = table("knowledgePageOutline")
+  .from("factory.knowledge_page_outline")
+  .columns({
+    id: string(),
+    projectId: string().from("project_id"),
+    slug: string(),
+    title: string(),
+    parentId: string().from("parent_id").optional(),
+    sortOrder: number().from("sort_order"),
+    icon: enumeration<"knowledge" | "home" | "ticket" | "ide" | "preview" | "settings">(),
+    metadataVersion: number().from("metadata_version"),
+    state: enumeration<"active" | "archived">(),
+    version: number(),
+    currentRevisionId: string().from("current_revision_id").optional(),
+    createdAt: number().from("created_at"),
+    updatedAt: number().from("updated_at"),
+  })
+  .primaryKey("id");
+
+const readVersion = table("readVersion")
+  .from("factory.read_version")
+  .columns({
+    projectId: string().from("project_id"),
+    audience: string(),
+    scope: enumeration<
+      | "lifecycle"
+      | "ticket"
+      | "conversation"
+      | "review"
+      | "inbox"
+      | "knowledge"
+      | "inputs"
+      | "sources"
+      | "releases"
+    >(),
+    resourceId: string().from("resource_id"),
+    revision: string(),
+  })
+  .primaryKey("projectId", "audience", "scope", "resourceId");
+
 export const zeroSchema = createSchema({
-  tables: [project, ticket, epic, ticketDependency, knowledgePage, projectMembership],
+  tables: [
+    project,
+    ticket,
+    epic,
+    ticketDependency,
+    knowledgePage,
+    projectMembership,
+    knowledgePageOutline,
+    readVersion,
+  ],
   relationships: [
     relationships(project, ({ many }) => ({
       members: many({
@@ -116,6 +165,11 @@ export const zeroSchema = createSchema({
         sourceField: ["projectId"],
         destField: ["projectId"],
         destSchema: projectMembership,
+      }),
+      dependents: many({
+        sourceField: ["id"],
+        destField: ["prerequisiteId"],
+        destSchema: ticketDependency,
       }),
     })),
     relationships(epic, ({ many }) => ({
@@ -133,6 +187,20 @@ export const zeroSchema = createSchema({
       }),
     })),
     relationships(knowledgePage, ({ many }) => ({
+      members: many({
+        sourceField: ["projectId"],
+        destField: ["projectId"],
+        destSchema: projectMembership,
+      }),
+    })),
+    relationships(knowledgePageOutline, ({ many }) => ({
+      members: many({
+        sourceField: ["projectId"],
+        destField: ["projectId"],
+        destSchema: projectMembership,
+      }),
+    })),
+    relationships(readVersion, ({ many }) => ({
       members: many({
         sourceField: ["projectId"],
         destField: ["projectId"],

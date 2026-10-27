@@ -180,7 +180,11 @@ export function ChangeAgentMessage(props: {
     <Show
       when={props.message.activity}
       fallback={
-        <article class={`agent-message ${props.message.role}`}>
+        <article
+          class={`agent-message ${props.message.role}`}
+          id={`coding-message-${props.message.id}`}
+          tabindex="-1"
+        >
           <small class="sr-only">{props.message.role === "user" ? "You" : "Assistant"}</small>
           <div class="markdown-body" innerHTML={markdownHTML(props.message.text)} />
           <Show when={props.message.truncated}>
@@ -356,7 +360,7 @@ export function ConversationEntryCard(props: {
           </details>
         }
       >
-        <article class="conversation-question">
+        <article class="conversation-question" id={`conversation-entry-${entry.id}`} tabindex="-1">
           <Show when={String(entry.payload["message"] ?? "")}>
             <p>{String(entry.payload["message"] ?? "")}</p>
           </Show>
@@ -390,7 +394,7 @@ export function ConversationEntryCard(props: {
   }
   if (entry.kind === "requirement") {
     return (
-      <article class="conversation-requirement">
+      <article class="conversation-requirement" id={`conversation-entry-${entry.id}`} tabindex="-1">
         <div class="markdown-body" innerHTML={markdownHTML(entry.body)} />
         <MessageCopy text={entry.body} scope={entry.id} />
         <Show when={entry.payload["epicProposal"] || !props.requirementVisible}>
@@ -435,7 +439,11 @@ export function ConversationEntryCard(props: {
     ),
   );
   return (
-    <article class={`agent-message ${entry.actor === "user" ? "user" : "assistant"}`}>
+    <article
+      class={`agent-message ${entry.actor === "user" ? "user" : "assistant"}`}
+      id={`conversation-entry-${entry.id}`}
+      tabindex="-1"
+    >
       <small class="sr-only">
         {entry.kind === "answer" ? "Your answer" : entry.actor === "user" ? "You" : "Assistant"}
       </small>

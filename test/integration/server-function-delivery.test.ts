@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createDeliveryService } from "../../apps/factory/src/delivery/service";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
@@ -40,6 +40,12 @@ test("native Delivery preserves exact review/Stop identities, current authority 
       },
     },
     controller: {
+      async settings() {
+        throw new Error("This proof does not read Delivery settings");
+      },
+      async configure() {
+        throw new Error("This proof does not change Delivery settings");
+      },
       async get(...args) {
         effects.push(["get", ...args]);
         return value();

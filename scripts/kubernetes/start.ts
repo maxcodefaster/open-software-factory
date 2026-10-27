@@ -14,6 +14,7 @@ import { installForgeBrowserLogout } from "../factory/forge-logout";
 import { waitForFactory } from "../factory/readiness";
 import { requireWritableRuntimeStorage } from "../factory/storage-readiness";
 import { bootstrapOpenBao } from "../factory/openbao-bootstrap";
+import { requireObjectStorage } from "../../apps/factory/src/storage/bootstrap";
 
 function required(name: string) {
   const value = process.env[name];
@@ -214,6 +215,8 @@ const startupID = crypto.randomUUID();
 // Public traffic remains excluded until this startup's readiness marker exists.
 const database = createDatabase(1);
 try {
+  console.log("Checking the installation's private object storage");
+  await requireObjectStorage(database, directory);
   await finishInstallationMaintenance(database);
 } finally {
   await database.client.end();

@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { planningDesign } from "../fixtures/technical-planning";
 
 test("compiled Ticket and Project commands validate exact input, bind the actor and detach cancellation without replay", async () => {
   const origin = "https://owned-tickets.test",
@@ -32,6 +33,12 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     commandId: crypto.randomUUID(),
     revisionId: revision,
     codingReasoning: "high" as const,
+    technicalDesignRevisionId: crypto.randomUUID(),
+  };
+  const technicalInput = {
+    commandId: crypto.randomUUID(),
+    expectedRevisionId: crypto.randomUUID(),
+    content: planningDesign,
   };
   const project = {
     name: "Owned Project",
@@ -73,6 +80,13 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
           authority();
           effects.push(["save", ...args]);
           return { id: input.commandId, ticketVersion: 2, requirementRevisionId: null };
+        },
+        async saveTechnicalDesign(
+          ...args: Parameters<FactoryServices["tickets"]["saveTechnicalDesign"]>
+        ) {
+          authority();
+          effects.push(["save-technical-design", ...args]);
+          return { id: args[2].commandId };
         },
         async followUp(...args: Parameters<FactoryServices["tickets"]["followUp"]>) {
           authority();
@@ -120,6 +134,7 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     ["approveRequirementRevision", [ticket, revision]],
     ["startTicketChange", [ticket]],
     ["saveTicketDocument", [ticket, input]],
+    ["saveTicketTechnicalDesign", [ticket, technicalInput]],
     [
       "createTicketFollowUp",
       [
@@ -147,6 +162,25 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     ["startTicketChange", ["bad-id"]],
     ["saveTicketDocument", [ticket, { ...input, expectedVersion: 0 }]],
     ["saveTicketDocument", [ticket, { ...input, createdBy: crypto.randomUUID() }]],
+    [
+      "saveTicketTechnicalDesign",
+      [
+        ticket,
+        {
+          ...technicalInput,
+          content: {
+            ...planningDesign,
+            diagrams: [
+              {
+                title: "Denied",
+                description: "External include",
+                source: "@startuml\n!include secret\n@enduml",
+              },
+            ],
+          },
+        },
+      ],
+    ],
     ["createTicketFollowUp", [ticket, { commandId: "bad-id" }]],
     ["trashTicket", ["bad-id"]],
     ["restoreTicket", [ticket, -1]],
@@ -172,12 +206,17 @@ test("compiled Ticket and Project commands validate exact input, bind the actor 
     status: 404,
   });
   expect(await call("startTicketChange", [ticket])).toMatchObject({ ok: false, status: 404 });
+  expect(await call("saveTicketTechnicalDesign", [ticket, technicalInput])).toMatchObject({
+    ok: false,
+    status: 404,
+  });
   allowed = true;
   expect(await call("getTicketDetail", [ticket])).toMatchObject({ ok: true });
   for (const [name, args] of writes.filter(([name]) => name !== "implementTicket"))
     expect(await call(name, args)).toMatchObject({ ok: true });
   expect(await call("getProjects", [])).toMatchObject({ ok: true, value: { projects: [] } });
   expect(effects).toContainEqual(["save", actor, ticket, input]);
+  expect(effects).toContainEqual(["save-technical-design", actor, ticket, technicalInput]);
   expect(effects).toContainEqual(["restore", actor, ticket, 2]);
   expect(effects).toContainEqual(["register", actor, project]);
   expect(effects).toContainEqual([

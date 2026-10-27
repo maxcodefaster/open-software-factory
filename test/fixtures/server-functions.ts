@@ -1,8 +1,10 @@
 import { resolve } from "node:path";
-import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import type { APIRequestContext, APIResponse, Page, Route } from "@playwright/test";
-import { decodeResponse, serializeString } from "@solidjs/web/server-functions/client";
+import {
+  decodeResponse as decodeNativeResponse,
+  serializeString,
+} from "@solidjs/web/server-functions/client";
 import { agentActivityStream } from "../../apps/factory/src/agent/activity-stream";
 import {
   type AgentView,
@@ -21,6 +23,20 @@ import { createServerFunctionEndpoint } from "../../apps/factory/src/server-func
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const serviceFunctions = {
+  learning: {
+    getLearning: "get",
+    saveLearning: "set",
+    decideLearning: "decide",
+    rollbackLearning: "rollback",
+  },
+  inbox: {
+    getInbox: "list",
+    getAttentionPeople: "people",
+    getTicketAttention: "ticket",
+    setTicketResponsibility: "responsibility",
+    setTicketFollowing: "follow",
+    markInboxItem: "receipt",
+  },
   runtime: {
     startPersonalWorkspace: "startPersonal",
     startTicketWorkspace: "startTicket",
@@ -51,6 +67,8 @@ const serviceFunctions = {
     confirmEpicProposal: "confirmEpic",
   },
   delivery: {
+    getDeliverySettings: "settings",
+    configureDelivery: "configure",
     getDelivery: "get",
     approveDelivery: "approve",
     retryCandidateReview: "retryReview",
@@ -61,11 +79,13 @@ const serviceFunctions = {
     registerProject: "register",
   },
   tickets: {
+    cancelTicketImplementation: "cancelImplementation",
     createRequirementRevision: "createRevision",
     approveRequirementRevision: "approveRevision",
     startTicketChange: "startChange",
     getTicketDetail: "detail",
     saveTicketDocument: "save",
+    saveTicketTechnicalDesign: "saveTechnicalDesign",
     createTicketFollowUp: "followUp",
     trashTicket: "trash",
     restoreTicket: "restore",
@@ -118,6 +138,7 @@ const serviceFunctions = {
   mcp: {
     getMCPLibrary: "get",
     saveMCPDefinition: "save",
+    saveMCPCover: "cover",
     saveMCPChoice: "choose",
     proposeMCPSharing: "propose",
     acceptMCPSharing: "accept",
@@ -138,6 +159,7 @@ const serviceFunctions = {
     previewSkillImport: "previewImport",
     previewRepositorySkill: "previewRepository",
     saveSkill: "save",
+    saveSkillCover: "cover",
     saveSkillChoice: "choose",
     proposeSkillSharing: "propose",
     acceptSkillSharing: "accept",
@@ -222,6 +244,8 @@ const serviceFunctions = {
 
 type ServiceDoubles = { [K in keyof FactoryServices]?: Partial<FactoryServices[K]> };
 type Functions = typeof import("../../apps/factory/src/server-functions/releases") &
+  typeof import("../../apps/factory/src/server-functions/learning") &
+  typeof import("../../apps/factory/src/server-functions/inbox") &
   typeof import("../../apps/factory/src/server-functions/models") &
   typeof import("../../apps/factory/src/server-functions/runtime") &
   typeof import("../../apps/factory/src/server-functions/agent") &
@@ -242,36 +266,45 @@ type Functions = typeof import("../../apps/factory/src/server-functions/releases
   typeof import("../../apps/factory/src/server-functions/access") &
   typeof import("../../apps/factory/src/server-functions/environments") &
   typeof import("../../apps/factory/src/server-functions/usage");
-type FunctionName = keyof Functions;
+type FunctionName = {
+  [K in keyof Functions]: Functions[K] extends (...args: never[]) => unknown ? K : never;
+}[keyof Functions];
 type BufferedFunctionName = Exclude<FunctionName, "getAgentActivity" | "sendConversationMessage">;
 type FunctionResult<N extends FunctionName> = Awaited<ReturnType<Functions[N]>>;
 
-// Standalone component builds have another Vite root and function hash. They
-// still dispatch the same named function through the real production handler.
+// Each build uses its compiler-produced entry and function identities.
+// Development references resolve by name; opaque hashes are never guessed.
 export async function compiledFactoryEndpoint(
   options: Omit<Parameters<typeof createServerFunctionEndpoint>[0], "handle" | "publicFunctionIDs">,
+  entrypoint = resolve(factoryBuildDirectory(), "server/entry.js"),
 ) {
-  const directory = factoryBuildDirectory();
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
-    pathToFileURL(resolve(directory, "server/entry.js")).href
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(
+    pathToFileURL(entrypoint).href
   );
-  const manifest = JSON.parse(
-    await readFile(resolve(directory, "client/.vite/solid-server-functions.json"), "utf8"),
-  );
+  const manifest = compiledManifest(entry);
+  const applicationEntry = resolve(factoryBuildDirectory(), "server/entry.js");
+  const callerManifest =
+    entrypoint === applicationEntry
+      ? manifest
+      : compiledManifest(await import(pathToFileURL(applicationEntry).href));
   const endpoint = createServerFunctionEndpoint({
     ...options,
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
     publicFunctionIDs: entry.publicFunctionIDs,
+    functionIDs: entry.functionIDs,
   });
   return (request: Request) => {
     const target = new URL(request.url);
-    const name = target.pathname
-      .split("/")
-      .at(-1)
-      ?.replace(/-[^-]+$/, "");
+    // Browser calls identify this component build; direct fixture calls identify
+    // the application build. Both must name an actual compiler-produced function.
+    const name = functionName(target, manifest) ?? functionName(target, callerManifest);
     const found = manifest.functions.find((item: { name: string }) => item.name === name);
     if (found) target.pathname = `/_server/data/${found.id}`;
-    return endpoint(new Request(target, request));
+    const fixtureRequest = new Request(target, request);
+    // A component page has no Start Router to receive a route flight.
+    // Keep the native function wire, as in mockFactoryFunctions below.
+    fixtureRequest.headers.delete("x-single-flight");
+    return endpoint(fixtureRequest);
   };
 }
 
@@ -283,15 +316,8 @@ export async function mockFactoryFunctions(
   dropResponse?: (name: string) => boolean,
 ) {
   const entryURL = pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href;
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
-    entryURL
-  );
-  const manifest = JSON.parse(
-    await readFile(
-      resolve(factoryBuildDirectory(), "client/.vite/solid-server-functions.json"),
-      "utf8",
-    ),
-  );
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(entryURL);
+  const manifest = compiledManifest(entry);
   const names = Object.entries(serviceFunctions).flatMap(([service, functions]) =>
     Object.entries(functions).flatMap(([name, method]) => {
       const double = services[service as keyof FactoryServices];
@@ -331,13 +357,16 @@ export async function mockFactoryFunctions(
             "content-type, x-server-function-format, x-server-function-id",
         };
         if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
-        const name = new URL(request.url).pathname
-          .split("/")
-          .at(-1)
-          ?.replace(/-[^-]+$/, "");
+        const name = functionName(new URL(request.url), manifest);
         if (!name || !names.includes(name))
           return new Response(null, { status: 404, headers: cors });
-        const response = await endpoint(request);
+        const compiled = manifest.functions.find((item) => item.name === name);
+        if (!compiled) throw new Error("Compiled streaming function is missing");
+        const target = new URL(request.url);
+        target.pathname = `/_server/data/${compiled.id}`;
+        const fixtureRequest = new Request(target, request);
+        fixtureRequest.headers.delete("x-single-flight");
+        const response = await endpoint(fixtureRequest);
         // This controlled failure is after the named service has admitted its
         // work, not a second dispatch or a JSON/SSE compatibility encoder.
         if (dropResponse?.(name)) {
@@ -361,10 +390,7 @@ export async function mockFactoryFunctions(
     return networkOpening;
   }
   const handler = async (route: Route) => {
-    const name = new URL(route.request().url()).pathname
-      .split("/")
-      .at(-1)
-      ?.replace(/-[^-]+$/, "");
+    const name = functionName(new URL(route.request().url()), manifest);
     if (!name || !names.includes(name)) return route.fallback();
     // Isolated Vite fixtures use another root and therefore another function
     // hash. Resolve the same named function in this proof's compiled manifest.
@@ -391,16 +417,21 @@ export async function mockFactoryFunctions(
       session: async () => ({ user: { id: "owned-browser-fixture" } }),
       maintenance: async () => false,
       requireFresh: async () => {},
-      handle: entry.handleServerFunctionRequest,
+      handle: async (request, options) => entry.default.fetch(request, options),
       publicFunctionIDs: entry.publicFunctionIDs,
     });
     const body = input.postDataBuffer();
     const target = new URL(input.url());
     target.pathname = `/_server/data/${compiled.id}`;
+    // Component fixtures deliberately have no Start Router. Test the real
+    // function wire without requesting a route refresh that cannot be consumed.
+    // Full Factory browser journeys retain the native router flight protocol.
+    const headers = new Headers(input.headers());
+    headers.delete("x-single-flight");
     const response = await endpoint(
       new Request(target, {
         method: input.method(),
-        headers: input.headers(),
+        headers,
         body: body ? new Uint8Array(body).buffer : null,
       }),
     );
@@ -463,7 +494,7 @@ export function completedConversation(value: unknown): ReadableStream<Conversati
 export function conversationCommand(
   base: string,
   projectID: string,
-  input: Parameters<Functions["sendConversationMessage"]>[1],
+  input: NonNullable<Parameters<Functions["sendConversationMessage"]>[0]>["data"][1],
   headers: HeadersInit = {},
   signal?: AbortSignal,
 ) {
@@ -480,7 +511,7 @@ export function conversationCommand(
 export async function browserConversation(
   page: Page,
   projectID: string,
-  input: Parameters<Functions["sendConversationMessage"]>[1],
+  input: NonNullable<Parameters<Functions["sendConversationMessage"]>[0]>["data"][1],
 ) {
   const base = new URL(page.url()).origin;
   const cookie = (await page.context().cookies(base))
@@ -532,9 +563,10 @@ export async function factoryFunctionRequest(
   headers: HeadersInit = {},
   signal?: AbortSignal,
 ) {
-  const manifest = await Bun.file(
-    resolve(factoryBuildDirectory(), "client/.vite/solid-server-functions.json"),
-  ).json();
+  const compiled: typeof import("../../apps/factory/src/start-server") = await import(
+    pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
+  );
+  const manifest = compiledManifest(compiled);
   const entry = manifest.functions.find((value: { name: string }) => value.name === name);
   if (!entry) throw new Error(`Compiled Factory function is missing: ${name}`);
   const requestHeaders = new Headers(headers);
@@ -544,7 +576,7 @@ export async function factoryFunctionRequest(
   return new Request(`${base}/_server/data/${entry.id}`, {
     method: "POST",
     headers: requestHeaders,
-    body: await serializeString(args),
+    body: await serializeString([{ method: "POST", data: args }]),
     ...(signal ? { signal } : {}),
   });
 }
@@ -552,11 +584,11 @@ export async function factoryFunctionRequest(
 export async function callFactoryFunction<N extends FunctionName>(
   base: string,
   name: N,
-  args: Parameters<Functions[N]>,
+  args: NonNullable<Parameters<Functions[N]>[0]>["data"],
   headers: HeadersInit = {},
   signal?: AbortSignal,
 ): Promise<FunctionResult<N>> {
-  const result = await decodeResponse<FunctionResult<N>>(
+  const result = await decodeFactoryResponse<FunctionResult<N>>(
     await fetch(await factoryFunctionRequest(base, name, args, headers, signal)),
   );
   if (result === undefined) throw new Error(`Factory function returned no result: ${name}`);
@@ -566,7 +598,7 @@ export async function callFactoryFunction<N extends FunctionName>(
 export function browserFunction<N extends BufferedFunctionName>(
   page: Page,
   name: N,
-  args: Parameters<Functions[N]>,
+  args: NonNullable<Parameters<Functions[N]>[0]>["data"],
 ): Promise<FunctionResult<N>> {
   return requestFunction(page.request, name, args, new URL(page.url()).origin);
 }
@@ -574,7 +606,7 @@ export function browserFunction<N extends BufferedFunctionName>(
 export async function requestFunction<N extends BufferedFunctionName>(
   client: APIRequestContext,
   name: N,
-  args: Parameters<Functions[N]>,
+  args: NonNullable<Parameters<Functions[N]>[0]>["data"],
   base = process.env["FACTORY_BROWSER_BASE_URL"] ?? "http://127.0.0.1:3000",
 ): Promise<FunctionResult<N>> {
   const request = await factoryFunctionRequest(base, name, args);
@@ -595,7 +627,7 @@ export async function requestFunction<N extends BufferedFunctionName>(
 export async function decodeBrowserFunction<T>(
   response: Pick<APIResponse, "body" | "status" | "headers">,
 ): Promise<T> {
-  const result = await decodeResponse<T>(
+  const result = await decodeFactoryResponse<T>(
     new Response(new Uint8Array(await response.body()).buffer, {
       status: response.status(),
       headers: response.headers(),
@@ -603,4 +635,49 @@ export async function decodeBrowserFunction<T>(
   );
   if (result === undefined) throw new Error("Factory function returned no result");
   return result as T;
+}
+
+function compiledManifest(entry: typeof import("../../apps/factory/src/start-server")) {
+  return {
+    functions: Object.entries(entry.factoryFunctions).map(([name, fn]) => ({
+      name,
+      id: entry.compiledFunctionID(fn),
+    })),
+  };
+}
+function functionName(url: URL, manifest: ReturnType<typeof compiledManifest>) {
+  const id = url.pathname.split("/").at(-1) ?? "";
+  const compiled = manifest.functions.find((item) => item.id === id);
+  if (compiled) return compiled.name;
+  // Start uses file/export identities in development, even in an isolated Vite root.
+  try {
+    const dev = JSON.parse(Buffer.from(id, "base64url").toString("utf8"));
+    const name =
+      typeof dev.export === "string"
+        ? dev.export.replace(/_createServerFn_handler$/, "")
+        : undefined;
+    if (manifest.functions.some((item) => item.name === name)) return name;
+  } catch {
+    /* An unknown ID must remain unknown. */
+  }
+  return undefined;
+}
+export async function decodeFactoryResponse<T>(response: Response): Promise<T | undefined> {
+  const value = await decodeNativeResponse<{ result?: T; error?: unknown }>(response);
+  if (value?.error) throw value.error;
+  return value?.result;
+}
+
+export async function factoryFunctionMatcher(name: string) {
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(
+    pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
+  );
+  const manifest = compiledManifest(entry);
+  if (!manifest.functions.some((fn) => fn.name === name))
+    throw new Error(`Compiled Factory function is missing: ${name}`);
+  return (url: URL) => functionName(url, manifest) === name;
+}
+
+export async function factoryFunctionMatches(url: string, name: string) {
+  return (await factoryFunctionMatcher(name))(new URL(url));
 }

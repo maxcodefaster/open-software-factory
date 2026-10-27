@@ -14,6 +14,7 @@ import { turnObservationInput } from "../../packages/conversation-domain/src/tur
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockBootstrap } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 test("Build preparation distinguishes lost history and retains correction routing after compute stops", async () => {
   const fixture = await factoryProcess(undefined, { FACTORY_HOST: "0.0.0.0" });
@@ -149,7 +150,7 @@ test("Build preparation distinguishes lost history and retains correction routin
     });
     await mockFactoryFunctions(page, {
       conversations: {
-        message: async (_actor, factoryTargetID, factoryCommand) => {
+        message: async (_actor, _factoryTargetID, _factoryCommand) => {
           researchRequests++;
           return (() => {
             throw new CommandError("conflict", String("Build must not become research"));
@@ -159,10 +160,10 @@ test("Build preparation distinguishes lost history and retains correction routin
     });
     await mockFactoryFunctions(page, {
       agent: {
-        prompt: async (_actor, factoryTargetID, factoryCommand) => {
+        prompt: async (_actor, _factoryTargetID, factoryCommand) => {
           prompts.push(factoryCommand);
           state = "starting";
-          turn = { ...turn!, state: "pending" };
+          turn = { ...fixtureValue(turn, "turn"), state: "pending" };
           return agentViewSchema.parse(view());
         },
       },

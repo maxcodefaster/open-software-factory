@@ -1,17 +1,21 @@
-import { callFactoryFunction, decodeBrowserFunction } from "./server-functions";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 import { expect } from "bun:test";
 import { resolve } from "node:path";
 import { expect as visible } from "@playwright/test";
 import { z } from "zod";
 import {
+  type AgentView,
   agentViewSchema,
   changesResponseSchema,
-  deliveryViewSchema,
   conversationViewSchema,
-  type AgentView,
+  deliveryViewSchema,
 } from "../../apps/factory/src/api-contracts";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import type { releaseInstallation } from "./release-installation";
+import {
+  callFactoryFunction,
+  decodeBrowserFunction,
+  factoryFunctionMatches,
+} from "./server-functions";
 
 type Fixture = Awaited<ReturnType<typeof releaseInstallation>>;
 
@@ -146,8 +150,8 @@ export async function releaseBuild(fixture: Fixture) {
       panel.getByRole("button", { name: "Start implementation", exact: true }),
     ).toBeEnabled({ timeout: 120_000 });
     const pending = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname.startsWith("/_server/data/startCoding-") &&
+      async (response) =>
+        (await factoryFunctionMatches(response.url(), "startCoding")) &&
         response.request().method() === "POST",
       { timeout: 120_000 },
     );

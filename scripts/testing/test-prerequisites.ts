@@ -1,8 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-const root = resolve(import.meta.dir, "../..");
-const scanner = new Bun.Transpiler({ loader: "ts" });
+const root = resolve(import.meta.dirname, "../..");
+let scanner: Bun.Transpiler | undefined;
+function scanImports(source: string) {
+  scanner ??= new Bun.Transpiler({ loader: "ts" });
+  return scanner.scanImports(source);
+}
 
 export function verificationEnvironment(environment: Record<string, string | undefined>) {
   const env = { ...environment };
@@ -12,7 +16,8 @@ export function verificationEnvironment(environment: Record<string, string | und
       (key.endsWith("_LIVE") || key.includes("_PROOF") || /MODEL.*(KEY|TOKEN|BASE_URL)/.test(key))
     )
       delete env[key];
-    else if (key.startsWith("FACTORY_ATTACHMENT_S3_")) delete env[key];
+    else if (key.startsWith("FACTORY_OBJECT_S3_") || key.startsWith("FACTORY_ATTACHMENT_S3_"))
+      delete env[key];
   return env;
 }
 
@@ -24,15 +29,13 @@ export function productionBuildEnvironment(environment: Record<string, string | 
 }
 
 export function needsTheiaTestBuild(source: string) {
-  return scanner
-    .scanImports(source)
-    .some(({ path }) =>
-      /\/deploy\/theia-ide\/(?:node_modules\/|factory-ide-extension\/lib\/)/.test(path),
-    );
+  return scanImports(source).some(({ path }) =>
+    /\/deploy\/theia-ide\/(?:node_modules\/|factory-ide-extension\/lib\/)/.test(path),
+  );
 }
 
 export function needsOIDCTestCA(source: string) {
-  return scanner.scanImports(source).some(({ path }) => /\/fixtures\/oidc-provider$/.test(path));
+  return scanImports(source).some(({ path }) => /\/fixtures\/oidc-provider$/.test(path));
 }
 
 export async function appendOwnedTestCA(

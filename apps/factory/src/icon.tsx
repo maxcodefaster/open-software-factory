@@ -20,6 +20,11 @@ export type IconName =
   | "home"
   | "ide"
   | "inbox"
+  | "mail"
+  | "mail-open"
+  | "archive"
+  | "unarchive"
+  | "refresh"
   | "knowledge"
   | "minimize"
   | "more"
@@ -100,6 +105,22 @@ export function Icon(props: { name: IconName }) {
         <Match when={props.name === "inbox"}>
           <path d="M5 5h14l2 9v5H3v-5l2-9Z" />
           <path d="M3 14h5l1.5 2h5L16 14h5" />
+        </Match>
+        <Match when={props.name === "mail"}>
+          <rect x="3" y="5" width="18" height="14" rx="2" />
+          <path d="m3 7 9 6 9-6" />
+        </Match>
+        <Match when={props.name === "mail-open"}>
+          <path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9Zm0 0 9 6 9-6M3 20l6-6m6 0 6 6" />
+        </Match>
+        <Match when={props.name === "archive"}>
+          <path d="M4 9h16v11H4V9Zm-1-5h18v5H3V4Zm6 9h6" />
+        </Match>
+        <Match when={props.name === "unarchive"}>
+          <path d="M4 13v7h16v-7M3 10h5m8 0h5M12 15V3m-4 4 4-4 4 4" />
+        </Match>
+        <Match when={props.name === "refresh"}>
+          <path d="M20 9a8 8 0 0 0-14-3L3 9m0-6v6h6M4 15a8 8 0 0 0 14 3l3-3m0 6v-6h-6" />
         </Match>
         <Match when={props.name === "knowledge"}>
           <path d="M4.5 5.5A3.5 3.5 0 0 1 8 2h4v18H8a3.5 3.5 0 0 0-3.5 2V5.5Z" />

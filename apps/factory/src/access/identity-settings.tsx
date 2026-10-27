@@ -3,11 +3,11 @@ import { z } from "zod";
 import { identityConfiguration } from "../../../../packages/identity-domain/src/configuration";
 import { protocolRequest } from "../api-client";
 import {
+  activateIdentityConfiguration,
   getIdentityConfiguration,
   saveIdentityConfiguration,
-  activateIdentityConfiguration,
 } from "../server-functions/access";
-import { serverCall, type ServerValue } from "../server-functions/result";
+import { type ServerValue, serverCall } from "../server-functions/result";
 
 export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | undefined }) {
   const [current, setCurrent] =
@@ -21,7 +21,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
   let pendingCommandID = crypto.randomUUID();
   let lastInput = "";
   async function load() {
-    const view = await serverCall(getIdentityConfiguration());
+    const view = await serverCall(getIdentityConfiguration({ data: [] }));
     setCurrent(view);
     setMode(view.mode);
     setIssuer(view.issuer ?? "");
@@ -70,9 +70,13 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
     }
     const result = await serverCall(
       saveIdentityConfiguration({
-        commandID: pendingCommandID,
-        version: current()?.version ?? 0,
-        configuration,
+        data: [
+          {
+            commandID: pendingCommandID,
+            version: current()?.version ?? 0,
+            configuration,
+          },
+        ],
       }),
     );
     setCurrent(result);
@@ -99,7 +103,7 @@ export function IdentitySettings(props: { beforeCompanySignIn?: (() => void) | u
     location.assign(result.url);
   }
   async function activate(commandID: string) {
-    const result = await serverCall(activateIdentityConfiguration(commandID));
+    const result = await serverCall(activateIdentityConfiguration({ data: [commandID] }));
     setCurrent(result);
     setNotice("Sign-in configuration activated. Background Agents continue.");
   }

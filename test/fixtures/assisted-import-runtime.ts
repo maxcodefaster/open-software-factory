@@ -20,7 +20,7 @@ export async function assistedImportRuntime(input: {
   const database = factory.connect();
   const browser = await chromium.launch({ headless: true });
   const started = performance.now();
-  async function api(path: string, method = "GET", body?: unknown) {
+  async function _api(path: string, method = "GET", body?: unknown) {
     const response = await fetch(factory.base + path, {
       method,
       headers: { cookie, origin: factory.base, "content-type": "application/json" },

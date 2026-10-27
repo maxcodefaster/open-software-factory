@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import type { APIRequestContext } from "@playwright/test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { SystemContractError } from "../../packages/system-contract/src/system-contract";
 import {

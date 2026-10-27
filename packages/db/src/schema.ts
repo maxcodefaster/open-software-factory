@@ -719,6 +719,48 @@ export const ticket = factorySchema.table("ticket", {
   trashError: text("trash_error"),
 });
 
+export const ticketResponsibility = factorySchema.table("ticket_responsibility", {
+  ticketId: uuid("ticket_id")
+    .primaryKey()
+    .references(() => ticket.id, { onDelete: "cascade" }),
+  userId: uuid("user_id"),
+  version: integer("version").notNull().default(1),
+});
+
+export const ticketFollow = factorySchema.table(
+  "ticket_follow",
+  {
+    ticketId: uuid("ticket_id")
+      .notNull()
+      .references(() => ticket.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").notNull(),
+    following: boolean("following").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.ticketId, table.userId] })],
+);
+
+export const ticketResponsibilityEvent = factorySchema.table("ticket_responsibility_event", {
+  id: uuid("id").primaryKey(),
+  ticketId: uuid("ticket_id")
+    .notNull()
+    .references(() => ticket.id, { onDelete: "cascade" }),
+  userId: uuid("user_id"),
+  actorId: uuid("actor_id").notNull(),
+  expectedVersion: integer("expected_version").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const inboxReceipt = factorySchema.table(
+  "inbox_receipt",
+  {
+    userId: uuid("user_id").notNull(),
+    itemId: text("item_id").notNull(),
+    seenEventId: text("seen_event_id"),
+    archived: boolean("archived").notNull().default(false),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.itemId] })],
+);
+
 export const ticketDependency = factorySchema.table(
   "ticket_dependency",
   {
@@ -923,4 +965,209 @@ export const usageRateOverride = factorySchema.table(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [primaryKey({ columns: [table.provider, table.model] })],
+);
+
+export const learningSourceArtifact = factorySchema.table(
+  "learning_source_artifact",
+  {
+    // agent_turn is SQL-owned, like agent_turn_skill. The baseline owns this FK.
+    turnId: uuid("turn_id").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    reference: text("reference").notNull(),
+    body: text("body").notNull(),
+    truncated: boolean("truncated").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.turnId, table.ordinal] })],
+);
+export const learningPolicy = factorySchema.table("learning_policy", {
+  scopeKey: text("scope_key").primaryKey(),
+  projectId: uuid("project_id")
+    .notNull()
+    .references(() => project.id, { onDelete: "cascade" }),
+  ownerId: uuid("owner_id").references(() => authUser.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull(),
+  automaticSkills: boolean("automatic_skills").notNull().default(false),
+  version: integer("version").notNull(),
+  updatedBy: uuid("updated_by")
+    .notNull()
+    .references(() => authUser.id),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const learningReview = factorySchema.table("learning_review", {
+  id: uuid("id").primaryKey(),
+  projectId: uuid("project_id")
+    .notNull()
+    .references(() => project.id, { onDelete: "cascade" }),
+  ownerId: uuid("owner_id").references(() => authUser.id, { onDelete: "cascade" }),
+  developerOnly: boolean("developer_only").notNull(),
+  reviewerId: uuid("reviewer_id")
+    .notNull()
+    .references(() => authUser.id),
+  kind: text("kind").notNull(),
+  rubric: text("rubric").notNull(),
+  modelId: text("model_id").notNull(),
+  modelConnection: jsonb("model_connection"),
+  judgeKey: text("judge_key").notNull(),
+  state: text("state").notNull(),
+  input: jsonb("input").notNull(),
+  inputDigest: text("input_digest").notNull(),
+  result: jsonb("result"),
+  calibrated: boolean("calibrated"),
+  reason: text("reason"),
+  ownerToken: uuid("owner_token").notNull(),
+  ownerExpiresAt: timestamp("owner_expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+});
+export const learningCase = factorySchema.table("learning_case", {
+  id: text("id").primaryKey(),
+  projectId: uuid("project_id")
+    .notNull()
+    .references(() => project.id, { onDelete: "cascade" }),
+  ownerId: uuid("owner_id").references(() => authUser.id, { onDelete: "cascade" }),
+  reviewerId: uuid("reviewer_id")
+    .notNull()
+    .references(() => authUser.id),
+  developerOnly: boolean("developer_only").notNull(),
+  activity: text("activity").notNull(),
+  outcome: text("outcome").notNull(),
+  settledAt: timestamp("settled_at", { withTimezone: true }).notNull(),
+  snapshot: jsonb("snapshot").notNull(),
+  selected: boolean("selected").notNull(),
+  batchId: uuid("batch_id").references(() => learningReview.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const learningProposal = factorySchema.table(
+  "learning_proposal",
+  {
+    id: uuid("id").primaryKey(),
+    reviewId: uuid("review_id")
+      .notNull()
+      .references(() => learningReview.id, { onDelete: "cascade" }),
+    ordinal: integer("ordinal").notNull(),
+    content: jsonb("content").notNull(),
+    state: text("state").notNull().default("proposed"),
+    decisionId: uuid("decision_id").unique(),
+    decidedBy: uuid("decided_by").references(() => authUser.id),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    ticketId: uuid("ticket_id").references(() => ticket.id),
+  },
+  (table) => [uniqueIndex("learning_proposal_review_ordinal").on(table.reviewId, table.ordinal)],
+);
+export const learningCommand = factorySchema.table("learning_command", {
+  id: uuid("id").primaryKey(),
+  actorId: uuid("actor_id")
+    .notNull()
+    .references(() => authUser.id),
+  input: jsonb("input").notNull(),
+  result: jsonb("result").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const learningTrial = factorySchema.table(
+  "learning_trial",
+  {
+    id: uuid("id").primaryKey(),
+    proposalId: uuid("proposal_id")
+      .notNull()
+      .references(() => learningProposal.id, { onDelete: "cascade" }),
+    phase: text("phase").notNull(),
+    actorId: uuid("actor_id")
+      .notNull()
+      .references(() => authUser.id),
+    policyVersion: integer("policy_version").notNull(),
+    modelId: text("model_id").notNull(),
+    modelConnection: jsonb("model_connection"),
+    judgeKey: text("judge_key").notNull(),
+    rubric: text("rubric").notNull(),
+    input: jsonb("input").notNull(),
+    inputDigest: text("input_digest").notNull(),
+    state: text("state").notNull().default("running"),
+    result: jsonb("result"),
+    reason: text("reason"),
+    ownerToken: uuid("owner_token").notNull(),
+    ownerExpiresAt: timestamp("owner_expires_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [uniqueIndex("learning_trial_proposal_phase").on(table.proposalId, table.phase)],
+);
+export const learningTrialStep = factorySchema.table(
+  "learning_trial_step",
+  {
+    trialId: uuid("trial_id")
+      .notNull()
+      .references(() => learningTrial.id, { onDelete: "cascade" }),
+    stage: integer("stage").notNull(),
+    input: jsonb("input").notNull(),
+    inputDigest: text("input_digest").notNull(),
+    state: text("state").notNull().default("running"),
+    result: jsonb("result"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [primaryKey({ columns: [table.trialId, table.stage] })],
+);
+export const learningApplication = factorySchema.table("learning_application", {
+  id: uuid("id").primaryKey(),
+  proposalId: uuid("proposal_id")
+    .notNull()
+    .unique()
+    .references(() => learningProposal.id, { onDelete: "cascade" }),
+  target: jsonb("target").notNull(),
+  editDigest: text("edit_digest").notNull(),
+  activation: jsonb("activation").notNull().default([]),
+  appliedRevisionId: uuid("applied_revision_id").notNull(),
+  appliedVersion: integer("applied_version").notNull(),
+  appliedBy: uuid("applied_by")
+    .notNull()
+    .references(() => authUser.id),
+  comparisonId: uuid("comparison_id").references(() => learningTrial.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  state: text("state").notNull().default("applied"),
+  revertedRevisionId: uuid("reverted_revision_id"),
+  revertedVersion: integer("reverted_version"),
+  revertedBy: uuid("reverted_by").references(() => authUser.id),
+  revertedComparisonId: uuid("reverted_comparison_id").references(() => learningTrial.id),
+  revertedAt: timestamp("reverted_at", { withTimezone: true }),
+});
+
+export const readVersion = factorySchema.table(
+  "read_version",
+  {
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    audience: text("audience").notNull(),
+    scope: text("scope").notNull(),
+    resourceId: uuid("resource_id").notNull(),
+    revision: uuid("revision").notNull().defaultRandom(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.audience, table.scope, table.resourceId] }),
+    index("read_version_scope").on(table.scope, table.projectId),
+  ],
+);
+
+export const knowledgePageOutline = factorySchema.table(
+  "knowledge_page_outline",
+  {
+    id: uuid("id")
+      .primaryKey()
+      .references(() => knowledgePage.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    parentId: uuid("parent_id"),
+    sortOrder: integer("sort_order").notNull(),
+    icon: text("icon").notNull(),
+    metadataVersion: bigint("metadata_version", { mode: "number" }).notNull(),
+    state: knowledgePageState("state").notNull(),
+    version: bigint("version", { mode: "number" }).notNull(),
+    currentRevisionId: uuid("current_revision_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [index("knowledge_page_outline_project").on(table.projectId, table.state)],
 );

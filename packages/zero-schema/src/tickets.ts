@@ -5,13 +5,15 @@ import {
   defineQueryWithType,
   type ReadonlyJSONObject,
 } from "@rocicorp/zero";
+import { z } from "zod";
 import { canPlanTicket } from "../../ticket-domain/src/ticket";
-import { type FactoryZeroContext, type FactoryZeroSchema, zql } from "./schema";
-import { integer, record, text, uuid, validator } from "./validation";
-import { assignTicketEpicMutator, epicMutators } from "./epics";
 import { dependencyMutators } from "./dependencies";
+import { assignTicketEpicMutator, epicMutators } from "./epics";
 import { knowledgeMutators } from "./knowledge";
 import { projectMutators } from "./projects";
+import { readVersionQueries } from "./reads";
+import { type FactoryZeroContext, type FactoryZeroSchema, zql } from "./schema";
+import { integer, record, text, uuid, validator } from "./validation";
 
 type Json<T> = ReadonlyJSONObject & T;
 type CreateArgs = Json<{
@@ -172,6 +174,7 @@ const projectIdValidator = validator<Json<{ projectId: string }>>((value) => {
 });
 
 export const zeroQueries = defineQueries({
+  readVersions: readVersionQueries,
   dependencies: {
     list: defineQuery(projectIdValidator, ({ args, ctx }) => {
       const query = zql.ticketDependency.where("projectId", args.projectId);
@@ -200,22 +203,111 @@ export const zeroQueries = defineQueries({
     }),
   },
   tickets: {
-    list: defineQuery(projectIdValidator, ({ args, ctx }) => {
-      const query = zql.ticket.where("projectId", args.projectId).orderBy("updatedAt", "desc");
+    active: defineQuery(
+      z.object({ projectId: z.uuid(), limit: z.number().int().positive() }),
+      ({ args, ctx }) => {
+        const query = zql.ticket
+          .where("projectId", args.projectId)
+          .where("trashedAt", "IS", null)
+          .where("convertedToEpicId", "IS", null)
+          .where("state", "NOT IN", ["done", "cancelled"])
+          .orderBy("updatedAt", "desc")
+          .limit(args.limit);
+        return ctx.systemManager
+          ? query
+          : query.whereExists("members", (member) => member.where("userId", ctx.userId));
+      },
+    ),
+    history: defineQuery(
+      z.object({ projectId: z.uuid(), limit: z.number().int().positive() }),
+      ({ args, ctx }) => {
+        const query = zql.ticket
+          .where("projectId", args.projectId)
+          .where("trashedAt", "IS", null)
+          .where("convertedToEpicId", "IS", null)
+          .where("state", "IN", ["done", "cancelled"])
+          .orderBy("updatedAt", "desc")
+          .limit(args.limit);
+        return ctx.systemManager
+          ? query
+          : query.whereExists("members", (member) => member.where("userId", ctx.userId));
+      },
+    ),
+    trash: defineQuery(
+      z.object({ projectId: z.uuid(), limit: z.number().int().positive() }),
+      ({ args, ctx }) => {
+        const query = zql.ticket
+          .where("projectId", args.projectId)
+          .where("trashedAt", "IS NOT", null)
+          .orderBy("trashedAt", "desc")
+          .limit(args.limit);
+        return ctx.systemManager
+          ? query
+          : query.whereExists("members", (member) => member.where("userId", ctx.userId));
+      },
+    ),
+    prerequisites: defineQuery(projectIdValidator, ({ args, ctx }) => {
+      const query = zql.ticket
+        .where("projectId", args.projectId)
+        .whereExists("dependents", (edge) => edge.where("projectId", args.projectId));
       return ctx.systemManager
         ? query
         : query.whereExists("members", (member) => member.where("userId", ctx.userId));
     }),
+    find: defineQuery(
+      z.object({ projectId: z.uuid(), text: z.string().max(200) }),
+      ({ args, ctx }) => {
+        let query = zql.ticket
+          .where("projectId", args.projectId)
+          .where("trashedAt", "IS", null)
+          .where("convertedToEpicId", "IS", null);
+        for (const term of args.text.trim().split(/\s+/).filter(Boolean)) {
+          if (/^tck-?$/i.test(term)) continue;
+          const reference =
+            /^tck-([0-9a-f]{1,6})$/i.exec(term)?.[1]?.toLowerCase() ??
+            (/^[0-9a-f]{6}$/i.test(term) ? term.toLowerCase() : undefined);
+          const pattern = `%${term.replace(/[\\%_]/g, "\\$&")}%`;
+          if (reference) {
+            const uuidFor = (value: string) =>
+              `${value.padEnd(8, "0")}-0000-0000-0000-000000000000`;
+            const end = (parseInt(reference, 16) + 1).toString(16).padStart(reference.length, "0");
+            query = query.where(({ cmp, or, and }) =>
+              or(
+                cmp("title", "ILIKE", pattern),
+                end.length > reference.length
+                  ? cmp("id", ">=", uuidFor(reference))
+                  : and(cmp("id", ">=", uuidFor(reference)), cmp("id", "<", uuidFor(end))),
+              ),
+            );
+          } else query = query.where("title", "ILIKE", pattern);
+        }
+        const result = query.orderBy("updatedAt", "desc").limit(51);
+        return ctx.systemManager
+          ? result
+          : result.whereExists("members", (member) => member.where("userId", ctx.userId));
+      },
+    ),
   },
   knowledge: {
-    list: defineQuery(projectIdValidator, ({ args, ctx }) => {
-      const query = zql.knowledgePage
+    outline: defineQuery(projectIdValidator, ({ args, ctx }) => {
+      const query = zql.knowledgePageOutline
         .where("projectId", args.projectId)
         .where("state", "active")
         .orderBy("title", "asc");
       return ctx.systemManager
         ? query
         : query.whereExists("members", (member) => member.where("userId", ctx.userId));
+    }),
+    page: defineQuery(z.object({ projectId: z.uuid(), pageId: z.uuid() }), ({ args, ctx }) => {
+      const query = zql.knowledgePage
+        .where("projectId", args.projectId)
+        .where("id", args.pageId)
+        .where("state", "active");
+      return (
+        ctx.systemManager
+          ? query
+          : query.whereExists("members", (member) => member.where("userId", ctx.userId))
+      ).one();
     }),
   },
 });

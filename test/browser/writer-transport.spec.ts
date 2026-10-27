@@ -6,7 +6,9 @@ import { createServer, type ViteDevServer } from "vite";
 import { type WriterView, writerViewSchema } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFunctionMatches, mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 const cache = resolve(".factory/test-results/vite", `writer-transport-${crypto.randomUUID()}`);
 const directory = ".factory/test-results/writer-transport";
@@ -19,19 +21,14 @@ test.beforeAll(async () => {
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["writer-status.html", "review-transport.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await server.listen();
-  origin = server.resolvedUrls!.local[0]!.replace(/\/$/, "");
+  origin = fixtureValue(
+    fixtureValue(server.resolvedUrls, "server.resolvedUrls").local[0],
+    "server.resolvedUrls!.local[0]",
+  ).replace(/\/$/, "");
   await mkdir(directory, { recursive: true });
 });
 test.afterAll(async () => {
@@ -93,8 +90,8 @@ test("Writer ignores a delayed pre-command status after the exact editing reques
   await started.promise;
   await page.getByRole("button", { name: "Request editing", exact: true }).click();
   await expect(page.getByText("Editing requested", { exact: true })).toBeVisible();
-  const observed = page.waitForResponse((response) =>
-    new URL(response.url()).pathname.startsWith("/_server/data/getChangeWriterStatus-"),
+  const observed = page.waitForResponse(
+    async (response) => await factoryFunctionMatches(response.url(), "getChangeWriterStatus"),
   );
   release.resolve(initial());
   await observed;
@@ -157,8 +154,8 @@ test("Writer continues admitted work while hidden without publishing its late re
   view = writerViewSchema.parse({ ...initial(), epoch: 4, canWrite: true, yours: true });
   await page.getByRole("button", { name: "Show writing status", exact: true }).click();
   await expect(page.getByRole("button", { name: "Release editing", exact: true })).toBeVisible();
-  const observed = page.waitForResponse((response) =>
-    new URL(response.url()).pathname.startsWith("/_server/data/requestChangeEditing-"),
+  const observed = page.waitForResponse(
+    async (response) => await factoryFunctionMatches(response.url(), "requestChangeEditing"),
   );
   release.resolve(requested());
   await observed;
@@ -213,7 +210,7 @@ test("Review publishes its completed post-save read even when another poll tick 
       },
       async create() {
         created = true;
-        return { feedbackId: saved.feedback[0]!.id };
+        return { feedbackId: fixtureValue(saved.feedback[0], "saved.feedback[0]").id };
       },
     },
   });
@@ -227,7 +224,7 @@ test("Review publishes its completed post-save read even when another poll tick 
     await page.getByRole("button", { name: "Save feedback", exact: true }).click();
     await readStarted.promise;
     await page.clock.fastForward(5_001);
-    gates[0]!.resolve(saved);
+    fixtureValue(gates[0], "gates[0]").resolve(saved);
     await expect(page.getByText("1 open Thread blocks Delivery", { exact: true })).toBeVisible();
   } finally {
     for (const gate of gates) gate.resolve(saved);
@@ -281,7 +278,7 @@ test("Review publishes a newer command before an older read and never restores t
       },
       async create() {
         created = true;
-        return { feedbackId: saved.feedback[0]!.id };
+        return { feedbackId: fixtureValue(saved.feedback[0], "saved.feedback[0]").id };
       },
     },
   });
@@ -297,8 +294,8 @@ test("Review publishes a newer command before an older read and never restores t
     await page.getByRole("combobox", { name: "Feedback type" }).selectOption("thread");
     await page.getByRole("button", { name: "Save feedback", exact: true }).click();
     await expect(page.getByText("1 open Thread blocks Delivery", { exact: true })).toBeVisible();
-    const observed = page.waitForResponse((response) =>
-      new URL(response.url()).pathname.startsWith("/_server/data/getVisualReview-"),
+    const observed = page.waitForResponse(
+      async (response) => await factoryFunctionMatches(response.url(), "getVisualReview"),
     );
     oldRead.resolve(empty);
     await observed;

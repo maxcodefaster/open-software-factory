@@ -89,9 +89,11 @@ test("Implement freezes developer reasoning atomically, rejects changed replays 
     };
     const send = (
       ticket: typeof developer,
-      body: Parameters<
-        typeof import("../../apps/factory/src/server-functions/tickets").implementTicket
-      >[1],
+      body: NonNullable<
+        Parameters<
+          typeof import("../../apps/factory/src/server-functions/tickets").implementTicket
+        >[0]
+      >["data"][1],
     ) =>
       callFactoryFunction(process.base, "implementTicket", [ticket.ticketID, body], ticket.headers);
     expect(await send(developer, command)).toMatchObject({ ok: true });

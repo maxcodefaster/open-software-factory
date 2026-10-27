@@ -39,6 +39,14 @@ export async function claimAgentWriterIn(
   commissionerID: string,
 ) {
   const writer = await lockChangeWriterIn(sql, changeID);
+  const [integration] =
+    await sql`SELECT id FROM factory.change_commit_operation WHERE change_id=${changeID}
+    AND source='integration' AND state NOT IN ('succeeded','failed') LIMIT 1`;
+  if (integration)
+    throw new CommandError(
+      "conflict",
+      "Wait for the retained integration outcome before starting another Agent turn.",
+    );
   if (writer.state === "human" && writer.userID !== commissionerID) {
     let activeHolder = true;
     try {

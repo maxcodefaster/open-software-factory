@@ -19,11 +19,13 @@ import {
   type TicketWorkspaceProps,
 } from "../../apps/factory/src/ticket-workspace";
 import { CopyButton } from "../../apps/factory/src/ui/feedback";
+import { WorkspaceTabbar } from "../../apps/factory/src/workspace-tabbar";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/knowledge-workspace.css";
 import "../../apps/factory/src/style.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
+import { fixtureValue } from "./value";
 
 const projectID = "10000000-0000-4000-8000-000000000001";
 const userID = "10000000-0000-4000-8000-000000000002";
@@ -121,7 +123,7 @@ function Ticket() {
   );
   const drafts = new Map<string, TicketDraft>();
   const save: TicketWorkspaceProps["onSaveDocument"] = async (input) => {
-    const ticketID = tickets()[selected()]!.id;
+    const ticketID = fixtureValue(tickets()[selected()], "tickets()[selected()]").id;
     const saved = await fetch("/fixture/ticket-save", {
       method: "POST",
       body: JSON.stringify({ ...input, ticketID }),
@@ -152,13 +154,13 @@ function Ticket() {
       </button>
       <TicketWorkspace
         current={{
-          ticket: tickets()[selected()]!,
+          ticket: fixtureValue(tickets()[selected()], "tickets()[selected()]"),
           revisions: [],
           documentRevisions: [],
           origin: null,
           followUps: [],
         }}
-        storageKey={`feedback-proof:${tickets()[selected()]!.id}`}
+        storageKey={`feedback-proof:${fixtureValue(tickets()[selected()], "tickets()[selected()]").id}`}
         ticketReference="TCK-1"
         pending={false}
         epics={[]}
@@ -287,6 +289,17 @@ function Copy() {
         </button>
       </nav>
       <Show when={mounted()}>
+        <section aria-label="Linked workspace">
+          <h2>Document link</h2>
+          <WorkspaceTabbar
+            tabs={[{ id: "reference", view: "knowledge", label: "Reference" }]}
+            activeTabID="reference"
+            shareURL={`${location.origin}/projects/${projectID}/wiki/reference-${owner()}`}
+            onActivate={noAction}
+            onClose={noAction}
+            onMinimize={noAction}
+          />
+        </section>
         <section aria-label="Reusable copy button">
           <h2>Copy a reference</h2>
           <CopyButton class="quiet-button" value="Factory reference" scope={owner()} />
@@ -297,7 +310,7 @@ function Copy() {
         <section aria-label="Read-only code">
           <h2>Read code</h2>
           <MarkdownReader
-            value={code + "\n" + code}
+            value={`${code}\n${code}`}
             label="Reference code"
             class="markdown-body"
             scopeKey={String(owner())}
@@ -334,4 +347,7 @@ function Surface() {
     </main>
   );
 }
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

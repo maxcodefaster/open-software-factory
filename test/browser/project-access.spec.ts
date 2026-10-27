@@ -1,13 +1,15 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, test } from "@playwright/test";
 import { z } from "zod";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserBootstrap,
+  factoryFunctionMatches,
+  mockFactoryFunctions,
+  requestFunction,
+} from "../fixtures/server-functions";
 import { signIn } from "../support/factory-fixture";
 
 test("managers create accounts and Project access; developers see only their Project and lose revoked access", async ({
@@ -136,8 +138,8 @@ test("managers create accounts and Project access; developers see only their Pro
       await requestFunction(developer.request, "getConversation", [otherProjectID, {}]),
     ).toMatchObject({ ok: false, status: 404 });
     const roleSaved = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname.startsWith("/_server/data/saveProjectMember-") &&
+      async (response) =>
+        (await factoryFunctionMatches(response.url(), "saveProjectMember")) &&
         response.request().method() === "POST",
     );
     await dialog.getByLabel("Manage project for Access QA developer").check();

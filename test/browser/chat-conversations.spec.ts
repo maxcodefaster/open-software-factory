@@ -240,7 +240,7 @@ test("planning Skill selection survives an unchanged conversation refresh withou
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      get: async (_actor, factoryTargetID, factoryCommand) => {
+      get: async (_actor, _factoryTargetID, _factoryCommand) => {
         conversationReads++;
         return conversationViewSchema.nullable().parse(conversation);
       },

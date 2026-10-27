@@ -1,31 +1,28 @@
-import { children, createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
-import { z } from "zod";
-import {
-  type MCPLibraryView,
-  resolveMCPChoice,
-} from "../../../../packages/conversation-domain/src/mcp-library";
+import { children, createEffect, createMemo, createSignal, For, Show, untrack } from "solid-js";
+import type { z } from "zod";
+import { resolveMCPChoice } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
   defaultInputInstructions,
-  monitoringSave,
   type monitoringChange,
-  monitoringView,
+  monitoringSave,
+  type monitoringView,
 } from "../../../../packages/conversation-domain/src/monitoring";
 import { APIRequestError } from "../api-client";
-import { serverCall } from "../server-functions/result";
-import { getMCPLibrary } from "../server-functions/mcp";
-import {
-  getProjectInputs,
-  saveProjectInput,
-  disableProjectInput,
-  rotateProjectInput,
-} from "../server-functions/inputs";
 import { Icon } from "../icon";
 import { bindPopoverKeyboard } from "../popover-keyboard";
+import {
+  disableProjectInput,
+  rotateProjectInput,
+  saveProjectInput,
+} from "../server-functions/inputs";
+import { serverCall } from "../server-functions/result";
 import { CopyButton } from "../ui/feedback";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import { monitoringSourceAvailable } from "./sources";
+import { createInputReads } from "./reads";
 import "./settings.css";
+import { DeliverySettings } from "../delivery/settings";
 
 type View = z.infer<typeof monitoringView>;
 type Hook = View["hooks"][number];
@@ -149,16 +146,12 @@ export function MonitoringSettings(props: {
   onOpenTicket?: ((id: string, projectId: string) => void) | undefined;
 }) {
   const isActive = createMemo(() => props.active);
-  const [loaded, setLoaded] = createSignal<{
-    projectId: string;
-    view: View;
-    sources: MCPLibraryView;
-  }>();
+  const reads = createInputReads(() => props.project?.id, isActive);
   const [draft, setDraft] = createSignal<Draft>();
   const [confirmed, setConfirmed] = createSignal("");
   const [busy, setBusy] = createSignal(false);
-  const [loading, setLoading] = createSignal(false);
-  const [readError, setReadError] = createSignal("");
+  const loading = reads.loading;
+  const readError = reads.error;
   const [error, setError] = createSignal("");
   const [notice, setNotice] = createSignal("");
   const [pending, setPending] = createSignal<Operation>();
@@ -166,20 +159,18 @@ export function MonitoringSettings(props: {
   const [secret, setSecret] = createSignal<{ projectId: string; url: string; rotated: boolean }>();
   const [revealed, setRevealed] = createSignal(false);
   const [picking, setPicking] = createSignal(false);
-  let reads = 0;
   let heading: HTMLHeadingElement | undefined;
   let setupHeading: HTMLHeadingElement | undefined;
   let rotationHeading: HTMLHeadingElement | undefined;
   let addButton: HTMLButtonElement | undefined;
   const sourcesHelpId = `input-sources-${crypto.randomUUID()}`;
-  const view = () => (loaded()?.projectId === props.project?.id ? loaded()?.view : undefined);
-  const sources = () =>
-    loaded()?.projectId === props.project?.id ? (loaded()?.sources.entries ?? []) : [];
+  const view = reads.view;
+  const sources = () => reads.sources()?.entries ?? [];
   const available = () =>
     sources().filter((entry) => monitoringSourceAvailable(entry, props.project?.id ?? ""));
   const inherited = () =>
     available().filter((entry) => {
-      const choice = resolveMCPChoice(loaded()?.sources.choices ?? [], entry.id, "planning", false);
+      const choice = resolveMCPChoice(reads.sources()?.choices ?? [], entry.id, "planning", false);
       return (
         choice && choice.state !== "disable" && choice.revisionId === entry.connection?.revisionId
       );
@@ -215,51 +206,15 @@ export function MonitoringSettings(props: {
   };
   const blocked = () => busy() || Boolean(pending());
 
-  async function load(quiet = false) {
-    const project = props.project;
-    if (!project || !isActive()) return;
-    const sequence = ++reads;
-    if (!quiet) setLoading(true);
-    try {
-      const [view, sources] = await Promise.all([
-        serverCall(getProjectInputs(project.id)),
-        serverCall(getMCPLibrary(project.id)),
-      ]);
-      if (sequence !== reads || project.id !== props.project?.id || !isActive()) return;
-      const next = { projectId: project.id, view, sources };
-      if (JSON.stringify(loaded()) !== JSON.stringify(next)) setLoaded(next);
-      setReadError("");
-    } catch (cause) {
-      if (sequence === reads && project.id === props.project?.id && isActive())
-        setReadError(cause instanceof Error ? cause.message : "Inputs could not load.");
-    } finally {
-      if (sequence === reads) setLoading(false);
-    }
-  }
+  const load = () => reads.reload();
   createEffect(
-    () => ({ id: props.project?.id, active: isActive() }),
-    ({ active }) => {
+    () => ({ project: props.project, active: isActive() }),
+    () => {
       setRotation(undefined);
       setSecret(undefined);
       setRevealed(false);
       setNotice("");
-      reads++;
-      if (!active) return;
       setError("");
-      setReadError("");
-      void load();
-      let refreshing = false;
-      const timer = setInterval(() => {
-        if (refreshing || busy() || document.visibilityState !== "visible") return;
-        refreshing = true;
-        void load(true).finally(() => {
-          refreshing = false;
-        });
-      }, 2_000);
-      return () => {
-        reads++;
-        clearInterval(timer);
-      };
     },
   );
   let handledSource: string | undefined;
@@ -284,13 +239,16 @@ export function MonitoringSettings(props: {
       )
         return;
       handledSource = request.id;
-      if (!draftHere()) edit();
-      change({ connectionIds: [...new Set([...selectedIds(), request.connectionId])] });
+      // This explicit return from MCP applies once to the current editable draft.
+      untrack(() => {
+        if (!draftHere()) edit(undefined, request.connectionId);
+        else change({ connectionIds: [...new Set([...selectedIds(), request.connectionId])] });
+      });
       setPicking(false);
       requestAnimationFrame(() => heading?.focus({ preventScroll: true }));
     },
   );
-  function edit(hook?: Hook) {
+  function edit(hook?: Hook, connectionId?: string) {
     const project = props.project;
     if (!project || !view()?.canManage || blocked()) return;
     setError("");
@@ -307,7 +265,9 @@ export function MonitoringSettings(props: {
         expectedVersion: hook?.version ?? 0,
         name: hook?.name ?? "",
         instructions: hook?.instructions ?? defaultInputInstructions,
-        connectionIds: hook?.connectionIds ?? [],
+        connectionIds: [
+          ...new Set([...(hook?.connectionIds ?? []), ...(connectionId ? [connectionId] : [])]),
+        ],
         enabled: true,
         delegation: hook?.delegation ?? "prepare-ticket",
       },
@@ -345,10 +305,10 @@ export function MonitoringSettings(props: {
     try {
       const value = await serverCall(
         operation.action === "save"
-          ? saveProjectInput(operation.projectId, operation.input)
+          ? saveProjectInput({ data: [operation.projectId, operation.input] })
           : operation.action === "disable"
-            ? disableProjectInput(operation.projectId, operation.id, operation.input)
-            : rotateProjectInput(operation.projectId, operation.id, operation.input),
+            ? disableProjectInput({ data: [operation.projectId, operation.id, operation.input] })
+            : rotateProjectInput({ data: [operation.projectId, operation.id, operation.input] }),
       );
       setPending(undefined);
       if (operation.projectId !== props.project?.id) return;
@@ -374,7 +334,7 @@ export function MonitoringSettings(props: {
         setError(
           cause instanceof Error ? cause.message : "The Input command could not be confirmed.",
         );
-        await load(true);
+        await load();
       }
     } finally {
       setBusy(false);
@@ -408,6 +368,10 @@ export function MonitoringSettings(props: {
     });
   }
   const lastEvent = (id: string) => view()?.incidents.find((event) => event.hookId === id);
+  const receivedLabel = (id: string) => {
+    const event = lastEvent(id);
+    return event ? `Last received ${time(event.lastSeenAt)}` : "Waiting for the first request";
+  };
   const time = (value: string) =>
     new Date(value).toLocaleString(undefined, {
       month: "short",
@@ -421,6 +385,9 @@ export function MonitoringSettings(props: {
       aria-label="Project inputs"
       aria-busy={loading() || busy() ? "true" : "false"}
     >
+      <Show when={props.project}>
+        {(project) => <DeliverySettings projectID={project().id} active={props.active !== false} />}
+      </Show>
       <Show when={readError()}>
         <div class="input-message input-error" role="alert">
           <p>{readError()}</p>
@@ -482,7 +449,7 @@ export function MonitoringSettings(props: {
               Copy this private URL into your sender's webhook settings. Its key is shown only now.
             </p>
             <div class="input-webhook">
-              <label>
+              <label class="control-field">
                 Webhook URL
                 <input
                   type={revealed() ? "text" : "password"}
@@ -565,7 +532,7 @@ export function MonitoringSettings(props: {
               </p>
             </Show>
             <fieldset disabled={!editable()}>
-              <label>
+              <label class="control-field">
                 Name
                 <input
                   required
@@ -575,7 +542,7 @@ export function MonitoringSettings(props: {
                   onInput={(event) => change({ name: event.currentTarget.value })}
                 />
               </label>
-              <label>
+              <label class="control-field">
                 Task
                 <textarea
                   required
@@ -660,7 +627,7 @@ export function MonitoringSettings(props: {
                   By default, prepared Tickets wait for human approval. You can explicitly delegate
                   bounded application fixes and Delivery.
                 </p>
-                <label class="input-checkbox">
+                <label class="control-check">
                   <input
                     type="checkbox"
                     checked={automatic()}
@@ -684,7 +651,7 @@ export function MonitoringSettings(props: {
                   <Show when={!selected().length}>
                     <p class="input-error">Connect a read-only source before enabling Autofix.</p>
                   </Show>
-                  <label class="input-checkbox">
+                  <label class="control-check">
                     <input
                       type="checkbox"
                       checked={confirmed() === basis()}
@@ -793,11 +760,7 @@ export function MonitoringSettings(props: {
                             ? "Human approval to implement"
                             : "Autofix & Delivery delegated"}
                         </p>
-                        <p class="input-help">
-                          {lastEvent(hook().id)
-                            ? `Last received ${time(lastEvent(hook().id)!.lastSeenAt)}`
-                            : "Waiting for the first request"}
-                        </p>
+                        <p class="input-help">{receivedLabel(hook().id)}</p>
                       </div>
                       <Show when={current().canDisable}>
                         <InputActions name={hook().name}>
@@ -926,7 +889,7 @@ export function MonitoringSettings(props: {
               </Show>
               <For each={current().incidents} keyed={(event) => event.id}>
                 {(event) => (
-                  <details class="input-event">
+                  <details class="input-event" id={`input-event-${event().id}`} tabindex="-1">
                     <summary>
                       <Icon name="chevron" />
                       <span>

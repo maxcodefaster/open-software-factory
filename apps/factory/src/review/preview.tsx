@@ -18,6 +18,7 @@ const selectionInput = z.object({
 });
 
 export function PreviewReview(props: {
+  projectID?: string | undefined;
   changeID: string;
   attemptID: string;
   userID: string;
@@ -308,7 +309,10 @@ export function PreviewReview(props: {
           aria-label="Preview feedback"
           tabindex="-1"
           hidden={!popup()}
-          style={{ left: `${position().x}px`, top: `${position().y}px` }}
+          style={{
+            "--review-popover-x": `${position().x}px`,
+            "--review-popover-y": `${position().y}px`,
+          }}
           onKeyDown={(event) => {
             if (event.key !== "Escape" || !feedbackID()) return;
             event.preventDefault();
@@ -332,6 +336,7 @@ export function PreviewReview(props: {
             </header>
           </Show>
           <ReviewPanel
+            projectID={props.projectID}
             changeID={props.changeID}
             userID={props.userID}
             canDevelop={props.canDevelop}

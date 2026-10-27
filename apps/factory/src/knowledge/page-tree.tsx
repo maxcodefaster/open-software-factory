@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { pageSiblings } from "../../../../packages/knowledge-domain/src/page-tree";
-import type { KnowledgePage, RepositoryDocument } from "../api-contracts";
+import type { KnowledgePageOutline, RepositoryDocument } from "../api-contracts";
 import { Icon } from "../icon";
 
 export type PageMove = { pageId: string; parentId: string | null; beforeId: string | null };
@@ -33,7 +33,7 @@ export function pageDropPosition(y: number, top: number, height: number): DropPo
 }
 export function KnowledgeTree(props: {
   projectID: string;
-  pages: KnowledgePage[];
+  pages: KnowledgePageOutline[];
   documents: RepositoryDocument[];
   canDevelop: boolean;
   onSearch(): void;

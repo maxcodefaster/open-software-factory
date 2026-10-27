@@ -13,6 +13,7 @@ import "../../apps/factory/src/knowledge-workspace.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
 import "@fontsource/ibm-plex-mono/400.css";
+import { fixtureValue } from "./value";
 
 const parameters = new URLSearchParams(location.search);
 const surface = parameters.get("surface") ?? "wiki";
@@ -24,6 +25,7 @@ const projectID = "10000000-0000-4000-8000-000000000001";
 const userID = "10000000-0000-4000-8000-000000000002";
 const noAction = () => {};
 const sentence = "Release context stays readable while formatting the approved delivery scope. ";
+export const wikiSaveAttempts: unknown[] = [];
 
 function Wiki() {
   const pages: KnowledgePage[] = ["Invoice exports", "Billing rules"].map((title, index) => ({
@@ -44,10 +46,20 @@ function Wiki() {
     currentRevisionId: null,
   }));
   const [selected, setSelected] = createSignal(pages[0]?.id);
+  const document = parameters.has("document")
+    ? {
+        path: "README.md",
+        title: "Repository guide",
+        body: "Repository documents remain read-only in the Wiki.",
+        blobSha: "a".repeat(40),
+        commitSha: "b".repeat(40),
+      }
+    : undefined;
   return (
     <KnowledgeWorkspace
       pages={pages}
       selectedPage={pages.find((page) => page.id === selected())}
+      openDocument={document}
       documents={[]}
       revisions={[]}
       searchResults={[]}
@@ -62,7 +74,8 @@ function Wiki() {
       onOpenDocument={noAction}
       onGenerate={noAction}
       onSearch={noAction}
-      onSavePage={async () => {
+      onSavePage={async (...input) => {
+        wikiSaveAttempts.push(input);
         throw new Error("This visual fixture does not persist edits.");
       }}
       onHistory={async () => {}}
@@ -218,4 +231,7 @@ function Surface() {
   );
 }
 
-render(() => <Surface />, document.getElementById("root")!);
+render(
+  () => <Surface />,
+  fixtureValue(document.getElementById("root"), 'document.getElementById("root")'),
+);

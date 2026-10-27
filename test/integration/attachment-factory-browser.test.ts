@@ -11,6 +11,7 @@ import { ownedAttachmentS3 } from "../fixtures/attachment-s3";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { fixtureValue } from "../fixtures/value";
 
 const visible = browserExpect.configure({ timeout: 30_000 });
 
@@ -133,11 +134,16 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
       await page.mouse.move(0, width === 390 ? 843 : 999);
-      await visible(page.locator(".topbar-start .context-button")).toHaveCount(0);
-      const dock = (await page.getByRole("navigation", { name: "Workspace dock" }).boundingBox())!;
+      const projectSelector = page.locator(".topbar-start .context-button");
+      if (width > 900) await visible(projectSelector).toBeVisible();
+      else await visible(projectSelector).toBeHidden();
+      const dock = fixtureValue(
+        await page.getByRole("navigation", { name: "Workspace dock" }).boundingBox(),
+        '(await page.getByRole("navigation", { name: "Workspace dock" }).boundingBox())',
+      );
       expect(Math.abs(dock.x + dock.width / 2 - width / 2)).toBeLessThanOrEqual(1);
       const gear = page.getByRole("button", { name: "Settings", exact: true });
-      const gearBox = (await gear.boundingBox())!;
+      const gearBox = fixtureValue(await gear.boundingBox(), "(await gear.boundingBox())");
       expect(
         Math.abs(dock.y + dock.height / 2 - gearBox.y - gearBox.height / 2),
       ).toBeLessThanOrEqual(1);
@@ -157,45 +163,65 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
         animations: "disabled",
       });
       await page.keyboard.press("Escape");
-      await visible(gear).toBeFocused();
+      await visible(width > 900 ? projectSelector : gear).toBeFocused();
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
     const capture = async (name: string) => {
-      await visible(page!.getByText(/Updates paused/)).toHaveCount(0);
+      await visible(fixtureValue(page, "page").getByText(/Updates paused/)).toHaveCount(0);
       await visible(
-        page!.getByText("Update failed. Your saved pages are still available.", { exact: true }),
+        fixtureValue(page, "page").getByText(
+          "Update failed. Your saved pages are still available.",
+          { exact: true },
+        ),
       ).toHaveCount(0);
       for (const width of [1440, 768, 390]) {
-        await page!.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
-        await page!.screenshot({
+        await fixtureValue(page, "page").setViewportSize({
+          width,
+          height: width === 390 ? 844 : 1000,
+        });
+        await fixtureValue(page, "page").screenshot({
           path: resolve(directory, `${name}-${width}.png`),
           fullPage: true,
           animations: "disabled",
         });
-        expect(await page!.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
-          true,
-        );
+        expect(
+          await fixtureValue(page, "page").evaluate(
+            () => document.documentElement.scrollWidth <= innerWidth,
+          ),
+        ).toBe(true);
         if (name === "feedback-draft" && width === 390) {
-          const count = page!.locator(".review-composer .attachment-count");
+          const count = fixtureValue(page, "page").locator(".review-composer .attachment-count");
           expect(
             await count.evaluate((element) => element.scrollWidth <= element.clientWidth),
           ).toBe(true);
           await visible(
-            page!.getByRole("button", { name: "Scroll attachments right", exact: true }),
+            fixtureValue(page, "page").getByRole("button", {
+              name: "Scroll attachments right",
+              exact: true,
+            }),
           ).not.toBeVisible();
-          const save = page!.getByRole("button", { name: "Save feedback", exact: true });
+          const save = fixtureValue(page, "page").getByRole("button", {
+            name: "Save feedback",
+            exact: true,
+          });
           await save.scrollIntoViewIfNeeded();
           await visible(save).toBeInViewport();
-          await page!.screenshot({ path: resolve(directory, "feedback-actions-390.png") });
+          await fixtureValue(page, "page").screenshot({
+            path: resolve(directory, "feedback-actions-390.png"),
+          });
         }
         if (name === "feedback-saved" && width === 390) {
-          const file = page!.locator(".review-message-body a.factory-attachment-file").first();
+          const file = fixtureValue(page, "page")
+            .locator(".review-message-body a.factory-attachment-file")
+            .first();
           await file.scrollIntoViewIfNeeded();
           await visible(file).toBeInViewport();
-          await page!.screenshot({ path: resolve(directory, "feedback-files-390.png") });
+          await fixtureValue(page, "page").screenshot({
+            path: resolve(directory, "feedback-files-390.png"),
+          });
         }
       }
-      await page!.setViewportSize({ width: 1440, height: 1000 });
+      await fixtureValue(page, "page").setViewportSize({ width: 1440, height: 1000 });
     };
     await page
       .getByRole("button")
@@ -271,7 +297,10 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     const oneFileHeights = new Map<number, number>();
     for (const width of [1440, 768, 390]) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
-      oneFileHeights.set(width, (await composer.boundingBox())!.height);
+      oneFileHeights.set(
+        width,
+        fixtureValue(await composer.boundingBox(), "(await composer.boundingBox())").height,
+      );
     }
     await page.setViewportSize({ width: 1440, height: 1000 });
     await composer.getByLabel("Choose attachments").setInputFiles(supportingFiles);
@@ -294,35 +323,58 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
         .locator("li")
         .evaluateAll((items) => items.map((item) => item.getBoundingClientRect().top));
       expect(Math.max(...geometry) - Math.min(...geometry)).toBeLessThan(1);
-      const metadataOverlap = await files
-        .locator("li")
-        .evaluateAll((items) =>
-          items.map(
-            (item) =>
-              item.querySelector(".attachment-file-ready")!.getBoundingClientRect().right -
-              item.querySelector(".attachment-file-remove")!.getBoundingClientRect().left,
-          ),
+      const metadataOverlap = await files.locator("li").evaluateAll((items) => {
+        function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+          if (value === undefined || value === null)
+            throw new Error(`Missing fixture value: ${description}`);
+          return value;
+        }
+        return items.map(
+          (item) =>
+            fixtureValue(
+              item.querySelector(".attachment-file-ready"),
+              'item.querySelector(".attachment-file-ready")',
+            ).getBoundingClientRect().right -
+            fixtureValue(
+              item.querySelector(".attachment-file-remove"),
+              'item.querySelector(".attachment-file-remove")',
+            ).getBoundingClientRect().left,
         );
+      });
       expect(Math.max(...metadataOverlap)).toBeLessThanOrEqual(0);
-      expect((await composer.boundingBox())!.height).toBeLessThanOrEqual(
-        oneFileHeights.get(width)! + 2,
+      expect(
+        fixtureValue(await composer.boundingBox(), "(await composer.boundingBox())").height,
+      ).toBeLessThanOrEqual(
+        fixtureValue(oneFileHeights.get(width), "oneFileHeights.get(width)") + 2,
       );
       const attach = composer.getByRole("button", { name: "Add image or file", exact: true });
       const send = composer.getByRole("button", { name: "Send message", exact: true });
-      const attachBox = (await attach.boundingBox())!;
-      const sendBox = (await send.boundingBox())!;
+      const attachBox = fixtureValue(await attach.boundingBox(), "(await attach.boundingBox())");
+      const sendBox = fixtureValue(await send.boundingBox(), "(await send.boundingBox())");
       expect(
         Math.abs(attachBox.y + attachBox.height / 2 - sendBox.y - sendBox.height / 2),
       ).toBeLessThanOrEqual(1);
       expect(attachBox.x).toBeLessThan(sendBox.x);
-      expect((await attach.locator("svg").boundingBox())!.width).toBeLessThan(
-        (await send.locator("svg").boundingBox())!.width,
+      expect(
+        fixtureValue(
+          await attach.locator("svg").boundingBox(),
+          '(await attach.locator("svg").boundingBox())',
+        ).width,
+      ).toBeLessThan(
+        fixtureValue(
+          await send.locator("svg").boundingBox(),
+          '(await send.locator("svg").boundingBox())',
+        ).width,
       );
       const shell = await composer.evaluate((element) => {
         const rect = (element.closest(".agent-input-shell") ?? element).getBoundingClientRect();
         return { y: rect.y, height: rect.height };
       });
-      const topPadding = (await files.locator("li").first().boundingBox())!.y - shell.y;
+      const topPadding =
+        fixtureValue(
+          await files.locator("li").first().boundingBox(),
+          '(await files.locator("li").first().boundingBox())',
+        ).y - shell.y;
       const bottomPadding = shell.y + shell.height - sendBox.y - sendBox.height;
       expect(Math.abs(topPadding - bottomPadding)).toBeLessThanOrEqual(4);
       await files.focus();
@@ -333,7 +385,7 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
       await help.click();
       const panel = composer.locator(".attachment-help-content");
       await visible(panel).toBeInViewport();
-      const bounds = (await panel.boundingBox())!;
+      const bounds = fixtureValue(await panel.boundingBox(), "(await panel.boundingBox())");
       expect(bounds.x).toBeGreaterThanOrEqual(0);
       expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
       expect(bounds.y).toBeGreaterThanOrEqual(0);
@@ -422,7 +474,7 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
       const direct = ticket.getByRole("button", { name, exact: true });
       if (await direct.isVisible()) return direct.click();
       await ticket.getByRole("button", { name: "Ticket actions", exact: true }).click();
-      await page!.getByRole("menuitem", { name, exact: true }).click();
+      await fixtureValue(page, "page").getByRole("menuitem", { name, exact: true }).click();
     };
     await action("Add feedback");
     const feedback = page.getByRole("form", { name: "Add review feedback" });
@@ -455,13 +507,20 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
     await visible(
       composer.getByRole("list", { name: "Prepared attachments" }).locator("li"),
     ).toHaveCount(5);
-    const expectedFiles = await composer
-      .locator(".attachment-file-open")
-      .evaluateAll((links) => links.map((link) => link.getAttribute("href")!));
+    const expectedFiles = await composer.locator(".attachment-file-open").evaluateAll((links) => {
+      function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+        if (value === undefined || value === null)
+          throw new Error(`Missing fixture value: ${description}`);
+        return value;
+      }
+      return links.map((link) =>
+        fixtureValue(link.getAttribute("href"), 'link.getAttribute("href")'),
+      );
+    });
     const attempts: { text: string; commandId: string }[] = [];
     await mockFactoryFunctions(page, {
       conversations: {
-        message: async (_actor, factoryTargetID, factoryCommand) => {
+        message: async (_actor, _factoryTargetID, factoryCommand) => {
           attempts.push(factoryCommand);
           return (() => {
             throw new CommandError(
@@ -487,11 +546,13 @@ test("chat controls, Project switching and attachments fit Factory at desktop an
         composer.getByRole("list", { name: "Prepared attachments" }).locator("li"),
       ).toHaveCount(5);
     }
-    expect(attachmentIDs(attempts[0]!.text).sort()).toEqual(
+    expect(attachmentIDs(fixtureValue(attempts[0], "attempts[0]").text).sort()).toEqual(
       attachmentIDs(expectedFiles.join("\n")).sort(),
     );
-    expect(attempts[0]!.text).toContain("Keep the document's caveats.");
-    expect(attempts[0]!.commandId).toBe(attempts[1]!.commandId);
+    expect(fixtureValue(attempts[0], "attempts[0]").text).toContain("Keep the document's caveats.");
+    expect(fixtureValue(attempts[0], "attempts[0]").commandId).toBe(
+      fixtureValue(attempts[1], "attempts[1]").commandId,
+    );
     const [turns] = await database.client<{ count: number }[]>`
       SELECT count(*)::int AS count FROM factory.agent_turn WHERE project_id=${fixture.projectID}`;
     expect(turns?.count).toBe(1);

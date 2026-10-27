@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createMCPService } from "../../apps/factory/src/mcp/service";
@@ -94,7 +94,7 @@ test("native MCP and Inputs retain host validation, immutable commands, actor bi
       },
     },
   );
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(
     pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
   );
   const endpoint = createServerFunctionEndpoint({
@@ -105,7 +105,7 @@ test("native MCP and Inputs retain host validation, immutable commands, actor bi
     requireFresh: async () => {
       throw new Error("MCP and Inputs do not add Fresh Auth");
     },
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
   });
   const call = async (name: string, args: unknown[]) =>
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));

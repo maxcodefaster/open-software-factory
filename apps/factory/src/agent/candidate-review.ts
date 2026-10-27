@@ -2,7 +2,9 @@ import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
 import {
   candidateReviewCallInput,
+  candidateReviewResultInput,
   candidateReviewToolCatalogue,
+  checkedReviewResult,
   reviewNeedsBrowser,
 } from "../../../../packages/conversation-domain/src/candidate-review";
 import type {
@@ -24,6 +26,10 @@ type ReviewScope = {
   criteria: number;
   coverageVersion: number;
   result: unknown;
+  findingSourceID: string | null;
+  proposal: unknown;
+  previousSHA: string | null;
+  focusNeedsApp: boolean;
   evidence: Array<Record<string, unknown>>;
 };
 type Inventory = Array<{ path: string; sha: string; size: number }>;
@@ -50,16 +56,63 @@ export function createCandidateReviewController(
       apiURL: process.env["FACTORY_FORGEJO_API_URL"] ?? "",
       token: process.env["FACTORY_FORGEJO_TOKEN"] ?? "",
     });
+  // Revision-scoped caches hold source only, never authority or review verdicts.
+  // In-flight reads coalesce; rejected reads can be retried.
+  const cache = new Map<string, { promise: Promise<unknown>; bytes: number }>();
+  let cacheBytes = 0;
+  function forget(key: string) {
+    cacheBytes -= cache.get(key)?.bytes ?? 0;
+    cache.delete(key);
+  }
+  function forgetOldest() {
+    const key = cache.keys().next().value;
+    if (key === undefined) return false;
+    forget(key);
+    return true;
+  }
+  async function cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const old = cache.get(key);
+    if (old) return old.promise as Promise<T>;
+    if (cache.size >= 256) forgetOldest();
+    const entry = { promise: Promise.resolve<unknown>(undefined), bytes: 0 };
+    entry.promise = load()
+      .then((value) => {
+        if (cache.get(key) === entry) {
+          entry.bytes = Buffer.byteLength(
+            typeof value === "string" ? value : JSON.stringify(value),
+          );
+          cacheBytes += entry.bytes;
+          while (cacheBytes > 8 * 1_048_576) {
+            if (!forgetOldest()) break;
+          }
+        }
+        return value;
+      })
+      .catch((cause) => {
+        if (cache.get(key) === entry) forget(key);
+        throw cause;
+      });
+    cache.set(key, entry);
+    return entry.promise as Promise<T>;
+  }
   // Exact immutable source only. No checkout file service, shell, test execution,
   // writes, ambient credentials or Project-chosen MCP tools are exposed here.
   async function scopeIn(sql: AgentTurnTransaction, turnID: string) {
     const [scope] = await sql<ReviewScope[]>`
       SELECT review.id,review.change_id AS "changeID",review.commit_sha AS "commitSHA",
         review.base_sha AS "baseSHA",project.repository_url AS "repositoryURL",review.result,review.evidence,
-        review.coverage_version AS "coverageVersion",
+        review.coverage_version AS "coverageVersion",review.finding_source_id AS "findingSourceID",
+        source.result AS proposal,focus.commit_sha AS "previousSHA",
+        (COALESCE(focus.result->>'ui'='unverified',false) OR EXISTS(
+          SELECT 1 FROM factory.review_scenario scenario
+          WHERE scenario.review_id=COALESCE(focus.finding_source_id,focus.id)
+            AND scenario.observation_kind='app' AND scenario.status IN ('failed','unverified')
+        )) AS "focusNeedsApp",
         jsonb_array_length(revision.canonical_content::jsonb->'acceptanceCriteria') AS criteria
       FROM factory.candidate_review review
       JOIN factory.change change ON change.id=review.change_id
+      LEFT JOIN factory.candidate_review source ON source.id=review.finding_source_id
+      LEFT JOIN factory.candidate_review focus ON focus.id=review.focus_review_id AND focus.change_id=change.id
       JOIN factory.project project ON project.id=change.project_id
       JOIN factory.requirement_approval approval ON approval.id=change.requirement_approval_id
       JOIN factory.requirement_revision revision ON revision.id=approval.requirement_revision_id
@@ -102,29 +155,23 @@ export function createCandidateReviewController(
   async function inventories(scope: ReviewScope) {
     const repo = repository(scope);
     const [base, candidate] = await Promise.all([
-      forge.listFiles(repo, scope.baseSHA),
-      forge.listFiles(repo, scope.commitSHA),
+      cached(`inventory:${scope.repositoryURL}:${scope.baseSHA}`, () =>
+        forge.listFiles(repo, scope.baseSHA),
+      ),
+      cached(`inventory:${scope.repositoryURL}:${scope.commitSHA}`, () =>
+        forge.listFiles(repo, scope.commitSHA),
+      ),
     ]);
-    const before = new Map(base.map((file) => [file.path, file]));
-    const after = new Map(candidate.map((file) => [file.path, file]));
-    const paths = [...new Set([...before.keys(), ...after.keys()])].sort();
-    return {
-      base,
-      candidate,
-      files: paths.map((path) => ({
-        path,
-        base: before.get(path) ?? null,
-        candidate: after.get(path) ?? null,
-        changed: before.get(path)?.sha !== after.get(path)?.sha,
-      })),
-    };
+    return { base, candidate };
   }
   async function source(scope: ReviewScope, files: Inventory, path: string, ref: string) {
     const file = files.find((file) => file.path === path);
     if (!file) throw new CommandError("not-found", "File is absent from this exact revision");
     if (file.size > 1_048_576)
       throw new CommandError("conflict", "Review file exceeds the 1 MiB text limit");
-    const content = await forge.getFile(repository(scope), path, ref);
+    const content = await cached(`file:${scope.repositoryURL}:${ref}:${path}`, () =>
+      forge.getFile(repository(scope), path, ref),
+    );
     if (Buffer.byteLength(content) > 1_048_576 || content.includes("\0"))
       throw new CommandError("conflict", "Review requires a bounded text file");
     return content;
@@ -162,7 +209,14 @@ export function createCandidateReviewController(
   return {
     async tools(turnID: string) {
       const turn = await turns.get(turnID);
-      return turn?.command.kind === "change-review" ? candidateReviewToolCatalogue : [];
+      if (turn?.command.kind !== "change-review") return [];
+      const [review] = await database.client<{ checking: boolean }[]>`
+        SELECT finding_source_id IS NOT NULL AS checking FROM factory.candidate_review WHERE turn_id=${turnID}`;
+      return candidateReviewToolCatalogue.filter((tool) =>
+        review?.checking
+          ? !["review_report", "review_scenario", "review_scenario_result"].includes(tool.name)
+          : tool.name !== "review_finding_report",
+      );
     },
     async observeBrowser(
       turnID: string,
@@ -197,6 +251,11 @@ export function createCandidateReviewController(
             }
           : {}),
       });
+      const reference = `\nReview evidence ID: browser:${typeof requestID}:${requestID}`;
+      const text = result.content.find((part) => part.type === "text");
+      if (text?.type === "text")
+        text.text = text.text.slice(0, 32_768 - reference.length) + reference;
+      else if (result.content.length < 16) result.content.push({ type: "text", text: reference });
     },
     async call(
       turnID: string,
@@ -206,8 +265,117 @@ export function createCandidateReviewController(
     ): Promise<BuildBrowserResult> {
       const call = candidateReviewCallInput.parse(raw);
       const scope = await authorized(turnID, ownerToken, async (_sql, scope) => scope);
-      if (scope.result && call.name !== "review_report")
+      if (scope.result && !["review_report", "review_finding_report"].includes(call.name))
         throw new CommandError("conflict", "Review report is already recorded");
+      if (
+        (scope.findingSourceID &&
+          ["review_report", "review_scenario", "review_scenario_result"].includes(call.name)) ||
+        (!scope.findingSourceID && call.name === "review_finding_report")
+      )
+        throw new CommandError("conflict", "This tool does not belong to this review phase");
+      if (call.name === "review_finding_report") {
+        return authorized(turnID, ownerToken, async (sql, current) => {
+          const check = call.arguments;
+          if (current.result) {
+            const [same] = await sql`SELECT id FROM factory.candidate_review
+              WHERE id=${current.id} AND finding_checks=${JSON.stringify(check)}::jsonb`;
+            if (!same) throw new CommandError("conflict", "The immutable finding check changed");
+            return textResult("Finding check already recorded. Finish normally.");
+          }
+          const proposal = candidateReviewResultInput.parse(current.proposal);
+          for (const item of [...check.checks, ...check.criteria]) {
+            if (item.status === "unresolved" || item.status === "unverified") continue;
+            const observations = item.evidenceIds.map((id) =>
+              current.evidence.find((observation) => observation["id"] === id),
+            );
+            if (
+              !observations.length ||
+              observations.some(
+                (observation) =>
+                  !observation ||
+                  !(
+                    observation["kind"] === "browser" ||
+                    (observation["kind"] === "source" &&
+                      (observation["revision"] === "candidate" || observation["diff"] === true))
+                  ),
+              )
+            )
+              throw new CommandError(
+                "conflict",
+                "Finding decisions need your own exact-candidate observations",
+              );
+          }
+          let result = checkedReviewResult(proposal, check);
+          if (result.verdict === "passed") {
+            const [original] = await sql<
+              { evidence: ReviewScope["evidence"]; uiRequired: boolean }[]
+            >`
+              SELECT evidence,ui_required AS "uiRequired" FROM factory.candidate_review WHERE id=${current.findingSourceID}`;
+            const cases = await sql<
+              {
+                id: string;
+                criterion: number;
+                category: string;
+                status: string;
+                observationKind: "app" | "source";
+              }[]
+            >`SELECT id,criterion,category,status,COALESCE(observation_kind,'app') AS "observationKind"
+              FROM factory.review_scenario WHERE review_id=${current.findingSourceID}`;
+            const rechecked = (criterion: number, kind: "app" | "source") =>
+              check.criteria.some(
+                (item) =>
+                  item.criterion === criterion &&
+                  item.status === "passed" &&
+                  item.evidenceIds.some((id) =>
+                    current.evidence.some(
+                      (observation) =>
+                        observation["id"] === id &&
+                        (kind === "app"
+                          ? observation["kind"] === "browser"
+                          : observation["kind"] === "source" || observation["kind"] === "browser"),
+                    ),
+                  ),
+              );
+            const accepted = cases.filter(
+              (item) =>
+                hasCaseObservation(original?.evidence ?? [], item.id, item.observationKind) &&
+                (item.status === "passed" || rechecked(item.criterion, item.observationKind)),
+            );
+            if (
+              result.criteria.some(
+                (criterion) => !accepted.some((item) => item.criterion === criterion.criterion),
+              ) ||
+              cases.some((item) => !accepted.includes(item)) ||
+              !accepted.some((item) => item.category === "normal") ||
+              !accepted.some((item) => ["error", "boundary"].includes(item.category)) ||
+              (original?.uiRequired &&
+                (!accepted.some(
+                  (item) => item.observationKind === "app" && item.category === "normal",
+                ) ||
+                  !accepted.some(
+                    (item) =>
+                      item.observationKind === "app" &&
+                      ["error", "boundary"].includes(item.category),
+                  )))
+            )
+              result = {
+                ...result,
+                verdict: "incomplete",
+                summary: `${check.summary}\nRequired candidate coverage remains incomplete.`.slice(
+                  0,
+                  2_000,
+                ),
+              };
+          }
+          await sql`UPDATE factory.candidate_review SET finding_checks=${JSON.stringify(check)}::jsonb,
+            result=${JSON.stringify(result)}::jsonb,
+            ui_required=(SELECT ui_required FROM factory.candidate_review WHERE id=${current.findingSourceID})
+            WHERE id=${current.id} AND result IS NULL`;
+          return textResult(
+            "Finding check recorded. Finish normally; only confirmed blockers can request correction.",
+          );
+        });
+      }
       if (call.name === "review_scenario" || call.name === "review_scenario_result") {
         return authorized(turnID, ownerToken, async (sql, current) => {
           if (current.result)
@@ -277,6 +445,22 @@ export function createCandidateReviewController(
         });
       }
       const inventory = await inventories(scope);
+      async function revisionFiles(revision: "candidate" | "base" | "previous") {
+        if (revision !== "previous")
+          return {
+            files: inventory[revision],
+            sha: revision === "base" ? scope.baseSHA : scope.commitSHA,
+          };
+        if (!scope.previousSHA)
+          throw new CommandError("conflict", "This review has no previous candidate");
+        const sha = scope.previousSHA;
+        return {
+          sha,
+          files: await cached(`inventory:${scope.repositoryURL}:${sha}`, () =>
+            forge.listFiles(repository(scope), sha),
+          ),
+        };
+      }
       if (call.name === "review_report") {
         const result = call.arguments;
         if (
@@ -287,9 +471,16 @@ export function createCandidateReviewController(
             "conflict",
             "Review must cover every approved acceptance criterion exactly once",
           );
-        const uiRequired = reviewNeedsBrowser(
-          inventory.files.filter((file) => file.changed).map((file) => file.path),
-        );
+        const before = scope.previousSHA ? (await revisionFiles("previous")).files : inventory.base;
+        const oldFiles = new Map(before.map((file) => [file.path, file.sha]));
+        const newFiles = new Map(inventory.candidate.map((file) => [file.path, file.sha]));
+        const uiRequired =
+          scope.focusNeedsApp ||
+          reviewNeedsBrowser(
+            [...new Set([...oldFiles.keys(), ...newFiles.keys()])].filter(
+              (path) => oldFiles.get(path) !== newFiles.get(path),
+            ),
+          );
         await authorized(turnID, ownerToken, async (sql, current) => {
           if (current.result) {
             if (JSON.stringify(current.result) !== JSON.stringify(result)) {
@@ -384,7 +575,18 @@ export function createCandidateReviewController(
       let output: unknown;
       let observation: Record<string, unknown>;
       if (call.name === "review_files") {
-        const files = inventory.files.filter((file) => !call.arguments.changedOnly || file.changed);
+        const comparison = await revisionFiles(call.arguments.comparison);
+        const before = new Map(comparison.files.map((file) => [file.path, file]));
+        const after = new Map(inventory.candidate.map((file) => [file.path, file]));
+        const files = [...new Set([...before.keys(), ...after.keys()])]
+          .sort()
+          .map((path) => ({
+            path,
+            base: before.get(path) ?? null,
+            candidate: after.get(path) ?? null,
+            changed: before.get(path)?.sha !== after.get(path)?.sha,
+          }))
+          .filter((file) => !call.arguments.changedOnly || file.changed);
         const page: typeof files = [];
         let bytes = 256;
         for (const file of files.slice(call.arguments.offset, call.arguments.offset + 200)) {
@@ -399,7 +601,7 @@ export function createCandidateReviewController(
         }
         output = {
           commit: scope.commitSHA,
-          base: scope.baseSHA,
+          base: comparison.sha,
           files: page,
           nextOffset:
             call.arguments.offset + page.length < files.length
@@ -411,19 +613,89 @@ export function createCandidateReviewController(
           changedOnly: call.arguments.changedOnly,
           offset: call.arguments.offset,
         };
+      } else if (call.name === "review_search") {
+        const { query, revision, pathPrefix, offset, startLine } = call.arguments;
+        const selected = await revisionFiles(revision);
+        const files = selected.files
+          .filter((file) => file.path.startsWith(pathPrefix))
+          .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+        const matches: Array<{ path: string; line: number; text: string }> = [];
+        const skipped: string[] = [];
+        let nextOffset: number | null = null;
+        let nextLine = 1;
+        let bytes = 0;
+        let readBytes = 0;
+        let index = offset;
+        function skip(path: string) {
+          const size = Buffer.byteLength(JSON.stringify(path));
+          if (bytes + size > 24_000) {
+            if (!bytes) throw new CommandError("conflict", "Search contains an oversized path");
+            return false;
+          }
+          skipped.push(path);
+          bytes += size;
+          return true;
+        }
+        outer: for (; index < Math.min(files.length, offset + 200); index++) {
+          const file = files[index];
+          if (!file) break;
+          if (file.size > 1_048_576) {
+            if (!skip(file.path)) break;
+            continue;
+          }
+          if (readBytes + file.size > 1_048_576 && index > offset) break;
+          const content = await cached(
+            `file:${scope.repositoryURL}:${selected.sha}:${file.path}`,
+            () => forge.getFile(repository(scope), file.path, selected.sha),
+          );
+          readBytes += Buffer.byteLength(content);
+          if (content.includes("\0") || Buffer.byteLength(content) > 1_048_576) {
+            if (!skip(file.path)) break;
+            continue;
+          }
+          const lines = content.split("\n");
+          for (let line = index === offset ? startLine - 1 : 0; line < lines.length; line++) {
+            const text = lines[line];
+            if (text === undefined) continue;
+            const position = text.indexOf(query);
+            if (position < 0) continue;
+            const start = Math.max(0, position - 200);
+            const match = {
+              path: file.path,
+              line: line + 1,
+              text: text.slice(start, start + 1_000),
+            };
+            const size = Buffer.byteLength(JSON.stringify(match));
+            if (bytes + size > 24_000) {
+              if (!bytes) throw new CommandError("conflict", "Search contains an oversized path");
+              nextOffset = index;
+              nextLine = line + 1;
+              break outer;
+            }
+            matches.push(match);
+            bytes += size;
+          }
+        }
+        if (nextOffset === null && index < files.length) nextOffset = index;
+        output = { revision, commit: selected.sha, matches, skipped, nextOffset, nextLine };
+        observation = {
+          kind: matches.length ? "source" : "search",
+          revision,
+          search: query,
+          pathPrefix,
+          offset,
+          startLine,
+          paths: matches.map((match) => match.path),
+        };
       } else if (call.name === "review_read") {
         const { path, revision, startLine, lines } = call.arguments;
-        const content = await source(
-          scope,
-          inventory[revision],
-          path,
-          revision === "base" ? scope.baseSHA : scope.commitSHA,
-        );
+        const selected = await revisionFiles(revision);
+        const content = await source(scope, selected.files, path, selected.sha);
         const all = content.split("\n");
         output = {
           path,
           revision,
-          commit: revision === "base" ? scope.baseSHA : scope.commitSHA,
+          commit: selected.sha,
           totalLines: all.length,
           text: all
             .slice(startLine - 1, startLine - 1 + lines)
@@ -432,11 +704,16 @@ export function createCandidateReviewController(
         };
         observation = { kind: "source", path, revision, startLine, lines };
       } else {
-        const { path } = call.arguments;
-        const change = inventory.files.find((file) => file.path === path);
-        if (!change) throw new CommandError("not-found", "File is absent from the review");
-        const before = change.base ? await source(scope, inventory.base, path, scope.baseSHA) : "";
-        const after = change.candidate
+        const { path, comparison } = call.arguments;
+        const beforeRevision = await revisionFiles(comparison);
+        const beforeFile = beforeRevision.files.find((file) => file.path === path);
+        const candidateFile = inventory.candidate.find((file) => file.path === path);
+        if (!beforeFile && !candidateFile)
+          throw new CommandError("not-found", "File is absent from the review");
+        const before = beforeFile
+          ? await source(scope, beforeRevision.files, path, beforeRevision.sha)
+          : "";
+        const after = candidateFile
           ? await source(scope, inventory.candidate, path, scope.commitSHA)
           : "";
         output = createTwoFilesPatch(
@@ -444,18 +721,21 @@ export function createCandidateReviewController(
           `candidate/${path}`,
           before,
           after,
-          scope.baseSHA,
+          beforeRevision.sha,
           scope.commitSHA,
           { context: 4 },
         );
-        observation = { kind: "source", path, diff: true };
+        observation = { kind: "source", path, diff: true, comparison };
       }
       await record(turnID, ownerToken, {
         ...observation,
         id: `source:${typeof requestID}:${requestID}`,
         commit: scope.commitSHA,
       });
-      return textResult(output);
+      return textResult({
+        evidenceId: `source:${typeof requestID}:${requestID}`,
+        ...(typeof output === "object" && output ? output : { text: output }),
+      });
     },
   };
 }

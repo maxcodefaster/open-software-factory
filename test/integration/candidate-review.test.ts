@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
+import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
@@ -166,6 +168,394 @@ test("review source comes only from immutable Git refs and a report needs observ
     await f.dispose();
   }
 });
+
+test("literal source search is revision-bound, paginated, cached and never searches the checkout", async () => {
+  const f = await candidateReviewFixture();
+  let reads = 0;
+  const forge = {
+    listFiles: async () => [
+      { path: "files", sha: "f".repeat(40), size: 20 },
+      { path: "src/guard.ts", sha: "c".repeat(40), size: 1_000_000 },
+      { path: "src/other.ts", sha: "b".repeat(40), size: 100 },
+      { path: "src/image.bin", sha: "e".repeat(40), size: 10 },
+    ],
+    getFile: async (_repo: unknown, path: string, ref: string) => {
+      reads++;
+      expect([f.commit, "a".repeat(40)]).toContain(ref);
+      if (path === "src/image.bin") return "\0image";
+      return path === "src/guard.ts"
+        ? Array.from({ length: 100 }, (_, i) => `guard ${i} ${"x".repeat(900)}`).join("\n")
+        : "guard [literal]\n";
+    },
+  } as unknown as ReturnType<typeof createForgejoClient>;
+  const controller = createCandidateReviewController(f.database, forge);
+  try {
+    const turn = await f.activeReview();
+    const search = async (arguments_: Record<string, unknown>, id: string) => {
+      const output = await controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_search", arguments: { query: "guard", pathPrefix: "src/", ...arguments_ } },
+        id,
+      );
+      return JSON.parse((output.content[0] as { text: string }).text);
+    };
+    const first = await search({}, "first");
+    expect(first.commit).toBe(f.commit);
+    expect(first.matches.length).toBeGreaterThan(0);
+    expect(first.nextOffset).toBe(0);
+    expect(first.nextLine).toBeGreaterThan(1);
+    const again = await search({}, "again");
+    expect(again.matches).toEqual(first.matches);
+    expect(reads).toBe(1);
+    const literal = await search({ query: "[literal]", pathPrefix: "files" }, "literal");
+    expect(literal.matches).toEqual([{ path: "files", line: 1, text: "guard [literal]" }]);
+    const next = await search({ offset: first.nextOffset, startLine: first.nextLine }, "next");
+    expect(next.matches[0].line).toBeGreaterThan(first.matches.at(-1).line);
+    await expect(search({ revision: "previous" }, "absent")).rejects.toThrow("no previous");
+    await f.controller().stop(f.changeID);
+    await expect(search({}, "stale-cache")).rejects.toThrow();
+  } finally {
+    await f.dispose();
+  }
+});
+
+async function findingFixture(coverage = true) {
+  const f = await candidateReviewFixture();
+  const source = sourceFixture();
+  const controller = createCandidateReviewController(f.database, source.forge);
+  const proposal = {
+    ...passed,
+    verdict: "changes-requested" as const,
+    findings: [
+      {
+        severity: "blocking" as const,
+        title: "Suspected wrong addition",
+        explanation: "The operation might subtract.",
+        reproduction: "Call sum(2,3).",
+      },
+    ],
+  };
+  try {
+    const discovery = await f.activeReview();
+    if (coverage) await observedCases(controller, discovery, source.path);
+    else
+      await controller.call(
+        discovery.id,
+        discovery.ownerToken,
+        { name: "review_read", arguments: { path: source.path } },
+        "discovery",
+      );
+    await controller.call(
+      discovery.id,
+      discovery.ownerToken,
+      { name: "review_report", arguments: proposal },
+      "report",
+    );
+    await f.turns.settle(
+      discovery.id,
+      discovery.ownerToken,
+      "completed",
+      proposal.summary,
+      async (sql) => {
+        await sql`UPDATE factory.candidate_review SET state='changes-requested',completed_at=now() WHERE id=${f.reviewID}`;
+        await sql`UPDATE factory.change_agent_session SET state='committed' WHERE change_id=${f.changeID}`;
+      },
+    );
+    const checkID = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.candidate_review(
+      id,verification_id,ordinal,change_id,commit_sha,base_sha,created_by,finding_source_id)
+      VALUES(${checkID},${f.verificationID},2,${f.changeID},${f.commit},${"a".repeat(40)},${f.userID},${f.reviewID})`;
+    const checker = await f.activeReview(checkID);
+    return { ...f, source, reviewer: controller, checkID, checker, proposal };
+  } catch (cause) {
+    await f.dispose();
+    throw cause;
+  }
+}
+
+test.each(["confirmed", "dismissed", "unresolved"] as const)(
+  "a fresh finding checker records %s without repeating full review or mutating discovery",
+  async (status) => {
+    const f = await findingFixture();
+    try {
+      const original = await f.review();
+      const tools = await f.reviewer.tools(f.checker.id);
+      expect(tools.map((tool) => tool.name)).toContain("review_finding_report");
+      expect(tools.map((tool) => tool.name)).not.toContain("review_report");
+      const call = (name: string, arguments_: unknown, id: string) =>
+        f.reviewer.call(f.checker.id, f.checker.ownerToken, { name, arguments: arguments_ }, id);
+      const check = {
+        summary: `Independent investigation: ${status}.`,
+        checks: [
+          {
+            finding: 1,
+            status,
+            evidence: "The inspected candidate guard establishes the conditions.",
+            evidenceIds: ["source:string:own-read"],
+          },
+        ],
+      };
+      await expect(call("review_report", passed, "wrong-phase")).rejects.toThrow("phase");
+      if (status !== "unresolved")
+        await expect(call("review_finding_report", check, "unobserved")).rejects.toThrow(
+          "observations",
+        );
+      await call("review_read", { path: f.source.path }, "own-read");
+      await call("review_finding_report", check, "checked");
+      await call("review_finding_report", check, "checked");
+      expect((await f.review(f.checkID))?.result).toMatchObject({
+        verdict:
+          status === "confirmed"
+            ? "changes-requested"
+            : status === "dismissed"
+              ? "passed"
+              : "incomplete",
+      });
+      expect((await f.review(f.checkID))?.state).toBe("running");
+      expect(await f.review()).toEqual(original);
+      await expect(
+        call("review_finding_report", { ...check, summary: "Rewritten" }, "rewrite"),
+      ).rejects.toThrow("immutable");
+      await expect(call("review_read", { path: f.source.path }, "after-report")).rejects.toThrow(
+        "already recorded",
+      );
+    } finally {
+      await f.dispose();
+    }
+  },
+);
+
+test("dismissing all findings cannot invent missing discovery coverage", async () => {
+  const f = await findingFixture(false);
+  try {
+    await f.reviewer.call(
+      f.checker.id,
+      f.checker.ownerToken,
+      { name: "review_read", arguments: { path: f.source.path } },
+      "guard",
+    );
+    await f.reviewer.call(
+      f.checker.id,
+      f.checker.ownerToken,
+      {
+        name: "review_finding_report",
+        arguments: {
+          summary: "The suspicion was unfounded.",
+          checks: [
+            {
+              finding: 1,
+              status: "dismissed",
+              evidence: "Source proves addition.",
+              evidenceIds: ["source:string:guard"],
+            },
+          ],
+        },
+      },
+      "checked",
+    );
+    expect((await f.review(f.checkID))?.result).toMatchObject({ verdict: "incomplete" });
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("a focused finding check preserves the original QA recording and chapters", async () => {
+  const f = await findingFixture();
+  const recordingID = crypto.randomUUID();
+  try {
+    await f.database.client`INSERT INTO factory.review_media(
+      id,change_id,review_id,kind,commit_sha,state,byte_length,sha256,duration_ms)
+      VALUES(${recordingID},${f.changeID},${f.reviewID},'recording',${f.commit},'complete',8,${"a".repeat(64)},1000)`;
+    const actions: string[] = [];
+    f.hub.parentOperation = async (_attempt, operation, authorize) => {
+      await authorize?.(() => {});
+      actions.push(operation.action);
+      const scope = JSON.parse(String(operation["data"]));
+      return {
+        data: JSON.stringify({
+          content: [{ type: "text", text: "Observed the exact candidate" }],
+          structuredContent: {
+            sessionId: scope.sessionId,
+            turnId: f.checker.id,
+            runtimeAttemptId: f.attemptID,
+            generation: 1,
+            app: "app",
+            headCommit: f.commit,
+            workingTreeModified: false,
+            observedAt: new Date().toISOString(),
+          },
+        }),
+      };
+    };
+    const browser = createBuildBrowserController(f.database, f.hub, "owned-finding-browser");
+    const grant = await browser.prepare(f.checker.id, f.checker.ownerToken);
+    const authorized = await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`);
+    if (!authorized) throw new Error("Missing focused browser authority");
+    await browser.call(
+      authorized.session,
+      f.checker.ownerToken,
+      { name: "browser_open", arguments: { app: "app" } },
+      "focused-app",
+    );
+    expect(actions).toEqual(["browser-call"]);
+    const view = await createVisualReviewController(f.database).get(f.changeID, f.userID);
+    expect(view.recordingCurrent).toBe(true);
+    expect(view.recording?.id).toBe(recordingID);
+    expect(view.scenarios).toHaveLength(2);
+    expect(
+      await f.database.client`SELECT id FROM factory.review_media WHERE review_id=${f.checkID}`,
+    ).toHaveLength(0);
+    await browser.closeTurn(f.checker.id);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("Stop fences a finding checker, including cached source and report publication", async () => {
+  const f = await findingFixture();
+  try {
+    await f.reviewer.call(
+      f.checker.id,
+      f.checker.ownerToken,
+      { name: "review_read", arguments: { path: f.source.path } },
+      "guard",
+    );
+    await f.controller().stop(f.changeID);
+    await expect(
+      f.reviewer.call(
+        f.checker.id,
+        f.checker.ownerToken,
+        {
+          name: "review_finding_report",
+          arguments: {
+            summary: "Too late.",
+            checks: [
+              {
+                finding: 1,
+                status: "confirmed",
+                evidence: "Observed source.",
+                evidenceIds: ["source:string:guard"],
+              },
+            ],
+          },
+        },
+        "late",
+      ),
+    ).rejects.toThrow();
+    expect((await f.review(f.checkID))?.result).toBeNull();
+  } finally {
+    await f.dispose();
+  }
+});
+
+test.each([false, true])(
+  "a focused correction repeats App QA only when the correction changes frontend source: %s",
+  async (changesApp) => {
+    const f = await candidateReviewFixture();
+    const newer = "e".repeat(40);
+    const forge = {
+      listFiles: async (_repo: unknown, ref: string) => [
+        {
+          path: "src/app.tsx",
+          sha:
+            ref === "a".repeat(40)
+              ? "a".repeat(40)
+              : ref === newer && changesApp
+                ? "f".repeat(40)
+                : "b".repeat(40),
+          size: 100,
+        },
+        {
+          path: "test/app.test.ts",
+          sha: ref === newer ? "c".repeat(40) : "d".repeat(40),
+          size: 100,
+        },
+      ],
+      getFile: async () => "export const checked = true;\n",
+    } as unknown as ReturnType<typeof createForgejoClient>;
+    const reviewer = createCandidateReviewController(f.database, forge);
+    try {
+      const old = await f.activeReview();
+      const context = {
+        sessionId: crypto.randomUUID(),
+        turnId: old.id,
+        changeId: f.changeID,
+        runtimeAttemptId: f.attemptID,
+        generation: 1,
+        app: "app",
+        headCommit: f.commit,
+        workingTreeModified: false,
+        observedAt: new Date().toISOString(),
+      };
+      await reviewer.observeBrowser(
+        old.id,
+        old.ownerToken,
+        { name: "browser_screenshot", arguments: {} },
+        "old-screenshot",
+        {
+          structuredContent: context,
+          content: [{ type: "image", mimeType: "image/jpeg", data: "aGVsbG8=" }],
+        },
+      );
+      await observedCases(reviewer, old, "src/app.tsx", context);
+      await reviewer.call(
+        old.id,
+        old.ownerToken,
+        {
+          name: "review_report",
+          arguments: { ...passed, ui: "checked" },
+        },
+        "old-report",
+      );
+      await f.turns.settle(
+        old.id,
+        old.ownerToken,
+        "completed",
+        "Original App inspected",
+        async (sql) => {
+          await sql`UPDATE factory.candidate_review SET state='passed',completed_at=now() WHERE id=${f.reviewID}`;
+          await sql`UPDATE factory.change_agent_session SET state='committed' WHERE change_id=${f.changeID}`;
+        },
+      );
+      await f.database.client`INSERT INTO factory.change_commit_operation(
+        id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
+        observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
+        SELECT ${crypto.randomUUID()},id,runtime_attempt_id,2,branch_name,${f.commit},${newer},${newer},
+          'Owned correction',${crypto.randomUUID()},'succeeded',created_by,now() FROM factory.change WHERE id=${f.changeID}`;
+      const verificationID = crypto.randomUUID();
+      const reviewID = crypto.randomUUID();
+      await f.database.client`INSERT INTO factory.verification(
+        id,change_id,commit_sha,pull_request_number,runner_name,action_run_id,created_by,state,completed_at)
+        VALUES(${verificationID},${f.changeID},${newer},1,'owned-focus',2,${f.userID},'succeeded',now())`;
+      await f.database.client`INSERT INTO factory.candidate_review(
+        id,verification_id,change_id,commit_sha,base_sha,created_by,focus_review_id)
+        VALUES(${reviewID},${verificationID},${f.changeID},${newer},${"a".repeat(40)},${f.userID},${f.reviewID})`;
+      const turn = await f.activeReview(reviewID);
+      await observedCases(reviewer, turn, "test/app.test.ts");
+      const report = reviewer.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_report",
+          arguments: passed,
+        },
+        "current-report",
+      );
+      if (changesApp) await expect(report).rejects.toThrow("actual App review");
+      else {
+        await report;
+        expect((await f.review(reviewID))?.result).toMatchObject({
+          verdict: "passed",
+          ui: "not-applicable",
+        });
+      }
+      expect((await f.review())?.result).toMatchObject({ verdict: "passed", ui: "checked" });
+    } finally {
+      await f.dispose();
+    }
+  },
+);
 
 test("frontend review rejects missing, dirty and different-commit screenshots", async () => {
   const f = await candidateReviewFixture();

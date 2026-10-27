@@ -1,9 +1,12 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
-import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import { bounded, readableError } from "./native-errors";
+import { navigationMessages, projectMessages } from "./message-projection";
+import { classifyAgentTurn } from "./turn-outcome";
 import {
   candidateReviewPermissions,
   candidateReviewResultInput,
 } from "../../../../packages/conversation-domain/src/candidate-review";
+import type { CodingReasoning } from "../../../../packages/conversation-domain/src/model-settings";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { lockChangeWriterIn } from "../access/change-writer";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { createChangeWriterController } from "../access/writer-controller";
@@ -19,11 +22,10 @@ import { codingAllowanceDenial } from "../usage/opencode";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createBuildBrowserController } from "./browser-controller";
 import { createChangeAdmission } from "./change-admission";
-import { createCodingContexts } from "./conversation-contexts";
-import { activityNavigation, type ActivityNavigation } from "./activity-navigation";
-import { createReviewAdmission } from "./review-admission";
 import { createChangeAgentTransport } from "./change-transport";
 import { createAgentCommitTransport } from "./commit-transport";
+import { createCodingContexts } from "./conversation-contexts";
+import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
 import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
@@ -34,17 +36,12 @@ import {
   readOpenCodeInputMessages,
   syncOpenCodeInputGuidance,
 } from "./opencode-client";
-import { observeOpenCodeUsage } from "./opencode-usage";
 import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
-import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
-import { createChangeAgentStop } from "./stop";
+import { observeOpenCodeUsage } from "./opencode-usage";
+import { createReviewAdmission } from "./review-admission";
 import { waitForBuildSandbox } from "./runtime-readiness";
+import { createChangeAgentStop } from "./stop";
 import { readTurnObservation } from "./turn-observation";
-import {
-  assessBuildCompletion,
-  buildCompletionText,
-  type BuildCompletionContract,
-} from "./build-completion";
 import {
   type AgentTurnRecord,
   type AgentTurnTransaction,
@@ -78,79 +75,8 @@ type AgentRow = {
 
 const workspaceDirectory = "/workspace/project";
 
-type TurnMessage = {
-  readonly id: string;
-  readonly type: string;
-  readonly created: number;
-  readonly completed?: number;
-  readonly finish?: string;
-  readonly error?: unknown;
-  readonly content?: readonly { readonly type: string; readonly text?: string }[];
-};
-
-export function classifyAgentTurn(
-  messages: readonly TurnMessage[],
-  activeMessageID: string | null,
-  sessionRunning: boolean,
-  completionContract?: BuildCompletionContract,
-) {
-  if (!activeMessageID) return { state: "pending" as const };
-  const userIndex = messages.findIndex(
-    (message) => message.type === "user" && message.id === activeMessageID,
-  );
-  if (userIndex < 0 || sessionRunning) return { state: "pending" as const };
-  // The pinned API returns newest-first messages. Only the interval after this
-  // exact input belongs to it; timestamps can tie and are not causal identity.
-  const interval = messages.slice(0, userIndex);
-  if (interval.some((message) => message.type === "user")) return { state: "pending" as const };
-  const assistant = interval.find((message) => message.type === "assistant");
-  if (!assistant?.completed) return { state: "pending" as const };
-  if (assistant.error || assistant.finish === "error") {
-    return { state: "failed" as const, error: assistant.error };
-  }
-  if (assistant.finish === "stop") {
-    const completion = assessBuildCompletion(
-      completionContract,
-      assistant.content
-        ?.filter((part) => part.type === "text")
-        .map((part) => part.text ?? "")
-        .join("\n") ?? "",
-    );
-    return completion.ready
-      ? {
-          state: "succeeded" as const,
-          ...(completion.summary ? { summary: completion.summary } : {}),
-        }
-      : { state: "failed" as const, error: completion.error };
-  }
-  if (["length", "content-filter", "unknown"].includes(assistant.finish ?? "")) {
-    return {
-      state: "failed" as const,
-      error: `OpenCode stopped with ${assistant.finish}`,
-    };
-  }
-  return { state: "pending" as const };
-}
-
 function opencode(hub: RuntimeHub, attemptID: string) {
   return createOpenCodeClient((request, path) => hub.request(attemptID, "agent", request, path));
-}
-
-function bounded(value: string, limit: number) {
-  return value.length <= limit ? value : `${value.slice(0, limit - 1)}…`;
-}
-
-function readableError(value: unknown) {
-  if (value instanceof Error) return value.message;
-  if (value && typeof value === "object") {
-    if ("message" in value && typeof value.message === "string") return value.message;
-    if ("data" in value && value.data && typeof value.data === "object") {
-      if ("message" in value.data && typeof value.data.message === "string") {
-        return value.data.message;
-      }
-    }
-  }
-  return typeof value === "string" ? value : "OpenCode run failed";
 }
 
 async function awaitConfiguredModel(
@@ -184,250 +110,6 @@ async function awaitConfiguredModel(
   throw new Error(
     "OpenCode and the configured Factory model did not become ready. The IDE remains available.",
   );
-}
-
-type ActivityStatus = "pending" | "streaming" | "running" | "completed" | "error";
-
-function activityStatus(value: string): ActivityStatus | undefined {
-  switch (value) {
-    case "pending":
-    case "streaming":
-    case "running":
-    case "completed":
-    case "error":
-      return value;
-    default:
-      return undefined;
-  }
-}
-
-type ProjectToolState = {
-  status: string;
-  input?: unknown | undefined;
-  content?: ReadonlyArray<{ type: string; text?: string | undefined }> | undefined;
-  metadata?: Record<string, unknown> | undefined;
-};
-
-type ProjectMessageContent = {
-  id?: string | undefined;
-  type: string;
-  text?: string | undefined;
-  name?: string | undefined;
-  state?: ProjectToolState | undefined;
-  time?: { created: number; completed?: number; ran?: number } | undefined;
-};
-
-type ProjectMessage = {
-  id: string;
-  type: string;
-  time: { created: number; completed?: number; ran?: number };
-  text?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  content?: ReadonlyArray<ProjectMessageContent> | undefined;
-  status?: string | undefined;
-  exit?: number | string | undefined;
-  output?: { output?: string | undefined } | undefined;
-  command?: string | undefined;
-};
-
-function isProjectMessage(value: unknown): value is ProjectMessage {
-  if (!value || typeof value !== "object") return false;
-  if (!("id" in value) || typeof value.id !== "string") return false;
-  if (!("type" in value) || typeof value.type !== "string") return false;
-  if (!("time" in value) || !value.time || typeof value.time !== "object") return false;
-  if (!("created" in value.time) || typeof value.time.created !== "number") return false;
-  return !("content" in value) || value.content === undefined || Array.isArray(value.content);
-}
-
-export type AgentProjectedMessage = {
-  id: string;
-  role: "user" | "assistant" | "tool";
-  text: string;
-  at: number;
-  truncated?: boolean;
-  activity?: {
-    name: string;
-    status: ActivityStatus;
-    detail?: string;
-    truncated?: boolean;
-    navigation?: ActivityNavigation;
-  };
-};
-
-export function navigationMessages(messages: AgentProjectedMessage[], allowed: boolean) {
-  if (allowed) return messages;
-  return messages.map((message) => {
-    const activity = message.activity;
-    if (!activity?.navigation) return message;
-    return {
-      ...message,
-      activity: {
-        name: activity.name,
-        status: activity.status,
-        ...(activity.detail !== undefined ? { detail: activity.detail } : {}),
-        ...(activity.truncated !== undefined ? { truncated: activity.truncated } : {}),
-      },
-    };
-  });
-}
-
-function objectString(value: unknown, key: string) {
-  if (!value || typeof value !== "object") return null;
-  const candidate = (value as Record<string, unknown>)[key];
-  return typeof candidate === "string" && candidate.trim() ? candidate.trim() : null;
-}
-
-function toolSummary(name: string, input: unknown) {
-  const path = objectString(input, "path") ?? objectString(input, "file");
-  const command = objectString(input, "command");
-  const query = objectString(input, "query") ?? objectString(input, "pattern");
-  if (["write", "edit", "apply_patch"].includes(name) && path) return `Updated ${path}`;
-  if (name === "read" && path) return `Read ${path}`;
-  if (["bash", "shell"].includes(name) && command) return command;
-  if (["grep", "glob", "search"].includes(name) && query) return `Searched for ${query}`;
-  return name.replaceAll("_", " ");
-}
-
-function toolDetail(state: {
-  status: string;
-  content?: ReadonlyArray<{ type: string; text?: string | undefined }> | undefined;
-  error?: unknown | undefined;
-}) {
-  const output = state.content
-    ?.filter((item) => item.type === "text" && item.text?.trim())
-    .map((item) => item.text?.trim())
-    .join("\n");
-  if (output) return { text: bounded(output, 4_000), truncated: output.length > 4_000 };
-  if (state.status === "error" && state.error) {
-    const error = readableError(state.error);
-    return { text: bounded(error, 1_000), truncated: error.length > 1_000 };
-  }
-  return null;
-}
-
-function isFactoryBootstrapMessage(message: { text: string; metadata?: Record<string, unknown> }) {
-  return (
-    message.metadata?.["factoryBootstrap"] === true ||
-    (message.text.startsWith("Implement the approved ticket: ") &&
-      message.text.includes("\nApproved specification:\n") &&
-      message.text.endsWith(
-        "Do not commit or push; the Factory does that after you finish successfully.",
-      ))
-  );
-}
-
-export function projectMessages(
-  messages: unknown,
-  admittedInputs?: ReadonlyMap<string, string | null>,
-) {
-  if (!messages || typeof messages !== "object" || !("data" in messages)) return [];
-  if (!Array.isArray(messages.data)) return [];
-  return messages.data
-    .filter(isProjectMessage)
-    .slice(0, 100)
-    .reverse()
-    .flatMap<AgentProjectedMessage>((message) => {
-      if (message.type === "user") {
-        if (typeof message.text !== "string") return [];
-        const admittedText = admittedInputs?.get(message.id);
-        if (admittedText === null) return [];
-        if (
-          admittedText === undefined &&
-          isFactoryBootstrapMessage({
-            text: message.text,
-            ...(message.metadata ? { metadata: message.metadata } : {}),
-          })
-        ) {
-          return [];
-        }
-        return [
-          {
-            id: message.id,
-            role: "user",
-            text: bounded(admittedText ?? message.text, 8_000),
-            at: message.time.created,
-          },
-        ];
-      }
-      if (message.type === "assistant") {
-        let textOrdinal = 0;
-        let toolOrdinal = 0;
-        return (message.content ?? []).flatMap<AgentProjectedMessage>((content) => {
-          const ordinal =
-            content.type === "text" ? textOrdinal++ : content.type === "tool" ? toolOrdinal++ : 0;
-          if (content.type === "text" && content.text?.trim()) {
-            const text = buildCompletionText(content.text);
-            return [
-              {
-                id: `${message.id}:text:${ordinal}`,
-                role: "assistant",
-                text: bounded(text, 8_000),
-                at: message.time.created,
-                ...(text.length > 8_000 ? { truncated: true } : {}),
-              },
-            ];
-          }
-          if (content.type === "tool" && content.name && content.state && content.time) {
-            const status = activityStatus(content.state.status);
-            if (!status) return [];
-            const browserPrefix = "factory_browser_browser_";
-            const browserAction = content.name.startsWith(browserPrefix)
-              ? content.name.slice(browserPrefix.length)
-              : undefined;
-            const input = status === "streaming" ? null : content.state.input;
-            const detail = toolDetail(content.state);
-            const summary = toolSummary(browserAction ?? content.name, input);
-            const navigation =
-              status === "completed"
-                ? activityNavigation(content.name, input, content.state.metadata)
-                : undefined;
-            return [
-              {
-                id: `${message.id}:tool:${content.id ?? ordinal}`,
-                role: "tool",
-                text: bounded(summary, 500),
-                at: content.time.created,
-                activity: {
-                  name: browserAction ? "browser" : content.name,
-                  status,
-                  ...(detail ? { detail: detail.text } : {}),
-                  ...(summary.length > 500 || detail?.truncated ? { truncated: true } : {}),
-                  ...(navigation ? { navigation } : {}),
-                },
-              },
-            ];
-          }
-          return [];
-        });
-      }
-      if (message.type === "shell") {
-        if (!message.command) return [];
-        const status: ActivityStatus =
-          message.status === "running"
-            ? "running"
-            : message.status === "exited" && message.exit === 0
-              ? "completed"
-              : "error";
-        const detail = message.output?.output?.trim();
-        return [
-          {
-            id: message.id,
-            role: "tool",
-            text: bounded(message.command, 500),
-            at: message.time.created,
-            activity: {
-              name: "shell",
-              status,
-              ...(detail ? { detail: bounded(detail, 4_000) } : {}),
-              ...(message.command.length > 500 || (detail?.length ?? 0) > 4_000
-                ? { truncated: true }
-                : {}),
-            },
-          },
-        ];
-      }
-      return [];
-    });
 }
 
 export function createAgentController(
@@ -618,6 +300,7 @@ export function createAgentController(
     starters.add(turnID);
     let owned: AgentTurnRecord | null = null;
     let renew: ReturnType<typeof setInterval> | undefined;
+    let pendingRenewal: Promise<void> | undefined;
     let dispatched = false;
     try {
       // Branch creation is independently recovered. A recorded bootstrap waits
@@ -635,7 +318,15 @@ export function createAgentController(
       const changeID = owned.command.changeId;
       const intent = await admission.intent(turnID);
       renew = setInterval(() => {
-        void renewExecution(turnID, ownerToken).catch(() => {});
+        if (closed || pendingRenewal) return;
+        pendingRenewal = renewExecution(turnID, ownerToken)
+          .then(
+            () => {},
+            () => {},
+          )
+          .finally(() => {
+            pendingRenewal = undefined;
+          });
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
@@ -840,6 +531,7 @@ export function createAgentController(
       }
     } finally {
       if (renew) clearInterval(renew);
+      await pendingRenewal;
       await browser?.closeTurn(turnID);
       starters.delete(turnID);
     }
@@ -850,6 +542,7 @@ export function createAgentController(
     recovering.add(turnID);
     let owned: AgentTurnRecord | null = null;
     let renewal: ReturnType<typeof setInterval> | undefined;
+    let pendingRenewal: Promise<void> | undefined;
     try {
       // A restarted Factory may arrive before the dead process's lease expires.
       // Wait for that lease, never infer process death merely from startup.
@@ -866,7 +559,15 @@ export function createAgentController(
       const changeID = owned.command.changeId;
       const intent = await admission.intent(turnID);
       renewal = setInterval(() => {
-        void renewExecution(turnID, ownerToken).catch(() => {});
+        if (closed || pendingRenewal) return;
+        pendingRenewal = renewExecution(turnID, ownerToken)
+          .then(
+            () => {},
+            () => {},
+          )
+          .finally(() => {
+            pendingRenewal = undefined;
+          });
       }, 10_000);
       if (!writers)
         throw new CommandError("unavailable", "Change writer enforcement is not configured");
@@ -1057,6 +758,7 @@ export function createAgentController(
       }
     } finally {
       if (renewal) clearInterval(renewal);
+      await pendingRenewal;
       await browser?.closeTurn(turnID);
       recovering.delete(turnID);
     }
@@ -1102,6 +804,7 @@ export function createAgentController(
         attemptID: string;
         branchName: string;
         expectedParentSHA: string;
+        mergeParentSHA: string | null;
         commitSHA: string | null;
         commitMessage: string;
         state: string;
@@ -1111,6 +814,7 @@ export function createAgentController(
     >`
       SELECT operation.id, operation.change_id AS "changeID", operation.runtime_attempt_id AS "attemptID",
         operation.branch_name AS "branchName", operation.expected_parent_sha AS "expectedParentSHA",
+        operation.merge_parent_sha AS "mergeParentSHA",
         operation.commit_sha AS "commitSHA", operation.commit_message AS "commitMessage", operation.state, operation.last_error AS "lastError",
         project.repository_url AS "repositoryURL"
       FROM factory.change_commit_operation operation
@@ -1125,6 +829,7 @@ export function createAgentController(
         const payload = {
           operationId: operation.id,
           expectedSha: operation.expectedParentSHA,
+          mergeParentSha: operation.mergeParentSHA ?? "",
           commitMessage: operation.commitMessage,
           authorName: "Open Software Factory",
           authorEmail: "factory@localhost",
@@ -1152,6 +857,7 @@ export function createAgentController(
         action: "git-push",
         branch: operation.branchName,
         expectedSha: operation.expectedParentSHA,
+        mergeParentSha: operation.mergeParentSHA ?? "",
         commitSha: commitSHA,
         repositoryURL: operation.repositoryURL.startsWith("file://")
           ? operation.repositoryURL
@@ -1283,7 +989,7 @@ export function createAgentController(
     const created = await sql<Array<{ id: string }>>`
       INSERT INTO factory.change_commit_operation(
         id, change_id, runtime_attempt_id, sequence, branch_name, expected_parent_sha,
-        commit_message, idempotency_key, state, created_by
+        integration_base_sha, merge_parent_sha, commit_message, idempotency_key, state, created_by
       )
       SELECT ${operationID}, change.id, ${active.runtimeAttemptID},
         COALESCE(MAX(previous.sequence), 0) + 1, change.branch_name,
@@ -1293,6 +999,16 @@ export function createAgentController(
             ORDER BY latest.sequence DESC LIMIT 1),
           change.base_sha
         ),
+        (SELECT integration_base_sha FROM factory.change_commit_operation latest
+          WHERE latest.change_id=change.id AND (latest.state='succeeded' OR (
+            latest.source='integration' AND latest.state='failed' AND latest.last_error='integration has conflicts'))
+          ORDER BY latest.sequence DESC LIMIT 1),
+        (SELECT merge_parent_sha FROM factory.change_commit_operation integration
+          WHERE integration.change_id=change.id AND integration.source='integration'
+            AND integration.state='failed' AND integration.last_error='integration has conflicts'
+            AND integration.sequence>COALESCE((SELECT MAX(sequence) FROM factory.change_commit_operation
+              WHERE change_id=change.id AND state='succeeded'),0)
+          ORDER BY integration.sequence DESC LIMIT 1),
         ${active.ticketTitle}, ${`change-commit:${changeID}:${operationID}`},
         'commit-intended', ${userID}
       FROM factory.change change
@@ -1336,7 +1052,7 @@ export function createAgentController(
       while (!closed) {
         const revision = wake.revision();
         const session = await row(changeID);
-        if (!session || !session.sessionID || session.activeTurnID !== turnID) return;
+        if (!session?.sessionID || session.activeTurnID !== turnID) return;
         if (session.state === "stopped") {
           run(reconcileStop(changeID));
           return;

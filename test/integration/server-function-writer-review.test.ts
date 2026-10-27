@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createWriterService } from "../../apps/factory/src/access/writer-service";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { writerViewSchema } from "../../apps/factory/src/api-contracts";
@@ -124,7 +124,7 @@ test("compiled Writer and Review commands preserve actors, epochs, immutable bat
       record("dispatch", args);
     },
   });
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(
     pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
   );
   const endpoint = createServerFunctionEndpoint({
@@ -135,7 +135,7 @@ test("compiled Writer and Review commands preserve actors, epochs, immutable bat
     requireFresh: async () => {
       throw new Error("Writer and Review did not add Fresh Auth");
     },
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
   });
   const call = async (name: string, args: unknown[]) =>
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));

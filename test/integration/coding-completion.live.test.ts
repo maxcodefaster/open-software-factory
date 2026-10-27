@@ -1,22 +1,26 @@
 import { expect, test } from "bun:test";
-import { callFactoryFunction, decodeBrowserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
-import type { ProjectSetupView } from "../../packages/project-domain/src/setup";
-import type { ServerResult } from "../../apps/factory/src/server-functions/result";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect as browserExpect, chromium } from "@playwright/test";
 import { agentViewSchema, deliveryViewSchema } from "../../apps/factory/src/api-contracts";
+import type { ServerResult } from "../../apps/factory/src/server-functions/result";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createWorkspaceSourceController } from "../../apps/factory/src/workspace/source-controller";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import type { ProjectSetupView } from "../../packages/project-domain/src/setup";
 import { installationDirectory, loadInstallation } from "../../scripts/factory/installation";
 import { verifyCodingSource } from "../fixtures/coding-source";
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
 import { eventually } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
+import {
+  callFactoryFunction,
+  decodeBrowserFunction,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionMatches,
+} from "../fixtures/server-functions";
 
 // Bun does not load playwright.config.ts. Match the repository's normal browser
 // assertion window rather than accidentally using Playwright's 5-second default.
@@ -98,7 +102,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
       // 15-minute cutoff must not abandon healthy source/runtime preparation.
       const journeyDeadline = Date.now() + 3_300_000;
       const remainingJourneyMS = () => Math.max(1, journeyDeadline - Date.now());
-      async function api(path: string, method = "GET", body?: unknown) {
+      async function _api(path: string, method = "GET", body?: unknown) {
         const response = await fetch(base + path, {
           method,
           headers: { cookie, origin: base, "content-type": "application/json" },
@@ -195,8 +199,8 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await setup.getByLabel("Repository name", { exact: true }).fill(slug);
         await captureFactory("01-starter-setup");
         const creation = page.waitForResponse(
-          (response) =>
-            new URL(response.url()).pathname.startsWith("/_server/data/createSetupProject-") &&
+          async (response) =>
+            (await factoryFunctionMatches(response.url(), "createSetupProject")) &&
             response.request().method() === "POST",
         );
         await setup.getByRole("button", { name: "Create project", exact: true }).click();
@@ -382,8 +386,8 @@ for (const requirementsPath of ["manual", "interview"] as const)
         }
         await captureFactory("02-requirements-ready");
         const implementation = page.waitForResponse(
-          (response) =>
-            response.url().includes("/_server/data/implementTicket-") &&
+          async (response) =>
+            (await factoryFunctionMatches(response.url(), "implementTicket")) &&
             response.request().method() === "POST",
         );
         await page.getByRole("button", { name: "Implement", exact: true }).click();
@@ -575,8 +579,8 @@ for (const requirementsPath of ["manual", "interview"] as const)
         await visible(page.getByRole("button", { name: "Deliver", exact: true })).toBeEnabled();
         await captureFactory("05-review-passed");
         const approval = page.waitForResponse(
-          (response) =>
-            response.url().includes("/_server/data/approveDelivery-") &&
+          async (response) =>
+            (await factoryFunctionMatches(response.url(), "approveDelivery")) &&
             response.request().method() === "POST",
         );
         await page.getByRole("button", { name: "Deliver", exact: true }).click();
@@ -696,7 +700,7 @@ for (const requirementsPath of ["manual", "interview"] as const)
             const [intent] = await database.client<{ projectID: string; state: string }[]>`
               SELECT project_id AS "projectID",state FROM factory.project_repository_intent
               WHERE setup_id=${result["setupID"]} AND slug=${slug}`;
-            if (!intent || intent.state !== "committed") {
+            if (intent?.state !== "committed") {
               const cause = new Error(
                 "Owned repository setup is still unconfirmed. Its exact intent is retained; execution cleanup cannot yet be confirmed.",
               );

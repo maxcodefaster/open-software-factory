@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { interviewAnswerInput } from "./conversation";
+import { interviewAnswerInput, planningIntentInput } from "./conversation";
 import { modelConnectionReference } from "./model-connection";
 import { skillRevisionIDsInput } from "./skills";
 import { codingReasoningInput } from "./model-settings";
@@ -53,7 +53,11 @@ export const agentTurnCommandInput = z.discriminatedUnion("kind", [
       ...projectFields,
       kind: z.literal("project-message"),
       text: z.string().trim().min(1).max(12_000),
-      intent: z.enum(["requirements-interview", "project-research"]).optional(),
+      intent: planningIntentInput.optional(),
+      sourceCommit: z
+        .string()
+        .regex(/^[a-f0-9]{40}$/)
+        .optional(),
     })
     .strict(),
   z

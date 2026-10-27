@@ -18,6 +18,7 @@ import type {
   personalSkillSettingsInput,
   projectSkillSettingsInput,
 } from "../../../../packages/conversation-domain/src/skill-inheritance";
+import type { libraryCoverInput } from "../../../../packages/conversation-domain/src/library-covers";
 
 export function createSkillService(
   skills: ReturnType<typeof createSkillController>,
@@ -59,6 +60,9 @@ export function createSkillService(
     },
     save(userID: string, input: z.output<typeof skillLibrarySaveInput>) {
       return skills.library.save(input, userID);
+    },
+    cover(userID: string, input: z.output<typeof libraryCoverInput>) {
+      return skills.library.cover(input, userID);
     },
     choose(userID: string, input: z.output<typeof skillChoiceInput>) {
       return skills.chooseLibrary(input, userID, input.projectId);

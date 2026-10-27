@@ -22,6 +22,9 @@ export function TicketBoardContents(props: {
   epicID: string;
   onEpic(id: string): void;
   onSaveEpic(input: EpicEdit, current?: Epic): Promise<boolean>;
+  ticketsIncomplete?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?(): void;
 }) {
   const [editing, setEditing] = createSignal(false);
   const selected = () => props.epics.find((epic) => epic.id === props.epicID);
@@ -131,7 +134,10 @@ export function TicketBoardContents(props: {
             <span class="epic-stack-preview">{input.tickets[0]?.title}</span>
           </Show>
         </span>
-        <small>{input.tickets.length}</small>
+        <small>
+          {input.tickets.length}
+          {props.ticketsIncomplete ? " loaded" : ""}
+        </small>
       </button>
     </article>
   );
@@ -152,17 +158,17 @@ export function TicketBoardContents(props: {
                 <span>Completed &amp; cancelled</span>
                 <span>{props.archivedTickets.length} tickets</span>
               </header>
-              <For each={props.archivedTickets}>
+              <For each={props.archivedTickets} keyed={(ticket) => ticket.id}>
                 {(ticket) => (
                   <button
                     type="button"
                     class="ticket-archive-row"
                     disabled={props.pending}
-                    onClick={() => props.onSelect(ticket.id)}
+                    onClick={() => props.onSelect(ticket().id)}
                   >
-                    <small class="ticket-archive-reference">{props.reference(ticket.id)}</small>
-                    <strong class="ticket-archive-title">{ticket.title}</strong>
-                    <span class="ticket-archive-status">{props.status(ticket)}</span>
+                    <small class="ticket-archive-reference">{props.reference(ticket().id)}</small>
+                    <strong class="ticket-archive-title">{ticket().title}</strong>
+                    <span class="ticket-archive-status">{props.status(ticket())}</span>
                   </button>
                 )}
               </For>
@@ -275,7 +281,7 @@ export function TicketBoardContents(props: {
                   <h2 id="epic-folder-title">{epic().title}</h2>
                   <span class="epic-progress">
                     {members().filter((ticket) => ticket.state === "done").length}/
-                    {members().length} done
+                    {members().length} done{props.ticketsIncomplete ? " in loaded pages" : ""}
                     <Show when={members().some((ticket) => ticket.state === "cancelled")}>
                       {" · "}
                       {members().filter((ticket) => ticket.state === "cancelled").length} cancelled
@@ -283,6 +289,16 @@ export function TicketBoardContents(props: {
                   </span>
                 </div>
                 <div class="epic-folder-actions">
+                  <Show when={props.ticketsIncomplete && props.onLoadMore}>
+                    <button
+                      type="button"
+                      class="workspace-action"
+                      disabled={props.pending || props.loadingMore}
+                      onClick={() => props.onLoadMore?.()}
+                    >
+                      {props.loadingMore ? "Loading Tickets…" : "Show more Tickets"}
+                    </button>
+                  </Show>
                   <button
                     type="button"
                     class="workspace-action"
@@ -331,7 +347,11 @@ export function TicketBoardContents(props: {
                     !members().length && !props.epics.some((child) => child.parentId === epic().id)
                   }
                 >
-                  <p class="epic-folder-empty">No tickets in this Epic yet.</p>
+                  <p class="epic-folder-empty">
+                    {props.ticketsIncomplete
+                      ? "No Tickets in the loaded pages. Show more to find other work in this Epic."
+                      : "No tickets in this Epic yet."}
+                  </p>
                 </Show>
               </div>
             </>

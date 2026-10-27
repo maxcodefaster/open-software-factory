@@ -7,7 +7,8 @@ import type {
 } from "../../../../packages/conversation-domain/src/agent-turn";
 import type { createAccessController } from "../access/controller";
 import { agentViewSchema } from "../api-contracts";
-import { navigationMessages, type createAgentController } from "./controller";
+import type { createAgentController } from "./controller";
+import { navigationMessages } from "./message-projection";
 import type { newCodingConversationInput } from "./commands";
 import { agentActivityStream } from "./activity-stream";
 

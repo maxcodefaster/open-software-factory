@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
@@ -93,7 +93,7 @@ test("compiled Setup preserves command identities and ignores browser cancellati
       },
     },
   } satisfies { [K in keyof FactoryServices]?: Partial<FactoryServices[K]> };
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(
     pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href
   );
   const endpoint = createServerFunctionEndpoint({
@@ -104,7 +104,7 @@ test("compiled Setup preserves command identities and ignores browser cancellati
     requireFresh: async () => {
       throw new Error("Setup did not add a fresh-authentication gate");
     },
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
   });
   const call = async (name: string, args: unknown[]) =>
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));

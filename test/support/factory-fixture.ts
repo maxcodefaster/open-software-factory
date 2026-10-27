@@ -79,6 +79,10 @@ export async function deleteFactoryProject(
     await database.client.begin(async (transaction) => {
       await transaction`DELETE FROM factory.usage_operation WHERE project_id=${projectID}`;
       await transaction`SET LOCAL session_replication_role = 'replica'`;
+      await transaction`DELETE FROM factory.implementation_order WHERE project_id=${projectID}`;
+      await transaction`DELETE FROM factory.project_delivery_queue WHERE project_id=${projectID}`;
+      await transaction`DELETE FROM factory.project_delivery_policy WHERE project_id=${projectID}`;
+      await transaction`DELETE FROM factory.technical_design_revision WHERE ticket_id IN (SELECT id FROM factory.ticket WHERE project_id=${projectID})`;
       await transaction`DELETE FROM factory.project_setup_confirmation WHERE inspection_id IN (SELECT id FROM factory.project_setup_inspection WHERE project_id=${projectID})`;
       await transaction`DELETE FROM factory.project_setup_inspection WHERE project_id=${projectID}`;
       await transaction`DELETE FROM factory.project_setup_readiness WHERE project_id=${projectID}`;

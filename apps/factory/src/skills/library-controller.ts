@@ -21,6 +21,15 @@ import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 import { starterSkills } from "./starters";
 import { previewSkillImport, previewRepositorySkill, checkSkillSourceUpdate } from "./import";
+import {
+  defaultLibraryCover,
+  libraryCoverInput,
+} from "../../../../packages/conversation-domain/src/library-covers";
+import {
+  initializeLibraryCoverIn,
+  libraryCoversIn,
+  saveLibraryCoverIn,
+} from "../library-covers/store";
 
 const nil = "00000000-0000-0000-0000-000000000000";
 const hash = (content: SkillContent) =>
@@ -143,6 +152,11 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
         item.ownerId === userId ||
         (item.scope === "project" && item.projectId === projectId),
     );
+    const covers = await libraryCoversIn(
+      sql,
+      "skill",
+      visible.map((item) => item.id),
+    );
     const rows = await sql<
       Array<{
         libraryId: string;
@@ -231,6 +245,7 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       choices: choices.filter((choice) => visible.some((item) => item.id === choice.libraryId)),
       entries: visible.map((library) => ({
         ...library,
+        cover: covers.get(library.id) ?? null,
         editable:
           library.ownerId === userId ||
           (library.scope === "system" && access.canManageSystem) ||
@@ -264,89 +279,114 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
       await seed(sql, userId);
       return viewIn(sql, userId, projectId, legacy);
     },
-    async save(value: unknown, userId: string) {
+    async saveIn(sql: AgentTurnTransaction, value: unknown, userId: string) {
       const input = skillLibrarySaveInput.parse(value);
-      return database.client.begin(async (sql) => {
-        await lock(sql);
-        await authority(sql, userId, input.scope, input.projectId);
-        let library = (await libraries(sql)).find((item) => item.id === input.libraryId);
-        if (library) {
-          if (
-            library.scope !== input.scope ||
-            (library.scope === "personal" && library.ownerId !== userId) ||
-            (library.scope === "project" && library.projectId !== input.projectId)
-          )
-            throw new CommandError("not-found", "Skill not found");
-        } else {
-          if (input.expectedRevision !== 0)
-            throw new CommandError("conflict", "The previous skill version is unavailable");
-          library = {
-            id: input.libraryId,
-            storageKey: `library-${input.libraryId}`,
-            scope: input.scope,
-            ownerId: input.scope === "personal" ? userId : null,
-            projectId: input.scope === "project" ? (input.projectId ?? null) : null,
-          };
-          await sql`INSERT INTO factory.skill_library(id, storage_key, scope, owner_id, project_id) VALUES (${library.id}, ${library.storageKey}, ${library.scope}, ${library.ownerId}, ${library.projectId})`;
-        }
-        await writeRevision(
+      await lock(sql);
+      await authority(sql, userId, input.scope, input.projectId);
+      let library = (await libraries(sql)).find((item) => item.id === input.libraryId);
+      if (library) {
+        if (
+          library.scope !== input.scope ||
+          (library.scope === "personal" && library.ownerId !== userId) ||
+          (library.scope === "project" && library.projectId !== input.projectId)
+        )
+          throw new CommandError("not-found", "Skill not found");
+      } else {
+        if (input.expectedRevision !== 0)
+          throw new CommandError("conflict", "The previous skill version is unavailable");
+        library = {
+          id: input.libraryId,
+          storageKey: `library-${input.libraryId}`,
+          scope: input.scope,
+          ownerId: input.scope === "personal" ? userId : null,
+          projectId: input.scope === "project" ? (input.projectId ?? null) : null,
+        };
+        await sql`INSERT INTO factory.skill_library(id, storage_key, scope, owner_id, project_id) VALUES (${library.id}, ${library.storageKey}, ${library.scope}, ${library.ownerId}, ${library.projectId})`;
+        await initializeLibraryCoverIn(
           sql,
-          library,
-          input.revisionId,
-          input.expectedRevision,
-          input.content,
+          "skill",
+          library.id,
+          defaultLibraryCover(library.id),
           userId,
         );
-        return { libraryId: library.id, revisionId: input.revisionId };
+      }
+      await writeRevision(
+        sql,
+        library,
+        input.revisionId,
+        input.expectedRevision,
+        input.content,
+        userId,
+      );
+      return { libraryId: library.id, revisionId: input.revisionId };
+    },
+    async save(value: unknown, userId: string) {
+      return database.client.begin((sql) => this.saveIn(sql, value, userId));
+    },
+    async cover(value: unknown, userId: string) {
+      const input = libraryCoverInput.parse(value);
+      return database.client.begin(async (sql) => {
+        await lock(sql);
+        const library = (await libraries(sql)).find((item) => item.id === input.libraryId);
+        if (!library || (library.scope === "personal" && library.ownerId !== userId))
+          throw new CommandError("not-found", "Skill not found");
+        await authority(sql, userId, library.scope, library.projectId ?? undefined);
+        return saveLibraryCoverIn(sql, "skill", input, userId);
       });
+    },
+    async chooseIn(
+      sql: AgentTurnTransaction,
+      value: unknown,
+      userId: string,
+      legacy?: (sql: AgentTurnTransaction) => Promise<RetainedSettings>,
+    ) {
+      const input = skillChoiceInput.parse(value);
+      await lock(sql);
+      await authority(sql, userId, input.scope, input.projectId);
+      if (input.scope !== "system" && !input.projectId)
+        throw new CommandError("conflict", "Select a Project for skill choices");
+      if (input.state === "required" && input.scope === "personal")
+        throw new CommandError("conflict", "Only managers can require a skill");
+      const view = await viewIn(sql, userId, input.projectId, await legacy?.(sql));
+      const entry = view.entries.find((item) => item.id === input.libraryId);
+      if (
+        !entry ||
+        (input.scope === "system" && entry.scope !== "system") ||
+        (input.scope === "project" && entry.scope === "personal")
+      )
+        throw new CommandError("not-found", "Skill is unavailable at this scope");
+      const parents = view.choices.filter(
+        (item) =>
+          item.scope !== input.scope && (input.scope === "personal" || item.scope === "system"),
+      );
+      const required = resolveLibraryChoice(parents, entry.id, input.role);
+      if (required?.state === "required")
+        throw new CommandError("conflict", "This skill is required by an inherited rule");
+      const revisionId = input.revisionId ?? entry.revisions[0]?.id;
+      const revision = entry.revisions.find((item) => item.id === revisionId);
+      if (!revision?.published || !revision.content.roles.includes(input.role))
+        throw new CommandError("conflict", "Select an available version for this role");
+      const context = input.scope === "system" ? nil : (input.projectId ?? nil);
+      const owner = input.scope === "personal" ? userId : nil;
+      const [current] = await sql<
+        Array<{ version: number }>
+      >`SELECT version::float8 AS version FROM factory.skill_library_choice WHERE library_id = ${entry.id} AND scope = ${input.scope} AND context_id = ${context} AND user_id = ${owner} AND role = ${input.role}`;
+      if ((current?.version ?? 0) !== input.expectedVersion)
+        throw new CommandError(
+          "conflict",
+          "Skill choices changed elsewhere. Reload before saving.",
+        );
+      await sql`INSERT INTO factory.skill_library_choice(library_id, scope, context_id, user_id, role, state, revision_id, version)
+          VALUES (${entry.id}, ${input.scope}, ${context}, ${owner}, ${input.role}, ${input.state}, ${revision.id}, ${(current?.version ?? 0) + 1})
+          ON CONFLICT (library_id, scope, context_id, user_id, role) DO UPDATE SET state = EXCLUDED.state, revision_id = EXCLUDED.revision_id, version = EXCLUDED.version`;
+      return { saved: true };
     },
     async choose(
       value: unknown,
       userId: string,
       legacy?: (sql: AgentTurnTransaction) => Promise<RetainedSettings>,
     ) {
-      const input = skillChoiceInput.parse(value);
-      return database.client.begin(async (sql) => {
-        await lock(sql);
-        await authority(sql, userId, input.scope, input.projectId);
-        if (input.scope !== "system" && !input.projectId)
-          throw new CommandError("conflict", "Select a Project for skill choices");
-        if (input.state === "required" && input.scope === "personal")
-          throw new CommandError("conflict", "Only managers can require a skill");
-        const view = await viewIn(sql, userId, input.projectId, await legacy?.(sql));
-        const entry = view.entries.find((item) => item.id === input.libraryId);
-        if (
-          !entry ||
-          (input.scope === "system" && entry.scope !== "system") ||
-          (input.scope === "project" && entry.scope === "personal")
-        )
-          throw new CommandError("not-found", "Skill is unavailable at this scope");
-        const parents = view.choices.filter(
-          (item) =>
-            item.scope !== input.scope && (input.scope === "personal" || item.scope === "system"),
-        );
-        const required = resolveLibraryChoice(parents, entry.id, input.role);
-        if (required?.state === "required")
-          throw new CommandError("conflict", "This skill is required by an inherited rule");
-        const revisionId = input.revisionId ?? entry.revisions[0]?.id;
-        const revision = entry.revisions.find((item) => item.id === revisionId);
-        if (!revision?.published || !revision.content.roles.includes(input.role))
-          throw new CommandError("conflict", "Select an available version for this role");
-        const context = input.scope === "system" ? nil : (input.projectId ?? nil);
-        const owner = input.scope === "personal" ? userId : nil;
-        const [current] = await sql<
-          Array<{ version: number }>
-        >`SELECT version::float8 AS version FROM factory.skill_library_choice WHERE library_id = ${entry.id} AND scope = ${input.scope} AND context_id = ${context} AND user_id = ${owner} AND role = ${input.role}`;
-        if ((current?.version ?? 0) !== input.expectedVersion)
-          throw new CommandError(
-            "conflict",
-            "Skill choices changed elsewhere. Reload before saving.",
-          );
-        await sql`INSERT INTO factory.skill_library_choice(library_id, scope, context_id, user_id, role, state, revision_id, version)
-          VALUES (${entry.id}, ${input.scope}, ${context}, ${owner}, ${input.role}, ${input.state}, ${revision.id}, ${(current?.version ?? 0) + 1})
-          ON CONFLICT (library_id, scope, context_id, user_id, role) DO UPDATE SET state = EXCLUDED.state, revision_id = EXCLUDED.revision_id, version = EXCLUDED.version`;
-        return { saved: true };
-      });
+      return database.client.begin((sql) => this.chooseIn(sql, value, userId, legacy));
     },
     async propose(
       id: string,
@@ -406,6 +446,19 @@ export function createSkillLibraryController(database: ReturnType<typeof createD
           projectId: proposal.projectId,
         };
         await sql`INSERT INTO factory.skill_library(id, storage_key, scope, project_id) VALUES (${library.id}, ${library.storageKey}, ${library.scope}, ${library.projectId})`;
+        const [source] = await sql<Array<{ libraryId: string }>>`
+          SELECT library_id AS "libraryId" FROM factory.skill_library_revision
+          WHERE revision_id = ${proposal.revisionId}`;
+        const cover = source
+          ? (await libraryCoversIn(sql, "skill", [source.libraryId])).get(source.libraryId)
+          : undefined;
+        await initializeLibraryCoverIn(
+          sql,
+          "skill",
+          library.id,
+          cover?.key ?? defaultLibraryCover(library.id),
+          userId,
+        );
         // Deterministic copy identity, isolated from the author's mutable future versions.
         const identity = createHash("md5").update(`shared-revision:${proposalId}`).digest("hex");
         const revisionId = `${identity.slice(0, 8)}-${identity.slice(8, 12)}-4${identity.slice(13, 16)}-8${identity.slice(17, 20)}-${identity.slice(20)}`;

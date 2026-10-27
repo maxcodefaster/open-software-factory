@@ -41,7 +41,13 @@ test("migrated UI calls shared services without parallel HTTP command adapters",
     "routes/projects.ts",
   ])
     expect(existsSync(new URL(`../${file}`, import.meta.url))).toBe(false);
-  const host = await Bun.file(new URL("../server.ts", import.meta.url)).text();
+  const host = (
+    await Promise.all(
+      ["server.ts", "server/application.ts", "server/protocols.ts", "server/transport.ts"].map(
+        (file) => Bun.file(new URL(`../${file}`, import.meta.url)).text(),
+      ),
+    )
+  ).join("\n");
   expect(host).not.toMatch(/create(?:ProjectModel|ModelConnection|Environment)Routes/);
   expect(host).not.toContain("createAccessRoutes");
   expect(host).not.toContain("createProjectSetupRoutes");
@@ -73,7 +79,7 @@ test("migrated UI calls shared services without parallel HTTP command adapters",
   const editor = await Bun.file(new URL("../developer-ide-workspace.tsx", import.meta.url)).text();
   expect(editor).not.toMatch(/\bapiRequest\b|\bfetch\s*\(/);
   expect(editor.match(/\/api\/[^`"'\s]*/g)).toEqual([
-    "/api/developer-ide/access?embed=1&epoch=${current.epoch}",
+    `/api/developer-ide/access?embed=1&epoch=\${current.epoch}`,
   ]);
   expect(editor).toContain("serverCall");
   const attachments = await Bun.file(new URL("../attachments/ui.tsx", import.meta.url)).text();
@@ -134,5 +140,19 @@ test("migrated UI calls shared services without parallel HTTP command adapters",
   ]) {
     const source = await Bun.file(new URL(`./${file}.ts`, import.meta.url)).text();
     expect(source).not.toMatch(/\bfetch\s*\(|\bapiRequest\b|new Request\s*\(/);
+    expect(source).toContain("createServerFn(");
+    expect(source).not.toContain('"use server"');
   }
+  const start = await Bun.file(new URL("../start-server.ts", import.meta.url)).text();
+  expect(start).toContain("createStartHandler");
+  expect(start).not.toContain("virtual:solid-server-function-handler");
+  const config = await Bun.file(new URL("../../vite.config.ts", import.meta.url)).text();
+  expect(config).not.toContain("factoryServerFunctionManifest");
+  expect(config).not.toContain("factoryFunctionManifestID");
+
+  // Keep the persistent desktop as composition, not a second giant render or command hook.
+  for (const component of ["TicketWorkspace", "TicketBoardContents", "ConversationSwitcher"])
+    expect(mainUI).not.toContain(`<${component}`);
+  for (const command of ["sendProjectMessage", "promptAgent", "implementTicket"])
+    expect(mainUI).not.toMatch(new RegExp(`async function ${command}\\b`));
 });

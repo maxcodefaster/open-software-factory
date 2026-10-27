@@ -1,7 +1,7 @@
 import { createSignal, Show } from "solid-js";
 import type { SkillContent } from "../../../../packages/conversation-domain/src/skills";
 import { serverCall } from "../server-functions/result";
-import { previewSkillImport, previewRepositorySkill } from "../server-functions/skills";
+import { previewRepositorySkill, previewSkillImport } from "../server-functions/skills";
 
 export function SkillImportPanel(props: {
   onPreview: (preview: { content: SkillContent; warnings: string[] }) => void;
@@ -54,7 +54,7 @@ export function SkillImportPanel(props: {
         }
         files.push({ path: relative.slice(prefix.length), body, encoding });
       }
-      return serverCall(previewSkillImport({ files }));
+      return serverCall(previewSkillImport({ data: [{ files }] }));
     });
   }
   return (
@@ -112,9 +112,13 @@ export function SkillImportPanel(props: {
             void preview(() =>
               serverCall(
                 previewRepositorySkill({
-                  repository: repository(),
-                  commit: commit(),
-                  path: path(),
+                  data: [
+                    {
+                      repository: repository(),
+                      commit: commit(),
+                      path: path(),
+                    },
+                  ],
                 }),
               ),
             );

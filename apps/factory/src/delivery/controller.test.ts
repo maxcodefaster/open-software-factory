@@ -18,6 +18,9 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
   let rejectPrompt = false;
   let promptCalls = 0;
   let repairAcknowledged = false;
+  let actionStatus = "failure";
+  let diagnosisKind = "check-failed";
+  let recordedDiagnosis: unknown;
   let supersededState = "runner-starting";
   let supersededRunner = "42";
   let supersededStopped = false;
@@ -47,6 +50,16 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
       }
       if (query.includes("UPDATE factory.verification SET runner_id = NULL")) supersededRunner = "";
       if (query.includes("AS active")) return [{ active: state === "active" }];
+      if (
+        query.includes("UPDATE factory.verification SET state") &&
+        query.includes("RETURNING diagnosis")
+      ) {
+        const encoded = values.find(
+          (value) => typeof value === "string" && value.startsWith('{"kind":'),
+        );
+        recordedDiagnosis = encoded ? JSON.parse(String(encoded)) : null;
+        return [{ diagnosis: recordedDiagnosis }];
+      }
       if (query.includes("ticket.title, ticket.description"))
         return [
           {
@@ -77,6 +90,7 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
             state: "failed",
             actionRunID: "1",
             repairPromptedAt: repairAcknowledged ? "now" : null,
+            diagnosis: recordedDiagnosis,
           },
         ];
       if (query.includes("SELECT state FROM factory.change_agent_session"))
@@ -123,10 +137,27 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
         id: 1,
         workflowID: "factory-verification.yml",
         event: "pull_request",
-        status: "failure",
+        status: actionStatus,
         url: "http://forge/runs/1",
       },
     ],
+    diagnoseVerification: async () => ({
+      kind: diagnosisKind,
+      summary: "Project checks: test failed",
+      jobs:
+        diagnosisKind === "check-failed"
+          ? [
+              {
+                id: 1,
+                attempt: 1,
+                name: "Checks",
+                step: 1,
+                stepName: "test",
+                output: "Expected 200, got 500",
+              },
+            ]
+          : [],
+    }),
     getDefaultBranch: async () => ({ headSha: defaultHead }),
     mergeFastForward: async () => {
       mergeCalls += 1;
@@ -178,6 +209,9 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
     setDefaultHead: (value: string) => {
       defaultHead = value;
     },
+    setMergeState: (value: string) => {
+      mergeState = value;
+    },
     failPersistenceOnce: () => {
       failMergePersistence = true;
     },
@@ -195,10 +229,27 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
     deletedRunners,
     supersededState: () => supersededState,
     retiredBranches,
+    setActionStatus: (value: string) => {
+      actionStatus = value;
+    },
+    setDiagnosisKind: (value: string) => {
+      diagnosisKind = value;
+    },
   };
 }
 
 describe("Delivery recovery", () => {
+  test.each(["cancelled", "skipped", "execution-failed", "unavailable"])(
+    "%s cannot commission an application-code correction",
+    async (kind) => {
+      const f = fixture(false, true);
+      f.setDiagnosisKind(kind);
+      f.setActionStatus(["cancelled", "skipped"].includes(kind) ? kind : "failure");
+      await f.controller.reconcile("change");
+      expect(f.promptCalls()).toBe(0);
+      expect(f.repairAcknowledged()).toBe(false);
+    },
+  );
   test("retires a delivered protected branch without opening a deletion permission gap", async () => {
     const f = fixture(true, false, false, true);
     await f.controller.reconcile("change");
@@ -267,8 +318,16 @@ describe("Delivery recovery", () => {
     expect(f.mergeCalls()).toBe(1);
   });
 
-  test("does not mistake unrelated default-branch movement for a successful merge", async () => {
+  test("does not mistake unrelated default-branch movement for a confirmed merge outcome", async () => {
     const f = fixture();
+    f.setDefaultHead("c".repeat(40));
+    await f.controller.reconcile("change");
+    expect(f.mergeState()).toBe("ambiguous");
+    expect(f.mergeCalls()).toBe(0);
+  });
+  test("rejects an undispatched merge when its default-branch basis moved", async () => {
+    const f = fixture();
+    f.setMergeState("pending");
     f.setDefaultHead("c".repeat(40));
     await f.controller.reconcile("change");
     expect(f.mergeState()).toBe("failed");

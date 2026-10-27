@@ -5,6 +5,7 @@ import { factoryProcess, eventually } from "../fixtures/factory-process";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createWikiSourceUpdates } from "../../apps/factory/src/knowledge/source-updates";
 import { createForgejoClient } from "../../packages/forge/src/forge";
+import { fixtureValue } from "../fixtures/value";
 
 test
   .skipIf(process.env["FACTORY_WIKI_LIVE"] !== "1")
@@ -18,9 +19,9 @@ test
     ).trim();
     const owned = await factoryProcess();
     const db = owned.connect();
-    const owner = process.env["FACTORY_FORGEJO_OWNER"]!;
-    const api = process.env["FACTORY_FORGEJO_API_URL"]!;
-    const token = process.env["FACTORY_FORGEJO_TOKEN"]!;
+    const owner = process.env["FACTORY_FORGEJO_OWNER"];
+    const api = process.env["FACTORY_FORGEJO_API_URL"];
+    const token = process.env["FACTORY_FORGEJO_TOKEN"];
     const name = `wiki-live-${crypto.randomUUID().slice(0, 8)}`;
     const project = crypto.randomUUID(),
       user = crypto.randomUUID();
@@ -55,7 +56,7 @@ test
     let wiki: ReturnType<typeof createKnowledgeController> | undefined;
     const complete = () =>
       eventually(
-        () => wiki!.generation(project),
+        () => fixtureValue(wiki, "wiki").generation(project),
         (value) => ["succeeded", "failed"].includes(String(value?.["state"])),
         "Configured Wiki generation did not finish",
         200_000,
@@ -106,7 +107,7 @@ test
             "expect(reserve(10,3)).toBe(7)",
           ],
         ]) {
-          await file(`packages/${module}/index.ts`, content!);
+          await file(`packages/${module}/index.ts`, fixtureValue(content, "content"));
           await file(
             `packages/${module}/index.test.ts`,
             `import {test,expect} from 'bun:test';\nimport {${module === "billing" ? "invoice" : module === "fulfilment" ? "dispatch" : "reserve"}} from './index';\ntest('verified ${module}',()=>{${assertion}});`,
@@ -132,7 +133,7 @@ test
       expect(initial.length).toBeGreaterThan(0);
       expect(initial.length).toBeLessThanOrEqual(6);
       expect(initial.map((page) => page.body).join("\n")).toMatch(/clos|history|retain/i);
-      const page = initial[0]!;
+      const page = fixtureValue(initial[0], "initial[0]");
       updates = createWikiSourceUpdates({
         database: db,
         forge: createForgejoClient({ apiURL: api, token }),
@@ -140,7 +141,7 @@ test
         owner,
         receiverURL: `http://host.docker.internal:${listener.port}`,
         signingKey: "owned-live-model-hook-key-not-production",
-        reconcile: (projectID) => wiki!.reconcile(projectID),
+        reconcile: (projectID) => fixtureValue(wiki, "wiki").reconcile(projectID),
       });
       await updates.ensure(project);
       await wiki.edit(
@@ -180,8 +181,8 @@ test
       );
       await eventually(
         async () => {
-          await updates!.drain();
-          return wiki!.generation(project);
+          await fixtureValue(updates, "updates").drain();
+          return fixtureValue(wiki, "wiki").generation(project);
         },
         (value) => value?.["id"] !== first?.["id"],
         "Signed push did not start a configured-model update",

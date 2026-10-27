@@ -25,7 +25,7 @@ export function bindPopoverKeyboard(
         (
           element.querySelector<HTMLElement>(
             '[aria-current="true"], [aria-current="page"], [data-popover-option]:not(:disabled)',
-          ) ?? available[0]
+          ) ?? (event.target.hasAttribute("data-popover-search") ? undefined : available[0])
         )?.focus();
       }
       return;

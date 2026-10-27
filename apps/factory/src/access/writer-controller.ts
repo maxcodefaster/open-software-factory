@@ -3,7 +3,7 @@ import { forgeUsername } from "../../../../packages/forge/src/access";
 import { CommandError } from "../command-error";
 import { lockChangeWriterIn } from "./change-writer";
 import { projectDevelopmentAuthorityIn } from "./controller";
-import { writerActivity, type WriterActivity } from "./writer-activity";
+import { type WriterActivity, writerActivity } from "./writer-activity";
 
 type Database = ReturnType<typeof createDatabase>;
 type WriterView = {
@@ -304,9 +304,14 @@ export function createChangeWriterController(options: {
           AND session.state IN ('committed','stopped') AND NOT session.stop_pending
           AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=writer.turn_id AND state IN ('completed','stopped','failed'))
           AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${changeID} AND state IN ('pending','dispatching','running','uncertain'))
-          AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${changeID} AND state NOT IN ('succeeded','failed'))`;
+          AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${changeID} AND state NOT IN ('succeeded','failed'))
+          AND NOT EXISTS(SELECT 1 FROM factory.project_delivery_policy policy
+            JOIN factory.change change ON change.project_id=policy.project_id
+            WHERE change.id=${changeID} AND policy.revoked_at IS NULL)`;
       // Settled work needs no explicit Stop. The first authorized developer
       // receives editing after the same process and Git fence as early takeover.
+      // Delegated Delivery retains its writer until an explicit takeover.
+      // Merely reading a Ticket must not stop that pipeline or revoke its basis.
       if (finished) return this.takeOver(changeID, userID, crypto.randomUUID(), finished.epoch);
       const [pending] = await database.client<{ commandID: string }[]>`
         SELECT writer.request_id AS "commandID" FROM factory.change_writer writer

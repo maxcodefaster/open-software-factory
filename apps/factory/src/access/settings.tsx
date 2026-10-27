@@ -1,17 +1,17 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import {
-  getProjectMembers,
-  getAccounts,
-  getSecurityPolicy,
   createAccount,
-  saveProjectMember,
-  removeProjectMember,
-  setAccountAccess,
   endAccountSessions,
+  getAccounts,
+  getProjectMembers,
+  getSecurityPolicy,
+  removeProjectMember,
+  saveProjectMember,
+  setAccountAccess,
 } from "../server-functions/access";
-import { serverCall, type ServerValue } from "../server-functions/result";
-import { memberInput } from "./commands";
+import { type ServerValue, serverCall } from "../server-functions/result";
 import { AccountActions } from "./account-actions";
+import { memberInput } from "./commands";
 import { FreshAuthentication } from "./fresh-authentication";
 import "./settings.css";
 
@@ -40,11 +40,13 @@ export function AccessSettings(props: {
     const version = ++loadVersion;
     const projectID = props.project?.id;
     const [memberResult, userResult, policy] = await Promise.all([
-      projectID ? serverCall(getProjectMembers(projectID)) : Promise.resolve({ members: [] }),
+      projectID
+        ? serverCall(getProjectMembers({ data: [projectID] }))
+        : Promise.resolve({ members: [] }),
       props.systemManager && !props.project
-        ? serverCall(getAccounts())
+        ? serverCall(getAccounts({ data: [] }))
         : Promise.resolve({ users: [] }),
-      serverCall(getSecurityPolicy()),
+      serverCall(getSecurityPolicy({ data: [] })),
     ]);
     if (!disposed && version === loadVersion) {
       setMembers(memberResult.members);
@@ -69,9 +71,13 @@ export function AccessSettings(props: {
     const data = new FormData(form);
     await serverCall(
       createAccount({
-        name: String(data.get("name") ?? ""),
-        email: String(data.get("email") ?? ""),
-        password: String(data.get("password") ?? ""),
+        data: [
+          {
+            name: String(data.get("name") ?? ""),
+            email: String(data.get("email") ?? ""),
+            password: String(data.get("password") ?? ""),
+          },
+        ],
       }),
     );
     if (disposed) return;
@@ -84,14 +90,14 @@ export function AccessSettings(props: {
   async function setMember(email: string, role: Member["role"], manageProject = false) {
     const projectID = props.project?.id;
     if (!projectID) return;
-    await serverCall(saveProjectMember(projectID, { email, role, manageProject }));
+    await serverCall(saveProjectMember({ data: [projectID, { email, role, manageProject }] }));
     await load();
     if (!disposed) setNotice("Project access saved.");
   }
   async function removeMember(member: Member) {
     const projectID = props.project?.id;
     if (!projectID) return;
-    await serverCall(removeProjectMember(projectID, member.userId));
+    await serverCall(removeProjectMember({ data: [projectID, member.userId] }));
     if (disposed) return;
     setRemoving(undefined);
     await load();
@@ -100,7 +106,9 @@ export function AccessSettings(props: {
   }
   async function changeAccount(userID: string, kind: "access" | "sessions", disabled = true) {
     await serverCall(
-      kind === "access" ? setAccountAccess(userID, disabled) : endAccountSessions(userID),
+      kind === "access"
+        ? setAccountAccess({ data: [userID, disabled] })
+        : endAccountSessions({ data: [userID] }),
     );
     setAccountAction(undefined);
     await load();
@@ -222,7 +230,7 @@ export function AccessSettings(props: {
                     void act(() => addAccount(form));
                   }}
                 >
-                  <label>
+                  <label class="control-field">
                     Name
                     <input
                       name="name"
@@ -232,7 +240,7 @@ export function AccessSettings(props: {
                       disabled={busy()}
                     />
                   </label>
-                  <label>
+                  <label class="control-field">
                     Email
                     <input
                       name="email"
@@ -243,7 +251,7 @@ export function AccessSettings(props: {
                       disabled={busy()}
                     />
                   </label>
-                  <label>
+                  <label class="control-field">
                     Initial password
                     <input
                       name="password"
@@ -298,7 +306,7 @@ export function AccessSettings(props: {
                               <option value="developer">Developer</option>
                               <option value="product-contributor">Product Contributor</option>
                             </select>
-                            <label class="access-permission">
+                            <label class="control-check access-permission">
                               <input
                                 type="checkbox"
                                 aria-label={`Manage project for ${member.name}`}
@@ -380,7 +388,7 @@ export function AccessSettings(props: {
                   });
                 }}
               >
-                <label>
+                <label class="control-field">
                   Member email
                   <input
                     name="email"
@@ -391,14 +399,14 @@ export function AccessSettings(props: {
                     disabled={busy()}
                   />
                 </label>
-                <label>
+                <label class="control-field">
                   Role
                   <select name="role" disabled={busy()}>
                     <option value="developer">Developer</option>
                     <option value="product-contributor">Product Contributor</option>
                   </select>
                 </label>
-                <label class="access-permission">
+                <label class="control-check access-permission">
                   <input name="manageProject" type="checkbox" disabled={busy()} />
                   Manage project
                 </label>

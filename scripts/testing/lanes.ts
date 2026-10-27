@@ -1,9 +1,11 @@
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { rm } from "node:fs/promises";
 
 const nativeNames = new Set([
+  "forgejo-diagnostics.native",
   "native-project-releases",
   "attachment-s3",
+  "object-storage.native",
   "attachment-browser",
   "attachment-factory-browser",
   "agent-native-commit-recovery",
@@ -17,6 +19,9 @@ const nativeNames = new Set([
   "openbao",
 ]);
 const compiledProtocolTests = new Set([
+  "client-budgets.test.ts",
+  "server-function-learning.test.ts",
+  "server-function-inbox.test.ts",
   "server-function-runtime.test.ts",
   "server-function-tickets.test.ts",
   "server-function-delivery.test.ts",
@@ -38,10 +43,7 @@ export function controllerNeedsDatabase(path: string) {
   return !compiledProtocolTests.has(path.split("/").at(-1) ?? "");
 }
 export function integrationLane(path: string) {
-  const name = path
-    .split("/")
-    .at(-1)!
-    .replace(/\.test\.ts$/, "");
+  const name = basename(path).replace(/\.test\.ts$/, "");
   return name.endsWith(".live")
     ? "live"
     : name.startsWith("opencode-") || nativeNames.has(name)
@@ -70,7 +72,7 @@ export const browserFiles = {
 // require the paid lane. They must also be discoverable by that explicit lane.
 export const mixedPaidBrowserFiles = ["ticket-requirements-journey.spec.ts"];
 export function browserLane(path: string) {
-  const name = path.split("/").at(-1)!;
+  const name = basename(path);
   for (const [lane, files] of Object.entries(browserFiles)) if (files.includes(name)) return lane;
   if (name.includes(".live.")) throw new Error(`Unclassified browser live proof: ${name}`);
   return "ui";
@@ -113,7 +115,7 @@ if (import.meta.main) {
         >
       | undefined;
     try {
-      // Client, handler and manifest belong to this invocation. Never rebuild
+      // Client and compiled Start handler belong to this invocation. Never rebuild
       // the artifacts a retained Factory or another proof is currently serving.
       if (buildDirectory) {
         env["FACTORY_BUILD_DIRECTORY"] = buildDirectory;

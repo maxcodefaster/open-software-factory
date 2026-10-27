@@ -5,6 +5,9 @@ import {
   candidateReviewPermissions,
   candidateReviewResultInput,
   candidateReviewToolCatalogue,
+  checkedReviewResult,
+  findingCheckResultInput,
+  findingCheckInstructions,
   reviewNeedsBrowser,
 } from "./candidate-review";
 
@@ -31,6 +34,104 @@ const result = {
   findings: [],
   ui: "not-applicable",
 };
+const proposal = candidateReviewResultInput.parse({
+  ...result,
+  verdict: "changes-requested",
+  findings: [
+    {
+      severity: "blocking",
+      title: "Suspected defect",
+      explanation: "A concrete claim.",
+      reproduction: "Use the affected input.",
+    },
+    {
+      severity: "advisory",
+      title: "Optional naming",
+      explanation: "A preference.",
+      reproduction: "Read the name.",
+    },
+  ],
+});
+function findingCheck(status: "confirmed" | "dismissed" | "unresolved") {
+  return findingCheckResultInput.parse({
+    summary: `The claim was ${status}.`,
+    checks: [
+      {
+        finding: 1,
+        status,
+        evidence: "Inspected the relevant guard.",
+        evidenceIds: ["source:string:guard"],
+      },
+    ],
+  });
+}
+test("confirmed findings alone commission correction, false alarms pass and material uncertainty stays incomplete", () => {
+  expect(checkedReviewResult(proposal, findingCheck("confirmed")).verdict).toBe(
+    "changes-requested",
+  );
+  const dismissed = checkedReviewResult(proposal, findingCheck("dismissed"));
+  expect(dismissed.verdict).toBe("passed");
+  expect(dismissed.findings.map((finding) => finding.title)).toEqual(["Optional naming"]);
+  expect(checkedReviewResult(proposal, findingCheck("unresolved")).verdict).toBe("incomplete");
+  expect(proposal.findings[0]?.explanation).toBe("A concrete claim.");
+});
+test("a finding check accounts for every blocker exactly once and cannot invent findings or rewrite passed criteria", () => {
+  const check = findingCheck("dismissed");
+  for (const changed of [
+    { checks: [] },
+    { checks: [...check.checks, ...check.checks] },
+    { checks: check.checks.map((item) => ({ ...item, finding: 2 })) },
+    { checks: check.checks.map((item) => ({ ...item, finding: 3 })) },
+    {
+      criteria: [
+        {
+          criterion: 1,
+          status: "passed" as const,
+          evidence: "Unnecessary repetition.",
+          evidenceIds: [],
+        },
+      ],
+    },
+  ])
+    expect(() => checkedReviewResult(proposal, { ...check, ...changed })).toThrow();
+});
+test("dismissing a blocker cannot silently pass failed criteria or unavailable App QA", () => {
+  const failed = {
+    ...proposal,
+    criteria: [{ criterion: 1, status: "failed" as const, evidence: "Claimed failure." }],
+  };
+  expect(checkedReviewResult(failed, findingCheck("dismissed")).verdict).toBe("incomplete");
+  const rechecked = findingCheckResultInput.parse({
+    ...findingCheck("dismissed"),
+    criteria: [
+      {
+        criterion: 1,
+        status: "passed",
+        evidence: "The guard establishes the requirement.",
+        evidenceIds: ["source:string:guard"],
+      },
+    ],
+  });
+  expect(checkedReviewResult(failed, rechecked).verdict).toBe("passed");
+  expect(checkedReviewResult({ ...failed, ui: "unverified" }, rechecked).verdict).toBe(
+    "incomplete",
+  );
+});
+test("finding checks receive a focused counter-investigation, not another full review", () => {
+  const policy = findingCheckInstructions({
+    commitSHA: "d".repeat(40),
+    baseSHA: "a".repeat(40),
+    verificationID: "owned-ci",
+    specification: "Approved behavior.",
+    proposal,
+  });
+  expect(policy).toContain("Try to disprove");
+  expect(policy).toContain("Do not repeat the full review");
+  expect(policy).toContain("original one-based position");
+  expect(policy).toContain("source-level argument");
+  expect(policy).toContain("own evidence");
+});
+
 test("review cannot approve missing proof, duplicate coverage or a blocking defect", () => {
   expect(candidateReviewResultInput.safeParse(result).success).toBe(true);
   for (const changed of [

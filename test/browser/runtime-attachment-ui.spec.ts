@@ -1,10 +1,12 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
+import { expect, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
-import { expect, test } from "@playwright/test";
 import { previewBridge } from "../../apps/factory/src/review/preview-bridge";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 const evidence = ".factory/test-results/runtime-attachment";
 const cacheDir = resolve(".factory/test-results/vite", `runtime-attachment-${crypto.randomUUID()}`);
@@ -22,6 +24,7 @@ test.beforeAll(async () => {
     cacheDir,
     publicDir: resolve("apps/factory/public"),
     plugins: [
+      factoryFixtureStart(),
       solid({ ssr: false }),
       {
         name: "owned-preview-document",
@@ -53,7 +56,10 @@ test.beforeAll(async () => {
     server: { host: "127.0.0.1", port: 0 },
   });
   await frontend.listen();
-  origin = frontend.resolvedUrls!.local[0]!.replace(/\/$/, "");
+  origin = fixtureValue(
+    fixtureValue(frontend.resolvedUrls, "frontend.resolvedUrls").local[0],
+    "frontend.resolvedUrls!.local[0]",
+  ).replace(/\/$/, "");
   await mkdir(evidence, { recursive: true });
 });
 test.beforeEach(() => {
@@ -89,16 +95,23 @@ test("Preview accepts its parsed document, not a spoofed sender, while an image 
     appRuntimeOrigin(origin, attemptID, "app"),
   );
   await expect(connection).toBeVisible();
-  await page.evaluate(() =>
-    window.dispatchEvent(
+  await page.evaluate(() => {
+    function fixtureValue<T>(value: T, description: string): NonNullable<T> {
+      if (value === undefined || value === null)
+        throw new Error(`Missing fixture value: ${description}`);
+      return value;
+    }
+    return window.dispatchEvent(
       new MessageEvent("message", {
         origin: "https://unrelated.example",
-        source: document.querySelector<HTMLIFrameElement>('iframe[title="Factory Preview"]')!
-          .contentWindow,
+        source: fixtureValue(
+          document.querySelector<HTMLIFrameElement>('iframe[title="Factory Preview"]'),
+          "document.querySelector<HTMLIFrameElement>('iframe[title=\"Factory Preview\"]')",
+        ).contentWindow,
         data: { type: "factory-preview-document-ready" },
       }),
-    ),
-  );
+    );
+  });
   await expect(connection).toBeVisible();
   bridgeGate.resolve();
   await expect(connection).toHaveCount(0, { timeout: 3000 });

@@ -66,7 +66,7 @@ export async function languageToolsFixture(options: {
               kind: "browser",
               attemptID: attempt.id,
               channel: "language",
-              path: `/${match![2]}/${match![1]}`,
+              path: `/${match[2]}/${match[1]}`,
             },
           })
         )

@@ -21,4 +21,30 @@ describe("Zero client lifecycle", () => {
     expect(closed).toBe(1);
     lifecycle.dispose();
   });
+
+  test("refreshes a changed auth token without discarding the user's cache", async () => {
+    const tokens: string[] = [];
+    let closed = 0;
+    const client = {
+      connection: {
+        state: { current: { name: "connected" } as const },
+        async connect(options: { auth: string }) {
+          tokens.push(options.auth);
+        },
+      },
+      async close() {
+        closed++;
+      },
+    };
+    const lifecycle = new ZeroClientLifecycle<typeof client>();
+    lifecycle.select({ userId: "one", schemaVersion: "1", auth: "first" }, () => client);
+    expect(
+      lifecycle.select({ userId: "one", schemaVersion: "1", auth: "second" }, () => client),
+    ).toBe(client);
+    expect(tokens).toEqual(["second"]);
+    expect(closed).toBe(0);
+    lifecycle.dispose();
+    await Bun.sleep(0);
+    expect(closed).toBe(1);
+  });
 });

@@ -1,18 +1,16 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { createReviewMedia } from "../../apps/factory/src/review/media";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { observe } from "../fixtures/pinned-opencode";
+import { memoryPrivateObjects } from "../fixtures/private-objects";
+import { fixtureValue } from "../fixtures/value";
 
 test("native review settlement publishes every recording chunk before closing its browser", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-recording-settlement-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const browser = createBuildBrowserController(f.database, f.hub, "owned-finish-secret", media);
   const controller = createAgentController(
     f.database,
@@ -115,7 +113,6 @@ test("native review settlement publishes every recording chunk before closing it
     f.acceptResponse();
     f.release();
     await controller.shutdown();
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
@@ -124,8 +121,7 @@ test.each(["abort", "stop"] as const)(
   "%s fences a pending recording without replaying App actions or exporting chunks",
   async (ending) => {
     const f = await candidateReviewFixture();
-    const directory = await mkdtemp(join(tmpdir(), "factory-recording-pending-"));
-    const media = createReviewMedia(f.database, directory);
+    const media = createReviewMedia(f.database, memoryPrivateObjects());
     const browser = createBuildBrowserController(f.database, f.hub, "owned-pending-secret", media);
     const pending = Promise.withResolvers<void>();
     const cancellation = new AbortController();
@@ -183,16 +179,15 @@ test.each(["abort", "stop"] as const)(
     } finally {
       cancellation.abort();
       await finishing?.catch(() => {});
-      await rm(directory, { recursive: true, force: true });
       await f.dispose();
     }
   },
 );
 
-test("state-volume I/O does not hold the turn lease lock and Stop fences a staged recording", async () => {
+test("object storage I/O does not hold the turn lease lock and Stop fences a staged recording", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-recording-stage-"));
-  const media = createReviewMedia(f.database, directory);
+  const objects = memoryPrivateObjects();
+  const media = createReviewMedia(f.database, objects);
   const staged = Promise.withResolvers<void>(),
     release = Promise.withResolvers<void>();
   const originalStage = media.stage;
@@ -256,11 +251,12 @@ test("state-volume I/O does not hold the turn lease lock and Stop fences a stage
     await finishing;
     expect((await media.read(f.changeID, f.userID, grant.sessionID, null)).status).toBe(404);
     await media.sweep();
-    expect(await Bun.file(join(directory, "review-media", grant.sessionID)).exists()).toBe(false);
+    expect([...objects.blobs.keys()].some((key) => key.endsWith(`/${grant.sessionID}`))).toBe(
+      false,
+    );
   } finally {
     release.resolve();
     await finishing?.catch(() => {});
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
@@ -327,8 +323,7 @@ test("encoder failure is distinct from successful App observations and never rep
 
 test("a Project preserves earlier review evidence and automatically records its next QA browser", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-automatic-recording-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const review = createVisualReviewController(f.database);
   const previousID = crypto.randomUUID();
   const previousVideo = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]);
@@ -349,7 +344,9 @@ test("a Project preserves earlier review evidence and automatically records its 
     const previous = await media.read(f.changeID, f.userID, previousID, null);
     expect(previous.status).toBe(200);
     expect(new Uint8Array(await previous.arrayBuffer())).toEqual(previousVideo);
-    expect((await review.get(f.changeID, f.userID)).feedback[0]?.id).toBe(comment.feedbackId!);
+    expect((await review.get(f.changeID, f.userID)).feedback[0]?.id).toBe(
+      fixtureValue(comment.feedbackId, "comment.feedbackId"),
+    );
 
     const turn = await f.activeReview();
     const actions: string[] = [];
@@ -400,15 +397,13 @@ test("a Project preserves earlier review evidence and automatically records its 
     expect(actions).toEqual(["browser-call", "browser-recording-start", "browser-renew"]);
     await browser.closeTurn(turn.id);
   } finally {
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
 
 test("recording publication is scoped to the current owner, indexed manifest and exact candidate", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-recording-publication-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const data = Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 1, 2, 3, 4]);
   try {
     const turn = await f.activeReview();
@@ -468,7 +463,6 @@ test("recording publication is scoped to the current owner, indexed manifest and
     await browser.closeTurn(turn.id);
     expect((await media.read(f.changeID, f.userID, grant.sessionID, null)).status).toBe(200);
   } finally {
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });

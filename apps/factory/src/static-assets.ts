@@ -12,7 +12,10 @@ function encodingQuality(header: string | null, name: string) {
   return values.get(name) ?? values.get("*") ?? (name === "identity" ? 1 : 0);
 }
 
-export function createStaticAssets(directory: string) {
+export function createStaticAssets(
+  directory: string,
+  renderPage: (request: Request) => Promise<Response>,
+) {
   const root = resolve(directory);
   return async (request: Request): Promise<Response> => {
     if (!["GET", "HEAD"].includes(request.method))
@@ -25,17 +28,18 @@ export function createStaticAssets(directory: string) {
     }
     if (path.split("/").some((part) => part.startsWith(".")) || /\0|\.(?:br|gz)$/.test(path))
       return new Response(null, { status: 404 });
-    let filePath = resolve(root, `.${path === "/" ? "/index.html" : path}`);
+    if (path === "/") return renderPage(request);
+    const filePath = resolve(root, `.${path}`);
     if (!filePath.startsWith(`${root}/`)) return new Response(null, { status: 404 });
     let file = Bun.file(filePath);
     if (!(await file.exists())) {
       // Only client navigation falls back to the shell, never an outdated asset or API.
       if (
+        !/^\/(?:api|internal|_server|assets|src)(?:\/|$)/.test(path) &&
         !path.split("/").at(-1)?.includes(".") &&
         request.headers.get("accept")?.includes("text/html")
       ) {
-        filePath = resolve(root, "index.html");
-        file = Bun.file(filePath);
+        return renderPage(request);
       } else return new Response(null, { status: 404 });
     }
     const immutable = /\/assets\/[^/]+-[\w-]{8,}\.[a-z0-9]+$/i.test(filePath);

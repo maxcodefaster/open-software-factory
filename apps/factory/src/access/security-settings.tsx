@@ -1,14 +1,14 @@
 import { createEffect, createSignal, Show } from "solid-js";
-import { protocolRequest, emptyResponseSchema } from "../api-client";
+import { emptyResponseSchema, protocolRequest } from "../api-client";
 import {
+  endOwnSessions,
   getSecurityPolicy,
   getSignOutDestination,
-  endOwnSessions,
 } from "../server-functions/access";
-import { serverCall, type ServerValue } from "../server-functions/result";
+import { type ServerValue, serverCall } from "../server-functions/result";
 import "./settings.css";
-import { IdentitySettings } from "./identity-settings";
 import { FreshAuthentication } from "./fresh-authentication";
+import { IdentitySettings } from "./identity-settings";
 
 export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?: () => void }) {
   const [policy, setPolicy] = createSignal<ServerValue<ReturnType<typeof getSecurityPolicy>>>();
@@ -18,7 +18,7 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
   createEffect(
     () => undefined,
     () => {
-      void serverCall(getSecurityPolicy())
+      void serverCall(getSecurityPolicy({ data: [] }))
         .then(setPolicy)
         .catch((cause) =>
           setError(cause instanceof Error ? cause.message : "Could not load security settings"),
@@ -29,7 +29,7 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
     setBusy(true);
     setError("");
     try {
-      await serverCall(endOwnSessions());
+      await serverCall(endOwnSessions({ data: [] }));
       location.reload();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not end sessions");
@@ -40,7 +40,7 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
     setBusy(true);
     setError("");
     try {
-      const destination = await serverCall(getSignOutDestination());
+      const destination = await serverCall(getSignOutDestination({ data: [] }));
       await protocolRequest(emptyResponseSchema, "/api/auth/sign-out", { method: "POST" });
       if (destination.forgeLogoutURL) location.assign(destination.forgeLogoutURL);
       else location.reload();
@@ -58,19 +58,17 @@ export function SecuritySettings(props: { company: boolean; beforeCompanySignIn?
       <Show
         when={props.company}
         fallback={
-          <>
-            <Show when={policy()}>
-              {(value) => (
-                <section>
-                  <h3>Sign-in</h3>
-                  <p class="model-settings-note">
-                    {value().companySignIn ? "Company single sign-on" : "Managed Factory accounts"}.
-                    Browser sessions renew with activity for {value().sessionDays} days.
-                  </p>
-                </section>
-              )}
-            </Show>
-          </>
+          <Show when={policy()}>
+            {(value) => (
+              <section>
+                <h3>Sign-in</h3>
+                <p class="model-settings-note">
+                  {value().companySignIn ? "Company single sign-on" : "Managed Factory accounts"}.
+                  Browser sessions renew with activity for {value().sessionDays} days.
+                </p>
+              </section>
+            )}
+          </Show>
         }
       >
         <IdentitySettings beforeCompanySignIn={props.beforeCompanySignIn} />

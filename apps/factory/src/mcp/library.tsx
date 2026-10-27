@@ -1,38 +1,45 @@
-import { createEffect, createSignal, For, Show } from "solid-js";
 import type { JSX } from "@solidjs/web";
+import { createEffect, createSignal, For, Show, untrack } from "solid-js";
 import type { z } from "zod";
 import {
-  mcpDefinition,
-  recommendedMCPs,
-  resolveMCPChoice,
+  type MCPChoice,
   type MCPDefinition,
   type MCPLibraryView,
   type MCPRole,
-  type MCPChoice,
+  mcpDefinition,
   type mcpSaveInput,
+  recommendedMCPs,
+  resolveMCPChoice,
 } from "../../../../packages/conversation-domain/src/mcp-library";
-import { serverCall } from "../server-functions/result";
+import { Icon } from "../icon";
+import { monitoringSourceAvailable } from "../monitoring/sources";
 import {
-  getMCPLibrary,
-  saveMCPDefinition,
-  saveMCPChoice,
-  proposeMCPSharing,
   acceptMCPSharing,
   connectMCP,
   disconnectMCP,
-  reviewMCPAccess,
+  getMCPLibrary,
   grantMCPProject,
+  proposeMCPSharing,
+  reviewMCPAccess,
+  saveMCPChoice,
+  saveMCPCover,
+  saveMCPDefinition,
 } from "../server-functions/mcp";
-import { Icon } from "../icon";
-import { monitoringSourceAvailable } from "../monitoring/sources";
+import { serverCall } from "../server-functions/result";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
 import "../skills/library.css";
 import "./library.css";
+import type { LibraryCover } from "../../../../packages/conversation-domain/src/library-covers";
+import { libraryCoverURL } from "../library-covers/catalog";
+import { LibraryCoverPicker } from "../library-covers/picker";
+import { createMCPNavigation } from "./navigation";
 
 type Scope = "personal" | "project" | "system";
 type Entry = MCPLibraryView["entries"][number];
-const cover = (provider: string) =>
-  `/art/mcp/${provider === "sentry" || provider === "datadog" ? provider : "custom"}.webp`;
+const cover = (provider: string, selected?: LibraryCover | null) =>
+  selected
+    ? libraryCoverURL(selected.key, "mcp")
+    : `/art/mcp/${provider === "sentry" || provider === "datadog" ? provider : "custom"}.webp`;
 const endpointHost = (endpoint: string | undefined) => (endpoint ? new URL(endpoint).host : "");
 const scopeLabel = (scope: Scope) =>
   scope === "personal" ? "Personal" : scope === "project" ? "Project" : "Factory";
@@ -56,12 +63,22 @@ export function MCPLibrary(props: {
   onMonitoringReturn?: ((connectionId?: string) => void) | undefined;
 }) {
   const [view, setView] = createSignal<MCPLibraryView>();
-  const [query, setQuery] = createSignal("");
-  const [owner, setOwner] = createSignal("all");
-  const [workType, setWorkType] = createSignal("all");
-  const [filters, setFilters] = createSignal(false);
-  const [scope, setScope] = createSignal<Scope>("personal");
-  const [selected, setSelected] = createSignal<string>();
+  const navigation = createMCPNavigation(() => props.monitoringSetup?.id);
+  const {
+    query,
+    setQuery,
+    owner,
+    setOwner,
+    workType,
+    setWorkType,
+    filters,
+    setFilters,
+    scope,
+    setScope,
+    selected,
+    setSelected,
+    setEditor,
+  } = navigation;
   const [draft, setDraft] = createSignal<{
     content: MCPDefinition;
     scope: Scope;
@@ -69,9 +86,10 @@ export function MCPLibrary(props: {
     projectName?: string;
     entry?: Entry;
   }>();
-  const [editor, setEditor] = createSignal(false);
+  const editor = () => navigation.editor() && Boolean(draft());
   const [busy, setBusy] = createSignal(false);
   const [loading, setLoading] = createSignal(false);
+  const [readError, setReadError] = createSignal("");
   const [error, setError] = createSignal("");
   const [message, setMessage] = createSignal("");
   const [token, setToken] = createSignal("");
@@ -85,19 +103,12 @@ export function MCPLibrary(props: {
   let addButton: HTMLButtonElement | undefined;
   let gallery: HTMLDivElement | undefined;
   let actionMenu: HTMLDetailsElement | undefined;
+  let filterRoot: HTMLDivElement | undefined;
+  let filterButton: HTMLButtonElement | undefined;
   let setupHeading: HTMLHeadingElement | undefined;
+  const filterID = `mcp-filters-${crypto.randomUUID()}`;
+  const activeFilters = () => [owner(), workType()].filter((value) => value !== "all").length;
   let scroll = 0;
-  let beforeSetup:
-    | {
-        scope: Scope;
-        query: string;
-        owner: string;
-        workType: string;
-        filters: boolean;
-        selected: string | undefined;
-        editor: boolean;
-      }
-    | undefined;
   const setupHere = () =>
     Boolean(props.monitoringSetup && props.monitoringSetup.projectId === props.projectId);
   const setupBlocked = () =>
@@ -120,14 +131,27 @@ export function MCPLibrary(props: {
         (!props.monitoringSetup || item.scope !== "personal")
       );
     });
-  async function load(quiet = false) {
+  function clearFilters() {
+    setQuery("");
+    setOwner("all");
+    setWorkType("all");
+  }
+  function dismissFilters(event: KeyboardEvent) {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    setFilters(false);
+    filterButton?.focus();
+  }
+  async function load(projectId: string | undefined, quiet = false) {
     const current = ++sequence;
     if (!quiet) setLoading(true);
     try {
       const result = await serverCall(
-        props.projectId ? getMCPLibrary(props.projectId) : getMCPLibrary(),
+        projectId ? getMCPLibrary({ data: [projectId] }) : getMCPLibrary({ data: [] }),
       );
       if (current !== sequence) return;
+      setReadError("");
       const previousEntry = view()?.entries.find((item) => item.id === selected());
       const nextEntry = result.entries.find((item) => item.id === selected());
       if (
@@ -150,74 +174,65 @@ export function MCPLibrary(props: {
       )
         setScope("personal");
       return result;
+    } catch (cause) {
+      if (current === sequence)
+        setReadError(cause instanceof Error ? cause.message : "Could not load connections.");
     } finally {
       if (current === sequence && !quiet) setLoading(false);
     }
   }
   async function mutate(action: () => Promise<unknown>, text: string) {
+    if (busy()) return false;
     setBusy(true);
     setError("");
     setMessage("");
     try {
       await action();
       setMessage(text);
-      await load();
+      await load(props.projectId);
+      return true;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The MCP action failed. Try again.");
+      return false;
     } finally {
       setBusy(false);
     }
   }
   createEffect(
     () => ({ active: props.active, projectId: props.projectId }),
-    ({ active }) => {
-      if (active !== false) void load().catch((cause) => setError(String(cause.message ?? cause)));
+    ({ active, projectId }) => {
+      setReadError("");
+      if (active !== false) void load(projectId);
       return () => {
         sequence++;
       };
     },
   );
   createEffect(
+    () => props.active,
+    (active) => {
+      if (active === false) return;
+      const dismiss = (event: PointerEvent) => {
+        if (!(event.target instanceof Node)) return;
+        if (filters() && !filterRoot?.contains(event.target)) setFilters(false);
+        if (actionMenu?.open && !actionMenu.contains(event.target)) actionMenu.open = false;
+      };
+      document.addEventListener("pointerdown", dismiss);
+      return () => document.removeEventListener("pointerdown", dismiss);
+    },
+  );
+  createEffect(
     () => props.monitoringSetup?.id,
     (id) => {
       if (!id) {
-        if (beforeSetup) {
-          setScope(beforeSetup.scope);
-          setQuery(beforeSetup.query);
-          setOwner(beforeSetup.owner);
-          setWorkType(beforeSetup.workType);
-          setFilters(beforeSetup.filters);
-          setSelected(beforeSetup.selected);
-          setEditor(beforeSetup.editor && Boolean(draft()));
-          setAllowed(
-            view()?.entries.find((item) => item.id === beforeSetup?.selected)?.connection
-              ?.allowedTools ?? [],
-          );
-          setToken("");
-          setAuthorization(undefined);
-          setConfirmed(false);
-          setError("");
-          setMessage("");
-          beforeSetup = undefined;
-        }
+        setAllowed(untrack(() => entry()?.connection?.allowedTools ?? []));
+        setToken("");
+        setAuthorization(undefined);
+        setConfirmed(false);
+        setError("");
+        setMessage("");
         return;
       }
-      beforeSetup ??= {
-        scope: scope(),
-        query: query(),
-        owner: owner(),
-        workType: workType(),
-        filters: filters(),
-        selected: selected(),
-        editor: editor(),
-      };
-      setSelected(undefined);
-      setEditor(false);
-      setQuery("");
-      setOwner("all");
-      setWorkType("all");
-      setFilters(false);
-      setScope("project");
       setError("");
       setMessage("");
       setToken("");
@@ -230,26 +245,24 @@ export function MCPLibrary(props: {
     () => ({
       active: props.active !== false && setupHere(),
       authorizing: entry()?.connection?.state === "authorizing",
+      projectId: props.projectId,
     }),
-    ({ active, authorizing }) => {
+    ({ active, authorizing, projectId }) => {
       if (!active || !authorizing) return;
       let refreshing = false;
       const timer = setInterval(() => {
         if (refreshing || busy() || loading() || document.visibilityState !== "visible") return;
         refreshing = true;
-        void load(true)
-          .catch((cause) =>
-            setError(cause instanceof Error ? cause.message : "Connection status could not load."),
-          )
-          .finally(() => {
-            refreshing = false;
-          });
+        void load(projectId, true).finally(() => {
+          refreshing = false;
+        });
       }, 2_000);
       return () => clearInterval(timer);
     },
   );
   function open(item: Entry) {
     scroll = gallery?.scrollTop ?? 0;
+    setFilters(false);
     setSelected(item.id);
     setAllowed(item.connection?.allowedTools ?? []);
     setConfirmed(false);
@@ -327,7 +340,7 @@ export function MCPLibrary(props: {
     const libraryId = submitted.input.libraryId;
     await mutate(
       async () => {
-        await serverCall(saveMCPDefinition(submitted.input));
+        await serverCall(saveMCPDefinition({ data: [submitted.input] }));
         pendingSave = undefined;
         setDraft(undefined);
         setEditor(false);
@@ -343,6 +356,11 @@ export function MCPLibrary(props: {
     );
   }
   async function choose(item: Entry, role: MCPRole, state: MCPChoice["state"]) {
+    const revision = item.revisions[0];
+    if (!revision) {
+      setError("This MCP definition has no saved version. Reload before continuing.");
+      return;
+    }
     const current = view()?.choices.find(
       (choice) => choice.libraryId === item.id && choice.role === role && choice.scope === scope(),
     );
@@ -350,13 +368,17 @@ export function MCPLibrary(props: {
       () =>
         serverCall(
           saveMCPChoice({
-            libraryId: item.id,
-            revisionId: item.revisions[0]!.id,
-            scope: scope(),
-            role,
-            state,
-            expectedVersion: current?.version ?? 0,
-            ...(scope() !== "system" && props.projectId ? { projectId: props.projectId } : {}),
+            data: [
+              {
+                libraryId: item.id,
+                revisionId: revision.id,
+                scope: scope(),
+                role,
+                state,
+                expectedVersion: current?.version ?? 0,
+                ...(scope() !== "system" && props.projectId ? { projectId: props.projectId } : {}),
+              },
+            ],
           }),
         ),
       "MCP choice saved for new work.",
@@ -365,14 +387,24 @@ export function MCPLibrary(props: {
   async function connect() {
     const item = entry();
     if (!item || setupBlocked()) return;
+    const revision = item.revisions[0];
+    if (!revision) {
+      setError("This MCP definition has no saved version. Reload before continuing.");
+      return;
+    }
     setAuthorization(undefined);
     await mutate(async () => {
       const result = await serverCall(
-        connectMCP(item.id, {
-          commandId: crypto.randomUUID(),
-          revisionId: item.revisions[0]!.id,
-          expectedVersion: item.connection?.version ?? 0,
-          ...(latest()?.content.authentication === "bearer" ? { token: token() } : {}),
+        connectMCP({
+          data: [
+            item.id,
+            {
+              commandId: crypto.randomUUID(),
+              revisionId: revision.id,
+              expectedVersion: item.connection?.version ?? 0,
+              ...(latest()?.content.authentication === "bearer" ? { token: token() } : {}),
+            },
+          ],
         }),
       );
       setToken("");
@@ -507,19 +539,37 @@ export function MCPLibrary(props: {
               onInput={(event) => setQuery(event.currentTarget.value)}
             />
           </label>
-          <div class="skill-filter-control">
+          <div
+            class="skill-filter-control"
+            ref={(element) => {
+              filterRoot = element;
+            }}
+          >
             <button
+              ref={(element) => {
+                filterButton = element;
+              }}
               type="button"
-              class="workspace-action"
+              class="workspace-action skill-filter-toggle"
+              aria-label="Filters"
               aria-expanded={filters() ? "true" : "false"}
-              onClick={() => setFilters(!filters())}
+              aria-controls={filterID}
+              onKeyDown={dismissFilters}
+              onClick={() => {
+                if (actionMenu) actionMenu.open = false;
+                setFilters((open) => !open);
+              }}
             >
-              Filter
+              Filter{activeFilters() ? ` · ${activeFilters()}` : ""}
             </button>
-            <div class="skill-filter-options" hidden={!filters()}>
+            <div class="skill-filter-options" id={filterID} hidden={!filters()}>
               <label>
                 Ownership
-                <select value={owner()} onChange={(event) => setOwner(event.currentTarget.value)}>
+                <select
+                  value={owner()}
+                  onChange={(event) => setOwner(event.currentTarget.value)}
+                  onKeyDown={dismissFilters}
+                >
                   <option value="all">All owners</option>
                   <Show when={!props.monitoringSetup}>
                     <option value="personal">Only me</option>
@@ -533,16 +583,43 @@ export function MCPLibrary(props: {
                 <select
                   value={workType()}
                   onChange={(event) => setWorkType(event.currentTarget.value)}
+                  onKeyDown={dismissFilters}
                 >
                   <option value="all">All work types</option>
                   <option value="planning">Investigate &amp; Plan</option>
                   <option value="build">Build</option>
                 </select>
               </label>
+              <Show when={query() || activeFilters()}>
+                <button
+                  type="button"
+                  class="quiet-button"
+                  onKeyDown={dismissFilters}
+                  onClick={() => {
+                    clearFilters();
+                    filterButton?.focus();
+                  }}
+                >
+                  Clear filters
+                </button>
+              </Show>
             </div>
           </div>
         </div>
       </header>
+      <Show when={readError()}>
+        <div class="skill-library-error" role="alert">
+          <span>{readError()}</span>
+          <button
+            type="button"
+            class="quiet-button"
+            disabled={loading() || busy()}
+            onClick={() => void load(props.projectId)}
+          >
+            Retry loading
+          </button>
+        </div>
+      </Show>
       <Show when={error()}>
         <p class="skill-library-error" role="alert">
           {error()}
@@ -780,7 +857,9 @@ export function MCPLibrary(props: {
                         disabled={busy() || setupBlocked()}
                         onClick={() =>
                           void mutate(async () => {
-                            const result = await serverCall(acceptMCPSharing(proposal.id));
+                            const result = await serverCall(
+                              acceptMCPSharing({ data: [proposal.id] }),
+                            );
                             setSelected(result.libraryId);
                           }, "Definition added to the shared library. Connect it separately.")
                         }
@@ -811,7 +890,7 @@ export function MCPLibrary(props: {
                     >
                       <img
                         class="mcp-cover"
-                        src={cover(item.revisions[0]?.content.provider ?? "custom")}
+                        src={cover(item.revisions[0]?.content.provider ?? "custom", item.cover)}
                         width="768"
                         height="512"
                         alt=""
@@ -851,15 +930,7 @@ export function MCPLibrary(props: {
               <div class="skill-library-empty">
                 <h3>No matching connections</h3>
                 <p>Try another search or clear the filters.</p>
-                <button
-                  type="button"
-                  class="quiet-button"
-                  onClick={() => {
-                    setQuery("");
-                    setOwner("all");
-                    setWorkType("all");
-                  }}
-                >
+                <button type="button" class="quiet-button" onClick={clearFilters}>
                   Clear filters
                 </button>
               </div>
@@ -924,7 +995,7 @@ export function MCPLibrary(props: {
                 <header class="skill-detail-heading mcp-detail-heading">
                   <img
                     class="mcp-cover"
-                    src={cover(latest()?.content.provider ?? "custom")}
+                    src={cover(latest()?.content.provider ?? "custom", item().cover)}
                     width="768"
                     height="512"
                     alt=""
@@ -955,7 +1026,10 @@ export function MCPLibrary(props: {
                             class="workspace-action"
                             data-primary="true"
                             disabled={busy() || setupBlocked() || Boolean(draft())}
-                            onClick={() => edit(latest()!.content, item())}
+                            onClick={() => {
+                              const revision = latest();
+                              if (revision) edit(revision.content, item());
+                            }}
                           >
                             Edit definition
                           </button>
@@ -968,10 +1042,28 @@ export function MCPLibrary(props: {
                     </p>
                   </div>
                 </header>
+                <Show when={item().editable && !setupBlocked()}>
+                  <LibraryCoverPicker
+                    kind="mcp"
+                    cover={item().cover}
+                    busy={busy()}
+                    onSave={(key, expectedVersion) =>
+                      mutate(
+                        () =>
+                          serverCall(
+                            saveMCPCover({
+                              data: [{ libraryId: item().id, key, expectedVersion }],
+                            }),
+                          ),
+                        "Cover saved. Connection access is unchanged.",
+                      )
+                    }
+                  />
+                </Show>
                 <section class="mcp-connection" aria-label="MCP connection">
                   <h4>{stateLabel(item().connection?.state)}</h4>
                   <p class="mcp-endpoint">{latest()?.content.endpoint}</p>
-                  <Show when={item().connection && item().connection!.revisionId !== latest()?.id}>
+                  <Show when={item().connection && item().connection?.revisionId !== latest()?.id}>
                     <p>
                       The saved definition is newer than the connected version. Reconnect and review
                       it before adopting it for new work. Existing choices have not changed.
@@ -1029,7 +1121,7 @@ export function MCPLibrary(props: {
                           disabled={busy() || setupBlocked()}
                           onClick={() =>
                             void mutate(
-                              () => serverCall(disconnectMCP(item().id)),
+                              () => serverCall(disconnectMCP({ data: [item().id] })),
                               "Connection disconnected. Further MCP lookups are blocked.",
                             )
                           }
@@ -1048,7 +1140,12 @@ export function MCPLibrary(props: {
                           <button
                             type="button"
                             class="quiet-button"
-                            onClick={() => void mutate(load, "Connection status refreshed.")}
+                            onClick={() =>
+                              void mutate(
+                                () => load(props.projectId),
+                                "Connection status refreshed.",
+                              )
+                            }
                           >
                             Refresh status
                           </button>
@@ -1064,7 +1161,7 @@ export function MCPLibrary(props: {
                   when={
                     item().editable &&
                     item().connection &&
-                    ["review", "ready"].includes(item().connection!.state) &&
+                    ["review", "ready"].includes(item().connection?.state ?? "") &&
                     (!props.monitoringSetup || item().connection?.state === "review")
                   }
                 >
@@ -1117,23 +1214,31 @@ export function MCPLibrary(props: {
                       type="button"
                       class="primary-button"
                       disabled={busy() || setupBlocked() || !confirmed() || !allowed().length}
-                      onClick={() =>
+                      onClick={() => {
+                        const selected = item();
+                        const connection = selected.connection;
+                        if (!connection) return;
                         void mutate(
                           () =>
                             serverCall(
-                              reviewMCPAccess(item().id, {
-                                expectedVersion: item().connection!.version,
-                                confirmReadOnlyAccess: true,
-                                tools: item()
-                                  .connection!.tools.filter((tool) => allowed().includes(tool.name))
-                                  .map(({ name, digest }) => ({ name, digest })),
+                              reviewMCPAccess({
+                                data: [
+                                  selected.id,
+                                  {
+                                    expectedVersion: connection.version,
+                                    confirmReadOnlyAccess: true,
+                                    tools: connection.tools
+                                      .filter((tool) => allowed().includes(tool.name))
+                                      .map(({ name, digest }) => ({ name, digest })),
+                                  },
+                                ],
                               }),
                             ),
                           props.monitoringSetup
                             ? "Read-only access approved. Continue to the Input."
                             : "Read-only access approved. Choose where to enable this connection.",
-                        )
-                      }
+                        );
+                      }}
                     >
                       Approve read-only access
                     </button>
@@ -1162,23 +1267,30 @@ export function MCPLibrary(props: {
                         (item().connection?.state !== "ready" &&
                           !item().connection?.projectGrants.includes(props.projectId ?? ""))
                       }
-                      onClick={() =>
+                      onClick={() => {
+                        const selected = item();
+                        const connection = selected.connection;
+                        const projectId = props.projectId;
+                        if (!connection || !projectId) return;
                         void mutate(
                           () =>
                             serverCall(
-                              grantMCPProject(item().id, {
-                                projectId: props.projectId!,
-                                expectedVersion: item().connection!.version,
-                                enabled: !item().connection!.projectGrants.includes(
-                                  props.projectId!,
-                                ),
+                              grantMCPProject({
+                                data: [
+                                  selected.id,
+                                  {
+                                    projectId,
+                                    expectedVersion: connection.version,
+                                    enabled: !connection.projectGrants.includes(projectId),
+                                  },
+                                ],
                               }),
                             ),
                           "Project connection access updated.",
-                        )
-                      }
+                        );
+                      }}
                     >
-                      {item().connection!.projectGrants.includes(props.projectId!)
+                      {item().connection?.projectGrants.includes(props.projectId ?? "")
                         ? "Revoke Project access"
                         : "Grant Project access"}
                     </button>
@@ -1256,6 +1368,13 @@ export function MCPLibrary(props: {
                         );
                       const locked = () =>
                         effective()?.state === "required" && effective()?.scope !== scope();
+                      const choiceLabel = () => {
+                        const choice = effective();
+                        if (!choice) return "Off until enabled";
+                        return locked()
+                          ? `Required by ${scopeLabel(choice.scope)} policy`
+                          : `${choice.state === "disable" ? "Off" : "Enabled"} by ${scopeLabel(choice.scope)} choice`;
+                      };
                       const activationBlock = () => {
                         if (item().connection?.state !== "ready")
                           return "Connect and approve read-only access before enabling.";
@@ -1299,13 +1418,7 @@ export function MCPLibrary(props: {
                                 </option>
                               </Show>
                             </select>
-                            <small>
-                              {locked()
-                                ? `Required by ${scopeLabel(effective()!.scope)} policy`
-                                : effective()
-                                  ? `${effective()!.state === "disable" ? "Off" : "Enabled"} by ${scopeLabel(effective()!.scope)} choice`
-                                  : "Off until enabled"}
-                            </small>
+                            <small>{choiceLabel()}</small>
                             <Show when={activationBlock()}>
                               <small>{activationBlock()}</small>
                             </Show>
@@ -1314,7 +1427,7 @@ export function MCPLibrary(props: {
                             when={
                               !locked() &&
                               effective() &&
-                              effective()!.revisionId !== latest()?.id &&
+                              effective()?.revisionId !== latest()?.id &&
                               item().connection?.revisionId === latest()?.id &&
                               item().connection?.state === "ready"
                             }
@@ -1394,22 +1507,28 @@ export function MCPLibrary(props: {
                       type="button"
                       class="quiet-button"
                       disabled={busy()}
-                      onClick={() =>
+                      onClick={() => {
+                        const revision = latest();
+                        if (!revision) return;
                         void mutate(
                           () =>
                             serverCall(
                               proposeMCPSharing({
-                                id: crypto.randomUUID(),
-                                revisionId: latest()!.id,
-                                target: props.projectId ? shareTarget() : "system",
-                                ...(props.projectId && shareTarget() === "project"
-                                  ? { projectId: props.projectId }
-                                  : {}),
+                                data: [
+                                  {
+                                    id: crypto.randomUUID(),
+                                    revisionId: revision.id,
+                                    target: props.projectId ? shareTarget() : "system",
+                                    ...(props.projectId && shareTarget() === "project"
+                                      ? { projectId: props.projectId }
+                                      : {}),
+                                  },
+                                ],
                               }),
                             ),
                           "Definition proposed for manager review. No credentials were shared.",
-                        )
-                      }
+                        );
+                      }}
                     >
                       Propose shared definition
                     </button>

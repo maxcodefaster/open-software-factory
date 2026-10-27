@@ -99,7 +99,7 @@ export function SkillRevisionEditor(props: {
     setBusy(true);
     setError("");
     try {
-      const saved = await serverCall(saveSkill(pending));
+      const saved = await serverCall(saveSkill({ data: [pending] }));
       props.onSaved({ ...saved, scope: scope() });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save skill");

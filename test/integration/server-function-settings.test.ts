@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { factoryFunctionRequest } from "../fixtures/server-functions";
@@ -17,9 +17,7 @@ test("compiled settings functions validate inputs, retain host permissions and p
   let probeSignal: AbortSignal | undefined;
   const probeStarted = Promise.withResolvers<void>();
   const entryURL = pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href;
-  const entry: typeof import("../../apps/factory/src/server-functions/entry") = await import(
-    entryURL
-  );
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(entryURL);
   const environment: EnvironmentSettingsView = {
     environment: "development",
     version: 1,
@@ -74,7 +72,7 @@ test("compiled settings functions validate inputs, retain host permissions and p
     requireFresh: async () => {
       throw new Error("These saves did not require fresh auth");
     },
-    handle: entry.handleServerFunctionRequest,
+    handle: async (request, options) => entry.default.fetch(request, options),
   });
   const call = async (name: string, args: unknown[]) =>
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));

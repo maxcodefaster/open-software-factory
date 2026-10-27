@@ -1,15 +1,16 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import {
-  executionPolicy,
   type ExecutionPolicy,
+  executionPolicy,
 } from "../../../../packages/conversation-domain/src/execution-policy";
-import {
-  type UsageSettingsView,
-  type currentComputeView,
+import type {
+  currentComputeView,
+  UsageSettingsView,
 } from "../../../../packages/conversation-domain/src/usage-view";
 import { serverCall } from "../server-functions/result";
-import { getUsage, getCurrentCompute, saveUsage } from "../server-functions/usage";
+import { getCurrentCompute, getUsage, saveUsage } from "../server-functions/usage";
 import "./settings.css";
+import { LearningSettings } from "../learning/settings";
 import { ContractPrices } from "./contract-prices";
 
 const fields = [
@@ -26,7 +27,10 @@ const usd = (nano: string) =>
   }).format(Number(nano) / 1_000_000_000);
 const tokens = (count: string) => new Intl.NumberFormat("en-US").format(Number(count));
 
-export function UsageSettings(props: { projectID?: string | undefined }) {
+export function UsageSettings(props: {
+  projectID?: string | undefined;
+  onOpenTicket?: ((id: string, projectId: string) => void) | undefined;
+}) {
   const [view, setView] = createSignal<UsageSettingsView>();
   const [compute, setCompute] = createSignal<ReturnType<typeof currentComputeView.parse>>();
   const [policy, setPolicy] = createSignal<ExecutionPolicy>(executionPolicy.parse({}));
@@ -41,7 +45,7 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
   const scope = () => props.projectID ?? null;
   const usageRead = createMemo(() => {
     const target = scope();
-    return serverCall(getUsage(target)).then(
+    return serverCall(getUsage({ data: [target] })).then(
       (value) => ({ target, ok: true as const, value }),
       (cause: unknown) => ({
         target,
@@ -73,7 +77,7 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
       if (refreshing) return;
       refreshing = true;
       try {
-        const value = await serverCall(getCurrentCompute(target));
+        const value = await serverCall(getCurrentCompute({ data: [target] }));
         if (!disposed && current === epoch) setCompute(value);
       } catch {
         if (!disposed && current === epoch) setCompute(undefined);
@@ -108,8 +112,8 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
     setError("");
     setNotice("");
     try {
-      await serverCall(saveUsage(scope(), retry));
-      const value = await serverCall(getUsage(scope()));
+      await serverCall(saveUsage({ data: [scope(), retry] }));
+      const value = await serverCall(getUsage({ data: [scope()] }));
       if (generation !== epoch) return;
       retry = undefined;
       publish(value);
@@ -124,6 +128,8 @@ export function UsageSettings(props: { projectID?: string | undefined }) {
   const coding = () => view()?.scopes.find((scope) => scope.scope === (props.projectID ?? null));
   return (
     <section class="usage-settings" aria-label="Usage & limits">
+      <LearningSettings projectID={props.projectID} onOpenTicket={props.onOpenTicket} />
+      <h3 class="usage-section-title">Usage & limits</h3>
       <Show when={error()}>
         <p role="alert">{error()}</p>
       </Show>

@@ -7,6 +7,7 @@ import { createForgejoReleases } from "../../packages/forge/src/releases";
 import { releasePackageOwner } from "../../packages/project-domain/src/release";
 import { publicationRuntimeProof } from "../fixtures/publication-runtime";
 import { releaseArgoProof } from "../fixtures/release-argo";
+import { fixtureValue } from "../fixtures/value";
 
 test(
   "pinned Forgejo isolates Git and package readers and revokes already-issued OCI bearer access",
@@ -50,7 +51,7 @@ test(
         `FORGEJO__server__ROOT_URL=${origin}/`,
         "-p",
         `127.0.0.1:${port}:3000`,
-        "codeberg.org/forgejo/forgejo:15.0.10-rootless@sha256:6ffebd9ab9ee9f6677e3523fa60debd9de630ff2a226fa681d6cc0c7ba541d77",
+        "codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8",
       ]);
       owned = true;
       for (let attempt = 0; attempt < 120; attempt++) {
@@ -209,7 +210,10 @@ test(
           headers: { authorization: `Bearer ${auth}` },
         });
         expect(begin.status).toBe(202);
-        const location = new URL(begin.headers.get("location")!, origin);
+        const location = new URL(
+          fixtureValue(begin.headers.get("location"), 'begin.headers.get("location")'),
+          origin,
+        );
         location.searchParams.set("digest", digest);
         expect(
           (
@@ -339,7 +343,7 @@ test(
         "        run: sleep 10",
         "      - name: Guard native job authority",
         "        env:",
-        "          OWNED_TASK_TOKEN: ${{ github.token }}",
+        `          OWNED_TASK_TOKEN: \${{ github.token }}`,
         "        run: |",
         "          node --input-type=module - <<'NODE'",
         `          const root = "http://host.orb.internal:${port}";`,
@@ -390,7 +394,7 @@ test(
         jobs = await adapter.jobs(repository, `factory-release-${attemptID}`);
       }
       expect(jobs).toHaveLength(1);
-      const job = jobs[0]!;
+      const job = fixtureValue(jobs[0], "jobs[0]");
       const registration = await forge.registerEphemeralRunner(repository, `owned-${attemptID}`);
       const pins = (await Bun.file("upstream.json").json()) as {
         nodeDevelopment: { image: string };
@@ -509,7 +513,9 @@ test(
       expect((await forge.getDefaultBranch(repository)).headSha).toBe(source.headSha);
       expect([401, 403, 404]).toContain(denied.package);
       expect(observed?.commit_sha).toBe(source.headSha);
-      expect(JSON.parse(observed!.event_payload).inputs.factory_release_id).toBe(attemptID);
+      expect(
+        JSON.parse(fixtureValue(observed, "observed").event_payload).inputs.factory_release_id,
+      ).toBe(attemptID);
       if (process.env["FACTORY_RUN_RELEASE_RUNTIME_PROOF"] === "1") {
         expect(
           (

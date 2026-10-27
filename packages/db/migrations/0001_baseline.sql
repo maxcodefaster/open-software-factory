@@ -41,6 +41,7 @@ CREATE TYPE factory.change_agent_state AS ENUM (
 
 CREATE TYPE factory.change_commit_source AS ENUM (
     'agent',
+    'integration',
     'repository-document'
 );
 
@@ -451,12 +452,14 @@ CREATE FUNCTION factory.guard_candidate_review() RETURNS trigger
     LANGUAGE plpgsql
     AS $$
 BEGIN
-  IF ROW(NEW.id,NEW.verification_id,NEW.change_id,NEW.commit_sha,NEW.base_sha,NEW.created_at,NEW.repair_command_id,NEW.ordinal,NEW.created_by,NEW.supersedes_id)
-    IS DISTINCT FROM ROW(OLD.id,OLD.verification_id,OLD.change_id,OLD.commit_sha,OLD.base_sha,OLD.created_at,OLD.repair_command_id,OLD.ordinal,OLD.created_by,OLD.supersedes_id)
+  IF ROW(NEW.id,NEW.verification_id,NEW.change_id,NEW.commit_sha,NEW.base_sha,NEW.created_at,NEW.repair_command_id,NEW.ordinal,NEW.created_by,NEW.supersedes_id,NEW.finding_source_id,NEW.focus_review_id)
+    IS DISTINCT FROM ROW(OLD.id,OLD.verification_id,OLD.change_id,OLD.commit_sha,OLD.base_sha,OLD.created_at,OLD.repair_command_id,OLD.ordinal,OLD.created_by,OLD.supersedes_id,OLD.finding_source_id,OLD.focus_review_id)
     OR (OLD.turn_id IS NOT NULL AND NEW.turn_id IS DISTINCT FROM OLD.turn_id)
     OR (OLD.result IS NOT NULL AND NEW.result IS DISTINCT FROM OLD.result)
+    OR (OLD.finding_checks IS NOT NULL AND NEW.finding_checks IS DISTINCT FROM OLD.finding_checks)
     OR (OLD.state IN ('passed','changes-requested','incomplete') AND
-      ROW(NEW.state,NEW.evidence,NEW.completed_at) IS DISTINCT FROM ROW(OLD.state,OLD.evidence,OLD.completed_at))
+      ROW(NEW.state,NEW.evidence,NEW.completed_at,NEW.finding_checks,NEW.ui_required) IS DISTINCT FROM
+      ROW(OLD.state,OLD.evidence,OLD.completed_at,OLD.finding_checks,OLD.ui_required))
   THEN RAISE EXCEPTION 'Candidate review intent and confirmed outcome are immutable'; END IF;
   RETURN NEW;
 END $$;
@@ -1759,6 +1762,9 @@ CREATE TABLE factory.candidate_review (
     verification_id uuid NOT NULL,
     ordinal integer DEFAULT 1 NOT NULL,
     supersedes_id uuid,
+    finding_source_id uuid,
+    focus_review_id uuid,
+    finding_checks jsonb,
     change_id uuid NOT NULL,
     commit_sha text NOT NULL,
     base_sha text NOT NULL,
@@ -1779,6 +1785,8 @@ CREATE TABLE factory.candidate_review (
     CONSTRAINT candidate_review_evidence_check CHECK (((jsonb_typeof(evidence) = 'array'::text) AND (jsonb_array_length(evidence) <= 256))),
     CONSTRAINT candidate_review_ordinal_check CHECK ((ordinal > 0)),
     CONSTRAINT candidate_review_result_check CHECK (((result IS NULL) OR ((jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 32768)))),
+    CONSTRAINT candidate_review_finding_checks_check CHECK (finding_checks IS NULL OR
+      (finding_source_id IS NOT NULL AND jsonb_typeof(finding_checks)='object' AND octet_length(finding_checks::text)<=32768)),
     CONSTRAINT candidate_review_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'running'::text, 'passed'::text, 'changes-requested'::text, 'incomplete'::text])))
 );
 
@@ -1797,6 +1805,8 @@ CREATE TABLE factory.change (
     cancelled_at timestamp with time zone,
     failure text,
     runtime_attempt_id uuid,
+    delivery_waiting_sha text,
+    delivery_waiting_policy_id uuid,
     CONSTRAINT change_base_sha_check CHECK ((base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
     CONSTRAINT change_branch_name_check CHECK ((branch_name ~ '^factory/change-[0-9a-f]{12}$'::text)),
     CONSTRAINT change_check CHECK (((state = 'cancelled'::factory.change_state) = (cancelled_at IS NOT NULL))),
@@ -1857,6 +1867,8 @@ CREATE TABLE factory.change_commit_operation (
     sequence integer NOT NULL,
     branch_name text NOT NULL,
     expected_parent_sha text NOT NULL,
+    integration_base_sha text,
+    merge_parent_sha text,
     commit_sha text,
     observed_remote_sha text,
     commit_message text NOT NULL,
@@ -1880,7 +1892,9 @@ CREATE TABLE factory.change_commit_operation (
     CONSTRAINT change_commit_operation_expected_parent_sha_check CHECK ((expected_parent_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
     CONSTRAINT change_commit_operation_observed_remote_sha_check CHECK (((observed_remote_sha IS NULL) OR (observed_remote_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text))),
     CONSTRAINT change_commit_operation_sequence_check CHECK ((sequence > 0)),
-    CONSTRAINT change_commit_operation_source_check CHECK ((((source = 'agent'::factory.change_commit_source) AND (runtime_attempt_id IS NOT NULL) AND (repository_path IS NULL) AND (repository_blob_sha IS NULL) AND (repository_content IS NULL) AND (content_digest IS NULL)) OR ((source = 'repository-document'::factory.change_commit_source) AND (runtime_attempt_id IS NULL) AND (repository_path IS NOT NULL) AND (repository_blob_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND (repository_content IS NOT NULL) AND (content_digest ~ '^[0-9a-f]{64}$'::text))))
+    CONSTRAINT change_commit_integration_base CHECK (integration_base_sha IS NULL OR integration_base_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'),
+    CONSTRAINT change_commit_merge_parent CHECK (merge_parent_sha IS NULL OR (merge_parent_sha = integration_base_sha AND merge_parent_sha <> expected_parent_sha)),
+    CONSTRAINT change_commit_operation_source_check CHECK ((((source IN ('agent'::factory.change_commit_source, 'integration'::factory.change_commit_source)) AND (runtime_attempt_id IS NOT NULL) AND (repository_path IS NULL) AND (repository_blob_sha IS NULL) AND (repository_content IS NULL) AND (content_digest IS NULL)) OR ((source = 'repository-document'::factory.change_commit_source) AND (runtime_attempt_id IS NULL) AND (repository_path IS NOT NULL) AND (repository_blob_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text) AND (repository_content IS NOT NULL) AND (content_digest ~ '^[0-9a-f]{64}$'::text))))
 );
 
 CREATE TABLE factory.change_editing_decision (
@@ -1988,6 +2002,7 @@ CREATE TABLE factory.delivery_approval (
     candidate_review_id uuid,
     monitoring_incident_id uuid,
     monitoring_policy_id uuid,
+    delivery_policy_id uuid,
     CONSTRAINT delivery_approval_commit_sha_check CHECK ((commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
     CONSTRAINT delivery_monitoring_basis CHECK (((monitoring_incident_id IS NULL) = (monitoring_policy_id IS NULL)))
 );
@@ -2454,6 +2469,13 @@ CREATE TABLE factory.mcp_library (
     project_id uuid,
     CONSTRAINT mcp_library_check CHECK ((((scope = 'personal'::text) AND (owner_id IS NOT NULL) AND (project_id IS NULL)) OR ((scope = 'project'::text) AND (owner_id IS NULL) AND (project_id IS NOT NULL)) OR ((scope = 'system'::text) AND (owner_id IS NULL) AND (project_id IS NULL)))),
     CONSTRAINT mcp_library_scope_check CHECK ((scope = ANY (ARRAY['personal'::text, 'project'::text, 'system'::text])))
+);
+
+CREATE TABLE factory.mcp_library_cover (
+    library_id uuid PRIMARY KEY,
+    cover_key text NOT NULL CHECK (cover_key ~ '^[a-z][a-z-]{1,63}$'),
+    version bigint NOT NULL CHECK (version > 0),
+    updated_by uuid NOT NULL
 );
 
 CREATE TABLE factory.mcp_oauth_flow (
@@ -3024,6 +3046,7 @@ CREATE TABLE factory.requirement_approval (
     id uuid NOT NULL,
     ticket_id uuid NOT NULL,
     requirement_revision_id uuid NOT NULL,
+    technical_design_revision_id uuid,
     approved_by uuid NOT NULL,
     approved_at timestamp with time zone DEFAULT now() NOT NULL,
     monitoring_incident_id uuid,
@@ -3221,6 +3244,13 @@ CREATE TABLE factory.skill_library (
     project_id uuid,
     CONSTRAINT skill_library_check CHECK ((((scope = 'personal'::text) AND (owner_id IS NOT NULL) AND (project_id IS NULL)) OR ((scope = 'project'::text) AND (owner_id IS NULL) AND (project_id IS NOT NULL)) OR ((scope = 'system'::text) AND (owner_id IS NULL) AND (project_id IS NULL)))),
     CONSTRAINT skill_library_scope_check CHECK ((scope = ANY (ARRAY['system'::text, 'project'::text, 'personal'::text])))
+);
+
+CREATE TABLE factory.skill_library_cover (
+    library_id uuid PRIMARY KEY,
+    cover_key text NOT NULL CHECK (cover_key ~ '^[a-z][a-z-]{1,63}$'),
+    version bigint NOT NULL CHECK (version > 0),
+    updated_by uuid NOT NULL
 );
 
 CREATE TABLE factory.skill_library_choice (
@@ -3421,7 +3451,7 @@ CREATE TABLE factory.usage_operation (
     CONSTRAINT usage_operation_engine_check CHECK ((engine = ANY (ARRAY['opencode'::text, 'mastra'::text]))),
     CONSTRAINT usage_operation_id_check CHECK (((length(id) >= 1) AND (length(id) <= 400))),
     CONSTRAINT usage_operation_outcome_check CHECK ((outcome = ANY (ARRAY['completed'::text, 'failed'::text, 'interrupted'::text, 'unknown'::text]))),
-    CONSTRAINT usage_operation_purpose_check CHECK ((purpose = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text])))
+    CONSTRAINT usage_operation_purpose_check CHECK ((purpose = ANY (ARRAY['coding'::text, 'research'::text, 'requirements'::text, 'wiki'::text, 'setup'::text, 'probe'::text, 'learning'::text])))
 );
 
 CREATE TABLE factory.usage_rate_override (
@@ -3465,6 +3495,7 @@ CREATE TABLE factory.verification (
     runner_token text,
     state factory.verification_state DEFAULT 'pending'::factory.verification_state NOT NULL,
     summary text,
+    diagnosis jsonb,
     repair_prompted_at timestamp with time zone,
     created_by uuid NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
@@ -3474,7 +3505,9 @@ CREATE TABLE factory.verification (
     CONSTRAINT verification_check1 CHECK (((state <> ALL (ARRAY['runner-starting'::factory.verification_state, 'running'::factory.verification_state, 'succeeded'::factory.verification_state, 'failed'::factory.verification_state])) OR (action_run_id IS NOT NULL))),
     CONSTRAINT verification_check2 CHECK (((runtime_attempt_id IS NULL) OR (runner_token IS NOT NULL))),
     CONSTRAINT verification_commit_sha_check CHECK ((commit_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text)),
-    CONSTRAINT verification_summary_check CHECK (((summary IS NULL) OR (length(summary) <= 2000)))
+    CONSTRAINT verification_summary_check CHECK (((summary IS NULL) OR (length(summary) <= 2000))),
+    CONSTRAINT verification_diagnosis_check CHECK (diagnosis IS NULL OR
+      (jsonb_typeof(diagnosis)='object' AND octet_length(diagnosis::text)<=24000))
 );
 
 CREATE TABLE factory.wiki_source_update (
@@ -3790,7 +3823,8 @@ ALTER TABLE ONLY factory.delivery_approval
     ADD CONSTRAINT delivery_approval_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY factory.delivery_approval
-    ADD CONSTRAINT delivery_approval_verification_id_key UNIQUE (verification_id);
+    ADD CONSTRAINT delivery_approval_exact_basis_key UNIQUE NULLS NOT DISTINCT
+      (verification_id, candidate_review_id, approved_by, monitoring_policy_id, delivery_policy_id);
 
 ALTER TABLE ONLY factory.developer_ide
     ADD CONSTRAINT developer_ide_pkey PRIMARY KEY (user_id);
@@ -3803,7 +3837,6 @@ ALTER TABLE ONLY factory.development_workspace
 
 ALTER TABLE ONLY factory.development_workspace
     ADD CONSTRAINT development_workspace_id_project_id_key UNIQUE (id, project_id);
-
 
 
 ALTER TABLE ONLY factory.development_workspace
@@ -3835,7 +3868,6 @@ ALTER TABLE ONLY factory.execution_policy
 
 ALTER TABLE ONLY factory.execution_slot
     ADD CONSTRAINT execution_slot_assigned_attempt_id_key UNIQUE (assigned_attempt_id);
-
 
 
 ALTER TABLE ONLY factory.execution_slot
@@ -3967,8 +3999,10 @@ ALTER TABLE ONLY factory.mcp_share_proposal
 ALTER TABLE ONLY factory.mcp_token_refresh
     ADD CONSTRAINT mcp_token_refresh_pkey PRIMARY KEY (id);
 
-ALTER TABLE ONLY factory.merge_operation
-    ADD CONSTRAINT merge_operation_change_id_key UNIQUE (change_id);
+CREATE UNIQUE INDEX merge_operation_one_unfinished ON factory.merge_operation(change_id)
+  WHERE state NOT IN ('succeeded','failed');
+CREATE UNIQUE INDEX merge_operation_one_success ON factory.merge_operation(change_id)
+  WHERE state='succeeded';
 
 ALTER TABLE ONLY factory.merge_operation
     ADD CONSTRAINT merge_operation_delivery_approval_id_key UNIQUE (delivery_approval_id);
@@ -4193,7 +4227,6 @@ ALTER TABLE ONLY factory.runtime_attempt
     ADD CONSTRAINT runtime_attempt_id_workspace_id_key UNIQUE (id, workspace_id);
 
 
-
 ALTER TABLE ONLY factory.runtime_attempt
     ADD CONSTRAINT runtime_attempt_pkey PRIMARY KEY (id);
 
@@ -4390,6 +4423,8 @@ CREATE UNIQUE INDEX build_browser_one_unclosed_session ON factory.build_browser_
 CREATE INDEX build_browser_session_cleanup_idx ON factory.build_browser_session USING btree (runtime_attempt_id) WHERE (state <> 'closed'::text);
 
 CREATE INDEX candidate_review_change_idx ON factory.candidate_review USING btree (change_id);
+CREATE UNIQUE INDEX candidate_review_finding_source_idx ON factory.candidate_review (finding_source_id)
+  WHERE finding_source_id IS NOT NULL AND supersedes_id IS NULL;
 
 CREATE UNIQUE INDEX change_agent_opencode_session_uidx ON factory.change_agent_session USING btree (opencode_session_id) WHERE (opencode_session_id IS NOT NULL);
 
@@ -4818,6 +4853,13 @@ ALTER TABLE ONLY factory.candidate_review
     ADD CONSTRAINT candidate_review_supersedes_id_fkey FOREIGN KEY (supersedes_id) REFERENCES factory.candidate_review(id);
 
 ALTER TABLE ONLY factory.candidate_review
+    ADD CONSTRAINT candidate_review_finding_source_fkey FOREIGN KEY (finding_source_id,change_id,verification_id,commit_sha)
+    REFERENCES factory.candidate_review(id,change_id,verification_id,commit_sha);
+
+ALTER TABLE ONLY factory.candidate_review
+    ADD CONSTRAINT candidate_review_focus_fkey FOREIGN KEY (focus_review_id) REFERENCES factory.candidate_review(id);
+
+ALTER TABLE ONLY factory.candidate_review
     ADD CONSTRAINT candidate_review_turn_id_fkey FOREIGN KEY (turn_id) REFERENCES factory.agent_turn(id);
 
 ALTER TABLE ONLY factory.candidate_review
@@ -5154,6 +5196,12 @@ ALTER TABLE ONLY factory.mcp_library
 
 ALTER TABLE ONLY factory.mcp_library
     ADD CONSTRAINT mcp_library_project_id_fkey FOREIGN KEY (project_id) REFERENCES factory.project(id);
+
+ALTER TABLE ONLY factory.mcp_library_cover
+    ADD CONSTRAINT mcp_library_cover_library_id_fkey FOREIGN KEY (library_id) REFERENCES factory.mcp_library(id);
+
+ALTER TABLE ONLY factory.mcp_library_cover
+    ADD CONSTRAINT mcp_library_cover_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES auth."user"(id);
 
 ALTER TABLE ONLY factory.mcp_oauth_flow
     ADD CONSTRAINT mcp_oauth_flow_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES factory.mcp_connection(id);
@@ -5515,6 +5563,12 @@ ALTER TABLE ONLY factory.skill_library
 ALTER TABLE ONLY factory.skill_library
     ADD CONSTRAINT skill_library_project_id_fkey FOREIGN KEY (project_id) REFERENCES factory.project(id);
 
+ALTER TABLE ONLY factory.skill_library_cover
+    ADD CONSTRAINT skill_library_cover_library_id_fkey FOREIGN KEY (library_id) REFERENCES factory.skill_library(id);
+
+ALTER TABLE ONLY factory.skill_library_cover
+    ADD CONSTRAINT skill_library_cover_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES auth."user"(id);
+
 ALTER TABLE ONLY factory.skill_library_revision
     ADD CONSTRAINT skill_library_revision_copied_from_fkey FOREIGN KEY (copied_from) REFERENCES factory.skill_revision(id);
 
@@ -5650,6 +5704,33 @@ ALTER TABLE ONLY factory.wiki_source_update
 ALTER TABLE ONLY factory.workspace_source
     ADD CONSTRAINT workspace_source_workspace_id_fkey FOREIGN KEY (workspace_id) REFERENCES factory.development_workspace(id);
 
+CREATE TABLE factory.technical_design_revision (
+    id uuid PRIMARY KEY,
+    ticket_id uuid NOT NULL REFERENCES factory.ticket(id),
+    requirement_revision_id uuid NOT NULL,
+    previous_revision_id uuid REFERENCES factory.technical_design_revision(id),
+    ordinal integer NOT NULL CHECK (ordinal > 0),
+    source_commit text NOT NULL CHECK (source_commit ~ '^[a-f0-9]{40}$'),
+    canonical_content text NOT NULL CHECK (length(canonical_content) BETWEEN 1 AND 100000),
+    content_digest text NOT NULL CHECK (content_digest = encode(factory.digest(convert_to(canonical_content, 'UTF8'), 'sha256'), 'hex')),
+    citations jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(citations) = 'array'),
+    diagram_renders jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(diagram_renders) = 'array'),
+    renderer_version text NOT NULL,
+    created_by uuid NOT NULL REFERENCES auth."user"(id),
+    author_kind text NOT NULL CHECK (author_kind IN ('human','ai')),
+    turn_id uuid UNIQUE REFERENCES factory.agent_turn(id),
+    planning_turn_id uuid REFERENCES factory.agent_turn(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (ticket_id, ordinal),
+    UNIQUE (id, ticket_id, requirement_revision_id),
+    FOREIGN KEY (requirement_revision_id, ticket_id) REFERENCES factory.requirement_revision(id, ticket_id)
+);
+CREATE TRIGGER technical_design_revision_immutable BEFORE UPDATE OR DELETE
+    ON factory.technical_design_revision FOR EACH ROW EXECUTE FUNCTION factory.reject_mutation();
+ALTER TABLE factory.requirement_approval ADD CONSTRAINT requirement_approval_technical_design_fk
+    FOREIGN KEY (technical_design_revision_id, ticket_id, requirement_revision_id)
+    REFERENCES factory.technical_design_revision(id, ticket_id, requirement_revision_id);
+
 CREATE TABLE factory.personal_git_operation (
     id uuid PRIMARY KEY,
     workspace_id uuid NOT NULL REFERENCES factory.development_workspace(id),
@@ -5690,6 +5771,567 @@ CREATE PUBLICATION factory_zero_publication FOR TABLE factory.epic, factory.know
 
 INSERT INTO factory.installation_maintenance(singleton) VALUES (true);
 INSERT INTO factory.attachment_storage(singleton,id) VALUES (true,gen_random_uuid());
+-- Personal attention is retained separately from shared decisions and execution.
+CREATE TABLE factory.ticket_responsibility (
+    ticket_id uuid PRIMARY KEY REFERENCES factory.ticket(id) ON DELETE CASCADE,
+    user_id uuid REFERENCES auth."user"(id),
+    version integer NOT NULL DEFAULT 1 CHECK (version > 0)
+);
+CREATE TABLE factory.ticket_follow (
+    ticket_id uuid NOT NULL REFERENCES factory.ticket(id) ON DELETE CASCADE,
+    user_id uuid NOT NULL REFERENCES auth."user"(id) ON DELETE CASCADE,
+    following boolean NOT NULL,
+    PRIMARY KEY (ticket_id, user_id)
+);
+CREATE TABLE factory.ticket_responsibility_event (
+    id uuid PRIMARY KEY,
+    ticket_id uuid NOT NULL REFERENCES factory.ticket(id) ON DELETE CASCADE,
+    user_id uuid REFERENCES auth."user"(id),
+    actor_id uuid NOT NULL REFERENCES auth."user"(id),
+    expected_version integer NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX ticket_responsibility_event_recipient ON factory.ticket_responsibility_event(user_id, created_at);
+CREATE TABLE factory.inbox_receipt (
+    user_id uuid NOT NULL REFERENCES auth."user"(id) ON DELETE CASCADE,
+    item_id text NOT NULL,
+    seen_event_id text,
+    archived boolean NOT NULL DEFAULT false,
+    PRIMARY KEY (user_id, item_id)
+);
+
+-- Retrospective learning never grants implementation or Delivery authority.
+CREATE TABLE factory.learning_source_artifact (
+    turn_id uuid NOT NULL REFERENCES factory.agent_turn(id) ON DELETE CASCADE,
+    ordinal integer NOT NULL CHECK (ordinal BETWEEN 0 AND 2),
+    reference text NOT NULL CHECK (length(reference) BETWEEN 1 AND 400),
+    body text NOT NULL CHECK (length(body) BETWEEN 1 AND 2000),
+    truncated boolean NOT NULL,
+    PRIMARY KEY (turn_id, ordinal)
+);
+CREATE TABLE factory.learning_policy (
+    scope_key text PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES factory.project(id) ON DELETE CASCADE,
+    owner_id uuid REFERENCES auth."user"(id) ON DELETE CASCADE,
+    enabled boolean NOT NULL,
+    automatic_skills boolean NOT NULL DEFAULT false,
+    version integer NOT NULL CHECK (version > 0),
+    updated_by uuid NOT NULL REFERENCES auth."user"(id),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CHECK (scope_key = project_id::text || ':' || coalesce(owner_id::text, 'project'))
+);
+CREATE TABLE factory.learning_case (
+    id text PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES factory.project(id) ON DELETE CASCADE,
+    owner_id uuid REFERENCES auth."user"(id) ON DELETE CASCADE,
+    reviewer_id uuid NOT NULL REFERENCES auth."user"(id),
+    developer_only boolean NOT NULL,
+    activity text NOT NULL,
+    outcome text NOT NULL CHECK (outcome IN ('completed','failed','interrupted','unknown')),
+    settled_at timestamptz NOT NULL,
+    snapshot jsonb NOT NULL CHECK (octet_length(snapshot::text) <= 65536),
+    selected boolean NOT NULL,
+    batch_id uuid,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX learning_case_pending ON factory.learning_case(project_id, owner_id, developer_only, settled_at)
+    WHERE selected AND batch_id IS NULL;
+CREATE INDEX learning_case_observed ON factory.learning_case(project_id, owner_id, developer_only, settled_at)
+    WHERE selected;
+CREATE TABLE factory.learning_review (
+    id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES factory.project(id) ON DELETE CASCADE,
+    owner_id uuid REFERENCES auth."user"(id) ON DELETE CASCADE,
+    developer_only boolean NOT NULL,
+    reviewer_id uuid NOT NULL REFERENCES auth."user"(id),
+    kind text NOT NULL CHECK (kind IN ('calibration','work')),
+    rubric text NOT NULL,
+    model_id text NOT NULL,
+    model_connection jsonb,
+    judge_key text NOT NULL,
+    state text NOT NULL CHECK (state IN ('running','completed','failed','uncertain')),
+    input jsonb NOT NULL CHECK (octet_length(input::text) <= 262144),
+    input_digest text NOT NULL CHECK (input_digest ~ '^[a-f0-9]{64}$'),
+    result jsonb CHECK (octet_length(result::text) <= 65536),
+    calibrated boolean,
+    reason text,
+    owner_token uuid NOT NULL,
+    owner_expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz
+);
+CREATE INDEX learning_review_judge ON factory.learning_review(judge_key, kind, state);
+ALTER TABLE factory.learning_case ADD CONSTRAINT learning_case_batch_fk
+    FOREIGN KEY (batch_id) REFERENCES factory.learning_review(id);
+CREATE TABLE factory.learning_proposal (
+    id uuid PRIMARY KEY,
+    review_id uuid NOT NULL REFERENCES factory.learning_review(id) ON DELETE CASCADE,
+    ordinal integer NOT NULL CHECK (ordinal >= 0),
+    content jsonb NOT NULL CHECK (octet_length(content::text) <= 32000),
+    state text NOT NULL DEFAULT 'proposed' CHECK (state IN ('proposed','dismissed','ticket-created','applied')),
+    decision_id uuid UNIQUE,
+    decided_by uuid REFERENCES auth."user"(id),
+    decided_at timestamptz,
+    ticket_id uuid REFERENCES factory.ticket(id),
+    UNIQUE (review_id, ordinal)
+);
+CREATE TABLE factory.learning_command (
+    id uuid PRIMARY KEY,
+    actor_id uuid NOT NULL REFERENCES auth."user"(id),
+    input jsonb NOT NULL,
+    result jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE factory.learning_trial (
+    id uuid PRIMARY KEY,
+    proposal_id uuid NOT NULL REFERENCES factory.learning_proposal(id) ON DELETE CASCADE,
+    phase text NOT NULL CHECK (phase IN ('adopt','recover')),
+    actor_id uuid NOT NULL REFERENCES auth."user"(id),
+    policy_version integer NOT NULL CHECK (policy_version > 0),
+    model_id text NOT NULL,
+    model_connection jsonb,
+    judge_key text NOT NULL,
+    rubric text NOT NULL,
+    input jsonb NOT NULL CHECK (octet_length(input::text) <= 196608),
+    input_digest text NOT NULL CHECK (input_digest ~ '^[a-f0-9]{64}$'),
+    state text NOT NULL DEFAULT 'running' CHECK (state IN ('running','completed','failed','uncertain')),
+    result jsonb CHECK (octet_length(result::text) <= 65536),
+    reason text,
+    owner_token uuid NOT NULL,
+    owner_expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    UNIQUE (proposal_id, phase)
+);
+CREATE TABLE factory.learning_trial_step (
+    trial_id uuid NOT NULL REFERENCES factory.learning_trial(id) ON DELETE CASCADE,
+    stage integer NOT NULL CHECK (stage BETWEEN 0 AND 2),
+    input jsonb NOT NULL CHECK (octet_length(input::text) <= 196608),
+    input_digest text NOT NULL CHECK (input_digest ~ '^[a-f0-9]{64}$'),
+    state text NOT NULL DEFAULT 'running' CHECK (state IN ('running','completed','uncertain')),
+    result jsonb CHECK (octet_length(result::text) <= 65536),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz,
+    PRIMARY KEY (trial_id, stage)
+);
+CREATE INDEX learning_trial_running ON factory.learning_trial(owner_expires_at) WHERE state='running';
+CREATE TABLE factory.learning_application (
+    id uuid PRIMARY KEY,
+    proposal_id uuid NOT NULL UNIQUE REFERENCES factory.learning_proposal(id) ON DELETE CASCADE,
+    target jsonb NOT NULL,
+    edit_digest text NOT NULL CHECK (edit_digest ~ '^[a-f0-9]{64}$'),
+    activation jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(activation)='array' AND jsonb_array_length(activation)<=2),
+    applied_revision_id uuid NOT NULL,
+    applied_version integer NOT NULL CHECK (applied_version > 0),
+    applied_by uuid NOT NULL REFERENCES auth."user"(id),
+    comparison_id uuid REFERENCES factory.learning_trial(id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    state text NOT NULL DEFAULT 'applied' CHECK (state IN ('applied','reverted')),
+    reverted_revision_id uuid,
+    reverted_version integer,
+    reverted_by uuid REFERENCES auth."user"(id),
+    reverted_comparison_id uuid REFERENCES factory.learning_trial(id),
+    reverted_at timestamptz,
+    CHECK ((state='applied' AND reverted_revision_id IS NULL AND reverted_version IS NULL AND reverted_by IS NULL AND reverted_at IS NULL AND reverted_comparison_id IS NULL)
+      OR (state='reverted' AND reverted_revision_id IS NOT NULL AND reverted_version=applied_version+1 AND reverted_by IS NOT NULL AND reverted_at IS NOT NULL))
+);
+CREATE FUNCTION factory.guard_learning_record() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_TABLE_NAME IN ('learning_review','learning_trial') THEN
+    IF (to_jsonb(NEW)-'state'-'result'-'calibrated'-'reason'-'owner_expires_at'-'completed_at')
+      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'result'-'calibrated'-'reason'-'owner_expires_at'-'completed_at')
+      OR (OLD.state<>'running' AND NEW IS DISTINCT FROM OLD)
+    THEN RAISE EXCEPTION 'Learning admission and settled evidence are immutable'; END IF;
+  ELSIF TG_TABLE_NAME='learning_trial_step' THEN
+    IF (to_jsonb(NEW)-'state'-'result'-'completed_at')
+      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'result'-'completed_at')
+      OR (OLD.state<>'running' AND NEW IS DISTINCT FROM OLD)
+    THEN RAISE EXCEPTION 'Learning comparison calls are immutable'; END IF;
+  ELSIF TG_TABLE_NAME='learning_case' THEN
+    IF (to_jsonb(NEW)-'batch_id') IS DISTINCT FROM (to_jsonb(OLD)-'batch_id')
+      OR (OLD.batch_id IS NOT NULL AND NEW IS DISTINCT FROM OLD)
+    THEN RAISE EXCEPTION 'Learning source evidence is immutable'; END IF;
+  ELSIF TG_TABLE_NAME='learning_proposal' THEN
+    IF (to_jsonb(NEW)-'state'-'decision_id'-'decided_by'-'decided_at'-'ticket_id')
+      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'decision_id'-'decided_by'-'decided_at'-'ticket_id')
+      OR (OLD.state<>'proposed' AND NEW IS DISTINCT FROM OLD)
+    THEN RAISE EXCEPTION 'Learning proposals and decisions are immutable'; END IF;
+  ELSIF TG_TABLE_NAME='learning_application' THEN
+    IF (to_jsonb(NEW)-'state'-'reverted_revision_id'-'reverted_version'-'reverted_by'-'reverted_at'-'reverted_comparison_id')
+      IS DISTINCT FROM (to_jsonb(OLD)-'state'-'reverted_revision_id'-'reverted_version'-'reverted_by'-'reverted_at'-'reverted_comparison_id')
+      OR (OLD.state<>'applied' AND NEW IS DISTINCT FROM OLD)
+    THEN RAISE EXCEPTION 'Learning application and rollback evidence are immutable'; END IF;
+  ELSE
+    RAISE EXCEPTION 'Learning command receipts are immutable';
+  END IF;
+  RETURN NEW;
+END; $$;
+CREATE TRIGGER learning_review_guard BEFORE UPDATE ON factory.learning_review
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_case_guard BEFORE UPDATE ON factory.learning_case
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_proposal_guard BEFORE UPDATE ON factory.learning_proposal
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_command_guard BEFORE UPDATE ON factory.learning_command
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_application_guard BEFORE UPDATE ON factory.learning_application
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_trial_guard BEFORE UPDATE ON factory.learning_trial
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_trial_step_guard BEFORE UPDATE ON factory.learning_trial_step
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+CREATE TRIGGER learning_source_artifact_guard BEFORE UPDATE ON factory.learning_source_artifact
+  FOR EACH ROW EXECUTE FUNCTION factory.guard_learning_record();
+
+-- Content-free read invalidation. The authenticated read still owns filtering,
+-- native observations and command-result fences. Never replicate prompts,
+-- credentials, heartbeat leases, logs or native transcript snapshots here.
+CREATE TABLE factory.read_version (
+  project_id uuid NOT NULL REFERENCES factory.project(id) ON DELETE CASCADE,
+  audience text NOT NULL CHECK (audience IN ('shared','developer') OR audience ~ '^[0-9a-f-]{36}$'),
+  scope text NOT NULL CHECK (scope IN ('lifecycle','ticket','conversation','review','inbox','knowledge','inputs','sources','releases')),
+  resource_id uuid NOT NULL,
+  revision uuid NOT NULL DEFAULT gen_random_uuid(),
+  PRIMARY KEY (project_id, audience, scope, resource_id)
+);
+CREATE INDEX read_version_scope ON factory.read_version(scope, project_id);
+ALTER PUBLICATION factory_zero_publication ADD TABLE factory.read_version;
+
+CREATE TABLE factory.knowledge_page_outline (
+  id uuid PRIMARY KEY REFERENCES factory.knowledge_page(id) ON DELETE CASCADE,
+  project_id uuid NOT NULL REFERENCES factory.project(id) ON DELETE CASCADE,
+  slug text NOT NULL,
+  title text NOT NULL,
+  parent_id uuid,
+  sort_order integer NOT NULL,
+  icon text NOT NULL,
+  metadata_version bigint NOT NULL,
+  state factory.knowledge_page_state NOT NULL,
+  version bigint NOT NULL,
+  current_revision_id uuid,
+  created_at timestamptz NOT NULL,
+  updated_at timestamptz NOT NULL
+);
+CREATE INDEX knowledge_page_outline_project ON factory.knowledge_page_outline(project_id,state);
+ALTER PUBLICATION factory_zero_publication ADD TABLE factory.knowledge_page_outline;
+CREATE FUNCTION factory.project_knowledge_page_outline() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP='DELETE' THEN
+    DELETE FROM factory.knowledge_page_outline WHERE id=OLD.id;
+  ELSE
+    INSERT INTO factory.knowledge_page_outline
+      SELECT NEW.id,NEW.project_id,NEW.slug,NEW.title,NEW.parent_id,NEW.sort_order,NEW.icon,
+        NEW.metadata_version,NEW.state,NEW.version,NEW.current_revision_id,NEW.created_at,NEW.updated_at
+    ON CONFLICT (id) DO UPDATE SET
+      project_id=EXCLUDED.project_id,slug=EXCLUDED.slug,title=EXCLUDED.title,parent_id=EXCLUDED.parent_id,sort_order=EXCLUDED.sort_order,
+      icon=EXCLUDED.icon,metadata_version=EXCLUDED.metadata_version,state=EXCLUDED.state,
+      version=EXCLUDED.version,current_revision_id=EXCLUDED.current_revision_id,updated_at=EXCLUDED.updated_at;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+CREATE TRIGGER knowledge_page_outline AFTER INSERT OR UPDATE OR DELETE ON factory.knowledge_page
+  FOR EACH ROW EXECUTE FUNCTION factory.project_knowledge_page_outline();
+
+CREATE FUNCTION factory.touch_read_version(project uuid, target_scope text, resource uuid, target_audience text DEFAULT 'shared')
+RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+  IF $1 IS NULL OR $3 IS NULL OR NOT EXISTS(SELECT 1 FROM factory.project WHERE id=$1) THEN RETURN; END IF;
+  -- Read projections lock last, after domain writes, and serialize all of a
+  -- Project's audiences in one order. They never enter an admission lock chain.
+  PERFORM pg_advisory_xact_lock(hashtextextended('read-version:'||$1::text,0));
+  INSERT INTO factory.read_version(project_id,audience,scope,resource_id)
+    VALUES ($1,$4,$2,$3)
+  ON CONFLICT (project_id,audience,scope,resource_id)
+    DO UPDATE SET revision=EXCLUDED.revision;
+END;
+$$;
+
+CREATE FUNCTION factory.invalidate_factory_reads() RETURNS trigger LANGUAGE plpgsql AS $$
+<<projection>>
+DECLARE
+  record jsonb := CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END;
+  project uuid;
+  ticket uuid;
+  change uuid;
+  conversation uuid;
+  audience text := 'shared';
+  person uuid;
+BEGIN
+  IF TG_OP='UPDATE' THEN
+    IF TG_TABLE_NAME='agent_turn' THEN
+      IF (OLD.state,OLD.outcome_summary) IS NOT DISTINCT FROM (NEW.state,NEW.outcome_summary) THEN RETURN NULL; END IF;
+    ELSIF TG_TABLE_NAME='conversation_context' THEN
+      IF (to_jsonb(OLD)-ARRAY['transcript','archived_session']) = (to_jsonb(NEW)-ARRAY['transcript','archived_session']) THEN RETURN NULL; END IF;
+    ELSIF (to_jsonb(OLD)-ARRAY['updated_at','owner_expires_at','owner_token']) =
+          (to_jsonb(NEW)-ARRAY['updated_at','owner_expires_at','owner_token']) THEN RETURN NULL;
+    END IF;
+  END IF;
+
+  IF TG_TABLE_NAME IN ('inbox_receipt','account_access','administrator') THEN
+    person := (record->>'user_id')::uuid;
+    FOR project IN
+      SELECT id FROM factory.project WHERE EXISTS(
+        SELECT 1 FROM factory.project_membership WHERE project_id=id AND user_id=person)
+        OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=person)
+      ORDER BY id
+    LOOP
+      PERFORM factory.touch_read_version(project,'inbox',project,person::text);
+      IF TG_TABLE_NAME<>'inbox_receipt' THEN
+        PERFORM factory.touch_read_version(project,'inbox',project);
+      END IF;
+    END LOOP;
+    RETURN NULL;
+  END IF;
+
+  project := (record->>'project_id')::uuid;
+  ticket := (record->>'ticket_id')::uuid;
+  change := (record->>'change_id')::uuid;
+  conversation := (record->>'conversation_id')::uuid;
+  IF TG_TABLE_NAME='project' THEN project := (record->>'id')::uuid; END IF;
+  IF TG_TABLE_NAME='ticket' THEN ticket := (record->>'id')::uuid; END IF;
+  IF TG_TABLE_NAME='change' THEN change := (record->>'id')::uuid; END IF;
+  IF TG_TABLE_NAME='ticket_conversation' THEN conversation := (record->>'id')::uuid; END IF;
+  IF TG_TABLE_NAME='coding_pause' THEN
+    SELECT change_id INTO change FROM factory.agent_turn WHERE id=(record->>'turn_id')::uuid;
+  END IF;
+  IF TG_TABLE_NAME='runtime_compute_wait' THEN
+    SELECT project_id,change_id INTO project,change FROM factory.runtime_attempt WHERE id=(record->>'attempt_id')::uuid;
+  END IF;
+  IF TG_TABLE_NAME='review_feedback_message' THEN
+    SELECT change_id INTO change FROM factory.review_feedback WHERE id=(record->>'feedback_id')::uuid;
+  END IF;
+  IF TG_TABLE_NAME='review_scenario' THEN
+    SELECT change_id INTO change FROM factory.candidate_review WHERE id=(record->>'review_id')::uuid;
+  END IF;
+  IF change IS NOT NULL THEN
+    SELECT project_id,ticket_id INTO project,ticket FROM factory.change WHERE id=projection.change;
+  ELSIF conversation IS NOT NULL THEN
+    SELECT project_id,ticket_id,CASE WHEN ticket_id IS NULL THEN created_by::text ELSE 'shared' END
+      INTO project,ticket,audience FROM factory.ticket_conversation WHERE id=projection.conversation;
+  ELSIF ticket IS NOT NULL THEN
+    SELECT project_id INTO project FROM factory.ticket WHERE id=projection.ticket;
+  END IF;
+  IF TG_TABLE_NAME='agent_turn' AND ticket IS NULL THEN audience := record->>'created_by'; END IF;
+  IF TG_TABLE_NAME='ticket_follow' THEN audience := record->>'user_id'; END IF;
+  IF TG_TABLE_NAME='change_editing_request' THEN audience := record->>'owner_id'; END IF;
+  IF audience='shared' AND (
+    TG_TABLE_NAME='technical_design_revision' OR
+    (TG_TABLE_NAME='conversation_entry' AND record->'payload'->>'visibility'='developer') OR
+    (TG_TABLE_NAME='conversation_context' AND record->>'kind'='coding') OR
+    (TG_TABLE_NAME='agent_turn' AND (
+      record->'authority'->>'visibility'='developer' OR
+      record->'authority'->>'mode'='build' OR
+      record->'input'->>'intent' IN ('technical-planning','full-planning')))
+  ) THEN audience := 'developer'; END IF;
+  IF project IS NULL OR audience IS NULL THEN RETURN NULL; END IF;
+
+  PERFORM factory.touch_read_version(project,'inbox',project,audience);
+  IF TG_TABLE_NAME IN ('conversation_entry','conversation_context','ticket_conversation','agent_turn',
+    'ticket','ticket_document_revision','requirement_revision','requirement_approval','technical_design_revision') THEN
+    PERFORM factory.touch_read_version(project,'conversation',COALESCE(ticket,project),audience);
+  END IF;
+  IF ticket IS NOT NULL THEN
+    PERFORM factory.touch_read_version(project,'ticket',ticket,audience);
+  END IF;
+  IF change IS NOT NULL THEN
+    PERFORM factory.touch_read_version(project,'review',change,audience);
+  END IF;
+  IF TG_TABLE_NAME IN ('change','runtime_attempt','runtime_compute_wait','staging_preview','verification','candidate_review',
+    'change_agent_session','change_writer','change_editing_decision',
+    'coding_pause','delivery_approval','merge_operation','promotion_operation',
+    'pull_request_operation','review_feedback','review_feedback_message','review_media','review_scenario','implementation_order','project_delivery_queue')
+    OR (TG_TABLE_NAME='agent_turn' AND change IS NOT NULL) THEN
+    PERFORM factory.touch_read_version(project,'lifecycle',project);
+  END IF;
+  IF TG_TABLE_NAME IN ('knowledge_generation','knowledge_page') THEN
+    PERFORM factory.touch_read_version(project,'knowledge',project);
+  END IF;
+  RETURN NULL;
+END;
+$$;
+
+DO $$
+DECLARE name text;
+BEGIN
+  FOREACH name IN ARRAY ARRAY[
+    'project','project_membership','account_access','administrator','ticket',
+    'ticket_document_revision','requirement_revision','requirement_approval','technical_design_revision',
+    'ticket_responsibility','ticket_responsibility_event','ticket_follow','inbox_receipt',
+    'ticket_conversation','conversation_entry','conversation_context','agent_turn',
+    'change','runtime_attempt','runtime_compute_wait','staging_preview','verification','candidate_review','change_agent_session',
+    'change_writer','change_editing_request','change_editing_decision',
+    'coding_pause','delivery_approval','merge_operation','promotion_operation','pull_request_operation',
+    'review_feedback','review_feedback_message','review_media','review_scenario',
+    'knowledge_generation','knowledge_page','monitoring_incident','monitoring_hook'
+  ] LOOP
+    EXECUTE format('CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR UPDATE OR DELETE ON factory.%I DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads()',name);
+  END LOOP;
+END;
+$$;
+
+-- Settings observations carry only a version. Source credentials, tools and
+-- Input payloads remain behind their authenticated Server Functions.
+CREATE FUNCTION factory.invalidate_settings_reads() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  record jsonb := CASE WHEN TG_OP='DELETE' THEN to_jsonb(OLD) ELSE to_jsonb(NEW) END;
+  project uuid;
+  library uuid;
+  library_scope text;
+  target_scope text;
+BEGIN
+  IF TG_OP='UPDATE' AND
+    (to_jsonb(OLD)-ARRAY['updated_at','owner_expires_at','owner_token','received_window','received_count']) =
+    (to_jsonb(NEW)-ARRAY['updated_at','owner_expires_at','owner_token','received_window','received_count'])
+    THEN RETURN NULL;
+  END IF;
+  IF TG_TABLE_NAME='project_membership' THEN
+    IF TG_OP='UPDATE' AND (OLD.role,OLD.manage_project) IS NOT DISTINCT FROM (NEW.role,NEW.manage_project)
+      THEN RETURN NULL;
+    END IF;
+    project := (record->>'project_id')::uuid;
+    -- Cached Settings capabilities must follow current Project authority even
+    -- when the member remains authorized to read the same version rows.
+    FOREACH target_scope IN ARRAY ARRAY['inputs','sources','releases'] LOOP
+      PERFORM factory.touch_read_version(project,target_scope,project);
+    END LOOP;
+    RETURN NULL;
+  ELSIF TG_TABLE_NAME IN ('monitoring_hook','monitoring_incident') THEN
+    project := (record->>'project_id')::uuid;
+    target_scope := 'inputs';
+  ELSIF TG_TABLE_NAME IN ('project_release','release_access') THEN
+    project := (record->>'project_id')::uuid;
+    target_scope := 'releases';
+  ELSIF TG_TABLE_NAME='release_attempt' THEN
+    SELECT project_id INTO project FROM factory.project_release WHERE id=(record->>'release_id')::uuid;
+    IF project IS NULL THEN RETURN NULL; END IF;
+    target_scope := 'releases';
+  ELSIF TG_TABLE_NAME='mcp_project_grant' THEN
+    project := (record->>'project_id')::uuid;
+    target_scope := 'sources';
+  ELSIF TG_TABLE_NAME='mcp_choice' THEN
+    IF record->>'scope'='personal' THEN RETURN NULL; END IF;
+    IF record->>'scope'='project' THEN project := (record->>'context_id')::uuid; END IF;
+    target_scope := 'sources';
+  ELSE
+    library := COALESCE((record->>'library_id')::uuid,(record->>'id')::uuid);
+    IF TG_TABLE_NAME='mcp_library' THEN
+      project := (record->>'project_id')::uuid;
+      library_scope := record->>'scope';
+    ELSE
+      SELECT scope,project_id INTO library_scope,project FROM factory.mcp_library WHERE id=library;
+    END IF;
+    IF library_scope IS NULL OR library_scope='personal' THEN RETURN NULL; END IF;
+    target_scope := 'sources';
+  END IF;
+  IF project IS NOT NULL THEN
+    PERFORM factory.touch_read_version(project,target_scope,project);
+  ELSE
+    -- Shared Factory source changes invalidate authorized Project reads, not
+    -- personal choices or private connection contents.
+    FOR project IN SELECT id FROM factory.project ORDER BY id LOOP
+      PERFORM factory.touch_read_version(project,target_scope,project);
+    END LOOP;
+  END IF;
+  RETURN NULL;
+END;
+$$;
+DO $$
+DECLARE name text;
+BEGIN
+  FOREACH name IN ARRAY ARRAY[
+    'project_membership','monitoring_hook','monitoring_incident','mcp_library','mcp_revision',
+    'mcp_connection','mcp_project_grant','mcp_choice','mcp_library_cover',
+    'project_release','release_attempt','release_access'
+  ] LOOP
+    EXECUTE format('CREATE CONSTRAINT TRIGGER settings_read_version AFTER INSERT OR UPDATE OR DELETE ON factory.%I DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_settings_reads()',name);
+  END LOOP;
+END;
+$$;
+
+-- The queue owns no execution engine. It serializes the existing Delivery path.
+CREATE TABLE factory.project_delivery_policy (
+  id uuid PRIMARY KEY,
+  project_id uuid NOT NULL REFERENCES factory.project(id),
+  delegated_by uuid NOT NULL REFERENCES auth."user"(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  revoked_at timestamptz,
+  revoked_command_id uuid,
+  revoked_by uuid REFERENCES auth."user"(id)
+);
+CREATE UNIQUE INDEX project_delivery_one_active_policy ON factory.project_delivery_policy(project_id) WHERE revoked_at IS NULL;
+CREATE TABLE factory.project_delivery_queue (
+  project_id uuid PRIMARY KEY REFERENCES factory.project(id),
+  change_id uuid UNIQUE REFERENCES factory.change(id),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE factory.delivery_approval ADD CONSTRAINT delivery_policy_basis_fk
+  FOREIGN KEY(delivery_policy_id) REFERENCES factory.project_delivery_policy(id);
+ALTER TABLE factory.change ADD CONSTRAINT change_delivery_waiting_policy_fk
+  FOREIGN KEY(delivery_waiting_policy_id) REFERENCES factory.project_delivery_policy(id);
+ALTER TABLE factory.delivery_approval ADD CONSTRAINT delivery_one_delegation
+  CHECK (delivery_policy_id IS NULL OR monitoring_policy_id IS NULL);
+
+CREATE TABLE factory.implementation_order (
+  command_id uuid PRIMARY KEY,
+  project_id uuid NOT NULL REFERENCES factory.project(id),
+  ticket_id uuid NOT NULL REFERENCES factory.ticket(id),
+  created_by uuid NOT NULL REFERENCES auth."user"(id),
+  requirement_revision_id uuid NOT NULL REFERENCES factory.requirement_revision(id),
+  technical_design_revision_id uuid REFERENCES factory.technical_design_revision(id),
+  coding_reasoning text,
+  source_sha text NOT NULL CHECK (source_sha ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'),
+  state text NOT NULL DEFAULT 'waiting' CHECK(state IN ('waiting','started','blocked','cancelled')),
+  change_id uuid REFERENCES factory.change(id),
+  cancelled_by uuid REFERENCES auth."user"(id),
+  cancelled_at timestamptz,
+  last_error text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX implementation_order_one_waiting ON factory.implementation_order(ticket_id) WHERE state='waiting';
+
+CREATE FUNCTION factory.protect_integration_intent() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.change_id,NEW.runtime_attempt_id,NEW.sequence,NEW.source,NEW.expected_parent_sha,
+      NEW.integration_base_sha,NEW.merge_parent_sha,NEW.branch_name,NEW.commit_message,NEW.created_by,NEW.idempotency_key)
+    IS DISTINCT FROM ROW(OLD.change_id,OLD.runtime_attempt_id,OLD.sequence,OLD.source,OLD.expected_parent_sha,
+      OLD.integration_base_sha,OLD.merge_parent_sha,OLD.branch_name,OLD.commit_message,OLD.created_by,OLD.idempotency_key) THEN
+    RAISE EXCEPTION 'Commit intent and integrated source are immutable';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER integration_intent BEFORE UPDATE ON factory.change_commit_operation
+  FOR EACH ROW EXECUTE FUNCTION factory.protect_integration_intent();
+CREATE FUNCTION factory.protect_delivery_policy() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.id,NEW.project_id,NEW.delegated_by,NEW.created_at) IS DISTINCT FROM
+    ROW(OLD.id,OLD.project_id,OLD.delegated_by,OLD.created_at)
+    OR (OLD.revoked_at IS NOT NULL AND NEW IS DISTINCT FROM OLD) THEN
+    RAISE EXCEPTION 'Delivery delegation and revocation are immutable';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER delivery_policy_identity BEFORE UPDATE ON factory.project_delivery_policy
+  FOR EACH ROW EXECUTE FUNCTION factory.protect_delivery_policy();
+CREATE FUNCTION factory.protect_implementation_order() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF ROW(NEW.command_id,NEW.project_id,NEW.ticket_id,NEW.created_by,NEW.requirement_revision_id,
+      NEW.technical_design_revision_id,NEW.coding_reasoning,NEW.source_sha,NEW.created_at)
+    IS DISTINCT FROM ROW(OLD.command_id,OLD.project_id,OLD.ticket_id,OLD.created_by,OLD.requirement_revision_id,
+      OLD.technical_design_revision_id,OLD.coding_reasoning,OLD.source_sha,OLD.created_at)
+    OR (OLD.state<>'waiting' AND NEW IS DISTINCT FROM OLD) THEN
+    RAISE EXCEPTION 'Commissioned implementation scope is immutable';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER implementation_scope BEFORE UPDATE ON factory.implementation_order
+  FOR EACH ROW EXECUTE FUNCTION factory.protect_implementation_order();
+CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR UPDATE OR DELETE ON factory.implementation_order
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
+CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR UPDATE OR DELETE ON factory.project_delivery_queue
+  DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
+
 INSERT INTO factory.schema_migration(version) VALUES (1);
 
 COMMIT;

@@ -13,6 +13,7 @@ import { localOpenBao } from "../../scripts/factory/openbao";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { assistedImportRuntime } from "../fixtures/assisted-import-runtime";
 import { removeOwnedProjectSources } from "../fixtures/editor-source-resources";
+import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
   "private HTTPS import transfers exact history, branches and tags once and removes its encrypted token",
@@ -127,10 +128,14 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
         await factory.start();
         cookie = await factory.signIn();
         if (process.env["FACTORY_ASSISTED_IMPORT_CLEANUP_ONLY"] === "1") {
-          const api = (path: string) =>
-            fetch(factory!.base + path, {
+          const _api = (path: string) =>
+            fetch(fixtureValue(factory, "factory").base + path, {
               method: "POST",
-              headers: { cookie, origin: factory!.base, "content-type": "application/json" },
+              headers: {
+                cookie,
+                origin: fixtureValue(factory, "factory").base,
+                "content-type": "application/json",
+              },
               body: "{}",
               signal: AbortSignal.timeout(60_000),
             });
@@ -142,10 +147,10 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
             expect(
               (
                 await callFactoryFunction(
-                  factory!.base,
+                  factory.base,
                   "stopRuntimeAttempt",
                   [attempt.id],
-                  { cookie, origin: factory!.base, "content-type": "application/json" },
+                  { cookie, origin: factory.base, "content-type": "application/json" },
                   AbortSignal.timeout(60_000),
                 )
               ).ok,
@@ -153,7 +158,7 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
             await eventually(
               async () =>
                 (
-                  await database!
+                  await fixtureValue(database, "database")
                     .client`SELECT state FROM factory.runtime_attempt WHERE id=${attempt.id}`
                 )[0]?.["state"],
               (state) => state === "stopped",
@@ -163,7 +168,12 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
           }
           await removeOwnedProjectSources(database, importedProjectID, (workspace) =>
             serverCall(
-              callFactoryFunction(factory!.base, "stopWorkspaceSource", [workspace], { cookie }),
+              callFactoryFunction(
+                fixtureValue(factory, "factory").base,
+                "stopWorkspaceSource",
+                [workspace],
+                { cookie },
+              ),
             ),
           );
           succeeded = true;
@@ -303,7 +313,7 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
         "FORGEJO__service__DISABLE_REGISTRATION=true",
         "--publish",
         "127.0.0.1::3000",
-        "codeberg.org/forgejo/forgejo:15.0.10-rootless@sha256:6ffebd9ab9ee9f6677e3523fa60debd9de630ff2a226fa681d6cc0c7ba541d77",
+        "codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8",
       ]);
       destinationCreated = true;
       const port = (await command(["docker", "port", container, "3000/tcp"])).split(":").at(-1);
@@ -364,7 +374,7 @@ test.skipIf(process.env["FACTORY_RUN_PRIVATE_IMPORT_PROOF"] !== "1")(
           : undefined,
       );
       database = factory.connect();
-      async function api(path: string, method = "GET", body?: unknown) {
+      async function _api(path: string, method = "GET", body?: unknown) {
         if (!factory) throw new Error("Owned import Factory missing");
         const response = await fetch(factory.base + path, {
           method,

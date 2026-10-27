@@ -77,6 +77,7 @@ export async function pinnedOpenCode(
   const id = crypto.randomUUID();
   const source = `factory-owned-opencode-artifact-${id}`;
   const container = `factory-owned-opencode-process-${id}`;
+  const network = `factory-owned-opencode-network-${id}`;
   const scratch = await realpath(await mkdtemp(resolve(tmpdir(), "factory-opencode-process-")));
   const project = retainedProject ?? resolve(scratch, "project");
   await mkdir(project, { recursive: true });
@@ -84,6 +85,8 @@ export async function pinnedOpenCode(
   await mkdir(evidence, { recursive: true });
   const created: string[] = [];
   const acknowledged = new Set<string>();
+  let networkIntended = false;
+  let networkAcknowledged = false;
   async function create(name: string, ...args: string[]) {
     created.push(name);
     await writeFile(
@@ -96,6 +99,7 @@ export async function pinnedOpenCode(
         scratch,
         ownerProcessID: process.pid,
         attempted: created,
+        network,
       }),
       { mode: 0o600 },
     );
@@ -124,6 +128,28 @@ export async function pinnedOpenCode(
       await docker("rm", "--force", "--volumes", name);
       created.splice(created.indexOf(name), 1);
     }
+    if (networkIntended) {
+      const owner = await docker(
+        "network",
+        "inspect",
+        "--format",
+        '{{index .Labels "factory.owned-process-test"}}',
+        network,
+      ).catch((cause: unknown) => {
+        if (
+          networkAcknowledged &&
+          cause instanceof Error &&
+          /(?:no such|not found)/i.test(cause.message)
+        )
+          return null;
+        throw cause;
+      });
+      if (owner !== null) {
+        if (owner !== id) throw new Error("Owned process network cleanup refused");
+        await docker("network", "rm", network);
+      }
+      networkIntended = false;
+    }
     await writeFile(resolve(evidence, "cleanup.json"), JSON.stringify({ removed: true }));
   }
   try {
@@ -138,6 +164,13 @@ export async function pinnedOpenCode(
       label,
       artifactImage,
     );
+    networkIntended = true;
+    await writeFile(
+      resolve(evidence, "network-intent.json"),
+      JSON.stringify({ network, owner: id }),
+    );
+    await docker("network", "create", "--label", label, network);
+    networkAcknowledged = true;
     if (skillManifest)
       await Bun.write(resolve(scratch, "admitted-skills.json"), JSON.stringify(skillManifest));
     if (packaged) {
@@ -159,6 +192,8 @@ export async function pinnedOpenCode(
       container,
       "--label",
       label,
+      "--network",
+      network,
       "--env",
       `FACTORY_PROCESS_MODEL_ID=${nativeProvider?.modelID ?? buildModelID}`,
       ...(nativeProvider

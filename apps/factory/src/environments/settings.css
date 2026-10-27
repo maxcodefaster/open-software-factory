@@ -224,21 +224,9 @@
 }
 .environment-settings input,
 .environment-settings textarea {
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-sm);
-  background: var(--material-input);
-  color: var(--color-ink);
-  font-family: var(--font-interface);
-  font-size: var(--text-sm);
-  min-height: var(--control-height);
   height: auto;
 }
 .environment-settings textarea {
-  resize: vertical;
   min-height: var(--editor-format-control-height);
 }
 .environment-settings .environment-search > input {
@@ -275,8 +263,7 @@
   cursor: pointer;
   font-size: var(--text-sm);
 }
-.environment-settings summary:focus-visible,
-.environment-actions-menu button:focus-visible {
+.environment-settings summary:focus-visible {
   outline: 2px solid var(--color-focus);
   outline-offset: 2px;
 }

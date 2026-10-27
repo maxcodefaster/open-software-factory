@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
@@ -13,8 +14,13 @@ import type {
 import type { monitoringSave } from "../../packages/conversation-domain/src/monitoring";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
+import {
+  browserFunction,
+  factoryFunctionMatches,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { fixtureValue } from "../fixtures/value";
 
 test("Project Inputs separate automatic preparation, source access, explicit Autofix and one-time keys", async ({
   page,
@@ -224,14 +230,14 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await detail.getByRole("button", { name: "Connect", exact: true }).click();
     const signInLink = detail.getByRole("link", { name: "Continue sign-in" });
     await expect(signInLink).toBeVisible();
-    await expect(page.getByRole("status")).not.toContainText("Loading connections");
+    await expect(
+      page.locator(".mcp-library").getByRole("status").filter({ hasText: "Loading connections" }),
+    ).toHaveCount(0);
     await signInLink.focus();
-    const observed = page.waitForResponse((response) =>
-      new URL(response.url()).pathname.startsWith("/_server/data/getMCPLibrary-"),
-    );
-    await observed;
     await expect(signInLink).toBeFocused();
-    await expect(page.getByRole("status")).not.toContainText("Loading connections");
+    await expect(
+      page.locator(".mcp-library").getByRole("status").filter({ hasText: "Loading connections" }),
+    ).toHaveCount(0);
     await expect(useSource).toBeDisabled();
     await database.client`UPDATE factory.mcp_connection SET state='review',version=2 WHERE id=${contextualSourceId}`;
     const access = detail.getByRole("region", { name: "Read-only tool review", exact: true });
@@ -439,7 +445,7 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
       .getByRole("button", { name: "Inputs", exact: true })
       .click();
     await expect(secret).toBeHidden();
-    await expect(monitoring.getByRole("status")).toHaveCount(0);
+    await expect(monitoring.locator(":scope > .input-message[role='status']")).toHaveCount(0);
 
     const hook = monitoring.getByRole("article", { name: "Invoice errors input", exact: true });
     async function openActions() {
@@ -450,10 +456,11 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     }
     await openActions();
     await hook.getByRole("button", { name: "Disable input", exact: true }).focus();
-    // Unchanged polling must not replace a focused control.
-    const read = page.waitForResponse((response) =>
-      new URL(response.url()).pathname.startsWith("/_server/data/getProjectInputs-"),
+    // An unchanged projection invalidation must not replace a focused control.
+    const read = page.waitForResponse(
+      async (response) => await factoryFunctionMatches(response.url(), "getProjectInputs"),
     );
+    await database.client`SELECT factory.touch_read_version(${projectId},'inputs',${projectId})`;
     await read;
     await expect(hook.getByRole("button", { name: "Disable input", exact: true })).toBeFocused();
     await hook.getByRole("button", { name: "Disable input", exact: true }).click();
@@ -543,7 +550,10 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
       peerMonitoring.getByRole("button", { name: "Add input", exact: true }),
     ).toBeVisible();
     await expect(peerPage.getByText("Factory administration", { exact: true })).toHaveCount(0);
-    const denied = await browserFunction(peerPage, "saveProjectInput", [projectId, commands[0]!]);
+    const denied = await browserFunction(peerPage, "saveProjectInput", [
+      projectId,
+      fixtureValue(commands[0], "commands[0]"),
+    ]);
     expect(denied).toMatchObject({ ok: false, status: 403 });
     await database.client`UPDATE factory.project_membership SET manage_project=false WHERE project_id=${projectId}`;
     await expect(

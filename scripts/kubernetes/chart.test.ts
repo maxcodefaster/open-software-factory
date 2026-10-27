@@ -166,7 +166,7 @@ test("the repository chart is a Kubernetes installation, not a host Docker launc
       expect(definition).not.toContain(forbidden);
   }
   const dependencies = all.filter((resource) => resource.kind === "StatefulSet");
-  expect(dependencies).toHaveLength(4);
+  expect(dependencies).toHaveLength(5);
   for (const dependency of dependencies)
     expect(dependency.spec?.template?.spec.automountServiceAccountToken).toBe(false);
 });
@@ -224,6 +224,7 @@ test("all standard service images retain the maintained exact upstream pins", as
     forgejo: compose.services.forgejo.image,
     zero: compose.services["zero-cache"].image,
     openbao: upstream.openbao.image,
+    objects: upstream.garage.image,
   };
   for (const [role, image] of Object.entries(expected)) {
     const workload = all.find(
@@ -233,6 +234,63 @@ test("all standard service images retain the maintained exact upstream pins", as
     expect(workload?.spec?.template?.spec.containers[0]?.image).toBe(image);
     expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
   }
+});
+
+test("the chart provides one private persistent file store without operator S3 configuration", async () => {
+  const all = await resources();
+  const config = all.find((resource) => resource.metadata.name === "portable-config")?.data;
+  expect(config?.["FACTORY_OBJECT_S3_ENDPOINT"]).toBe(
+    "http://portable-objects.factory-proof.svc:3900",
+  );
+  expect(config?.["FACTORY_OBJECT_S3_BUCKET"]).toBe("factory");
+  expect(config?.["FACTORY_OBJECT_S3_REGION"]).toBe("garage");
+  const secret = all.find(
+    (resource) => resource.kind === "Secret" && resource.metadata.name === "portable-objects",
+  );
+  expect(Buffer.from(secret?.data?.["access-key-id"] ?? "", "base64").toString()).toMatch(
+    /^GK[a-f0-9]{32}$/,
+  );
+  for (const key of ["secret-access-key", "rpc-secret"])
+    expect(Buffer.from(secret?.data?.[key] ?? "", "base64").toString()).toMatch(/^[a-f0-9]{64}$/);
+  const claim = all.find(
+    (resource) =>
+      resource.kind === "PersistentVolumeClaim" && resource.metadata.name === "portable-objects",
+  );
+  for (const retained of [secret, claim])
+    expect(retained?.metadata.annotations?.["helm.sh/resource-policy"]).toBe("keep");
+  const objectService = all.find(
+    (resource) => resource.kind === "Service" && resource.metadata.name === "portable-objects",
+  );
+  expect(objectService?.spec).toMatchObject({ type: "ClusterIP" });
+  const application = all.find((resource) => resource.kind === "Deployment");
+  expect(application?.spec?.template?.spec.containers[0]?.env).toEqual(
+    expect.arrayContaining([
+      {
+        name: "FACTORY_OBJECT_S3_ACCESS_KEY_ID",
+        valueFrom: { secretKeyRef: { name: "portable-objects", key: "access-key-id" } },
+      },
+      {
+        name: "FACTORY_OBJECT_S3_SECRET_ACCESS_KEY",
+        valueFrom: { secretKeyRef: { name: "portable-objects", key: "secret-access-key" } },
+      },
+    ]),
+  );
+  const template = await readFile(`${chart}/templates/objects.yaml`, "utf8");
+  expect(template).toContain('lookup "v1" "Secret"');
+  expect(template).toContain("Refusing to replace access to existing file data");
+});
+
+test("old external attachment configuration cannot silently switch retained files to an empty store", async () => {
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "attachments.endpoint=https://previous.example",
+  ]);
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr).toContain("Transfer retained external attachments");
 });
 
 test("every upgrade replaces Factory even when its image and configuration are unchanged", async () => {

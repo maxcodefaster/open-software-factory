@@ -10,7 +10,7 @@ import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 
 const planning = "planning-original";
 const build = "build-original";

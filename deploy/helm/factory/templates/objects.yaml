@@ -1,0 +1,137 @@
+{{- if or .Values.attachments.endpoint .Values.attachments.bucket .Values.attachments.existingSecret }}
+{{- fail "Factory now manages one object store. Transfer retained external attachments and state-volume review media explicitly before upgrading; do not silently replace their storage." }}
+{{- end }}
+{{- $name := printf "%s-objects" (include "factory.name" .) -}}
+{{- $previous := lookup "v1" "Secret" .Release.Namespace $name -}}
+{{- $claim := lookup "v1" "PersistentVolumeClaim" .Release.Namespace $name -}}
+{{- if and $claim (not $previous) -}}
+{{- fail "The retained object storage credentials are missing. Refusing to replace access to existing file data." -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  access-key-id: {{ if $previous }}{{ required "Retained object access key is missing" (index $previous.data "access-key-id") | quote }}{{ else }}{{ printf "GK%s" (randAlphaNum 64 | sha256sum | trunc 32) | b64enc | quote }}{{ end }}
+  secret-access-key: {{ if $previous }}{{ required "Retained object secret key is missing" (index $previous.data "secret-access-key") | quote }}{{ else }}{{ randAlphaNum 64 | sha256sum | b64enc | quote }}{{ end }}
+  rpc-secret: {{ if $previous }}{{ required "Retained object RPC secret is missing" (index $previous.data "rpc-secret") | quote }}{{ else }}{{ randAlphaNum 64 | sha256sum | b64enc | quote }}{{ end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+data:
+  garage.toml: |
+    metadata_dir = "/data/meta"
+    data_dir = "/data/blocks"
+    db_engine = "sqlite"
+    replication_factor = 1
+    rpc_bind_addr = "127.0.0.1:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+    [s3_api]
+    s3_region = "garage"
+    api_bind_addr = "0.0.0.0:3900"
+    root_domain = ".objects.invalid"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  {{- include "factory.claim" (dict "root" . "size" .Values.objectStorage.size) | nindent 2 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name | quote }}
+    app.kubernetes.io/component: objects
+  ports:
+    - {name: s3, port: 3900, targetPort: s3}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: objects
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: objects
+      annotations:
+        factory.dev/upgrade-revision: {{ .Release.Revision | quote }}
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector: {kubernetes.io/os: linux}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: objects
+          image: "docker.io/dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690"
+          command: [/garage, server, --single-node, --default-bucket]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          env:
+            - name: GARAGE_DEFAULT_BUCKET
+              value: factory
+            - name: GARAGE_DEFAULT_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $name }}, key: access-key-id}
+            - name: GARAGE_DEFAULT_SECRET_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ $name }}, key: secret-access-key}
+            - name: GARAGE_RPC_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ $name }}, key: rpc-secret}
+          ports:
+            - {name: s3, containerPort: 3900}
+          readinessProbe:
+            tcpSocket: {port: s3}
+            periodSeconds: 5
+          startupProbe:
+            tcpSocket: {port: s3}
+            periodSeconds: 2
+            failureThreshold: 60
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/garage.toml, subPath: garage.toml, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: {{ $name }}}
+        - name: config
+          configMap: {name: {{ $name }}}

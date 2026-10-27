@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createKnowledgeService } from "../../apps/factory/src/knowledge/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";

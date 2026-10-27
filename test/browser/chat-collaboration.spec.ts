@@ -3,9 +3,11 @@ import { resolve } from "node:path";
 import { expect, test } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { writerViewSchema } from "../../apps/factory/src/api-contracts";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { writerViewSchema } from "../../apps/factory/src/api-contracts";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 const evidence = ".factory/test-results/chat-collaboration";
 const cacheDirectory = resolve(
@@ -22,19 +24,14 @@ test.beforeAll(async () => {
     cacheDir: cacheDirectory,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["chat-collaboration.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await server.listen();
-  origin = server.resolvedUrls!.local[0]!.replace(/\/$/, "");
+  origin = fixtureValue(
+    fixtureValue(server.resolvedUrls, "server.resolvedUrls").local[0],
+    "server.resolvedUrls!.local[0]",
+  ).replace(/\/$/, "");
   await mkdir(evidence, { recursive: true });
 });
 test.afterAll(async () => {
@@ -92,6 +89,7 @@ test("chat creation lives in history; the compact header and long menu stay keyb
       const header = page.getByRole("region", { name: "Ticket conversations", exact: true });
       const title = header.getByRole("button", { name: "Conversation", exact: true });
       const menu = page.getByRole("menu", { name: "Conversation history", exact: true });
+      const history = page.getByRole("dialog", { name: "Conversation history", exact: true });
       const create = menu.getByRole("menuitem", { name: "New chat", exact: true });
       const minimize = header.getByRole("button", { name: "Minimize Agent panel" });
       for (const width of [1440, 760, 390, 320]) {
@@ -125,6 +123,8 @@ test("chat creation lives in history; the compact header and long menu stay keyb
           await title.press("ArrowDown");
         }
         await expect(create).toBeVisible();
+        await expect(header.getByRole("searchbox", { name: "Find conversation" })).toBeFocused();
+        await page.keyboard.press("ArrowDown");
         await expect(menu.getByRole("menuitemradio").first()).toBeFocused();
         await page.keyboard.press("Home");
         await expect(create).toBeFocused();
@@ -132,9 +132,9 @@ test("chat creation lives in history; the compact header and long menu stay keyb
         await page.keyboard.press("ArrowDown");
         await expect(menu.getByRole("menuitemradio").first()).toBeFocused();
         await expect
-          .poll(() => menu.evaluate((node) => node.getBoundingClientRect().right))
+          .poll(() => history.evaluate((node) => node.getBoundingClientRect().right))
           .toBeLessThanOrEqual(width);
-        const menuBounds = await menu.boundingBox();
+        const menuBounds = await history.boundingBox();
         if (!menuBounds) throw new Error("Conversation history is missing");
         expect(menuBounds.x).toBeGreaterThanOrEqual(0);
         expect(menuBounds.x + menuBounds.width).toBeLessThanOrEqual(width);
@@ -161,6 +161,47 @@ test("chat creation lives in history; the compact header and long menu stay keyb
       await context.close();
     }
   }
+});
+
+test("long history filters by name without creating or retargeting Coding", async ({ page }) => {
+  await page.goto(`${origin}/chat-collaboration.html?long`);
+  const title = page.getByRole("button", { name: "Conversation", exact: true });
+  const history = page.getByRole("dialog", { name: "Conversation history", exact: true });
+  const menu = history.getByRole("menu", { name: "Conversation history", exact: true });
+  await title.click();
+  const search = history.getByRole("searchbox", { name: "Find conversation" });
+  await expect(search).toBeFocused();
+  await search.fill("research 24");
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(1);
+  await search.press("ArrowDown");
+  await expect(
+    menu.getByRole("menuitemradio", { name: "Research conversation 24 Research" }),
+  ).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(history).toBeHidden();
+  await expect(title).toBeFocused();
+  await expect(title).toContainText("Research conversation 24");
+  await title.click();
+  await expect(search).toHaveValue("");
+  await expect(
+    menu.getByRole("menuitemradio", { name: "Fresh Coding Active Coding" }),
+  ).toBeVisible();
+  await search.fill("no such discussion");
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(0);
+  await expect(history.getByRole("status")).toHaveText(
+    "No matching conversations. Try another name.",
+  );
+  await search.press("ArrowDown");
+  await expect(search).toBeFocused();
+  await search.press("Escape");
+  await expect(title).toBeFocused();
+  await expect(page.getByText("Opened activity: none · Fresh contexts: 0")).toBeAttached();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await title.click();
+  await search.fill("coding");
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(1);
+  await expect(menu.getByRole("menuitemradio")).toContainText("Active Coding");
+  await page.screenshot({ path: `${evidence}/filtered-history-390.png` });
 });
 
 test("Skill selection is keyboard accessible and edits a draft without sending or enabling guidance", async ({
@@ -206,8 +247,8 @@ test("Skill selection is keyboard accessible and edits a draft without sending o
   await draft.press("/");
   await expect(option).toBeVisible();
   const box = await option.boundingBox();
-  expect(box!.x).toBeGreaterThanOrEqual(0);
-  expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+  expect(fixtureValue(box, "box").x).toBeGreaterThanOrEqual(0);
+  expect(fixtureValue(box, "box").x + fixtureValue(box, "box").width).toBeLessThanOrEqual(390);
   await page.screenshot({ path: `${evidence}/skills-narrow.png`, fullPage: true });
   await page.keyboard.press("Escape");
   await expect(option).not.toBeVisible();

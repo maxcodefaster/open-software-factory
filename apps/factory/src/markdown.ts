@@ -31,11 +31,13 @@ function createReader(codeControls = false) {
       },
       link({ href, title, tokens }) {
         const label = this.parser.parseInline(tokens);
+        if (/^factory-person:[a-f0-9-]{36}$/i.test(href))
+          return `<span class="factory-mention">${label}</span>`;
         if (!/^(https?:\/\/|mailto:|#|\/(?!\/))/i.test(href)) return label;
         const attachment = /^\/api\/attachments\/[a-f0-9-]{36}$/i.test(href);
         const attribute =
           (title || attachment
-            ? ' title="' + escapeHTML(title ?? tokens.map((token) => token.raw).join("")) + '"'
+            ? ` title="${escapeHTML(title ?? tokens.map((token) => token.raw).join(""))}"`
             : "") + (attachment ? ' class="factory-attachment-file" download' : "");
         return (
           '<a href="' +
@@ -81,7 +83,7 @@ export function markdownHTML(
           tokenizer(source) {
             if (this.lexer.state.inLink) return;
             const match = /^#wiki\/([a-z0-9]+(?:-[a-z0-9]+)*)(?![\w/-])/.exec(source);
-            const title = match && pages.get(match[1]!);
+            const title = match?.[1] && pages.get(match[1]);
             if (!match || !title) return;
             return { type: "factoryWikiReference", raw: match[0], slug: match[1], title };
           },

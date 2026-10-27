@@ -20,9 +20,40 @@ import "./settings.css";
 const grants = ["runtime", "build", "verification"] as const;
 const grantLabels = { runtime: "Runtime", build: "Image build", verification: "Verification" };
 
-export function EnvironmentSettings(props: { projectID: string; navigation?: JSX.Element }) {
-  const navigation = children(() => props.navigation);
+type EnvironmentSettingsProps = { projectID: string; navigation?: JSX.Element };
+
+export function EnvironmentSettings(props: EnvironmentSettingsProps) {
   const [environment, setEnvironment] = createSignal<ProjectEnvironment>("development");
+  const [sort, setSort] = createSignal("name-asc");
+  return (
+    <For
+      each={[{ projectID: props.projectID, environment: environment() }]}
+      keyed={(scope) => `${scope.projectID}:${scope.environment}`}
+    >
+      {(scope) => (
+        <EnvironmentDocument
+          projectID={scope().projectID}
+          environment={scope().environment}
+          navigation={props.navigation}
+          onEnvironmentChange={setEnvironment}
+          sort={sort()}
+          onSortChange={setSort}
+        />
+      )}
+    </For>
+  );
+}
+
+function EnvironmentDocument(
+  props: EnvironmentSettingsProps & {
+    environment: ProjectEnvironment;
+    onEnvironmentChange(scope: ProjectEnvironment): void;
+    sort: string;
+    onSortChange(value: string): void;
+  },
+) {
+  const navigation = children(() => props.navigation);
+  const environment = () => props.environment;
   const [view, setView] = createSignal<EnvironmentSettingsView>();
   const [variables, setVariables] = createSignal<EnvironmentWrite["variables"]>([]);
   const [registries, setRegistries] = createSignal<EnvironmentWrite["registries"]>([]);
@@ -39,7 +70,7 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
   const [search, setSearch] = createSignal("");
   const [usage, setUsage] = createSignal("all");
   const [state, setState] = createSignal("all");
-  const [sort, setSort] = createSignal("name-asc");
+  const sort = () => props.sort;
   const [filtersOpen, setFiltersOpen] = createSignal(false);
   const filtersID = `environment-filters-${crypto.randomUUID()}`;
   const activeOptions = () =>
@@ -178,6 +209,22 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
       ),
     );
   }
+  async function load(projectID = props.projectID, scope = environment()) {
+    const epoch = generation;
+    setBusy(true);
+    try {
+      const value = await serverCall(getEnvironment({ data: [projectID, scope] }));
+      if (epoch === generation) {
+        setError("");
+        publish(value);
+      }
+    } catch (cause) {
+      if (epoch === generation)
+        setError(cause instanceof Error ? cause.message : "Could not load environment");
+    } finally {
+      if (epoch === generation) setBusy(false);
+    }
+  }
   function changeVariable(index: number, patch: Partial<EnvironmentWrite["variables"][number]>) {
     if (retry) return;
     retry = undefined;
@@ -202,7 +249,7 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
     setError("");
     try {
       const value = await serverCall(
-        discardEnvironmentSave(props.projectID, environment(), commandID),
+        discardEnvironmentSave({ data: [props.projectID, environment(), commandID] }),
       );
       if (epoch !== generation) return;
       retry = undefined;
@@ -231,16 +278,18 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
     setError("");
     setNotice("");
     try {
-      const value = await serverCall(saveEnvironment(props.projectID, environment(), input));
+      const value = await serverCall(
+        saveEnvironment({ data: [props.projectID, environment(), input] }),
+      );
       if (epoch !== generation) return;
       retry = undefined;
       publish(value);
       setNotice("Saved. New starts use these settings; restart existing compute to apply.");
     } catch (cause) {
       if (epoch === generation) {
-        const latest = await serverCall(getEnvironment(props.projectID, environment())).catch(
-          () => undefined,
-        );
+        const latest = await serverCall(
+          getEnvironment({ data: [props.projectID, environment()] }),
+        ).catch(() => undefined);
         if (epoch !== generation) return;
         if (latest) {
           setView(latest);
@@ -288,8 +337,8 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
   }
   createEffect(
     () => [props.projectID, environment()] as const,
-    () => {
-      const epoch = ++generation;
+    ([projectID, scope]) => {
+      ++generation;
       setView(undefined);
       setVariables([]);
       setRegistries([]);
@@ -304,19 +353,8 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
       menu?.hidePopover();
       setError("");
       setNotice("");
-      setBusy(true);
       retry = undefined;
-      void serverCall(getEnvironment(props.projectID, environment()))
-        .then((value) => {
-          if (epoch === generation) publish(value);
-        })
-        .catch((cause) => {
-          if (epoch === generation)
-            setError(cause instanceof Error ? cause.message : "Could not load environment");
-        })
-        .finally(() => {
-          if (epoch === generation) setBusy(false);
-        });
+      void load(projectID, scope);
       return () => {
         generation += 1;
         retry = undefined;
@@ -370,7 +408,7 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
               type="button"
               disabled={busy()}
               aria-pressed={environment() === item ? "true" : "false"}
-              onClick={() => setEnvironment(item)}
+              onClick={() => props.onEnvironmentChange(item)}
             >
               {item === "development" ? "Development" : "Main-Preview"}
             </button>
@@ -380,7 +418,19 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
       <Show
         when={view()}
         fallback={
-          <p role="status">{busy() ? "Loading environment…" : "Environment unavailable."}</p>
+          <>
+            <p role="status">{busy() ? "Loading environment…" : "Environment unavailable."}</p>
+            <Show when={error()}>
+              <button
+                type="button"
+                class="quiet-button"
+                disabled={busy()}
+                onClick={() => void load()}
+              >
+                Retry loading
+              </button>
+            </Show>
+          </>
         }
       >
         {(current) => (
@@ -464,7 +514,7 @@ export function EnvironmentSettings(props: { projectID: string; navigation?: JSX
                 <select
                   aria-label="Sort variables"
                   value={sort()}
-                  onChange={(event) => setSort(event.currentTarget.value)}
+                  onChange={(event) => props.onSortChange(event.currentTarget.value)}
                 >
                   <option value="name-asc">Name A to Z</option>
                   <option value="name-desc">Name Z to A</option>

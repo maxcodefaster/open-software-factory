@@ -16,7 +16,7 @@ export function SignIn(props: {
     try {
       const response = await factoryIdentityClient.signIn.sso({
         providerId: "company",
-        callbackURL: location.origin,
+        callbackURL: location.href,
       });
       if (response.error) throw new Error(response.error.message ?? "Company sign-in failed");
       if (response.data?.url) location.assign(response.data.url);

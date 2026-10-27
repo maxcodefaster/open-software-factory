@@ -1,18 +1,22 @@
+import { createHash } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { expect, test } from "@playwright/test";
 import {
-  attemptsResponseSchema,
   appPreviewsSchema,
+  attemptsResponseSchema,
   changesResponseSchema,
   conversationViewSchema,
 } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
-import { projectSetupView, type ProjectSetupView } from "../../packages/project-domain/src/setup";
-import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { expect, test } from "@playwright/test";
 import { createDatabase } from "../../packages/db/src/client";
+import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserBootstrap,
+  factoryFunctionMatches,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
@@ -594,8 +598,8 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
   await page.keyboard.press("ArrowDown");
   await expect(items.nth(1)).toBeFocused();
   const focused = await items.nth(1).elementHandle();
-  const refreshed = await page.waitForResponse((response) =>
-    new URL(response.url()).pathname.startsWith("/_server/data/getChanges-"),
+  const refreshed = await page.waitForResponse(
+    async (response) => await factoryFunctionMatches(response.url(), "getChanges"),
   );
   await refreshed.finished();
   await page.evaluate(

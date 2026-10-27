@@ -7,8 +7,9 @@ import { factoryProcess } from "../fixtures/factory-process";
 import { createProjectService } from "../../apps/factory/src/projects/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import { fixtureValue } from "../fixtures/value";
 
 test("new Projects spread persistent backgrounds across the catalogue, including concurrent registrations", async () => {
   const owned = await factoryProcess();
@@ -69,7 +70,7 @@ test("new Projects spread persistent backgrounds across the catalogue, including
       );
     await expect(
       database.client`UPDATE factory.project SET desktop_background_key='https://example.invalid/art.jpg'
-        WHERE id=${first[0]!.id}`.execute(),
+        WHERE id=${fixtureValue(first[0], "first[0]").id}`.execute(),
     ).rejects.toThrow("check constraint");
   } finally {
     await database.client.end();
@@ -189,7 +190,7 @@ test("new Projects receive catalogue backgrounds without changing identities or 
       const [row] = await database.client<{ key: string }[]>`
         SELECT desktop_background_key AS key FROM factory.project WHERE id=${id}`;
       expect(desktopBackgroundKeys.some((key) => key === row?.key)).toBe(true);
-      backgrounds.push(row!.key);
+      backgrounds.push(fixtureValue(row, "row").key);
     }
     expect(new Set(backgrounds).size).toBe(2);
     expect(

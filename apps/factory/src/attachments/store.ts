@@ -9,6 +9,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn } from "../access/controller";
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
+import { objectStorageConfigured } from "../storage/objects";
 import type { ConvertedAttachment } from "./conversion-result";
 import { processAttachment } from "./process";
 import { type AttachmentObjects, attachmentDigest, createAttachmentObjects } from "./objects";
@@ -153,7 +154,7 @@ export async function freezeAttachmentContextIn(
     if (ticket)
       sources.push({
         label: "Selected Ticket",
-        content: ticket.description + "\n" + ticket.canonical,
+        content: `${ticket.description}\n${ticket.canonical}`,
       });
     const messages = await sql<
       { body: string }[]
@@ -318,10 +319,7 @@ export function createAttachmentStore(
         return {
           limits,
           usedBytes: usage?.projectBytes ?? 0,
-          configured: Boolean(
-            process.env["FACTORY_ATTACHMENT_S3_BUCKET"] &&
-              process.env["FACTORY_ATTACHMENT_S3_ENDPOINT"],
-          ),
+          configured: objectStorageConfigured(),
         };
       });
     },
@@ -434,7 +432,9 @@ export function createAttachmentStore(
             if (!current)
               throw new CommandError("conflict", "This upload no longer owns its file writes.");
           });
-          await objects.put(manifest[index]!.key, part.data, part.mediaType);
+          const stored = manifest[index];
+          if (!stored) throw new Error("Attachment processing lost its recorded object");
+          await objects.put(stored.key, part.data, part.mediaType);
         }
         return await database.client.begin(async (sql) => {
           await projectAuthorityIn(sql, userID, row.projectId);

@@ -1,11 +1,14 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 import { sourceWorkspaceViewSchema } from "../../apps/factory/src/api-contracts";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionMatches,
+} from "../fixtures/server-functions";
 import { signIn } from "../support/factory-fixture";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
 
 const projectID = process.env["FACTORY_STABILIZATION_PROJECT_ID"];
 test.use({ trace: "off" });
@@ -55,8 +58,8 @@ test("current Starter IDE reopens with usable source without starting compute", 
       SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID}
     `;
     await signIn(page);
-    const sourceResponse = page.waitForResponse((response) =>
-      new URL(response.url()).pathname.startsWith("/_server/data/ensurePersonalSource-"),
+    const sourceResponse = page.waitForResponse(
+      async (response) => await factoryFunctionMatches(response.url(), "ensurePersonalSource"),
     );
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: project.slug }).click();

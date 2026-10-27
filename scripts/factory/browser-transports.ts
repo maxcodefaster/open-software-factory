@@ -1,8 +1,9 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: This guard matches literal TypeScript source, not interpolated runtime URLs.
-import ts from "typescript";
-import { dirname, relative, resolve } from "node:path";
+
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname, relative, resolve } from "node:path";
+import ts from "typescript";
 
 export type BrowserNetworkCall = {
   file: string;
@@ -98,6 +99,8 @@ export function editorProtocolDecision(call: BrowserNetworkCall): string | undef
     args = call.arguments;
   if (file === "factory-runtime-context.ts" && call.operation === "fetch" && args[0] === "...args")
     return "Granted IDE origin only: observe Workspace compute; only explicit prepare starts it.";
+  if (file === "factory-git-client.ts" && call.operation === "fetch" && args[0] === "...args")
+    return "Grant-bound personal Workspace Git operations with exact head and command identity.";
   if (
     file === "factory-source-client.ts" &&
     call.operation === "EventSource" &&
@@ -144,7 +147,7 @@ export async function inventoryBrowserTransports(root: string) {
     modules.add(path);
     const file = relative(root, path),
       text = await readFile(path, "utf8");
-    if (file.includes("/server-functions/") && /["']use server["']/.test(text)) {
+    if (file.includes("/server-functions/") && /\bcreateServerFn\s*\(/.test(text)) {
       functions.add(file);
       return;
     }
@@ -195,6 +198,9 @@ export async function inventoryBrowserTransports(root: string) {
     }
   }
   await visit(resolve(root, "apps/factory/src/client.tsx"));
+  // Start's virtual client entry imports the router. Follow the authored root
+  // too so the transport guard still covers the entire retained desktop.
+  await visit(resolve(root, "apps/factory/src/router.tsx"));
   return {
     modules: modules.size,
     serverFunctionModules: [...functions].sort(),

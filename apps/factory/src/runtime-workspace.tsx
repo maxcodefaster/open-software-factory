@@ -45,6 +45,7 @@ export function RuntimeWorkspaceTabs(props: {
           const changeID = attempt()?.changeId;
           if (!changeID) return undefined;
           return {
+            projectID: props.projectID,
             changeID,
             userID: props.userID,
             canDevelop: props.canDevelop,
@@ -89,6 +90,7 @@ export function RuntimeWorkspace(props: {
   active?: boolean | undefined;
   review?:
     | {
+        projectID?: string | undefined;
         changeID: string;
         userID: string;
         canDevelop: boolean;
@@ -129,6 +131,7 @@ function AttachedRuntimeFrame(props: {
   active?: boolean | undefined;
   review?:
     | {
+        projectID?: string | undefined;
         changeID: string;
         userID: string;
         canDevelop: boolean;
@@ -138,17 +141,16 @@ function AttachedRuntimeFrame(props: {
 }) {
   const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
   let frame: HTMLIFrameElement | undefined;
-  function usePreview() {
-    if (props.title !== "Preview" || !props.attemptID || props.active === false) return;
+  const activePreviewID = () =>
+    props.title === "Preview" && props.active !== false ? props.attemptID : undefined;
+  function usePreview(attemptID: string | undefined) {
+    if (!attemptID) return;
     frame?.contentWindow?.postMessage(
       { type: "factory-runtime-use" },
-      appRuntimeOrigin(location.origin, props.attemptID, "app"),
+      appRuntimeOrigin(location.origin, attemptID, "app"),
     );
   }
-  createEffect(
-    () => [props.active, props.attemptID] as const,
-    () => usePreview(),
-  );
+  createEffect(activePreviewID, usePreview);
   createEffect(
     () => props.url,
     () => {
@@ -179,7 +181,7 @@ function AttachedRuntimeFrame(props: {
         // The document is attached even if a nonessential image is still loading.
         // This is not App health, runtime readiness or review evidence.
         setPhase("loaded");
-        usePreview();
+        usePreview(activePreviewID());
       };
       window.addEventListener("message", ready);
       return () => window.removeEventListener("message", ready);
@@ -216,23 +218,30 @@ function AttachedRuntimeFrame(props: {
             document?.contentType === "application/json" &&
             new URL(document.URL).pathname === "/api/runtime-access";
           setPhase(accessRejected ? "failed" : "loaded");
-          if (!accessRejected) usePreview();
+          if (!accessRejected) usePreview(activePreviewID());
         }}
         onError={() => setPhase("failed")}
       />
       <Show
-        when={props.title === "Preview" && props.review && props.attemptID && phase() === "loaded"}
+        when={
+          props.title === "Preview" && props.review && props.attemptID && phase() === "loaded"
+            ? { review: props.review, attemptID: props.attemptID }
+            : undefined
+        }
       >
-        <PreviewReview
-          changeID={props.review!.changeID}
-          attemptID={props.attemptID!}
-          userID={props.review!.userID}
-          canDevelop={props.review!.canDevelop}
-          active={props.active !== false}
-          onOpenTicket={props.review!.onOpenTicket}
-          frame={() => frame}
-          runtimeOrigin={appRuntimeOrigin(location.origin, props.attemptID!, "app")}
-        />
+        {(context) => (
+          <PreviewReview
+            projectID={context().review.projectID}
+            changeID={context().review.changeID}
+            attemptID={context().attemptID}
+            userID={context().review.userID}
+            canDevelop={context().review.canDevelop}
+            active={props.active !== false}
+            onOpenTicket={context().review.onOpenTicket}
+            frame={() => frame}
+            runtimeOrigin={appRuntimeOrigin(location.origin, context().attemptID, "app")}
+          />
+        )}
       </Show>
       <Show when={phase() !== "loaded" || props.reconnecting}>
         <div

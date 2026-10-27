@@ -19,6 +19,10 @@
   align-self: center;
 }
 
+.copy-feedback[data-icon-only="true"] > .feedback-mark {
+  font-size: var(--control-icon-size);
+}
+
 .interaction-feedback:has(> span:last-child:empty) > .feedback-mark {
   visibility: hidden;
 }

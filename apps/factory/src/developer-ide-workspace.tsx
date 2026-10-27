@@ -1,5 +1,10 @@
 import { createEffect, createSignal, onCleanup, Show } from "solid-js";
-import { invoke } from "@solidjs/web/server-functions";
+import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
+import { confirmAccessStopped } from "./access-stop";
+import { developerIDEOrigin } from "./developer-ide-origin";
+import type { ActivityNavigationRequest } from "./ide-messages";
+import { type DevelopmentPreviewMessage, developmentPreviewMessage } from "./ide-messages";
+import { selectedSourcePreparation } from "./selected-source-preparation";
 import { serverCall } from "./server-functions/result";
 import {
   ensureDeveloperIDE,
@@ -10,13 +15,7 @@ import {
   stopDeveloperIDE,
   stopWorkspaceSource,
 } from "./server-functions/workspaces";
-import { developmentPreviewMessage, type DevelopmentPreviewMessage } from "./ide-messages";
-import type { ActivityNavigationRequest } from "./ide-messages";
-import { selectedSourcePreparation } from "./selected-source-preparation";
 import { recoverWorkspaceSource } from "./source-recovery";
-import { confirmAccessStopped } from "./access-stop";
-import { developerIDEOrigin } from "./developer-ide-origin";
-import type { WorkspaceSourceState } from "../../../packages/workspace-domain/src/source";
 
 export function DeveloperIDEWorkspace(props: {
   userID: string;
@@ -47,7 +46,7 @@ export function DeveloperIDEWorkspace(props: {
   let editorRecovery: AbortController | undefined;
   const preparation = selectedSourcePreparation(async (projectID) => {
     await serverCall(
-      invoke(ensurePersonalSource, { signal: AbortSignal.timeout(15_000) }, projectID),
+      ensurePersonalSource({ ...{ signal: AbortSignal.timeout(15_000) }, data: [projectID] }),
     );
   });
   createEffect(
@@ -87,9 +86,9 @@ export function DeveloperIDEWorkspace(props: {
     setAvailableSource(undefined);
     try {
       await recoverWorkspaceSource(workspaceID, restart, signal, {
-        stop: (id, signal) => serverCall(invoke(stopWorkspaceSource, { signal }, id)),
-        read: (id, signal) => serverCall(invoke(getWorkspaceSource, { signal }, id)),
-        ensure: (id, signal) => serverCall(invoke(ensureWorkspaceSource, { signal }, id)),
+        stop: (id, signal) => serverCall(stopWorkspaceSource({ ...{ signal }, data: [id] })),
+        read: (id, signal) => serverCall(getWorkspaceSource({ ...{ signal }, data: [id] })),
+        ensure: (id, signal) => serverCall(ensureWorkspaceSource({ ...{ signal }, data: [id] })),
         wait: pause,
       });
       if (!cancel.signal.aborted) setSourceRetry((value) => value + 1);
@@ -129,8 +128,8 @@ export function DeveloperIDEWorkspace(props: {
       await confirmAccessStopped(
         signal,
         {
-          stop: (signal) => serverCall(invoke(stopDeveloperIDE, { signal })),
-          read: (signal) => serverCall(invoke(getDeveloperIDE, { signal })),
+          stop: (signal) => serverCall(stopDeveloperIDE({ ...{ signal }, data: [] })),
+          read: (signal) => serverCall(getDeveloperIDE({ ...{ signal }, data: [] })),
           wait: pause,
         },
         "Editor Stop was not confirmed. Nothing was restarted.",
@@ -172,7 +171,7 @@ export function DeveloperIDEWorkspace(props: {
       setEditorError("");
       void (async () => {
         let current = await serverCall(
-          invoke(ensureDeveloperIDE, { signal: cancel.signal }, projectID),
+          ensureDeveloperIDE({ ...{ signal: cancel.signal }, data: [projectID] }),
         );
         while (!cancel.signal.aborted) {
           setEditorState(current.state);
@@ -190,7 +189,7 @@ export function DeveloperIDEWorkspace(props: {
           if (["failed", "stopped", "stop-intended"].includes(current.state))
             throw new Error(current.failure ?? "Editor is stopped. Retry to prepare it.");
           await pause(cancel.signal);
-          current = await serverCall(invoke(getDeveloperIDE, { signal: cancel.signal }));
+          current = await serverCall(getDeveloperIDE({ ...{ signal: cancel.signal }, data: [] }));
         }
       })().catch((cause: unknown) => {
         if (!cancel.signal.aborted)
@@ -210,7 +209,7 @@ export function DeveloperIDEWorkspace(props: {
       void (async () => {
         while (!cancel.signal.aborted) {
           const source = await serverCall(
-            invoke(getWorkspaceSource, { signal: cancel.signal }, workspaceID),
+            getWorkspaceSource({ ...{ signal: cancel.signal }, data: [workspaceID] }),
           );
           if (!cancel.signal.aborted) setSourceState(source.state);
           if (source.state === "ready") {

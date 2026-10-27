@@ -50,6 +50,7 @@ export function CopyButton(props: {
   value: string;
   label?: string;
   accessibleLabel?: string;
+  iconOnly?: boolean;
   scope?: unknown;
   class?: string;
   disabled?: boolean;
@@ -65,16 +66,20 @@ export function CopyButton(props: {
         type="button"
         class={`copy-feedback${props.class ? ` ${props.class}` : ""}`}
         aria-label={props.accessibleLabel ?? props.label ?? "Copy"}
+        title={props.iconOnly ? copyFeedbackLabel(clipboard.state(), props.label) : undefined}
         aria-busy={clipboard.state() === "pending" ? "true" : "false"}
         data-feedback={clipboard.state()}
+        data-icon-only={props.iconOnly ? "true" : undefined}
         disabled={props.disabled}
         onClick={() => void clipboard.copy(props.value)}
       >
         <span class="feedback-mark" aria-hidden="true" />
-        <span class="copy-feedback-label" aria-hidden="true">
-          <span class="copy-feedback-reserve">{props.label ?? "Copy"}</span>
-          <span>{copyFeedbackLabel(clipboard.state(), props.label)}</span>
-        </span>
+        <Show when={!props.iconOnly}>
+          <span class="copy-feedback-label" aria-hidden="true">
+            <span class="copy-feedback-reserve">{props.label ?? "Copy"}</span>
+            <span>{copyFeedbackLabel(clipboard.state(), props.label)}</span>
+          </span>
+        </Show>
       </button>
       <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">
         {clipboard.state() === "success" ? (props.successMessage ?? "Copied") : ""}

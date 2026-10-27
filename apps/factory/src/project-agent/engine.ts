@@ -6,6 +6,7 @@ import type { LLMStepResult } from "@mastra/core/stream";
 import { createTool } from "@mastra/core/tools";
 import { formatSkillActivation } from "@mastra/core/workspace";
 import { z } from "zod";
+import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import {
   attachmentListInput,
   attachmentReadInput,
@@ -48,6 +49,7 @@ export async function generateProjectResponse(input: {
   attachmentRead?: (call: z.infer<typeof attachmentToolCallInput>) => Promise<BuildBrowserResult>;
   mode: "investigate" | "plan";
   requirementsInterview?: boolean;
+  technicalPlanning?: TechnicalPlanningBase;
   inputTask?: { instructions: string; remainingTools(): string[] };
   modelId: string;
   connection: ResolvedModelConnection;
@@ -85,6 +87,7 @@ export async function generateProjectResponse(input: {
 }) {
   input = { ...input, signal: AbortSignal.any([input.signal, AbortSignal.timeout(60_000)]) };
   const envelope = JSON.parse(projectModelContext(input)) as Record<string, unknown>;
+  if (input.technicalPlanning) envelope["technicalPlanning"] = input.technicalPlanning;
   if (input.attachmentContext) envelope["attachments"] = input.attachmentContext;
   const context = JSON.stringify(envelope);
   if (Buffer.byteLength(context) > 96 * 1024) throw new ProjectContextLimitError();
@@ -134,6 +137,7 @@ export async function generateProjectResponse(input: {
       ),
   });
   const code = input.research.code;
+  const attachmentRead = input.attachmentRead;
   const discoveredCode = new Set<string>();
   const codeTools = code
     ? {
@@ -204,7 +208,7 @@ export async function generateProjectResponse(input: {
           )
         : { searchProject, readProject }),
       ...codeTools,
-      ...(input.attachmentRead
+      ...(attachmentRead
         ? {
             attachment_list: createTool({
               id: "attachment_list",
@@ -213,7 +217,7 @@ export async function generateProjectResponse(input: {
               inputSchema: attachmentListInput,
               execute: (args) =>
                 bounded(`attachment-list:${JSON.stringify(args)}`, () =>
-                  input.attachmentRead!({ name: "attachment_list", arguments: args }),
+                  attachmentRead({ name: "attachment_list", arguments: args }),
                 ),
             }),
             attachment_read: createTool({
@@ -223,7 +227,7 @@ export async function generateProjectResponse(input: {
               inputSchema: attachmentReadInput,
               execute: (args) =>
                 bounded(`attachment:${JSON.stringify(args)}`, () =>
-                  input.attachmentRead!({ name: "attachment_read", arguments: args }),
+                  attachmentRead({ name: "attachment_read", arguments: args }),
                 ),
               toModelOutput: (raw: unknown) => ({
                 type: "content" as const,
@@ -283,7 +287,7 @@ Use the search/read tools before claiming facts about
 Project Knowledge or Tickets. Cite only source IDs and labels returned by those tools.
 Factory-selected Ticket context frozen at admission is already read and may be cited using its
 supplied ID/title. Do not search or read that Ticket again unless its content is truncated.
-For an Interview, clarify the supplied intent directly. Use tools only when a consequential
+For a Product Interview, clarify the supplied intent directly. Use tools only when a consequential
 decision depends on a Project fact not already supplied. Do not inspect implementation code
 merely to ask product questions. Never search only to add a citation.
 Use relationships and full source reads for context, not broad repeated searches. Batch independent
@@ -301,14 +305,39 @@ decisions unless the user corrects them. Requirement/Epic payloads are advisory 
 an immutable requirementRevisionId records acceptance. Omitted background is unknown, not evidence.
 For research answers, give each citation a distinct reference number from 1 to 12 and place [^number] immediately after the statement it supports in message. Only cite sources you read. Never put a detached reference list or Sources section at the end. References do not belong inside code examples.
 ${
-  input.inputTask
-    ? `Prepare one concise Ticket with grounded requirements and observable acceptance criteria.
+  input.technicalPlanning
+    ? `This task is Technical Planning, not a Product Interview. The confirmed product specification
+is frozen in the selected Ticket context. Never rewrite its behavior or expand its scope.
+Research the relevant existing code at source commit ${input.technicalPlanning.sourceCommit}.
+Read before claiming how an existing module, interface or flow works. Use findCode then readCode,
+and cite inspected files. All code references must use that one commit.
+Return a technical-design with context, proposedChanges, decisions, assumptions, risks, validation
+and diagrams. Context describes the inspected current system; proposedChanges describes the
+intended changes, module boundaries and data flow. Record real alternatives and why one fits.
+Resolve consequential design choices with question/round before finalizing. If required source
+cannot be inspected, return an answer explaining the missing evidence, not an invented design.
+Map EVERY numbered product acceptance criterion, starting at 1, to a concrete executable check.
+Diagrams are optional: at most two focused, self-contained PlantUML component or sequence diagrams.
+Each source starts with @startuml on its own line and ends with @enduml on its own line.
+Do not put a diagram name or file name after @startuml. A valid component example is:
+@startuml
+component "Existing invoices" as Invoices
+component "Proposed export" as Export
+Export --> Invoices : authorized read
+@enduml
+No includes, URLs, hyperlinks, images, macros, preprocessing directives, themes or percent functions.
+Distinguish existing components from proposed changes in labels, not only color. Give every
+diagram a descriptive title and plain-language explanation. Do not add a decorative diagram.
+The result is an advisory technical revision. It does not approve or start implementation.
+Return only an answer, question/round, or technical-design. Never return requirements or an Epic.`
+    : input.inputTask
+      ? `Prepare one concise Ticket with grounded requirements and observable acceptance criteria.
 Return an answer explaining the gap when essential context is missing. Do not ask interactive
 questions or propose Epics. Check existing work for duplicates. Preserve the saved task's scope.`
-    : input.mode === "investigate"
-      ? `Return only an answer to the current research question. Preserve any unfinished Interview
+      : input.mode === "investigate"
+        ? `Return only an answer to the current research question. Preserve any unfinished Interview
 or proposal without replacing it. No questions, requirements or Epic proposals in this task.`
-      : `In plan mode return an answer, an adaptive interview
+        : `In plan mode return an answer, an adaptive interview
 round, or a complete requirement proposal. Choose based on the user's request: informational
 questions need a cited answer, not a requirements interview. Interview or propose only when the
 user is defining or clarifying intended work. Return kind round with 1 to 4 independent questions
@@ -366,6 +395,7 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
       input.mode,
       input.requirementsInterview,
       Boolean(input.inputTask),
+      Boolean(input.technicalPlanning),
     );
   const providerOptions = modelProviderOptions(input.connection, input.modelId);
   const mastra = new Mastra({ agents: { project: agent }, logger: noopLogger });
@@ -496,11 +526,15 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
     if (response.error) throw response.error;
     input.usageObserved?.(observeProjectUsage(response.steps));
     progress("validating");
-    const result = parseProjectAgentOutput(response.object, input.mode);
+    const result = parseProjectAgentOutput(
+      response.object,
+      input.mode,
+      Boolean(input.technicalPlanning),
+    );
     failed = false;
     return result;
   } catch (cause) {
-    if (isStructuredOutputFailure(cause)) throw new ProjectAgentOutputError();
+    if (isStructuredOutputFailure(cause)) throw new ProjectAgentOutputError(cause);
     throw cause;
   } finally {
     await usage.finish(failed);

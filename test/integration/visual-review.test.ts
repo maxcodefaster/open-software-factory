@@ -1,8 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { z } from "zod";
 import { createAccessController } from "../../apps/factory/src/access/controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
@@ -17,7 +14,9 @@ import {
 } from "../../packages/conversation-domain/src/visual-review";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
+import { memoryPrivateObjects } from "../fixtures/private-objects";
 import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 
 test("human feedback is idempotent, scoped, versioned and admits corrections only explicitly", async () => {
   const f = await candidateReviewFixture();
@@ -69,11 +68,14 @@ test("human feedback is idempotent, scoped, versioned and admits corrections onl
       FROM factory.agent_turn WHERE change_id=${f.changeID}`;
     expect(before?.count).toBe(1);
     const commandId = crypto.randomUUID();
-    const selected = { commandId, feedback: [{ id: first.feedbackId!, version: 1 }] };
+    const selected = {
+      commandId,
+      feedback: [{ id: fixtureValue(first.feedbackId, "first.feedbackId"), version: 1 }],
+    };
     const correction = outcome.parse(await native("sendReviewRevision", [f.changeID, selected]));
     expect(await native("sendReviewRevision", [f.changeID, selected])).toMatchObject(correction);
     const [intent] = await f.database.client<{ session: string; text: string }[]>`
-      SELECT session_id AS session,prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id=${correction.turnId!}`;
+      SELECT session_id AS session,prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id=${fixtureValue(correction.turnId, "correction.turnId")}`;
     expect(intent?.session).toBe(f.sessionID);
     expect(intent?.text).toContain(input.body);
     expect(intent?.text).toContain("Do not resolve Threads");
@@ -147,18 +149,21 @@ test("one revision atomically takes all pending Threads and excludes notes, sent
       body: "Await my recheck.",
     });
     await f.database
-      .client`UPDATE factory.review_feedback SET state='implemented',version=2 WHERE id=${implemented.feedbackId!}`;
+      .client`UPDATE factory.review_feedback SET state='implemented',version=2 WHERE id=${fixtureValue(implemented.feedbackId, "implemented.feedbackId")}`;
     const snapshot = {
       commandId: crypto.randomUUID(),
       feedback: [
-        { id: first.feedbackId!, version: 1 },
-        { id: second.feedbackId!, version: 1 },
+        { id: fixtureValue(first.feedbackId, "first.feedbackId"), version: 1 },
+        { id: fixtureValue(second.feedbackId, "second.feedbackId"), version: 1 },
       ],
     };
     for (const feedback of [
       [snapshot.feedback[0]],
-      [...snapshot.feedback, { id: note.feedbackId!, version: 1 }],
-      [...snapshot.feedback, { id: implemented.feedbackId!, version: 2 }],
+      [...snapshot.feedback, { id: fixtureValue(note.feedbackId, "note.feedbackId"), version: 1 }],
+      [
+        ...snapshot.feedback,
+        { id: fixtureValue(implemented.feedbackId, "implemented.feedbackId"), version: 2 },
+      ],
     ])
       await expect(
         controller.dispatch(
@@ -182,7 +187,7 @@ test("one revision atomically takes all pending Threads and excludes notes, sent
     await expect(controller.dispatch(f.changeID, f.userID, snapshot, admit)).rejects.toThrow(
       "changed",
     );
-    snapshot.feedback[1]!.version = 2;
+    fixtureValue(snapshot.feedback[1], "snapshot.feedback[1]").version = 2;
     const revision = await controller.dispatch(f.changeID, f.userID, snapshot, admit);
     expect(await controller.dispatch(f.changeID, f.userID, snapshot, admit)).toMatchObject(
       revision,
@@ -202,13 +207,13 @@ test("one revision atomically takes all pending Threads and excludes notes, sent
       ),
     ).rejects.toThrow("changed");
     const [intent] = await f.database.client<{ text: string }[]>`
-      SELECT prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id=${revision.turnId!}`;
+      SELECT prompt_text AS text FROM factory.change_agent_turn_intent WHERE turn_id=${fixtureValue(revision.turnId, "revision.turnId")}`;
     expect(intent?.text).not.toContain("This is conversation");
     expect(intent?.text).not.toContain("Await my recheck");
-    expect(intent?.text).toContain(first.feedbackId!);
-    expect(intent?.text).toContain(second.feedbackId!);
+    expect(intent?.text).toContain(fixtureValue(first.feedbackId, "first.feedbackId"));
+    expect(intent?.text).toContain(fixtureValue(second.feedbackId, "second.feedbackId"));
 
-    const owner = await f.turns.claimPending(revision.turnId!);
+    const owner = await f.turns.claimPending(fixtureValue(revision.turnId, "revision.turnId"));
     if (!owner?.ownerToken) throw new Error("Missing revision owner");
     await f.writers.prepareAgent(f.changeID, owner.id);
     await f.database
@@ -220,9 +225,10 @@ test("one revision atomically takes all pending Threads and excludes notes, sent
       name: "feedback_list",
       arguments: {},
     });
-    expect(
-      JSON.parse(listed.content[0]!.type === "text" ? listed.content[0]!.text : "null"),
-    ).toEqual(snapshot.feedback);
+    const listedContent = fixtureValue(listed.content[0], "listed.content[0]");
+    expect(JSON.parse(listedContent.type === "text" ? listedContent.text : "null")).toEqual(
+      snapshot.feedback,
+    );
     await f.turns.settle(owner.id, owner.ownerToken, "completed", "Owned revision finished");
     const sent = await controller.get(f.changeID, f.userID);
     expect(sent.feedback.find((item) => item.id === first.feedbackId)?.correctionState).toBe(
@@ -249,7 +255,7 @@ test("one revision atomically takes all pending Threads and excludes notes, sent
       pendingReviewThreads((await controller.get(f.changeID, f.userID)).feedback).map(
         (item) => item.id,
       ),
-    ).toEqual([implemented.feedbackId!]);
+    ).toEqual([fixtureValue(implemented.feedbackId, "implemented.feedbackId")]);
   } finally {
     await f.dispose();
   }
@@ -317,10 +323,10 @@ test("a failed revision becomes actionable only for another explicit request", a
     });
     const input = {
       commandId: crypto.randomUUID(),
-      feedback: [{ id: thread.feedbackId!, version: 1 }],
+      feedback: [{ id: fixtureValue(thread.feedbackId, "thread.feedbackId"), version: 1 }],
     };
     const first = await controller.dispatch(f.changeID, f.userID, input, admit);
-    const owner = await f.turns.claimPending(first.turnId!);
+    const owner = await f.turns.claimPending(fixtureValue(first.turnId, "first.turnId"));
     if (!owner?.ownerToken) throw new Error("Missing owned revision");
     await f.writers.prepareAgent(f.changeID, owner.id);
     await f.turns.beginDispatch(owner.id, owner.ownerToken);
@@ -350,8 +356,7 @@ test("a failed revision becomes actionable only for another explicit request", a
 
 test("new complete video replaces annotated video but keeps stills; remaining video expires after completion", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-review-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const controller = createVisualReviewController(f.database);
   try {
     const oldID = crypto.randomUUID(),
@@ -402,15 +407,13 @@ test("new complete video replaces annotated video but keeps stills; remaining vi
       .client`DELETE FROM factory.project_membership WHERE project_id=${f.projectID} AND user_id=${f.userID}`;
     await expect(media.read(f.changeID, f.userID, stillID, null)).rejects.toThrow();
   } finally {
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
 
 test("source checks stay outside video chapters and do not extend the preceding App chapter", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-source-case-timing-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const controller = createVisualReviewController(f.database);
   try {
     const recordingID = crypto.randomUUID();
@@ -440,7 +443,6 @@ test("source checks stay outside video chapters and do not extend the preceding 
       hasRecordingPosition: false,
     });
   } finally {
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
@@ -493,8 +495,7 @@ test("image-free Preview anchors are idempotent and retain only their own Change
 
 test("DOM images are labelled reconstructions and cannot replace a recording's original provenance", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-preview-context-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const controller = createVisualReviewController(f.database);
   const jpeg = new Uint8Array(32);
   jpeg.set([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1]);
@@ -542,7 +543,6 @@ test("DOM images are labelled reconstructions and cannot replace a recording's o
       }),
     ).rejects.toThrow("changed its Runtime Attempt");
   } finally {
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
@@ -562,8 +562,7 @@ test("review exposes recording availability without a Project recording preferen
 
 test("saved frames retain deleted-video and superseded-Preview context without resurrecting video", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-frame-context-"));
-  const media = createReviewMedia(f.database, directory);
+  const media = createReviewMedia(f.database, memoryPrivateObjects());
   const jpeg = new Uint8Array(32);
   jpeg.set([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1]);
   try {
@@ -631,7 +630,6 @@ test("saved frames retain deleted-video and superseded-Preview context without r
   } finally {
     await f.database
       .client`UPDATE factory.change SET runtime_attempt_id=${f.attemptID} WHERE id=${f.changeID}`;
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });
@@ -648,7 +646,10 @@ test("the correction agent may request rechecking but cannot resolve or silently
     const correction = await controller.dispatch(
       f.changeID,
       f.userID,
-      { commandId: crypto.randomUUID(), feedback: [{ id: first.feedbackId!, version: 1 }] },
+      {
+        commandId: crypto.randomUUID(),
+        feedback: [{ id: fixtureValue(first.feedbackId, "first.feedbackId"), version: 1 }],
+      },
       async (sql, text, commandId) =>
         (
           await createChangeAdmission(f.database, buildModelID).admitIn(sql, f.changeID, f.userID, {
@@ -658,7 +659,7 @@ test("the correction agent may request rechecking but cannot resolve or silently
           })
         ).turn.id,
     );
-    const turn = await f.turns.claimPending(correction.turnId!);
+    const turn = await f.turns.claimPending(fixtureValue(correction.turnId, "correction.turnId"));
     if (!turn?.ownerToken) throw new Error("Missing correction owner");
     await f.writers.prepareAgent(f.changeID, turn.id);
     await f.database
@@ -695,8 +696,8 @@ test("the correction agent may request rechecking but cannot resolve or silently
 
 test("revision tools retain the complete discussion when its supplementary saved image is missing", async () => {
   const f = await candidateReviewFixture();
-  const directory = await mkdtemp(join(tmpdir(), "factory-revision-media-"));
-  const media = createReviewMedia(f.database, directory);
+  const objects = memoryPrivateObjects();
+  const media = createReviewMedia(f.database, objects);
   const controller = createVisualReviewController(f.database, media.bytes);
   const jpeg = new Uint8Array(32);
   jpeg.set([0xff, 0xd8, 0xff, 0xc0, 0, 17, 8, 0, 1, 0, 1]);
@@ -729,7 +730,10 @@ test("revision tools retain the complete discussion when its supplementary saved
     const correction = await controller.dispatch(
       f.changeID,
       f.userID,
-      { commandId: crypto.randomUUID(), feedback: [{ id: thread.feedbackId!, version: 2 }] },
+      {
+        commandId: crypto.randomUUID(),
+        feedback: [{ id: fixtureValue(thread.feedbackId, "thread.feedbackId"), version: 2 }],
+      },
       async (sql, text, commandId) =>
         (
           await createChangeAdmission(f.database, buildModelID).admitIn(sql, f.changeID, f.userID, {
@@ -739,7 +743,7 @@ test("revision tools retain the complete discussion when its supplementary saved
           })
         ).turn.id,
     );
-    const turn = await f.turns.claimPending(correction.turnId!);
+    const turn = await f.turns.claimPending(fixtureValue(correction.turnId, "correction.turnId"));
     if (!turn?.ownerToken) throw new Error("Missing correction owner");
     await f.writers.prepareAgent(f.changeID, turn.id);
     await f.database
@@ -755,7 +759,8 @@ test("revision tools retain the complete discussion when its supplementary saved
       mimeType: "image/jpeg",
       data: Buffer.from(jpeg).toString("base64"),
     });
-    await rm(join(directory, "review-media", frame.id));
+    for (const key of objects.blobs.keys())
+      if (key.endsWith(`/${frame.id}`)) await objects.remove(key);
     const withoutImage = await controller.call(turn.id, turn.ownerToken, call);
     expect(withoutImage.isError).not.toBe(true);
     expect(withoutImage.content[0]).toEqual(complete.content[0]);
@@ -783,7 +788,6 @@ test("revision tools retain the complete discussion when its supplementary saved
       }),
     ).rejects.toThrow("not in this revision batch");
   } finally {
-    await rm(directory, { recursive: true, force: true });
     await f.dispose();
   }
 });

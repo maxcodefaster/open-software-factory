@@ -69,6 +69,7 @@ export function createReleaseController(options: {
       .replace(/\.git$/, "")
       .split("/")
       .filter(Boolean);
+    const [owner, name] = parts;
     const allowed = [new URL(options.apiURL).origin, new URL(options.publicURL).origin];
     if (
       !allowed.includes(parsed.origin) ||
@@ -77,13 +78,14 @@ export function createReleaseController(options: {
       parsed.search ||
       parsed.hash ||
       parts.length !== 2 ||
-      parts[0] !== options.owner
+      owner !== options.owner ||
+      !name
     )
       throw new CommandError(
         "conflict",
         "Project does not identify the configured Forgejo repository",
       );
-    return { owner: parts[0]!, name: parts[1]! };
+    return { owner, name };
   }
   async function project(projectID: string) {
     const [row] = await database.client<{ repositoryURL: string; branch: string }[]>`
@@ -262,7 +264,8 @@ export function createReleaseController(options: {
                 }
               },
             );
-            if (matching.length !== 1) {
+            const [run] = matching;
+            if (matching.length !== 1 || !run) {
               await state(
                 row,
                 "uncertain",
@@ -270,7 +273,7 @@ export function createReleaseController(options: {
               );
               return;
             }
-            row.runID = matching[0]!.id;
+            row.runID = run.id;
           }
           if (!row.runID) {
             await publication.protectReleaseTags(context.repository);
@@ -339,9 +342,10 @@ export function createReleaseController(options: {
                 await state(row, "running");
                 return;
               }
-              if (jobs.length !== 1)
+              const [job] = jobs;
+              if (jobs.length !== 1 || !job)
                 throw new Error("Publication job identity is missing or ambiguous");
-              row.jobHandle = jobs[0]!.handle;
+              row.jobHandle = job.handle;
               await sql`UPDATE factory.release_attempt SET job_handle=${row.jobHandle} WHERE id=${row.attemptID}`;
             }
             if (!row.runnerUUID) {
@@ -700,9 +704,11 @@ export function createReleaseController(options: {
           !row.jobHandle ||
           row.state !== "running" ||
           row.ended ||
-          !row.runtimeAttemptID
+          !row.runtimeAttemptID ||
+          !row.contract
         )
           return new Response(null, { status: 409 });
+        const contract = row.contract;
         await authorize(sql, row.createdBy, row.projectID);
         const [runtime] =
           await sql`SELECT id FROM factory.runtime_attempt WHERE id=${row.runtimeAttemptID} AND state IN ('starting','ready') AND stop_intended_at IS NULL AND isolated_kind='publication'`;
@@ -741,10 +747,7 @@ export function createReleaseController(options: {
         let credential = await secrets.read(`release-publish/${row.projectID}/${grant.id}`);
         if (!credential?.token) {
           // A retry must not silently replace content already published under this version.
-          for (const name of [
-            ...row.contract!.images,
-            ...(row.contract!.chart ? [row.contract!.chart] : []),
-          ])
+          for (const name of [...contract.images, ...(contract.chart ? [contract.chart] : [])])
             if (
               await publication.versionExists(releasePackageOwner(row.projectID), name, row.version)
             )
@@ -752,7 +755,7 @@ export function createReleaseController(options: {
                 "conflict",
                 "This version already contains artifacts. Publish a new version instead of overwriting them.",
               );
-          for (const file of row.contract!.files)
+          for (const file of contract.files)
             if (
               await publication.versionExists(
                 releasePackageOwner(row.projectID),

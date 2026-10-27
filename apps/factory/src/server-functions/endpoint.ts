@@ -1,7 +1,7 @@
-import { CommandError } from "../command-error";
-import { SystemContractError } from "../../../../packages/system-contract/src/system-contract";
-import { json } from "../http";
 import { z } from "zod";
+import { SystemContractError } from "../../../../packages/system-contract/src/system-contract";
+import { CommandError } from "../command-error";
+import { json } from "../http";
 import type { FactoryFunctionContext, FactoryServices } from "./context";
 import type { ServerResult } from "./result";
 
@@ -27,8 +27,7 @@ async function run<T>(execute: () => Promise<T>): Promise<ServerResult<T>> {
 type FunctionHandler = (
   request: Request,
   options: {
-    event: { locals: { factory: FactoryFunctionContext } };
-    csrf: { origin: string; allowCredentials: boolean };
+    context: { factory: FactoryFunctionContext };
   },
 ) => Promise<Response>;
 
@@ -39,6 +38,7 @@ export function createServerFunctionEndpoint(dependencies: {
   maintenance(): Promise<boolean>;
   requireFresh(request: Request): Promise<unknown>;
   publicFunctionIDs?: ReadonlySet<string>;
+  functionIDs?: ReadonlySet<string>;
   handle: FunctionHandler;
 }) {
   return async (request: Request) => {
@@ -46,7 +46,7 @@ export function createServerFunctionEndpoint(dependencies: {
       return json({ error: "Method not allowed" }, 405, { "cache-control": "no-store" });
     // Restore the configured public origin after TLS termination. Never trust forwarded headers.
     const origin = request.headers.get("origin");
-    if (origin !== dependencies.origin)
+    if (origin !== dependencies.origin || request.headers.get("sec-fetch-site") === "none")
       return json({ error: "Factory command origin is invalid" }, 403, {
         "cache-control": "no-store",
       });
@@ -57,6 +57,12 @@ export function createServerFunctionEndpoint(dependencies: {
     const session = await dependencies.session(request);
     if (!session && !publicRead)
       return json({ error: "Authentication required" }, 401, { "cache-control": "no-store" });
+    const id = target.pathname.split("/").at(-1) ?? "";
+    if (dependencies.functionIDs && !dependencies.functionIDs.has(id))
+      return json({ error: "Factory was updated. Reload before continuing." }, 404, {
+        "cache-control": "no-store",
+        "x-server-function-unknown": "true",
+      });
     const factory: FactoryFunctionContext = {
       ...dependencies.services,
       get actorID() {
@@ -96,12 +102,12 @@ export function createServerFunctionEndpoint(dependencies: {
       },
     };
     const canonical = new URL(`${target.pathname}${target.search}`, dependencies.origin);
-    const response = await dependencies.handle(new Request(canonical, request), {
-      event: { locals: { factory } },
-      // The host already checks this exact configured origin above. Supply it
-      // to Solid too: a proxy can retain a same-site/cross-site Fetch Metadata
-      // header even after the request URL is restored to its canonical origin.
-      csrf: { origin: dependencies.origin, allowCredentials: true },
+    const canonicalRequest = new Request(canonical, request);
+    // TLS termination can leave Fetch Metadata describing the proxy hop.
+    // Only the exact public Origin accepted above may use the canonical host.
+    canonicalRequest.headers.set("sec-fetch-site", "same-origin");
+    const response = await dependencies.handle(canonicalRequest, {
+      context: { factory },
     });
     // Native function bodies can carry long-lived typed streams even though
     // their content type is not SSE. Do not buffer or transform that wire.

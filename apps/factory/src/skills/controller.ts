@@ -165,26 +165,40 @@ export function createSkillController(database: ReturnType<typeof createDatabase
       });
     },
     library,
-    async getLibrary(userID: string, projectID?: string) {
-      return database.client.begin(async (sql) => {
-        await lock(sql, true);
-        return library.viewIn(
-          sql,
-          userID,
-          projectID,
-          projectID
-            ? await inherited(sql, projectID, userID)
-            : {
-                system: await system(sql),
-                project: {
-                  version: 0,
-                  planning: { required: [], optional: null, selected: null },
-                  build: { required: [], optional: null, selected: null },
-                },
-                personal: { version: 0, planning: null, build: null },
+    async getLibraryIn(sql: AgentTurnTransaction, userID: string, projectID?: string) {
+      await lock(sql, true);
+      return library.viewIn(
+        sql,
+        userID,
+        projectID,
+        projectID
+          ? await inherited(sql, projectID, userID)
+          : {
+              system: await system(sql),
+              project: {
+                version: 0,
+                planning: { required: [], optional: null, selected: null },
+                build: { required: [], optional: null, selected: null },
               },
-        );
-      });
+              personal: { version: 0, planning: null, build: null },
+            },
+      );
+    },
+    async getLibrary(userID: string, projectID?: string) {
+      return database.client.begin((sql) => this.getLibraryIn(sql, userID, projectID));
+    },
+    async chooseLibraryIn(
+      sql: AgentTurnTransaction,
+      value: unknown,
+      userID: string,
+      projectID?: string,
+    ) {
+      return library.chooseIn(
+        sql,
+        value,
+        userID,
+        projectID ? (transaction) => inherited(transaction, projectID, userID) : undefined,
+      );
     },
     async chooseLibrary(value: unknown, userID: string, projectID?: string) {
       return library.choose(

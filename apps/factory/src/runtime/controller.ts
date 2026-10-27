@@ -1,13 +1,12 @@
+import { agentConfiguration } from "./agent-configuration";
 import { type ParseError, parse as parseJSONC } from "jsonc-parser";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient, type ForgeRepository } from "../../../../packages/forge/src/forge";
 import type { ComputeClass } from "../../../../packages/runtime-domain/src/compute";
 import {
   hashConnectorToken,
-  runtimeBuildBrowserToken,
   runtimeConnectorTokens,
   runtimeIdentity,
-  runtimeModelToken,
   runtimePublicationToken,
 } from "../../../../packages/runtime-domain/src/identity";
 import {
@@ -30,7 +29,6 @@ import {
 } from "../../../../packages/workspace-domain/src/workspace";
 import { createAccessController } from "../access/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
-import { modelEnvironment } from "../models/controller";
 import { requireSetupReady } from "../setup/execution-gate";
 import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
 import { createComputeWait } from "../usage/compute-wait";
@@ -64,7 +62,6 @@ type ExecutionIdentity = ReturnType<typeof runtimeIdentity> & {
   namespace: string;
   podName: string;
 };
-const agentModelID = process.env["FACTORY_AGENT_MODEL_ID"]?.trim() || "factory-coding-model";
 const systemContractPath = ".factory/system.json";
 
 function requirePinnedRuntimeHostImage(value: string | undefined) {
@@ -84,45 +81,6 @@ function repositoryFromURL(value: string): ForgeRepository {
   const name = parts.at(-1);
   if (!owner || !name) throw new SystemContractError("Project repository URL is invalid");
   return { owner, name };
-}
-
-async function agentConfiguration(
-  database: Database,
-  changeID: string,
-  secret: string,
-  attemptID: string,
-  generation: number,
-  browserToolsImage: string | null,
-) {
-  if (!browserToolsImage || !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(browserToolsImage))
-    throw new Error(
-      "Configure FACTORY_BROWSER_TOOLS_IMAGE with the pinned Build browser image before starting implementation",
-    );
-  const [admitted] = await database.client<
-    Array<{
-      modelID: string;
-      provider: "openai" | "anthropic" | "deepseek" | null;
-      reasoningEffort: "medium" | "high" | "xhigh" | "max" | null;
-    }>
-  >`
-    SELECT turn.authority->>'modelId' AS "modelID", version.provider,
-      turn.authority->>'codingReasoning' AS "reasoningEffort"
-    FROM factory.agent_turn turn LEFT JOIN factory.model_connection_version version
-      ON version.connection_id::text=turn.authority->'modelConnection'->>'connectionID'
-      AND version.version::text=turn.authority->'modelConnection'->>'version'
-    WHERE turn.change_id=${changeID} ORDER BY turn.created_at, turn.id LIMIT 1`;
-  const modelID = admitted?.modelID ?? agentModelID;
-  return {
-    modelBaseURL: runtimeFactoryURL(`/internal/model/${attemptID}/v1`),
-    modelToken: runtimeModelToken(secret, attemptID, generation),
-    modelID,
-    modelIDs: admitted ? [modelID] : modelEnvironment().models,
-    provider: admitted?.provider ?? "openai",
-    ...(admitted?.reasoningEffort ? { reasoningEffort: admitted.reasoningEffort } : {}),
-    browserToolsImage,
-    browserURL: runtimeFactoryURL(`/internal/build-browser/${attemptID}`),
-    browserToken: runtimeBuildBrowserToken(secret, attemptID, generation),
-  };
 }
 
 export function createRuntimeController(
@@ -670,6 +628,9 @@ export function createRuntimeController(
   ) {
     const repositoryURL = runtimeRepositoryURL(input.repositoryURL, input.identity.attemptID);
     try {
+      const publicationVersion = input.verification?.version;
+      if (input.verification?.publicationID && !publicationVersion)
+        throw new Error("Publication create intent is missing its version");
       if (input.repositoryURL.startsWith("file://")) {
         await prepareRuntimeRepository(
           input.identity.attemptID,
@@ -709,11 +670,11 @@ export function createRuntimeController(
                 runnerLabel:
                   input.kind === "publication" ? "factory-publication" : "factory-verification",
                 ...(input.verification.jobHandle ? { handle: input.verification.jobHandle } : {}),
-                ...(input.verification.publicationID
+                ...(input.verification.publicationID && publicationVersion
                   ? {
                       publication: {
                         id: input.verification.publicationID,
-                        version: input.verification.version!,
+                        version: publicationVersion,
                         credentialURL: runtimeFactoryURL(
                           `/internal/releases/${input.verification.publicationID}/credentials`,
                         ),
@@ -836,6 +797,16 @@ export function createRuntimeController(
         if (row.isolatedKind === "verification" && (!row.runnerUUID || !row.runnerToken)) {
           throw new Error("Verification create intent is missing its ephemeral runner");
         }
+        const publicationVersion = row.publicationVersion;
+        if (
+          row.isolatedKind === "publication" &&
+          (!row.publicationID ||
+            !publicationVersion ||
+            !row.publicationHandle ||
+            !row.runnerUUID ||
+            !row.runnerToken)
+        )
+          throw new Error("Publication create intent is missing its bound runner or version");
         const generation = Number(attempt.generation);
         const runtimeOwnerID = row.workspaceID ?? attempt.id;
         const expectedIdentity = runtimeIdentity(
@@ -920,12 +891,12 @@ export function createRuntimeController(
                     row.isolatedKind === "publication"
                       ? "factory-publication"
                       : "factory-verification",
-                  ...(row.publicationID && row.publicationHandle
+                  ...(row.publicationID && row.publicationHandle && publicationVersion
                     ? {
                         handle: row.publicationHandle,
                         publication: {
                           id: row.publicationID,
-                          version: row.publicationVersion!,
+                          version: publicationVersion,
                           credentialURL: runtimeFactoryURL(
                             `/internal/releases/${row.publicationID}/credentials`,
                           ),
@@ -1185,7 +1156,7 @@ export function createRuntimeController(
         const [attempt] = await lock<
           Array<{ state: string; generation: number; namespace: string; podName: string }>
         >`SELECT state,generation::float8 AS generation,kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName" FROM factory.runtime_attempt WHERE id=${attemptID}`;
-        if (!attempt || attempt.state !== "create-intended") return;
+        if (attempt?.state !== "create-intended") return;
         const generation = attempt.generation;
         const tokens = runtimeConnectorTokens(connectorSecret, attemptID, generation);
         await lock`SELECT pg_advisory_unlock(hashtext(${projectLock}))`;
@@ -2215,7 +2186,8 @@ export function createRuntimeController(
         const [sequence] = await lock<{ generation: number }[]>`
           SELECT (COALESCE(MAX(generation),0)+1)::float8 AS generation FROM factory.runtime_attempt
           WHERE project_id=${row.projectID} AND isolated_kind IS NOT NULL`;
-        const generation = sequence!.generation;
+        if (!sequence) throw new Error("Publication generation observation is missing");
+        const generation = sequence.generation;
         const identity = await executionIdentity(publicationID, generation, lock);
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         await lock.begin(async (tx) => {

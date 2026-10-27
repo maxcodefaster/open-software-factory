@@ -2,9 +2,9 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import upstream from "../../upstream.json";
 
-export const attachmentS3Image =
-  "docker.io/dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690";
+export const attachmentS3Image = upstream.garage.image;
 
 async function docker(...args: string[]) {
   const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
@@ -30,6 +30,7 @@ export async function ownedAttachmentS3(resumeOwner?: string, parentOwnsCleanup 
   let secret = randomBytes(32).toString("hex");
   const saved = new Map<string, string | undefined>();
   let created = false;
+  let networkCreated = false;
   async function dispose() {
     for (const [name, value] of saved) {
       if (value === undefined) delete process.env[name];
@@ -44,6 +45,17 @@ export async function ownedAttachmentS3(resumeOwner?: string, parentOwnsCleanup 
       );
       if (owner !== id) throw new Error("Refusing to remove an unowned S3 proof container");
       await docker("rm", "-f", name);
+    }
+    if (networkCreated && !parentOwnsCleanup) {
+      const owner = await docker(
+        "network",
+        "inspect",
+        "--format",
+        '{{index .Labels "factory.attachment-proof"}}',
+        name,
+      );
+      if (owner !== id) throw new Error("Refusing to remove an unowned S3 proof network");
+      await docker("network", "rm", name);
     }
     if (!parentOwnsCleanup) await rm(directory, { recursive: true, force: true });
   }
@@ -74,9 +86,12 @@ export async function ownedAttachmentS3(resumeOwner?: string, parentOwnsCleanup 
       key = recordedKey;
       secret = recordedSecret;
       created = true;
+      networkCreated = true;
       console.info(`Owned attachment S3 recovered without another create: ${name}`);
     } else {
       await mkdir(directory, { recursive: true, mode: 0o700 });
+      await docker("network", "create", "--label", `factory.attachment-proof=${id}`, name);
+      networkCreated = true;
       const configuration = join(directory, "garage.toml");
       await writeFile(
         configuration,
@@ -86,6 +101,8 @@ export async function ownedAttachmentS3(resumeOwner?: string, parentOwnsCleanup 
       await docker(
         "create",
         "--name",
+        name,
+        "--network",
         name,
         "--label",
         `factory.attachment-proof=${id}`,
@@ -113,11 +130,11 @@ export async function ownedAttachmentS3(resumeOwner?: string, parentOwnsCleanup 
     const port = (await docker("port", name, "3900/tcp")).split(":").at(-1);
     const endpoint = `http://127.0.0.1:${port}`;
     const env = {
-      FACTORY_ATTACHMENT_S3_ENDPOINT: endpoint,
-      FACTORY_ATTACHMENT_S3_BUCKET: "factory-attachments",
-      FACTORY_ATTACHMENT_S3_REGION: "garage",
-      FACTORY_ATTACHMENT_S3_ACCESS_KEY_ID: key,
-      FACTORY_ATTACHMENT_S3_SECRET_ACCESS_KEY: secret,
+      FACTORY_OBJECT_S3_ENDPOINT: endpoint,
+      FACTORY_OBJECT_S3_BUCKET: "factory-attachments",
+      FACTORY_OBJECT_S3_REGION: "garage",
+      FACTORY_OBJECT_S3_ACCESS_KEY_ID: key,
+      FACTORY_OBJECT_S3_SECRET_ACCESS_KEY: secret,
     };
     for (const [name, value] of Object.entries(env)) {
       saved.set(name, process.env[name]);

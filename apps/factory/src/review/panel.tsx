@@ -1,4 +1,14 @@
-import { createEffect, createMemo, createSignal, For, onCleanup, Show } from "solid-js";
+import {
+  type Accessor,
+  createEffect,
+  createMemo,
+  createSignal,
+  For,
+  onCleanup,
+  onSettled,
+  Show,
+  untrack,
+} from "solid-js";
 import { z } from "zod";
 import {
   feedbackCreateInput,
@@ -6,7 +16,7 @@ import {
   feedbackUpdateInput,
   pendingReviewThreads,
   type ReviewFeedback,
-  reviewRegion,
+  type reviewRegion,
   type VisualReview,
 } from "../../../../packages/conversation-domain/src/visual-review";
 import { APIRequestError } from "../api-client";
@@ -23,6 +33,7 @@ import {
   updateReviewFeedback,
 } from "../server-functions/review";
 import { TicketActionBar } from "../ticket-action-bar";
+import { observeFactoryRead } from "../zero/reads";
 import { ReviewComposer } from "./composer";
 import { reviewMediaURL, uploadReviewStill } from "./media-client";
 import { reviewTime, scenarioAt } from "./playback";
@@ -101,11 +112,12 @@ export function ReviewPanel(props: {
   viewID?: string;
   feedbackID?: string | undefined;
   active?: boolean | undefined;
+  projectID?: string | undefined;
   onFeedback?(feedback: ReviewFeedback[], readOnly: boolean): void;
   onDraftChange?(dirty: boolean): void;
   onClose?(): void;
   onOpenPreview?: (() => void) | undefined;
-  onActions?(actions: ReviewActions | undefined): void;
+  onActions?(actions: Accessor<ReviewActions | undefined> | undefined): void;
 }) {
   const [view, setView] = createSignal<VisualReview>();
   const [error, setError] = createSignal("");
@@ -127,7 +139,7 @@ export function ReviewPanel(props: {
   const [fullscreen, setFullscreen] = createSignal(false);
   const [videoRatio, setVideoRatio] = createSignal(16 / 9);
   const [captionsURL, setCaptionsURL] = createSignal("");
-  const [composing, setComposing] = createSignal(Boolean(props.compact));
+  const [composing, setComposing] = createSignal(untrack(() => Boolean(props.compact)));
   const [markingVideo, setMarkingVideo] = createSignal(false);
   const [composerPosition, setComposerPosition] = createSignal({ x: 12, y: 12 });
   let surface: HTMLElement | undefined;
@@ -144,6 +156,11 @@ export function ReviewPanel(props: {
     `${props.userID}:${props.changeID}:${props.compact ? (props.viewID ?? "preview") : "ticket"}`;
   const mediaURL = (id: string) => reviewMediaURL(props.changeID, id);
   const readOnly = () => Boolean(props.readOnly || view()?.readOnly);
+  const completedRecording = () => {
+    const current = view();
+    const recording = current?.recording;
+    return current && recording?.state === "complete" ? { view: current, recording } : undefined;
+  };
   createEffect(
     () => body(),
     (value) => {
@@ -158,7 +175,7 @@ export function ReviewPanel(props: {
     const id = recordingIdentity();
     return id ? mediaURL(id) : undefined;
   });
-  function refresh(fresh = false): Promise<void> {
+  function refresh(fresh = false, changeID = props.changeID): Promise<void> {
     // A slow read must still be publishable when the next poll ticks. Commands
     // and explicit cross-view changes supersede reads begun before their save.
     if (pendingRead && !fresh) return pendingRead;
@@ -167,7 +184,7 @@ export function ReviewPanel(props: {
     const request = (async () => {
       let result: VisualReview;
       try {
-        result = await serverCall(getVisualReview(props.changeID));
+        result = await serverCall(getVisualReview({ data: [changeID] }));
       } catch (cause) {
         if (epoch === generation && sequence === readSequence && !view()) setLoadFailed(true);
         throw cause;
@@ -188,8 +205,18 @@ export function ReviewPanel(props: {
     void request.then(settled, settled);
     return request;
   }
-  createEffect(scopeIdentity, () => {
-    const key = viewKey();
+  const reviewScope = () => {
+    const key = scopeIdentity();
+    // Reset only for a new view identity, not when its current Change snapshot updates.
+    return untrack(() => ({
+      key,
+      commandKey: commandKey(),
+      changeID: props.changeID,
+      compact: Boolean(props.compact),
+    }));
+  };
+  createEffect(reviewScope, (scope) => {
+    const key = scope.key;
     const scopeGeneration = ++generation;
     pendingRead = undefined;
     retry = undefined;
@@ -202,11 +229,11 @@ export function ReviewPanel(props: {
     setReplies({});
     setCapture(undefined);
     setSelectedScenario("");
-    setComposing(Boolean(props.compact));
+    setComposing(scope.compact);
     setMarkingVideo(false);
     setError("");
     setNotice("");
-    const retained = retainedReviewViews.get(viewKey());
+    const retained = retainedReviewViews.get(key);
     if (retained) {
       setBody(retained.body);
       setKind(retained.kind);
@@ -218,7 +245,7 @@ export function ReviewPanel(props: {
       setReplies(retained.replies);
     }
     try {
-      const stored = sessionStorage.getItem(commandKey());
+      const stored = sessionStorage.getItem(scope.commandKey);
       if (stored) {
         retry = pendingCommand.parse(JSON.parse(stored));
         if (retry.action === "feedback") {
@@ -234,7 +261,7 @@ export function ReviewPanel(props: {
         "A saved review request could not be restored. Check the coding history before sending a new correction.",
       );
     }
-    void refresh().catch(() => {
+    void refresh(false, scope.changeID).catch(() => {
       if (generation === scopeGeneration)
         setError("Review could not load. Reload review to retry.");
     });
@@ -243,17 +270,14 @@ export function ReviewPanel(props: {
         void refresh(true).catch(() => {});
     };
     window.addEventListener("factory-review-changed", changed);
-    const timer = setInterval(() => {
-      if (props.active !== false && document.visibilityState !== "hidden")
-        void refresh().catch(() => {});
-    }, 5_000);
     return () => {
+      const recordingID = view()?.recording?.id;
       retainedReviewViews.set(key, {
         body: body(),
         kind: kind(),
         ...(capture() ? { capture: capture() } : {}),
         time: video?.currentTime ?? 0,
-        ...(view()?.recording?.id ? { recordingID: view()!.recording!.id } : {}),
+        ...(recordingID ? { recordingID } : {}),
         scenario: selectedScenario(),
         composing: composing(),
         marking: markingVideo(),
@@ -262,10 +286,17 @@ export function ReviewPanel(props: {
       });
       generation++;
       video?.pause();
-      clearInterval(timer);
       window.removeEventListener("factory-review-changed", changed);
     };
   });
+  observeFactoryRead(
+    () =>
+      props.projectID && props.active !== false
+        ? { projectId: props.projectID, scope: "review", resourceId: props.changeID }
+        : null,
+    () => refresh(true),
+    () => setLoadFailed(true),
+  );
   createEffect(
     () => props.capture,
     (value) => {
@@ -439,10 +470,10 @@ export function ReviewPanel(props: {
       sessionStorage.setItem(key, JSON.stringify(retry));
       const current = retry;
       if (current.action === "feedback")
-        await serverCall(createReviewFeedback(props.changeID, current.input));
+        await serverCall(createReviewFeedback({ data: [props.changeID, current.input] }));
       else if (current.action === "update")
-        await serverCall(updateReviewFeedback(props.changeID, current.input));
-      else await serverCall(sendReviewRevision(props.changeID, current.input));
+        await serverCall(updateReviewFeedback({ data: [props.changeID, current.input] }));
+      else await serverCall(sendReviewRevision({ data: [props.changeID, current.input] }));
       sessionStorage.removeItem(key);
       if (epoch !== generation) return false;
       retry = undefined;
@@ -623,13 +654,37 @@ export function ReviewPanel(props: {
         }
       : undefined,
   );
-  const showComposer = () => composing() && !props.feedbackID && !readOnly();
+  const canAddFeedback = () => Boolean(view()) && !readOnly();
+  const revisionHeaderActions = () => {
+    const action = revisionAction();
+    return action
+      ? [
+          {
+            id: "revision",
+            label: `${action.sending ? "Requesting revision…" : "Request revision"} · ${action.count} ${action.count === 1 ? "Thread" : "Threads"}`,
+            disabled: action.disabled,
+            title: `Revise ${action.count} eligible open ${action.count === 1 ? "Thread" : "Threads"}. Comments and Threads awaiting recheck are excluded.`,
+            primary: true,
+            run: () => revisionAction()?.request(),
+          },
+        ]
+      : [];
+  };
+  const showComposer = () => composing() && (!props.compact || !props.feedbackID) && !readOnly();
   async function reloadReview() {
     setError("");
     setLoadFailed(false);
     await refresh().catch(() => setError("Review could not load. Reload review to retry."));
   }
   function addFeedback() {
+    if (!canAddFeedback()) {
+      setError(
+        readOnly()
+          ? "This review is read-only."
+          : "Review is unavailable. Reload review before adding feedback.",
+      );
+      return;
+    }
     if (composing() && body().trim()) return;
     if (!body().trim()) {
       setCapture(undefined);
@@ -646,14 +701,22 @@ export function ReviewPanel(props: {
       ? undefined
       : {
           revision: revisionAction(),
-          addFeedback: readOnly() ? undefined : addFeedback,
+          addFeedback: canAddFeedback() ? addFeedback : undefined,
           reload: () => void reloadReview(),
         },
   );
-  createEffect(actions, (value) => {
-    props.onActions?.(value);
+  onSettled(() => {
+    const publish = untrack(() => props.onActions);
+    publish?.(actions);
+    return () => publish?.(undefined);
   });
-  onCleanup(() => props.onActions?.(undefined));
+  const composerSource = () => {
+    const current = capture();
+    if (!current) return undefined;
+    return current.context.source === "recording"
+      ? `Video · ${reviewTime((current.timestampMs ?? 0) / 1000, true)}`
+      : (current.element ?? current.page);
+  };
   const composer = () => (
     <ReviewComposer
       attachmentScopeKey={`feedback:${props.changeID}:new`}
@@ -661,13 +724,7 @@ export function ReviewPanel(props: {
       kind={kind()}
       busy={busy()}
       locked={Boolean(retry) || !view()}
-      source={
-        capture()
-          ? capture()!.context.source === "recording"
-            ? `Video · ${reviewTime((capture()!.timestampMs ?? 0) / 1000, true)}`
-            : (capture()!.element ?? capture()!.page)
-          : undefined
-      }
+      source={composerSource()}
       image={frameURL() || undefined}
       reconstructed={capture()?.context.source === "preview"}
       onBody={setBody}
@@ -694,7 +751,10 @@ export function ReviewPanel(props: {
       class={`review-composer-placement ${!props.compact ? "is-floating" : ""}`}
       style={
         !props.compact
-          ? { left: `${composerPosition().x}px`, top: `${composerPosition().y}px` }
+          ? {
+              "--review-composer-x": `${composerPosition().x}px`,
+              "--review-composer-y": `${composerPosition().y}px`,
+            }
           : undefined
       }
     >
@@ -767,21 +827,21 @@ export function ReviewPanel(props: {
                   ? [{ id: "preview", label: "Open Live Preview", run: props.onOpenPreview }]
                   : []),
                 ...(!readOnly()
-                  ? [{ id: "feedback", label: "Add feedback", run: addFeedback }]
-                  : []),
-                ...(revisionAction()
                   ? [
                       {
-                        id: "revision",
-                        label: revisionAction()!.sending
-                          ? "Requesting revision…"
-                          : "Request revision",
-                        disabled: revisionAction()!.disabled,
-                        primary: true,
-                        run: () => revisionAction()?.request(),
+                        id: "feedback",
+                        label: "Add feedback",
+                        disabled: !canAddFeedback(),
+                        title: !view()
+                          ? loadFailed()
+                            ? "Reload review before adding feedback."
+                            : "Wait for review to load before adding feedback."
+                          : undefined,
+                        run: addFeedback,
                       },
                     ]
                   : []),
+                ...revisionHeaderActions(),
               ]}
             />
           </Show>
@@ -807,9 +867,12 @@ export function ReviewPanel(props: {
       <Show
         when={view()}
         fallback={
-          <Show when={loadFailed()} fallback={<p role="status">Loading review…</p>}>
+          <Show
+            when={loadFailed()}
+            fallback={<p role="status">Loading review… Feedback is available once it loads.</p>}
+          >
             <p role="status">
-              Review is unavailable.
+              Review is unavailable. Reload review before adding feedback.
               <Show when={props.compact}>
                 {" "}
                 <button type="button" class="quiet-button" onClick={() => void reloadReview()}>
@@ -905,10 +968,10 @@ export function ReviewPanel(props: {
                     </video>
                   </Show>
                   <Show when={!markingVideo() && view()?.recording?.state === "complete"}>
-                    <For each={view()?.feedback}>
+                    <For each={view()?.feedback} keyed={(item) => item.id}>
                       {(item, index) => {
                         const point = () => {
-                          const annotation = item.annotation;
+                          const annotation = item().annotation;
                           return annotation?.source === "recording" &&
                             annotation.recordingId === view()?.recording?.id &&
                             Math.abs(annotation.timestampMs / 1000 - playhead()) <= 0.35
@@ -926,7 +989,7 @@ export function ReviewPanel(props: {
                                   left: `${region().x * 100}%`,
                                   top: `${region().y * 100}%`,
                                 }}
-                                onClick={() => focusFeedback(item)}
+                                onClick={() => focusFeedback(item())}
                               >
                                 {index() + 1}
                               </button>
@@ -995,21 +1058,23 @@ export function ReviewPanel(props: {
                     </button>
                   </Show>
                 </div>
-                <Show when={view()?.recording?.state === "complete"}>
-                  <ReviewPlayerControls
-                    time={playhead()}
-                    duration={duration()}
-                    paused={paused()}
-                    ready={duration() > 0 && !videoFailed()}
-                    fullscreen={fullscreen()}
-                    scenarios={view()!.scenarios}
-                    feedback={view()!.feedback}
-                    recordingID={view()!.recording!.id}
-                    onPlay={togglePlayback}
-                    onSeek={seek}
-                    onFeedback={focusFeedback}
-                    onFullscreen={() => void toggleFullscreen()}
-                  />
+                <Show when={completedRecording()}>
+                  {(current) => (
+                    <ReviewPlayerControls
+                      time={playhead()}
+                      duration={duration()}
+                      paused={paused()}
+                      ready={duration() > 0 && !videoFailed()}
+                      fullscreen={fullscreen()}
+                      scenarios={current().view.scenarios}
+                      feedback={current().view.feedback}
+                      recordingID={current().recording.id}
+                      onPlay={togglePlayback}
+                      onSeek={seek}
+                      onFeedback={focusFeedback}
+                      onFullscreen={() => void toggleFullscreen()}
+                    />
+                  )}
                 </Show>
               </div>
               <Show when={videoFailed()}>
@@ -1036,48 +1101,48 @@ export function ReviewPanel(props: {
                 <div class="review-scenario-summary">
                   <fieldset class="review-scenarios">
                     <legend class="sr-only">QA scenarios</legend>
-                    <For each={view()?.scenarios}>
+                    <For each={view()?.scenarios} keyed={(scenario) => scenario.id}>
                       {(scenario) => (
                         <button
                           type="button"
-                          aria-pressed={selectedScenario() === scenario.id ? "true" : "false"}
+                          aria-pressed={selectedScenario() === scenario().id ? "true" : "false"}
                           onClick={() => {
                             if (
-                              scenario.observationKind === "source" ||
-                              scenario.hasRecordingPosition === false
+                              scenario().observationKind === "source" ||
+                              scenario().hasRecordingPosition === false
                             )
                               video?.pause();
-                            setSelectedScenario(scenario.id);
+                            setSelectedScenario(scenario().id);
                             if (
                               video &&
                               view()?.recording?.state === "complete" &&
-                              scenario.observationKind !== "source" &&
-                              scenario.hasRecordingPosition !== false
+                              scenario().observationKind !== "source" &&
+                              scenario().hasRecordingPosition !== false
                             ) {
-                              seek(scenario.startedMs / 1000);
+                              seek(scenario().startedMs / 1000);
                             }
                           }}
                         >
                           <span
-                            class={`review-scenario-status is-${scenario.status ?? "unfinished"}`}
+                            class={`review-scenario-status is-${scenario().status ?? "unfinished"}`}
                           >
-                            <Show
-                              when={scenario.status === "passed"}
-                              fallback={<span aria-hidden="true">!</span>}
-                            >
-                              <Icon name="check" />
-                            </Show>
-                            <span class="sr-only">{scenario.status ?? "Unfinished"}: </span>
+                            {scenario().status === "passed"
+                              ? "Passed"
+                              : scenario().status === "failed"
+                                ? "Failed"
+                                : scenario().status === "unverified"
+                                  ? "Unverified"
+                                  : "Unfinished"}
                           </span>
-                          <span>{scenario.title}</span>
-                          <Show when={scenario.observationKind === "source"}>
+                          <span>{scenario().title}</span>
+                          <Show when={scenario().observationKind === "source"}>
                             <small>Source check</small>
                           </Show>
                           <Show
                             when={
-                              scenario.observationKind !== "source" &&
+                              scenario().observationKind !== "source" &&
                               view()?.recording?.state === "complete" &&
-                              scenario.hasRecordingPosition === false
+                              scenario().hasRecordingPosition === false
                             }
                           >
                             <small>Timing unavailable</small>
@@ -1086,19 +1151,22 @@ export function ReviewPanel(props: {
                       )}
                     </For>
                   </fieldset>
-                  <For each={view()?.scenarios.filter((item) => item.id === selectedScenario())}>
+                  <For
+                    each={view()?.scenarios.filter((item) => item.id === selectedScenario())}
+                    keyed={(scenario) => scenario.id}
+                  >
                     {(scenario) => (
-                      <dl class="review-scenario-outcome" aria-label={`${scenario.title} result`}>
-                        <Show when={scenario.expected}>
+                      <dl class="review-scenario-outcome" aria-label={`${scenario().title} result`}>
+                        <Show when={scenario().expected}>
                           <div>
                             <dt>Expected</dt>
-                            <dd>{scenario.expected}</dd>
+                            <dd>{scenario().expected}</dd>
                           </div>
                         </Show>
-                        <Show when={scenario.observed}>
+                        <Show when={scenario().observed}>
                           <div>
                             <dt>Observed</dt>
-                            <dd>{scenario.observed}</dd>
+                            <dd>{scenario().observed}</dd>
                           </div>
                         </Show>
                       </dl>
@@ -1148,7 +1216,15 @@ export function ReviewPanel(props: {
                   {feedbackRow}
                 </For>
                 <Show when={visibleFeedback().some((item) => item.state === "resolved")}>
-                  <details class="review-resolved" open={props.compact}>
+                  <details
+                    class="review-resolved"
+                    open={
+                      props.compact ||
+                      visibleFeedback().some(
+                        (item) => item.id === props.feedbackID && item.state === "resolved",
+                      )
+                    }
+                  >
                     <summary>
                       Resolved (
                       {visibleFeedback().filter((item) => item.state === "resolved").length})
@@ -1185,7 +1261,7 @@ function FeedbackItem(props: {
   busy: boolean;
   onAction(action: string, body?: string): Promise<boolean>;
 }) {
-  const [replying, setReplying] = createSignal(Boolean(props.reply));
+  const [replying, setReplying] = createSignal(untrack(() => Boolean(props.reply)));
   const [contextOpen, setContextOpen] = createSignal(false);
   const [thumbnailFailed, setThumbnailFailed] = createSignal(false);
   let replyInput: HTMLTextAreaElement | undefined;
@@ -1240,6 +1316,9 @@ function FeedbackItem(props: {
       if (value) setReplying(true);
     },
   );
+  createEffect(replying, (shown) => {
+    if (shown) queueMicrotask(() => replyInput?.focus());
+  });
   const representation = () => {
     const annotation = props.item.annotation;
     return annotation?.source === "preview" ? annotation.representation : undefined;
@@ -1275,6 +1354,20 @@ function FeedbackItem(props: {
     if (props.item.correctionState === "retry") return "Revision needs retry";
     return undefined;
   };
+  const replyMessage = (message: Accessor<ReviewFeedback["messages"][number]>) => (
+    <div class="review-message">
+      <header class="review-message-heading">
+        <span class="review-avatar" aria-hidden="true">
+          {initials(message().author)}
+        </span>
+        <div class="review-message-byline">
+          <strong>{message().author}</strong>
+          <time datetime={message().createdAt}>{messageTime(message().createdAt)}</time>
+        </div>
+      </header>
+      <div class="review-message-body markdown-body" innerHTML={markdownHTML(message().body)} />
+    </div>
+  );
   return (
     <article
       id={`review-feedback-${props.item.id}`}
@@ -1330,14 +1423,16 @@ function FeedbackItem(props: {
               }
               onClick={() => setContextOpen((shown) => !shown)}
             >
-              <Show when={props.item.annotation?.mediaId && !thumbnailFailed()}>
-                <img
-                  class="review-context-thumbnail"
-                  src={props.mediaURL(props.item.annotation!.mediaId!)}
-                  alt=""
-                  loading="lazy"
-                  onError={() => setThumbnailFailed(true)}
-                />
+              <Show when={!thumbnailFailed() && props.item.annotation?.mediaId}>
+                {(mediaID) => (
+                  <img
+                    class="review-context-thumbnail"
+                    src={props.mediaURL(mediaID())}
+                    alt=""
+                    loading="lazy"
+                    onError={() => setThumbnailFailed(true)}
+                  />
+                )}
               </Show>
               <Show when={!props.canSeek} fallback={<span class="sr-only">Saved QA frame</span>}>
                 {props.item.annotation?.source === "preview"
@@ -1387,18 +1482,20 @@ function FeedbackItem(props: {
                           <p>No context image. The page and element anchor are retained.</p>
                         }
                       >
-                        <div class="review-saved-frame-window">
-                          <FrameRegion
-                            image={props.mediaURL(annotation().mediaId!)}
-                            region={
-                              representation() === "dom-reconstruction"
-                                ? undefined
-                                : annotation().region
-                            }
-                            pinLabel={props.pinLabel}
-                            reconstructed={representation() === "dom-reconstruction"}
-                          />
-                        </div>
+                        {(mediaID) => (
+                          <div class="review-saved-frame-window">
+                            <FrameRegion
+                              image={props.mediaURL(mediaID())}
+                              region={
+                                representation() === "dom-reconstruction"
+                                  ? undefined
+                                  : annotation().region
+                              }
+                              pinLabel={props.pinLabel}
+                              reconstructed={representation() === "dom-reconstruction"}
+                            />
+                          </div>
+                        )}
                       </Show>
                       <small>{annotation().page}</small>
                       <Show when={annotation().source === "preview"}>
@@ -1426,24 +1523,21 @@ function FeedbackItem(props: {
         <Show when={props.item.messages.length > 1}>
           <div class="review-replies">
             <div class="review-reply-list">
-              <For each={props.item.messages.slice(1)}>
-                {(message) => (
-                  <div class="review-message">
-                    <header class="review-message-heading">
-                      <span class="review-avatar" aria-hidden="true">
-                        {initials(message.author)}
-                      </span>
-                      <div class="review-message-byline">
-                        <strong>{message.author}</strong>
-                        <time datetime={message.createdAt}>{messageTime(message.createdAt)}</time>
-                      </div>
-                    </header>
-                    <div
-                      class="review-message-body markdown-body"
-                      innerHTML={markdownHTML(message.body)}
-                    />
+              <Show when={props.item.messages.length > 2}>
+                <details class="review-earlier-replies">
+                  <summary>
+                    {props.item.messages.length - 2} earlier{" "}
+                    {props.item.messages.length === 3 ? "reply" : "replies"}
+                  </summary>
+                  <div class="review-earlier-reply-list">
+                    <For each={props.item.messages.slice(1, -1)} keyed={(message) => message.id}>
+                      {replyMessage}
+                    </For>
                   </div>
-                )}
+                </details>
+              </Show>
+              <For each={props.item.messages.slice(-1)} keyed={(message) => message.id}>
+                {replyMessage}
               </For>
             </div>
           </div>
@@ -1455,10 +1549,7 @@ function FeedbackItem(props: {
               class="review-text-action"
               aria-expanded={replying() ? "true" : "false"}
               disabled={props.busy}
-              onClick={() => {
-                setReplying((value) => !value);
-                if (replying()) queueMicrotask(() => replyInput?.focus());
-              }}
+              onClick={() => setReplying((value) => !value)}
             >
               Reply
             </button>
@@ -1555,8 +1646,8 @@ function FrameRegion(props: {
             style={{
               left: `${region().x * 100}%`,
               top: `${region().y * 100}%`,
-              width: `${region().width * 100}%`,
-              height: `${region().height * 100}%`,
+              "--review-region-width": `${region().width * 100}%`,
+              "--review-region-height": `${region().height * 100}%`,
             }}
           />
         )}

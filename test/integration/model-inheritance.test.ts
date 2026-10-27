@@ -8,7 +8,7 @@ import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
 import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { decodeResponse } from "@solidjs/web/server-functions/client";
+import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 
 const administrator = "01994a7d-0000-7000-8000-000000000001";
 const systemModel = "system-model";

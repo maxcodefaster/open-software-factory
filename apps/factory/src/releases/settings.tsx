@@ -16,6 +16,7 @@ import {
 } from "../server-functions/releases";
 import { serverCall } from "../server-functions/result";
 import { CopyButton, Feedback } from "../ui/feedback";
+import { observeFactoryRead } from "../zero/reads";
 import "./settings.css";
 
 type Release = ReleaseSettingsView["releases"][number];
@@ -92,12 +93,15 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
   let shownProject = "";
   let accessCommand: { commandID: string; name: string; scope: "git" | "packages" } | undefined;
   let rotationCommand: { id: string; commandID: string } | undefined;
-  async function load() {
+  let observed = false;
+  async function load(projectID = props.projectID, signal?: AbortSignal) {
     const current = generation;
     const sequence = ++readSequence;
     try {
-      const value = await serverCall(getProjectReleases(props.projectID));
-      if (!alive || current !== generation || sequence !== readSequence) return;
+      const value = await serverCall(
+        getProjectReleases({ data: [projectID], ...(signal ? { signal } : {}) }),
+      );
+      if (!alive || current !== generation || sequence !== readSequence || signal?.aborted) return;
       setView(value);
       setLoadError("");
     } catch {
@@ -152,16 +156,23 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
         setNotice("");
       }
       if (!active) return;
-      void load();
-      const interval = setInterval(() => {
-        if (!document.hidden) void load();
-      }, 5_000);
+      if (!observed) void load(projectID);
       return () => {
         alive = false;
         generation++;
-        clearInterval(interval);
       };
     },
+  );
+  observed = observeFactoryRead(
+    () =>
+      props.active !== false
+        ? { projectId: props.projectID, resourceId: props.projectID, scope: "releases" }
+        : null,
+    (signal) =>
+      load(
+        untrack(() => props.projectID),
+        signal,
+      ),
   );
   createEffect(confirmation, (value) => {
     if (value) confirmationHeading?.focus();
@@ -269,7 +280,7 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                         <p>No delivered commit with a healthy Staging Preview is available.</p>
                       }
                     >
-                      <Reference value={data().candidateSHA!} label="delivered commit" />
+                      {(sha) => <Reference value={sha()} label="delivered commit" />}
                     </Show>
                   </dd>
                   <dt>Publishes</dt>
@@ -326,10 +337,11 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                     <form
                       onSubmit={(event) => {
                         event.preventDefault();
-                        if (untrack(canReview))
+                        const commitSHA = data().candidateSHA;
+                        if (untrack(canReview) && commitSHA)
                           setConfirmation({
                             version: version(),
-                            commitSHA: data().candidateSHA!,
+                            commitSHA,
                             notes: notes(),
                             commandID: crypto.randomUUID(),
                           });
@@ -432,7 +444,7 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                             onClick={() =>
                               void action(async (current) => {
                                 await serverCall(
-                                  publishProjectRelease(props.projectID, confirmed()),
+                                  publishProjectRelease({ data: [props.projectID, confirmed()] }),
                                 );
                                 if (!current()) return;
                                 setConfirmation(undefined);
@@ -528,14 +540,18 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                               </For>
                               <div class="release-actions">
                                 <Show when={release().releaseURL}>
-                                  <a href={release().releaseURL!} target="_blank" rel="noreferrer">
-                                    Open Forgejo release
-                                  </a>
+                                  {(url) => (
+                                    <a href={url()} target="_blank" rel="noreferrer">
+                                      Open Forgejo release
+                                    </a>
+                                  )}
                                 </Show>
                                 <Show when={release().runURL}>
-                                  <a href={release().runURL!} target="_blank" rel="noreferrer">
-                                    Open Forgejo run
-                                  </a>
+                                  {(url) => (
+                                    <a href={url()} target="_blank" rel="noreferrer">
+                                      Open Forgejo run
+                                    </a>
+                                  )}
                                 </Show>
                                 <Show
                                   when={
@@ -551,7 +567,9 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                                     onClick={() =>
                                       void action(async (current) => {
                                         await serverCall(
-                                          reconcileProjectRelease(props.projectID, release().id),
+                                          reconcileProjectRelease({
+                                            data: [props.projectID, release().id],
+                                          }),
                                         );
                                         if (current())
                                           setNotice("Outcome checked. No new run was started.");
@@ -592,7 +610,9 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                                       onClick={() =>
                                         void action(async (current) => {
                                           await serverCall(
-                                            endProjectPublication(props.projectID, release().id),
+                                            endProjectPublication({
+                                              data: [props.projectID, release().id],
+                                            }),
                                           );
                                           if (current()) setEndID(undefined);
                                         })
@@ -640,7 +660,7 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                     />
                   </dd>
                 </dl>
-                <FreshAuthentication />
+                <FreshAuthentication active={props.active} />
                 <Show when={!data().configured}>
                   <p>
                     Machine access requires the configured Forgejo administrator and encrypted
@@ -683,34 +703,36 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                           </p>
                         }
                       >
-                        <div class="release-credential-field">
-                          <label>
-                            Access token
-                            <input
-                              readonly
-                              type={reveal() ? "text" : "password"}
-                              value={value().token!}
-                              autocomplete="off"
-                              spellcheck={false}
-                            />
-                          </label>
-                          <div class="release-actions">
-                            <button
-                              type="button"
-                              class="quiet-button"
-                              aria-pressed={reveal() ? "true" : "false"}
-                              onClick={() => setReveal(!reveal())}
-                            >
-                              {reveal() ? "Hide token" : "Show token"}
-                            </button>
-                            <CopyButton
-                              value={value().token!}
-                              label="Copy"
-                              accessibleLabel="Copy access token"
-                              class="quiet-button"
-                            />
+                        {(token) => (
+                          <div class="release-credential-field">
+                            <label>
+                              Access token
+                              <input
+                                readonly
+                                type={reveal() ? "text" : "password"}
+                                value={token()}
+                                autocomplete="off"
+                                spellcheck={false}
+                              />
+                            </label>
+                            <div class="release-actions">
+                              <button
+                                type="button"
+                                class="quiet-button"
+                                aria-pressed={reveal() ? "true" : "false"}
+                                onClick={() => setReveal(!reveal())}
+                              >
+                                {reveal() ? "Hide token" : "Show token"}
+                              </button>
+                              <CopyButton
+                                value={token()}
+                                label="Copy"
+                                accessibleLabel="Copy access token"
+                                class="quiet-button"
+                              />
+                            </div>
                           </div>
-                        </div>
+                        )}
                       </Show>
                       <p class="release-note">
                         Chart reads and runtime image pulls need credentials in their respective
@@ -739,7 +761,7 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                           scope: scope(),
                         };
                       const result = await serverCall(
-                        createReleaseAccess(props.projectID, accessCommand),
+                        createReleaseAccess({ data: [props.projectID, accessCommand] }),
                       );
                       if (!current()) return;
                       accessCommand = undefined;
@@ -867,11 +889,13 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                                           commandID: crypto.randomUUID(),
                                         };
                                       const result = await serverCall(
-                                        rotateReleaseAccess(
-                                          props.projectID,
-                                          grant().id,
-                                          rotationCommand.commandID,
-                                        ),
+                                        rotateReleaseAccess({
+                                          data: [
+                                            props.projectID,
+                                            grant().id,
+                                            rotationCommand.commandID,
+                                          ],
+                                        }),
                                       );
                                       if (!current()) return;
                                       rotationCommand = undefined;
@@ -915,7 +939,9 @@ export function ReleaseSettings(props: { projectID: string; active: boolean }) {
                                   onClick={() =>
                                     void action(async (current) => {
                                       await serverCall(
-                                        revokeReleaseAccess(props.projectID, grant().id),
+                                        revokeReleaseAccess({
+                                          data: [props.projectID, grant().id],
+                                        }),
                                       );
                                       if (!current()) return;
                                       setRevokeID(undefined);

@@ -15,7 +15,7 @@ test("every starter has its own shipped cover and approved concise summary", () 
   }
 });
 
-test("custom and imported identities get the same neutral fallback, not a claimed starter cover", () => {
+test("entries without saved artwork use a neutral fallback rather than a claimed starter cover", () => {
   expect(skillCover("custom")).toBe("/art/skills/personal-fallback.webp");
   expect(skillCover("imported-code-review")).toBe("/art/skills/personal-fallback.webp");
   expect(existsSync(resolve(import.meta.dir, "../../public", skillCover("custom").slice(1)))).toBe(

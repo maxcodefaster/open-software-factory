@@ -6,6 +6,9 @@ import { createServer } from "vite";
 import { releaseSettingsView } from "../../packages/project-domain/src/release";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { invalidateFixtureRead } from "../fixtures/read-invalidation";
+import { fixtureValue } from "../fixtures/value";
 
 test("release settings retain human version choice and show read-only handoff without deployment targets", async ({
   page,
@@ -18,15 +21,7 @@ test("release settings retain human version choice and show read-only handoff wi
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["project-inputs.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   const errors: string[] = [];
@@ -36,7 +31,10 @@ test("release settings retain human version choice and show read-only handoff wi
     if (message.type() === "warning") warnings.push(message.text());
   });
   await frontend.listen();
-  const origin = frontend.resolvedUrls!.local[0]!;
+  const origin = fixtureValue(
+    fixtureValue(frontend.resolvedUrls, "frontend.resolvedUrls").local[0],
+    "frontend.resolvedUrls!.local[0]",
+  );
   const view = releaseSettingsView.parse({
     canPublish: true,
     canManageAccess: true,
@@ -85,7 +83,7 @@ test("release settings retain human version choice and show read-only handoff wi
         },
         end: async () => {
           endings++;
-          view.releases[0]!.endedAt = "2026-10-25T12:00:00Z";
+          fixtureValue(view.releases[0], "view.releases[0]").endedAt = "2026-10-25T12:00:00Z";
         },
         publish: async (_user, _project, input) => {
           published.push(input);
@@ -135,7 +133,7 @@ test("release settings retain human version choice and show read-only handoff wi
         rotateAccess: async () => {
           rotations++;
           grantID = crypto.randomUUID();
-          view.access = [{ ...view.access[0]!, id: grantID }];
+          view.access = [{ ...fixtureValue(view.access[0], "view.access[0]"), id: grantID }];
           return {
             id: grantID,
             username: "synthetic-reader-rotated",
@@ -269,6 +267,7 @@ test("release settings retain human version choice and show read-only handoff wi
       "https://forge.example/releases/v1.5.0",
     );
     const readBefore = reads;
+    await invalidateFixtureRead(page, "releases");
     await expect.poll(() => reads).toBeGreaterThan(readBefore);
     await expect(releases.getByRole("link", { name: "Open Forgejo release" })).toBeVisible();
     await releases.getByRole("button", { name: "Copy web reference", exact: true }).click();
@@ -327,8 +326,10 @@ test("release settings retain human version choice and show read-only handoff wi
     await expect(releases.getByRole("alert")).toHaveCount(0);
     await expect(releases.getByRole("button", { name: "Review publication" })).toBeEnabled();
     // Uncertainty and ending an attempt never claim an artifact rollback.
-    view.releases[0]!.state = "uncertain";
-    view.releases[0]!.failure = "The native publication outcome is unconfirmed.";
+    fixtureValue(view.releases[0], "view.releases[0]").state = "uncertain";
+    fixtureValue(view.releases[0], "view.releases[0]").failure =
+      "The native publication outcome is unconfirmed.";
+    await invalidateFixtureRead(page, "releases");
     await releases.getByRole("button", { name: "Refresh releases" }).click();
     const summary = releases.locator("summary").filter({ hasText: "1.5.0" });
     await summary.click();

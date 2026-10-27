@@ -1,9 +1,8 @@
 import { createEffect, createSignal, Show, onCleanup } from "solid-js";
 import type { ConversationMode } from "../../../../packages/conversation-domain/src/conversation";
-import { type InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
+import type { InheritedModelSettingsView } from "../../../../packages/conversation-domain/src/model-inheritance";
 import type { InheritedSkillSettings } from "../../../../packages/conversation-domain/src/skill-inheritance";
 import type { TurnObservation } from "../../../../packages/conversation-domain/src/turn-observation";
-import { invoke } from "@solidjs/web/server-functions/client";
 import { getProjectModels } from "../server-functions/models";
 import { getInheritedSkills } from "../server-functions/skills";
 import { serverCall } from "../server-functions/result";
@@ -38,8 +37,8 @@ export function AgentBlockers(props: {
       const abort = new AbortController();
       currentRequest = abort;
       void Promise.all([
-        serverCall(invoke(getProjectModels, { signal: abort.signal }, projectID)),
-        serverCall(invoke(getInheritedSkills, { signal: abort.signal }, projectID)),
+        serverCall(getProjectModels({ ...{ signal: abort.signal }, data: [projectID] })),
+        serverCall(getInheritedSkills({ ...{ signal: abort.signal }, data: [projectID] })),
       ])
         .then(([models, skills]) => {
           if (!abort.signal.aborted) setConfiguration({ models, skills });

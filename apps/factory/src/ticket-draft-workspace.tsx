@@ -1,15 +1,14 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import { z } from "zod";
-import { RichDocumentSurface } from "./rich-document-surface";
-import { documentBlocks, type DocumentEditor, type DocumentFormat } from "./document-model";
+import { attachmentIDs } from "../../../packages/conversation-domain/src/attachments";
+import { useAttachmentProject } from "./attachments/ui";
+import { type DocumentEditor, type DocumentFormat, documentBlocks } from "./document-model";
 import { filterDocumentBlocks } from "./document-slash";
 import { editorPopoverPosition } from "./editor-popover-position";
-import { useAttachmentProject } from "./attachments/ui";
-import { attachmentIDs } from "../../../packages/conversation-domain/src/attachments";
-import { TicketActionBar } from "./ticket-action-bar";
-import { invoke } from "@solidjs/web/server-functions";
+import { RichDocumentSurface } from "./rich-document-surface";
 import { retainAttachmentDraft } from "./server-functions/attachments";
 import { serverCall } from "./server-functions/result";
+import { TicketActionBar } from "./ticket-action-bar";
 
 export const personalTicketDraftSchema = z.object({
   id: z.uuid(),
@@ -118,9 +117,15 @@ export function TicketDraftWorkspace(props: {
       const storageKey = props.storageKey;
       if (projectID)
         void serverCall(
-          invoke(retainAttachmentDraft, { keepalive: true }, projectID, value.id, {
-            sequence: value.attachmentSequence,
-            ids,
+          retainAttachmentDraft({
+            data: [
+              projectID,
+              value.id,
+              {
+                sequence: value.attachmentSequence,
+                ids,
+              },
+            ],
           }),
         ).catch(() => {
           if (props.storageKey !== storageKey || draft().id !== value.id) return;

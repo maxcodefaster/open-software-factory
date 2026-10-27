@@ -1,23 +1,22 @@
-import { createEffect, createSignal, For, Show, onCleanup } from "solid-js";
-import { invoke } from "@solidjs/web/server-functions/client";
+import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import {
-  modelProvider,
   type ModelConnectionView,
   type ModelConnectionWrite,
-  type ModelProvider,
   type ModelProbeResult,
+  type ModelProvider,
+  modelProvider,
 } from "../../../../packages/conversation-domain/src/model-connection";
 import {
-  codingReasoningInput,
   type CodingReasoning,
+  codingReasoningInput,
   type ModelSettingsView,
 } from "../../../../packages/conversation-domain/src/model-settings";
 import { APIRequestError } from "../api-client";
 import {
-  getModelConnections,
-  getModelConnection,
-  saveModelConnection,
   adoptDeploymentModelConnection,
+  getModelConnection,
+  getModelConnections,
+  saveModelConnection,
   selectModelRole,
 } from "../server-functions/models";
 import { serverCall } from "../server-functions/result";
@@ -79,7 +78,7 @@ export function ModelConnectionSettings(props: {
     props.onBusy(Boolean(value));
   }
   async function load() {
-    const value = await serverCall(getModelConnections());
+    const value = await serverCall(getModelConnections({ data: [] }));
     if (!disposed) setData(value);
   }
   createEffect(
@@ -122,7 +121,7 @@ export function ModelConnectionSettings(props: {
         endpoint: endpoint().trim() || null,
         apiKey: key(),
       };
-      const saved = await serverCall(saveModelConnection(pendingSave));
+      const saved = await serverCall(saveModelConnection({ data: [pendingSave] }));
       if (disposed) return;
       pendingSave = undefined;
       setKey("");
@@ -137,7 +136,7 @@ export function ModelConnectionSettings(props: {
           // Only unlock a rejected form when a read proves this command owns
           // neither a committed version nor the pending external write.
           try {
-            const saved = await serverCall(getModelConnection(pending.connectionID));
+            const saved = await serverCall(getModelConnection({ data: [pending.connectionID] }));
             if (saved.version === pending.version && saved.pendingCommandID !== pending.commandID)
               pendingSave = undefined;
           } catch (readError) {
@@ -183,7 +182,7 @@ export function ModelConnectionSettings(props: {
         )
           pendingAdoption = { commandID: crypto.randomUUID(), ...adoption };
         selected = await serverCall(
-          invoke(adoptDeploymentModelConnection, { signal: abort.signal }, pendingAdoption),
+          adoptDeploymentModelConnection({ ...{ signal: abort.signal }, data: [pendingAdoption] }),
         );
         pendingAdoption = undefined;
         const saved = selected;
@@ -215,7 +214,7 @@ export function ModelConnectionSettings(props: {
       if (!pendingCheck || JSON.stringify(previous) !== JSON.stringify(request))
         pendingCheck = { commandID: crypto.randomUUID(), ...request };
       const result = await serverCall(
-        invoke(selectModelRole, { signal: abort.signal }, pendingCheck),
+        selectModelRole({ ...{ signal: abort.signal }, data: [pendingCheck] }),
       );
       pendingCheck = undefined;
       if (!disposed) {

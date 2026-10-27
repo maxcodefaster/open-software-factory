@@ -118,7 +118,7 @@ function installPreviewBridge(factoryOrigin: string) {
         break;
       }
       const siblings = current.parentElement
-        ? [...current.parentElement.children].filter((item) => item.tagName === current!.tagName)
+        ? [...current.parentElement.children].filter((item) => item.tagName === current.tagName)
         : [];
       path.unshift(
         `${current.tagName.toLowerCase()}:nth-of-type(${siblings.indexOf(current) + 1})`,

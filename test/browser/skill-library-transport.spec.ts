@@ -5,10 +5,12 @@ import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import type { z } from "zod";
 import {
-  skillLibraryView,
   type skillLibrarySaveInput,
+  skillLibraryView,
 } from "../../packages/conversation-domain/src/skill-library";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { fixtureValue } from "../fixtures/value";
 
 const directory = ".factory/test-results/skill-transport";
 const cache = resolve(".factory/test-results/vite", `skill-transport-${crypto.randomUUID()}`);
@@ -22,19 +24,14 @@ test.beforeAll(async () => {
     cacheDir: cache,
     publicDir: resolve("apps/factory/public"),
     optimizeDeps: { entries: ["skill-library.html"] },
-    plugins: [
-      solid({
-        ssr: false,
-        serverFunctions: {
-          devMiddleware: false,
-          filter: { include: resolve("apps/factory/src/server-functions/**/*.{ts,tsx}") },
-        },
-      }),
-    ],
+    plugins: [factoryFixtureStart(), solid({ ssr: false })],
     server: { host: "127.0.0.1", port: 0 },
   });
   await server.listen();
-  origin = server.resolvedUrls!.local[0]!.replace(/\/$/, "");
+  origin = fixtureValue(
+    fixtureValue(server.resolvedUrls, "server.resolvedUrls").local[0],
+    "server.resolvedUrls!.local[0]",
+  ).replace(/\/$/, "");
   await mkdir(directory, { recursive: true });
 });
 test.afterAll(async () => {
@@ -112,7 +109,16 @@ test("Skill library without a Project uses native JSON calls and explicitly retr
   expect(reads).toBe(1);
   await page.getByRole("button", { name: "Add skill", exact: true }).click();
   const editor = page.getByRole("form", { name: "Skill editor", exact: true });
+  const resume = page.getByRole("button", { name: "Resume draft", exact: true });
+  await expect(resume).toBeHidden();
   await editor.getByLabel("Name", { exact: true }).fill("Owned private guidance");
+  await editor.getByRole("button", { name: "Back to library", exact: true }).click();
+  await expect(resume).toBeVisible();
+  await expect(resume).toBeFocused();
+  await resume.click();
+  await expect(resume).toBeHidden();
+  await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Owned private guidance");
+  await page.screenshot({ path: `${directory}/resumed-editor.png` });
   await editor
     .getByLabel("When to use", { exact: true })
     .fill("When checking the exact approved work.");

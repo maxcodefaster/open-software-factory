@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   type ConversationMode,
+  type InterviewQuestion,
   projectAgentAnswerOutput,
   projectAgentOutput,
   sourceCitationInput,
@@ -24,7 +25,7 @@ const citation = z.discriminatedUnion("source", [
   }),
 ]);
 const citations = z.array(citation).max(12).default([]);
-const [answer, question, round, requirement, epic] = projectAgentOutput.options;
+const [answer, question, round, requirement, epic, technicalDesign] = projectAgentOutput.options;
 const planning = z.discriminatedUnion("kind", [
   answer.extend({ citations }),
   question.extend({ citations }),
@@ -42,6 +43,12 @@ const automaticInput = z.discriminatedUnion("kind", [
   answer.extend({ citations }),
   requirement.extend({ citations }),
 ]);
+const technical = z.discriminatedUnion("kind", [
+  answer.extend({ citations }),
+  question.extend({ citations }),
+  round.extend({ citations }),
+  technicalDesign.extend({ citations }),
+]);
 
 // Strict provider schemas require every property. Non-applicable Git fields must
 // be absent from non-code variants, and an unused footnote is explicitly null.
@@ -49,25 +56,40 @@ export function projectAgentProviderOutputFor(
   mode: ConversationMode,
   requirementsInterview = false,
   inputTask = false,
+  technicalPlanning = false,
 ) {
   return z
     .object({
       output:
         mode === "investigate"
           ? projectAgentAnswerOutput.extend({ citations })
-          : inputTask
-            ? automaticInput
-            : requirementsInterview
-              ? interview
-              : planning,
+          : technicalPlanning
+            ? technical
+            : inputTask
+              ? automaticInput
+              : requirementsInterview
+                ? interview
+                : planning,
     })
     .strict();
 }
 
-export function parseProjectAgentOutput(value: unknown, mode: ConversationMode) {
-  const { output } = projectAgentProviderOutputFor(mode).parse(value);
+export function parseProjectAgentOutput(
+  value: unknown,
+  mode: ConversationMode,
+  technicalPlanning = false,
+) {
+  const { output } = projectAgentProviderOutputFor(mode, false, false, technicalPlanning).parse(
+    value,
+  );
+  // The Agent proposes choices, but cannot remove the human's own answer path.
+  // Keep this at model admission, not in the generic question/answer contract.
+  const withCustomAnswer = (question: InterviewQuestion): InterviewQuestion =>
+    question.type === "free-text" ? question : { ...question, allowCustom: true };
   return projectAgentOutput.parse({
     ...output,
+    ...(output.kind === "question" ? { question: withCustomAnswer(output.question) } : {}),
+    ...(output.kind === "round" ? { questions: output.questions.map(withCustomAnswer) } : {}),
     citations: output.citations.map(({ reference, ...source }) => ({
       ...source,
       ...(reference === null ? {} : { reference }),
@@ -76,9 +98,27 @@ export function parseProjectAgentOutput(value: unknown, mode: ConversationMode) 
 }
 
 export class ProjectAgentOutputError extends Error {
-  constructor() {
+  readonly diagnostic: string;
+  constructor(cause?: unknown) {
     super("The Project Agent returned an invalid response. Your input is saved.");
     this.name = "ProjectAgentOutputError";
+    let current = cause;
+    let diagnostic = "Structured output validation failed.";
+    for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
+      if (current instanceof z.ZodError) {
+        diagnostic = current.issues
+          .map((issue) => `${issue.path.join(".")}: ${issue.code}`)
+          .join("; ");
+        break;
+      }
+      const value = current as Record<string, unknown>;
+      if (typeof value["id"] === "string" && /^[A-Z_]+$/.test(value["id"]))
+        diagnostic = value["id"];
+      current = value["cause"];
+    }
+    // Paths/codes only. Never retain provider request bodies, generated text,
+    // credentials or raw SDK error details in a public-facing error.
+    this.diagnostic = diagnostic;
   }
 }
 
