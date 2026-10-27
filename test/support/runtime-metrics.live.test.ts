@@ -1,91 +1,58 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import type { ExecutionSlot } from "../../packages/runtime-domain/src/reserve";
-import { reserveIdentity } from "../../packages/runtime-domain/src/reserve";
-import { factoryboxLocation } from "../../packages/runtime-kubernetes/src/factorybox-location";
-import { createCurrentMetrics } from "../../packages/runtime-kubernetes/src/metrics";
-import { createReserveClient } from "../../packages/runtime-kubernetes/src/reserve";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { readRuntimeRegistryCA } from "../../packages/runtime-kubernetes/src/client";
+import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { createConformanceRuntime } from "../../scripts/runtime/factorybox-conformance";
 import upstream from "../../upstream.json";
 
 test.skipIf(process.env["FACTORY_RUN_METRICS_PROOF"] !== "1")(
-  "outer Envbox metrics attribute controlled private-Docker CPU and memory",
+  "Factorybox Sandbox metrics attribute controlled private-Docker CPU and memory",
   async () => {
-    const identity = reserveIdentity(crypto.randomUUID());
-    let slot: ExecutionSlot = {
-      ...identity,
-      ...factoryboxLocation(crypto.randomUUID()),
-      role: "staging",
-      state: "creating",
-      runtimeHostImage: (await readFile(".factory/runtime-host-image", "utf8")).trim(),
-      namespaceUID: null,
-      podUID: null,
-      claimUID: null,
-      assignedAttemptID: null,
-      expiresAt: new Date(Date.now() + 180000).toISOString(),
-    };
-    let ready = false;
-    const adapter = createReserveClient(),
-      metrics = createCurrentMetrics();
-    async function command(args: string[]) {
-      const child = Bun.spawn(["kubectl", "--context", "orbstack", ...args], {
-        stdout: "pipe",
-        stderr: "pipe",
+    const owner = crypto.randomUUID();
+    const artifacts = resolve(".factory/test-results/runtime-metrics", owner);
+    await mkdir(artifacts, { recursive: true });
+    const image = (
+      process.env["FACTORY_RUNTIME_CONFORMANCE_IMAGE"] ??
+      (await readFile(".factory/runtime-host-image", "utf8"))
+    ).trim();
+    const runtime = createConformanceRuntime(
+      owner,
+      image,
+      configuredFactoryboxRuntimeProfile(),
+      await readRuntimeRegistryCA(),
+      artifacts,
+    );
+    const command = async (args: string[]) => {
+      const result = await runCommand(runtime.execArgs(["docker", ...args]), undefined, {
+        timeoutMS: 60_000,
+        outputBytes: 64 * 1024,
       });
-      const [output, error, status] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      if (status !== 0) throw new Error(error);
-      return output;
-    }
+      if (result.exitCode !== 0)
+        throw new Error(result.stderr || "Owned metrics private-Docker command failed");
+      return result.stdout;
+    };
     try {
-      const deadline = Date.now() + 90000;
-      while (Date.now() < deadline) {
-        const observed = await adapter.prepare(slot);
-        slot = {
-          ...slot,
-          namespaceUID: observed.namespaceUID,
-          podUID: observed.podUID,
-          claimUID: observed.claimUID,
-        };
-        if (observed.ready) {
-          ready = true;
-          break;
-        }
-        if (observed.failed) throw new Error("Owned Envbox metrics fixture failed");
-        await Bun.sleep(1000);
-      }
-      if (!ready || !slot.podUID) throw new Error("Owned Envbox did not become ready");
-      let baseline = await metrics(slot.namespace, "slot", slot.podUID);
+      await runtime.prepare();
+      await runtime.boundary();
+      // The runtime filesystem is a verified Factorybox base, not an image in
+      // an ambient host Docker daemon. Acquire this workload only in its own
+      // private daemon and retain the immutable image identity for every run.
+      await command(["pull", upstream.nodeDevelopment.image]);
+      await command(["run", "--rm", "--pull=never", upstream.nodeDevelopment.image, "node", "-v"]);
+      let baseline = await runtime.metrics();
       for (let attempt = 0; attempt < 20 && baseline.status !== "available"; attempt++) {
         await Bun.sleep(2000);
-        baseline = await metrics(slot.namespace, "slot", slot.podUID);
+        baseline = await runtime.metrics();
       }
       expect(baseline.status).toBe("available");
-      // Image preparation can release memory after readiness. Warm the exact inner
-      // image first, then require stable measured working sets before adding load.
-      await command([
-        "exec",
-        "-n",
-        slot.namespace,
-        "slot",
-        "--",
-        "docker",
-        "exec",
-        "workspace_cvm",
-        "docker",
-        "run",
-        "--rm",
-        "--pull=never",
-        upstream.nodeDevelopment.image,
-        "node",
-        "-v",
-      ]);
+      // Image acquisition can release memory after readiness. Keep the
+      // existing stability control before introducing the attributed load.
       let stable = 0;
       for (let attempt = 0; attempt < 20 && stable < 2; attempt++) {
         await Bun.sleep(5000);
-        const current = await metrics(slot.namespace, "slot", slot.podUID);
+        const current = await runtime.metrics();
         stable =
           current.status === "available" &&
           Math.abs((current.memoryMiB ?? 0) - (baseline.memoryMiB ?? 0)) < 24 &&
@@ -96,19 +63,12 @@ test.skipIf(process.env["FACTORY_RUN_METRICS_PROOF"] !== "1")(
       }
       expect(stable).toBe(2);
       await command([
-        "exec",
-        "-n",
-        slot.namespace,
-        "slot",
-        "--",
-        "docker",
-        "exec",
-        "workspace_cvm",
-        "docker",
         "run",
         "--detach",
         "--name",
         "owned-metrics-load",
+        "--label",
+        `factory.dev/metrics-owner=${owner}`,
         "--pull=never",
         upstream.nodeDevelopment.image,
         "node",
@@ -118,20 +78,28 @@ test.skipIf(process.env["FACTORY_RUN_METRICS_PROOF"] !== "1")(
       let load = baseline;
       for (let attempt = 0; attempt < 12; attempt++) {
         await Bun.sleep(3000);
-        load = await metrics(slot.namespace, "slot", slot.podUID);
+        load = await runtime.metrics();
         if (
           (load.cpuMilli ?? 0) > (baseline.cpuMilli ?? 0) + 100 &&
           (load.memoryMiB ?? 0) > (baseline.memoryMiB ?? 0) + 100
         )
           break;
       }
-      console.log("Owned inner Envbox attribution", { baseline, load });
+      await writeFile(
+        resolve(artifacts, "attribution.json"),
+        `${JSON.stringify({ owner, baseline, load }, null, 2)}\n`,
+        { flag: "wx", mode: 0o600 },
+      );
       expect(load.status).toBe("available");
       expect(load.cpuMilli ?? 0).toBeGreaterThan((baseline.cpuMilli ?? 0) + 100);
       expect(load.memoryMiB ?? 0).toBeGreaterThan((baseline.memoryMiB ?? 0) + 100);
+      await runtime.boundary();
+      await runtime.passed();
     } finally {
-      await adapter.retire({ ...slot, state: "retiring" });
+      // This fixture owns a separate worker/store. Success deletes only its
+      // UID-checked namespace; failure fences that exact Pod and retains data.
+      await runtime.cleanup();
     }
   },
-  360000,
+  420_000,
 );
