@@ -1173,9 +1173,11 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err := injectApprovedTools(ctx, assignment, result.ContainerID); err != nil {
 		return err
 	}
+	// docker cp creates root-owned artifacts even when the image declares a
+	// non-root USER. Only setup uses root; the child keeps the CLI's remote user.
 	setup := exec.CommandContext(
 		ctx,
-		"docker", "exec", result.ContainerID, "sh", "-c",
+		"docker", "exec", "--user", "0:0", result.ContainerID, "sh", "-c",
 		"chmod 0555 \"$1\" && chmod 0444 \"$2\"",
 		"factory-connector-setup", connectorPath, assignmentPath,
 	)
@@ -1224,7 +1226,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 			}
 			tool = "/opt/factory/language-tools/glibc"
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput(); err != nil {
+		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/language-tools/runtime").CombinedOutput(); err != nil {
 			return fmt.Errorf("create language tools destination: %w: %s", err, output)
 		}
 		for _, copy := range [][2]string{{"/opt/factory/language-tools/node_modules", "/opt/factory/language-tools/node_modules"}, {tool + "/.", "/opt/factory/language-tools/runtime"}} {
@@ -1243,7 +1245,7 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 			}
 			tool = "/opt/factory/opencode/glibc/bun"
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput(); err != nil {
+		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory/opencode").CombinedOutput(); err != nil {
 			return fmt.Errorf("create OpenCode destination: %w: %s", err, output)
 		}
 		if output, err := exec.CommandContext(ctx, "docker", "cp", "/opt/factory/opencode/server", containerID+":/opt/factory/opencode/server").CombinedOutput(); err != nil {
@@ -1252,18 +1254,18 @@ func injectApprovedTools(ctx context.Context, assignment Assignment, containerID
 		if output, err := exec.CommandContext(ctx, "docker", "cp", tool, containerID+":/opt/factory/opencode/bun").CombinedOutput(); err != nil {
 			return fmt.Errorf("inject OpenCode: %w: %s", err, output)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput(); err != nil {
+		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/opencode/bun").CombinedOutput(); err != nil {
 			return fmt.Errorf("prepare OpenCode: %w: %s", err, output)
 		}
 	}
 	if needsVerification {
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput(); err != nil {
+		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "mkdir", "-p", "/opt/factory").CombinedOutput(); err != nil {
 			return fmt.Errorf("create Forgejo Runner destination: %w: %s", err, output)
 		}
 		if output, err := exec.CommandContext(ctx, "docker", "cp", "/usr/local/bin/forgejo-runner", containerID+":/opt/factory/forgejo-runner").CombinedOutput(); err != nil {
 			return fmt.Errorf("inject Forgejo Runner: %w: %s", err, output)
 		}
-		if output, err := exec.CommandContext(ctx, "docker", "exec", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput(); err != nil {
+		if output, err := exec.CommandContext(ctx, "docker", "exec", "--user", "0:0", containerID, "chmod", "0555", "/opt/factory/forgejo-runner").CombinedOutput(); err != nil {
 			return fmt.Errorf("prepare Forgejo Runner: %w: %s", err, output)
 		}
 	}
