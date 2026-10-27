@@ -178,6 +178,23 @@ def preparation_plan(request, rootfs_sha256, source):
             'rootfsSHA256': rootfs_sha256, 'source': source}
 
 
+def checkpoint_io_policy(linux, machine):
+    architecture = {'aarch64': 'SCMP_ARCH_AARCH64', 'x86_64': 'SCMP_ARCH_X86_64'}.get(machine)
+    if architecture is None:
+        raise ValueError('Unsupported native checkpoint architecture')
+    if linux.get('seccomp') is not None:
+        raise ValueError('Refusing to replace an unreviewed existing seccomp policy')
+    # CRIU cannot save live io_uring mappings. Match the standalone native
+    # consumer profile, inherited by every descendant in this Sandbox.
+    # Return EPERM so libuv uses ordinary I/O. Never change host sysctls.
+    linux['seccomp'] = {
+        'defaultAction': 'SCMP_ACT_ALLOW',
+        'architectures': [architecture],
+        'syscalls': [{'names': ['io_uring_setup', 'io_uring_enter', 'io_uring_register'],
+                      'action': 'SCMP_ACT_ERRNO', 'errnoRet': 1}],
+    }
+
+
 def prepare(request):
     validate_identity(request, with_assignment=True)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
@@ -246,6 +263,7 @@ def prepare(request):
     spec['root']['readonly'] = False
     spec['linux']['uidMappings'] = [{'containerID': 0, 'hostID': 100000, 'size': 65536}]
     spec['linux']['gidMappings'] = [{'containerID': 0, 'hostID': 100000, 'size': 65536}]
+    checkpoint_io_policy(spec['linux'], os.uname().machine)
     # Go 1.27 enables MPTCP listeners by default. CRIU cannot retain those
     # sockets, so use ordinary TCP in this newly owned guest network namespace.
     # Kernels without MPTCP already use TCP and have no corresponding sysctl.

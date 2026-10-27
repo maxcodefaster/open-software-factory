@@ -182,6 +182,10 @@ export function createConformanceRuntime(
     namespace: input.namespace,
     pod: input.podName,
     architecture: profile.architecture,
+    target() {
+      if (!identity || !record) throw new Error("Conformance has no admitted native Sandbox");
+      return { input, identity };
+    },
     async prepare() {
       await save("intent.json", { owner, input, resources: resources.items });
       await command(

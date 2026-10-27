@@ -45,6 +45,15 @@ namespace. Go 1.27 otherwise creates MPTCP listeners by default, which the check
 refuses. Ordinary TCP remains available. This does not change a host sysctl or add MPTCP support
 to CRIU.
 
+The Sandbox OCI seccomp profile returns `EPERM` for `io_uring_setup`, `io_uring_enter`
+and `io_uring_register`, matching the standalone native consumer profile. CRIU cannot save those
+live kernel objects. The inherited filter keeps Node/libuv and other consumers on their supported
+I/O fallback without changing host sysctls. The preparer selects the admitted worker's native
+ARM64 or AMD64 seccomp architecture and refuses an unexpected upstream profile instead of
+overwriting its restrictions. This is not a claim that Factorybox supports checkpointing io_uring.
+The filter applies to fresh preparation. Retained OCI inputs and snapshots stay immutable;
+upgrading Factory does not patch an existing execution during Resume.
+
 Start `dockerd` directly inside Sysbox. The generic DinD entrypoint makes system mounts shared,
 which creates unsupported nested proc mount propagation when restoring a Dev Container. Sysbox
 already prepares those system mounts; the consumer must preserve their private propagation.

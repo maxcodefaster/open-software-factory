@@ -36,6 +36,30 @@ class PreparationTests(unittest.TestCase):
         return patch.dict(os.environ, {"FACTORY_POD_UID": self.request["podUID"],
                                        "FACTORY_STORE_ID": self.request["storeID"]})
 
+    def test_checkpoint_profile_denies_all_io_uring_entrypoints_on_each_native_architecture(self):
+        for machine, architecture in [("aarch64", "SCMP_ARCH_AARCH64"),
+                                       ("x86_64", "SCMP_ARCH_X86_64")]:
+            with self.subTest(machine=machine):
+                linux = {}
+                self.module["checkpoint_io_policy"](linux, machine)
+                self.assertEqual(linux["seccomp"], {
+                    "defaultAction": "SCMP_ACT_ALLOW",
+                    "architectures": [architecture],
+                    "syscalls": [{"names": ["io_uring_setup", "io_uring_enter", "io_uring_register"],
+                                  "action": "SCMP_ACT_ERRNO", "errnoRet": 1}],
+                })
+
+    def test_checkpoint_profile_never_replaces_unreviewed_seccomp_or_accepts_another_architecture(self):
+        existing = {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []}
+        linux = {"seccomp": existing}
+        with self.assertRaisesRegex(ValueError, "existing seccomp"):
+            self.module["checkpoint_io_policy"](linux, "aarch64")
+        self.assertIs(linux["seccomp"], existing)
+        unsupported = {}
+        with self.assertRaisesRegex(ValueError, "architecture"):
+            self.module["checkpoint_io_policy"](unsupported, "armv7l")
+        self.assertEqual(unsupported, {})
+
     def test_old_single_sandbox_protocol_is_refused_before_worker_commands(self):
         request = {**self.request, "version": 1, "sharedSource": False, "bootstrap": ":"}
         del request["sandboxID"]
