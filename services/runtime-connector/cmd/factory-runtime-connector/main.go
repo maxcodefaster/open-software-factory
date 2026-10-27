@@ -21,6 +21,19 @@ func main() {
 	if len(os.Args) < 2 {
 		fail("usage: factory-runtime-connector <parent|child>")
 	}
+	if os.Args[1] == "prepared-control" {
+		flags := flag.NewFlagSet("prepared-control", flag.ExitOnError)
+		action := flags.String("action", "", "fixed private prepared child operation")
+		if err := flags.Parse(os.Args[2:]); err != nil {
+			fail(err.Error())
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		defer cancel()
+		if err := connector.ControlPreparedChild(ctx, *action, os.Stdin, os.Stdout); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
 	if os.Args[1] == "browser-client" {
 		if len(os.Args) != 3 {
 			fail("usage: factory-runtime-connector browser-client <Build turn ID>; one fixed JSON tool call on stdin")
@@ -63,6 +76,15 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if os.Args[1] == "prepared-child" {
+		if *tokenPath != "" || *childTokenPath != "" || *tokenStdin || os.Getenv("FACTORY_CONNECTOR_TOKEN") != "" {
+			fail("prepared Project processes cannot read Runtime credentials")
+		}
+		if err := connector.RunPreparedChild(ctx, assignment); err != nil {
+			fail(err.Error())
+		}
+		return
+	}
 	token := os.Getenv("FACTORY_CONNECTOR_TOKEN")
 	if *tokenPath != "" {
 		content, readErr := os.ReadFile(*tokenPath)

@@ -47,6 +47,20 @@ type Assignment struct {
 	Prebuild               *PrebuildAssignment `json:"prebuild,omitempty"`
 	EffectiveConfiguration string              `json:"-"`
 	PrebuildCacheImage     string              `json:"-"`
+	containerOrigin        *containerOrigin
+}
+
+type containerOrigin struct {
+	AttemptID          string `json:"attemptID"`
+	Generation         uint64 `json:"generation"`
+	ComposeProjectName string `json:"composeProjectName"`
+}
+
+func (assignment Assignment) containerIdentity() containerOrigin {
+	if assignment.containerOrigin != nil {
+		return *assignment.containerOrigin
+	}
+	return containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, assignment.ComposeProjectName}
 }
 
 type PrebuildAssignment struct {

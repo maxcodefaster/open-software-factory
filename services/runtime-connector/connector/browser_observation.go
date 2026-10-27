@@ -85,9 +85,10 @@ func (manager *browserRuntimeManager) inspectPrimary(ctx context.Context) (inspe
 		return inspectedContainer{}, errors.New("browser primary container inspection was not confirmed")
 	}
 	primary := primaries[0]
-	if primary.ID != manager.primaryID || !primary.State.Running || primary.Config.Labels[attemptLabel] != manager.assignment.RuntimeAttemptID ||
-		primary.Config.Labels[generationLabel] != strconv.FormatUint(manager.assignment.Generation, 10) ||
-		primary.Config.Labels["com.docker.compose.project"] != manager.assignment.ComposeProjectName {
+	owner := manager.assignment.containerIdentity()
+	if primary.ID != manager.primaryID || !primary.State.Running || primary.Config.Labels[attemptLabel] != owner.AttemptID ||
+		primary.Config.Labels[generationLabel] != strconv.FormatUint(owner.Generation, 10) ||
+		primary.Config.Labels["com.docker.compose.project"] != owner.ComposeProjectName {
 		return inspectedContainer{}, errors.New("browser primary container no longer owns this Workspace generation")
 	}
 	return primary, nil

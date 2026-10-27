@@ -31,11 +31,12 @@ type devcontainerResult struct {
 }
 
 type parentState struct {
-	RuntimeAttemptID   string `json:"runtimeAttemptId"`
-	Generation         uint64 `json:"generation"`
-	ContainerID        string `json:"containerId"`
-	ComposeProjectName string `json:"composeProjectName"`
-	PreserveWorkspace  bool   `json:"preserveWorkspace"`
+	RuntimeAttemptID   string           `json:"runtimeAttemptId"`
+	Generation         uint64           `json:"generation"`
+	ContainerID        string           `json:"containerId"`
+	ComposeProjectName string           `json:"composeProjectName"`
+	PreserveWorkspace  bool             `json:"preserveWorkspace"`
+	ContainerOrigin    *containerOrigin `json:"containerOrigin,omitempty"`
 }
 
 type inspectedContainer struct {
@@ -75,6 +76,10 @@ type inspectedContainer struct {
 }
 
 func RunParent(ctx context.Context, assignment Assignment, token string, childToken string) (returnError error) {
+	return runParent(ctx, assignment, token, childToken, nil)
+}
+
+func runParent(ctx context.Context, assignment Assignment, token string, childToken string, prepared *preparedProject) (returnError error) {
 	environment, err := readRuntimeEnvironment(ctx, assignment, token)
 	if err != nil {
 		return err
@@ -111,6 +116,23 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	}
 	if token == "" || childToken == "" {
 		return errors.New("Factory parent and child connector tokens are required")
+	}
+	if prepared != nil {
+		// Runtime grants are read only after assignment. Never inject them into
+		// the captured clean processes, even when only their version changed.
+		if !samePreparedProject(prepared.assignment, assignment) ||
+			len(environment.Bundle.Variables) != 0 || len(environment.Bundle.Registries) != 0 {
+			if err := cleanupProject(prepared.state()); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
+				return err
+			}
+			prepared = nil
+		} else {
+			origin := prepared.origin
+			assignment.containerOrigin = &origin
+		}
 	}
 	finishDocker := startupPhase("private-docker")
 	dockerErr := waitForDocker(ctx)
@@ -162,19 +184,21 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		control.write(Message{Type: "status", Phase: "stopped"})
 		return nil
 	}
-	if err := prepareDevcontainerProject(ctx, assignment); err != nil {
-		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-		return err
-	}
-	assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, assignment, token)
-	if assignment.PrebuildCacheImage != "" {
-		path, cleanup, err := preparePrebuildConsumer(ctx, assignment, assignment.PrebuildCacheImage)
-		if err == nil {
-			defer cleanup()
-			assignment.EffectiveConfiguration = path
-			if _, err := validateDevcontainer(ctx, assignment); err != nil {
-				control.write(Message{Type: "status", Phase: "failed", Error: "Prepared image violates the resolved Dev Container boundary"})
-				return err
+	if prepared == nil {
+		if err := prepareDevcontainerProject(ctx, assignment); err != nil {
+			control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
+			return err
+		}
+		assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, assignment, token)
+		if assignment.PrebuildCacheImage != "" {
+			path, cleanup, err := preparePrebuildConsumer(ctx, assignment, assignment.PrebuildCacheImage)
+			if err == nil {
+				defer cleanup()
+				assignment.EffectiveConfiguration = path
+				if _, err := validateDevcontainer(ctx, assignment); err != nil {
+					control.write(Message{Type: "status", Phase: "failed", Error: "Prepared image violates the resolved Dev Container boundary"})
+					return err
+				}
 			}
 		}
 	}
@@ -183,7 +207,12 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 	})
 	defer preparation.stop()
 	finishDevcontainer := startupPhase("devcontainer-start")
-	result, err := startDevcontainer(ctx, assignment)
+	var result devcontainerResult
+	if prepared == nil {
+		result, err = startDevcontainer(ctx, assignment)
+	} else {
+		result, err = prepared.observe()
+	}
 	finishDevcontainer()
 	if err != nil {
 		if !errors.Is(err, errDevcontainerNotStarted) {
@@ -200,6 +229,7 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		ContainerID:        result.ContainerID,
 		ComposeProjectName: result.ComposeProjectName,
 		PreserveWorkspace:  assignment.PreserveWorkspace,
+		ContainerOrigin:    assignment.containerOrigin,
 	}
 	defer func() {
 		if err := cleanupProject(state); err != nil && returnError == nil {
@@ -224,7 +254,12 @@ func RunParent(ctx context.Context, assignment Assignment, token string, childTo
 		}
 	}()
 	finishInjection := startupPhase("tool-injection")
-	injectionErr := injectChild(ctx, assignment, result, childToken)
+	var injectionErr error
+	if prepared == nil {
+		injectionErr = injectChild(ctx, assignment, result, childToken)
+	} else {
+		injectionErr = activatePreparedChild(ctx, assignment, result, childToken)
+	}
 	finishInjection()
 	if err := injectionErr; err != nil {
 		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
@@ -1248,10 +1283,14 @@ func inspectContainer(containerID string) (inspectedContainer, error) {
 }
 
 func cleanupProject(state parentState) error {
+	owner := containerOrigin{state.RuntimeAttemptID, state.Generation, state.ComposeProjectName}
+	if state.ContainerOrigin != nil {
+		owner = *state.ContainerOrigin
+	}
 	if state.ContainerID != "" {
 		container, err := inspectContainer(state.ContainerID)
 		if err == nil && container.Config.Labels["com.docker.compose.project"] == "" {
-			if container.ID != state.ContainerID || container.Config.Labels[attemptLabel] != state.RuntimeAttemptID || container.Config.Labels[generationLabel] != strconv.FormatUint(state.Generation, 10) {
+			if container.ID != state.ContainerID || container.Config.Labels[attemptLabel] != owner.AttemptID || container.Config.Labels[generationLabel] != strconv.FormatUint(owner.Generation, 10) {
 				return errors.New("Standalone cleanup identity changed")
 			}
 			if exec.Command("docker", "rm", "-f", state.ContainerID).Run() != nil {
@@ -1259,7 +1298,10 @@ func cleanupProject(state parentState) error {
 			}
 		}
 	}
-	label := "com.docker.compose.project=" + state.ComposeProjectName
+	if owner.ComposeProjectName == "" {
+		return nil
+	}
+	label := "com.docker.compose.project=" + owner.ComposeProjectName
 	for _, resource := range []struct {
 		list   []string
 		remove []string

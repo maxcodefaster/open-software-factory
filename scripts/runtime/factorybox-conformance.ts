@@ -39,6 +39,7 @@ export function conformanceResources(
   image: string,
   profile: FactoryboxRuntimeProfile,
   certificate: string,
+  project?: Readonly<Record<string, unknown>>,
 ) {
   const input = {
     ...factoryboxLocation(owner),
@@ -85,6 +86,7 @@ export function conformanceResources(
           role: "staging",
           images: [],
           expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+          ...(project ? { project } : {}),
         }),
       },
     },
@@ -135,8 +137,9 @@ export function createConformanceRuntime(
   profile: FactoryboxRuntimeProfile,
   certificate: string,
   artifacts: string,
+  project?: Readonly<Record<string, unknown>>,
 ) {
-  const resources = conformanceResources(owner, image, profile, certificate);
+  const resources = conformanceResources(owner, image, profile, certificate, project);
   const { input, declaration } = resources;
   const request = factoryboxRuntimeRequest(input);
   const deadline = performance.now() + 420_000;
@@ -278,7 +281,12 @@ export function createConformanceRuntime(
       };
       return { input: target, identity };
     },
-    async prepare() {
+    async prepare(
+      beforeStart?: (
+        target: { input: FactoryboxRuntimeInput; identity: FactoryboxWorkerIdentity },
+        bundle: string,
+      ) => Promise<void>,
+    ) {
       await save("intent.json", { owner, input, resources: resources.items });
       await command(
         ["create", "-f", "-"],
@@ -318,6 +326,7 @@ export function createConformanceRuntime(
         deadline - performance.now(),
       );
       await save("preparation.json", prepared);
+      if (beforeStart) await beforeStart({ input, identity }, prepared.bundle);
       started = true;
       const view = await operation({
         action: "start",
@@ -421,6 +430,40 @@ export function createConformanceRuntime(
           JSON.parse(observed.stdout).metadata?.uid !== identity.podUID
         )
           throw new Error("Cannot fence a changed or unobserved failed conformance worker");
+        const diagnostics = await runCommand(
+          kubernetesCommand([
+            "exec",
+            "-n",
+            input.namespace,
+            input.podName,
+            "-c",
+            "worker",
+            "--",
+            "python3",
+            "-c",
+            `import json,pathlib,subprocess,sys
+expected=json.loads(sys.argv[1])
+status=json.loads(subprocess.check_output(['/opt/factorybox/factorybox','worker-status'],timeout=5))
+if status['store_id']!=expected['storeID'] or status['epoch']!=expected['epoch']:raise ValueError('Diagnostic worker identity changed')
+root=pathlib.Path('/var/lib/sysbox/fixed-store/data/store/input')/expected['sandboxID']/'bundle/upper'
+for name in ['factory-connector.log','factory-dockerd.log']:
+ path=root/'var/log'/name
+ if not path.resolve().is_relative_to(root.resolve()):raise ValueError('Diagnostic log leaves its private input')
+ try:
+  with path.open('rb') as file:
+   file.seek(0,2);file.seek(max(0,file.tell()-32768));text=file.read(32768).decode('utf8',errors='replace')
+  print(json.dumps({'log':name,'tail':text}))
+ except FileNotFoundError:print(json.dumps({'log':name,'missing':True}))`,
+            JSON.stringify({
+              storeID: identity.storeID,
+              epoch: identity.epoch,
+              sandboxID: input.sandboxID,
+            }),
+          ]),
+          undefined,
+          { timeoutMS: 15_000, outputBytes: 128 * 1024 },
+        );
+        await save("pre-fence-diagnostics.json", diagnostics);
         const marked = await runCommand(
           kubernetesCommand([
             "patch",

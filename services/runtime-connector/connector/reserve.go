@@ -18,11 +18,12 @@ import (
 )
 
 type ReserveSlot struct {
-	Version   int       `json:"version"`
-	ID        string    `json:"id"`
-	Role      string    `json:"role"`
-	Images    []string  `json:"images"`
-	ExpiresAt time.Time `json:"expiresAt"`
+	Version   int         `json:"version"`
+	ID        string      `json:"id"`
+	Role      string      `json:"role"`
+	Images    []string    `json:"images"`
+	ExpiresAt time.Time   `json:"expiresAt"`
+	Project   *Assignment `json:"project,omitempty"`
 }
 
 type ReserveActivation struct {
@@ -31,6 +32,7 @@ type ReserveActivation struct {
 	Assignment  Assignment `json:"assignment"`
 	ParentToken string     `json:"parentToken"`
 	ChildToken  string     `json:"childToken"`
+	TemplateID  string     `json:"templateId,omitempty"`
 }
 
 type reserveOutcome struct {
@@ -75,12 +77,24 @@ func validateReserveSlot(slot ReserveSlot) error {
 			return errors.New("execution slot images must be immutable")
 		}
 	}
+	if slot.Project != nil {
+		if err := validatePreparedProject(*slot.Project); err != nil {
+			return err
+		}
+		if slot.Project.RuntimeAttemptID != slot.ID || slot.Project.Generation != 1 {
+			return errors.New("prepared Project belongs to another template")
+		}
+	}
 	return nil
 }
 
 func validateReserveActivation(slot ReserveSlot, activation ReserveActivation) error {
 	assignment := activation.Assignment
-	if activation.SlotID != slot.ID || activation.PodUID == "" || activation.ParentToken == "" || activation.ChildToken == "" {
+	correctSlot := activation.SlotID == slot.ID && activation.TemplateID == ""
+	if slot.Project != nil {
+		correctSlot = activation.TemplateID == slot.ID && activation.SlotID != slot.ID && identityPattern.MatchString(activation.SlotID)
+	}
+	if !correctSlot || activation.PodUID == "" || activation.ParentToken == "" || activation.ChildToken == "" {
 		return errors.New("execution slot activation identity or capabilities are missing")
 	}
 	if err := assignment.Validate(); err != nil {
@@ -89,8 +103,12 @@ func validateReserveActivation(slot ReserveSlot, activation ReserveActivation) e
 	if assignment.WorkspaceFolder != "/home/coder/project" || assignment.RemoteWorkspaceFolder != "/workspace/project" || assignment.ConnectorStateDir != "/home/coder/connector-state" || assignment.PreserveWorkspace || assignment.BrowserToolsImage != "" {
 		return errors.New("execution slot activation cannot replace retained source or change its storage boundary")
 	}
+	if slot.Project != nil && assignment.RepositoryIdentity != slot.Project.RepositoryIdentity {
+		return errors.New("prepared Project cannot acquire another Project's capabilities")
+	}
 	for _, channel := range assignment.Channels {
-		if (slot.Role == "staging" && channel.Kind != "app") || (slot.Role == "verification" && channel.Kind != "verification") {
+		if (slot.Project != nil && channel.Kind != "app" && channel.Kind != "verification") ||
+			(slot.Project == nil && ((slot.Role == "staging" && channel.Kind != "app") || (slot.Role == "verification" && channel.Kind != "verification"))) {
 			return errors.New("execution slot activation role differs from prepared tools")
 		}
 	}
@@ -143,7 +161,7 @@ func acceptReserveActivation(slot ReserveSlot, path string) (ReserveActivation, 
 		return activation, err
 	}
 	digest := sha256.Sum256(content)
-	expected := reserveOutcome{SlotID: slot.ID, PodUID: activation.PodUID, AttemptID: activation.Assignment.RuntimeAttemptID, Generation: activation.Assignment.Generation, Digest: hex.EncodeToString(digest[:])}
+	expected := reserveOutcome{SlotID: activation.SlotID, PodUID: activation.PodUID, AttemptID: activation.Assignment.RuntimeAttemptID, Generation: activation.Assignment.Generation, Digest: hex.EncodeToString(digest[:])}
 	directory := filepath.Dir(path)
 	var previous reserveOutcome
 	_, err = readReserveJSON(filepath.Join(directory, "activated.json"), &previous)
@@ -156,8 +174,12 @@ func acceptReserveActivation(slot ReserveSlot, path string) (ReserveActivation, 
 	if !errors.Is(err, os.ErrNotExist) {
 		return activation, err
 	}
-	if _, err := os.Lstat(activation.Assignment.WorkspaceFolder); !errors.Is(err, os.ErrNotExist) {
-		return activation, errors.New("unassigned execution slot already contains repository data")
+	if slot.Project == nil {
+		if _, err := os.Lstat(activation.Assignment.WorkspaceFolder); !errors.Is(err, os.ErrNotExist) {
+			return activation, errors.New("unassigned execution slot already contains repository data")
+		}
+	} else if err := checkoutProject(context.Background(), *slot.Project); err != nil {
+		return activation, fmt.Errorf("prepared Project is no longer clean: %w", err)
 	}
 	if _, err := os.Lstat(activation.Assignment.ConnectorStateDir); !errors.Is(err, os.ErrNotExist) {
 		return activation, errors.New("unassigned execution slot already contains runtime state")
@@ -201,6 +223,7 @@ func RunReserve(ctx context.Context, slotPath, activationPath string) error {
 	if err := waitForDocker(ctx); err != nil {
 		return err
 	}
+	var project *preparedProject
 	if _, err := os.Stat(activationPath); errors.Is(err, os.ErrNotExist) {
 		for _, args := range [][]string{{"ps", "--all", "--quiet"}, {"volume", "ls", "--quiet"}} {
 			output, err := exec.CommandContext(ctx, "docker", args...).Output()
@@ -214,6 +237,15 @@ func RunReserve(ctx context.Context, slotPath, activationPath string) error {
 		if err != nil {
 			return err
 		}
+		if slot.Project != nil {
+			project, err = prepareReservedProject(ctx, *slot.Project)
+			if err != nil {
+				return err
+			}
+			if err := waitPreparedDockerIdle(ctx); err != nil {
+				return err
+			}
+		}
 		if err := os.WriteFile(filepath.Join(directory, "ready"), []byte(slot.ID), 0400); err != nil {
 			return err
 		}
@@ -222,15 +254,21 @@ func RunReserve(ctx context.Context, slotPath, activationPath string) error {
 	defer ticker.Stop()
 	for {
 		if _, err := os.Stat(activationPath); err == nil {
+			if slot.Project != nil && project == nil {
+				return errors.New("used prepared Project cannot boot as a fresh reserve")
+			}
 			activation, err := acceptReserveActivation(slot, activationPath)
 			if err != nil {
 				return err
 			}
-			return RunParent(ctx, activation.Assignment, activation.ParentToken, activation.ChildToken)
+			return runParent(ctx, activation.Assignment, activation.ParentToken, activation.ChildToken, project)
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if time.Now().After(slot.ExpiresAt) {
+		// Prepared Project clones retain the template's in-memory recipe.
+		// Their individual unused-slot TTL is owned by Factory, not this
+		// copied absolute template deadline.
+		if slot.Project == nil && time.Now().After(slot.ExpiresAt) {
 			return errors.New("unassigned execution slot expired")
 		}
 		select {
