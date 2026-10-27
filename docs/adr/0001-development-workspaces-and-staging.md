@@ -6,7 +6,7 @@ status: accepted
 
 Factory separates the Developer IDE, durable Development Workspace and replaceable execution
 Sandbox. One warm Theia backend per active developer is the target, rather than one backend per
-open Ticket. Editing must not wait for Envbox, the Dev Container, Apps, OpenCode or browser tools.
+open Ticket. Editing must not wait for Factorybox, the Dev Container, Apps, OpenCode or browser tools.
 The [architecture reference](../README.md#verification-and-operating-limits) records verification
 and operating limits separately from this decision.
 
@@ -36,11 +36,13 @@ immutable Runtime Attempt; retries of the same intended create retain its identi
 persists intent before external creates and assignments. A running Agent does not stop merely
 because its editor, Ticket or Preview is hidden.
 
-Every Sandbox uses pinned Envbox, its unprivileged Sysbox workspace and private Docker daemon,
+Every Sandbox uses an admitted, pinned Factorybox worker with Sysbox and a private Docker daemon,
 the exact Dev Containers CLI, and the Factory Runtime Connector. This supports Docker-in-Docker
-without exposing the node Docker socket to Project code. The outer privileged Envbox wrapper is
+without exposing the node Docker socket to Project code. The privileged shared worker is
 trusted infrastructure; Sysbox shares the host kernel and is not separate-kernel VM isolation.
 This decision targets authorized Enterprise development, not a public hostile-code service.
+The concrete worker, canonical Source and same-worker Pause/Resume boundary is defined in
+[ADR 0022](0022-factorybox-workspace-execution.md).
 
 Factory maintains a small reserve of clean, unassigned, prepared execution slots. It replenishes
 after reservation rather than waiting for the reserve to become empty. A configured minimum-ready
@@ -51,13 +53,13 @@ an unbounded replacement loop. Exhaustion leaves the editor usable and compute h
 A slot contains approved base tools and images, not repository data, Project hooks or user secrets.
 Reservation and one-time assignment are durable, deterministic and recoverable; fresh capabilities
 are issued only after assignment. Used slots never return to the unassigned reserve. Their data
-remain under their owner or their disposable compute is destroyed. Envbox waiting and Connector
+remain under their owner or their disposable compute is destroyed. Standby waiting and Connector
 activation are Factory-owned behavior, not a rewritten admitted Runtime Attempt.
 
-A prebooted Pod cannot acquire a different PVC by changing its assignment. Fully prepared slots
-therefore serve fresh Staging and Verification runtimes with their own clean storage.
-Existing stopped Workspaces retain their storage identity and use normal preparation or their own
-retained compute. Broader reserve reuse requires a separately proven storage-attachment design.
+An unused Sandbox cannot adopt another Workspace's canonical Source under live file descriptions.
+Prepared slots therefore serve fresh Staging and Verification runtimes with their own clean
+private storage. Existing Workspaces retain their canonical Source identity and use normal
+preparation or resume their own retained compute. Used slots never return to the reserve.
 
 ## Preparation and resource use
 
@@ -93,7 +95,8 @@ read their runtime variables; UI masking is not code isolation. New settings app
 and builds, without stopping current work. Main-Preview remains a Dev Container, not a release artifact.
 
 Keep registry access close to execution and prepare each actual image-cache tier: node/Kubelet,
-Envbox Docker, and private Workspace Docker. Do not share a live Docker graph directory between
+the Factorybox worker's immutable base import, and private Workspace Docker.
+Do not share a live Docker graph directory between
 Workspaces. Separate durable source and approved data from bounded, disposable image and build caches.
 Theia belongs in the Developer IDE image; other tools are exact, role-specific artifacts rather than
 an all-tools payload copied into every runtime.
@@ -101,8 +104,9 @@ an all-tools payload copied into every runtime.
 Prepare only used Workspaces. Start optional browser tools and processes when needed, without making
 editor or PTY readiness wait for unrelated services. Preserve genuine Dev Container hook dependencies.
 Allow bounded CPU bursts, retain active work, and shut down idle compute. Process views consume
-bounded events instead of repeatedly fetching and rebuilding unchanged state. RAM snapshots,
-live migration, generic runtime providers and a second control plane are not part of this design.
+bounded events instead of repeatedly fetching and rebuilding unchanged state. Same-worker RAM
+Pause/Resume follows ADR 0022. Live migration, generic runtime providers and a second control plane
+are not part of this design.
 
 ## Staging and retained work
 

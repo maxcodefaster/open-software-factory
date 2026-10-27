@@ -19,11 +19,6 @@
     "version": "2.7.1",
     "image": "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
   },
-  "envbox": {
-    "version": "0.6.9",
-    "image": "ghcr.io/coder/envbox@sha256:13e4477ed65912a72e52bb7115db63d4da934cf8a55962c8fdf7c470901dceff",
-    "source": "https://github.com/coder/envbox/tree/0.6.9"
-  },
   "docker": {
     "version": "29.9.0",
     "image": "docker.io/library/docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470"

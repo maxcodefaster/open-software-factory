@@ -22,7 +22,7 @@ const FixtureWebSocket = WebSocket as typeof WebSocket & {
 };
 
 // Native child + unchanged pinned language servers in actual Python/TypeScript
-// container environments. This deliberately does not claim Envbox conformance;
+// container environments. This deliberately does not claim Factorybox conformance;
 // the normal runtime and final application acceptance cover that topology.
 export async function languageToolsFixture(options: {
   image: string;

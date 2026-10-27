@@ -22,7 +22,7 @@ var prebuildCommit = regexp.MustCompile(`^[a-f0-9]{40}([a-f0-9]{24})?$`)
 var prebuildImageID = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var errPrebuildImageUnavailable = errors.New("prebuild image is unavailable")
 
-// The producer runs only in an assigned Envbox's private daemon. Consumers use
+// The producer runs only in an assigned Factorybox Sandbox's private daemon. Consumers use
 // the returned ordinary registry digest in their normal Dev Container recipe.
 type PrebuildRequest struct {
 	Commit          string `json:"commit"`

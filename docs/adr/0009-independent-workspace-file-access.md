@@ -25,7 +25,7 @@ startup without retaining a privileged serving process.
 
 The file service mounts only the source parent and its own read-only assignment, not Docker graphs,
 service data or execution assignments.
-It remains available during active editing independently of the Envbox and Dev Container lifecycle.
+It remains available during active editing independently of the Factorybox Sandbox and Dev Container lifecycle.
 Historical unused Workspaces do not each require an always-running file service.
 
 After a brief stable selection, prepare only the authorized selected Project's personal source

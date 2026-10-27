@@ -73,7 +73,7 @@ owns durable product state and compact Evidence. Forgejo owns repositories, bran
 pull requests, Action runs and full Verification logs. Kubernetes owns observed outer resources;
 each private Docker daemon owns its inner containers, networks and volumes.
 
-Domain modules remain independent of Solid, Zero, OpenCode, Forgejo, Kubernetes, Docker and Envbox
+Domain modules remain independent of Solid, Zero, OpenCode, Forgejo, Kubernetes, Docker and Factorybox
 types. Concrete Factory adapters contain vendor APIs. Persist intent before external creation;
 every create has deterministic identity, idempotency and ambiguous-outcome recovery.
 
@@ -557,7 +557,7 @@ different sessions. Linux Connector race tests/vet include filesystem tests omit
 the irreversible credential transition runs separately as CGO-free code, matching the shipped binary.
 The root-private snapshot trust file covers only the validated checkout and its Git directory.
 
-Native Envbox conformance passed restart, retained volume, Connector transport and unsafe-mount
+Historical native Envbox conformance passed restart, retained volume, Connector transport and unsafe-mount
 rejection, then removed its unique owned Pod/claim without touching the shared registry. Browser
 checks cover retained Skill drafts, Wiki draft recovery, Settings tabs, old reads after Stop and
 signed-out editor exclusion, with inspected desktop/narrow captures. The entry bundle decreased

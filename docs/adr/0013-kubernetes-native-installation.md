@@ -9,9 +9,10 @@ dependency or claiming an unperformed AKS acceptance.
 The application and its standard PostgreSQL, Forgejo, Zero and encrypted OpenBao services run
 inside Kubernetes. Internal Services carry callbacks and server-to-server traffic; browser-facing
 origins remain explicit and independent. Factory uses its ServiceAccount rather than a person's
-administrator kubeconfig or the node's Docker socket. Envbox, Sysbox and the private Workspace
-Docker topology remain unchanged and exactly pinned. Compatible Linux workers, privileged outer
-Envbox Pods and usable persistent storage are explicit prerequisites, not automatically relaxed
+administrator kubeconfig or the node's Docker socket. Execution uses an admitted, pinned
+Factorybox worker with Sysbox and a private Docker daemon per Sandbox, as defined in
+[ADR 0022](0022-factorybox-workspace-execution.md). Compatible Linux workers, privileged outer
+worker Pods and usable persistent storage are explicit prerequisites, not automatically relaxed
 security settings.
 
 The installed application builds an ephemeral connection configuration from its projected

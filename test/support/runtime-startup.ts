@@ -39,7 +39,7 @@ const phaseSchema = z.strictObject({
 });
 export type StartupMeasurement = z.infer<typeof phaseSchema>;
 
-// Decode only Connector clock records from Envbox's output envelope. Raw runtime
+// Decode only Connector clock records from the runtime output envelope. Raw runtime
 // output, App logs, assignments and credentials never enter timing artifacts.
 export function startupMeasurements(raw: string) {
   const measurements = new Map<string, StartupMeasurement>();

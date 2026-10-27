@@ -32,7 +32,7 @@ func startupPhase(phase string) func() {
 	return func() {
 		finish()
 		os.Stderr.Write(output.Bytes())
-		// Envbox's attached output may buffer late records. Keep the same bounded
+		// Attached output may buffer late records. Keep the same bounded
 		// clocks in ephemeral container /tmp, never in the durable Workspace.
 		if file, err := os.OpenFile(startupTimingPath, os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0600); err == nil {
 			file.Write(output.Bytes())
