@@ -1,4 +1,4 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Show, untrack } from "solid-js";
 import type {
   SkillLibraryEntry,
   SkillLibraryView,
@@ -31,10 +31,10 @@ export function SkillGalleryDetail(props: {
   onCover: (key: LibraryCoverKey, expectedVersion: number) => Promise<boolean>;
 }) {
   const [reading, setReading] = createSignal<SkillRole>(
-    props.preferredRole === "build" ? "build" : "planning",
+    untrack(() => (props.preferredRole === "build" ? "build" : "planning")),
   );
   const [target, setTarget] = createSignal<"project" | "system">(
-    props.projectId ? "project" : "system",
+    untrack(() => (props.projectId ? "project" : "system")),
   );
   const roles = () =>
     (["planning", "build"] as const).filter(

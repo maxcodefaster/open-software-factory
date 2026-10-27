@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import type { z } from "zod";
@@ -141,4 +142,41 @@ test("Skill library without a Project uses native JSON calls and explicitly retr
   await page.screenshot({ path: `${directory}/private-narrow.png`, fullPage: true });
   expect(errors).toEqual([]);
   expect(retired).toEqual([]);
+});
+
+test.describe("touch Skill drafts", () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+
+  test("Back and Resume preserve the owned draft without saving", async ({ page }) => {
+    let writes = 0;
+    await mockFactoryFunctions(page, {
+      skills: {
+        library: async () =>
+          skillLibraryView.parse({
+            entries: [],
+            sharedVersions: [],
+            choices: [],
+            proposals: [],
+            canManageProject: false,
+            canManageSystem: false,
+          }),
+        save: async () => {
+          writes++;
+          throw new Error("Navigation must not save a Skill");
+        },
+      },
+    });
+    await page.goto(`${origin}/skill-library.html`);
+    await page.getByRole("button", { name: "Add skill", exact: true }).tap();
+    const editor = page.getByRole("form", { name: "Skill editor", exact: true });
+    await editor.getByLabel("Name", { exact: true }).fill("Unsaved touch guidance");
+    await editor.getByRole("button", { name: "Back to library", exact: true }).tap();
+    await page.getByRole("button", { name: "Resume draft", exact: true }).tap();
+    await expect(editor.getByLabel("Name", { exact: true })).toHaveValue("Unsaved touch guidance");
+    expect(writes).toBe(0);
+    await page.screenshot({ path: `${directory}/touch-draft.png`, fullPage: true });
+    await editor.getByRole("button", { name: "Discard draft", exact: true }).tap();
+    await expect(page.getByRole("button", { name: "Resume draft", exact: true })).toBeHidden();
+    expect(writes).toBe(0);
+  });
 });

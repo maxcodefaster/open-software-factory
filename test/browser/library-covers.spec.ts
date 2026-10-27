@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";

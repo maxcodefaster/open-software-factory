@@ -1,5 +1,5 @@
 import { createPatch } from "diff";
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Show, untrack } from "solid-js";
 import type {
   SkillLibraryEntry,
   SkillScope,
@@ -23,11 +23,17 @@ export function SkillRevisionEditor(props: {
   onCancel: () => void;
   onDiscard?: (() => void) | undefined;
 }) {
-  const [draft, setDraft] = createSignal(structuredClone(props.content));
-  const [scope, setScope] = createSignal<SkillScope>(props.entry?.scope ?? props.scope);
+  // Seed the owned draft once; library refreshes must not overwrite unsaved edits.
+  const initial = untrack(() => ({
+    content: structuredClone(props.content),
+    scope: props.entry?.scope ?? props.scope,
+    reviewed: !props.warnings?.length,
+  }));
+  const [draft, setDraft] = createSignal(initial.content);
+  const [scope, setScope] = createSignal<SkillScope>(initial.scope);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
-  const [reviewed, setReviewed] = createSignal(!props.warnings?.length);
+  const [reviewed, setReviewed] = createSignal(initial.reviewed);
   let pending:
     | {
         libraryId: string;

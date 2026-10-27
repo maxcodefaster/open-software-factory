@@ -476,12 +476,12 @@ export function SkillLibrary(props: {
         </div>
       </header>
       <div class="skill-editor-screen" hidden={!editorOpen()}>
-        <Show when={editing()}>
+        <Show keyed when={editing()}>
           {(editor) => (
             <SkillRevisionEditor
-              content={editor().content}
-              entry={editor().entry}
-              warnings={editor().warnings}
+              content={editor.content}
+              entry={editor.entry}
+              warnings={editor.warnings}
               scope="personal"
               projectId={props.projectId}
               canManageProject={view()?.canManageProject ?? false}
@@ -665,7 +665,9 @@ export function SkillLibrary(props: {
                         <span class="skill-tile-caption">
                           <span class="skill-tile-title">{revision()?.content.name}</span>
                           <span class="skill-tile-description">
-                            <Show when={revision()}>{(item) => skillSummary(item().content)}</Show>
+                            <Show when={revision()}>
+                              {(item) => <>{skillSummary(item().content)}</>}
+                            </Show>
                           </span>
                         </span>
                       </button>

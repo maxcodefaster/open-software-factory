@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import type { z } from "zod";

@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { type WriterView, writerViewSchema } from "../../apps/factory/src/api-contracts";
