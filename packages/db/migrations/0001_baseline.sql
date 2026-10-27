@@ -862,7 +862,9 @@ CREATE FUNCTION factory.protect_execution_slot() RETURNS trigger
     AS $$
 BEGIN
   IF TG_OP = 'UPDATE' THEN
-    IF NEW.factorybox_worker_id <> OLD.factorybox_worker_id OR NEW.id <> OLD.id OR NEW.role <> OLD.role OR NEW.runtime_host_image <> OLD.runtime_host_image
+    IF ROW(NEW.project_id,NEW.staging_attempt_id,NEW.revision,NEW.template_id,NEW.template_key,NEW.project_recipe,NEW.seed_expires_at)
+        IS DISTINCT FROM ROW(OLD.project_id,OLD.staging_attempt_id,OLD.revision,OLD.template_id,OLD.template_key,OLD.project_recipe,OLD.seed_expires_at)
+      OR NEW.factorybox_worker_id <> OLD.factorybox_worker_id OR NEW.id <> OLD.id OR NEW.role <> OLD.role OR NEW.runtime_host_image <> OLD.runtime_host_image
       OR NEW.kubernetes_namespace <> OLD.kubernetes_namespace OR NEW.created_at <> OLD.created_at
       OR NEW.expires_at <> OLD.expires_at
       OR (OLD.namespace_uid IS NOT NULL AND NEW.namespace_uid IS DISTINCT FROM OLD.namespace_uid)
@@ -881,11 +883,38 @@ BEGIN
       RAISE EXCEPTION 'Execution slots cannot return to the reserve' USING ERRCODE = '23514';
     END IF;
     IF NEW.assigned_attempt_id IS DISTINCT FROM OLD.assigned_attempt_id AND
-      (OLD.state <> 'ready' OR NEW.state <> 'assigned') THEN
+      (OLD.state <> 'ready' OR NEW.state <> 'assigned' OR OLD.template_id IS NULL) THEN
       RAISE EXCEPTION 'Only a ready execution slot may be assigned once' USING ERRCODE = '23514';
     END IF;
   ELSIF NEW.state <> 'creating' OR NEW.assigned_attempt_id IS NOT NULL OR NEW.namespace_uid IS NOT NULL OR NEW.pod_uid IS NOT NULL THEN
     RAISE EXCEPTION 'Execution slots require clean create intent' USING ERRCODE = '23514';
+  END IF;
+  IF TG_OP='INSERT' AND NOT EXISTS (
+    SELECT 1 FROM factory.runtime_attempt staging
+    JOIN factory.staging_preview preview ON preview.runtime_attempt_id=staging.id
+    JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=staging.id
+    JOIN factory.staging_configuration configuration ON configuration.runtime_attempt_id=staging.id
+    WHERE staging.id=NEW.staging_attempt_id AND staging.project_id=NEW.project_id
+      AND staging.revision=NEW.revision AND preview.revision=NEW.revision
+      AND staging.isolated_kind='staging' AND staging.state='ready' AND staging.stop_intended_at IS NULL
+      AND staging.factorybox_worker_id=NEW.factorybox_worker_id
+      AND artifact.runtime_host_image=NEW.runtime_host_image AND artifact.factorybox_profile=NEW.factorybox_profile
+      AND configuration.declaration->>'devcontainerPath'=NEW.project_recipe->>'devcontainerPath'
+      AND configuration.declaration->'channels'=NEW.project_recipe->'channels'
+      AND configuration.declaration->'processes'=NEW.project_recipe->'processes'
+  ) THEN
+    RAISE EXCEPTION 'Execution pool requires the healthy promoted Staging identity';
+  END IF;
+  IF NEW.template_id IS NOT NULL AND NOT EXISTS (
+    SELECT 1 FROM factory.execution_slot template WHERE template.id=NEW.template_id
+      AND template.template_id IS NULL AND template.project_id=NEW.project_id
+      AND template.staging_attempt_id=NEW.staging_attempt_id AND template.revision=NEW.revision
+      AND template.template_key=NEW.template_key AND template.project_recipe=NEW.project_recipe
+      AND template.seed_expires_at=NEW.seed_expires_at
+      AND template.factorybox_worker_id=NEW.factorybox_worker_id
+      AND template.runtime_host_image=NEW.runtime_host_image AND template.factorybox_profile=NEW.factorybox_profile
+  ) THEN
+    RAISE EXCEPTION 'Standby Fork must retain its exact clean Staging template';
   END IF;
   RETURN NEW;
 END;
@@ -933,7 +962,12 @@ BEGIN
     OR (OLD.factorybox_start_attempted AND NOT NEW.factorybox_start_attempted)
     OR (OLD.factorybox_pause_attempted AND NOT NEW.factorybox_pause_attempted)
     OR (OLD.factorybox_resume_attempted AND NOT NEW.factorybox_resume_attempted)
-    OR (OLD.factorybox_delete_attempted AND NOT NEW.factorybox_delete_attempted) THEN
+    OR (OLD.factorybox_delete_attempted AND NOT NEW.factorybox_delete_attempted)
+    OR (OLD.factorybox_fork_attempted AND NOT NEW.factorybox_fork_attempted)
+    OR (OLD.factorybox_fork_request IS NOT NULL AND NEW.factorybox_fork_request IS DISTINCT FROM OLD.factorybox_fork_request)
+    OR (OLD.factorybox_standby IS NOT NULL AND NEW.factorybox_standby IS DISTINCT FROM OLD.factorybox_standby)
+    OR (OLD.source_import_sha256 IS NOT NULL AND NEW.source_import_sha256 IS DISTINCT FROM OLD.source_import_sha256)
+    OR (OLD.source_import_observation IS NOT NULL AND NEW.source_import_observation IS DISTINCT FROM OLD.source_import_observation) THEN
     RAISE EXCEPTION 'Factorybox execution slot artifacts and admitted identity are immutable';
   END IF;
   IF (OLD.factorybox_retirement_request IS NOT NULL AND NEW.factorybox_retirement_request IS DISTINCT FROM OLD.factorybox_retirement_request)
@@ -1219,7 +1253,8 @@ BEGIN
   IF NEW.assigned_attempt_id IS NOT NULL AND NOT EXISTS(
     SELECT 1 FROM factory.runtime_attempt attempt
     JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
-    WHERE attempt.id=NEW.assigned_attempt_id AND attempt.isolated_kind::text=NEW.role
+    WHERE attempt.id=NEW.assigned_attempt_id AND NEW.template_id IS NOT NULL
+      AND attempt.isolated_kind IN ('staging','verification') AND attempt.project_id=NEW.project_id
       AND attempt.workspace_id IS NULL AND attempt.kubernetes_namespace=NEW.kubernetes_namespace
       AND attempt.factorybox_worker_id=NEW.factorybox_worker_id
       AND attempt.kubernetes_pod_name='worker' AND artifact.runtime_host_image=NEW.runtime_host_image
@@ -2088,6 +2123,23 @@ CREATE TABLE factory.execution_policy_command (
 
 CREATE TABLE factory.execution_slot (
     id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    staging_attempt_id uuid NOT NULL,
+    revision text NOT NULL CHECK (revision ~ '^([a-f0-9]{40}|[a-f0-9]{64})$'),
+    template_id uuid,
+    template_key text NOT NULL CHECK (template_key ~ '^[a-f0-9]{64}$'),
+    project_recipe jsonb NOT NULL CHECK (jsonb_typeof(project_recipe)='object'),
+    seed_expires_at timestamp with time zone NOT NULL,
+    CONSTRAINT execution_slot_recipe_shape CHECK (
+      (project_recipe->>'runtimeAttemptId') IS NOT DISTINCT FROM coalesce(template_id,id)::text
+      AND (project_recipe->>'repositoryIdentity') IS NOT DISTINCT FROM project_id::text
+      AND (project_recipe->>'revision') IS NOT DISTINCT FROM revision
+      AND (project_recipe->>'controlUrl') IS NOT DISTINCT FROM 'ws://unassigned.invalid/'),
+    source_import_sha256 text CHECK (source_import_sha256 ~ '^[a-f0-9]{64}$'),
+    source_import_observation jsonb,
+    factorybox_fork_request jsonb,
+    factorybox_fork_attempted boolean DEFAULT false NOT NULL,
+    factorybox_standby jsonb,
     role text NOT NULL,
     state text NOT NULL,
     runtime_host_image text NOT NULL,
@@ -2110,8 +2162,20 @@ CREATE TABLE factory.execution_slot (
     factorybox_delete_attempted boolean DEFAULT false NOT NULL,
     factorybox_retirement_request jsonb,
     factorybox_retirement_observation jsonb,
+    CONSTRAINT execution_slot_fork_shape CHECK (
+      (template_id IS NOT NULL OR (factorybox_fork_request IS NULL AND NOT factorybox_fork_attempted))
+      AND (NOT factorybox_fork_attempted OR factorybox_fork_request IS NOT NULL)
+      AND (template_id IS NULL OR (source_import_sha256 IS NULL AND NOT factorybox_start_attempted))
+      AND (assigned_attempt_id IS NULL OR template_id IS NOT NULL)),
+    CONSTRAINT execution_slot_import_shape CHECK (source_import_observation IS NULL OR
+      (template_id IS NULL AND source_import_sha256 IS NOT NULL AND source_import_observation->>'sha256'=source_import_sha256)),
+    CONSTRAINT execution_slot_ready_native CHECK (state<>'ready' OR
+      (factorybox_identity IS NOT NULL AND factorybox_preparation IS NOT NULL AND factorybox_pause_attempted
+       AND (factorybox_start_attempted OR factorybox_fork_attempted) AND factorybox_standby IS NOT NULL
+       AND (factorybox_standby->>'anonymousBytes') IS NOT DISTINCT FROM '0'
+       AND (factorybox_standby->>'snapshotResidentBytes') IS NOT DISTINCT FROM '0')),
     CONSTRAINT execution_slot_retirement_request_check CHECK ((factorybox_retirement_request IS NULL) OR
-      ((jsonb_typeof(factorybox_retirement_request)='object') AND (state IN ('retiring','assigned','deleted')) AND factorybox_start_attempted)),
+      ((jsonb_typeof(factorybox_retirement_request)='object') AND (state IN ('retiring','assigned','deleted')) AND (factorybox_start_attempted OR factorybox_fork_attempted))),
     CONSTRAINT execution_slot_retirement_observation_check CHECK ((factorybox_retirement_observation IS NULL) OR
       ((jsonb_typeof(factorybox_retirement_observation)='object') AND
        (factorybox_retirement_observation->'request') IS NOT DISTINCT FROM factorybox_retirement_request AND factorybox_retirement_request IS NOT NULL)),
@@ -3222,6 +3286,23 @@ CREATE TABLE factory.staging_preview (
     CONSTRAINT staging_preview_revision_check CHECK ((revision ~ '^[0-9a-f]{40}$|^[0-9a-f]{64}$'::text))
 );
 
+CREATE TABLE factory.staging_configuration (
+    runtime_attempt_id uuid PRIMARY KEY,
+    declaration jsonb NOT NULL CHECK (jsonb_typeof(declaration)='object'),
+    created_at timestamp with time zone DEFAULT now() NOT NULL
+);
+CREATE FUNCTION factory.protect_staging_configuration() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP<>'INSERT' THEN RAISE EXCEPTION 'Staging execution declaration is immutable'; END IF;
+  IF NOT EXISTS(SELECT 1 FROM factory.runtime_attempt WHERE id=NEW.runtime_attempt_id
+    AND isolated_kind='staging' AND state='create-intended' AND stop_intended_at IS NULL) THEN
+    RAISE EXCEPTION 'Staging declaration requires its active execution intent';
+  END IF;
+  RETURN NEW;
+END $$;
+CREATE TRIGGER staging_configuration_immutable BEFORE INSERT OR UPDATE OR DELETE ON factory.staging_configuration
+  FOR EACH ROW EXECUTE FUNCTION factory.protect_staging_configuration();
+
 CREATE TABLE factory.system_skill_settings (
     singleton boolean DEFAULT true NOT NULL,
     version bigint NOT NULL,
@@ -3759,6 +3840,9 @@ ALTER TABLE ONLY factory.execution_slot
 
 ALTER TABLE ONLY factory.execution_slot
     ADD CONSTRAINT execution_slot_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY factory.execution_slot
+    ADD CONSTRAINT execution_slot_template_fkey FOREIGN KEY(template_id) REFERENCES factory.execution_slot(id);
 
 ALTER TABLE ONLY factory.external_identity
     ADD CONSTRAINT external_identity_issuer_subject_key UNIQUE (issuer, subject);
@@ -4334,6 +4418,10 @@ CREATE INDEX epic_research_idx ON factory.epic USING gin (factory.research_vecto
 CREATE INDEX epic_title_trgm_idx ON factory.epic USING gin (lower(title) factory.gin_trgm_ops);
 
 CREATE INDEX execution_slot_due ON factory.execution_slot USING btree (state, reconcile_after);
+
+CREATE UNIQUE INDEX execution_template_one_current_key ON factory.execution_slot(template_key)
+  WHERE template_id IS NULL AND state<>'deleted';
+CREATE INDEX execution_slot_template_children ON factory.execution_slot(template_id,state);
 
 CREATE UNIQUE INDEX knowledge_generation_one_active_per_project ON factory.knowledge_generation USING btree (project_id) WHERE (state = ANY (ARRAY['pending'::factory.knowledge_generation_state, 'running'::factory.knowledge_generation_state]));
 
@@ -4944,6 +5032,14 @@ ALTER TABLE ONLY factory.execution_policy
 
 ALTER TABLE ONLY factory.execution_slot
     ADD CONSTRAINT execution_slot_assigned_attempt_id_fkey FOREIGN KEY (assigned_attempt_id) REFERENCES factory.runtime_attempt(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE ONLY factory.execution_slot
+    ADD CONSTRAINT execution_slot_project_fkey FOREIGN KEY(project_id) REFERENCES factory.project(id);
+ALTER TABLE ONLY factory.execution_slot
+    ADD CONSTRAINT execution_slot_staging_attempt_fkey FOREIGN KEY(staging_attempt_id) REFERENCES factory.runtime_attempt(id);
+
+ALTER TABLE ONLY factory.staging_configuration
+    ADD CONSTRAINT staging_configuration_attempt_fkey FOREIGN KEY(runtime_attempt_id) REFERENCES factory.runtime_attempt(id);
 
 ALTER TABLE ONLY factory.external_identity
     ADD CONSTRAINT external_identity_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth."user"(id) ON DELETE CASCADE;

@@ -2,20 +2,23 @@ import { z } from "zod";
 import type { FactoryboxOperation } from "./factorybox-worker";
 
 const state = z.object({
-  record: z.object({
-    id: z.string(),
-    runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
-    phase: z.enum(["running", "paused"]),
-    pause: z
-      .object({
-        snapshot_id: z.string(),
-        completed_at: z.string().optional(),
-        after: z.object({ anon: z.number() }).optional(),
-        snapshot: z.object({ resident_bytes_after: z.number() }).optional(),
-        resume: z.object({ completed_at: z.string().optional() }).optional(),
-      })
-      .optional(),
-  }),
+  record: z
+    .object({
+      id: z.string(),
+      runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
+      phase: z.enum(["running", "paused"]),
+      pause: z
+        .object({
+          snapshot_id: z.string(),
+          completed_at: z.string().optional(),
+          after: z.object({ anon: z.number() }).optional(),
+          snapshot: z.object({ resident_bytes_after: z.number() }).optional(),
+          resume: z.object({ completed_at: z.string().optional() }).optional(),
+        })
+        .passthrough()
+        .optional(),
+    })
+    .passthrough(),
   runtime: z.object({ status: z.string() }).optional(),
 });
 

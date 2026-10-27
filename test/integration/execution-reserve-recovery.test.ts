@@ -3,8 +3,12 @@ import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-c
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import type { ReserveClient } from "../../packages/runtime-kubernetes/src/reserve";
+import { executionPoolFixture } from "../fixtures/execution-pool";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import {
+  installOwnedRuntimeConfiguration,
+  ownedFactoryboxProfile,
+} from "../fixtures/runtime-configuration";
 
 test("queued reserve controllers use the preparation committed under the slot lock before admitting Start", async () => {
   const restoreConfiguration = installOwnedRuntimeConfiguration();
@@ -23,7 +27,9 @@ test("queued reserve controllers use the preparation committed under the slot lo
   const observations = { namespaceUID: "namespace", podUID: "pod", claimUID: "claim" };
   const starts: string[] = [];
   const calls: Array<{ prepared: boolean; startAllowed: boolean; startAttempted: boolean }> = [];
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
   try {
+    owned = await executionPoolFixture(database, store, ownedFactoryboxProfile, images);
     const [slot] = await database.client.begin((sql) => store.plan(sql));
     if (!slot) throw new Error("Owned reserve slot missing");
     await store.observe(database.client, slot.id, {
@@ -31,6 +37,8 @@ test("queued reserve controllers use the preparation committed under the slot lo
       ready: false,
       factoryboxIdentity: { epoch: "owned" },
     });
+    await store.intendSourceImport(database.client, slot.id, "d".repeat(64));
+    await store.completeSourceImport(database.client, slot.id, { sha256: "d".repeat(64) });
     await database.client`UPDATE factory.execution_slot SET reconcile_after=now() WHERE id=${slot.id}`;
     const adapter: ReserveClient = {
       async prepare(current, options) {
@@ -103,6 +111,7 @@ test("queued reserve controllers use the preparation committed under the slot lo
     release.resolve();
     await Promise.allSettled(pending);
     await Promise.all(controllers.map((controller) => controller.close()));
+    await owned?.cleanup();
     await database.client.end({ timeout: 2 });
     await host.dispose();
     restoreConfiguration();
@@ -119,6 +128,7 @@ test("a missing native record never authorizes another Start after durable admis
   };
   const store = createReserveStore(defaultReservePolicy, images);
   const admissions: boolean[] = [];
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
   const diagnostic = spyOn(console, "error").mockImplementation(() => {});
   const controller = createExecutionReserve(database, images, defaultReservePolicy, {
     async prepare(slot, options) {
@@ -139,6 +149,7 @@ test("a missing native record never authorizes another Start after durable admis
     },
   });
   try {
+    owned = await executionPoolFixture(database, store, ownedFactoryboxProfile, images);
     const [slot] = await database.client.begin((sql) => store.plan(sql));
     if (!slot) throw new Error("Owned reserve slot missing");
     await store.observe(database.client, slot.id, {
@@ -149,6 +160,8 @@ test("a missing native record never authorizes another Start after durable admis
       factoryboxIdentity: { epoch: "owned" },
       factoryboxPreparation: { bundle: "owned-private-input" },
     });
+    await store.intendSourceImport(database.client, slot.id, "d".repeat(64));
+    await store.completeSourceImport(database.client, slot.id, { sha256: "d".repeat(64) });
     expect(await store.intendStart(database.client, slot.id)).toBe(true);
     for (let index = 0; index < 2; index++) {
       await database.client`UPDATE factory.execution_slot SET reconcile_after=now() WHERE id=${slot.id}`;
@@ -164,6 +177,7 @@ test("a missing native record never authorizes another Start after durable admis
   } finally {
     await controller.close();
     diagnostic.mockRestore();
+    await owned?.cleanup();
     await database.client.end({ timeout: 2 });
     await host.dispose();
     restoreConfiguration();

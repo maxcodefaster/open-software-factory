@@ -21,8 +21,8 @@ test("retained Forge identity must still match the exact local listener", () => 
     );
 });
 
-test("a fresh local launch keeps spare compute off unless explicitly requested", () => {
-  expect(localServerSettings({}, defaults).executionReserveTarget).toBe("0");
+test("a fresh local launch requests two unused paused Forks and preserves explicit overrides", () => {
+  expect(localServerSettings({}, defaults).executionReserveTarget).toBe("2");
   for (const value of ["0", "1", "4"]) {
     expect(
       localServerSettings({ FACTORY_EXECUTION_RESERVE_TARGET: value }, defaults)
@@ -45,12 +45,12 @@ test("local startup preserves explicit listener and bootstrap credentials", () =
     host: "127.0.0.1",
     email: "chosen@factory.local",
     password: "chosen-local-test-password",
-    executionReserveTarget: "0",
+    executionReserveTarget: "2",
   });
   expect(localServerSettings({}, defaults)).toEqual({
     host: "0.0.0.0",
     ...defaults,
-    executionReserveTarget: "0",
+    executionReserveTarget: "2",
   });
 });
 
@@ -61,7 +61,7 @@ test("owned installation defaults retain their own identity, and invalid setting
     host: "0.0.0.0",
     email: "owned@factory.local",
     password: "owned-password",
-    executionReserveTarget: "0",
+    executionReserveTarget: "2",
   });
   for (const environment of [
     { FACTORY_HOST: "" },

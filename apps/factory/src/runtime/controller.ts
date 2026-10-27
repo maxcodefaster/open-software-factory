@@ -54,6 +54,7 @@ import {
 } from "./launcher";
 import { recoveredConnectionObserver } from "./recovered-connections";
 import type { ExecutionReserve } from "./reserve-controller";
+import { freezeStagingConfiguration } from "./staging-configuration";
 import type { RuntimeAttemptView } from "./types";
 import { createFactoryboxWorker, factoryboxAllocation } from "./worker";
 
@@ -270,6 +271,7 @@ export function createRuntimeController(
           hub.revoke(attemptID);
           return;
         }
+        await freezeStagingConfiguration(sql, attemptID, input.resources);
         reserve?.refill();
         const activated = await computeWait.launch(
           attemptID,

@@ -8,11 +8,14 @@ import {
 } from "../../../../packages/runtime-domain/src/reserve";
 import { createKubernetesClient } from "../../../../packages/runtime-kubernetes/src/client";
 import { factoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { factoryboxWorkerIdentity } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import {
   createReserveClient,
+  factoryboxReserveInput,
   type ReserveClient,
 } from "../../../../packages/runtime-kubernetes/src/reserve";
 import { createReserveStore } from "./reserve-store";
+import { createStagingTemplateProducer } from "./staging-template";
 import { createFactoryboxWorker, rememberFactoryboxIdentity } from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -28,11 +31,11 @@ export function executionReservePolicy(
       throw new Error("Execution reserve configuration requires bounded integers");
     return Number(value);
   };
-  const readyPerRole = read("FACTORY_EXECUTION_RESERVE_TARGET", defaultReservePolicy.readyPerRole);
+  const readyTarget = read("FACTORY_EXECUTION_RESERVE_TARGET", defaultReservePolicy.readyTarget);
   return requireReservePolicy({
     ...defaultReservePolicy,
-    readyPerRole,
-    maxSlots: Math.max(2, 2 * readyPerRole),
+    readyTarget,
+    maxSlots: Math.max(2, readyTarget),
     maxExecutionSlots: read("FACTORY_EXECUTION_MAX_SLOTS", defaultReservePolicy.maxExecutionSlots),
   });
 }
@@ -44,6 +47,7 @@ export function createExecutionReserve(
   adapter: ReserveClient = createReserveClient(),
 ) {
   const store = createReserveStore(policy, images);
+  const templates = createStagingTemplateProducer(database, store, images);
   const worker = createFactoryboxWorker(database, createKubernetesClient());
   let closed = false;
   let running: Promise<void> | null = null;
@@ -65,6 +69,16 @@ export function createExecutionReserve(
     }
   }
   async function reconcile() {
+    if (policy.readyTarget) {
+      try {
+        await templates.refresh();
+      } catch (cause) {
+        console.error(
+          "Staging template source preparation deferred",
+          cause instanceof Error ? cause.message : "Source is unavailable",
+        );
+      }
+    }
     const due = await database.client.begin((sql) => store.plan(sql));
     for (const planned of due) {
       if (closed) return;
@@ -76,7 +90,21 @@ export function createExecutionReserve(
         if (!slot || slot.state !== planned.state) return;
         try {
           if (slot.state === "retiring") {
-            await adapter.retire(slot, {
+            let retiring = slot;
+            if (!slot.templateID && slot.sourceImportSHA256 && !slot.sourceImportObservation) {
+              const id = slot.id;
+              await templates.importSource(
+                slot,
+                factoryboxReserveInput(slot),
+                factoryboxWorkerIdentity.parse(slot.factoryboxIdentity),
+                async () => false,
+                (observation) => store.completeSourceImport(sql, id, observation),
+              );
+              const refreshed = await store.get(sql, id);
+              if (!refreshed || refreshed.state !== "retiring") return;
+              retiring = refreshed;
+            }
+            await adapter.retire(retiring, {
               intendDelete: () => store.intendDelete(sql, slot.id),
               intendRetirement: (request) => store.intendRetirement(sql, slot.id, request),
               completeRetirement: (observation) =>
@@ -88,6 +116,16 @@ export function createExecutionReserve(
             const startAllowed = await store.intendStart(sql, slot.id);
             const observed = await adapter.prepare(slot, {
               startAllowed,
+              sourceTemplate: slot.templateID ? await store.get(sql, slot.templateID) : null,
+              intendFork: (request) => store.intendFork(sql, slot.id, request),
+              importSource: (input, identity) =>
+                templates.importSource(
+                  slot,
+                  input,
+                  identity,
+                  (sha256) => store.intendSourceImport(sql, slot.id, sha256),
+                  (observation) => store.completeSourceImport(sql, slot.id, observation),
+                ),
               intendStandby: (action) => store.intendStandby(sql, slot.id, action),
               provision: (resources) =>
                 worker.provision(

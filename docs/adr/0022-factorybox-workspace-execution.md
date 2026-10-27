@@ -96,13 +96,40 @@ Stopping one Source epoch closes only its own connections, not every connection 
 its Namespace. Resource names do not depend on a dedicated Namespace for uniqueness;
 Factory verifies Namespace ownership and placement separately.
 
-A never-used reserve becomes ready only after native Pause confirms its exact
-standby snapshot, zero Sandbox anonymous RAM and no resident snapshot pages.
-Assignment resumes that same Sandbox before delivering its role and credentials.
-Persist each Pause/Resume attempt before the external command. A lost response
-can settle through the original native record but cannot commission another
-mutation or a cold replacement. This is a paused prepared reserve, not a claim
-that cold preparation forms a Staging-derived preforked pool.
+Freeze the public declaration actually sent to each Staging Attempt before external
+creation. The pool derives its Project, revision, App processes, Dev Container path
+and artifact pins from the healthy promoted Staging identity, not from later mutable
+Project settings. Prepare a separate clean checkout outside captured processes, without
+Git transport credentials or Factory grants. Do not snapshot the live Staging
+execution and copy its credentials.
+
+Start the declared credential-free Apps in that clean template, Pause it, then create
+two real native Forks and Pause each unused Fork. This is one shared Project-bound
+pool for eligible fresh Staging and Verification, not a pool per role or a limit of
+two running Sandboxes. Recent Project execution demand selects the warm Project.
+Only empty Staging Runtime Environments are eligible for this preparation; others
+keep ordinary fresh execution. An existing canonical Workspace is never replaced
+by the template checkout.
+
+Ready requires native confirmation of the exact standby snapshot, zero anonymous
+RAM and no resident snapshot pages. Persist source import, Fork, Pause and Resume
+intent before their external effects. Bind each Fork to its original template,
+native owner, checkpoint hash and worker epoch. Lost output is observed without
+another mutation or a replacement identity. Used slots never return to the pool;
+the controller fills their places with new paused Forks.
+
+Resume the selected Fork before delivering fresh Parent and Child authority. An exact
+revision/configuration with no resolved Runtime variables or registries adopts the
+already-running App processes through private root-peer control. Different input
+rebuilds only that Fork's private execution with its fresh grants. Keep the immutable
+inner container origin separate from the new Runtime Attempt identity.
+
+Retire unused slots when their TTL or promoted basis changes. The template snapshot
+stays useful while its promoted basis remains current; its copied seed deadline is
+not the lifetime of later Forks. Finish admitted clean preparation before normal
+retirement so private inputs have a native owner. An obsolete template waits for all
+its children to retire. An unconfirmed native or import outcome remains retained for
+inspection rather than resetting attempted flags or repeating the create.
 
 An explicit Stop can retire execution on a missing, terminal or restarted original worker after exact Namespace
 and Pod UID checks. This records no invented native Delete receipt. It still removes only that

@@ -1,14 +1,15 @@
 import { expect, test } from "bun:test";
 import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts";
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
-import { defaultReservePolicy, type ReserveRole } from "../../packages/runtime-domain/src/reserve";
-import { fixture } from "../fixtures/change-agent-turns";
+import {
+  defaultReservePolicy,
+  type ReservePolicy,
+} from "../../packages/runtime-domain/src/reserve";
+import { executionPoolFixture } from "../fixtures/execution-pool";
 import { factoryProcess } from "../fixtures/factory-process";
 
-const images = {
-  staging: `registry.invalid/base@sha256:${"1".repeat(64)}`,
-  verification: `registry.invalid/check@sha256:${"2".repeat(64)}`,
-};
+const image = `registry.invalid/base@sha256:${"1".repeat(64)}`;
+const images = { staging: image, verification: image };
 const profile = {
   image: `registry.invalid/worker@sha256:${"a".repeat(64)}`,
   executableSHA256: "b".repeat(64),
@@ -18,224 +19,150 @@ const profile = {
   boundedBytes: 8589934592 as const,
   claimGiB: 32 as const,
 };
-const artifacts = {
-  factoryboxProfile: profile,
-  hostImages: {
-    staging: images.staging,
-    verification: images.verification,
-    development: images.staging,
-    build: images.staging,
-  },
-  browserToolsImage: `registry.invalid/browser@sha256:${"3".repeat(64)}`,
-};
-
-test("reserve persists clean create intent, serializes claims, freezes assignment and counts every admission", async () => {
-  const processFixture = await factoryProcess();
-  const database = processFixture.connect();
-  const store = createReserveStore(
-    { ...defaultReservePolicy, maxExecutionSlots: 3 },
-    images,
-    profile,
-  );
+async function setup(policy: ReservePolicy = defaultReservePolicy) {
+  const host = await factoryProcess(),
+    database = host.connect();
+  const admitted = createReserveStore({ ...policy, readyTarget: 2 }, images, profile);
   try {
-    const owned = await fixture(undefined, undefined, database);
-    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
-    const planned = await database.client.begin(async (sql) => store.plan(sql));
-    expect(planned).toHaveLength(1);
-    const slot = planned[0];
-    if (!slot) throw new Error("Expected one persisted execution slot");
-    expect(slot.state).toBe("creating");
-    expect(slot.role).toBe("staging");
-    expect(slot.assignedAttemptID).toBeNull();
-    expect(
-      (await database.client.begin((sql) => store.plan(sql))).map((candidate) => candidate.id),
-    ).toEqual([slot.id]);
-    expect(await database.client`SELECT id FROM factory.execution_slot`).toHaveLength(1);
-    await store.observe(database.client, slot.id, {
+    const owned = await executionPoolFixture(database, admitted, profile, images);
+    const store = createReserveStore(policy, images, profile);
+    return {
+      ...owned,
+      database,
+      store,
+      async dispose() {
+        await owned.cleanup();
+        await database.client.end({ timeout: 2 });
+        await host.dispose();
+      },
+    };
+  } catch (cause) {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+    throw cause;
+  }
+}
+
+test("parallel admissions claim one ready Fork once, keep the template private, and count cold admissions", async () => {
+  const f = await setup({ ...defaultReservePolicy, maxExecutionSlots: 5 });
+  try {
+    const template = await f.prepareTemplate();
+    if (!template) throw new Error("Missing source template");
+    const [slot] = await f.database.client.begin((sql) => f.store.plan(sql));
+    if (!slot) throw new Error("Missing Fork");
+    await f.store.observe(f.database.client, slot.id, {
       namespaceUID: "owned-namespace",
       podUID: "owned-pod",
       claimUID: "owned-claim",
       ready: false,
-      factoryboxIdentity: { epoch: "owned" },
-      factoryboxPreparation: { bundle: "owned" },
+      factoryboxIdentity: template.factoryboxIdentity,
+      factoryboxPreparation: { kind: "fork" },
     });
-    expect(await store.intendStart(database.client, slot.id)).toBe(true);
-    expect(await store.intendStart(database.client, slot.id)).toBe(false);
-    await expect(
-      store.observe(database.client, slot.id, {
-        namespaceUID: "owned-namespace",
-        podUID: "owned-pod",
-        claimUID: "owned-claim",
-        ready: true,
-      }),
-    ).rejects.toThrow("standby Pause");
-    expect(await store.intendStandby(database.client, slot.id, "resume")).toBe(false);
-    expect(await store.intendStandby(database.client, slot.id, "pause")).toBe(true);
-    expect(await store.intendStandby(database.client, slot.id, "pause")).toBe(false);
-    await store.observe(database.client, slot.id, {
+    const source = template.factoryboxStandby as {
+      sandboxID: string;
+      owner: string;
+      snapshotID: string;
+      checkpointSHA256: string;
+    };
+    await f.store.intendFork(f.database.client, slot.id, {
+      action: "fork",
+      sandboxID: `runtime-${slot.id.replaceAll("-", "")}`,
+      sourceSandboxID: source.sandboxID,
+      sourceOwner: source.owner,
+      snapshotID: source.snapshotID,
+      checkpointSHA256: source.checkpointSHA256,
+    });
+    await f.store.intendStandby(f.database.client, slot.id, "pause");
+    await f.store.observe(f.database.client, slot.id, {
       namespaceUID: "owned-namespace",
       podUID: "owned-pod",
       claimUID: "owned-claim",
       ready: true,
       factoryboxPaused: true,
+      factoryboxStandby: { ...source, anonymousBytes: 0, snapshotResidentBytes: 0 },
     });
-    const second = await database.client.begin((sql) => store.plan(sql));
-    expect(second).toHaveLength(1);
-    expect(second[0]?.role).toBe("verification");
-    const verificationSlot = second[0];
-    if (!verificationSlot) throw new Error("Expected an in-flight Verification slot");
-    let generation = 40;
-    async function admit(role?: ReserveRole) {
-      const attemptID = crypto.randomUUID();
-      return database.client.begin(async (sql) => {
-        const claimed = await store.admit(sql, attemptID, role);
+    const [preparing] = await f.database.client.begin((sql) => f.store.plan(sql));
+    expect(preparing?.templateID).toBe(template.id);
+    let generation = 2;
+    async function admit() {
+      const id = crypto.randomUUID();
+      return f.database.client.begin(async (sql) => {
+        const selected = await f.store.admit(sql, id, "staging", {
+          projectID: f.projectID,
+          kind: "staging",
+        });
         await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          VALUES(${attemptID},${owned.projectID},'staging',${generation++},${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
-        await freezeRuntimeArtifacts(sql, attemptID, artifacts);
-        return { attemptID, claimed };
+          VALUES(${id},${f.projectID},'staging',${generation++},${f.revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${f.userID})`;
+        await freezeRuntimeArtifacts(sql, id, f.artifactConfiguration);
+        return { id, selected };
       });
     }
-    const admissions = await Promise.all([admit("staging"), admit("staging")]);
-    expect(admissions.filter((admission) => admission.claimed)).toHaveLength(1);
-    const assigned = admissions.find((admission) => admission.claimed);
-    if (!assigned) throw new Error("Expected exactly one claimed slot");
-    expect((await store.assigned(database.client, assigned.attemptID))?.id).toBe(slot.id);
-    expect(await store.intendStandby(database.client, slot.id, "resume")).toBe(true);
-    expect(await store.intendStandby(database.client, slot.id, "resume")).toBe(false);
-    for (const field of ["factorybox_pause_attempted", "factorybox_resume_attempted"]) {
-      await expect(
-        (async () => {
-          await database.client.unsafe(
-            `UPDATE factory.execution_slot SET ${field}=false WHERE id=$1`,
-            [slot.id],
-          );
-        })(),
-      ).rejects.toThrow("immutable");
-    }
+    const claims = await Promise.all([admit(), admit()]);
+    expect(claims.filter((value) => value.selected)).toHaveLength(1);
+    expect(claims.find((value) => value.selected)?.selected?.id).toBe(slot.id);
+    expect((await f.store.get(f.database.client, template.id))?.assignedAttemptID).toBeNull();
     await expect(admit()).rejects.toThrow("capacity is occupied");
-    expect(
-      await database.client`SELECT id FROM factory.runtime_attempt WHERE state='create-intended'`,
-    ).toHaveLength(2);
     for (const [field, value] of [
       ["state", "ready"],
       ["assigned_attempt_id", crypto.randomUUID()],
-      ["runtime_host_image", images.verification],
-      ["pod_uid", "replacement-pod"],
+      ["pod_uid", "replacement"],
+      ["factorybox_pause_attempted", false],
     ] as const)
       await expect(
         (async () => {
-          await database.client.unsafe(
+          await f.database.client.unsafe(
             `UPDATE factory.execution_slot SET ${field}=$1 WHERE id=$2`,
             [value, slot.id],
           );
         })(),
       ).rejects.toThrow();
-    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${assigned.attemptID}`;
-    await store.usedRemoved(database.client, assigned.attemptID);
-    expect((await store.assigned(database.client, assigned.attemptID))?.state).toBe("deleted");
-    const refill = await database.client.begin((sql) => store.plan(sql));
-    expect(
-      refill.some((candidate) => candidate.id !== slot.id && candidate.role === "staging"),
-    ).toBe(false);
-    // The in-flight Verification slot consumes the one creation permit.
-    await store.observe(database.client, verificationSlot.id, {
-      namespaceUID: "second-ns",
-      podUID: "second-pod",
-      claimUID: "second-claim",
-      ready: false,
-      factoryboxIdentity: { epoch: "second" },
-      factoryboxPreparation: { bundle: "second" },
-    });
-    expect(await store.intendStart(database.client, verificationSlot.id)).toBe(true);
-    expect(await store.intendStandby(database.client, verificationSlot.id, "pause")).toBe(true);
-    await store.observe(database.client, verificationSlot.id, {
-      namespaceUID: "second-ns",
-      podUID: "second-pod",
-      claimUID: "second-claim",
-      ready: true,
-      factoryboxPaused: true,
-    });
-    const next = await database.client.begin((sql) => store.plan(sql));
-    expect(next.some((candidate) => candidate.role === "staging" && candidate.id !== slot.id)).toBe(
-      true,
-    );
   } finally {
-    await database.client.end({ timeout: 2 });
-    await processFixture.dispose();
+    await f.dispose();
   }
-}, 30_000);
+}, 60_000);
 
-test("expired unassigned slots retire before admission and cannot return to the reserve", async () => {
-  const processFixture = await factoryProcess();
-  const database = processFixture.connect();
-  const store = createReserveStore({ ...defaultReservePolicy, readyPerRole: 0 }, images, profile);
-  const id = crypto.randomUUID();
+test("disabled reserve retires unused prepared execution without returning it to the pool", async () => {
+  const f = await setup({ ...defaultReservePolicy, readyTarget: 0 });
   try {
-    await database.client`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,created_at,expires_at)
-      VALUES(${id},'staging','creating',${images.staging},now()-interval '16 minutes',now()-interval '1 second')`;
-    await store.observe(database.client, id, {
-      namespaceUID: "expired-ns",
-      podUID: "expired-pod",
-      claimUID: "expired-claim",
-      ready: false,
-      factoryboxIdentity: { epoch: "expired" },
-      factoryboxPreparation: { bundle: "expired" },
-    });
-    expect(await store.intendStart(database.client, id)).toBe(true);
-    expect(await store.intendStandby(database.client, id, "pause")).toBe(true);
-    await store.observe(database.client, id, {
-      namespaceUID: "expired-ns",
-      podUID: "expired-pod",
-      claimUID: "expired-claim",
-      ready: true,
-      factoryboxPaused: true,
-    });
-    const due = await database.client.begin((sql) => store.plan(sql));
+    await f.prepareTemplate();
+    const due = await f.database.client.begin((sql) => f.store.plan(sql));
     expect(due).toHaveLength(1);
-    expect(due[0]).toMatchObject({ id, state: "retiring", assignedAttemptID: null });
+    expect(due[0]).toMatchObject({ id: f.template.id, state: "retiring", assignedAttemptID: null });
     expect(
-      await database.client.begin((sql) => store.admit(sql, crypto.randomUUID(), "staging")),
+      await f.database.client.begin((sql) =>
+        f.store.admit(sql, crypto.randomUUID(), "staging", {
+          projectID: f.projectID,
+          kind: "staging",
+        }),
+      ),
     ).toBeNull();
-    await store.retired(database.client, id);
-    expect(await database.client.begin((sql) => store.plan(sql))).toHaveLength(0);
+    await f.store.retired(f.database.client, f.template.id);
+    expect(await f.database.client.begin((sql) => f.store.plan(sql))).toHaveLength(0);
     await expect(
       (async () => {
-        await database.client`UPDATE factory.execution_slot SET state='ready' WHERE id=${id}`;
+        await f.database
+          .client`UPDATE factory.execution_slot SET state='ready' WHERE id=${f.template.id}`;
       })(),
     ).rejects.toThrow("cannot return");
   } finally {
-    await database.client.end({ timeout: 2 });
-    await processFixture.dispose();
+    await f.dispose();
   }
-}, 30_000);
+}, 60_000);
 
-test("unused slot retirement persists its exact plan and immutable compact outcome across recovery", async () => {
-  const processFixture = await factoryProcess(),
-    database = processFixture.connect();
-  const store = createReserveStore({ ...defaultReservePolicy, readyPerRole: 0 }, images, profile);
-  const id = crypto.randomUUID();
+test("retirement retains exact immutable intent and outcome across controller recovery", async () => {
+  const f = await setup({ ...defaultReservePolicy, readyTarget: 0 });
   try {
-    await database.client`INSERT INTO factory.execution_slot(id,role,state,runtime_host_image,expires_at)
-      VALUES(${id},'staging','creating',${images.staging},now()+interval '10 minutes')`;
-    await store.observe(database.client, id, {
-      namespaceUID: "owned-ns",
-      podUID: "owned-pod",
-      claimUID: "owned-claim",
-      ready: false,
-      factoryboxIdentity: { epoch: "owned" },
-      factoryboxPreparation: { bundle: "owned" },
-    });
-    expect(await store.intendStart(database.client, id)).toBe(true);
-    await store.retire(database.client, id);
+    await f.prepareTemplate();
+    await f.store.retire(f.database.client, f.template.id);
     const request = {
       version: 1,
       storeID: "a".repeat(32),
       epoch: "b".repeat(32),
-      sandboxID: `runtime-${id.replaceAll("-", "")}`,
+      sandboxID: `runtime-${f.template.id.replaceAll("-", "")}`,
       checkpoints: [],
       resumes: [],
       backing: {
-        sandbox_id: `runtime-${id.replaceAll("-", "")}`,
+        sandbox_id: `runtime-${f.template.id.replaceAll("-", "")}`,
         sandbox_owner: "c".repeat(32),
         input_sha256: "d".repeat(64),
       },
@@ -244,106 +171,75 @@ test("unused slot retirement persists its exact plan and immutable compact outco
       version: 1,
       request,
       receipts: [
-        { action: "retire-sandbox", intentSHA256: "e".repeat(64), completedAt: "completed" },
+        { action: "retire-sandbox", intentSHA256: "e".repeat(64), completedAt: "complete" },
       ],
     };
-    await expect(store.completeRetirement(database.client, id, observation)).rejects.toThrow(
-      "original request",
-    );
-    await store.intendRetirement(database.client, id, request);
+    await expect(
+      f.store.completeRetirement(f.database.client, f.template.id, observation),
+    ).rejects.toThrow("original request");
+    await f.store.intendRetirement(f.database.client, f.template.id, request);
     const recovered = createReserveStore(
-      { ...defaultReservePolicy, readyPerRole: 0 },
+      { ...defaultReservePolicy, readyTarget: 0 },
       images,
       profile,
     );
-    await recovered.intendRetirement(database.client, id, request);
+    await recovered.intendRetirement(f.database.client, f.template.id, request);
     await expect(
-      recovered.intendRetirement(database.client, id, { ...request, epoch: "f".repeat(32) }),
+      recovered.intendRetirement(f.database.client, f.template.id, {
+        ...request,
+        epoch: "f".repeat(32),
+      }),
     ).rejects.toThrow("original request");
-    const [intended] = await database.client<Array<{ request: unknown; outcome: unknown }>>`
-      SELECT factorybox_retirement_request AS request,factorybox_retirement_observation AS outcome FROM factory.execution_slot WHERE id=${id}`;
-    expect(intended).toEqual({ request, outcome: null });
     await expect(
-      (async () => {
-        await database.client`UPDATE factory.execution_slot SET factorybox_retirement_request='{}'::jsonb WHERE id=${id}`;
-      })(),
-    ).rejects.toThrow("immutable");
-    await expect(
-      recovered.completeRetirement(database.client, id, {
+      recovered.completeRetirement(f.database.client, f.template.id, {
         ...observation,
         request: { ...request, epoch: "f".repeat(32) },
       }),
     ).rejects.toThrow("original request");
-    await recovered.completeRetirement(database.client, id, observation);
-    await recovered.completeRetirement(database.client, id, observation);
+    await recovered.completeRetirement(f.database.client, f.template.id, observation);
+    await recovered.completeRetirement(f.database.client, f.template.id, observation);
     await expect(
-      recovered.completeRetirement(database.client, id, { ...observation, receipts: [] }),
+      recovered.completeRetirement(f.database.client, f.template.id, {
+        ...observation,
+        receipts: [],
+      }),
     ).rejects.toThrow("outcome");
     await expect(
       (async () => {
-        await database.client`UPDATE factory.execution_slot SET factorybox_retirement_observation=NULL WHERE id=${id}`;
+        await f.database
+          .client`UPDATE factory.execution_slot SET factorybox_retirement_observation=NULL WHERE id=${f.template.id}`;
       })(),
     ).rejects.toThrow("immutable");
-    await recovered.retired(database.client, id);
-    const [retired] = await database.client<
-      Array<{ state: string; request: unknown; observation: unknown }>
-    >`
-      SELECT state,factorybox_retirement_request AS request,factorybox_retirement_observation AS observation FROM factory.execution_slot WHERE id=${id}`;
-    expect(retired).toEqual({ state: "deleted", request, observation });
+    await recovered.retired(f.database.client, f.template.id);
+    const [saved] = await f.database
+      .client`SELECT state,factorybox_retirement_request AS request,factorybox_retirement_observation AS observation
+      FROM factory.execution_slot WHERE id=${f.template.id}`;
+    expect(saved).toMatchObject({ state: "deleted", request, observation });
   } finally {
-    await database.client.end({ timeout: 2 });
-    await processFixture.dispose();
+    await f.dispose();
   }
-}, 30_000);
+}, 60_000);
 
-test("cold worker preparation keeps its lifecycle deadline without extending stale slots", async () => {
-  const processFixture = await factoryProcess();
-  const database = processFixture.connect();
-  const store = createReserveStore(defaultReservePolicy, images, profile);
-  const cold = crypto.randomUUID();
-  const stale = crypto.randomUUID();
+test("cold preparation retains the original 420 second deadline, without resetting stale identities", async () => {
+  const f = await setup();
   try {
-    for (const [id, age] of [
-      [cold, 240],
-      [stale, 421],
-    ] as const) {
-      await database.client`INSERT INTO factory.execution_slot
-        (id,role,state,runtime_host_image,created_at,expires_at,factorybox_profile)
-        VALUES(${id},'staging','creating',${images.staging},
-          now()-${age}*interval '1 second',now()+interval '10 minutes',${JSON.stringify(profile)}::text::jsonb)`;
+    const ids = [crypto.randomUUID(), crypto.randomUUID()];
+    for (const [index, age] of [240, 421].entries()) {
+      const id = ids[index]!;
+      const recipe = { ...(f.template.projectRecipe as object), runtimeAttemptId: id };
+      await f.database.client`INSERT INTO factory.execution_slot
+        (id,project_id,staging_attempt_id,revision,template_key,project_recipe,seed_expires_at,role,state,runtime_host_image,created_at,expires_at,factorybox_profile)
+        VALUES(${id},${f.projectID},${f.stagingID},${f.revision},${String(index + 1).repeat(64)},${JSON.stringify(recipe)}::text::jsonb,
+          now()+interval '10 minutes','staging','creating',${image},now()-${age}*interval '1 second',now()+interval '10 minutes',${JSON.stringify(profile)}::text::jsonb)`;
     }
-    const due = await database.client.begin((sql) => store.plan(sql));
-    expect(due.find((slot) => slot.id === cold)?.state).toBe("creating");
-    expect(due.find((slot) => slot.id === stale)?.state).toBe("retiring");
+    const due = await f.database.client.begin((sql) => f.store.plan(sql));
+    expect(due.find((slot) => slot.id === ids[0])?.state).toBe("creating");
+    expect(due.find((slot) => slot.id === ids[1])?.state).toBe("retiring");
+    await f.store.defer(f.database.client, ids[1]!);
+    await f.database.client.begin((sql) => f.store.plan(sql));
+    expect((await f.store.get(f.database.client, ids[1]!))?.state).toBe("retiring");
+    expect(await f.database.client`SELECT id FROM factory.execution_slot`).toHaveLength(3);
   } finally {
-    await database.client.end({ timeout: 2 });
-    await processFixture.dispose();
+    await f.dispose();
   }
-}, 30_000);
-
-test("failed preparation retires within its budget without unbounded refill", async () => {
-  const processFixture = await factoryProcess();
-  const database = processFixture.connect();
-  const store = createReserveStore(
-    { ...defaultReservePolicy, preparationMS: 1_000 },
-    images,
-    profile,
-  );
-  try {
-    const [slot] = await database.client.begin((sql) => store.plan(sql));
-    expect(slot).toBeDefined();
-    if (!slot) throw new Error("Expected one persisted execution slot");
-    await Bun.sleep(1_050);
-    const due = await database.client.begin((sql) => store.plan(sql));
-    expect(due.find((candidate) => candidate.id === slot.id)?.state).toBe("retiring");
-    await store.retired(database.client, slot.id);
-    const pending = await database.client.begin((sql) => store.plan(sql));
-    expect(pending.filter((candidate) => candidate.role === slot.role)).toHaveLength(0);
-    expect(
-      await database.client`SELECT id FROM factory.execution_slot WHERE role=${slot.role}`,
-    ).toHaveLength(1);
-  } finally {
-    await database.client.end({ timeout: 2 });
-    await processFixture.dispose();
-  }
-}, 30_000);
+}, 60_000);

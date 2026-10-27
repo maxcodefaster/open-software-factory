@@ -1,6 +1,9 @@
-import { mkdir, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
+import { runEnvironmentCommand } from "../../../../packages/runtime-kubernetes/src/command";
 
 const sourceRoot = "/tmp/open-software-factory-runtime-sources";
 
@@ -228,4 +231,66 @@ function configuredRepository(repositoryURL: string) {
     throw new Error("Project repository is outside the configured forge");
   return { apiURL, token, owner, name: parts[1] };
 }
+
+// Git transport credentials exist only in this server-side process environment.
+// Neither the checkout config nor captured processes receive them.
+export async function cleanRuntimeSourceArchive(
+  repositoryURL: string,
+  revision: string,
+  projectID: string,
+) {
+  if (!/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(revision) || !/^[a-f0-9-]{36}$/.test(projectID))
+    throw new Error("Invalid clean Project source identity");
+  const root = await mkdtemp(resolve(tmpdir(), "factory-clean-project-"));
+  const checkout = resolve(root, "project");
+  const archive = resolve(root, "source.tar");
+  const publicURL = `https://unassigned.invalid/${projectID}.git`;
+  const env = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_TRACE: "0",
+    GIT_TRACE_CURL: "0",
+    COPYFILE_DISABLE: "1",
+    GIT_CONFIG_COUNT: "0",
+  };
+  if (!repositoryURL.startsWith("file://")) {
+    const repository = configuredRepository(repositoryURL);
+    Object.assign(env, {
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "http.extraHeader",
+      GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(`factory:${repository.token}`).toString("base64")}`,
+    });
+  }
+  async function git(args: string[]) {
+    const result = await runEnvironmentCommand(["git", ...args], env, {
+      timeoutMS: 180_000,
+      outputBytes: 16 * 1024,
+    });
+    if (result.exitCode !== 0) throw new Error("Clean Project Git preparation failed");
+  }
+  try {
+    await git(["clone", "--no-checkout", "--no-hardlinks", "--", repositoryURL, checkout]);
+    await git(["-C", checkout, "checkout", "--detach", revision]);
+    await git(["-C", checkout, "config", "factory.repositoryIdentity", projectID]);
+    await git(["-C", checkout, "remote", "set-url", "origin", publicURL]);
+    const result = await runEnvironmentCommand(["tar", "-C", checkout, "-cf", archive, "."], env, {
+      timeoutMS: 180_000,
+      outputBytes: 16 * 1024,
+    });
+    if (result.exitCode !== 0) throw new Error("Clean Project archive failed");
+    const hash = createHash("sha256");
+    for await (const chunk of Bun.file(archive).stream()) hash.update(chunk);
+    return {
+      file: Bun.file(archive),
+      sha256: hash.digest("hex"),
+      cleanup: () => rm(root, { recursive: true, force: true }),
+    };
+  } catch (cause) {
+    await rm(root, { recursive: true, force: true });
+    throw cause;
+  }
+}
+
 import { createHmac, timingSafeEqual } from "node:crypto";

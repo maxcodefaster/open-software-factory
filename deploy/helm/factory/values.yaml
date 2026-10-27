@@ -17,7 +17,7 @@ factorybox:
   architecture: ""
   nodeName: ""
   kernel: ""
-executionReserveTarget: 0
+executionReserveTarget: 2
 
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.
 storageClass: ""

@@ -10,7 +10,7 @@ test("reserve counts admitted creation, expiry cleanup and assigned execution ag
   const counts = { matching: 0, creating: 0, spare: 0, execution: 7 };
   expect(reserveCreationCount(defaultReservePolicy, counts)).toBe(1);
   expect(reserveCreationCount(defaultReservePolicy, { ...counts, creating: 1, spare: 1 })).toBe(0);
-  expect(reserveCreationCount(defaultReservePolicy, { ...counts, matching: 1, spare: 1 })).toBe(0);
+  expect(reserveCreationCount(defaultReservePolicy, { ...counts, matching: 1, spare: 1 })).toBe(1);
   expect(reserveCreationCount(defaultReservePolicy, { ...counts, spare: 2 })).toBe(0);
   expect(reserveCreationCount(defaultReservePolicy, { ...counts, execution: 16 })).toBe(0);
   expect(reserveCreationCount(defaultReservePolicy, { ...counts, spare: 1, execution: 15 })).toBe(
@@ -21,7 +21,7 @@ test("reserve counts admitted creation, expiry cleanup and assigned execution ag
 test("reserve policy cannot exceed bounded targets or create invalid resource identities", () => {
   expect(requireReservePolicy(defaultReservePolicy)).toEqual(defaultReservePolicy);
   for (const override of [
-    { readyPerRole: 5 },
+    { readyTarget: 9 },
     { maxSlots: 1 },
     { creationConcurrency: 3 },
     { maxExecutionSlots: 1 },

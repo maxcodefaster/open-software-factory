@@ -1,16 +1,18 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import type { TransactionSql } from "postgres";
-import { policyIn, lockUsageIn } from "./policy";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { CommandError } from "../command-error";
+import { lockUsageIn, policyIn } from "./policy";
 
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
+
 import {
-  computeReservation,
   type ComputeClass,
+  computeReservation,
 } from "../../../../packages/runtime-domain/src/compute";
+
 export {
-  computeReservation,
   type ComputeClass,
+  computeReservation,
 } from "../../../../packages/runtime-domain/src/compute";
 
 export class ComputeCapacityError extends CommandError {
@@ -41,18 +43,21 @@ export async function admitComputeIn(
   projectID: string | null,
   kind: ComputeClass,
   adoptingSlot = false,
+  capturedClass: ComputeClass = kind,
 ) {
   await lockUsageIn(sql);
   await sql`SELECT pg_advisory_xact_lock(hashtext('factory-execution-capacity'))`;
   const policy = await policyIn(sql, projectID);
   const reservation = computeReservation(kind);
+  const captured = computeReservation(capturedClass);
   for (const scope of [
     { id: null, policy: policy.factory },
     ...(projectID ? [{ id: projectID, policy: policy.effective }] : []),
   ]) {
     const used = await computeAllocationIn(sql, scope.id);
     for (const key of ["sandboxes", "cpuMilli", "memoryMiB"] as const) {
-      const next = used[key] + (adoptingSlot && scope.id === null ? 0 : reservation[key]);
+      const next =
+        used[key] + reservation[key] - (adoptingSlot && scope.id === null ? captured[key] : 0);
       const limit = scope.policy[key];
       if (limit !== null && next > limit) throw new ComputeCapacityError();
     }

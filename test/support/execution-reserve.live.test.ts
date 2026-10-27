@@ -379,7 +379,7 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
       await fixture.shutdown();
       // Use the real controller's durable Delete/retirement intents. Direct
       // adapter cleanup without those callbacks cannot retire paused slots.
-      manager = createExecutionReserve(database, images, { ...policy, readyPerRole: 0 }, client);
+      manager = createExecutionReserve(database, images, { ...policy, readyTarget: 0 }, client);
       await manager.start();
       await eventually(
         slots,

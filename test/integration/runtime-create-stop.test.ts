@@ -19,10 +19,12 @@ import {
   KubernetesObservationUnavailableError,
 } from "../../packages/runtime-kubernetes/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
+import { executionPoolFixture } from "../fixtures/execution-pool";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import {
   ownedRuntimeConfiguration as configuration,
   installOwnedRuntimeConfiguration,
+  ownedFactoryboxProfile,
 } from "../fixtures/runtime-configuration";
 
 let restoreConfiguration: () => void;
@@ -821,6 +823,7 @@ test.each([
     let creating: Promise<unknown> | undefined;
     let recovering: Promise<unknown> | undefined;
     let attemptID: string | undefined;
+    let poolFixture: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
     async function read() {
       const rows = await database.client<
         {
@@ -862,8 +865,17 @@ test.each([
           { ...defaultReservePolicy, creationConcurrency: 2 },
           images,
         );
+        poolFixture = await executionPoolFixture(
+          database,
+          store,
+          ownedFactoryboxProfile,
+          images,
+          owned,
+        );
+        const template = await poolFixture.prepareTemplate();
+        if (!template) throw new Error("Owned template missing");
         const planned = await database.client.begin((sql) => store.plan(sql));
-        const slot = planned.find((candidate) => candidate.role === "verification");
+        const slot = planned.find((candidate) => candidate.templateID);
         if (!slot) throw new Error("Owned Verification slot missing");
         await store.observe(database.client, slot.id, {
           namespaceUID: "owned-namespace-uid",
@@ -873,7 +885,22 @@ test.each([
           factoryboxIdentity: { epoch: "owned" },
           factoryboxPreparation: { bundle: "owned" },
         });
-        expect(await store.intendStart(database.client, slot.id)).toBe(true);
+        const source = template.factoryboxStandby as {
+          sandboxID: string;
+          owner: string;
+          snapshotID: string;
+          checkpointSHA256: string;
+        };
+        expect(
+          await store.intendFork(database.client, slot.id, {
+            action: "fork",
+            sandboxID: `runtime-${slot.id.replaceAll("-", "")}`,
+            sourceSandboxID: source.sandboxID,
+            sourceOwner: source.owner,
+            snapshotID: source.snapshotID,
+            checkpointSHA256: source.checkpointSHA256,
+          }),
+        ).toBe(true);
         expect(await store.intendStandby(database.client, slot.id, "pause")).toBe(true);
         await store.observe(database.client, slot.id, {
           namespaceUID: "owned-namespace-uid",
@@ -881,13 +908,14 @@ test.each([
           claimUID: "owned-claim",
           ready: true,
           factoryboxPaused: true,
+          factoryboxStandby: { ...source, anonymousBytes: 0, snapshotResidentBytes: 0 },
         });
         exists = true;
         namespaceCreated = true;
         reserve = createExecutionReserve(
           database,
           images,
-          { ...defaultReservePolicy, readyPerRole: 0 },
+          { ...defaultReservePolicy, readyTarget: 0 },
           {
             async prepare() {
               throw new Error("Unexpected reserve refill");
@@ -1003,6 +1031,7 @@ test.each([
       await creating?.catch(() => undefined);
       await recovering?.catch(() => undefined);
       await reserve?.close();
+      await poolFixture?.cleanup();
       // Let the observer released by the stopped replacement boundary finish
       // its final state read before disposing its database.
       await Bun.sleep(0);

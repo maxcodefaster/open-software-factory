@@ -31,6 +31,7 @@ import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybo
 import {
   executeFactoryboxOperation,
   type FactoryboxWorkerIdentity,
+  factoryboxOperation,
   factoryboxWorkerIdentity,
   inspectFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -45,6 +46,7 @@ export interface SlotObservation {
   readonly factoryboxIdentity?: unknown;
   readonly factoryboxPreparation?: unknown;
   readonly factoryboxPaused?: boolean;
+  readonly factoryboxStandby?: unknown;
 }
 interface StandbyIntent {
   intendStandby(action: "pause" | "resume"): Promise<boolean>;
@@ -60,6 +62,12 @@ export interface ReserveClient {
     options?: {
       startAllowed: boolean;
       provision(resources: readonly unknown[]): Promise<unknown>;
+      importSource?(
+        input: FactoryboxRuntimeInput,
+        identity: FactoryboxWorkerIdentity,
+      ): Promise<void>;
+      sourceTemplate?: ExecutionSlot | null;
+      intendFork?(request: unknown): Promise<boolean>;
     } & StandbyIntent,
   ): Promise<SlotObservation>;
   activate(
@@ -107,10 +115,11 @@ export function renderReserveResources(slot: ExecutionSlot, registryCA: string) 
       stringData: {
         "slot.json": JSON.stringify({
           version: 1,
-          id: slot.id,
+          id: slot.templateID ?? slot.id,
           role: slot.role,
-          images: [upstream.nodeDevelopment.image],
-          expiresAt: new Date(slot.expiresAt).toISOString(),
+          images: slot.projectRecipe ? [] : [upstream.nodeDevelopment.image],
+          expiresAt: new Date(slot.seedExpiresAt ?? slot.expiresAt).toISOString(),
+          ...(slot.projectRecipe ? { project: slot.projectRecipe } : {}),
         }),
       },
     },
@@ -319,6 +328,40 @@ const preparation = z.object({
   epoch: z.string(),
   podUID: z.string(),
 });
+const capturedTemplate = z.object({
+  sandboxID: z.string(),
+  owner: z.string().regex(/^[a-f0-9]{32}$/),
+  snapshotID: z.string().regex(/^[a-f0-9]{32}$/),
+  checkpointSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+  inputSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+});
+function standbyEvidence(slot: ExecutionSlot, input: FactoryboxRuntimeInput, value: unknown) {
+  const native = z
+    .object({
+      record: z.object({
+        id: z.literal(input.sandboxID),
+        owner: z.string().regex(/^[a-f0-9]{32}$/),
+        input_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+        pause: z.object({
+          snapshot_id: z.literal(slot.id.replaceAll("-", "")),
+          completed_at: z.string().min(1),
+          checkpoint_sha256: z.string().regex(/^[a-f0-9]{64}$/),
+          after: z.object({ anon: z.literal(0) }),
+          snapshot: z.object({ resident_bytes_after: z.literal(0) }),
+        }),
+      }),
+    })
+    .parse(value).record;
+  return {
+    sandboxID: native.id,
+    owner: native.owner,
+    inputSHA256: native.input_sha256,
+    snapshotID: native.pause.snapshot_id,
+    checkpointSHA256: native.pause.checkpoint_sha256,
+    anonymousBytes: 0,
+    snapshotResidentBytes: 0,
+  };
+}
 async function reserveState(input: FactoryboxRuntimeInput, identity: FactoryboxWorkerIdentity) {
   const result = await executeFactoryboxOperation(
     factoryboxRuntimeRequest(input),
@@ -443,13 +486,13 @@ export function createReserveClient(
     options?: DeleteIntent,
   ) {
     const pod = resources.find((value) => value.kind === "Pod");
-    if (!pod || !slot.factoryboxIdentity || !slot.factoryboxPreparation) return;
+    if (!pod || !slot.factoryboxIdentity) return;
     const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
     if (pod.metadata.uid !== identity.podUID)
       throw new Error("Execution slot worker UID changed before native cleanup");
     const input = factoryboxReserveInput(slot);
     if (await native.retired(input, identity)) return;
-    if (slot.factoryboxStartAttempted) {
+    if (slot.factoryboxStartAttempted || slot.factoryboxForkAttempted) {
       const observation = await native.execute(
         factoryboxRuntimeRequest(input),
         identity,
@@ -546,7 +589,7 @@ export function createReserveClient(
           });
         }
       }
-      await native.release(input, identity, false);
+      if (!slot.templateID) await native.release(input, identity, false);
       const result = await native.execute(
         factoryboxRuntimeRequest(input),
         identity,
@@ -577,6 +620,11 @@ export function createReserveClient(
       await options.completeRetirement({ version: 1, request, receipts });
       return;
     }
+    if (slot.templateID && !slot.factoryboxForkAttempted) return;
+    if (!slot.factoryboxPreparation)
+      throw new Error("Unconfirmed template preparation remains retained for inspection");
+    if (slot.sourceImportSHA256 && !slot.sourceImportObservation)
+      throw new Error("Original template source import is unconfirmed; backing was retained");
     await native.release(input, identity, true);
   }
   async function cleanup(slot: ExecutionSlot, options?: DeleteIntent) {
@@ -668,6 +716,75 @@ export function createReserveClient(
       );
       if (!slot.factoryboxIdentity)
         return { ...observed, ready: false, factoryboxIdentity: identity };
+      if (slot.templateID) {
+        const source = options.sourceTemplate;
+        if (
+          !source ||
+          source.id !== slot.templateID ||
+          (source.state !== "ready" &&
+            !(source.state === "retiring" && slot.factoryboxForkAttempted)) ||
+          source.projectID !== slot.projectID ||
+          source.templateKey !== slot.templateKey ||
+          source.workerID !== slot.workerID
+        )
+          throw new Error("Fork template is no longer admitted");
+        const captured = capturedTemplate.parse(source.factoryboxStandby);
+        const original = factoryboxWorkerIdentity.parse(source.factoryboxIdentity);
+        if (
+          original.epoch !== identity.epoch ||
+          original.podUID !== identity.podUID ||
+          captured.sandboxID !== factoryboxSandboxID(source.id)
+        )
+          throw new Error("Fork template worker changed");
+        const request = factoryboxOperation.parse({
+          action: "fork",
+          sandboxID: input.sandboxID,
+          sourceSandboxID: captured.sandboxID,
+          sourceOwner: captured.owner,
+          snapshotID: captured.snapshotID,
+          checkpointSHA256: captured.checkpointSHA256,
+        });
+        if (
+          slot.factoryboxForkRequest &&
+          JSON.stringify(factoryboxOperation.parse(slot.factoryboxForkRequest)) !==
+            JSON.stringify(request)
+        )
+          throw new Error("Fork ancestry differs from its original intent");
+        if (!slot.factoryboxForkAttempted) {
+          if (!options.intendFork || !(await options.intendFork(request)))
+            throw new Error("Fork outcome requires observation");
+          const created = await native.execute(
+            factoryboxRuntimeRequest(input),
+            identity,
+            request,
+            runFactoryboxKubernetes,
+            factoryboxRuntimeDeclaration(input),
+          );
+          if (!created.confirmed) throw new Error("Fork outcome is unconfirmed; never repeat it");
+        }
+        const state = await reserveState(input, identity);
+        z.object({
+          start: z.object({ completed_at: z.string().min(1) }),
+          fork: z.object({
+            source_id: z.literal(captured.sandboxID),
+            checkpoint_id: z.literal(captured.snapshotID),
+            checkpoint_sha256: z.literal(captured.checkpointSHA256),
+          }),
+        }).parse(state.record);
+        if (!slot.factoryboxPreparation)
+          return {
+            ...observed,
+            ready: false,
+            factoryboxPreparation: { version: 1, kind: "fork", request },
+          };
+        const paused = await standby(slot, input, identity, "pause", options);
+        return {
+          ...observed,
+          ready: true,
+          factoryboxPaused: true,
+          factoryboxStandby: standbyEvidence(slot, input, paused),
+        };
+      }
       if (!slot.factoryboxPreparation)
         return {
           ...observed,
@@ -689,6 +806,12 @@ export function createReserveClient(
         prepared.podUID !== identity.podUID
       )
         throw new Error("Execution slot preparation belongs to another Sandbox or worker");
+      if (slot.projectRecipe && !slot.sourceImportObservation) {
+        if (!options.importSource)
+          throw new Error("Clean template source import is not configured");
+        await options.importSource(input, identity);
+        return { ...observed, ready: false };
+      }
       if (options?.startAllowed) {
         const started = await executeFactoryboxOperation(
           factoryboxRuntimeRequest(input),
@@ -702,10 +825,19 @@ export function createReserveClient(
             `Execution slot Start outcome is unconfirmed: ${started.stderr.slice(-2000)}`,
           );
       }
+      if (!slot.factoryboxStartAttempted && !options.startAllowed)
+        return { ...observed, ready: false };
       const state = await reserveState(input, identity);
       if (state.record.phase === "paused") {
-        await standby(slot, input, identity, "pause", options);
-        return { ...observed, ready: true, factoryboxPaused: true };
+        const paused = await standby(slot, input, identity, "pause", options);
+        return {
+          ...observed,
+          ready: true,
+          factoryboxPaused: true,
+          ...(slot.projectRecipe
+            ? { factoryboxStandby: standbyEvidence(slot, input, paused) }
+            : {}),
+        };
       }
       if (state.runtime?.status !== "running")
         throw new Error("Execution slot preparation has no running native Sandbox");
@@ -716,8 +848,13 @@ export function createReserveClient(
         "test -f /home/coder/.factory-reserve/ready && cat /home/coder/.factory-reserve/ready",
       );
       if (ready.exitCode !== 0 || ready.stdout !== slot.id) return { ...observed, ready: false };
-      await standby(slot, input, identity, "pause", options);
-      return { ...observed, ready: true, factoryboxPaused: true };
+      const paused = await standby(slot, input, identity, "pause", options);
+      return {
+        ...observed,
+        ready: true,
+        factoryboxPaused: true,
+        ...(slot.projectRecipe ? { factoryboxStandby: standbyEvidence(slot, input, paused) } : {}),
+      };
     },
     async activate(slot, resources, options) {
       if (
@@ -808,6 +945,7 @@ export function createReserveClient(
       }
       const bundle = JSON.stringify({
         slotId: slot.id,
+        ...(slot.templateID ? { templateId: slot.templateID } : {}),
         podUID: slot.podUID,
         assignment: parsed,
         parentToken: assignment.stringData["parent-token"],
@@ -815,6 +953,19 @@ export function createReserveClient(
       });
       const input = factoryboxReserveInput(slot, labels);
       const identity = factoryboxWorkerIdentity.parse(slot.factoryboxIdentity);
+      if (slot.templateID) {
+        const captured = capturedTemplate.parse(slot.factoryboxStandby);
+        const current = await reserveState(input, identity);
+        z.object({
+          id: z.literal(captured.sandboxID),
+          owner: z.literal(captured.owner),
+          input_sha256: z.literal(captured.inputSHA256),
+          pause: z.object({
+            snapshot_id: z.literal(captured.snapshotID),
+            checkpoint_sha256: z.literal(captured.checkpointSHA256),
+          }),
+        }).parse(current.record);
+      }
       const state = await standby(slot, input, identity, "resume", options);
       const activated = await reserveGuestCommand(
         input,

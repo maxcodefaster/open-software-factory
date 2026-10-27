@@ -3,6 +3,18 @@ export type ReserveState = "creating" | "ready" | "assigned" | "retiring" | "del
 
 export interface ExecutionSlot {
   readonly id: string;
+  readonly projectID?: string;
+  readonly stagingAttemptID?: string;
+  readonly revision?: string;
+  readonly templateID?: string | null;
+  readonly templateKey?: string;
+  readonly seedExpiresAt?: string;
+  readonly projectRecipe?: unknown;
+  readonly sourceImportSHA256?: string | null;
+  readonly sourceImportObservation?: unknown;
+  readonly factoryboxForkRequest?: unknown;
+  readonly factoryboxForkAttempted?: boolean;
+  readonly factoryboxStandby?: unknown;
   readonly role: ReserveRole;
   readonly state: ReserveState;
   readonly runtimeHostImage: string;
@@ -23,7 +35,7 @@ export interface ExecutionSlot {
 }
 
 export interface ReservePolicy {
-  readonly readyPerRole: number;
+  readonly readyTarget: number;
   readonly maxSlots: number;
   readonly creationConcurrency: number;
   readonly maxExecutionSlots: number;
@@ -33,7 +45,7 @@ export interface ReservePolicy {
 }
 
 export const defaultReservePolicy: ReservePolicy = {
-  readyPerRole: 1,
+  readyTarget: 2,
   maxSlots: 2,
   creationConcurrency: 1,
   maxExecutionSlots: 16,
@@ -47,9 +59,9 @@ export const defaultReservePolicy: ReservePolicy = {
 export function requireReservePolicy(value: ReservePolicy): ReservePolicy {
   if (
     Object.values(value).some((number) => !Number.isSafeInteger(number) || number < 0) ||
-    value.readyPerRole > 4 ||
+    value.readyTarget > 8 ||
     value.maxSlots > 8 ||
-    value.maxSlots < 2 * value.readyPerRole ||
+    value.maxSlots < value.readyTarget ||
     value.creationConcurrency < 1 ||
     value.creationConcurrency > 2 ||
     value.maxExecutionSlots < value.maxSlots ||
@@ -85,7 +97,7 @@ export function reserveCreationCount(
   return Math.max(
     0,
     Math.min(
-      policy.readyPerRole - counts.matching,
+      policy.readyTarget - counts.matching,
       policy.creationConcurrency - counts.creating,
       policy.maxSlots - counts.spare,
       policy.maxExecutionSlots - counts.spare - counts.execution,

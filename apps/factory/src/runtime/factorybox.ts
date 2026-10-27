@@ -27,6 +27,7 @@ import {
   executeFactoryboxOperation,
   type FactoryboxOperation,
   type FactoryboxWorkerIdentity,
+  factoryboxOperation,
   factoryboxWorkerIdentity,
   inspectFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -312,7 +313,9 @@ export function createFactoryboxExecution(
     if (operation.completed) return;
     // Both unmount release and native retirement continue only their original
     // persisted ownership. A lost reply never selects new paths or credentials.
-    await releaseFactoryboxRuntime(saved.request, saved.identity, false, run);
+    const [fork] = await connection`SELECT id FROM factory.execution_slot
+      WHERE assigned_attempt_id=${attemptID} AND template_id IS NOT NULL`;
+    if (!fork) await releaseFactoryboxRuntime(saved.request, saved.identity, false, run);
     if (!operation.attempted) await attempted(connection, operation);
     const result = await executeFactoryboxOperation(
       factoryboxRuntimeRequest(saved.request),
@@ -526,6 +529,8 @@ export function createFactoryboxExecution(
               runtimeHostImage: string;
               slotID: string | null;
               slotIdentity: unknown;
+              slotForkRequest: unknown;
+              slotStandby: unknown;
               workerID: string;
               workspaceID: string | null;
               projectID: string;
@@ -536,6 +541,7 @@ export function createFactoryboxExecution(
           >`
           SELECT attempt.state,attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.kubernetes_uid AS "podUID",
             artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",slot.id AS "slotID",slot.factorybox_identity AS "slotIdentity",
+            slot.factorybox_fork_request AS "slotForkRequest",slot.factorybox_standby AS "slotStandby",
             attempt.factorybox_worker_id AS "workerID",attempt.workspace_id AS "workspaceID",
             attempt.project_id AS "projectID",attempt.generation,
             attempt.kubernetes_namespace AS namespace,attempt.kubernetes_pod_name AS "podName"
@@ -608,7 +614,54 @@ export function createFactoryboxExecution(
             await connection`UPDATE factory.factorybox_runtime SET identity=${JSON.stringify(identity)}::text::jsonb WHERE runtime_attempt_id=${attemptID} AND identity IS NULL`;
             saved.identity = identity;
           }
-          const prepared = await preparation(connection, attemptID, saved);
+          let prepared: { bundle: string };
+          if (attempt.slotForkRequest) {
+            const fork = factoryboxOperation.parse(attempt.slotForkRequest);
+            if (fork.action !== "fork" || fork.sandboxID !== request.sandboxID)
+              throw new Error("Assigned Fork differs from its retained native intent");
+            const target = await executeFactoryboxOperation(
+              factoryboxRuntimeRequest(request),
+              identity,
+              { action: "state", sandboxID: request.sandboxID },
+              run,
+              factoryboxRuntimeDeclaration(request),
+            );
+            if (!target.confirmed) throw new Error("Assigned Fork observation is unavailable");
+            const captured = z.object({ owner: z.string() }).parse(attempt.slotStandby);
+            const record = z
+              .object({
+                record: z.object({
+                  id: z.literal(request.sandboxID),
+                  owner: z.literal(captured.owner),
+                  input_sha256: z.string(),
+                  fork: z.object({
+                    source_id: z.literal(fork.sourceSandboxID),
+                    checkpoint_id: z.literal(fork.snapshotID),
+                    checkpoint_sha256: z.literal(fork.checkpointSHA256),
+                  }),
+                  start: z.object({ completed_at: z.string().min(1) }),
+                }),
+              })
+              .parse(JSON.parse(target.stdout)).record;
+            const adoption = await intent(connection, attemptID, "prepare");
+            if (!adoption.completed) {
+              if (!adoption.attempted) await attempted(connection, adoption);
+              await completed(connection, adoption, {
+                version: 1,
+                kind: "adopted-fork",
+                sandboxID: record.id,
+                owner: record.owner,
+                inputSHA256: record.input_sha256,
+                fork,
+              });
+            }
+            // Fork has a real native Start record, but no private input mount
+            // pair. The following Start is observation-only, never extraction
+            // or another Start mutation against the copied running processes.
+            prepared = {
+              bundle: `/var/lib/sysbox/fixed-store/data/store/input/${request.sandboxID}/bundle`,
+            };
+          } else prepared = await preparation(connection, attemptID, saved);
           await perform(
             connection,
             attemptID,

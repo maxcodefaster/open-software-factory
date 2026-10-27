@@ -245,9 +245,12 @@ and no Coder control plane or generic runtime provider layer.
 One exact consumer image contains ordinary execution, OpenCode and Forgejo Verification tools.
 Assignments select role processes and credentials; the Developer IDE, source service and browser
 tools remain separate artifacts. A persisted Runtime Attempt keeps its image through
-later publication. Fresh Staging and Verification may consume never-used prepared slots. A used
-slot never returns to the reserve, and no running Pod swaps its PVC. Existing Workspaces retain
-their own source and data identities. The local reserve target is zero.
+later publication. Eligible fresh Staging and Verification share two unused paused Forks of a
+clean Project template derived from healthy promoted Staging. The template has no Factory or Git
+transport grants; only empty Staging Runtime Environments are eligible. Assignment delivers fresh
+authority after Resume, and used slots are replaced rather than returned to the pool. Existing
+Workspaces keep their canonical source and data identities. The local and Helm defaults request
+two standby Forks, not a two-running-Sandbox limit. See [the ownership and recovery decision](adr/0022-factorybox-workspace-execution.md).
 
 The IDE's Git tab operates only on the selected developer's Personal Workspace. Status and file diffs
 are reads; Commit, Fetch and Pull use authenticated, persisted command identities. Git runs as the
