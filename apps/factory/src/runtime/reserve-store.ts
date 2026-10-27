@@ -83,6 +83,16 @@ export function createReserveStore(
         `SELECT ${fields} FROM factory.execution_slot WHERE state IN ('creating','retiring') AND reconcile_after<=now() ORDER BY created_at,id LIMIT ${policy.maxSlots}`,
       );
     },
+    async get(sql: SQL, id: string) {
+      return (
+        (
+          await sql.unsafe<ExecutionSlot[]>(
+            `SELECT ${fields} FROM factory.execution_slot WHERE id=$1`,
+            [id],
+          )
+        )[0] ?? null
+      );
+    },
     // Call in the transaction that inserts the immutable Runtime Attempt.
     async admit(
       sql: SQL,

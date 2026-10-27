@@ -69,53 +69,54 @@ export function createExecutionReserve(
     for (const planned of due) {
       if (closed) return;
       await withSlotLock(planned.id, async (sql) => {
-        const [state] = await sql<
-          Array<{ state: string }>
-        >`SELECT state FROM factory.execution_slot WHERE id=${planned.id}`;
-        if (state?.state !== planned.state) return;
+        // Another controller can finish preparation without changing "creating"
+        // while this one waits. Start admission and the adapter must use the
+        // same current preparation, never the pre-lock plan.
+        const slot = await store.get(sql, planned.id);
+        if (!slot || slot.state !== planned.state) return;
         try {
-          if (planned.state === "retiring") {
-            await adapter.retire(planned, {
-              intendDelete: () => store.intendDelete(sql, planned.id),
-              intendRetirement: (request) => store.intendRetirement(sql, planned.id, request),
+          if (slot.state === "retiring") {
+            await adapter.retire(slot, {
+              intendDelete: () => store.intendDelete(sql, slot.id),
+              intendRetirement: (request) => store.intendRetirement(sql, slot.id, request),
               completeRetirement: (observation) =>
-                store.completeRetirement(sql, planned.id, observation),
+                store.completeRetirement(sql, slot.id, observation),
             });
-            await store.retired(sql, planned.id);
+            await store.retired(sql, slot.id);
             requested = true;
           } else {
-            const startAllowed = await store.intendStart(sql, planned.id);
-            const observed = await adapter.prepare(planned, {
+            const startAllowed = await store.intendStart(sql, slot.id);
+            const observed = await adapter.prepare(slot, {
               startAllowed,
-              intendStandby: (action) => store.intendStandby(sql, planned.id, action),
+              intendStandby: (action) => store.intendStandby(sql, slot.id, action),
               provision: (resources) =>
                 worker.provision(
                   resources,
-                  factoryboxRuntimeProfile.parse(planned.factoryboxProfile),
-                  planned.runtimeHostImage,
+                  factoryboxRuntimeProfile.parse(slot.factoryboxProfile),
+                  slot.runtimeHostImage,
                 ),
             });
             if (observed.factoryboxIdentity)
               await rememberFactoryboxIdentity(
                 sql,
-                planned.workerID,
+                slot.workerID,
                 observed.factoryboxIdentity as Parameters<typeof rememberFactoryboxIdentity>[2],
               );
-            await store.observe(sql, planned.id, observed);
-            if (observed.failed) await store.retire(sql, planned.id);
+            await store.observe(sql, slot.id, observed);
+            if (observed.failed) await store.retire(sql, slot.id);
             if (observed.ready || observed.failed) requested = true;
           }
         } catch (cause) {
           // Reconciliation errors are ephemeral operator diagnostics, not
           // authorization to replay an uncertain native command.
           console.error("Factorybox reserve reconciliation deferred", {
-            slotID: planned.id,
-            state: planned.state,
+            slotID: slot.id,
+            state: slot.state,
             error: (cause instanceof Error ? cause.message : "Native outcome is unconfirmed").slice(
               -2000,
             ),
           });
-          await store.defer(sql, planned.id);
+          await store.defer(sql, slot.id);
         }
       });
     }
