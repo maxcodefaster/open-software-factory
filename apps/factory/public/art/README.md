@@ -83,3 +83,14 @@ The `mcp/*.webp` files are separately generated connection illustrations in the 
 They use landscape crops for Sentry, Datadog and custom sources. They depict connectivity, not
 live authorization or provider endorsements. Exact generation prompts are recorded in adjacent
 `.webp.json` sidecars.
+
+## Shared library cover catalog
+
+The `library/` directory contains thirty newly generated illustrations in the established
+cut-paper and woodcut print style. Each has a 384 × 512 portrait crop for Skills and a 768 × 512
+landscape crop for MCP connections. These are two crops of each illustration, not sixty distinct
+generated images. Existing Skill and provider covers remain separate.
+
+Generation used the configured development image API with existing Factory covers as style
+references. Each `.webp.json` sidecar records the exact prompt, generation timestamp, source
+digest and crop. The application serves the finished local files and never calls an image model.

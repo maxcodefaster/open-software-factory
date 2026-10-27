@@ -1,0 +1,17 @@
+{
+  "prompt": "Use case: stylized-concept\nAsset type: a cover illustration for Factory's shared Skill and MCP catalog.\nInput images: image 1 and image 2 are style references only. Preserve their reductive cut-paper and carved woodcut print character, restrained ink palette, bold silhouettes, tactile paper texture and imperfect printed edges. Do not copy their subjects or compositions.\nPrimary request: create ONE new illustration of the subject specified below, as a finished small-press editorial print. The artwork must have a distinct, considered composition that is identifiable at thumbnail size. This is a full-bleed illustration, not a logo, icon, photograph, interface, book mockup or contact sheet.\nCanvas: SQUARE. Compose the important subject in the central area shared by a centered 3:4 portrait crop and a centered 3:2 landscape crop. Broad shapes may reach the canvas edges; the central composition must survive both crops. No surrounding frame or margins.\nStyle: layered opaque cut-paper shapes and carved ink surfaces, subtle authentic mottled ink-on-paper texture, strong negative space. Confident limited shapes, not many tiny elements. Flat printmaking, no glossy gradients or rendered drop shadows.\nPalette: warm chalk, river blue, deep blue-green, moss and olive, straw ochre, restrained muted brick red. Use only a few of these colors per image. Follow the subject's dominant ground. The family must include both dark and light prints.\nConstraints: absolutely no text, words, letters, digits, logos, watermarks, recognizable branded symbols, badges, checkmarks, fake code, computer screens, device mockups, people, faces or realistic photographs. No decorative stars or status indicators. Nothing in this image claims a connection status, endorsement or capability.\n\nSubject: Four very large interlocking irregular fields of chalk, olive, blue-green and muted brick meet along a few confident seams. One ochre inset. Full-bleed abstract print, no grid, map labels or tiny mosaic.\n",
+  "createdAt": "2026-10-27T12:02:33.360Z",
+  "name": "Patchwork fields",
+  "generatedWith": "configured image-api launcher",
+  "sourceSha256": "3f305a1362264885bda6d14310bcd355bcea7ea8543a15c4512e80a2d6032ed2",
+  "crop": {
+    "x": 0,
+    "y": 209,
+    "width": 1254,
+    "height": 836
+  },
+  "dimensions": {
+    "width": 768,
+    "height": 512
+  }
+}

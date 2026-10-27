@@ -1,0 +1,17 @@
+{
+  "prompt": "Use case: stylized-concept\nAsset type: a cover illustration for Factory's shared Skill and MCP catalog.\nInput images: image 1 and image 2 are style references only. Preserve their reductive cut-paper and carved woodcut print character, restrained ink palette, bold silhouettes, tactile paper texture and imperfect printed edges. Do not copy their subjects or compositions.\nPrimary request: create ONE new illustration of the subject specified below, as a finished small-press editorial print. The artwork must have a distinct, considered composition that is identifiable at thumbnail size. This is a full-bleed illustration, not a logo, icon, photograph, interface, book mockup or contact sheet.\nCanvas: SQUARE. Compose the important subject in the central area shared by a centered 3:4 portrait crop and a centered 3:2 landscape crop. Broad shapes may reach the canvas edges; the central composition must survive both crops. No surrounding frame or margins.\nStyle: layered opaque cut-paper shapes and carved ink surfaces, subtle authentic mottled ink-on-paper texture, strong negative space. Confident limited shapes, not many tiny elements. Flat printmaking, no glossy gradients or rendered drop shadows.\nPalette: warm chalk, river blue, deep blue-green, moss and olive, straw ochre, restrained muted brick red. Use only a few of these colors per image. Follow the subject's dominant ground. The family must include both dark and light prints.\nConstraints: absolutely no text, words, letters, digits, logos, watermarks, recognizable branded symbols, badges, checkmarks, fake code, computer screens, device mockups, people, faces or realistic photographs. No decorative stars or status indicators. Nothing in this image claims a connection status, endorsement or capability.\n\nSubject: Several broad irregular overlapping cut-paper segments leave one clear central rounded opening. Warm ochre ground, river-blue and chalk segments with moss edges. Not a camera shutter, gear or logo.\n",
+  "createdAt": "2026-10-27T12:02:03.536Z",
+  "name": "Carved aperture",
+  "generatedWith": "configured image-api launcher",
+  "sourceSha256": "9c876c8e87ef07c6b81ef338ad9f3f4a0c5732d932faaee98c937f6b3393db77",
+  "crop": {
+    "x": 156.75,
+    "y": 0,
+    "width": 940.5,
+    "height": 1254
+  },
+  "dimensions": {
+    "width": 384,
+    "height": 512
+  }
+}
