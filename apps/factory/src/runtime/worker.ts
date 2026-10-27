@@ -6,6 +6,7 @@ import {
   type KubernetesClient,
   requireRuntimePodArtifacts,
 } from "../../../../packages/runtime-kubernetes/src/client";
+import { withCommandDeadline } from "../../../../packages/runtime-kubernetes/src/command";
 import {
   factoryboxLocation,
   factoryboxSharedLabels,
@@ -21,6 +22,26 @@ import {
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | TransactionSql;
+
+// All Sandboxes share one native controller lock. Keep its commands ordered
+// across reserve, execution and retirement controllers, including other Factory
+// processes connected to this installation's database.
+export async function withFactoryboxWorkerLock<T>(
+  sql: Database["client"],
+  action: () => Promise<T>,
+  deadline = performance.now() + 420_000,
+) {
+  const remaining = Math.ceil(deadline - performance.now());
+  if (remaining <= 0) throw new Error("Factorybox worker deadline expired before admission");
+  await sql`SELECT set_config('lock_timeout',${`${remaining}ms`},false)`;
+  await sql`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
+  try {
+    return await withCommandDeadline(deadline, action);
+  } finally {
+    await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
+  }
+}
+
 type Worker = {
   id: string;
   nodeName: string | null;

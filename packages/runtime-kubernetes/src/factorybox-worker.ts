@@ -419,26 +419,36 @@ export async function executeFactoryboxOperation(
     "--worker-epoch",
     admitted.epoch,
   ];
+  async function invoke(args: string[], observation: boolean) {
+    for (;;) {
+      const remainingMS = deadline - performance.now();
+      if (remainingMS <= 0) throw new Error("Factorybox lifecycle deadline expired before command");
+      const result = await run(
+        ["exec", input.podName, "-n", input.namespace, "-c", "worker", "--", ...args],
+        undefined,
+        {
+          timeoutMS: observation ? Math.min(remainingMS, 15_000) : remainingMS,
+          outputBytes: 4 * 1024 ** 2,
+        },
+      );
+      if (
+        !observation ||
+        result.exitCode !== 1 ||
+        result.stdout.trim() !== "" ||
+        !/^resource temporarily unavailable(?:\r?\ncommand terminated with exit code 1)?\s*$/.test(
+          result.stderr.trim(),
+        )
+      )
+        return result;
+      // An old native command can outlive Factory and its PostgreSQL lock.
+      // Wait only through read-only observation. Never replay a mutation on
+      // this error, and revalidate the original worker before each new read.
+      await Bun.sleep(Math.max(0, Math.min(100, deadline - performance.now())));
+      await inspectFactoryboxWorker(input, admitted, run, declaration);
+    }
+  }
   if (op.action === "fork") {
-    const source = await run(
-      [
-        "exec",
-        input.podName,
-        "-n",
-        input.namespace,
-        "-c",
-        "worker",
-        "--",
-        ...command,
-        "state",
-        op.sourceSandboxID,
-      ],
-      undefined,
-      {
-        timeoutMS: Math.max(1, Math.min(deadline - performance.now(), 15_000)),
-        outputBytes: 4 * 1024 ** 2,
-      },
-    );
+    const source = await invoke([...command, "state", op.sourceSandboxID], true);
     if (source.exitCode !== 0)
       throw new Error(`Fork source observation is unconfirmed: ${source.stderr}`);
     const published = z.object({
@@ -489,15 +499,9 @@ export async function executeFactoryboxOperation(
   if (op.action === "retire-sandbox")
     args.push("--sandbox-owner", op.sandboxOwner, "--input-sha256", op.inputSHA256);
   if (op.action !== "capacity") args.push(op.sandboxID);
-  const remainingMS = deadline - performance.now();
-  if (remainingMS <= 0) throw new Error("Factorybox lifecycle deadline expired before mutation");
   // One invocation only. Lost output, nonzero exits and partial JSON retain the
   // original operation identity; they never authorize another Sandbox/epoch.
-  const result = await run(
-    ["exec", input.podName, "-n", input.namespace, "-c", "worker", "--", ...args],
-    undefined,
-    { timeoutMS: remainingMS, outputBytes: 4 * 1024 ** 2 },
-  );
+  const result = await invoke(args, op.action === "state" || op.action === "capacity");
   if (result.exitCode !== 0) return { confirmed: false as const, ...result };
   const output = JSON.parse(result.stdout) as {
     record?: {

@@ -33,7 +33,11 @@ import {
   runFactoryboxKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import type { RuntimeHub } from "./hub";
-import { factoryboxAllocation, rememberFactoryboxIdentity } from "./worker";
+import {
+  factoryboxAllocation,
+  rememberFactoryboxIdentity,
+  withFactoryboxWorkerLock,
+} from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"];
@@ -81,7 +85,11 @@ export function createFactoryboxExecution(
     const connection = database.coordination();
     try {
       await connection`SELECT pg_advisory_lock(hashtext(${`factorybox:${attemptID}`}))`;
-      return await deadlines.run(deadline, () => action(connection));
+      return await withFactoryboxWorkerLock(
+        connection,
+        () => deadlines.run(deadline, () => action(connection)),
+        deadline,
+      );
     } finally {
       try {
         await connection`SELECT pg_advisory_unlock(hashtext(${`factorybox:${attemptID}`}))`;

@@ -132,6 +132,69 @@ test("worker admission preserves the complete private store and finite worker ce
   ).toThrow();
 });
 
+test("native state waits for a busy worker without manufacturing a failed Sandbox", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  let observations = 0;
+  const run: typeof f.run = async (...args) => {
+    if (args[0].includes("state")) {
+      observations++;
+      if (observations === 1)
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "resource temporarily unavailable\ncommand terminated with exit code 1\n",
+        };
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({ record: { version: 1, id: "owned", phase: "paused" } }),
+      };
+    }
+    return f.run(...args);
+  };
+  const result = await executeFactoryboxOperation(
+    request,
+    identity,
+    { action: "state", sandboxID: "owned" },
+    run,
+  );
+  expect(result.confirmed).toBe(true);
+  expect(observations).toBe(2);
+});
+
+test("busy native mutations remain one-shot and retain their unconfirmed outcome", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  f.result({ exitCode: 1, stdout: "", stderr: "resource temporarily unavailable\n" });
+  const result = await executeFactoryboxOperation(
+    request,
+    identity,
+    { action: "resume", sandboxID: "owned", snapshotID: "1".repeat(32) },
+    f.run,
+  );
+  expect(result.confirmed).toBe(false);
+  expect(f.calls.filter((args) => args.includes("resume"))).toHaveLength(1);
+});
+
+test("busy observation cannot follow a replacement worker Pod", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  let observations = 0;
+  const run: typeof f.run = async (...args) => {
+    if (args[0].includes("state")) {
+      observations++;
+      f.pod.metadata.uid = "replacement";
+      return { exitCode: 1, stdout: "", stderr: "resource temporarily unavailable\n" };
+    }
+    return f.run(...args);
+  };
+  await expect(
+    executeFactoryboxOperation(request, identity, { action: "state", sandboxID: "owned" }, run),
+  ).rejects.toThrow();
+  expect(observations).toBe(1);
+});
+
 test("Fork pins its source owner and published checkpoint before creating a distinct target", async () => {
   const f = fixture();
   const identity = await inspectFactoryboxWorker(request, undefined, f.run);

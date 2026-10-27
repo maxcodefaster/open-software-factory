@@ -1,190 +1,223 @@
 import { expect, test } from "bun:test";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { runtimeAttemptSchema } from "../../apps/factory/src/api-contracts";
 import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
+import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { forgeUsername } from "../../packages/forge/src/access";
 import {
   defaultReservePolicy,
   type ExecutionSlot,
 } from "../../packages/runtime-domain/src/reserve";
-import { factoryboxWorkerIdentity } from "../../packages/runtime-kubernetes/src/factorybox-worker";
+import { configuredFactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
-  createReserveClient,
-  factoryboxReserveInput,
-  type ReserveClient,
-} from "../../packages/runtime-kubernetes/src/reserve";
+  factoryboxWorkerIdentity,
+  runFactoryboxKubernetes,
+} from "../../packages/runtime-kubernetes/src/factorybox-worker";
+import { factoryboxReserveInput } from "../../packages/runtime-kubernetes/src/reserve";
+import upstream from "../../upstream.json";
 import { editorFixtureNamespaces } from "../fixtures/editor-source-resources";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { removeOwnedFactoryboxFixture } from "../fixtures/factorybox-cleanup";
-import { factoryboxFixtureCommand, observeFactoryboxFixture } from "../fixtures/factorybox-runtime";
+import { observeFactoryboxFixture } from "../fixtures/factorybox-runtime";
+import { ownedPostgresServer } from "../fixtures/postgres-server";
 import { runtimeAccessCookie } from "../fixtures/runtime-access";
 import { ownedRuntimeRepository } from "../fixtures/runtime-repository";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
 
 test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
-  "clean slots recover lost create acknowledgement, assign once, refill and survive pre-activation Factory crash",
+  "real Factory Staging produces paused Forks and recovers an assigned Fork across Factory process loss",
   async () => {
-    const image = async (name: string) =>
-      (
-        (name === "runtime-host" ? process.env["FACTORY_RUNTIME_HOST_IMAGE"] : undefined) ??
-        (await readFile(`.factory/${name}-image`, "utf8"))
-      ).trim();
-    const images = {
-      staging: await image("runtime-host"),
-      verification: await image("runtime-host"),
+    const owner = crypto.randomUUID();
+    const artifacts = resolve(".factory/test-results/execution-reserve", owner);
+    const source = resolve(artifacts, "project");
+    await mkdir(resolve(source, ".devcontainer"), { recursive: true });
+    await mkdir(resolve(source, ".factory"));
+    const progress = async (phase: string, detail: Record<string, unknown> = {}) => {
+      const event = { at: new Date().toISOString(), owner, phase, ...detail };
+      await appendFile(resolve(artifacts, "progress.jsonl"), `${JSON.stringify(event)}\n`, {
+        mode: 0o600,
+      });
+      console.log(`Factory Staging proof: ${JSON.stringify(event)}`);
     };
-    const proofID = crypto.randomUUID();
-    const artifacts = resolve(".factory/test-results/execution-reserve", proofID);
-    await mkdir(artifacts, { recursive: true });
+    await progress("setup");
+    await writeFile(
+      resolve(source, "server.js"),
+      'const nonce=require("node:crypto").randomUUID(),born=Date.now();let counter=0;setInterval(()=>counter++,25);require("node:http").createServer((req,res)=>{res.setHeader("content-type","application/json");res.end(JSON.stringify({nonce,pid:process.pid,born,counter}));}).listen(19472,"0.0.0.0");',
+    );
+    await writeFile(
+      resolve(source, ".factory/system.json"),
+      JSON.stringify({
+        version: 1,
+        primaryApp: "web",
+        apps: [
+          { id: "web", label: "App", command: ["node", "server.js"], port: 19472, healthPath: "/" },
+        ],
+      }),
+    );
+    await writeFile(
+      resolve(source, ".devcontainer/devcontainer.json"),
+      JSON.stringify({
+        image: upstream.node.image,
+        workspaceFolder: "/workspace/project",
+        workspaceMount: "source=/home/coder/project,target=/workspace/project,type=bind",
+        remoteUser: "node",
+        updateRemoteUserUID: false,
+        overrideCommand: true,
+        runArgs: ["--cap-drop=NET_RAW", "--cap-drop=SYS_PTRACE", "--cpus=1", "--memory=768m"],
+      }),
+    );
+    for (const args of [
+      ["init", "-b", "main"],
+      ["add", "."],
+      [
+        "-c",
+        "user.name=Factory",
+        "-c",
+        "user.email=factory@example.invalid",
+        "commit",
+        "-m",
+        "owned Factory pool proof",
+      ],
+    ]) {
+      const child = Bun.spawn(["git", "-C", source, ...args], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      if ((await child.exited) !== 0) throw new Error("Owned pool repository failed");
+    }
     for (const [name, path] of [
       ["fixture-source.ts", "test/support/execution-reserve.live.test.ts"],
-      ["prepare-source.py", "packages/runtime-kubernetes/src/factorybox/prepare.py"],
+      ["pool-source.ts", "apps/factory/src/runtime/reserve-controller.ts"],
+      ["runtime-source.ts", "apps/factory/src/runtime/controller.ts"],
     ] as const)
-      await writeFile(resolve(artifacts, name), await readFile(path, "utf8"), {
-        flag: "wx",
-        mode: 0o400,
-      });
-    const forgeHost = await ownedRuntimeRepository(artifacts, proofID);
-    const fixture = await factoryProcess(
-      { runtimeHostImage: images.staging, forgejoToken: forgeHost.token },
-      {
-        FACTORY_FORGEJO_ADMIN_TOKEN: forgeHost.token,
-        FACTORY_FORGEJO_API_URL: `${forgeHost.origin}/api/v1/`,
-        FACTORY_FORGEJO_OWNER: forgeHost.owner,
-        FACTORY_EXECUTION_RESERVE_TARGET: "1",
-      },
-    ).catch(async (cause) => {
-      await forgeHost.dispose();
-      throw cause;
-    });
-    const database = fixture.connect();
-    const before = await editorFixtureNamespaces();
-    const client = createReserveClient();
-    const policy = { ...defaultReservePolicy, retryMS: 1_000 };
-    let cookie = "";
-    let manager: ReturnType<typeof createExecutionReserve> | undefined;
-    let lost: { id: string; namespaceUID: string; podUID: string; claimUID: string } | undefined;
-    let preparationFailures = 0;
-    let passed = false;
-    const cleanSlots = new Set<string>();
-    const adapter: ReserveClient = {
-      ...client,
-      async prepare(slot, options) {
-        const [intent] = await database.client<
-          Array<{ state: string }>
-        >`SELECT state FROM factory.execution_slot WHERE id=${slot.id}`;
-        expect(intent?.state).toBe("creating");
-        if (!options) throw new Error("Owned reserve proof requires durable lifecycle callbacks");
-        const result = await client
-          .prepare(slot, {
-            ...options,
-            async intendStandby(action) {
-              if (action === "pause") {
-                const target = {
-                  input: factoryboxReserveInput(slot),
-                  identity: factoryboxWorkerIdentity.parse(slot.factoryboxIdentity),
-                };
-                for (const args of [
-                  ["docker", "ps", "--all", "--quiet"],
-                  ["docker", "volume", "ls", "--quiet"],
-                ])
-                  expect((await factoryboxFixtureCommand(target, args)).trim()).toBe("");
-                expect(
-                  (
-                    await factoryboxFixtureCommand(target, [
-                      "sh",
-                      "-ec",
-                      "test ! -e /home/coder/project && test ! -e /home/coder/connector-state && echo clean",
-                    ])
-                  ).trim(),
-                ).toBe("clean");
-                cleanSlots.add(slot.id);
-              }
-              return options.intendStandby(action);
-            },
-          })
-          .catch(async (cause: unknown) => {
-            await writeFile(
-              resolve(artifacts, `prepare-failure-${++preparationFailures}.json`),
-              JSON.stringify({
-                slotID: slot.id,
-                attemptedStart: slot.factoryboxStartAttempted,
-                prepared: Boolean(slot.factoryboxPreparation),
-                error: (cause instanceof Error ? cause.message : "Native preparation failed")
-                  .replaceAll(forgeHost.token, "<REDACTED>")
-                  .slice(-4000),
-              }),
-              { flag: "wx", mode: 0o600 },
-            );
-            throw cause;
-          });
-        if (!lost) {
-          lost = {
-            id: slot.id,
-            namespaceUID: result.namespaceUID,
-            podUID: result.podUID,
-            claimUID: result.claimUID,
-          };
-          throw new Error("Owned lost external-create acknowledgement");
-        }
-        return result;
-      },
-    };
-    const slots = () =>
-      database.client.unsafe<ExecutionSlot[]>(
-        'SELECT id,role,state,runtime_host_image AS "runtimeHostImage",factorybox_worker_id AS "workerID",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted",factorybox_delete_attempted AS "factoryboxDeleteAttempted" FROM factory.execution_slot ORDER BY created_at,id',
-      );
+      await writeFile(resolve(artifacts, name), await readFile(path), { flag: "wx", mode: 0o400 });
+    const image =
+      process.env["FACTORY_RUNTIME_HOST_IMAGE"] ??
+      (await readFile(".factory/runtime-host-image", "utf8")).trim();
+    const images = { staging: image, verification: image };
+    const profile = configuredFactoryboxRuntimeProfile();
+    const postgres = await ownedPostgresServer();
+    const previousPostgres = process.env["FACTORY_TEST_POSTGRES"];
+    let forge: Awaited<ReturnType<typeof ownedRuntimeRepository>>;
+    let host: Awaited<ReturnType<typeof factoryProcess>>;
+    let disposeForge: (() => Promise<void>) | undefined;
     try {
-      manager = createExecutionReserve(database, images, policy, adapter);
-      const preparedAt = performance.now();
-      await manager.reconcile();
-      expect(lost).toBeDefined();
-      const lostOutcome = lost;
-      if (!lostOutcome) throw new Error("Expected lost external-create acknowledgement");
-      expect((await slots()).find((slot) => slot.id === lostOutcome.id)?.podUID).toBeNull();
-      await manager.close();
-      manager = createExecutionReserve(database, images, policy, adapter);
-      await manager.start();
-      const prepared = await eventually(
-        slots,
-        (rows) => rows.filter((slot) => slot.state === "ready").length === 2,
-        "Owned clean reserve did not become ready",
+      process.env["FACTORY_TEST_POSTGRES"] = JSON.stringify(postgres.identity);
+      forge = await ownedRuntimeRepository(artifacts, owner, source);
+      disposeForge = () => forge.dispose();
+      host = await factoryProcess(
+        { runtimeHostImage: image, forgejoToken: forge.token },
+        {
+          FACTORY_FORGEJO_ADMIN_TOKEN: forge.token,
+          FACTORY_FORGEJO_API_URL: `${forge.origin}/api/v1/`,
+          FACTORY_FORGEJO_OWNER: forge.owner,
+          FACTORY_EXECUTION_RESERVE_TARGET: "2",
+        },
+      );
+    } catch (cause) {
+      const cleanup = await Promise.allSettled([disposeForge?.(), postgres.dispose()]);
+      if (cleanup.some((result) => result.status === "rejected"))
+        await progress("setup-cleanup-incomplete").catch(() => {});
+      throw cause;
+    } finally {
+      if (previousPostgres === undefined) delete process.env["FACTORY_TEST_POSTGRES"];
+      else process.env["FACTORY_TEST_POSTGRES"] = previousPostgres;
+    }
+    const database = host.connect();
+    const store = createReserveStore(defaultReservePolicy, images, profile);
+    const before = await editorFixtureNamespaces();
+    const projectID = crypto.randomUUID();
+    const save = (name: string, value: unknown) =>
+      writeFile(resolve(artifacts, name), JSON.stringify(value, null, 2), {
+        flag: "wx",
+        mode: 0o600,
+      });
+    let cookie = "";
+    let passed = false;
+    let preparationLock: ReturnType<typeof host.connect>["client"] | undefined;
+    let slotLock: ReturnType<typeof host.connect>["client"] | undefined;
+    let lockedSlot = "";
+    let retiring: ReturnType<typeof createExecutionReserve> | undefined;
+    const redact = (value: string) => value.replaceAll(forge.token, "<REDACTED>").slice(-4000);
+    const headers = () => ({ cookie, origin: host.base, "content-type": "application/json" });
+    async function slots() {
+      const ids = await database.client<Array<{ id: string }>>`
+        SELECT id FROM factory.execution_slot WHERE project_id=${projectID} ORDER BY created_at,id`;
+      return (await Promise.all(ids.map((row) => store.get(database.client, row.id)))).filter(
+        (row): row is ExecutionSlot => row !== null,
+      );
+    }
+    async function attempts() {
+      return z
+        .object({ attempts: z.array(runtimeAttemptSchema) })
+        .parse(
+          await serverCall(
+            callFactoryFunction(
+              host.base,
+              "getRuntimeAttempts",
+              [projectID],
+              headers(),
+              AbortSignal.timeout(15_000),
+            ),
+          ),
+        ).attempts;
+    }
+    async function ready(attemptID: string) {
+      return eventually(
+        async () => {
+          const found = (await attempts()).find((attempt) => attempt.id === attemptID);
+          if (found && ["failed", "cleanup-failed"].includes(found.state))
+            throw new Error(`Owned Staging failed: ${redact(found.failure ?? found.state)}`);
+          return found;
+        },
+        (value) => value?.state === "ready",
+        "Original admitted Staging did not become ready",
         420_000,
       );
-      const preparationMS = Math.round(performance.now() - preparedAt);
-      const recovered = prepared.find((slot) => slot.id === lostOutcome.id);
-      expect(recovered).toMatchObject({
-        namespaceUID: lostOutcome.namespaceUID,
-        podUID: lostOutcome.podUID,
-        claimUID: lostOutcome.claimUID,
+    }
+    async function stop(attemptID: string) {
+      await serverCall(
+        callFactoryFunction(
+          host.base,
+          "stopRuntimeAttempt",
+          [attemptID],
+          headers(),
+          AbortSignal.timeout(30_000),
+        ),
+      );
+      await eventually(
+        () => database.client<Array<{ state: string }>>`
+        SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`,
+        (rows) => rows[0]?.state === "stopped",
+        "Owned Staging Stop remains unsettled",
+        120_000,
+      );
+    }
+    async function app(attemptID: string) {
+      const access = await runtimeAccessCookie(host.base, cookie, attemptID, "app");
+      const response = await fetch(`${host.base}/runtime/${attemptID}/app/`, {
+        headers: { cookie: access },
       });
-      const selected = prepared.find((slot) => slot.role === "staging");
-      if (!selected?.podUID || !selected.namespaceUID || !selected.claimUID)
-        throw new Error("Ready reserve lacks complete owned resource outcomes");
-      for (const slot of prepared.filter((value) => value.state === "ready")) {
-        expect(cleanSlots.has(slot.id)).toBe(true);
-        const paused = await observeFactoryboxFixture({
-          input: factoryboxReserveInput(slot),
-          identity: factoryboxWorkerIdentity.parse(slot.factoryboxIdentity),
-        });
-        expect(paused.record.phase).toBe("paused");
-        expect(paused.record["pause"]).toMatchObject({
-          snapshot_id: slot.id.replaceAll("-", ""),
-          after: { anon: 0 },
-          snapshot: { resident_bytes_after: 0 },
-        });
-      }
-      expect(new Set(prepared.map((slot) => slot.workerID)).size).toBe(1);
-      expect(new Set(prepared.map((slot) => slot.podUID)).size).toBe(1);
-      let server = await fixture.start();
-      cookie = await fixture.signIn();
+      expect(response.status).toBe(200);
+      return z
+        .object({ nonce: z.uuid(), pid: z.number(), born: z.number(), counter: z.number() })
+        .parse(await response.json());
+    }
+    try {
+      // Image prebuild has its own live lane. Hold its admission in this owned
+      // database so a restart cannot add a third running Sandbox while this
+      // proof exercises Staging plus its clean template.
+      preparationLock = database.coordination();
+      await preparationLock`SELECT pg_advisory_lock(hashtext('project-image-preparation'))`;
+      let server = await host.start();
+      cookie = await host.signIn();
       const session = z
         .object({ session: z.object({ user: z.object({ id: z.uuid() }) }) })
-        .parse(await authenticatedBootstrap(fixture.base, { cookie }));
-      await forgeHost.execute([
+        .parse(await authenticatedBootstrap(host.base, { cookie }));
+      await forge.execute([
         "admin",
         "user",
         "create",
@@ -192,219 +225,280 @@ test.skipIf(process.env["FACTORY_RUN_EXECUTION_RESERVE_PROOF"] !== "1")(
         forgeUsername(session.session.user.id),
         "--random-password",
         "--email",
-        `${proofID}@reserve-proof.invalid`,
+        `${owner}@pool-proof.invalid`,
         "--must-change-password=false",
       ]);
-      const projectID = crypto.randomUUID();
-      await writeFile(
-        resolve(artifacts, "intent.json"),
-        JSON.stringify({
-          proofID,
-          projectID,
-          factoryID: fixture.id,
-          forgeContainer: forgeHost.container,
-          repository: forgeHost.repository,
-          prepared: prepared.map(({ id, namespace, namespaceUID, podUID, claimUID, role }) => ({
-            id,
-            namespace,
-            namespaceUID,
-            podUID,
-            claimUID,
-            role,
-          })),
-        }),
+      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by,desktop_background_key)
+        VALUES(${projectID},${`pool-${owner}`},'Owned Factory Staging',${forge.repositoryURL},'main',
+          '.devcontainer/devcontainer.json',${session.session.user.id},'gulf-of-marseille')`;
+      await save("intent.json", {
+        owner,
+        factoryID: host.id,
+        projectID,
+        repository: forge.repository,
+        postgres: postgres.identity,
+        profile,
+        image,
+        liveStagingRequired: true,
+      });
+      await progress("staging-requested", { projectID });
+
+      // Discard the first client reply after intent is committed. Observe the
+      // same admitted Attempt; never commission a second ensureStaging call.
+      const response = new AbortController();
+      const initialRequest = serverCall(
+        callFactoryFunction(host.base, "ensureStaging", [projectID], headers(), response.signal),
       );
-      await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`reserve-${proofID}`},'Owned reserve journey',${forgeHost.repositoryURL},'main','.devcontainer/devcontainer.json',${session.session.user.id})`;
-      const startedAt = performance.now();
-      const pending = callFactoryFunction(
-        fixture.base,
-        "ensureStaging",
-        [projectID],
-        { cookie, origin: fixture.base, "content-type": "application/json" },
-        AbortSignal.timeout(180_000),
-      ).catch(() => null);
-      const [assigned] = await eventually(
-        async () =>
-          database.client<
-            Array<{ id: string; state: string; generation: string; namespace: string }>
-          >`SELECT id,state,generation,kubernetes_namespace AS namespace FROM factory.runtime_attempt WHERE project_id=${projectID}`,
+      void initialRequest.catch(() => {});
+      const [initial] = await eventually(
+        () => database.client<Array<{ id: string }>>`
+        SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID}`,
         (rows) => rows.length === 1,
-        "Owned runtime intent missing",
+        "Initial Staging intent missing",
+        30_000,
       );
-      if (!assigned) throw new Error("Owned runtime intent missing");
-      expect(assigned.namespace).toBe(selected.namespace);
-      expect(assigned.state).toBe("create-intended");
-      await fixture.kill(server);
-      await pending;
-      server = await fixture.start();
-      const ready = await eventually(
-        async () => {
-          const result = z
-            .object({ attempts: z.array(runtimeAttemptSchema) })
-            .parse(
-              await serverCall(
-                callFactoryFunction(
-                  fixture.base,
-                  "getRuntimeAttempts",
-                  [projectID],
-                  { cookie, origin: fixture.base, "content-type": "application/json" },
-                  AbortSignal.timeout(180_000),
-                ),
-              ),
-            );
-          const attempt = result.attempts.find((candidate) => candidate.id === assigned.id);
-          if (!attempt || ["failed", "stopped", "cleanup-failed"].includes(attempt.state))
-            throw new Error(
-              `Owned reserved runtime unavailable: ${attempt?.failure ?? attempt?.state ?? "missing"}`,
-            );
-          return attempt;
-        },
-        (attempt) => attempt.state === "ready",
-        "Owned reserved runtime did not reconnect",
-        180_000,
-      );
-      expect(ready.id).toBe(assigned.id);
-      const [outcome] = await database.client<
-        Array<{ podUID: string; namespaceUID: string }>
-      >`SELECT kubernetes_uid AS "podUID",kubernetes_namespace_uid AS "namespaceUID" FROM factory.runtime_attempt WHERE id=${assigned.id}`;
-      expect(outcome).toEqual({ podUID: selected.podUID, namespaceUID: selected.namespaceUID });
-      const connectedMS = Math.round(performance.now() - startedAt);
-      const access = await runtimeAccessCookie(fixture.base, cookie, assigned.id, "app");
-      expect(
-        (
-          await fetch(`${fixture.base}/runtime/${assigned.id}/app/health`, {
-            headers: { cookie: access },
-          })
-        ).status,
-      ).toBe(200);
-      const refilled = await eventually(
+      if (!initial) throw new Error("Initial Staging identity missing");
+      response.abort();
+      await initialRequest.catch(() => {});
+      const firstReady = await ready(initial.id);
+      if (!firstReady) throw new Error("Live first Staging missing");
+      const firstApp = await app(initial.id);
+      await progress("staging-ready", { attemptID: initial.id });
+      const initialPool = await eventually(
         slots,
-        (rows) =>
-          rows.some(
-            (slot) => slot.role === "staging" && slot.state === "ready" && slot.id !== selected.id,
-          ),
-        "Reservation did not immediately trigger bounded refill",
-        180_000,
+        (rows) => rows.filter((row) => row.templateID && row.state === "ready").length === 2,
+        "Real healthy Staging never produced two paused Forks",
+        420_000,
       );
-      expect(refilled.filter((slot) => slot.state === "ready")).toHaveLength(2);
-      expect(refilled.find((slot) => slot.id === selected.id)).toMatchObject({
+      const poolReadyAt = Date.now();
+      const template = initialPool.find((row) => !row.templateID && row.state === "ready");
+      const unused = initialPool.filter((row) => row.templateID && row.state === "ready");
+      const selected = unused[0];
+      if (!template || !selected?.podUID)
+        throw new Error("Owned ready pool has no immutable worker");
+      expect(template.stagingAttemptID).toBe(initial.id);
+      expect(template.revision).toBe(forge.commit);
+      expect(new Set(initialPool.map((row) => row.workerID)).size).toBe(1);
+      for (const slot of unused) {
+        const state = await observeFactoryboxFixture({
+          input: factoryboxReserveInput(slot),
+          identity: factoryboxWorkerIdentity.parse(slot.factoryboxIdentity),
+        });
+        expect(state.record.phase).toBe("paused");
+        expect(state.record["pause"]).toMatchObject({
+          snapshot_id: slot.id.replaceAll("-", ""),
+          after: { anon: 0 },
+          snapshot: { resident_bytes_after: 0 },
+        });
+      }
+      await save("initial-live-staging.json", {
+        attemptID: initial.id,
+        app: firstApp,
+        templateID: template.id,
+        unusedSlotIDs: unused.map((row) => row.id),
+        poolReadyAt,
+      });
+      await progress("pool-ready", { templateID: template.id, unusedSlots: unused.length });
+
+      // Stop only this owned first Staging before consuming the pool. This
+      // keeps the native fixture below two running Sandboxes even while the
+      // replacement and its background template are prepared concurrently.
+      await stop(initial.id);
+      await progress("original-staging-stopped");
+      slotLock = database.coordination();
+      lockedSlot = selected.id;
+      await slotLock`SELECT pg_advisory_lock(hashtext(${`execution-slot:${lockedSlot}`}))`;
+      const replacementRequest = serverCall(
+        callFactoryFunction(
+          host.base,
+          "ensureStaging",
+          [projectID],
+          headers(),
+          AbortSignal.timeout(420_000),
+        ),
+      );
+      void replacementRequest.catch(() => {});
+      const [assigned] = await eventually(
+        () => database.client<Array<{ id: string; state: string; resumed: boolean }>>`
+        SELECT attempt.id,attempt.state,slot.factorybox_resume_attempted AS resumed
+        FROM factory.execution_slot slot JOIN factory.runtime_attempt attempt ON attempt.id=slot.assigned_attempt_id
+        WHERE slot.id=${selected.id}`,
+        (rows) => rows.length === 1,
+        "Factory did not assign the owned Fork",
+        30_000,
+      );
+      if (!assigned) throw new Error("Missing assigned Runtime Attempt");
+      expect(assigned.state).toBe("create-intended");
+      expect(assigned.resumed).toBe(false);
+      await progress("fork-assigned-before-resume", {
+        slotID: selected.id,
+        attemptID: assigned.id,
+      });
+      await host.kill(server);
+      await replacementRequest.catch(() => {});
+      await slotLock`SELECT pg_advisory_unlock(hashtext(${`execution-slot:${lockedSlot}`}))`;
+      await slotLock.end({ timeout: 1 });
+      slotLock = undefined;
+      lockedSlot = "";
+      const resumedAt = performance.now();
+      server = await host.start();
+      await ready(assigned.id);
+      const replacementApp = await app(assigned.id);
+      const resumedToUsefulMS = Math.round(performance.now() - resumedAt);
+      await progress("fork-ready-after-factory-restart", { resumedToUsefulMS });
+      expect(replacementApp.born).toBeLessThan(poolReadyAt);
+      expect(replacementApp.nonce).not.toBe(firstApp.nonce);
+      const retained = await store.assigned(database.client, assigned.id);
+      expect(retained).toMatchObject({
+        id: selected.id,
         state: "assigned",
         assignedAttemptID: assigned.id,
         podUID: selected.podUID,
         claimUID: selected.claimUID,
+        templateID: template.id,
       });
+      const [execution] = await database.client<Array<{ sandboxID: string; prepared: unknown }>>`
+        SELECT runtime.request->>'sandboxID' AS "sandboxID",operation.observation AS prepared
+        FROM factory.factorybox_runtime runtime JOIN factory.factorybox_lifecycle_operation operation
+          ON operation.runtime_attempt_id=runtime.runtime_attempt_id AND operation.action='prepare'
+        WHERE runtime.runtime_attempt_id=${assigned.id}`;
+      expect(execution?.sandboxID).toBe(`runtime-${selected.id.replaceAll("-", "")}`);
+      expect(execution?.prepared).toMatchObject({ kind: "adopted-fork" });
+      const [configuration] = await database.client<Array<{ declaration: unknown }>>`
+        SELECT declaration FROM factory.staging_configuration WHERE runtime_attempt_id=${assigned.id}`;
+      expect(configuration?.declaration).toMatchObject({
+        devcontainerPath: ".devcontainer/devcontainer.json",
+        processes: [{ name: "app", command: ["node", "server.js"] }],
+      });
+      const refilled = await eventually(
+        slots,
+        (rows) =>
+          rows.filter(
+            (row) =>
+              row.templateID && row.state === "ready" && row.stagingAttemptID === assigned.id,
+          ).length === 2,
+        "Replacement healthy Staging did not refresh its two paused Forks",
+        420_000,
+      );
+      expect(refilled.find((row) => row.id === selected.id)?.state).toBe("assigned");
       expect(
         await database.client`SELECT id FROM factory.development_workspace WHERE project_id=${projectID}`,
       ).toHaveLength(0);
       expect(await database.client`SELECT id FROM factory.agent_turn`).toHaveLength(0);
-      await manager.close();
-      manager = undefined;
-      expect(
-        (
-          await callFactoryFunction(
-            fixture.base,
-            "stopRuntimeAttempt",
-            [assigned.id],
-            { cookie, origin: fixture.base, "content-type": "application/json" },
-            AbortSignal.timeout(180_000),
-          )
-        ).ok,
-      ).toBe(true);
-      await eventually(
-        async () =>
-          database.client<
-            Array<{ state: string }>
-          >`SELECT state FROM factory.runtime_attempt WHERE id=${assigned.id}`,
-        (rows) => rows[0]?.state === "stopped",
-        "Owned reserved runtime cleanup incomplete",
-        120_000,
-      );
-      expect((await slots()).find((slot) => slot.id === selected.id)?.state).toBe("deleted");
-      await writeFile(
-        resolve(artifacts, "result.json"),
-        JSON.stringify({
-          preparationMS,
-          connectedMS,
-          lostCreateRecovered: true,
-          samePodAndClaim: true,
-          factoryCrashBeforeActivation: true,
-          assignedOnce: true,
-          refilledOnReservation: true,
-          noInference: true,
-          attemptID: assigned.id,
-        }),
-      );
-      passed = true;
-    } catch (cause) {
-      await writeFile(
-        resolve(artifacts, "failure.json"),
-        JSON.stringify({
-          error: (cause instanceof Error ? cause.message : "Native reserve proof failed")
-            .replaceAll(forgeHost.token, "<REDACTED>")
-            .slice(-4000),
-        }),
-        { flag: "wx", mode: 0o600 },
-      ).catch(() => console.error("Owned reserve failure could not be saved"));
-      throw cause;
-    } finally {
-      if (!passed)
-        await writeFile(
-          resolve(artifacts, "failure-state.json"),
-          JSON.stringify({ slots: await slots() }),
-          { flag: "wx", mode: 0o600 },
-        ).catch(() => console.error("Owned reserve failure evidence could not be saved"));
-      await manager?.close();
-      // Stop only this database's disposable runtime owners before removing their unassigned reserve.
-      const attempts = await database.client<
-        Array<{ id: string; state: string; generation: string }>
-      >`SELECT id,state,generation FROM factory.runtime_attempt`;
-      for (const attempt of attempts) {
-        if (!["stopped", "failed"].includes(attempt.state) && cookie)
-          await callFactoryFunction(
-            fixture.base,
-            "stopRuntimeAttempt",
-            [attempt.id],
-            { cookie, origin: fixture.base, "content-type": "application/json" },
-            AbortSignal.timeout(180_000),
-          ).catch(() => null);
-      }
-      await eventually(
-        () => database.client<Array<{ state: string }>>`
-          SELECT state FROM factory.runtime_attempt WHERE state NOT IN ('stopped','failed')`,
-        (rows) => rows.length === 0,
-        "Owned reserve consumers did not Stop before pool retirement",
-        120_000,
-      );
-      // Do not race a live target=1 controller against teardown's target=0.
-      await fixture.shutdown();
-      // Use the real controller's durable Delete/retirement intents. Direct
-      // adapter cleanup without those callbacks cannot retire paused slots.
-      manager = createExecutionReserve(database, images, { ...policy, readyTarget: 0 }, client);
-      await manager.start();
+      await progress("pool-refilled", { unusedSlots: 2 });
+      await save("result.json", {
+        passed: true,
+        actualFactoryStagingProved: true,
+        actualStagingReference: initial.id,
+        replacementAttemptID: assigned.id,
+        selectedSlotID: selected.id,
+        firstApp,
+        replacementApp,
+        resumedToUsefulMS,
+        preparedBeforeAssignment: true,
+        factoryCrashBeforeActivation: true,
+        discardedInitialReplyObservedWithoutCreateReplay: true,
+        oneWorker: true,
+        refreshedUnusedPausedForks: 2,
+        noInference: true,
+      });
+      await progress("cleanup");
+      await stop(assigned.id);
+      await host.shutdown();
+      retiring = createExecutionReserve(database, images, {
+        ...defaultReservePolicy,
+        readyTarget: 0,
+      });
+      await retiring.start();
       await eventually(
         slots,
-        (rows) => rows.every((slot) => slot.state === "deleted"),
-        "Owned reserve retirement did not settle",
-        180_000,
+        (rows) => rows.every((row) => row.state === "deleted"),
+        "Owned pool retirement remains unsettled",
+        420_000,
       );
-      await manager.close();
-      manager = undefined;
-      await removeOwnedFactoryboxFixture(fixture, artifacts);
+      await retiring.close();
+      retiring = undefined;
+      await removeOwnedFactoryboxFixture(host, artifacts);
       const after = await editorFixtureNamespaces();
-      for (const expected of before)
-        expect(after.find((item) => item.name === expected.name)?.uid).toBe(expected.uid);
-      for (const slot of await slots())
-        expect(after.some((item) => item.name === slot.namespace)).toBe(false);
-      await writeFile(
-        resolve(artifacts, "cleanup.json"),
-        JSON.stringify({ ownedSharedWorkerRemoved: true, unrelatedNamespacesUnchanged: true }),
-      );
-      await database.client.end({ timeout: 2 });
-      await fixture.dispose();
-      await forgeHost.dispose();
+      for (const previous of before)
+        expect(after.find((row) => row.name === previous.name)?.uid).toBe(previous.uid);
+      await save("cleanup.json", {
+        ownedWorkerRemoved: true,
+        allPrivateBackingRetired: true,
+        unrelatedNamespacesUnchanged: true,
+      });
+      await progress("cleanup-complete");
+      passed = true;
+    } catch (cause) {
+      await progress("failed", {
+        error: redact(cause instanceof Error ? cause.message : "Factory Staging proof failed"),
+      }).catch(() => {});
+      await save("failure.json", {
+        error: redact(cause instanceof Error ? cause.message : "Factory Staging proof failed"),
+      }).catch(() => {});
+      throw cause;
+    } finally {
+      if (slotLock) {
+        if (lockedSlot)
+          await slotLock`SELECT pg_advisory_unlock(hashtext(${`execution-slot:${lockedSlot}`}))`;
+        await slotLock.end({ timeout: 1 });
+      }
+      await retiring?.close();
+      await host.shutdown();
+      if (preparationLock) {
+        await preparationLock`SELECT pg_advisory_unlock(hashtext('project-image-preparation'))`;
+        await preparationLock.end({ timeout: 1 });
+      }
+      if (passed) {
+        await database.client.end({ timeout: 2 });
+        await host.dispose();
+        await forge.dispose();
+        await postgres.dispose();
+      } else {
+        const [worker] = await database.client<
+          Array<{ id: string; namespaceUID: string | null; podUID: string | null }>
+        >`
+          SELECT id,namespace_uid AS "namespaceUID",pod_uid AS "podUID" FROM factory.factorybox_worker WHERE singleton`;
+        await save("retained-failure.json", {
+          owner,
+          factoryID: host.id,
+          databaseURL: host.databaseURL,
+          postgres: postgres.identity,
+          forgeContainer: forge.container,
+          worker,
+          slots: await slots(),
+        }).catch(() => {});
+        if (worker?.podUID && worker.namespaceUID) {
+          const namespace = `factory-box-${worker.id.replaceAll("-", "")}`;
+          const current = await runFactoryboxKubernetes([
+            "get",
+            "pod",
+            "worker",
+            "-n",
+            namespace,
+            "-o",
+            "json",
+          ]);
+          if (current.exitCode === 0 && JSON.parse(current.stdout).metadata?.uid === worker.podUID)
+            await save(
+              "worker-fencing.json",
+              await runFactoryboxKubernetes(
+                ["delete", "--raw", `/api/v1/namespaces/${namespace}/pods/worker`, "-f", "-"],
+                JSON.stringify({
+                  apiVersion: "v1",
+                  kind: "DeleteOptions",
+                  preconditions: { uid: worker.podUID },
+                  gracePeriodSeconds: 45,
+                }),
+                { timeoutMS: 60_000, outputBytes: 1024 ** 2 },
+              ),
+            );
+        }
+        await database.client.end({ timeout: 2 });
+      }
     }
   },
-  // This journey includes cold pool provisioning, a Factory crash, assignment,
-  // refill and retirement. Each native operation keeps its own lifecycle bound.
-  900_000,
+  // Cold real Staging, pool preparation, process loss and refreshed Staging
+  // are separate native phases. Each retains its 420-second operation bound.
+  1_500_000,
 );

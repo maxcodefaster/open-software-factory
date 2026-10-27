@@ -16,7 +16,11 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/reserve";
 import { createReserveStore } from "./reserve-store";
 import { createStagingTemplateProducer } from "./staging-template";
-import { createFactoryboxWorker, rememberFactoryboxIdentity } from "./worker";
+import {
+  createFactoryboxWorker,
+  rememberFactoryboxIdentity,
+  withFactoryboxWorkerLock,
+} from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | TransactionSql;
@@ -59,7 +63,7 @@ export function createExecutionReserve(
     const key = `execution-slot:${id}`;
     try {
       await sql`SELECT pg_advisory_lock(hashtext(${key}))`;
-      return await action(sql);
+      return await withFactoryboxWorkerLock(sql, () => action(sql));
     } finally {
       try {
         await sql`SELECT pg_advisory_unlock(hashtext(${key}))`;

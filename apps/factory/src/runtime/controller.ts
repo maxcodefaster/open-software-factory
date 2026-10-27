@@ -568,6 +568,9 @@ export function createRuntimeController(
             : null;
     if (!state) return;
     const apps = state === "ready" ? hub.appChannels(attemptID) : [];
+    // Prepared Forks can reconnect before startup observation. Keep them
+    // starting until that observer has retained their native ownership, so
+    // early Connector readiness cannot skip adoption and later cleanup.
     const changed = await database.client`
       UPDATE factory.runtime_attempt SET state = ${state}::factory.runtime_attempt_state,
         declared_apps=CASE WHEN declared_apps='[]'::jsonb
@@ -579,6 +582,16 @@ export function createRuntimeController(
             (${state} = 'starting' AND state IN ('starting', 'ready')) OR
             (${state} = 'stopping' AND state IN ('stop-intended', 'stopping'))
           )
+          AND (${state}<>'ready' OR NOT EXISTS(
+            SELECT 1 FROM factory.execution_slot slot
+            WHERE slot.assigned_attempt_id=runtime_attempt.id AND slot.template_id IS NOT NULL
+              AND NOT EXISTS(
+                SELECT 1 FROM factory.factorybox_runtime saved
+                JOIN factory.factorybox_lifecycle_operation started
+                  ON started.runtime_attempt_id=saved.runtime_attempt_id AND started.action='start'
+                  AND started.completed_at IS NOT NULL
+                WHERE saved.runtime_attempt_id=runtime_attempt.id
+                  AND saved.request->>'sandboxID'='runtime-'||replace(slot.id::text,'-',''))))
     `;
     if (changed.count === 1 && state === "ready") {
       clearReconnectObservation(attemptID);
@@ -928,6 +941,7 @@ export function createRuntimeController(
               }
             : {}),
         });
+        await freezeStagingConfiguration(sql, attempt.id, resources);
         const activated = await computeWait.launch(
           attempt.id,
           () => reserve?.activate(attempt.id, resources) ?? Promise.resolve(null),

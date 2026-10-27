@@ -9,7 +9,7 @@ import {
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import type { runFactoryboxKubernetes } from "../../packages/runtime-kubernetes/src/factorybox-worker";
 import { fixture } from "../fixtures/change-agent-turns";
-import { factoryProcess } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 
 // Kubernetes and worker transport observations are fixtures. These cases prove
 // persisted Factory ownership, not native qualification of either architecture.
@@ -361,9 +361,29 @@ test.each([
       };
       const hub = new RuntimeHub(async () => {});
       const execution = createFactoryboxExecution(database, hub, run);
-      await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
-        "unconfirmed",
+      const holder = database.coordination();
+      await holder`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
+      const starting = execution.ensureStarted(owned.attemptID, [declared.pod]).then(
+        () => null,
+        (cause: unknown) => cause,
       );
+      try {
+        await eventually(
+          () => database.client`
+            SELECT pid FROM pg_stat_activity WHERE datname=current_database()
+              AND wait_event='advisory' AND query LIKE '%factorybox-worker-lifecycle%'`,
+          (rows) => rows.length === 1,
+          "Execution never waited for the shared native worker",
+        );
+        expect(preparations).toBe(0);
+        expect(mutations).toEqual([]);
+      } finally {
+        await holder`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
+        await holder.end({ timeout: 1 });
+      }
+      const startFailure = await starting;
+      expect(startFailure).toBeInstanceOf(Error);
+      expect((startFailure as Error).message).toContain("unconfirmed");
       const recovered = createFactoryboxExecution(database, hub, run);
       expect(await recovered.startupResources(owned.attemptID)).toEqual([declared.pod]);
       await recovered.ensureStarted(owned.attemptID);
