@@ -16,6 +16,7 @@ test("Factory App context supports loopback and ordinary public wildcard TLS", (
     origin: `http://${label}.localhost:58000`,
     basePath: prefix,
   });
+  assert.deepEqual(appProxyContext(new Headers(headers)), appProxyContext(headers));
   assert.deepEqual(
     appProxyContext({
       ...headers,

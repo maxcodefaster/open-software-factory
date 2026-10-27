@@ -2,29 +2,38 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createDatabase } from "../src/db/client.ts";
 import { createAuth } from "../src/auth.ts";
-import { once } from "node:events";
-import { createApplication } from "../src/app.ts";
+import { startApplication } from "./application.ts";
+import { readSession, sessionValue } from "./session.ts";
 
 test("production HTTP routing protects sessions and uses real authentication", async () => {
-  const application = createApplication({ baseURL: "http://localhost:4300" });
-  assert.equal(application.server.listening, false);
-  application.server.listen(0, "127.0.0.1");
-  await once(application.server, "listening");
-  const address = application.server.address();
-  assert.ok(address && typeof address !== "string");
-  const base = `http://127.0.0.1:${address.port}`;
+  const application = await startApplication();
+  const { base } = application;
   const email = `http-verification-${crypto.randomUUID()}@starter.test`;
+  const otherEmail = `http-other-${crypto.randomUUID()}@starter.test`;
   const password = crypto.randomUUID();
   async function post(path: string, body: unknown, cookie = "", origin = "http://localhost:4300") {
     return fetch(base + path, {
       method: "POST",
-      headers: { "content-type": "application/json", origin, cookie },
+      redirect: "manual",
+      headers: {
+        "content-type": "application/json",
+        origin,
+        cookie,
+        // Independent fixture clients keep the production rate limiter enabled.
+        "x-forwarded-for": "192.0.2.1",
+      },
       body: JSON.stringify(body),
     });
   }
   try {
-    assert.equal((await fetch(base + "/health")).status, 200);
-    assert.equal((await fetch(base + "/api/session")).status, 401);
+    assert.equal((await fetch(`${base}/health`)).status, 200);
+    const anonymous = await readSession(base);
+    assert.equal(anonymous.status, 200);
+    assert.equal(anonymous.headers.get("cache-control"), "no-store");
+    assert.equal(await sessionValue(anonymous), null);
+    assert.equal((await fetch(`${base}/api/session`, { redirect: "manual" })).status, 404);
+    assert.equal((await readSession(base, "", "https://foreign.example")).status, 403);
+    assert.equal((await readSession(base, "", "http://127.0.0.1:4301")).status, 403);
     const signup = await post("/api/auth/sign-up/email", {
       name: "HTTP verification",
       email,
@@ -47,14 +56,42 @@ test("production HTTP routing protects sessions and uses real authentication", a
       .map((value) => value.split(";")[0])
       .join("; ");
     assert.ok(cookie);
-    const session = await fetch(base + "/api/session", { headers: { cookie } });
+    const session = await readSession(base, cookie);
     assert.equal(session.status, 200);
-    assert.deepEqual(await session.json(), { name: "HTTP verification" });
-    assert.equal((await fetch(base + "/api/unknown", { headers: { cookie } })).status, 404);
+    assert.deepEqual(await sessionValue(session), { name: "HTTP verification" });
+    const other = await post("/api/auth/sign-up/email", {
+      name: "Other HTTP verification",
+      email: otherEmail,
+      password,
+    });
+    assert.equal(other.status, 200);
+    const otherCookie = other.headers
+      .getSetCookie()
+      .map((value) => value.split(";")[0])
+      .join("; ");
+    const observations = await Promise.all(
+      [cookie, "", otherCookie, cookie, otherCookie, ""].map(async (value) =>
+        sessionValue(await readSession(base, value)),
+      ),
+    );
+    assert.deepEqual(observations, [
+      { name: "HTTP verification" },
+      null,
+      { name: "Other HTTP verification" },
+      { name: "HTTP verification" },
+      { name: "Other HTTP verification" },
+      null,
+    ]);
+    assert.equal(
+      (await fetch(`${base}/api/unknown`, { headers: { cookie }, redirect: "manual" })).status,
+      404,
+    );
     assert.equal((await post("/api/auth/sign-out", {}, cookie)).status, 200);
-    assert.equal((await fetch(base + "/api/session", { headers: { cookie } })).status, 401);
+    const ended = await readSession(base, cookie);
+    assert.equal(ended.status, 200);
+    assert.equal(await sessionValue(ended), null);
   } finally {
-    await application.database.sql`DELETE FROM "user" WHERE email=${email}`;
+    await application.database.sql`DELETE FROM "user" WHERE email=${email} OR email=${otherEmail}`;
     await application.close();
     await application.close();
   }
@@ -80,6 +117,9 @@ test("PostgreSQL signup, protected session, invalid password and logout", async 
         headers: {
           "content-type": "application/json",
           origin,
+          "x-forwarded-for": ["http://localhost:4300", "http://127.0.0.1:4300"].includes(origin)
+            ? "192.0.2.2"
+            : "192.0.2.3",
           ...(cookie ? { cookie } : {}),
         },
         body: JSON.stringify(body),
@@ -117,7 +157,11 @@ test("PostgreSQL signup, protected session, invalid password and logout", async 
         await publicAuth.handler(
           new Request("https://app.example.test/api/auth/sign-in/email", {
             method: "POST",
-            headers: { "content-type": "application/json", origin: "http://127.0.0.1:4300" },
+            headers: {
+              "content-type": "application/json",
+              origin: "http://127.0.0.1:4300",
+              "x-forwarded-for": "192.0.2.4",
+            },
             body: JSON.stringify({ email, password }),
           }),
         )

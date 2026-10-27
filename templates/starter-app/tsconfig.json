@@ -2,6 +2,7 @@
   "compilerOptions": {
     "target": "ES2024",
     "module": "ESNext",
+    "moduleDetection": "force",
     "moduleResolution": "Bundler",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "strict": true,
@@ -14,7 +15,12 @@
     "allowImportingTsExtensions": true,
     "jsx": "preserve",
     "jsxImportSource": "@solidjs/web",
-    "types": ["node", "vite/client", "@solidjs/vite-plugin/boundary-modules"]
+    "types": [
+      "node",
+      "vite/client",
+      "@solidjs/vite-plugin/boundary-modules",
+      "@solidjs/vite-plugin/virtual-solid-manifest"
+    ]
   },
   "include": ["src", "test", "vite.config.ts"]
 }

@@ -8,7 +8,10 @@ export async function starterFiles() {
   const files: { path: string; content: string }[] = [];
   async function walk(directory: string, prefix = "") {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (["node_modules", "dist", ".git"].includes(entry.name) || entry.name.startsWith(".env"))
+      if (
+        ["node_modules", "dist", ".output", ".tanstack", ".git"].includes(entry.name) ||
+        entry.name.startsWith(".env")
+      )
         continue;
       if (entry.isSymbolicLink()) throw new Error("Starter contains a symlink");
       const path = prefix + entry.name;

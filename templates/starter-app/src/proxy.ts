@@ -3,10 +3,11 @@ import type { IncomingHttpHeaders } from "node:http";
 // Factory strips caller-provided forwarding headers before proxying an App.
 // Bind its browser host and path to the same Runtime Attempt, including when
 // the public Factory runs behind ordinary wildcard DNS and TLS.
-export function appProxyContext(headers: IncomingHttpHeaders) {
-  const host = headers["x-forwarded-host"];
-  const protocol = headers["x-forwarded-proto"];
-  const prefix = headers["x-forwarded-prefix"];
+export function appProxyContext(headers: IncomingHttpHeaders | Headers) {
+  const header = (name: string) => (headers instanceof Headers ? headers.get(name) : headers[name]);
+  const host = header("x-forwarded-host");
+  const protocol = header("x-forwarded-proto");
+  const prefix = header("x-forwarded-prefix");
   if (
     typeof host !== "string" ||
     !["http", "https"].includes(String(protocol)) ||

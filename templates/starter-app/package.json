@@ -6,30 +6,36 @@
     "node": "24.21.0"
   },
   "scripts": {
-    "dev": "node --watch src/server.ts",
+    "dev": "node --watch src/dev.ts",
+    "build": "vite build",
+    "start": "node .output/server/index.mjs",
     "db:migrate": "node src/db/migrate.ts",
-    "test": "node --test test/*.test.ts",
-    "check": "tsc --noEmit && vite build && npm test"
+    "test": "npm run build && node --test test/*.test.ts",
+    "check": "npm test && tsc --noEmit"
   },
   "dependencies": {
-    "@solidjs/web": "2.0.0-rc.14",
+    "@solidjs/web": "2.0.0-rc.18",
+    "@tanstack/solid-router": "2.0.0-rc.9",
+    "@tanstack/solid-start": "2.0.0-rc.9",
     "better-auth": "1.7.7",
     "drizzle-orm": "0.45.4",
     "postgres": "3.4.9",
-    "solid-js": "2.0.0-rc.14"
+    "solid-js": "2.0.0-rc.18"
   },
   "devDependencies": {
-    "@solidjs/vite-plugin": "3.0.0-next.49",
+    "@solidjs/vite-plugin": "3.0.0-next.51",
     "@types/node": "24.19.2",
+    "nitro": "3.0.260903-beta",
     "typescript": "6.0.3",
     "vite": "8.3.4"
   },
   "overrides": {
-    "@solidjs/compiler": "2.0.0-rc.14",
-    "@solidjs/signals": "2.0.0-rc.14",
-    "@solidjs/babel-plugin": "2.0.0-rc.14",
+    "@solidjs/compiler": "2.0.0-rc.18",
+    "@solidjs/signals": "2.0.0-rc.18",
+    "@solidjs/babel-plugin": "2.0.0-rc.18",
     "better-auth": {
-      "solid-js": "2.0.0-rc.14"
+      "solid-js": "$solid-js",
+      "@tanstack/solid-start": "$@tanstack/solid-start"
     }
   }
 }

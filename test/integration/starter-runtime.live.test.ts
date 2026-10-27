@@ -59,7 +59,7 @@ test.skipIf(process.env["FACTORY_RUN_STARTER_RUNTIME_PROOF"] !== "1")(
     const slug = retained?.slug ?? `owned-starter-${crypto.randomUUID().slice(0, 8)}`;
     const forge = createForgejoClient({ apiURL: "http://127.0.0.1:33030/api/v1/", token });
     const timings: Record<string, number> = {};
-    async function api(path: string, method = "GET", body?: unknown) {
+    async function _api(path: string, method = "GET", body?: unknown) {
       const response = await fetch(factory.base + path, {
         method,
         headers: { cookie, origin: factory.base, "content-type": "application/json" },
