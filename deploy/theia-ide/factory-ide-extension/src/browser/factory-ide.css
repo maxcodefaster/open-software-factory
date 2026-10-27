@@ -1,5 +1,5 @@
-.theia-sidebar-menu {
-  display: none !important;
+.theia-app-sidebar-container .lm-Widget.theia-sidebar-menu {
+  display: none;
 }
 
 #status-bar-factory-buffer-workspace {

@@ -1,4 +1,4 @@
-import { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
+import type { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
 import { DiagnosticSeverity } from "@theia/core/shared/vscode-languageserver-protocol";
 import type { EditorWidget } from "@theia/editor/lib/browser/editor-widget";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
