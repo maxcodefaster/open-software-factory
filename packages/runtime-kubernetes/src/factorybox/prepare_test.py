@@ -109,6 +109,34 @@ class PreparationTests(unittest.TestCase):
         changed = {**request, "assignment": {**request["assignment"], "parent-token": "another-parent"}}
         self.assertNotEqual(plan, self.module["preparation_plan"](changed, "a" * 64, None))
 
+    def test_base_admission_refusal_does_not_poison_a_new_private_input(self):
+        request = self.assigned()
+        seed = self.root / "seed"
+        seed.mkdir()
+        (seed / "rootfs.tar").write_bytes(b"exact frozen image")
+        rootfs = hashlib.sha256((seed / "rootfs.tar").read_bytes()).hexdigest()
+        (seed / "rootfs.sha256").write_text(rootfs + "  rootfs.tar\n")
+        (seed / "intent").write_text(
+            "\n".join(request[key] for key in ["podUID", "storeID", "runtimeHostImage"]) + "\n")
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"]}
+        root = self.root / "input" / request["sandboxID"]
+        globals_ = self.module["prepare"].__globals__
+        refusals = [RuntimeError("Native base admission is temporarily busy"),
+                    RuntimeError("Retry reached the same immutable base admission")]
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run") as mutation, self.environment(), \
+                patch.dict(globals_, {
+                    "Path": lambda path: seed if str(path) == "/var/lib/sysbox/seed" else Path(path),
+                    "image_base": unittest.mock.Mock(side_effect=refusals),
+                }):
+            with self.assertRaisesRegex(RuntimeError, "temporarily busy"):
+                self.module["prepare"](request)
+            self.assertFalse(root.exists(), "A refused shared base must not leave a partial private input")
+            with self.assertRaisesRegex(RuntimeError, "same immutable base"):
+                self.module["prepare"](request)
+            self.assertFalse(root.exists())
+            mutation.assert_not_called()
+
     def test_one_image_source_is_reused_across_distinct_sandbox_preparations(self):
         seed = self.root / "seed"
         seed.mkdir()

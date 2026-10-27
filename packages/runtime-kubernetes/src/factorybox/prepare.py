@@ -215,12 +215,15 @@ def prepare(request):
         if json.loads((root/'intent.json').read_text()) != plan:
             raise ValueError('Private input already belongs to another preparation')
         return prepared_input(request, status)
+    # Native base admission can be busy while another Sandbox resumes or
+    # retires a checkpoint. Do not publish a partial private input before the
+    # shared immutable base is available. Existing partial inputs stay guarded.
+    base = image_base(request, status, seed, expected[0], cli)
     root.parent.mkdir(mode=0o700, exist_ok=True)
     root.mkdir(mode=0o700)
     publish(root/'intent.json', plan)
     bundle = root/'bundle'
     bundle.mkdir(mode=0o700)
-    base = image_base(request, status, seed, expected[0], cli)
     for name in ['lower', 'upper', 'work', 'rootfs']:
         (bundle/name).mkdir(mode=0o755)
     subprocess.run(['mount', '--bind', base['tree']['saved'], str(bundle/'lower')], check=True)
