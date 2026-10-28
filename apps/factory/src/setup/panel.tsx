@@ -13,6 +13,7 @@ import {
   getSetupDraft,
   retrySetupProject,
   saveSetupDraft,
+  startAnotherSetupDraft,
 } from "../server-functions/setup";
 import "./setup.css";
 import { SetupInspection } from "./inspection-panel";
@@ -149,6 +150,12 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
         ),
       );
   }
+  async function startAnother() {
+    const value = draft();
+    if (!value) return;
+    await action(() => serverCall(startAnotherSetupDraft({ data: [value.id] })));
+    if (draft()?.id !== value.id) commandID = undefined;
+  }
   return {
     draft,
     visible,
@@ -159,6 +166,7 @@ export function createProjectSetupInteraction(userID: string, openPanel: () => v
     save,
     create,
     check,
+    startAnother,
     show,
     draftStorageKey: `project-setup:${userID}:draft`,
   };
@@ -401,7 +409,7 @@ export function ProjectSetupPanel(props: {
                   </label>
                   <label>
                     Access token{" "}
-                    <span class="setup-optional">optional for private repositories</span>
+                    <span class="setup-optional">required for private repositories</span>
                     <input
                       type="password"
                       autocomplete="off"
@@ -468,6 +476,20 @@ export function ProjectSetupPanel(props: {
                     {draft().state === "failed" ? "Retry setup" : "Check setup"}
                   </button>
                 </Show>
+                <Show when={draft().state === "checking" || draft().state === "failed"}>
+                  <p class="setup-note">
+                    Your previous repository and setup are retained. Use a different repository name
+                    for the new setup.
+                  </p>
+                  <button
+                    class="quiet-button"
+                    type="button"
+                    disabled={props.setup.pending()}
+                    onClick={() => void props.setup.startAnother()}
+                  >
+                    Start another setup
+                  </button>
+                </Show>
                 <Show when={draft().projectID}>
                   {(id) => (
                     <button
@@ -503,8 +525,10 @@ export function SetupEmptyBoard() {
     <section class="setup-empty-board" aria-label="Empty project board">
       <For each={["Ideas", "Requirements", "Implementation", "Review"]}>
         {(label) => (
-          <section>
-            <h2>{label}</h2>
+          <section class="lane">
+            <header class="lane-heading">
+              <h2>{label}</h2>
+            </header>
           </section>
         )}
       </For>

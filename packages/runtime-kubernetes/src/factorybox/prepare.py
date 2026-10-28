@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import stat
 import subprocess
 import sys
 
@@ -25,11 +27,24 @@ def digest(path):
 
 def publish(path, value):
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    with os.fdopen(descriptor, 'w') as stream:
-        json.dump(value, stream, separators=(',', ':'))
-        stream.write('\n')
-        stream.flush()
-        os.fsync(stream.fileno())
+    original = os.fstat(descriptor)
+    try:
+        with os.fdopen(descriptor, 'w') as stream:
+            json.dump(value, stream, separators=(',', ':'))
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        # A full filesystem must not leave our own empty/partial commit marker.
+        # Never unlink a pre-existing file, a replacement or another hardlink.
+        try:
+            current = path.lstat()
+            if ((current.st_dev, current.st_ino) == (original.st_dev, original.st_ino) and
+                    current.st_nlink == 1):
+                path.unlink()
+        except OSError:
+            pass
+        raise
     directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         os.fsync(directory)
@@ -133,6 +148,60 @@ def prepared_input(request, status):
     return completed
 
 
+def image_source_mounts(source):
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        target = re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), line.split()[4])
+        if target == str(source) or target.startswith(str(source)+'/'):
+            return True
+    return False
+
+
+def retire_image_source(root, base, status):
+    source = root/'source'
+    saved = str(Path(status['lifecycle']['root'])/'bases/factory-runtime/rootfs')
+    tree = base.get('tree', {})
+    if (base.get('version') != 1 or base.get('id') != 'factory-runtime' or
+            base.get('source') != str(source) or base.get('boot_id') != status['boot_id'] or
+            base.get('runtime_sha256') != status['lifecycle']['runtime_sha256'] or
+            not base.get('prepared_at') or tree.get('source') != str(source) or
+            tree.get('saved') != saved or tree.get('immutable', {}).get('root') != saved or
+            not re.fullmatch('[a-f0-9]{64}', tree.get('sha256', '')) or
+            root.resolve() != root or saved.startswith(str(source)+'/') or saved == str(source)):
+        raise ValueError('Native consumer base did not confirm an independent immutable import')
+    identity = {key: base[key] for key in
+                ['version', 'id', 'source', 'boot_id', 'runtime_sha256', 'prepared_at']}
+    identity['tree'] = {'saved': saved, 'sha256': tree['sha256']}
+    intent_path = root/'source-retirement.json'
+    complete_path = root/'source-retired.json'
+    if complete_path.exists():
+        if json.loads(complete_path.read_text()) != {'version': 1, 'base': identity}:
+            raise ValueError('Consumer import retirement belongs to another base')
+        if source.exists() or source.is_symlink():
+            raise ValueError('Retired consumer import source has a successor')
+        return
+    if intent_path.exists():
+        intent = json.loads(intent_path.read_text())
+        if intent.get('version') != 1 or intent.get('base') != identity:
+            raise ValueError('Consumer import retirement belongs to another base')
+    else:
+        info = source.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise ValueError('Consumer import source is not its original private directory')
+        intent = {'version': 1, 'base': identity,
+                  'directory': {'device': info.st_dev, 'inode': info.st_ino}}
+        publish(intent_path, intent)
+    if source.exists() or source.is_symlink():
+        info = source.lstat()
+        if (not stat.S_ISDIR(info.st_mode) or
+                intent.get('directory') != {'device': info.st_dev, 'inode': info.st_ino} or
+                image_source_mounts(source) or not shutil.rmtree.avoids_symlink_attacks):
+            raise ValueError('Consumer import source identity or mounts changed')
+        shutil.rmtree(source)
+    # Native prepare-base verifies its own complete immutable copy on every
+    # replay. Only this unused extraction is retired, never the base or Source.
+    publish(complete_path, {'version': 1, 'base': identity})
+
+
 def image_base(request, status, seed, rootfs_sha256, cli):
     # All Sandboxes on this worker use one exact consumer image. Serialize its
     # import, rather than extracting another multi-gigabyte source per Sandbox.
@@ -165,8 +234,10 @@ def image_base(request, status, seed, rootfs_sha256, cli):
                 project.rmdir()
             (source/'tmp').chmod(0o1777)
             publish(root/'prepared.json', intent)
-        return json.loads(subprocess.check_output(
+        base = json.loads(subprocess.check_output(
             [*cli, 'prepare-base', '--source', str(root/'source'), 'factory-runtime'], timeout=120))
+        retire_image_source(root, base, status)
+        return base
 
 
 def preparation_plan(request, rootfs_sha256, source):
@@ -202,6 +273,11 @@ def prepare(request):
     status = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
     if status['store_id'] != request['storeID'] or status['epoch'] != request['epoch']:
         raise ValueError('Worker identity changed before consumer preparation')
+    root = Path(status['store'])/'input'/request['sandboxID']
+    if (root/'intent.json').exists():
+        retained = json.loads((root/'intent.json').read_text())
+        if retained.get('cancelled') is True:
+            raise ValueError('Preparation was explicitly cancelled; its original identity is fenced')
     source = canonical_source(request)
     seed = Path('/var/lib/sysbox/seed')
     if (seed/'intent').read_text().splitlines() != [request['podUID'], request['storeID'], request['runtimeHostImage']]:
@@ -209,7 +285,6 @@ def prepare(request):
     expected = (seed/'rootfs.sha256').read_text().split()
     if len(expected) != 2 or expected[1] != 'rootfs.tar' or digest(seed/'rootfs.tar') != expected[0]:
         raise ValueError('Complete consumer rootfs differs from its committed export')
-    root = Path(status['store'])/'input'/request['sandboxID']
     plan = preparation_plan(request, expected[0], source)
     if root.exists():
         if json.loads((root/'intent.json').read_text()) != plan:
@@ -295,6 +370,39 @@ def prepare(request):
     return completed
 
 
+def cancel_preparation(request):
+    validate_identity(request)
+    status = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
+    if status['store_id'] != request['storeID'] or status['epoch'] != request['epoch']:
+        raise ValueError('Worker identity changed before preparation cancellation')
+    native = Path(status['lifecycle']['root'])/'objects'/request['sandboxID']
+    if native.exists() or native.is_symlink():
+        raise ValueError('Preparation cancellation cannot discard a native object')
+    parent = Path(status['store'])/'input'
+    parent.mkdir(mode=0o700, exist_ok=True)
+    if parent.resolve() != parent:
+        raise ValueError('Preparation cancellation parent is aliased')
+    root = parent/request['sandboxID']
+    expected = {'version': 1, 'cancelled': True, 'request': request}
+    try:
+        # A queued old prepare either observes this incompatible durable intent
+        # or loses its own mkdir. It cannot publish prepared.json or start.
+        root.mkdir(mode=0o700)
+    except FileExistsError:
+        if (root.is_symlink() or not root.is_dir() or
+                sorted(path.name for path in root.iterdir()) != ['intent.json']):
+            raise ValueError('Incomplete preparation must remain retained for inspection')
+        try:
+            original = json.loads((root/'intent.json').read_text())
+        except (OSError, ValueError):
+            raise ValueError('Incomplete preparation must remain retained for inspection')
+        if original != expected:
+            raise ValueError('Incomplete preparation must remain retained for inspection')
+    else:
+        publish(root/'intent.json', expected)
+    return {'version': 1, 'cancelled': True, 'sandboxID': request['sandboxID']}
+
+
 def release(request, never_started):
     # Cleanup needs the immutable identity, not live credentials or an accessible
     # Source directory. Only this Sandbox's private mount pair may be released.
@@ -345,6 +453,8 @@ if __name__ == '__main__':
     request = json.loads(encoded)
     if len(sys.argv) == 1:
         print(json.dumps(prepare(request)))
+    elif sys.argv[1:] == ['cancel']:
+        print(json.dumps(cancel_preparation(request)))
     elif sys.argv[1:] in [['release'], ['release', '--never-started']]:
         print(json.dumps(release(request, '--never-started' in sys.argv)))
     else:

@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { resolve } from "node:path";
+import { configurationPath } from "../../apps/factory/src/setup/configuration";
 import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
+import { starterFiles } from "../../apps/factory/src/setup/starter";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
@@ -18,6 +20,10 @@ test("setup inference does not retain the application's only pooled database con
   let controller: ReturnType<typeof createSetupInspection> | undefined;
   const commandID = crypto.randomUUID();
   let generations = 0;
+  let latestAnswers: Record<string, string> | undefined;
+  let latestContext: readonly { question: string; answer: string }[] | undefined;
+  const configuration = (await starterFiles()).filter((file) => configurationPath(file.path));
+  let sourceCommit = "a".repeat(40);
   try {
     await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${userID},'Owned pool proof',${`${userID}@pool.test`})`;
     await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
@@ -30,7 +36,7 @@ test("setup inference does not retain the application's only pooled database con
       fetch: async (url) => {
         const path = String(url);
         if (path.endsWith("/branches/main"))
-          return Response.json({ name: "main", commit: { id: "a".repeat(40) } });
+          return Response.json({ name: "main", commit: { id: sourceCommit } });
         if (path.includes("/git/trees/"))
           return Response.json({
             sha: "a".repeat(40),
@@ -50,19 +56,24 @@ test("setup inference does not retain the application's only pooled database con
       model: async () => ({ modelID: "owned-model", connectionID: null, connectionVersion: null }),
       connection: async () => ({ apiKey: "owned-key" }),
       ready: async () => {},
-      generate: async () => {
+      generate: async (input) => {
         generations++;
+        latestAnswers = input.answers;
+        latestContext = input.context;
         entered.resolve();
         await release.promise;
         return {
           purpose: "Owned application",
           services: [],
           uncertainty: [],
-          questions: [
-            { id: "port", question: "Which port should the app use?" },
-            { id: "health", question: "Which existing health path is available?" },
-          ],
-          files: [],
+          questions:
+            generations === 1
+              ? [
+                  { id: "port", question: "Which port should the app use?" },
+                  { id: "health", question: "Which existing health path is available?" },
+                ]
+              : [],
+          files: generations === 1 ? [] : configuration,
         };
       },
     });
@@ -103,6 +114,37 @@ test("setup inference does not retain the application's only pooled database con
         answers: { port: "4000", health: "/health" },
       }),
     ).rejects.toThrow("different work");
+    const revisionID = crypto.randomUUID();
+    const feedback = "Use the pinned Node image and retain the established behavioral checks.";
+    const revision = { parentID: continuationID, answers: { $feedback: feedback } };
+    await controller.start(projectID, userID, revisionID, revision);
+    await controller.settle();
+    expect(generations).toBe(3);
+    expect(latestAnswers?.["$feedback"]).toBe(feedback);
+    expect(latestContext).toContainEqual({
+      question: "Requested configuration changes",
+      answer: feedback,
+    });
+    expect(latestContext).toContainEqual({
+      question: "Which port should the app use?",
+      answer: "3000",
+    });
+    await controller.start(projectID, userID, revisionID, revision);
+    expect(generations).toBe(3);
+    await expect(
+      controller.start(projectID, userID, revisionID, {
+        ...revision,
+        answers: { $feedback: "Different instructions" },
+      }),
+    ).rejects.toThrow("different work");
+    sourceCommit = "c".repeat(40);
+    await expect(
+      controller.start(projectID, userID, crypto.randomUUID(), {
+        parentID: revisionID,
+        answers: { $feedback: feedback },
+      }),
+    ).rejects.toThrow("Source changed");
+    expect(generations).toBe(3);
   } finally {
     release.resolve();
     await database.client.end({ timeout: 0 });
@@ -315,6 +357,9 @@ test("actual Forgejo atomically applies only confirmed missing setup files and r
     });
     await controller.settle();
     await forge.ensureDefaultBranchProtection(repository, "main", false);
+    // Account reconciliation may already have protected the still-missing
+    // workflow before the manager confirms an imported Project's setup.
+    await forge.protectSetupWorkflow(repository, "main");
     loseResponse = true;
     await controller.confirm(projectID, manager, finalID);
     await forge.protectSetupWorkflow(repository, "main");

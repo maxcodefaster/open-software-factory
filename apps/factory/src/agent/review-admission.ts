@@ -71,7 +71,7 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           AND focus.change_id=change.id AND focus.state IN ('passed','changes-requested')
         LEFT JOIN factory.ticket_conversation conversation ON conversation.ticket_id=ticket.id
         WHERE change.id=${changeID} AND review.created_by=${userID}
-          AND (change.state='active' OR (change.state='starting' AND review.supersedes_id IS NOT NULL
+          AND (change.state='active' OR (change.state IN ('starting','failed') AND review.supersedes_id IS NOT NULL
             AND EXISTS(SELECT 1 FROM factory.runtime_attempt attempt
               WHERE attempt.id=change.runtime_attempt_id AND attempt.state IN ('stopped','failed'))))
           AND change.cancel_requested_at IS NULL
@@ -104,6 +104,10 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
       if (!first) throw new CommandError("conflict", "Review needs the admitted Coding model");
       const authority = agentTurnAuthorityInput.parse(first.authority);
       if (authority.mode !== "build") throw new Error("Missing Coding configuration");
+      // Only an explicit fresh review of the still-verified candidate recovers
+      // failed bootstrap. It does not resume or commission implementation.
+      await sql`UPDATE factory.change SET state='starting',failure=NULL,version=version+1
+        WHERE id=${changeID} AND state='failed'`;
       return turns.admitIn(
         sql,
         {

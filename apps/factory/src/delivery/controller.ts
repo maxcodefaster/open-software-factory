@@ -1315,7 +1315,7 @@ export function createDeliveryController(
         if (
           !(
             change.state === "active" ||
-            (change.state === "starting" &&
+            (["starting", "failed"].includes(change.state) &&
               ["stopped", "failed"].includes(change.runtimeState ?? ""))
           ) ||
           !previous ||

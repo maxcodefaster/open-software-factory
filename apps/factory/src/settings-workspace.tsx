@@ -1,4 +1,4 @@
-import { createSignal, For, lazy, Loading, Show, untrack } from "solid-js";
+import { createSignal, For, Loading, lazy, Show, untrack } from "solid-js";
 import { rememberSettingsReturn } from "./access/settings-return";
 import { createWorkspaceNavigation, WorkspaceNavigationToggle } from "./ui/workspace-navigation";
 import "./settings-workspace.css";
@@ -11,6 +11,9 @@ const AccessSettings = lazy(async () => ({
 }));
 const EnvironmentSettings = lazy(async () => ({
   default: (await import("./environments/settings")).EnvironmentSettings,
+}));
+const ProjectSetupSettings = lazy(async () => ({
+  default: (await import("./setup/settings")).ProjectSetupSettings,
 }));
 const MCPLibrary = lazy(async () => ({ default: (await import("./mcp/library")).MCPLibrary }));
 const ModelSettings = lazy(async () => ({
@@ -38,6 +41,7 @@ type Category =
   | "monitoring"
   | "people"
   | "environment"
+  | "setup"
   | "security"
   | "usage";
 
@@ -123,7 +127,7 @@ export function SettingsWorkspace(props: {
             label: `Project · ${props.project.name}`,
             categories: [
               ...(props.developer ? (["models"] as Category[]) : []),
-              ...(props.developer || canManage() ? (["environment"] as Category[]) : []),
+              ...(props.developer || canManage() ? (["setup", "environment"] as Category[]) : []),
               "monitoring",
               "releases",
               "usage",
@@ -160,6 +164,7 @@ export function SettingsWorkspace(props: {
       releases: "Releases",
       people: "People & access",
       environment: "Environments",
+      setup: "Project setup",
       usage: "Monitoring",
       security: scope === "system" ? "Company sign-in" : "Login & security",
     })[value];
@@ -241,6 +246,17 @@ export function SettingsWorkspace(props: {
             </header>
           </Show>
           <Loading on={category()} fallback={<p role="status">Opening settings…</p>}>
+            <Show
+              when={category() === "setup" && (props.developer || canManage()) && props.project}
+            >
+              {(project) => (
+                <ProjectSetupSettings
+                  projectID={project().id}
+                  userID={props.userID}
+                  canManage={canManage()}
+                />
+              )}
+            </Show>
             <Show when={visited().has("models")}>
               <div class="settings-configuration-host" hidden={category() !== "models"}>
                 <ModelSettings

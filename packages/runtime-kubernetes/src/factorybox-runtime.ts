@@ -370,6 +370,46 @@ export async function prepareFactoryboxRuntime(
     .parse(JSON.parse(result.stdout));
 }
 
+export async function cancelFactoryboxPreparation(
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  run: typeof runCommand = runFactoryboxKubernetes,
+) {
+  await inspectFactoryboxWorker(
+    factoryboxRuntimeRequest(input),
+    identity,
+    run,
+    factoryboxRuntimeDeclaration(input),
+  );
+  const result = await run(
+    [
+      "exec",
+      "-i",
+      input.podName,
+      "-n",
+      input.namespace,
+      "-c",
+      "worker",
+      "--",
+      "python3",
+      "-c",
+      factoryboxPrepareProgram,
+      "cancel",
+    ],
+    JSON.stringify(factoryboxPreparationIdentity(input, identity)),
+    { timeoutMS: 30_000, outputBytes: 16_384 },
+  );
+  if (result.exitCode !== 0)
+    throw new Error("Incomplete Factorybox preparation must remain retained for inspection");
+  return z
+    .strictObject({
+      version: z.literal(1),
+      cancelled: z.literal(true),
+      sandboxID: z.literal(input.sandboxID),
+    })
+    .parse(JSON.parse(result.stdout));
+}
+
 export async function releaseFactoryboxRuntime(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,

@@ -1,13 +1,13 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import type { z } from "zod";
-import { setupReadiness } from "../../../../packages/project-domain/src/setup";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import type {
-  SetupTask,
   ProjectSetupView,
-  SetupInspectionView,
-  projectSetupSave,
   projectSetupCreate,
+  projectSetupSave,
+  SetupInspectionView,
+  SetupTask,
 } from "../../../../packages/project-domain/src/setup";
+import { setupReadiness } from "../../../../packages/project-domain/src/setup";
 import { createAccessController } from "../access/controller";
 import { CommandError } from "../command-error";
 import type { createProjectSetupController } from "./controller";
@@ -34,6 +34,9 @@ export function createSetupService(options: {
   return {
     draft: options.drafts.view,
     begin: options.drafts.begin,
+    async startAnother(userID: string, id: string) {
+      return confirmed(await options.drafts.startAnother(userID, id));
+    },
     async save(userID: string, input: z.output<typeof projectSetupSave>) {
       return confirmed(await options.drafts.save(userID, input));
     },

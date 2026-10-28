@@ -13,6 +13,7 @@ import {
   readFactoryboxCheckpointRetirement,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-retention";
 import {
+  cancelFactoryboxPreparation,
   type FactoryboxRuntimeInput,
   factoryboxOriginalWorkerRetired,
   factoryboxRuntimeDeclaration,
@@ -161,8 +162,9 @@ export function createFactoryboxExecution(
         .passthrough()
         .parse(record.observation);
     const declaration = factoryboxRuntimeDeclaration(saved.request);
-    // Once an external command may have run, only observation can settle it.
-    // The same native command is never retried after lost output.
+    // Lost Start/Pause/Resume output remains observation-only. Explicit Stop
+    // may continue Delete only after the exact original native runtime is
+    // confirmed stopped, never by assuming a failed command had no effect.
     if (observeOnly && !record.attempted) await attempted(connection, record);
     const observation =
       record.attempted || observeOnly
@@ -178,29 +180,59 @@ export function createFactoryboxExecution(
             return executeFactoryboxOperation(request, identity, op, run, declaration);
           })();
     if (!observation.confirmed) throw new Error(`Factorybox ${op.action} outcome is unconfirmed`);
-    const result = z
-      .object({
-        runtime: z.object({ status: z.string() }).optional(),
-        record: z.object({
-          id: z.literal(saved.request.sandboxID),
-          phase: z.string(),
-          input_sha256: z.string().optional(),
-          owner: z.string(),
-          pause: z
-            .object({
-              snapshot_id: z.string(),
-              checkpoint_sha256: z
-                .string()
-                .regex(/^[a-f0-9]{64}$/)
-                .optional(),
-              completed_at: z.string().optional(),
-              resume: z.object({ completed_at: z.string().optional() }).optional(),
-            })
-            .optional(),
-          pause_history: z.array(z.unknown()).optional(),
-        }),
+    const nativeResult = z.object({
+      runtime: z.object({ status: z.string() }).optional(),
+      record: z.object({
+        id: z.literal(saved.request.sandboxID),
+        phase: z.string(),
+        input_sha256: z.string().optional(),
+        owner: z.string(),
+        pause: z
+          .object({
+            snapshot_id: z.string(),
+            checkpoint_sha256: z
+              .string()
+              .regex(/^[a-f0-9]{64}$/)
+              .optional(),
+            completed_at: z.string().optional(),
+            resume: z.object({ completed_at: z.string().optional() }).optional(),
+          })
+          .optional(),
+        pause_history: z.array(z.unknown()).optional(),
+      }),
+    });
+    let result = nativeResult.parse(JSON.parse(observation.stdout));
+    if (
+      op.action === "delete" &&
+      record.attempted &&
+      !observeOnly &&
+      ["running", "paused", "deleting"].includes(result.record.phase) &&
+      result.runtime?.status === "stopped"
+    ) {
+      const [closing] = await connection`SELECT id FROM factory.runtime_attempt
+        WHERE id=${attemptID} AND stop_intended_at IS NOT NULL
+          AND state IN ('stopping','cleanup-failed')`;
+      if (!closing)
+        throw new Error("Native Delete continuation requires the original explicit Stop");
+      const [started] = await connection<{ observation: unknown }[]>`
+        SELECT observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${attemptID} AND action='start' AND completed_at IS NOT NULL`;
+      z.object({
+        id: z.literal(saved.request.sandboxID),
+        owner: z.literal(result.record.owner),
+        inputSHA256: z.string().regex(/^[a-f0-9]{64}$/),
       })
-      .parse(JSON.parse(observation.stdout));
+        .refine((value) => value.inputSHA256 === result.record.input_sha256, {
+          message: "Native Delete owner/input differs from the original Start",
+        })
+        .parse(started?.observation);
+      // The pinned native Delete revalidates its own original process/cgroup
+      // identity and is idempotent. Keep the existing intent and first attempt.
+      // No new Start, prompt, source write or native identity is admitted.
+      const continued = await executeFactoryboxOperation(request, identity, op, run, declaration);
+      if (!continued.confirmed) throw new Error("Factorybox delete outcome is unconfirmed");
+      result = nativeResult.parse(JSON.parse(continued.stdout));
+    }
     const expected = { start: "running", pause: "paused", resume: "running", delete: "deleted" };
     if (
       !(op.action in expected) ||
@@ -502,8 +534,13 @@ export function createFactoryboxExecution(
           Array<{ completed: boolean }>
         >`SELECT completed_at IS NOT NULL AS completed
           FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${attemptID} AND action='prepare'`;
-        if (!prepared?.completed)
-          throw new Error("Incomplete Factorybox preparation was retained for inspection");
+        if (!prepared?.completed) {
+          if (start?.attempted)
+            throw new Error("Incomplete Factorybox preparation was retained for inspection");
+          await cancelFactoryboxPreparation(saved.request, saved.identity, run);
+          await connection`UPDATE factory.factorybox_runtime SET inputs_released_at=now() WHERE runtime_attempt_id=${attemptID} AND inputs_released_at IS NULL`;
+          return;
+        }
         let deleted: unknown;
         if (start?.attempted)
           deleted = await perform(
