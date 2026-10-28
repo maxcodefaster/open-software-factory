@@ -349,6 +349,7 @@ export async function fixture(
     revisionID,
     changeID,
     attemptID,
+    workspaceID,
     sessionID: `ses_owned_${suffix}`,
     controller,
     payloads,

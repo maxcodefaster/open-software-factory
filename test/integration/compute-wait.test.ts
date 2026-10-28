@@ -7,6 +7,7 @@ import { createComputeWait } from "../../apps/factory/src/usage/compute-wait";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { fixture } from "../fixtures/change-agent-turns";
+import { executionPoolFixture } from "../fixtures/execution-pool";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedFactoryboxProfile } from "../fixtures/runtime-configuration";
 
@@ -155,6 +156,7 @@ test("capacity wait retains exact runtime identity, serializes release and refus
 test("CPU, memory and Project ceilings include pending cleanup and count an adopted reserve once", async () => {
   const isolated = await factoryProcess();
   const database = isolated.connect();
+  let pool: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
   try {
     const work = await fixture(undefined, undefined, database);
     const setFactory = async (cpuMilli: number | null, memoryMiB: number | null) => {
@@ -183,24 +185,38 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
       memoryMiB: 1024,
     });
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${work.attemptID}`;
-    await setFactory(100, 256);
+    await setFactory(300, 768);
+    await database.client`UPDATE factory.execution_policy
+      SET policy=${JSON.stringify({ ...defaultExecutionPolicy(), sandboxes: 2 })}::jsonb
+      WHERE scope=${work.projectID}`;
     const image = `registry.invalid/owned@sha256:${"1".repeat(64)}`;
     const reserve = createReserveStore(
       defaultReservePolicy,
       { staging: image, verification: image },
       ownedFactoryboxProfile,
     );
+    pool = await executionPoolFixture(
+      database,
+      reserve,
+      ownedFactoryboxProfile,
+      { staging: image, verification: image },
+      { projectID: work.projectID, userID: work.userID },
+    );
+    const revision = pool.revision;
+    const template = await pool.prepareTemplate();
+    if (!template) throw new Error("Owned template is missing");
     const [slot] = await database.client.begin((sql) => reserve.plan(sql));
     if (!slot) throw new Error("Owned reserve missing");
+    expect(slot.templateID).toBe(template.id);
     expect(await database.client.begin((sql) => computeAllocationIn(sql, null))).toEqual({
+      sandboxes: 3,
+      cpuMilli: 300,
+      memoryMiB: 768,
+    });
+    expect(await database.client.begin((sql) => computeAllocationIn(sql, work.projectID))).toEqual({
       sandboxes: 1,
       cpuMilli: 100,
       memoryMiB: 256,
-    });
-    expect(await database.client.begin((sql) => computeAllocationIn(sql, work.projectID))).toEqual({
-      sandboxes: 0,
-      cpuMilli: 0,
-      memoryMiB: 0,
     });
     await reserve.observe(database.client, slot.id, {
       namespaceUID: "owned-ns",
@@ -210,7 +226,22 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
       factoryboxIdentity: { epoch: "owned" },
       factoryboxPreparation: { bundle: "owned" },
     });
-    expect(await reserve.intendStart(database.client, slot.id)).toBe(true);
+    const standby = template.factoryboxStandby as {
+      sandboxID: string;
+      owner: string;
+      snapshotID: string;
+      checkpointSHA256: string;
+    };
+    expect(
+      await reserve.intendFork(database.client, slot.id, {
+        action: "fork",
+        sandboxID: `runtime-${slot.id.replaceAll("-", "")}`,
+        sourceSandboxID: standby.sandboxID,
+        sourceOwner: standby.owner,
+        snapshotID: standby.snapshotID,
+        checkpointSHA256: standby.checkpointSHA256,
+      }),
+    ).toBe(true);
     expect(await reserve.intendStandby(database.client, slot.id, "pause")).toBe(true);
     await reserve.observe(database.client, slot.id, {
       namespaceUID: "owned-ns",
@@ -218,6 +249,7 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
       claimUID: "owned-pvc",
       ready: true,
       factoryboxPaused: true,
+      factoryboxStandby: { ...standby, anonymousBytes: 0, snapshotResidentBytes: 0 },
     });
     const attemptID = crypto.randomUUID();
     await database.client.begin(async (sql) => {
@@ -227,24 +259,29 @@ test("CPU, memory and Project ceilings include pending cleanup and count an adop
       });
       expect(adopted?.id).toBe(slot.id);
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-        VALUES(${attemptID},${work.projectID},'staging',1,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${work.userID})`;
+        VALUES(${attemptID},${work.projectID},'staging',2,${revision},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${work.userID})`;
       await freezeRuntimeArtifacts(sql, attemptID, {
         hostImages: { staging: image, verification: image, development: image, build: image },
         browserToolsImage: image,
       });
     });
-    for (const scope of [null, work.projectID])
-      expect(await database.client.begin((sql) => computeAllocationIn(sql, scope))).toEqual({
-        sandboxes: 1,
-        cpuMilli: 100,
-        memoryMiB: 256,
-      });
+    expect(await database.client.begin((sql) => computeAllocationIn(sql, null))).toEqual({
+      sandboxes: 3,
+      cpuMilli: 300,
+      memoryMiB: 768,
+    });
+    expect(await database.client.begin((sql) => computeAllocationIn(sql, work.projectID))).toEqual({
+      sandboxes: 2,
+      cpuMilli: 200,
+      memoryMiB: 512,
+    });
     await setFactory(0, 0);
     expect((await reserve.assigned(database.client, attemptID))?.state).toBe("assigned");
     await expect(
       database.client.begin((sql) => admitComputeIn(sql, work.projectID, "staging")),
     ).rejects.toMatchObject({ code: "conflict" });
   } finally {
+    await pool?.cleanup();
     await database.client.end();
     await isolated.dispose();
   }

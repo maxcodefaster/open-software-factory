@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdir, rm } from "node:fs/promises";
-import { resolve, sep } from "node:path";
+import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import {
   developerIDEViewSchema,
@@ -8,10 +7,9 @@ import {
 } from "../../apps/factory/src/api-contracts";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { workspaceSourceIdentity } from "../../packages/workspace-domain/src/source";
-import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("failed file access can be explicitly restarted without discarding the editor or starting compute", async () => {
@@ -34,26 +32,7 @@ test("failed file access can be explicitly restarted without discarding the edit
     editorEnsures = 0,
     computeStarts = 0;
   let page: import("@playwright/test").Page | undefined;
-  const frontend = resolve(
-    ".factory/test-results/source-recovery-browser",
-    `frontend-${crypto.randomUUID()}`,
-  );
   try {
-    const build = Bun.spawn(
-      [
-        "node",
-        resolve("node_modules/vite/bin/vite.js"),
-        "build",
-        "--config",
-        resolve("apps/factory/vite.config.ts"),
-        "--outDir",
-        frontend,
-      ],
-      { env: productionBuildEnvironment(process.env), stdout: "ignore", stderr: "pipe" },
-    );
-    const buildError = await new Response(build.stderr).text();
-    if (await build.exited)
-      throw new Error(`Owned frontend build failed: ${buildError.slice(-500)}`);
     await fixture.startPlanningCache();
     await fixture.start();
     const cookie = await fixture.signIn();
@@ -75,22 +54,19 @@ test("failed file access can be explicitly restarted without discarding the edit
       })),
     );
     page = await context.newPage();
-    // Test the current frontend without replacing assets served by a retained
-    // developer installation or depending on an older host build.
-    await page.route(`${fixture.base}/`, (route) =>
-      route.fulfill({ path: resolve(frontend, "index.html") }),
-    );
-    await page.route(`${fixture.base}/assets/**`, (route) => {
-      const file = resolve(frontend, new URL(route.request().url()).pathname.slice(1));
-      if (!file.startsWith(frontend + sep)) throw new Error("Fixture asset path escaped its build");
-      return route.fulfill({ path: file });
-    });
+    // The controller lane supplies this process's immutable Start client and
+    // server build. A second SPA build has no standalone index.html.
     const failures: string[] = [];
     page.on("pageerror", (error) => failures.push(error.message));
+    const executionCommands = await Promise.all(
+      ["startPersonalWorkspace", "startTicketWorkspace", "implementTicket"].map(
+        factoryFunctionMatcher,
+      ),
+    );
     page.on("request", (request) => {
       if (
         request.method() === "POST" &&
-        /\/(?:runtime|personal-workspace\/ensure|implement)$/.test(new URL(request.url()).pathname)
+        executionCommands.some((matches) => matches(new URL(request.url())))
       )
         computeStarts++;
     });
@@ -292,12 +268,8 @@ test("failed file access can be explicitly restarted without discarding the edit
     }
     throw cause;
   } finally {
-    try {
-      await browser.close();
-      await database.client.end({ timeout: 2 });
-      await fixture.dispose();
-    } finally {
-      await rm(frontend, { recursive: true, force: true });
-    }
+    await browser.close();
+    await database.client.end({ timeout: 2 });
+    await fixture.dispose();
   }
 }, 90_000);

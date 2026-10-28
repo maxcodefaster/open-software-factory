@@ -51,6 +51,20 @@ async function deliveryFixture() {
           url: "http://forge.invalid/run/1",
         },
       ],
+      diagnoseVerification: async () => ({
+        kind: "check-failed" as const,
+        summary: "Owned checks failed at the exact candidate.",
+        jobs: [
+          {
+            id: 8,
+            attempt: 1,
+            name: "Checks",
+            step: 1,
+            stepName: "test",
+            output: "Owned regression assertion failed.",
+          },
+        ],
+      }),
     };
     return {
       process,

@@ -149,7 +149,9 @@ test.each([
       ];
       let deletes = 0;
       let entriesAtDeletion: Awaited<ReturnType<typeof read>> = [];
-      await database.client`UPDATE factory.runtime_attempt SET kubernetes_uid='owned-cleanup-pod' WHERE id=${owned.attemptID}`;
+      await database.client`UPDATE factory.runtime_attempt SET
+        kubernetes_uid='owned-cleanup-pod',kubernetes_namespace_uid='owned-source-namespace'
+        WHERE id=${owned.attemptID}`;
       const runtime = createRuntimeController(
         database,
         owned.hub,
@@ -169,9 +171,17 @@ test.each([
             factoryboxImage: process.env["FACTORY_FACTORYBOX_WORKER_IMAGE"] ?? "owned-worker",
             runtimeHostImage: process.env["FACTORY_RUNTIME_HOST_IMAGE"] ?? "owned",
           }),
-          deletePod: async () => {
+          // A Sandbox owns its assignment, not the shared worker Pod.
+          // Native Delete and backing retirement have separate lifecycle proofs.
+          deleteSecret: async (input) => {
+            expect(input.namespaceUID).toBe("owned-source-namespace");
+            expect(input.attemptID).toBe(owned.attemptID);
+            expect(input.ownerID).toBe(owned.workspaceID);
             entriesAtDeletion = await read();
             deletes++;
+          },
+          deletePod: async () => {
+            throw new Error("Sandbox cleanup must preserve the shared worker");
           },
           deleteNamespace: async () => {
             throw new Error("Source must survive compute cleanup");
@@ -183,7 +193,7 @@ test.each([
       await eventually(
         async () => (await runtime.get(owned.attemptID))?.state,
         (state) => state === "stopped",
-        "Usage did not persist before Pod deletion",
+        "Usage did not persist before private assignment retirement",
         15000,
       );
       expect(deletes).toBe(1);

@@ -98,99 +98,105 @@ describe("runtime Kubernetes resources", () => {
     expect(JSON.stringify(pod)).not.toContain("FACTORY_OPENVSCODE_IMAGE");
   });
 
-  test("keeps development tools out of Staging", () => {
-    const resources = renderRuntimeResources({
-      factoryboxProfile: ownedFactoryboxProfile,
-      attemptID: "01234567-89ab-5def-8123-456789abcdef",
-      generation: 1,
-      ...ownedFactoryboxLocation,
-      projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
-      repositoryURL: "file:///factory/project",
-      revision: "a".repeat(40),
-      devcontainerPath: ".devcontainer/devcontainer.json",
-      composeProjectName: "factory_0123456789ab",
-      connectorToken: "one-use-token",
-      childConnectorToken: "one-use-child-token",
-      controlURL: "ws://factory.example/runtime/connect",
-      runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
-      registryCA: "certificate",
-      mode: "staging",
-      systemContract: multiAppSystemContract,
-    });
-    const assignment = resources.find((resource) => resource.kind === "Secret")?.stringData?.[
-      "assignment.json"
-    ];
-    expect(assignment).toBeDefined();
-    expect(JSON.parse(String(assignment))).toMatchObject({
-      channels: [{ name: "app" }, { name: "app-worker" }],
-      processes: [{ name: "app" }, { name: "app-worker" }],
-    });
-    expect(String(assignment)).not.toContain("/opt/factory/theia");
-    expect(String(assignment)).not.toContain('"name":"ide"');
-    expect(String(assignment)).not.toContain('"name":"agent"');
-    expect(
-      resources.find((resource) => resource.kind === "Pod")?.spec?.containers?.[0]?.resources,
-    ).toMatchObject({
-      requests: { cpu: "3", memory: "3Gi" },
-      limits: { cpu: "3", memory: "3Gi" },
-    });
-  });
+  test.each([undefined, 100] as const)(
+    "keeps development tools out of Staging with CPU reserve %s",
+    (cpuRequestMilli) => {
+      const resources = renderRuntimeResources({
+        factoryboxProfile: { ...ownedFactoryboxProfile, cpuRequestMilli },
+        attemptID: "01234567-89ab-5def-8123-456789abcdef",
+        generation: 1,
+        ...ownedFactoryboxLocation,
+        projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
+        repositoryURL: "file:///factory/project",
+        revision: "a".repeat(40),
+        devcontainerPath: ".devcontainer/devcontainer.json",
+        composeProjectName: "factory_0123456789ab",
+        connectorToken: "one-use-token",
+        childConnectorToken: "one-use-child-token",
+        controlURL: "ws://factory.example/runtime/connect",
+        runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
+        registryCA: "certificate",
+        mode: "staging",
+        systemContract: multiAppSystemContract,
+      });
+      const assignment = resources.find((resource) => resource.kind === "Secret")?.stringData?.[
+        "assignment.json"
+      ];
+      expect(assignment).toBeDefined();
+      expect(JSON.parse(String(assignment))).toMatchObject({
+        channels: [{ name: "app" }, { name: "app-worker" }],
+        processes: [{ name: "app" }, { name: "app-worker" }],
+      });
+      expect(String(assignment)).not.toContain("/opt/factory/theia");
+      expect(String(assignment)).not.toContain('"name":"ide"');
+      expect(String(assignment)).not.toContain('"name":"agent"');
+      expect(
+        resources.find((resource) => resource.kind === "Pod")?.spec?.containers?.[0]?.resources,
+      ).toMatchObject({
+        requests: { cpu: cpuRequestMilli === undefined ? "3" : "100m", memory: "3Gi" },
+        limits: { cpu: "3", memory: "3Gi" },
+      });
+    },
+  );
 
-  test("runs one exact Forgejo Actions job in a Verification Sandbox", () => {
-    const resources = renderRuntimeResources({
-      factoryboxProfile: ownedFactoryboxProfile,
-      attemptID: "01234567-89ab-5def-8123-456789abcdef",
-      generation: 3,
-      ...ownedFactoryboxLocation,
-      projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
-      repositoryURL: "https://forge.example/factory/project.git",
-      revision: "b".repeat(40),
-      devcontainerPath: ".devcontainer/devcontainer.json",
-      composeProjectName: "factory_0123456789ab",
-      connectorToken: "one-use-token",
-      childConnectorToken: "one-use-child-token",
-      controlURL: "ws://factory.example/runtime/connect",
-      runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
-      registryCA: "certificate",
-      mode: "verification",
-      verification: {
-        forgeURL: "https://forge.example/",
-        runnerUUID: "22222222-2222-4222-8222-222222222222",
-        runnerToken: "ephemeral-runner-token",
-        runnerLabel: "factory-verification",
-      },
-    });
-    const assignment = JSON.parse(
-      String(
-        resources.find((resource) => resource.kind === "Secret")?.stringData?.["assignment.json"],
-      ),
-    );
-    expect(assignment.channels).toEqual([
-      {
-        name: "verification",
-        kind: "verification",
-        target: "http://127.0.0.1:4500",
-        healthPath: "/health",
-      },
-    ]);
-    const process = assignment.processes[0];
-    expect(process.command[2]).toContain(
-      'spawn("/opt/factory/forgejo-runner", ["one-job", "--wait"',
-    );
-    expect(process.command[2]).not.toContain("forgejo-runner daemon");
-    expect(process.env.FACTORY_RUNNER_CONFIG).toContain("factory-verification:host");
-    expect(process.env.FACTORY_RUNNER_CONFIG).toContain("ephemeral-runner-token");
-    expect(JSON.stringify(resources)).not.toContain("/opt/factory/theia");
-    expect(JSON.stringify(assignment)).not.toContain('"name":"app"');
-    expect(JSON.stringify(assignment)).not.toContain('"name":"ide"');
-    expect(JSON.stringify(assignment)).not.toContain('"name":"agent"');
-    expect(
-      resources.find((resource) => resource.kind === "Pod")?.spec?.containers?.[0]?.resources,
-    ).toMatchObject({
-      requests: { cpu: "3", memory: "3Gi" },
-      limits: { cpu: "3", memory: "3Gi" },
-    });
-  });
+  test.each([undefined, 100] as const)(
+    "runs one exact Forgejo Actions job in a Verification Sandbox with CPU reserve %s",
+    (cpuRequestMilli) => {
+      const resources = renderRuntimeResources({
+        factoryboxProfile: { ...ownedFactoryboxProfile, cpuRequestMilli },
+        attemptID: "01234567-89ab-5def-8123-456789abcdef",
+        generation: 3,
+        ...ownedFactoryboxLocation,
+        projectID: "20e65e28-8bad-4c05-a063-3b629808d549",
+        repositoryURL: "https://forge.example/factory/project.git",
+        revision: "b".repeat(40),
+        devcontainerPath: ".devcontainer/devcontainer.json",
+        composeProjectName: "factory_0123456789ab",
+        connectorToken: "one-use-token",
+        childConnectorToken: "one-use-child-token",
+        controlURL: "ws://factory.example/runtime/connect",
+        runtimeHostImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,
+        registryCA: "certificate",
+        mode: "verification",
+        verification: {
+          forgeURL: "https://forge.example/",
+          runnerUUID: "22222222-2222-4222-8222-222222222222",
+          runnerToken: "ephemeral-runner-token",
+          runnerLabel: "factory-verification",
+        },
+      });
+      const assignment = JSON.parse(
+        String(
+          resources.find((resource) => resource.kind === "Secret")?.stringData?.["assignment.json"],
+        ),
+      );
+      expect(assignment.channels).toEqual([
+        {
+          name: "verification",
+          kind: "verification",
+          target: "http://127.0.0.1:4500",
+          healthPath: "/health",
+        },
+      ]);
+      const process = assignment.processes[0];
+      expect(process.command[2]).toContain(
+        'spawn("/opt/factory/forgejo-runner", ["one-job", "--wait"',
+      );
+      expect(process.command[2]).not.toContain("forgejo-runner daemon");
+      expect(process.env.FACTORY_RUNNER_CONFIG).toContain("factory-verification:host");
+      expect(process.env.FACTORY_RUNNER_CONFIG).toContain("ephemeral-runner-token");
+      expect(JSON.stringify(resources)).not.toContain("/opt/factory/theia");
+      expect(JSON.stringify(assignment)).not.toContain('"name":"app"');
+      expect(JSON.stringify(assignment)).not.toContain('"name":"ide"');
+      expect(JSON.stringify(assignment)).not.toContain('"name":"agent"');
+      expect(
+        resources.find((resource) => resource.kind === "Pod")?.spec?.containers?.[0]?.resources,
+      ).toMatchObject({
+        requests: { cpu: cpuRequestMilli === undefined ? "3" : "100m", memory: "3Gi" },
+        limits: { cpu: "3", memory: "3Gi" },
+      });
+    },
+  );
 
   test.each([undefined, "medium", "high"] as const)(
     "adds OpenCode with the frozen Coding configuration: %s",
