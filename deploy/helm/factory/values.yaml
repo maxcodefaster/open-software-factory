@@ -58,3 +58,13 @@ resources:
   limits:
     cpu: "2"
     memory: 2Gi
+
+# The pre-upgrade fence runs while the existing Factory Pod is still serving.
+maintenance:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: "1"
+      memory: 256Mi

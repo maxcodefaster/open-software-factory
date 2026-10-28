@@ -200,6 +200,12 @@ active model/setup probes. It commits a maintenance fence under the same databas
 new inference admissions. A concurrent request therefore cannot slip into the idle-check window.
 A busy installation refuses the upgrade without stopping the running application.
 
+Reserve scheduling headroom for that Job alongside the current Factory Pod. Its resource requests
+and limits are independently configurable through `maintenance.resources`; `resources` controls
+the application Pod. Adjust these in the installation's private values when required by measured
+control-plane use. They do not change Factorybox's admitted worker profile or remove the maintenance
+fence. An unscheduled Job has not run the idle check, so do not stop the application to force an upgrade.
+
 The application uses a single-replica Recreate deployment. A short interruption is expected.
 Each Helm revision replaces the Factory Pod, even when its image and configuration are unchanged,
 so its bootstrap clears the maintenance fence after a successful same-image upgrade too.
