@@ -1,14 +1,65 @@
-import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { expect, type Page } from "@playwright/test";
 import { CommandError } from "../../apps/factory/src/command-error";
 import {
   projectSetupView,
   setupInspectionView,
   setupReadiness,
 } from "../../packages/project-domain/src/setup";
+import { test as base } from "../fixtures/browser-test";
+import { factoryProcess } from "../fixtures/factory-process";
+import { ownedPostgresServer } from "../fixtures/postgres-server";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { signIn } from "../support/factory-fixture";
+
+type SignIn = (page: Page) => Promise<void>;
+const test = base.extend<
+  { factory: Awaited<ReturnType<typeof factoryProcess>>; signIn: SignIn },
+  { postgres: Awaited<ReturnType<typeof ownedPostgresServer>> }
+>({
+  postgres: [
+    // biome-ignore lint/correctness/noEmptyPattern: Playwright requires a destructured fixture argument.
+    async ({}, use) => {
+      const postgres = await ownedPostgresServer();
+      try {
+        await use(postgres);
+      } finally {
+        await postgres.dispose();
+      }
+    },
+    { scope: "worker", timeout: 60_000 },
+  ],
+  factory: [
+    async ({ postgres }, use) => {
+      const previous = process.env["FACTORY_TEST_POSTGRES"];
+      let factory: Awaited<ReturnType<typeof factoryProcess>>;
+      try {
+        process.env["FACTORY_TEST_POSTGRES"] = JSON.stringify(postgres.identity);
+        factory = await factoryProcess();
+      } finally {
+        if (previous === undefined) delete process.env["FACTORY_TEST_POSTGRES"];
+        else process.env["FACTORY_TEST_POSTGRES"] = previous;
+      }
+      try {
+        await factory.startPlanningCache();
+        await factory.start();
+        await use(factory);
+      } finally {
+        await factory.dispose();
+      }
+    },
+    { timeout: 60_000 },
+  ],
+  signIn: async ({ factory }, use) => {
+    await use(async (page) => {
+      await page.goto(factory.base);
+      await page.getByLabel("Email", { exact: true }).fill(`owned-${factory.id}@factory.local`);
+      await page
+        .getByLabel("Password", { exact: true })
+        .fill("owned-process-password-not-a-secret");
+      await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    });
+  },
+});
 
 test.setTimeout(30_000);
 
@@ -24,6 +75,7 @@ for (const device of [
     });
     test("starts another draft explicitly without replaying the previous import", async ({
       page,
+      signIn,
     }) => {
       let draft = projectSetupView.parse({
         id: crypto.randomUUID(),
@@ -98,7 +150,7 @@ for (const device of [
   });
 }
 
-async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
+async function openImportedSetup(page: Page, signIn: SignIn) {
   const projectID = crypto.randomUUID();
   const draft = {
     id: crypto.randomUUID(),
@@ -133,8 +185,9 @@ async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
 
 test("successful preparation hides technical fallback notes but retains actionable failures", async ({
   page,
+  signIn,
 }) => {
-  const fixture = await openImportedSetup(page);
+  const fixture = await openImportedSetup(page, signIn);
   await mockFactoryFunctions(page, {
     setup: {
       readiness: async () =>
@@ -168,8 +221,9 @@ test("successful preparation hides technical fallback notes but retains actionab
 
 test("an initial inspection read failure offers a read-only retry without starting inference", async ({
   page,
+  signIn,
 }) => {
-  const fixture = await openImportedSetup(page);
+  const fixture = await openImportedSetup(page, signIn);
   let reads = 0,
     writes = 0;
   await mockFactoryFunctions(page, {
@@ -198,8 +252,9 @@ test("an initial inspection read failure offers a read-only retry without starti
 
 test("an unconfirmed setup submission keeps its answers immutable and retries the same command explicitly", async ({
   page,
+  signIn,
 }) => {
-  const fixture = await openImportedSetup(page);
+  const fixture = await openImportedSetup(page, signIn);
   const inspection = {
     id: crypto.randomUUID(),
     projectID: fixture.projectID,
@@ -269,8 +324,9 @@ test("an unconfirmed setup submission keeps its answers immutable and retries th
 
 test("a definite setup rejection refreshes state and allows an explicitly corrected submission", async ({
   page,
+  signIn,
 }) => {
-  const fixture = await openImportedSetup(page);
+  const fixture = await openImportedSetup(page, signIn);
   const inspection = {
     id: crypto.randomUUID(),
     projectID: fixture.projectID,
@@ -316,6 +372,7 @@ test("a definite setup rejection refreshes state and allows an explicitly correc
 
 test("opening a created Project leaves setup without reading its disposed conditional props", async ({
   page,
+  signIn,
 }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.stack || error.message));

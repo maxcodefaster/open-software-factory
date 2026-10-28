@@ -174,35 +174,70 @@ esac
 }
 
 func TestBrowserImageTransportRetriesShareOneCancellableDeadline(t *testing.T) {
-	directory := t.TempDir()
-	logPath := filepath.Join(directory, "commands")
-	reference := "registry.factory/browser-tools@sha256:" + strings.Repeat("a", 64)
-	script := `#!/bin/sh
+	for _, delayInspect := range []bool{false, true} {
+		t.Run(fmt.Sprintf("slow-initial-inspection=%t", delayInspect), func(t *testing.T) {
+			directory := t.TempDir()
+			logPath := filepath.Join(directory, "commands")
+			reference := "registry.factory/browser-tools@sha256:" + strings.Repeat("a", 64)
+			script := `#!/bin/sh
+if [ "$FACTORY_DOCKER_DELAY_INSPECT" = true ] && [ ! -f "$FACTORY_DOCKER_LOG.inspected" ]; then
+  touch "$FACTORY_DOCKER_LOG.inspected"
+  sleep 0.6
+fi
 printf '%s\n' "$*" >> "$FACTORY_DOCKER_LOG"
 if [ "$1" = pull ]; then echo 'dial tcp: connect: connection refused' >&2; fi
 exit 1
 `
-	if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("FACTORY_DOCKER_LOG", logPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 450*time.Millisecond)
-	defer cancel()
-	started := time.Now()
-	err := ensureBrowserImage(ctx, reference)
-	if err == nil || !strings.Contains(err.Error(), "cancelled or exceeded") {
-		t.Fatal("retry lost its original startup deadline", err)
-	}
-	if time.Since(started) > time.Second {
-		t.Fatal("image download ignored cancellation while backing off")
-	}
-	commands, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count := strings.Count(string(commands), "pull "+reference); count < 1 || count > 3 {
-		t.Fatalf("retry was not bounded by one shared deadline: %s", commands)
+			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FACTORY_DOCKER_LOG", logPath)
+			t.Setenv("FACTORY_DOCKER_DELAY_INSPECT", fmt.Sprint(delayInspect))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			result := make(chan error, 1)
+			go func() {
+				defer close(result)
+				result <- ensureBrowserImage(ctx, reference)
+			}()
+			defer func() {
+				cancel()
+				for range result {
+				}
+			}()
+			// Start the short cancellation window only after a real pull begins.
+			// Scheduling the first executable is not the retry behavior under test.
+			for {
+				commands, _ := os.ReadFile(logPath)
+				if strings.Contains(string(commands), "pull "+reference) {
+					break
+				}
+				select {
+				case err := <-result:
+					t.Fatal("download ended before its first transport attempt", err)
+				case <-ctx.Done():
+					t.Fatal("download never reached its first transport attempt")
+				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			started := time.Now()
+			timer := time.AfterFunc(450*time.Millisecond, cancel)
+			defer timer.Stop()
+			err := <-result
+			if err == nil || !strings.Contains(err.Error(), "cancelled or exceeded") {
+				t.Fatal("retry lost its original startup deadline", err)
+			}
+			if time.Since(started) > time.Second {
+				t.Fatal("image download ignored cancellation while backing off")
+			}
+			commands, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count := strings.Count(string(commands), "pull "+reference); count < 1 || count > 3 {
+				t.Fatalf("retry was not bounded by one shared deadline: %s", commands)
+			}
+		})
 	}
 }
 
