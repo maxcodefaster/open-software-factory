@@ -13,8 +13,10 @@ credentials. Different customer trust domains require separate workers.
 Allocate the Factory worker identity lazily, so independently initialized installations never
 inherit the same identity from a database template. Workspace file access can allocate its
 Namespace and canonical Source claim without starting compute. The first execution pins the
-worker profile and consumer image. All roles on that worker use those exact pins. Namespace,
-Source claim, private store and original Pod UIDs remain immutable once observed.
+worker profile and its bootstrap consumer image. Namespace, Source claim, private store,
+original Pod UIDs and bootstrap declaration remain immutable once observed. Each new Sandbox
+separately freezes its selected consumer image. A later published consumer can serve new
+Sandboxes on that same worker without changing existing execution, Pause or Resume inputs.
 
 Shared resource creation is serialized and admitted before its external effect. A lost create
 response can be reconciled through the surviving original objects. A surviving Pod cannot
@@ -34,8 +36,21 @@ from private snapshots. The worker retains open descriptions so atomic saves, re
 directories and queued watches survive same-worker Resume. A stopped worker cannot recover those
 descriptions; worker loss requires an explicit fresh execution decision from retained source.
 
-Prepare the exact consumer runtime image before starting its Sandbox. A Kubernetes init container
-exports its own filesystem without Project source or credentials. After native HTTP readiness,
+Prepare the exact consumer runtime image before starting its Sandbox. The original Kubernetes init
+container exports the bootstrap image. Later images use a separate credential-free exporter Pod,
+on the original node, with only their private export directory mounted. The worker persists the
+image, worker epoch, export intent and one create attempt before that Pod is created. It pins the
+observed exporter UID and verifies the completed filesystem hash before import. Lost output
+observes the original exporter; a missing or replaced exporter cannot authorize another create.
+Cleanup uses its exact UID precondition, never the shared worker's Pod or claim.
+
+Each later image receives a distinct immutable native base. Its temporary extraction stays outside
+the bounded native filesystem; only the verified native base remains there. Retire that redundant
+extraction only after native verification, retaining the export and import receipts. Native capacity
+and metadata admission still apply. Registered bases are not pruned or overwritten to make room
+for an upgrade, and this contract does not claim unlimited upgrades on a bounded store.
+
+After native HTTP readiness,
 Factory verifies Pod, claim, node and live epoch before preparing a private OCI bundle and starting
 the Connector. Copy credentials and Pod DNS into private runtime files. Never mount the host's
 Docker socket or copy the canonical checkout into a snapshot.

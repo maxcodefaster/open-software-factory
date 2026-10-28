@@ -12,6 +12,45 @@ const observedPod = {
 };
 
 describe("launchRuntimeResources", () => {
+  test.each([true, false])(
+    "new consumer selection checks the original worker bootstrap, matching=%s",
+    async (matches) => {
+      let recorded = false;
+      const launch = launchRuntimeResources(
+        {
+          resources: [],
+          namespace: "namespace",
+          podName: "pod",
+          missingPodMessage: "missing",
+          runtimeHostImage: `registry.invalid/new-consumer@sha256:${"b".repeat(64)}`,
+          factoryboxProfile: ownedFactoryboxProfile,
+        },
+        {
+          kubernetes: {
+            apply: async () => ({
+              namespaceUID: "namespace-uid",
+              workerRuntimeHostImage: runtimeHostImage,
+            }),
+            getPod: async () => ({
+              ...observedPod,
+              runtimeHostImage: matches
+                ? runtimeHostImage
+                : `registry.invalid/wrong@sha256:${"c".repeat(64)}`,
+            }),
+          },
+          transitionObserved: async () => {
+            recorded = true;
+            return true;
+          },
+          observe: async () => {},
+          fail: async () => {},
+        },
+      );
+      if (matches) await launch;
+      else await expect(launch).rejects.toThrow("immutable create intent");
+      expect(recorded).toBe(matches);
+    },
+  );
   test("does not start an observer when Stop supersedes the observed create", async () => {
     let observed = false;
     await launchRuntimeResources(

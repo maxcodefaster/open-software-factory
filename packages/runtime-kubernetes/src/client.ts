@@ -48,7 +48,11 @@ export interface KubernetesClient {
       sharedUIDs?: Readonly<Record<string, string>>;
       createShared?: boolean;
     },
-  ): Promise<{ namespaceUID: string; sharedUIDs?: Record<string, string> }>;
+  ): Promise<{
+    namespaceUID: string;
+    sharedUIDs?: Record<string, string>;
+    workerRuntimeHostImage?: string;
+  }>;
   getPod(namespace: string, podName: string): Promise<RuntimePodObservation | null>;
   getNamespace(namespace: string): Promise<{ uid: string; labels: Record<string, string> } | null>;
   getPodLogs(namespace: string, podName: string): Promise<string>;

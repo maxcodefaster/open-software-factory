@@ -974,7 +974,7 @@ export function createRuntimeController(
           throw new Error("create intent resources do not match persisted credentials");
         requireRuntimePodArtifacts(
           pod,
-          artifacts.runtimeHostImage,
+          applied.workerRuntimeHostImage ?? artifacts.runtimeHostImage,
           artifacts.factoryboxProfile.image,
         );
         if (!(await recordCreated(sql, attempt.id, pod.uid, namespace.uid))) return;

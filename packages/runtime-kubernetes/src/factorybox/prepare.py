@@ -156,11 +156,26 @@ def image_source_mounts(source):
     return False
 
 
-def retire_image_source(root, base, status):
+def consumer_seed(request):
+    if request['runtimeHostImage'] == os.environ.get('FACTORY_RUNTIME_IMAGE', request['runtimeHostImage']):
+        return Path('/var/lib/sysbox/seed')
+    key = hashlib.sha256(request['runtimeHostImage'].encode()).hexdigest()
+    return Path('/var/lib/sysbox/consumer-seeds')/key
+
+
+def consumer_base_id(request):
+    if request['runtimeHostImage'] == os.environ.get('FACTORY_RUNTIME_IMAGE', request['runtimeHostImage']):
+        return 'factory-runtime'
+    # Native IDs are bounded to 63 characters. The complete image identity is
+    # still checked in the immutable import plan and canonical source path.
+    return 'runtime-'+hashlib.sha256(request['runtimeHostImage'].encode()).hexdigest()[:55]
+
+
+def retire_image_source(root, base, status, base_id='factory-runtime'):
     source = root/'source'
-    saved = str(Path(status['lifecycle']['root'])/'bases/factory-runtime/rootfs')
+    saved = str(Path(status['lifecycle']['root'])/'bases'/base_id/'rootfs')
     tree = base.get('tree', {})
-    if (base.get('version') != 1 or base.get('id') != 'factory-runtime' or
+    if (base.get('version') != 1 or base.get('id') != base_id or
             base.get('source') != str(source) or base.get('boot_id') != status['boot_id'] or
             base.get('runtime_sha256') != status['lifecycle']['runtime_sha256'] or
             not base.get('prepared_at') or tree.get('source') != str(source) or
@@ -203,14 +218,19 @@ def retire_image_source(root, base, status):
 
 
 def image_base(request, status, seed, rootfs_sha256, cli):
-    # All Sandboxes on this worker use one exact consumer image. Serialize its
-    # import, rather than extracting another multi-gigabyte source per Sandbox.
-    images = Path(status['store'])/'consumer-images'
+    if not re.fullmatch(r'[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}', request['runtimeHostImage']):
+        raise ValueError('Consumer image import belongs to another identity or an unpinned image')
+    # Each admitted image has its own immutable native base. Upgrades extract
+    # their temporary import next to the export, not a second full copy inside
+    # the bounded native store. The verified native copy remains bounded.
+    base_id = consumer_base_id(request)
+    upgraded = base_id != 'factory-runtime'
+    images = seed if upgraded else Path(status['store'])/'consumer-images'
     images.mkdir(mode=0o700, exist_ok=True)
     descriptor = os.open(images/'.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        root = images/rootfs_sha256
+        root = images/'import' if upgraded else images/rootfs_sha256
         intent = {'version': 1, 'storeID': request['storeID'], 'epoch': request['epoch'],
                   'podUID': request['podUID'], 'runtimeHostImage': request['runtimeHostImage'],
                   'rootfsSHA256': rootfs_sha256}
@@ -218,6 +238,8 @@ def image_base(request, status, seed, rootfs_sha256, cli):
             if json.loads((root/'prepared.json').read_text()) != intent:
                 raise ValueError('Shared consumer image import is incomplete or belongs to another identity')
         else:
+            if upgraded and shutil.disk_usage(status['store']).free < (seed/'rootfs.tar').stat().st_size + 512 * 1024**2:
+                raise ValueError('Consumer image upgrade needs capacity in the bounded worker store; existing bases remain retained')
             root.mkdir(mode=0o700)
             publish(root/'intent.json', intent)
             source = root/'source'
@@ -235,8 +257,8 @@ def image_base(request, status, seed, rootfs_sha256, cli):
             (source/'tmp').chmod(0o1777)
             publish(root/'prepared.json', intent)
         base = json.loads(subprocess.check_output(
-            [*cli, 'prepare-base', '--source', str(root/'source'), 'factory-runtime'], timeout=120))
-        retire_image_source(root, base, status)
+            [*cli, 'prepare-base', '--source', str(root/'source'), base_id], timeout=120))
+        retire_image_source(root, base, status, base_id)
         return base
 
 
@@ -279,7 +301,7 @@ def prepare(request):
         if retained.get('cancelled') is True:
             raise ValueError('Preparation was explicitly cancelled; its original identity is fenced')
     source = canonical_source(request)
-    seed = Path('/var/lib/sysbox/seed')
+    seed = consumer_seed(request)
     if (seed/'intent').read_text().splitlines() != [request['podUID'], request['storeID'], request['runtimeHostImage']]:
         raise ValueError('Consumer export belongs to another Pod or image')
     expected = (seed/'rootfs.sha256').read_text().split()
@@ -352,7 +374,7 @@ def prepare(request):
         if mount['destination'] == '/sys/fs/cgroup':
             mount['options'] = ['nosuid', 'noexec', 'nodev', 'rw']
     annotations = spec.setdefault('annotations', {})
-    annotations.update({'io.factorybox.base': 'factory-runtime', 'io.factorybox.outbound-ipv4': 'true',
+    annotations.update({'io.factorybox.base': base['id'], 'io.factorybox.outbound-ipv4': 'true',
                         'io.factorybox.checkpoint.irmap-scan-paths': json.dumps(['/home/coder/project'])})
     if request['sharedSource']:
         spec['mounts'].append({'type': 'bind', 'source': source['path'], 'destination': '/home/coder/project',

@@ -612,6 +612,9 @@ export function createFactoryboxExecution(
           )
             throw new Error("Runtime resources belong to another Factory worker");
           const owner = attempt.slotID ?? attempt.workspaceID ?? attemptID;
+          const worker = await factoryboxAllocation(connection);
+          if (worker.workerID !== attempt.workerID)
+            throw new Error("Runtime Attempt belongs to another Factory worker");
           const request: FactoryboxRuntimeInput = {
             attemptID,
             workerID: attempt.workerID,
@@ -628,6 +631,9 @@ export function createFactoryboxExecution(
               ...(attempt.slotID ? { "factory.dev/execution-slot": attempt.slotID } : {}),
             },
             runtimeHostImage: attempt.runtimeHostImage,
+            ...(worker.runtimeHostImage && worker.runtimeHostImage !== attempt.runtimeHostImage
+              ? { workerRuntimeHostImage: worker.runtimeHostImage }
+              : {}),
             profile: factoryboxRuntimeProfile.parse(attempt.profile),
             sharedSource: Boolean(attempt.workspaceID),
             ...(attempt.slotID ? { reserve: true } : {}),
@@ -641,9 +647,6 @@ export function createFactoryboxExecution(
           if (!saved || !isDeepStrictEqual(saved.request, request)) {
             throw new Error("Factorybox input differs from its immutable preparation intent");
           }
-          const worker = await factoryboxAllocation(connection);
-          if (worker.workerID !== request.workerID)
-            throw new Error("Runtime Attempt belongs to another Factory worker");
           const identity = await inspectFactoryboxWorker(
             factoryboxRuntimeRequest(request),
             saved.identity ??

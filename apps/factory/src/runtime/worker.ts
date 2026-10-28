@@ -114,11 +114,10 @@ async function bindProfile(sql: SQL, profileInput: unknown, image: string) {
   const updated = await sql`UPDATE factory.factorybox_worker
     SET profile=coalesce(profile,${JSON.stringify(profile)}::text::jsonb),
       runtime_host_image=coalesce(runtime_host_image,${image})
-    WHERE singleton AND (profile IS NULL OR profile=${JSON.stringify(profile)}::text::jsonb)
-      AND (runtime_host_image IS NULL OR runtime_host_image=${image})`;
+    WHERE singleton AND (profile IS NULL OR profile=${JSON.stringify(profile)}::text::jsonb)`;
   if (updated.count !== 1)
     throw new Error(
-      "Factory worker profile is already pinned; refusing a second worker or image swap",
+      "Factory worker profile is already pinned; refusing a different worker profile",
     );
   return read(sql);
 }
@@ -165,6 +164,35 @@ export function createFactoryboxWorker(database: Database, kubernetes: Kubernete
       try {
         await sql`SELECT pg_advisory_lock(hashtext('factorybox-worker-create'))`;
         const worker = await bindProfile(sql, profile, runtimeHostImage);
+        const bootstrapImage = worker.runtimeHostImage;
+        if (!bootstrapImage) throw new Error("Factory worker bootstrap image is missing");
+        // The shared Pod keeps its exact original init image and environment.
+        // Consumer upgrades are exported separately after native admission.
+        for (const item of declared) {
+          if (item.kind !== "Pod" || item.metadata.name !== "worker") continue;
+          const pod = z
+            .object({
+              spec: z
+                .object({
+                  initContainers: z.array(
+                    z.object({ name: z.string(), image: z.string() }).passthrough(),
+                  ),
+                  containers: z.array(z.object({ name: z.string() }).passthrough()),
+                })
+                .passthrough(),
+            })
+            .parse(item);
+          for (const container of [...pod.spec.initContainers, ...pod.spec.containers]) {
+            if (container.name === "runtime-image") Reflect.set(container, "image", bootstrapImage);
+            const env = z
+              .array(z.object({ name: z.string(), value: z.string().optional() }).passthrough())
+              .parse(Reflect.get(container, "env"));
+            for (const entry of env)
+              if (entry.name === "FACTORY_RUNTIME_IMAGE") entry.value = bootstrapImage;
+            Reflect.set(container, "env", env);
+          }
+          Reflect.set(item, "spec", pod.spec);
+        }
         const location = factoryboxLocation(worker.id);
         const expectedLabels = factoryboxSharedLabels(worker.id);
         const namespace = declared.find((value) => value.kind === "Namespace");
@@ -234,7 +262,7 @@ export function createFactoryboxWorker(database: Database, kubernetes: Kubernete
         if (storagePinned.count !== 1) throw new Error("Factory shared storage UID changed");
         const original = pod ?? (await kubernetes.getPod(location.namespace, location.podName));
         if (!original) throw new Error("Original Factory worker create outcome is unconfirmed");
-        requireRuntimePodArtifacts(original, runtimeHostImage, profile.image);
+        requireRuntimePodArtifacts(original, bootstrapImage, profile.image);
         if (!Object.entries(expectedLabels).every(([key, value]) => original.labels[key] === value))
           throw new Error("Factory worker Pod ownership changed");
         const podPinned =
@@ -251,7 +279,11 @@ export function createFactoryboxWorker(database: Database, kubernetes: Kubernete
             ownerID: worker.id,
             uid: observedNamespace.uid,
           });
-        return { namespaceUID: observedNamespace.uid, podUID: original.uid };
+        return {
+          namespaceUID: observedNamespace.uid,
+          podUID: original.uid,
+          workerRuntimeHostImage: bootstrapImage,
+        };
       } finally {
         try {
           await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-create'))`;

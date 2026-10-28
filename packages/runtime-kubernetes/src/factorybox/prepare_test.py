@@ -23,6 +23,9 @@ class PreparationTests(unittest.TestCase):
             "runtimeHostImage": "registry.invalid/runtime@sha256:" + "d" * 64,
             "sharedSource": False, "sourceWorkspaceID": None, "reserveSeed": False, "bootstrap": ":",
         }
+        environment = patch.dict(os.environ, {"FACTORY_RUNTIME_IMAGE": self.request["runtimeHostImage"]})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def assigned(self, **changes):
         request = {**self.request, **changes}
@@ -277,6 +280,53 @@ class PreparationTests(unittest.TestCase):
                 self.module["image_base"](
                     {**sibling, "runtimeHostImage": "foreign"}, status, seed, digest, ["cli"])
             self.assertEqual(extraction.call_count, 1)
+
+    def test_upgraded_images_have_independent_bases_and_preserve_the_original_import(self):
+        requests = [self.request, {**self.request, "runtimeHostImage": "registry.invalid/runtime@sha256:"+"e"*64}]
+        seeds = []
+        imported = []
+        status = {"store": str(self.root), "boot_id": "owned-boot",
+                  "lifecycle": {"root": str(self.root/"controller"), "runtime_sha256": "e"*64}}
+        for index in range(2):
+            seed = self.root/("seed-"+str(index))
+            seed.mkdir()
+            with tarfile.open(seed/"rootfs.tar", "w") as archive:
+                info = tarfile.TarInfo("home")
+                info.type = tarfile.DIRTYPE
+                archive.addfile(info)
+            seeds.append(seed)
+
+        def unpack(args, **kwargs):
+            destination = Path(args[args.index("-C")+1])
+            (destination/"home").mkdir(exist_ok=True)
+
+        def base(args, **kwargs):
+            source, name = args[args.index("--source")+1], args[-1]
+            imported.append((source, name))
+            saved = str(self.root/"controller/bases"/name/"rootfs")
+            return json.dumps({"version": 1, "id": name, "source": source, "boot_id": "owned-boot",
+                               "runtime_sha256": "e"*64, "prepared_at": "owned-time",
+                               "tree": {"source": source, "saved": saved, "sha256": "f"*64,
+                                        "immutable": {"root": saved}}}).encode()
+
+        with patch("subprocess.run", side_effect=unpack) as extraction, \
+                patch("subprocess.check_output", side_effect=base), \
+                patch.dict(self.module["image_base"].__globals__, {"image_source_mounts": lambda _: False}):
+            for request, seed in zip(requests, seeds):
+                sha = hashlib.sha256((seed/"rootfs.tar").read_bytes()).hexdigest()
+                self.module["image_base"](request, status, seed, sha, ["cli"])
+            original = (self.root/"consumer-images"/sha/"prepared.json").read_bytes()
+            self.module["image_base"](requests[0], status, seeds[0], sha, ["cli"])
+            self.module["image_base"](requests[1], status, seeds[1], sha, ["cli"])
+            self.assertEqual(extraction.call_count, 2)
+            self.assertEqual(imported[0], imported[2])
+            self.assertEqual(imported[1], imported[3])
+            self.assertNotEqual(imported[0][1], imported[1][1])
+            self.assertEqual(imported[0][1], "factory-runtime")
+            self.assertLessEqual(len(imported[1][1]), 63)
+            self.assertEqual((self.root/"consumer-images"/sha/"prepared.json").read_bytes(), original)
+            self.assertEqual(Path(imported[1][0]).parent, seeds[1]/"import")
+            self.assertFalse(Path(imported[1][0]).exists())
 
     def image_retirement_fixture(self):
         root = self.root / "consumer-images" / ("a" * 64)
