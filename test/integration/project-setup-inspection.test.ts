@@ -5,6 +5,7 @@ import { configurationPath } from "../../apps/factory/src/setup/configuration";
 import { requireSetupReady } from "../../apps/factory/src/setup/execution-gate";
 import { createSetupInspection } from "../../apps/factory/src/setup/inspection";
 import { starterFiles } from "../../apps/factory/src/setup/starter";
+import { setupFeedbackKey } from "../../packages/project-domain/src/setup";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
@@ -23,6 +24,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
   let invalidRecipe = false;
   const feedbacks: (string | undefined)[] = [];
   const contexts: (readonly { question: string; answer: string }[] | undefined)[] = [];
+  const previousProposals: unknown[] = [];
   const recipeReads: {
     available: readonly string[];
     body: string | null;
@@ -87,6 +89,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     generate: async (input) => {
       contexts.push(input.context);
       feedbacks.push(input.configurationFeedback);
+      previousProposals.push(Reflect.get(input, "previousProposal"));
       calls++;
       expect(input.paths).toHaveLength(2000);
       expect(input.paths).not.toContain("tools/forms-dev.mjs");
@@ -279,6 +282,68 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
       await database.client`SELECT state,failure FROM factory.project_setup_inspection WHERE id=${invalidID}`;
     expect(retainedInvalid?.["state"]).toBe("failed");
     expect(retainedInvalid?.["failure"]).toBe(invalid?.failure);
+
+    let reviewedID = correctedID;
+    for (let index = 0; index < 9; index++) {
+      const retained = (await controller.view(projectID, userID))?.output;
+      const nextID = crypto.randomUUID();
+      const correction = `Preserve the current recipe; review correction ${index + 1}.`;
+      await controller.start(projectID, userID, nextID, {
+        parentID: reviewedID,
+        answers: { [setupFeedbackKey]: correction },
+      });
+      await controller.settle();
+      expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+      expect(previousProposals.at(-1)).toEqual(retained);
+      expect(contexts.at(-1)).toContainEqual({
+        question: "Requested configuration changes",
+        answer: correction,
+      });
+      reviewedID = nextID;
+    }
+    await controller.stop(projectID, userID, reviewedID);
+    const eighthReviewBase = crypto.randomUUID();
+    const reviewedOutput = JSON.stringify({
+      purpose: "Owned retry application",
+      services: [],
+      uncertainty: [],
+      questions: [],
+      files,
+    });
+    await database.client`INSERT INTO factory.project_setup_inspection
+      (id,project_id,source_commit,state,created_by,parent_id,answers,output)
+      VALUES(${eighthReviewBase},${projectID},${head},'proposal',${userID},${eighthFailedID},
+        '{}'::jsonb,${reviewedOutput}::jsonb)`;
+    const eighthReviewID = crypto.randomUUID();
+    await controller.start(projectID, userID, eighthReviewID, {
+      parentID: eighthReviewBase,
+      answers: { [setupFeedbackKey]: "Correct only the native installer asset name." },
+    });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    expect(previousProposals.at(-1)).toEqual(JSON.parse(reviewedOutput));
+    expect(contexts.at(-1)).toHaveLength(9);
+    invalidRecipe = true;
+    const failedReviewID = crypto.randomUUID();
+    await controller.start(projectID, userID, failedReviewID, {
+      parentID: eighthReviewID,
+      answers: { [setupFeedbackKey]: "Preserve the recipe and correct only its installer." },
+    });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("failed");
+    invalidRecipe = false;
+    const recoveredReviewID = crypto.randomUUID();
+    await controller.start(projectID, userID, recoveredReviewID, { parentID: failedReviewID });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    expect(previousProposals.at(-1)).toEqual(JSON.parse(reviewedOutput));
+    expect(contexts.at(-1)).toContainEqual({
+      question: "Requested configuration changes",
+      answer: "Preserve the recipe and correct only its installer.",
+    });
+    const settledCalls = calls;
+    await controller.start(projectID, userID, recoveredReviewID, { parentID: failedReviewID });
+    expect(calls).toBe(settledCalls);
   } finally {
     await controller.settle();
     await database.client.end();

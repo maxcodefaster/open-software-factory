@@ -1,5 +1,49 @@
 import { expect, test } from "bun:test";
+import { knownModelRejection } from "../models/execution-policy";
 import { inspectConfiguration } from "./inspection-agent";
+
+test("retained proposal text remains inside the existing model input bound", async () => {
+  let requests = 0;
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      requests++;
+      return Response.json(
+        { error: "Oversized input must not reach the provider" },
+        { status: 500 },
+      );
+    },
+  });
+  try {
+    const failure = await inspectConfiguration({
+      modelID: "owned-model",
+      connection: { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned-input-bound" },
+      signal: AbortSignal.timeout(5000),
+      paths: ["package.json"],
+      existingConfiguration: [],
+      previousProposal: {
+        purpose: "Oversized retained configuration",
+        services: [],
+        uncertainty: [],
+        questions: [],
+        files: [
+          ".devcontainer/devcontainer.json",
+          ".devcontainer/Dockerfile",
+          ".devcontainer/compose.yaml",
+          ".devcontainer/compose.yml",
+          ".factory/system.json",
+          ".forgejo/workflows/factory-verification.yml",
+        ].map((path) => ({ path, content: "x".repeat(64000) })),
+      },
+      read: async () => '{"name":"owned"}',
+    }).catch((cause: unknown) => cause);
+    expect(knownModelRejection(failure)).toBe(true);
+    expect(requests).toBe(0);
+  } finally {
+    await provider.stop(true);
+  }
+});
 
 test("caller Stop still fences a longer setup invocation without starting inference", async () => {
   const abort = new AbortController();
@@ -68,6 +112,18 @@ test("native setup inspection has a final-output step after sequential source re
   const paths = ["package.json", "README.md", "src/server.ts", "src/database.ts"];
   const loaded: string[] = [];
   let requests = 0;
+  const previousProposal = {
+    purpose: "Retained configuration under explicit review",
+    services: [],
+    uncertainty: [],
+    questions: [],
+    files: [
+      {
+        path: ".devcontainer/Dockerfile" as const,
+        content: "FROM node:24\n# preserve-this-retained-installer\n",
+      },
+    ],
+  };
   const proposal = {
     purpose: "A source-grounded application requiring configuration",
     services: [{ name: "Web", description: "Web application", port: 3000 }],
@@ -106,6 +162,8 @@ test("native setup inspection has a final-output step after sequential source re
       expect(userText).toContain(
         '"missingConfiguration":[".devcontainer/devcontainer.json",".factory/system.json",".forgejo/workflows/factory-verification.yml"]',
       );
+      expect(userText).toContain('"previousProposal":');
+      expect(userText).toContain("preserve-this-retained-installer");
       expect(JSON.stringify(body.messages)).toContain(
         "write standard installation commands for already-established system tools and exact approved versions",
       );
@@ -170,6 +228,7 @@ test("native setup inspection has a final-output step after sequential source re
       },
       paths,
       existingConfiguration: [],
+      previousProposal,
       signal: AbortSignal.timeout(5000),
       read: async (path) => {
         loaded.push(path);
