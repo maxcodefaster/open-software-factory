@@ -15,6 +15,30 @@ export const configurationPath = (path: string) =>
     path,
   );
 
+const recovery = {
+  recipe:
+    "The proposal omitted a required recipe file. Retry to request a complete proposal. Answers and source are unchanged.",
+  compose:
+    "The proposal did not select its Compose stack. Retry to request a connected stack. Answers and source are unchanged.",
+  required:
+    "The proposal omitted required configuration. Retry to request all missing files. Answers and source are unchanged.",
+} as const;
+
+export class SetupConfigurationError extends Error {
+  readonly recovery: string;
+  constructor(kind: keyof typeof recovery, message: string) {
+    super(message);
+    this.name = "SetupConfigurationError";
+    this.recovery = recovery[kind];
+  }
+}
+
+export function setupConfigurationFeedback(failure: string | null) {
+  return Object.values(recovery).some((message) => message === failure)
+    ? (failure ?? undefined)
+    : undefined;
+}
+
 // Required Compose/Dev Container substitutions are declared by the repository.
 // Optional defaults do not require a Factory secret and values are never read here.
 export function requiredEnvironmentVariables(contents: readonly string[]) {
@@ -43,7 +67,10 @@ function yaml(content: string) {
 function reference(path: string, existingPaths: readonly string[]) {
   const resolved = posix.normalize(posix.join(".devcontainer", path));
   if (!existingPaths.includes(resolved) || resolved.startsWith("../") || posix.isAbsolute(path))
-    throw new Error("Dev Container references an unavailable repository file");
+    throw new SetupConfigurationError(
+      "recipe",
+      "Dev Container references an unavailable repository file",
+    );
 }
 function devContainer(content: string, existingPaths: readonly string[]) {
   const errors: ParseError[] = [];
@@ -109,6 +136,22 @@ export function validateConfiguration(
   const recipe = files.find((file) => file.path === ".devcontainer/devcontainer.json");
   if (recipe) {
     const value = devContainer(recipe.content, paths);
+    const composePaths = new Set(
+      (typeof value.dockerComposeFile === "string"
+        ? [value.dockerComposeFile]
+        : (value.dockerComposeFile ?? [])
+      ).map((path) => posix.normalize(posix.join(".devcontainer", path))),
+    );
+    if (
+      files.some(
+        (file) =>
+          /^\.devcontainer\/compose\.ya?ml$/.test(file.path) && !composePaths.has(file.path),
+      )
+    )
+      throw new SetupConfigurationError(
+        "compose",
+        "Proposed Compose files must be referenced by devcontainer.json",
+      );
     const composePath =
       typeof value.dockerComposeFile === "string"
         ? posix.normalize(posix.join(".devcontainer", value.dockerComposeFile))
@@ -194,5 +237,8 @@ export function validateSetupProposal(
     !output.questions.length &&
     requiredConfiguration.some((path) => !existingPaths.includes(path) && !paths.includes(path))
   )
-    throw new Error("Setup proposal does not contain the missing required files");
+    throw new SetupConfigurationError(
+      "required",
+      "Setup proposal does not contain the missing required files",
+    );
 }

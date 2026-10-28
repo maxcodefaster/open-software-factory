@@ -20,6 +20,8 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
   let head = "a".repeat(40);
   let calls = 0;
   let sourceReads = 0;
+  let invalidRecipe = false;
+  const feedbacks: (string | undefined)[] = [];
   const contexts: (readonly { question: string; answer: string }[] | undefined)[] = [];
   const recipeReads: {
     available: readonly string[];
@@ -84,6 +86,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     ready: async () => {},
     generate: async (input) => {
       contexts.push(input.context);
+      feedbacks.push(input.configurationFeedback);
       calls++;
       expect(input.paths).toHaveLength(2000);
       expect(input.paths).not.toContain("tools/forms-dev.mjs");
@@ -116,7 +119,12 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
         services: [],
         uncertainty: [],
         questions: calls === 1 ? [{ id: "port", question: "Which port should Factory use?" }] : [],
-        files: calls === 1 ? [] : files,
+        files:
+          calls === 1
+            ? []
+            : invalidRecipe
+              ? files.filter((file) => file.path !== ".devcontainer/compose.yaml")
+              : files,
       };
     },
   });
@@ -175,6 +183,102 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
       controller.start(projectID, userID, crypto.randomUUID(), { parentID: failedID }),
     ).rejects.toThrow("Source changed");
     expect(calls).toBe(3);
+
+    head = "a".repeat(40);
+    await controller.stop(projectID, userID, retryID);
+    let failedParent = failedID;
+    for (let index = 0; index < 9; index++) {
+      const id = crypto.randomUUID();
+      await database.client`INSERT INTO factory.project_setup_inspection
+        (id,project_id,source_commit,state,created_by,parent_id,answers,failure)
+        VALUES(${id},${projectID},${head},'failed',${userID},${failedParent},'{}'::jsonb,'Earlier inspection failed')`;
+      failedParent = id;
+    }
+    const recoveredID = crypto.randomUUID();
+    await controller.start(projectID, userID, recoveredID, { parentID: failedParent });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    expect(contexts.at(-1)).toEqual([
+      {
+        question: "Which port should Factory use?",
+        answer: "4321",
+      },
+    ]);
+    expect(calls).toBe(4);
+    await controller.stop(projectID, userID, recoveredID);
+
+    const questionOutput = JSON.stringify({
+      purpose: "Owned bounded question history",
+      services: [],
+      uncertainty: [],
+      questions: [{ id: "port", question: "Which port should Factory use?" }],
+      files: [],
+    });
+    let questionParent = initialID;
+    for (let index = 0; index < 7; index++) {
+      const id = crypto.randomUUID();
+      await database.client`INSERT INTO factory.project_setup_inspection
+        (id,project_id,source_commit,state,created_by,parent_id,answers,output)
+        VALUES(${id},${projectID},${head},'superseded',${userID},${questionParent},
+          '{"port":"4321"}'::jsonb,${questionOutput}::jsonb)`;
+      questionParent = id;
+    }
+    const eighthFailedID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.project_setup_inspection
+      (id,project_id,source_commit,state,created_by,parent_id,answers)
+      VALUES(${eighthFailedID},${projectID},${head},'failed',${userID},${questionParent},'{"port":"4321"}'::jsonb)`;
+    const eighthRetryID = crypto.randomUUID();
+    await controller.start(projectID, userID, eighthRetryID, { parentID: eighthFailedID });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    expect(contexts.at(-1)).toHaveLength(8);
+    expect(calls).toBe(5);
+    await controller.stop(projectID, userID, eighthRetryID);
+
+    const ninthQuestionID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.project_setup_inspection
+      (id,project_id,source_commit,state,created_by,parent_id,answers,output)
+      VALUES(${ninthQuestionID},${projectID},${head},'superseded',${userID},${questionParent},
+        '{"port":"4321"}'::jsonb,${questionOutput}::jsonb)`;
+    const ninthFailedID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.project_setup_inspection
+      (id,project_id,source_commit,state,created_by,parent_id,answers)
+      VALUES(${ninthFailedID},${projectID},${head},'failed',${userID},${ninthQuestionID},'{"port":"4321"}'::jsonb)`;
+    await controller.start(projectID, userID, crypto.randomUUID(), { parentID: ninthFailedID });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("failed");
+    expect(calls).toBe(5);
+
+    const cyclicID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.project_setup_inspection
+      (id,project_id,source_commit,state,created_by,parent_id,answers)
+      VALUES(${cyclicID},${projectID},${head},'failed',${userID},${cyclicID},'{}'::jsonb)`;
+    await controller.start(projectID, userID, crypto.randomUUID(), { parentID: cyclicID });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("failed");
+    expect(calls).toBe(5);
+
+    invalidRecipe = true;
+    const invalidID = crypto.randomUUID();
+    await controller.start(projectID, userID, invalidID);
+    await controller.settle();
+    const invalid = await controller.view(projectID, userID);
+    expect(invalid?.state).toBe("failed");
+    expect(invalid?.output).toBeNull();
+    expect(invalid?.failure).toContain("required recipe file");
+    invalidRecipe = false;
+    const correctedID = crypto.randomUUID();
+    await controller.start(projectID, userID, correctedID, { parentID: invalidID });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    expect(feedbacks.at(-1)).toBe(invalid?.failure ?? undefined);
+    await controller.start(projectID, userID, correctedID, { parentID: invalidID });
+    expect(calls).toBe(7);
+    expect(sourceReads).toBe(14);
+    const [retainedInvalid] =
+      await database.client`SELECT state,failure FROM factory.project_setup_inspection WHERE id=${invalidID}`;
+    expect(retainedInvalid?.["state"]).toBe("failed");
+    expect(retainedInvalid?.["failure"]).toBe(invalid?.failure);
   } finally {
     await controller.settle();
     await database.client.end();

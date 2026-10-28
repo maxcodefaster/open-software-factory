@@ -17,10 +17,13 @@ import { recordedMastraUsage } from "../usage/record-mastra";
 import {
   configurationPath,
   requiredConfiguration,
+  SetupConfigurationError,
+  setupConfigurationFeedback,
   validateConfiguration,
   validateSetupProposal,
 } from "./configuration";
 import { inspectConfiguration } from "./inspection-agent";
+import { setupInspectionTimeoutMS, setupQuestionRoundLimit } from "./limits";
 
 type InspectionRow = {
   id: string;
@@ -132,7 +135,8 @@ export function createSetupInspection(input: {
         const available = new Set(availablePaths);
         if (!value.modelID) throw new Error("Inspection model was not admitted");
         const connection = await input.connection(value);
-        signal = AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]);
+        signal = AbortSignal.any([abort.signal, AbortSignal.timeout(setupInspectionTimeoutMS)]);
+        const history = await questionContext(value, signal);
         const output = await (input.generate ?? inspectConfiguration)({
           modelID: value.modelID,
           connection,
@@ -146,7 +150,10 @@ export function createSetupInspection(input: {
           }),
           signal,
           answers: value.answers,
-          context: await questionContext(value),
+          context: history.confirmedAnswers,
+          ...(history.configurationFeedback
+            ? { configurationFeedback: history.configurationFeedback }
+            : {}),
           existingConfiguration: existing.filter(configurationPath),
           paths: availablePaths.slice(0, 2000),
           availablePaths,
@@ -170,26 +177,35 @@ export function createSetupInspection(input: {
           (cause instanceof Error && cause.name === "TimeoutError");
         const failure = timedOut
           ? "Inspection timed out. Previous answers and source are unchanged. Retry explicitly when ready."
-          : "Inspection could not finish. Previous answers and source are unchanged; retry when ready.";
+          : cause instanceof SetupConfigurationError
+            ? cause.recovery
+            : "Inspection could not finish. Previous answers and source are unchanged; retry when ready.";
         await sql`UPDATE factory.project_setup_inspection SET state='failed',failure=${failure},updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
       } finally {
         aborts.delete(value.id);
       }
     });
   }
-  async function questionContext(value: InspectionRow) {
+  async function questionContext(value: InspectionRow, signal: AbortSignal) {
     const rounds: { question: string; answer: string }[][] = [];
+    const seen = new Set([value.id]);
+    let configurationFeedback: string | undefined;
     let child = value;
-    for (let count = 0; child.parentID && count < 8; count++) {
+    while (child.parentID) {
+      signal.throwIfAborted();
+      if (seen.has(child.parentID)) throw new Error("Question context is unavailable");
+      seen.add(child.parentID);
       const parent = await row(child.parentID);
       if (!parent || parent.projectID !== value.projectID)
         throw new Error("Question context is unavailable");
+      if (child === value && parent.state === "failed")
+        configurationFeedback = setupConfigurationFeedback(parent.failure);
       if (parent.state === "failed") {
         child = parent;
         continue;
       }
       const output = setupInspectionOutput.parse(parent.output);
-      rounds.unshift(
+      const round =
         !output.questions.length && child.answers[setupFeedbackKey]
           ? [
               {
@@ -200,12 +216,15 @@ export function createSetupInspection(input: {
           : output.questions.map((question) => ({
               question: question.question,
               answer: child.answers[question.id] ?? "",
-            })),
-      );
+            }));
+      if (round.length) {
+        if (rounds.length >= setupQuestionRoundLimit)
+          throw new Error("Setup question round bound reached");
+        rounds.unshift(round);
+      }
       child = parent;
     }
-    if (child.parentID) throw new Error("Setup question round bound reached");
-    return rounds.flat();
+    return { confirmedAnswers: rounds.flat(), configurationFeedback };
   }
   async function start(
     projectID: string,
