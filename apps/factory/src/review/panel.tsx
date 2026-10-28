@@ -127,6 +127,7 @@ export function ReviewPanel(props: {
   const [body, setBody] = createSignal("");
   const [kind, setKind] = createSignal<"comment" | "thread">("comment");
   const [replies, setReplies] = createSignal<Record<string, string>>({});
+  const [resolvedOpen, setResolvedOpen] = createSignal(false);
   const [capture, setCapture] = createSignal<ReviewCapture>();
   const [frameURL, setFrameURL] = createSignal("");
   const capturedBlob = createMemo(() => capture()?.frame);
@@ -227,6 +228,7 @@ export function ReviewPanel(props: {
     setBody("");
     setKind("comment");
     setReplies({});
+    setResolvedOpen(false);
     setCapture(undefined);
     setSelectedScenario("");
     setComposing(scope.compact);
@@ -1219,11 +1221,13 @@ export function ReviewPanel(props: {
                   <details
                     class="review-resolved"
                     open={
+                      resolvedOpen() ||
                       props.compact ||
                       visibleFeedback().some(
                         (item) => item.id === props.feedbackID && item.state === "resolved",
                       )
                     }
+                    onToggle={(event) => setResolvedOpen(event.currentTarget.open)}
                   >
                     <summary>
                       Resolved (
