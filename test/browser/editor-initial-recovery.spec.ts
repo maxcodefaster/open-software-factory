@@ -1,6 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { createDeveloperIDEEdge } from "../../apps/factory/src/workspace/developer-ide-edge";
 import { CommandError } from "../../apps/factory/src/command-error";
 

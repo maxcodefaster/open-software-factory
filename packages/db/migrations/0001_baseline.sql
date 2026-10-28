@@ -6332,6 +6332,37 @@ CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR UPDATE OR DELETE ON facto
 CREATE CONSTRAINT TRIGGER read_version AFTER INSERT OR UPDATE OR DELETE ON factory.project_delivery_queue
   DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION factory.invalidate_factory_reads();
 
+-- Forgejo owns mirror configuration, credentials and scheduling. Factory only
+-- retains command identity/outcome so lost responses never repeat native creates.
+CREATE TABLE factory.repository_mirror_command (
+    id uuid PRIMARY KEY,
+    project_id uuid NOT NULL REFERENCES factory.project(id),
+    created_by uuid NOT NULL REFERENCES auth."user"(id),
+    action text NOT NULL CHECK (action IN ('create','remove','sync')),
+    target_url text,
+    remote_name text,
+    fingerprint text NOT NULL,
+    before_state jsonb NOT NULL,
+    state text NOT NULL CHECK (state IN ('executing','completed','failed','uncertain','acknowledged')),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    completed_at timestamptz
+);
+CREATE INDEX repository_mirror_unconfirmed ON factory.repository_mirror_command(project_id)
+    WHERE state IN ('executing','uncertain');
+CREATE FUNCTION factory.protect_repository_mirror_command() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.id,NEW.project_id,NEW.created_by,NEW.action,NEW.target_url,NEW.remote_name,
+           NEW.fingerprint,NEW.before_state,NEW.created_at) IS DISTINCT FROM
+       ROW(OLD.id,OLD.project_id,OLD.created_by,OLD.action,OLD.target_url,OLD.remote_name,
+           OLD.fingerprint,OLD.before_state,OLD.created_at)
+       OR (OLD.state IN ('completed','failed','acknowledged') AND NEW IS DISTINCT FROM OLD) THEN
+        RAISE EXCEPTION 'Repository mirror command identity and terminal outcome are immutable';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER repository_mirror_command_identity BEFORE UPDATE ON factory.repository_mirror_command
+    FOR EACH ROW EXECUTE FUNCTION factory.protect_repository_mirror_command();
+
 INSERT INTO factory.schema_migration(version) VALUES (1);
 
 COMMIT;

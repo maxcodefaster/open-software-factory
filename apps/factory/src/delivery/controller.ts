@@ -5,6 +5,7 @@ import { candidateReviewResultInput } from "../../../../packages/conversation-do
 import {
   verificationDiagnosisInput,
   verificationRepairInstructions,
+  verificationChangeScope,
 } from "../../../../packages/conversation-domain/src/verification";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
@@ -364,13 +365,33 @@ export function createDeliveryController(
             );
       if (diagnosis?.kind === "pending" || !(await stillActive())) return;
       if (!succeeded && !diagnosis) throw new Error("Failed Verification requires its diagnosis");
+      // Reuse the compact observation column, preserving historical failure diagnosis.
+      // No new log store, workflow scheduler or agent-authored result authority.
+      let receipt = null;
+      if (succeeded) {
+        receipt = await forge.observeVerification(repository, actionRun.id, change.commitSHA);
+        if (receipt.status !== "success" && receipt.status !== "unknown") return;
+        try {
+          const [before, after] = await Promise.all([
+            forge.listFiles(repository, change.baseSHA),
+            forge.listFiles(repository, change.commitSHA),
+          ]);
+          receipt.changes = verificationChangeScope(change.baseSHA, before, after);
+        } catch {
+          receipt.changes = null;
+        }
+      }
+      if (!(await stillActive())) return;
       const summary = diagnosis
         ? diagnosis.summary
-        : `Forgejo Actions verified ${change.commitSHA.slice(0, 12)}.`;
+        : `Forgejo Actions passed ${change.commitSHA.slice(0, 12)}.${receipt?.complete ? "" : " Detailed check observations are incomplete."}`;
       const [recorded] = await database.client<{ diagnosis: unknown }[]>`
         UPDATE factory.verification SET state = ${succeeded ? "succeeded" : "failed"}::factory.verification_state,
           summary = ${bounded(summary)},
-          diagnosis=CASE WHEN ${succeeded} THEN diagnosis ELSE ${diagnosis ? JSON.stringify(diagnosis) : null}::jsonb END,
+          diagnosis=CASE WHEN ${succeeded} THEN
+            CASE WHEN octet_length((COALESCE(diagnosis,'{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb)::text)<=24000
+              THEN COALESCE(diagnosis,'{}'::jsonb) || ${JSON.stringify({ receipt })}::jsonb ELSE diagnosis END
+            ELSE ${diagnosis ? JSON.stringify(diagnosis) : null}::jsonb END,
           completed_at = now(), updated_at = now()
         WHERE id = ${verification.id} AND state NOT IN ('succeeded', 'cancelled')
           AND (diagnosis IS NULL OR ${succeeded})

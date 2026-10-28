@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { sourceWorkspaceViewSchema } from "../../apps/factory/src/api-contracts";
 import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";

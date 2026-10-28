@@ -21,7 +21,7 @@ import {
 import { fixtureValue } from "../fixtures/value";
 
 test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(
-  "configured retrospective judge passes healthy, defect, false-alarm and missing-evidence calibration",
+  "configured retrospective judge distinguishes healthy work, defects, false greens, scope and coverage evidence",
   async () => {
     const modelId = modelEnvironment().planningModelId;
     const usage: UsageEntry[] = [];

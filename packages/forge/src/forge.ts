@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createForgejoDiagnostics } from "./diagnostics";
+import { createForgejoPushMirrors } from "./mirrors";
 
 export interface ForgeRepository {
   readonly owner: string;
@@ -173,8 +174,8 @@ export function createForgejoClient(options: {
   const request = options.fetch ?? fetch;
   const baseURL = new URL(options.apiURL.endsWith("/") ? options.apiURL : `${options.apiURL}/`);
 
-  async function response(path: string, init: RequestInit = {}) {
-    const result = await request(new URL(path, baseURL), {
+  async function send(path: string, init: RequestInit = {}) {
+    return request(new URL(path, baseURL), {
       ...init,
       redirect: "error",
       signal: init.signal ?? AbortSignal.timeout(options.timeoutMs ?? 10_000),
@@ -185,6 +186,10 @@ export function createForgejoClient(options: {
         ...init.headers,
       },
     });
+  }
+
+  async function response(path: string, init: RequestInit = {}) {
+    const result = await send(path, init);
     if (!result.ok) throw new ForgeHttpError(result.status);
     return result;
   }
@@ -248,6 +253,7 @@ export function createForgejoClient(options: {
   }
 
   return {
+    pushMirrors: createForgejoPushMirrors(send),
     async setupRepository(repository: ForgeRepository, setupID: string) {
       try {
         const value = setupRepositoryResponse.parse(await json(repositoryPath(repository)));

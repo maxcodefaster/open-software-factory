@@ -1,7 +1,8 @@
-import { basename, resolve } from "node:path";
 import { rm } from "node:fs/promises";
+import { basename, resolve } from "node:path";
 
 const nativeNames = new Set([
+  "repository-mirrors.native",
   "forgejo-diagnostics.native",
   "native-project-releases",
   "attachment-s3",
@@ -19,6 +20,7 @@ const nativeNames = new Set([
   "openbao",
 ]);
 const compiledProtocolTests = new Set([
+  "server-function-repository-mirrors.test.ts",
   "client-budgets.test.ts",
   "server-function-learning.test.ts",
   "server-function-inbox.test.ts",

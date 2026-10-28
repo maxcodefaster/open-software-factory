@@ -147,6 +147,16 @@ test("pinned Forgejo 17 exposes exact failed-step diagnostics and bounded native
     expect(diagnosis.jobs[0]?.stepName).toBe("Validate fixture");
     expect(diagnosis.jobs[0]?.output).toContain("Expected 200, received 500");
     expect(JSON.stringify(diagnosis)).not.toContain("owned-fixture-private-value");
+    const receipt = await client.observeVerification(repository, run.id, file.commit.sha);
+    expect(receipt.complete).toBe(true);
+    expect(receipt.status).toBe("failure");
+    expect(receipt.jobs[0]?.attempt).toBe(diagnosis.jobs[0]?.attempt);
+    expect(
+      receipt.jobs[0]?.steps.some(
+        (step) => step.name === "Validate fixture" && step.status === "failure",
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(receipt)).not.toContain("Expected 200");
     const observed = fixtureValue(diagnosis.jobs[0], "diagnosis.jobs[0]");
     const page = await client.readVerificationLog(repository, {
       runID: run.id,
@@ -169,6 +179,7 @@ test("pinned Forgejo 17 exposes exact failed-step diagnostics and bounded native
           commit: file.commit.sha,
           runID: run.id,
           diagnosis,
+          receipt,
           page,
         },
         null,

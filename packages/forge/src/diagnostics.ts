@@ -1,5 +1,9 @@
 import { z } from "zod";
-import type { VerificationDiagnosis } from "../../conversation-domain/src/verification";
+import {
+  verificationReceiptInput,
+  type VerificationDiagnosis,
+  type VerificationReceipt,
+} from "../../conversation-domain/src/verification";
 import type { ForgeRepository } from "./forge";
 
 const runInput = z.object({
@@ -94,6 +98,23 @@ export function createForgejoDiagnostics(
       throw new Error("Verification job or attempt changed");
     return value;
   }
+  async function observedJobs(repo: ForgeRepository, runID: number) {
+    const response = await send(`${path(repo)}/runs/${runID}/jobs?limit=9&page=1`);
+    const items = z
+      .array(jobInput)
+      .parse(JSON.parse(Buffer.from(await boundedBody(response, 256 * 1024)).toString()));
+    const total = response.headers.get("x-total-count");
+    if (
+      !items.length ||
+      items.length > 8 ||
+      /rel="next"/.test(response.headers.get("link") ?? "") ||
+      (total !== null && (!/^\d+$/.test(total) || Number(total) !== items.length)) ||
+      new Set(items.map((item) => item.id)).size !== items.length ||
+      items.some((item) => item.run_id !== runID)
+    )
+      throw new Error("Verification job observations are incomplete");
+    return items;
+  }
   async function output(
     repo: ForgeRepository,
     id: number,
@@ -119,6 +140,77 @@ export function createForgejoDiagnostics(
     };
   }
   return {
+    async observeVerification(
+      repo: ForgeRepository,
+      runID: number,
+      commit: string,
+    ): Promise<VerificationReceipt> {
+      const receipt: VerificationReceipt = {
+        commit,
+        runId: runID,
+        workflow: "factory-verification.yml",
+        status: "unknown",
+        complete: false,
+        jobs: [],
+        changes: null,
+      };
+      const status = (value: string): VerificationReceipt["status"] =>
+        terminal.has(value)
+          ? (value as VerificationReceipt["status"])
+          : ["running", "waiting", "blocked"].includes(value)
+            ? "pending"
+            : "unknown";
+      try {
+        const current = await run(repo, runID, commit);
+        receipt.status = status(current.status);
+        // A bounded first page is evidence only when the server confirms no next page.
+        const listed = await observedJobs(repo, runID);
+        let complete = terminal.has(current.status);
+        for (const item of listed) {
+          const detail = await job(repo, runID, item.id, item.attempt);
+          const steps = detail.steps ?? [];
+          complete &&=
+            detail.status === item.status &&
+            terminal.has(detail.status) &&
+            steps.length > 0 &&
+            steps.length <= 16 &&
+            new Set(steps.map((step) => step.number)).size === steps.length &&
+            steps.every((step) => terminal.has(step.status)) &&
+            (current.status !== "success" ||
+              detail.status === "success" ||
+              detail.status === "skipped") &&
+            (detail.status !== "success" ||
+              steps.every((step) => ["success", "skipped"].includes(step.status)));
+          receipt.jobs.push({
+            id: detail.id,
+            attempt: detail.attempt,
+            name: excerpt(sanitizeVerificationOutput(detail.name, credential), 120),
+            status: status(detail.status),
+            steps: steps.slice(0, 16).map((step) => ({
+              number: step.number,
+              name: excerpt(sanitizeVerificationOutput(step.name, credential), 120),
+              status: status(step.status),
+            })),
+          });
+        }
+        const confirmedJobs = await observedJobs(repo, runID);
+        const identities = (items: z.infer<typeof jobInput>[]) =>
+          items
+            .map((item) => `${item.id}:${item.attempt}:${item.status}`)
+            .sort()
+            .join(",");
+        const confirmed = await run(repo, runID, commit);
+        receipt.status = status(confirmed.status);
+        receipt.complete =
+          complete &&
+          confirmed.status === current.status &&
+          identities(listed) === identities(confirmedJobs);
+      } catch {
+        // Missing observations never become invented passing checks or log scraping.
+        receipt.complete = false;
+      }
+      return verificationReceiptInput.parse(receipt);
+    },
     async diagnoseVerification(
       repo: ForgeRepository,
       runID: number,

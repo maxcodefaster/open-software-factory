@@ -1,6 +1,7 @@
 import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { signIn } from "../support/factory-fixture";
 import { mockFactoryFunctions } from "../fixtures/server-functions";

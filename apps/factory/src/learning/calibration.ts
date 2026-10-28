@@ -4,7 +4,7 @@ import type {
 } from "../../../../packages/conversation-domain/src/learning";
 
 // These are fixed product checks, never editable by the optimizer. They test
-// clean work, a real defect, a false alarm, and an unsupported success claim.
+// Evidence failures and healthy test cleanup must not be confused with each other.
 export const calibrationCases: LearningCase[] = [
   {
     id: "calibration:healthy",
@@ -120,6 +120,126 @@ export const calibrationCases: LearningCase[] = [
     ],
     targets: [],
   },
+  {
+    id: "calibration:green-diagnostics",
+    projectId: "00000000-0000-4000-8000-000000000001",
+    ownerId: null,
+    developerOnly: true,
+    activity: "build",
+    outcome: "completed",
+    settledAt: "2026-10-27T00:00:00.000Z",
+    evidence: [
+      {
+        id: "diagnostics:task",
+        kind: "task",
+        truncated: false,
+        body: "Repair and verify the Skill editor with no structural reactivity diagnostics.",
+      },
+      {
+        id: "diagnostics:run",
+        kind: "artifact",
+        truncated: false,
+        body: "Exact-candidate browser run: 49 cases passed. The same run emitted STRICT_READ_UNTRACKED in SkillRevisionEditor. It imported plain Playwright test and bypassed the diagnostic fixture. Adding the fixture made that case fail before the production repair.",
+      },
+      {
+        id: "diagnostics:claim",
+        kind: "outcome",
+        truncated: false,
+        body: "Agent reported that the Skill editor was fully verified with no reactivity issues.",
+      },
+    ],
+    targets: [],
+  },
+  {
+    id: "calibration:scope-mismatch",
+    projectId: "00000000-0000-4000-8000-000000000001",
+    ownerId: null,
+    developerOnly: true,
+    activity: "build",
+    outcome: "completed",
+    settledAt: "2026-10-27T00:00:00.000Z",
+    evidence: [
+      {
+        id: "scope:task",
+        kind: "task",
+        truncated: false,
+        body: "Implement and verify the UI change with unit and browser checks.",
+      },
+      {
+        id: "scope:run",
+        kind: "artifact",
+        truncated: false,
+        body: "Protected exact-candidate workflow recorded one successful unit job, attempt 1. Its browser job was skipped. No browser observations or implementation source were retained.",
+      },
+      {
+        id: "scope:claim",
+        kind: "outcome",
+        truncated: false,
+        body: "Agent reported all required unit and browser checks passed. The UI implementation itself has no observed defect or correctness proof.",
+      },
+    ],
+    targets: [],
+  },
+  {
+    id: "calibration:coverage-lost",
+    projectId: "00000000-0000-4000-8000-000000000001",
+    ownerId: null,
+    developerOnly: true,
+    activity: "build",
+    outcome: "completed",
+    settledAt: "2026-10-27T00:00:00.000Z",
+    evidence: [
+      {
+        id: "lost:task",
+        kind: "task",
+        truncated: false,
+        body: "Remove redundant test orchestration while preserving duplicate-payment regression coverage.",
+      },
+      {
+        id: "lost:source",
+        kind: "artifact",
+        truncated: false,
+        body: "Exact diff deletes the sole duplicate-payment assertion. No equivalent case remains. An owned replay of the old defect passes the remaining suite but double-charges the request.",
+      },
+      {
+        id: "lost:claim",
+        kind: "outcome",
+        truncated: false,
+        body: "Agent called the deleted test redundant because the remaining suite was green.",
+      },
+    ],
+    targets: [],
+  },
+  {
+    id: "calibration:coverage-preserved",
+    projectId: "00000000-0000-4000-8000-000000000001",
+    ownerId: null,
+    developerOnly: true,
+    activity: "build",
+    outcome: "completed",
+    settledAt: "2026-10-27T00:00:00.000Z",
+    evidence: [
+      {
+        id: "preserved:task",
+        kind: "task",
+        truncated: false,
+        body: "Remove duplicate browser wrappers and replace an opaque historical schema hash without losing defect detection.",
+      },
+      {
+        id: "preserved:proof",
+        kind: "artifact",
+        truncated: false,
+        body: "Exact runner mapping shows removed wrappers only re-executed 31 preserved browser cases 32 times. Canonical cases still run. Five behavior checks preserve build ownership and cleanup. The schema replacement compares fresh and repeated installs and tests typed columns, PostgreSQL invariants and the publication allowlist. Injecting a missing constraint fails the new check; healthy installs pass.",
+      },
+      {
+        id: "preserved:outcome",
+        kind: "outcome",
+        truncated: false,
+        body: "Owned canonical browser, ownership and installation checks passed. Coverage preservation was demonstrated, not inferred from fewer tests or a green total.",
+      },
+    ],
+    targets: [],
+  },
 ];
 export function calibrationPassed(result: LearningResult) {
   const get = (id: string) => result.cases.find((item) => item.caseId === `calibration:${id}`);
@@ -130,10 +250,20 @@ export function calibrationPassed(result: LearningResult) {
     get("false-alarm")?.rework !== "avoidable" &&
     get("missing")?.fulfillment === "unknown" &&
     get("missing")?.verification === "unknown" &&
+    get("green-diagnostics")?.fulfillment === "problem" &&
+    get("green-diagnostics")?.verification === "problem" &&
+    get("scope-mismatch")?.fulfillment === "unknown" &&
+    get("scope-mismatch")?.verification === "problem" &&
+    get("coverage-lost")?.fulfillment === "problem" &&
+    get("coverage-lost")?.verification === "problem" &&
+    get("coverage-preserved")?.fulfillment === "supported" &&
+    get("coverage-preserved")?.verification === "supported" &&
+    get("coverage-preserved")?.rework !== "avoidable" &&
     !result.findings.some(
       (item) =>
         item.caseIds.includes("calibration:healthy") ||
-        item.caseIds.includes("calibration:false-alarm"),
+        item.caseIds.includes("calibration:false-alarm") ||
+        item.caseIds.includes("calibration:coverage-preserved"),
     )
   );
 }

@@ -1,4 +1,4 @@
-import { createSignal, For, lazy, Loading, Show, untrack } from "solid-js";
+import { createSignal, For, Loading, lazy, Show, untrack } from "solid-js";
 import { rememberSettingsReturn } from "./access/settings-return";
 import { createWorkspaceNavigation, WorkspaceNavigationToggle } from "./ui/workspace-navigation";
 import "./settings-workspace.css";
@@ -28,6 +28,9 @@ const ReleaseSettings = lazy(async () => ({
 const UsageSettings = lazy(async () => ({
   default: (await import("./usage/settings")).UsageSettings,
 }));
+const RepositoryMirrorSettings = lazy(async () => ({
+  default: (await import("./repository-mirrors/settings")).RepositoryMirrorSettings,
+}));
 
 type Scope = "personal" | "project" | "system";
 type Category =
@@ -39,7 +42,8 @@ type Category =
   | "people"
   | "environment"
   | "security"
-  | "usage";
+  | "usage"
+  | "repositories";
 
 export function SettingsWorkspace(props: {
   active?: boolean;
@@ -146,7 +150,7 @@ export function SettingsWorkspace(props: {
           {
             scope: "system" as const,
             label: "Factory administration",
-            categories: ["models", "usage", "people", "security"] as Category[],
+            categories: ["models", "usage", "repositories", "people", "security"] as Category[],
           },
         ]
       : []),
@@ -161,6 +165,7 @@ export function SettingsWorkspace(props: {
       people: "People & access",
       environment: "Environments",
       usage: "Monitoring",
+      repositories: "Repository mirrors",
       security: scope === "system" ? "Company sign-in" : "Login & security",
     })[value];
   const navigationTitle = () => (
@@ -241,6 +246,20 @@ export function SettingsWorkspace(props: {
             </header>
           </Show>
           <Loading on={category()} fallback={<p role="status">Opening settings…</p>}>
+            <Show
+              when={
+                visited().has("repositories") &&
+                props.systemManager &&
+                selection().scope === "system"
+              }
+            >
+              <div hidden={category() !== "repositories"}>
+                <RepositoryMirrorSettings
+                  active={props.active !== false && category() === "repositories"}
+                  projectID={props.project?.id}
+                />
+              </div>
+            </Show>
             <Show when={visited().has("models")}>
               <div class="settings-configuration-host" hidden={category() !== "models"}>
                 <ModelSettings

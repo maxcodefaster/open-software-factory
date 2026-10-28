@@ -13,20 +13,33 @@ function fixture(
     wrongCommit?: boolean;
     wrongJob?: boolean;
     pending?: boolean;
+    jobStatus?: string;
+    extraJobs?: boolean;
+    noSteps?: boolean;
+    nextPage?: boolean;
+    changedAttempt?: boolean;
+    lateAttempt?: boolean;
   } = {},
 ) {
   const calls: string[] = [];
+  let jobLists = 0;
   const job = {
     id: 8,
     run_id: options.wrongJob ? 99 : 7,
     attempt: 2,
     name: "Project checks",
-    status: options.pending ? "running" : "failure",
-    steps: [
-      { number: 0, name: "Set up job", status: options.step === 0 ? "failure" : "success" },
-      { number: 1, name: "bun run test", status: options.step === 0 ? "skipped" : "failure" },
-      { number: 2, name: "Complete job", status: "success" },
-    ],
+    status: options.pending ? "running" : (options.jobStatus ?? "failure"),
+    steps: options.noSteps
+      ? []
+      : [
+          { number: 0, name: "Set up job", status: options.step === 0 ? "failure" : "success" },
+          {
+            number: 1,
+            name: "bun run test",
+            status: options.step === 0 ? "skipped" : (options.jobStatus ?? "failure"),
+          },
+          { number: 2, name: "Complete job", status: "success" },
+        ],
   };
   const client = createForgejoClient({
     apiURL: "https://forge.invalid/api/v1/",
@@ -42,8 +55,20 @@ function fixture(
           event: "pull_request",
           status: options.status ?? "failure",
         });
-      if (url.pathname.endsWith("/runs/7/jobs")) return Response.json([job]);
-      if (url.pathname.endsWith("/jobs/8")) return Response.json(job);
+      if (url.pathname.endsWith("/runs/7/jobs")) {
+        jobLists++;
+        return Response.json(
+          options.extraJobs
+            ? Array.from({ length: 9 }, (_, i) => ({ ...job, id: i + 8 }))
+            : [{ ...job, ...(options.lateAttempt && jobLists > 1 ? { attempt: 3 } : {}) }],
+          { headers: options.nextPage ? { link: '<https://forge.invalid/next>; rel="next"' } : {} },
+        );
+      }
+      if (url.pathname.endsWith("/jobs/8"))
+        return Response.json({
+          ...job,
+          ...(options.changedAttempt ? { attempt: 3 } : {}),
+        });
       if (url.pathname.endsWith("/jobs/8/logs")) {
         expect(url.searchParams.get("attempt")).toBe("2");
         expect(url.searchParams.get("step")).toBe("1");
@@ -59,6 +84,47 @@ function fixture(
   });
   return { client, calls };
 }
+test("successful receipts retain exact native jobs and attempts, not logs or invented case totals", async () => {
+  const { client, calls } = fixture({ status: "success", jobStatus: "success" });
+  const receipt = await client.observeVerification(repository, 7, commit);
+  expect(receipt).toMatchObject({
+    commit,
+    runId: 7,
+    workflow: "factory-verification.yml",
+    complete: true,
+    status: "success",
+    jobs: [
+      {
+        id: 8,
+        attempt: 2,
+        status: "success",
+        steps: [
+          { number: 0 },
+          { number: 1, name: "bun run test", status: "success" },
+          { number: 2 },
+        ],
+      },
+    ],
+  });
+  expect(receipt.changes).toBeNull();
+  expect(calls.some((path) => path.endsWith("/logs"))).toBe(false);
+  expect(receipt).not.toHaveProperty("passed");
+});
+test.each([
+  { wrongCommit: true },
+  { wrongJob: true },
+  { noSteps: true },
+  { extraJobs: true },
+  { nextPage: true },
+  { pending: true },
+  { changedAttempt: true },
+  { lateAttempt: true },
+  { status: "success", jobStatus: "failure" },
+])("receipts keep unavailable, partial or contradictory checks incomplete: %j", async (options) => {
+  const { client, calls } = fixture(options);
+  expect((await client.observeVerification(repository, 7, commit)).complete).toBe(false);
+  expect(calls.some((path) => path.endsWith("/logs"))).toBe(false);
+});
 test("a failed real step has exact job/attempt, useful output and redacted credentials", async () => {
   const { client } = fixture();
   const result = await client.diagnoseVerification(repository, 7, commit);

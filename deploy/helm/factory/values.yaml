@@ -41,6 +41,9 @@ attachments:
 # a ca.crt key. Without it, Factory uses the image's normal system trust bundle.
 registryCASecret: ""
 modelAllowedOrigins: []
+# Extra public HTTPS Git hosts shared by Project import and native push mirrors.
+# GitHub, GitLab.com and Codeberg are already allowed.
+gitAllowedOrigins: []
 
 ingress:
   enabled: false

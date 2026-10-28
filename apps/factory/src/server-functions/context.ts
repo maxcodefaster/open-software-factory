@@ -17,6 +17,7 @@ import type { createInputService } from "../monitoring/service";
 import type { createConversationService } from "../project-agent/service";
 import type { createProjectService } from "../projects/service";
 import type { createReleaseController } from "../releases/controller";
+import type { createRepositoryMirrorController } from "../repository-mirrors/controller";
 import type { createReviewService } from "../review/service";
 import type { createRuntimeService } from "../runtime/service";
 import type { createSetupService } from "../setup/service";
@@ -26,6 +27,7 @@ import type { createWorkspaceService } from "../workspace/service";
 import type { ServerResult } from "./result";
 
 export type FactoryServices = {
+  repositoryMirrors: ReturnType<typeof createRepositoryMirrorController>;
   learning: ReturnType<typeof createLearningService>;
   inbox: ReturnType<typeof createInboxService>;
   releases: ReturnType<typeof createReleaseController>;

@@ -49,6 +49,26 @@
   },
   "overrides": [
     {
+      "includes": ["test/browser/**/*.spec.ts"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@playwright/test": {
+                    "importNames": ["test", "*", "default"],
+                    "message": "Import test from ../fixtures/browser-test so structural diagnostics fail the case."
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
       "includes": ["deploy/theia-ide/factory-ide-extension/src/**/*.ts"],
       "javascript": { "parser": { "unsafeParameterDecoratorsEnabled": true } }
     }

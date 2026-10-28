@@ -1,9 +1,8 @@
-import { spawn, execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { mkdir, rm } from "node:fs/promises";
-import { resolve } from "node:path";
-import { expect, test } from "@playwright/test";
+import { mkdir } from "node:fs/promises";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createDatabase } from "../../packages/db/src/client";
 import { learningFixture } from "../fixtures/learning";
@@ -12,21 +11,14 @@ import { createSkillController } from "../../apps/factory/src/skills/controller"
 import { retainedEditProposal } from "../fixtures/learning-edit";
 import type { LearningEdit } from "../../packages/conversation-domain/src/learning";
 import { fixtureValue } from "../fixtures/value";
+import { prepareBrowserBuild } from "../fixtures/browser-build";
 
 test("real Settings show monitoring, save learning policy and isolate private evidence without commissioning work", async ({
   page,
 }) => {
   test.setTimeout(240_000);
-  const build = resolve(
-    ".factory/test-results/application-builds",
-    `learning-browser-${crypto.randomUUID()}`,
-  );
-  const environment = { ...process.env, FACTORY_BUILD_DIRECTORY: build };
-  await promisify(execFile)(
-    "mise",
-    ["exec", "--", "bun", "--no-env-file", "run", "factory:build"],
-    { env: environment, maxBuffer: 4 * 1024 * 1024 },
-  );
+  const environment = { ...process.env };
+  const disposeBuild = await prepareBrowserBuild(environment);
   const host = spawn(
     "mise",
     ["exec", "--", "bun", "--no-env-file", "test/fixtures/inbox-browser-host.ts"],
@@ -358,6 +350,6 @@ test("real Settings show monitoring, save learning policy and isolate private ev
     await database?.client.end({ timeout: 2 });
     host.kill("SIGTERM");
     await stopped;
-    await rm(build, { recursive: true, force: true });
+    await disposeBuild();
   }
 });

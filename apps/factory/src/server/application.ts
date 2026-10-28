@@ -71,6 +71,7 @@ import { createConversationService } from "../project-agent/service";
 import { createProjectService } from "../projects/service";
 import { createReleaseController } from "../releases/controller";
 import { createReleaseSecrets } from "../releases/secrets";
+import { createRepositoryMirrorController } from "../repository-mirrors/controller";
 import { factoryRequestURL } from "../request-origin";
 import { createVisualReviewController } from "../review/controller";
 import { createReviewMedia } from "../review/media";
@@ -651,6 +652,15 @@ export async function createFactoryApplication() {
     origin: factoryOrigin,
     session: requireSession,
     services: {
+      repositoryMirrors: createRepositoryMirrorController({
+        database,
+        forge: createForgejoClient({ apiURL: forgeAPIURL, token: forgeToken }),
+        apiURL: forgeAPIURL,
+        publicURL: forgePublicOrigin,
+        owner: forgeOwner,
+        signingKey: runtimeSecret,
+        allowedOrigins: projectImportOrigins(process.env["FACTORY_GIT_IMPORT_ORIGINS"]),
+      }),
       learning: learningService,
       inbox: createInboxService(database),
       releases: releaseController,

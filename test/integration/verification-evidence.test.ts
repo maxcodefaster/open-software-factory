@@ -7,6 +7,7 @@ import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import type { VerificationDiagnosis } from "../../packages/conversation-domain/src/verification";
+import { verificationReceipt } from "../fixtures/verification";
 
 test("competing reconcilers use one saved diagnosis and one admitted correction", async () => {
   const f = await candidateReviewFixture();
@@ -140,6 +141,8 @@ test.each(["check-failed", "execution-failed", "cancelled", "skipped", "unavaila
           : [],
     };
     const forge = {
+      observeVerification: async () => verificationReceipt(f.commit),
+      listFiles: async () => [{ path: "src/app.ts", sha: f.commit }],
       getPullRequest: async () => ({ number: 1, headSha: f.commit, merged: false }),
       listActionRuns: async () => [
         {
@@ -219,6 +222,10 @@ test.each(["check-failed", "execution-failed", "cancelled", "skipped", "unavaila
         const [history] = await f.database.client<{ diagnosis: VerificationDiagnosis }[]>`
           SELECT diagnosis FROM factory.verification WHERE id=${f.verificationID}`;
         expect(history?.diagnosis.kind).toBe("execution-failed");
+        expect(history?.diagnosis).toHaveProperty("receipt.commit", f.commit);
+        expect(history?.diagnosis).toHaveProperty("receipt.jobs.0.attempt", 1);
+        await controller.reconcile(f.changeID);
+        expect(reads).toBe(1);
       }
     } finally {
       await f.dispose();

@@ -1,7 +1,8 @@
 import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";

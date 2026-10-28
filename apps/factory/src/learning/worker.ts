@@ -67,6 +67,7 @@ export function createLearningWorker(
           endpoint: fallback?.baseURL ?? null,
           rubric: learningRubric,
           instructions: workReviewInstructions,
+          calibration: calibrationCases,
         }),
       };
     },
@@ -132,6 +133,7 @@ export function createLearningWorker(
         endpoint: fallback?.baseURL ?? null,
         rubric: learningRubric,
         instructions: workReviewInstructions,
+        calibration: calibrationCases,
       });
       // Only one calibration per exact judge configuration. Expired/unknown
       // calibration does not authorize another paid call.

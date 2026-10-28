@@ -22,6 +22,7 @@ data:
   FACTORY_AUTH_BACKCHANNEL_URL: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000"
   FACTORY_FORGE_DISCOVERY_URL: "http://{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc:3000/api/auth/.well-known/openid-configuration"
   FACTORY_FORGEJO_API_URL: "http://{{ include "factory.name" . }}-forgejo.{{ .Release.Namespace }}.svc:3000/api/v1/"
+  FACTORY_GIT_IMPORT_ORIGINS: {{ join "," (uniq (concat (list "https://github.com" "https://gitlab.com" "https://codeberg.org") .Values.gitAllowedOrigins)) | quote }}
   FACTORY_ZERO_CACHE_URL: "http://{{ include "factory.name" . }}-zero.{{ .Release.Namespace }}.svc:4848"
   FACTORY_ZERO_CACHE_PUBLIC_URL: {{ include "factory.zeroBrowserURL" . | quote }}
   FACTORY_OPENBAO_URL: "https://{{ include "factory.name" . }}-openbao.{{ .Release.Namespace }}.svc:8200"

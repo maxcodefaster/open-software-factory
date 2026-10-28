@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { desktopBackgrounds } from "../../apps/factory/src/artworks";
 import { CommandError } from "../../apps/factory/src/command-error";

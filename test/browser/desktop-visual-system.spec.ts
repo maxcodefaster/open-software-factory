@@ -1,7 +1,8 @@
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { deleteFactoryProject } from "../support/factory-fixture";

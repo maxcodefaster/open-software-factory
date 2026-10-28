@@ -150,8 +150,17 @@ includes queueing and is not active model time. Existing monthly usage, compute,
 remain below the overview.
 
 Retrospective learning is on by default. It reviews eligible failed work and a stable one-in-five
-sample of completed work in batches after six selected cases or 24 hours. The configured Planning
-model first checks fixed healthy, defect, false-alarm and missing-evidence cases. It reads bounded
+sample of completed work in batches after six selected cases or 24 hours. Build work with missing
+or incomplete Verification evidence, non-successful Verification, skipped/retried checks or test/CI
+changes is selected regardless of sampling. Selection is a review reason, not a defect verdict.
+Successful Verification retains bounded native workflow jobs, steps and attempts for the exact
+commit, plus test/CI change flags against its integration basis, in its existing compact observation.
+These are not testcase counts or proof of coverage. Missing source observations stay unknown;
+full logs remain in the forge. Browser suites use the diagnostic fixture, enforced by lint, so
+structural Solid diagnostics cannot hide behind passing assertions.
+The configured Planning model first checks fixed healthy, defect, false-alarm, missing-evidence,
+false-green, scope-mismatch and lost/preserved-coverage cases. Calibration is bound to those exact
+cases as well as the model and instructions. It reads bounded
 retained evidence, never wakes a Sandbox for logs, and never runs because Settings opened.
 Unknown or expired calls are retained without an automatic paid retry. Learning calls are separately
 attributed in the usage journal. Project managers can pause shared learning; personal learning
@@ -207,6 +216,43 @@ Selected completed research retains at most three bounded excerpts of sources ac
 within its existing private/development visibility. It does not retain a tool transcript or copy
 external MCP responses into analytics. Truncation remains explicit and cannot prove an absence.
 
+## Repository mirrors
+
+Factory administrators configure native Forgejo push mirrors under Settings → Factory
+administration → Repository mirrors. Select a Project, supply an existing private HTTPS Git
+repository and its Git username/token, and explicitly confirm that the target may be overwritten.
+Use a target-scoped write token and disable target CI/deployment automation. GitHub, GitLab.com
+and Codeberg are allowed by default. `gitAllowedOrigins` adds exact public HTTPS hosts in Helm
+for both Project imports and mirrors; local-network access stays disabled.
+
+Forgejo owns credentials, mirror configuration, sync-on-push and the hourly fallback schedule.
+Factory adds no sync daemon. Refresh status observes native state; Sync now synchronizes all
+push mirrors of the selected Project. Configuration alone is not a successful transfer.
+The displayed time is the last native attempt, accompanied by its success or failure, not a
+claimed last-success time after a failed attempt. Removal stops future mirroring without
+deleting the external repository. Add, remove and manual sync require recent administrator
+authentication. Unconfirmed commands are observed rather than automatically repeated; after
+checking Forgejo an administrator can explicitly keep the observed state and acknowledge uncertainty.
+Factory retains command identity and outcomes, never the target credential in PostgreSQL or Zero.
+In pinned Forgejo 17, HTTPS mirror credentials remain readable in the repository's Git
+configuration on Forgejo's volume. They are not encrypted by Forgejo or held in OpenBao.
+Keep that volume and its backups private; encryption at rest must come from the underlying
+storage and backup configuration. A password field and redacted status do not provide that encryption.
+
+Mirrors copy central Git branches, tags and their reachable history, including pushed unmerged
+Changes. They do not capture unpushed Workspace work, Factory accounts, Tickets, approvals,
+Project secrets or uploaded files. Force-pushes and ref deletion also propagate: this is an
+external code copy, not an immutable versioned backup or a full Factory restore.
+Recover the external repository using normal Git, then import it as a new Project in a normally
+installed Factory and reconfigure access and environment. No old Factory database is required.
+If the target server did not select a default branch automatically, select an existing mirrored
+branch there before importing. Git mirroring does not copy repository settings.
+
+`mise exec -- bun run test:native repository-mirrors.native` owns separate pinned Forgejo
+instances. It proves native sync-on-push, an unmerged Change branch, tags, mirror removal
+without deleting the target, and standalone clone/integrity checks after removing the source.
+It does not provision or write a customer's GitHub/GitLab repository.
+
 ## Human attachments
 
 Wiki and Ticket editors open file selection through `/image` and `/file`, without a separate
@@ -218,11 +264,12 @@ file references. Personal Project chat and uncreated Ticket drafts remain privat
 Upload and document saves do not start agent work. Sending an ordinary chat still commissions its
 normal Agent Turn; saving feedback does not.
 
-The Helm chart supplies one private Garage object store for attachments, derived content,
+The Helm chart supplies one private Garage object store for original attachments, derived images,
 QA recordings and annotation stills. Bucket creation and retained credentials are automatic.
 The service is internal only; browsers and agents read files through authenticated Factory
 routes, never public bucket URLs. `objectStorage.size` sets the persistent claim size, initially
 16 GiB. Normal Kubernetes storage provisioning is the only storage prerequisite.
+Extracted attachment text remains in PostgreSQL; it is not a second file store.
 
 The defaults are 10 MiB per file and 20 MiB per message, configurable in environment bytes or
 Helm values. Factory imposes no cumulative storage limit per Project or installation.
@@ -616,6 +663,7 @@ Integration lanes also build the client and Server Function handler before start
 Factory processes. Each lane uses its own build directory and removes it during cleanup;
 parallel proofs do not replace each other's assets or the source-development `dist`.
 Those handlers use the same application services as the installed Bun host.
+The browser lanes share one pinned Bun entrypoint so owned suites can load Factory's Bun adapters.
 Playwright prepares one separate production build for direct browser runs and removes it
 afterward. A browser run nested in an integration proof reuses that proof's immutable build
 without rebuilding or deleting it. Isolated component journeys belong to `test:browser`;

@@ -7,6 +7,7 @@ import {
 } from "../../../../packages/conversation-domain/src/learning";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
 import { CommandError } from "../command-error";
+import { verificationReviewReasons } from "../../../../packages/conversation-domain/src/verification";
 
 type Database = ReturnType<typeof createDatabase>;
 type Operation = {
@@ -43,10 +44,11 @@ export async function collectLearningCases(
     const snapshot = await learningSnapshot(database, operation);
     if (!snapshot) continue; // An indexed operation can precede product settlement.
     const selected =
-      sampleLearningCase(snapshot.id, snapshot.outcome) &&
-      snapshot.evidence.some(
-        (item) => item.kind === "outcome" || item.kind === "artifact" || item.kind === "feedback",
-      );
+      sampleLearningCase(snapshot.id, snapshot.outcome, snapshot.reviewReasons) &&
+      ((snapshot.reviewReasons?.length ?? 0) > 0 ||
+        snapshot.evidence.some(
+          (item) => item.kind === "outcome" || item.kind === "artifact" || item.kind === "feedback",
+        ));
     if (!selected) {
       snapshot.evidence = [];
       snapshot.targets = [];
@@ -79,6 +81,7 @@ export async function collectLearningCases(
 async function learningSnapshot(database: Database, operation: Operation) {
   const evidence: LearningCase["evidence"] = [];
   const targets: LearningCase["targets"] = [];
+  const reviewReasons: string[] = [];
   let remaining = 20_000;
   function add(
     id: string,
@@ -233,7 +236,20 @@ async function learningSnapshot(database: Database, operation: Operation) {
           return null;
         add(`commit:${commit.id}`, "artifact", commit, 1_000);
         for (const check of checks)
-          add(`verification:${check.id}`, "artifact", { ...check, commit: commit.sha }, 4_000);
+          add(`verification:${check.id}`, "artifact", { ...check, commit: commit.sha }, 12_000);
+        const diagnosis = checks[0]?.diagnosis;
+        reviewReasons.push(
+          ...(checks[0] && checks[0].state !== "succeeded"
+            ? ["verification-not-successful"]
+            : verificationReviewReasons(
+                diagnosis && typeof diagnosis === "object"
+                  ? (diagnosis as Record<string, unknown>)["receipt"]
+                  : null,
+                commit.sha,
+              )),
+        );
+      } else {
+        reviewReasons.push("missing-verification-evidence");
       }
       const requirementId = turn.authority["requirementRevisionId"];
       if (typeof requirementId === "string" && uuid.test(requirementId)) {
@@ -443,5 +459,6 @@ async function learningSnapshot(database: Database, operation: Operation) {
     settledAt: new Date(operation.settledAt).toISOString(),
     evidence,
     targets,
+    ...(reviewReasons.length ? { reviewReasons } : {}),
   });
 }

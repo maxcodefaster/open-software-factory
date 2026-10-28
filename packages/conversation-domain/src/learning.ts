@@ -69,6 +69,7 @@ export const learningCase = z.object({
   settledAt: z.iso.datetime(),
   evidence: z.array(learningEvidence).max(24),
   targets: z.array(learningTargetEvidence).max(8).default([]),
+  reviewReasons: z.array(text(80)).max(8).optional(),
 });
 export type LearningCase = z.infer<typeof learningCase>;
 
@@ -176,8 +177,12 @@ export function applyLearningEdit(body: string, edit: Pick<LearningEdit, "before
 
 // Stable sampling does not re-roll on restart. Failed/uncertain operations are
 // always eligible; healthy work supplies a comparison without judging every turn.
-export function sampleLearningCase(id: string, outcome: LearningCase["outcome"]) {
-  if (outcome !== "completed") return true;
+export function sampleLearningCase(
+  id: string,
+  outcome: LearningCase["outcome"],
+  reviewReasons: readonly string[] = [],
+) {
+  if (outcome !== "completed" || reviewReasons.length) return true;
   let hash = 2166136261;
   for (const character of id) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
   return (hash >>> 0) % 5 === 0;

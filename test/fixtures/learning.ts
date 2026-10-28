@@ -4,13 +4,25 @@ export function calibratedResult(): LearningResult {
   return {
     cases: calibrationCases.map((item) => ({
       caseId: item.id,
-      fulfillment: item.id.endsWith("defect")
+      fulfillment: [
+        "calibration:defect",
+        "calibration:green-diagnostics",
+        "calibration:coverage-lost",
+      ].includes(item.id)
         ? ("problem" as const)
-        : item.id.endsWith("missing")
+        : ["calibration:missing", "calibration:scope-mismatch"].includes(item.id)
           ? ("unknown" as const)
           : ("supported" as const),
       rework: "unknown",
-      verification: "unknown",
+      verification: [
+        "calibration:green-diagnostics",
+        "calibration:scope-mismatch",
+        "calibration:coverage-lost",
+      ].includes(item.id)
+        ? "problem"
+        : item.id === "calibration:coverage-preserved"
+          ? "supported"
+          : "unknown",
       explanation: "Fixed calibration observation.",
       evidenceIds: item.evidence.map((source) => source.id),
     })),

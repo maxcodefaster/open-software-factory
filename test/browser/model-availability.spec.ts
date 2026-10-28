@@ -1,6 +1,7 @@
 import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createDatabase } from "../../packages/db/src/client";
 import { openProjectMenu } from "../fixtures/project-menu";

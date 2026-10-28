@@ -10,6 +10,7 @@ import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 import { retainLearningArtifactsIn } from "../../apps/factory/src/learning/artifacts";
 import { fixtureValue } from "../fixtures/value";
+import { verificationReceipt } from "../fixtures/verification";
 
 test("Input learning uses published outcomes and saved instructions, never raw webhook or private admission context", async () => {
   const host = await factoryProcess();
@@ -140,9 +141,10 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
       VALUES(${skill},'owned-private-guidance',1,${JSON.stringify(content)}::jsonb,${"a".repeat(64)},${owned.userID})`;
     await database.client`INSERT INTO factory.skill_library_revision(library_id,revision_id) VALUES(${library},${skill})`;
     const turns: string[] = [];
-    for (const personal of [false, true]) {
+    for (const scope of ["shared-risk", "personal", "clean"] as const) {
+      const personal = scope === "personal";
       let id = crypto.randomUUID();
-      while (!sampleLearningCase(`turn:${id}`, "completed")) id = crypto.randomUUID();
+      while (sampleLearningCase(`turn:${id}`, "completed") !== personal) id = crypto.randomUUID();
       turns.push(id);
       const command = crypto.randomUUID();
       const input = {
@@ -166,32 +168,50 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
       if (personal)
         await database.client`INSERT INTO factory.agent_turn_skill(turn_id,revision_id) VALUES(${id},${skill})`;
       await database.client`UPDATE factory.agent_turn SET state='completed',owner_token=NULL,owner_expires_at=NULL,
-        outcome_summary='Owned completed Build summary',updated_at=now() WHERE id=${id}`;
+        outcome_summary=${personal ? null : "Owned completed Build summary"},updated_at=now() WHERE id=${id}`;
       await database.client`INSERT INTO factory.usage_operation(id,project_id,user_id,purpose,engine,provider,model,settled_at,outcome)
         VALUES(${`turn:${id}`},${owned.projectID},${owned.userID},'coding','opencode','owned','owned',now(),'completed')`;
     }
     const publicTurn = fixtureValue(turns[0], "turns[0]"),
       privateTurn = fixtureValue(turns[1], "turns[1]"),
+      cleanTurn = fixtureValue(turns[2], "turns[2]"),
       verification = crypto.randomUUID();
     const branch = `factory/change-${owned.projectID.replaceAll("-", "").slice(0, 12)}`;
     await database.client`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,
       expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
       VALUES(${publicTurn},${owned.changeID},${owned.attemptID},1,${branch},${"a".repeat(40)},${"b".repeat(40)},${"b".repeat(40)},
       'Owned source-evidence check',${`owned:${publicTurn}`},'succeeded',${owned.userID},now())`;
+    const receipt = verificationReceipt("b".repeat(40));
+    fixtureValue(receipt.jobs[0], "receipt.jobs[0]").attempt = 2;
+    fixtureValue(receipt.jobs[0]?.steps[0], "receipt.jobs[0]?.steps[0]").status = "skipped";
+    fixtureValue(receipt.changes, "receipt.changes").tests = true;
     await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
-      summary,created_by,completed_at) VALUES(${verification},${owned.changeID},${"b".repeat(40)},1,1,'owned-learning-runner','failed',
-      'Owned exact-commit regression was detected',${owned.userID},now())`;
+      summary,diagnosis,created_by,completed_at) VALUES(${verification},${owned.changeID},${"b".repeat(40)},1,1,'owned-learning-runner','succeeded',
+      'Owned exact-commit workflow passed',${JSON.stringify({ receipt })}::jsonb,${owned.userID},now())`;
+    await database.client`INSERT INTO factory.change_commit_operation(id,change_id,runtime_attempt_id,sequence,branch_name,
+      expected_parent_sha,commit_sha,observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
+      VALUES(${cleanTurn},${owned.changeID},${owned.attemptID},2,${branch},${"a".repeat(40)},${"c".repeat(40)},${"c".repeat(40)},
+      'Owned clean check',${`owned:${cleanTurn}`},'succeeded',${owned.userID},now())`;
+    await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,action_run_id,runner_name,state,
+      diagnosis,created_by,completed_at) VALUES(${crypto.randomUUID()},${owned.changeID},${"c".repeat(40)},1,2,'owned-clean-learning-runner','succeeded',
+      ${JSON.stringify({ receipt: verificationReceipt("c".repeat(40), { runId: 2 }) })}::jsonb,${owned.userID},now())`;
     await collectLearningCases(database);
     const rows = await database.client<
-      { id: string; owner: string | null; snapshot: LearningCase }[]
+      { id: string; owner: string | null; snapshot: LearningCase; selected: boolean }[]
     >`
-      SELECT id,owner_id AS owner,snapshot FROM factory.learning_case ORDER BY id`;
+      SELECT id,owner_id AS owner,snapshot,selected FROM factory.learning_case ORDER BY id`;
     const shared = fixtureValue(
       rows.find((row) => row.id === `turn:${publicTurn}`),
       `rows.find((row) => row.id === \`turn:\${publicTurn}\`)`,
     );
     expect(shared.owner).toBeNull();
     expect(shared.snapshot.developerOnly).toBe(true);
+    expect(shared.selected).toBe(true);
+    expect(shared.snapshot.reviewReasons).toEqual([
+      "skipped-checks",
+      "retried-checks",
+      "test-changes",
+    ]);
     expect(
       shared.snapshot.evidence.some(
         (item) => item.id === `verification:${verification}` && item.body.includes("b".repeat(40)),
@@ -202,7 +222,16 @@ test("Build learning binds exact Verification and keeps loaded personal guidance
       `rows.find((row) => row.id === \`turn:\${privateTurn}\`)`,
     );
     expect(personal.owner).toBe(owned.userID);
+    expect(personal.selected).toBe(true);
+    expect(personal.snapshot.reviewReasons).toEqual(["missing-verification-evidence"]);
     expect(JSON.stringify(personal.snapshot)).toContain(content.instructions);
+    const clean = fixtureValue(
+      rows.find((row) => row.id === `turn:${cleanTurn}`),
+      "clean case",
+    );
+    expect(clean.selected).toBe(false);
+    expect(clean.snapshot.evidence).toEqual([]);
+    expect(clean.snapshot.reviewReasons).toBeUndefined();
     await database.client`UPDATE factory.project_membership SET role='product-contributor',manage_project=true
       WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
     const restricted = await createLearningService(database).get(owned.userID, owned.projectID);

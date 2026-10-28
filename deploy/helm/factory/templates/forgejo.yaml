@@ -1,3 +1,10 @@
+{{- $gitHosts := list "github.com" "gitlab.com" "codeberg.org" -}}
+{{- range .Values.gitAllowedOrigins -}}
+{{- if not (regexMatch "^https://[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$" .) -}}
+{{- fail "gitAllowedOrigins must contain exact public HTTPS origins without paths, ports or credentials." -}}
+{{- end -}}
+{{- $gitHosts = append $gitHosts (trimPrefix "https://" .) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -37,8 +44,12 @@ spec:
             - {name: FORGEJO__server__HTTP_PORT, value: "3000"}
             - {name: FORGEJO__server__ROOT_URL, value: "{{ include "factory.forgeURL" . }}/"}
             - {name: FORGEJO__webhook__ALLOWED_HOST_LIST, value: "{{ include "factory.name" . }}-internal.{{ .Release.Namespace }}.svc"}
-            - {name: FORGEJO__migrations__ALLOWED_DOMAINS, value: "github.com,gitlab.com,codeberg.org"}
+            - {name: FORGEJO__migrations__ALLOWED_DOMAINS, value: {{ join "," (uniq $gitHosts) | quote }}}
             - {name: FORGEJO__migrations__ALLOW_LOCALNETWORKS, value: "false"}
+            - {name: FORGEJO__migrations__ALLOW_UNENCRYPTED, value: "false"}
+            # Forgejo 17 uses wildcard matches here, not CIDRs. Explicitly allowed
+            # hostnames must not resolve to private, loopback or link-local IPs.
+            - {name: FORGEJO__migrations__BLOCKED_DOMAINS, value: "localhost,*.localhost,0.*,10.*,127.*,169.254.*,172.1[6-9].*,172.2[0-9].*,172.3[01].*,192.168.*,100.6[4-9].*,100.[7-9][0-9].*,100.1[01][0-9].*,100.12[0-7].*,::,::1,fc*:*,fd*:*,fe[89ab]*:*"}
           readinessProbe:
             httpGet: {path: /api/healthz, port: 3000}
             periodSeconds: 2

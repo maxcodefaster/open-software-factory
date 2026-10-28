@@ -61,10 +61,18 @@ test("concrete improvements are bound to observed revisions and exact unique pas
 test("work-review calibration checks real defects, healthy work, false alarms and missing evidence", () => {
   const result = validateLearningResult(calibratedResult(), calibrationCases);
   expect(calibrationPassed(result)).toBe(true);
-  for (const index of [0, 1, 2, 3]) {
+  for (let index = 0; index < result.cases.length; index++) {
     const changed = structuredClone(result);
-    fixtureValue(changed.cases[index], "changed.cases[index]").fulfillment =
-      index === 1 ? "supported" : "problem";
+    const item = fixtureValue(changed.cases[index], "changed.cases[index]");
+    item.fulfillment = item.fulfillment === "problem" ? "supported" : "problem";
+    expect(calibrationPassed(changed)).toBe(false);
+  }
+  for (const item of result.cases.filter((item) => item.verification !== "unknown")) {
+    const changed = structuredClone(result);
+    fixtureValue(
+      changed.cases.find((value) => value.caseId === item.caseId),
+      item.caseId,
+    ).verification = "unknown";
     expect(calibrationPassed(changed)).toBe(false);
   }
 });
@@ -103,6 +111,7 @@ test("sampling is stable, every failed outcome is eligible, and quiet projects r
   );
   for (const state of ["failed", "interrupted", "unknown"] as const)
     expect(sampleLearningCase("any", state)).toBe(true);
+  expect(sampleLearningCase("any", "completed", ["skipped-checks"])).toBe(true);
   const now = Date.parse("2026-10-26T12:00:00Z");
   const young = {
     ...fixtureValue(calibrationCases[0], "calibrationCases[0]"),

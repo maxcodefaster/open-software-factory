@@ -13,6 +13,7 @@ import * as mcp from "./mcp";
 import * as models from "./models";
 import * as projects from "./projects";
 import * as releases from "./releases";
+import * as repositoryMirrors from "./repository-mirrors";
 import * as review from "./review";
 import * as runtime from "./runtime";
 import * as setup from "./setup";
@@ -40,6 +41,7 @@ const authoredFunctions = {
   ...models,
   ...projects,
   ...releases,
+  ...repositoryMirrors,
   ...review,
   ...runtime,
   ...setup,

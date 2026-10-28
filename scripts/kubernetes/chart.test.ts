@@ -125,6 +125,68 @@ test.each(["arm64", "amd64"] as const)(
   },
 );
 
+test("native mirror hosts share the import allowlist without permitting private or unencrypted destinations", async () => {
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "gitAllowedOrigins[0]=https://git.example.com",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const all = parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource);
+  const config = all.find(
+    (item) => item.kind === "ConfigMap" && item.data?.["FACTORY_GIT_IMPORT_ORIGINS"],
+  );
+  expect(config?.data?.["FACTORY_GIT_IMPORT_ORIGINS"]).toBe(
+    "https://github.com,https://gitlab.com,https://codeberg.org,https://git.example.com",
+  );
+  const defaultConfig = (await resources()).find(
+    (item) => item.kind === "ConfigMap" && item.data?.["FACTORY_GIT_IMPORT_ORIGINS"],
+  );
+  expect(defaultConfig?.data?.["FACTORY_GIT_IMPORT_ORIGINS"]).toBe(
+    "https://github.com,https://gitlab.com,https://codeberg.org",
+  );
+  const forge = all.find(
+    (item) => item.kind === "StatefulSet" && item.metadata.name === "portable-forgejo",
+  );
+  const environment = forge?.spec?.template?.spec.containers[0]?.env;
+  expect(environment).toContainEqual({
+    name: "FORGEJO__migrations__ALLOWED_DOMAINS",
+    value: "github.com,gitlab.com,codeberg.org,git.example.com",
+  });
+  expect(environment).toContainEqual({
+    name: "FORGEJO__migrations__ALLOW_UNENCRYPTED",
+    value: "false",
+  });
+  const blocked = environment?.find(
+    (item) => item.name === "FORGEJO__migrations__BLOCKED_DOMAINS",
+  )?.value;
+  expect(blocked).toContain("169.254.*");
+  expect(blocked).toContain("172.1[6-9].*");
+  expect(blocked).toContain("fe[89ab]*:*");
+  expect(blocked).not.toContain("/");
+  for (const origin of [
+    "http://git.example.com",
+    "https://*.example.com",
+    "https://user:token@git.example.com",
+    "https://git.example.com/path",
+    "https://git.example.com:8443",
+  ]) {
+    const invalid = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set-string",
+      `gitAllowedOrigins[0]=${origin}`,
+    ]);
+    expect(invalid.exitCode).not.toBe(0);
+    expect(invalid.stderr).toContain("gitAllowedOrigins");
+  }
+});
+
 test("the chart rejects an unsupported worker architecture before installing resources", async () => {
   const rendered = await helm([
     "template",

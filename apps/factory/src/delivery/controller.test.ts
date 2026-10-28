@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { createDeliveryController } from "./controller";
+import { verificationReceipt } from "../../../../test/fixtures/verification";
 
 function fixture(delivered = false, repair = false, superseded = false, protectedBranch = false) {
   const baseSHA = "a".repeat(40);
@@ -131,6 +132,8 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
     { begin: async <T>(operation: (sql: unknown) => Promise<T>) => operation(client) },
   );
   const forge = {
+    observeVerification: async () => verificationReceipt(commitSHA),
+    listFiles: async () => [{ path: "src/app.ts", sha: commitSHA }],
     getPullRequest: async () => ({ number: 1, headSha: commitSHA, merged: !repair }),
     listActionRuns: async () => [
       {

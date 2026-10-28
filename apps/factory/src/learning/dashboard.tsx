@@ -873,6 +873,13 @@ export function LearningDashboard(props: {
                             </strong>{" "}
                             · {result.explanation}
                           </p>
+                          <p class="work-note">
+                            {result.verification === "supported"
+                              ? "Verification supported"
+                              : result.verification === "problem"
+                                ? "Verification problem"
+                                : "Verification not established"}
+                          </p>
                           <code>{result.caseId}</code>
                         </div>
                       )}

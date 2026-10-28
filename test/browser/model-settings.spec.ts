@@ -1,5 +1,6 @@
 import { mkdir } from "node:fs/promises";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
 import type { ModelConnectionView } from "../../packages/conversation-domain/src/model-connection";
 import { CommandError } from "../../apps/factory/src/command-error";

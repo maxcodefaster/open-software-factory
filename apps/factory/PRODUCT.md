@@ -52,7 +52,14 @@ human implementation approval unless bounded Autofix was explicitly delegated.
 See [Project Inputs](../../docs/adr/0018-project-inputs.md).
 
 Settings group Project configuration first, then Libraries, Personal and admin-only Factory
-administration. Small screens use a grouped title menu instead of a sidebar; desktop windows
+administration. Repository mirrors in Factory administration configure native Forgejo push
+mirrors for a selected Project, with explicit target-overwrite consent, native attempt status,
+manual synchronization and removal that preserves the external repository. They copy pushed
+Git history, not Factory accounts, Tickets, secrets, uploads or unpushed Workspace work.
+Configured mirrors lead with status; another target opens an explicit form. Token guidance
+identifies Forgejo's unencrypted Git configuration rather than claiming OpenBao storage.
+See [repository mirrors](../../README.md#repository-mirrors).
+Small screens use a grouped title menu instead of a sidebar; desktop windows
 keep their sidebars, including alongside the assistant. Skills are an
 instance library with personal, Project and Factory ownership. Personal libraries span Projects,
 but personal activation choices belong to a particular Project and work type.

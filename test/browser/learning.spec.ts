@@ -1,6 +1,7 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
-import { type BrowserContext, expect, test } from "@playwright/test";
+import { type BrowserContext, expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -93,6 +94,14 @@ for (const width of [1440, 768, 390]) {
     await expect(citedSource).toBeFocused();
     await expect(citedSource).toHaveAttribute("open", "");
     await expect(page.getByText("research · completed", { exact: true })).toBeVisible();
+    const scope = page
+      .locator(".work-case-result")
+      .filter({ hasText: "calibration:scope-mismatch" });
+    await expect(scope).toContainText("Insufficient evidence");
+    await expect(scope).toContainText("Verification problem");
+    await expect(
+      page.locator(".work-case-result").filter({ hasText: "calibration:coverage-preserved" }),
+    ).toContainText("Verification supported");
     await page.screenshot({ path: `${directory}/evidence-${width}.png`, fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
       true,
@@ -111,6 +120,26 @@ for (const width of [1440, 768, 390]) {
     expect(errors).toEqual([]);
   });
 }
+test.describe("touch review evidence", () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+  test("fulfillment and verification remain separate when opening a review by touch", async ({
+    page,
+  }) => {
+    await page.goto(`${origin}/learning.html`);
+    await page.getByText("Review history & evidence", { exact: false }).tap();
+    await page.getByText("8 work cases", { exact: true }).tap();
+    const scope = page
+      .locator(".work-case-result")
+      .filter({ hasText: "calibration:scope-mismatch" });
+    await expect(scope).toContainText("Insufficient evidence");
+    await expect(scope).toContainText("Verification problem");
+    await scope.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${directory}/verification-touch-390.png` });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(
+      true,
+    );
+  });
+});
 test("empty, read-only and private learning states are truthful", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 900 });
   await page.goto(`${origin}/learning.html?empty`);

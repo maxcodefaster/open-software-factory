@@ -1,7 +1,8 @@
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { requestFunction } from "../fixtures/server-functions";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { changeIdentity } from "../../packages/change-domain/src/change";
 import { createDatabase } from "../../packages/db/src/client";
 import { createForgejoClient } from "../../packages/forge/src/forge";

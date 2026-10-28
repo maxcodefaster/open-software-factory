@@ -1,7 +1,8 @@
 import { requestFunction } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createSkillController } from "../../apps/factory/src/skills/controller";

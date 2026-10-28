@@ -95,13 +95,27 @@ The unseal material and AppRole login are retained in the private Factory state 
 from OpenBao's encrypted data claim. Protect and back up these installation resources together.
 
 The chart also starts one pinned Garage object store. It creates the private `factory` bucket,
-credentials and a retained 16 GiB persistent claim automatically. Attachments, derived pages/text,
+credentials and a retained 16 GiB persistent claim automatically. Original attachments, derived page images,
 QA recordings and annotation stills use that same store. No external S3 account, endpoint or
 bucket setup is required. Set `objectStorage.size` to request more capacity using the cluster's
 normal storage rules. The internal-only service has no Ingress or workstation port forward.
 Public Factory readiness includes an authenticated object write/read, not just an open storage port.
 Back up the object-store claim and Secret with PostgreSQL and the installation state.
 The single-node store is not high availability and does not create backups.
+Extracted attachment text remains in PostgreSQL. Git mirroring does not protect uploads or
+this installation's other retained data.
+
+Factory administrators can configure native Forgejo push mirrors in Settings → Factory
+administration → Repository mirrors. The target Git repository must already exist and have
+appropriately scoped HTTPS write credentials. GitHub, GitLab.com and Codeberg are allowed by
+default. `gitAllowedOrigins`, for example `["https://git.example.com"]`, adds exact public HTTPS
+origins to both Factory's Project-import/mirror validation and Forgejo's native allowed hosts.
+Paths, credentials, wildcard hosts and custom ports are not accepted by the chart. Private
+network access remains disabled. No external storage, sync worker or backup account is needed
+for ordinary Factory file storage; the external Git target is only an optional code copy.
+Forgejo keeps HTTPS mirror credentials in its repository Git configuration, not OpenBao.
+The chart does not encrypt that token. Protect the Forgejo claims and their backups, and use
+encrypted underlying storage when encryption at rest is required.
 
 The planning cache starts with one sync worker, independent of the Kubernetes node's CPU count.
 Set `zeroSyncWorkers` to a larger positive integer when measured concurrent sync traffic requires

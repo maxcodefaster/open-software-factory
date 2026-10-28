@@ -23,6 +23,14 @@ import { createServerFunctionEndpoint } from "../../apps/factory/src/server-func
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 const serviceFunctions = {
+  repositoryMirrors: {
+    getRepositoryMirrorProjects: "projects",
+    getRepositoryMirrors: "get",
+    createRepositoryMirror: "create",
+    removeRepositoryMirror: "remove",
+    syncRepositoryMirrors: "sync",
+    acknowledgeRepositoryMirrorOperation: "acknowledge",
+  },
   learning: {
     getLearning: "get",
     saveLearning: "set",
@@ -244,6 +252,7 @@ const serviceFunctions = {
 
 type ServiceDoubles = { [K in keyof FactoryServices]?: Partial<FactoryServices[K]> };
 type Functions = typeof import("../../apps/factory/src/server-functions/releases") &
+  typeof import("../../apps/factory/src/server-functions/repository-mirrors") &
   typeof import("../../apps/factory/src/server-functions/learning") &
   typeof import("../../apps/factory/src/server-functions/inbox") &
   typeof import("../../apps/factory/src/server-functions/models") &
