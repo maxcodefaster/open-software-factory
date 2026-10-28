@@ -13,8 +13,11 @@ import { mockFactoryFunctions } from "../fixtures/server-functions";
 
 type SignIn = (page: Page) => Promise<void>;
 const test = base.extend<
-  { factory: Awaited<ReturnType<typeof factoryProcess>>; signIn: SignIn },
-  { postgres: Awaited<ReturnType<typeof ownedPostgresServer>> }
+  { signIn: SignIn },
+  {
+    postgres: Awaited<ReturnType<typeof ownedPostgresServer>>;
+    factory: Awaited<ReturnType<typeof factoryProcess>>;
+  }
 >({
   postgres: [
     // biome-ignore lint/correctness/noEmptyPattern: Playwright requires a destructured fixture argument.
@@ -47,7 +50,10 @@ const test = base.extend<
         await factory.dispose();
       }
     },
-    { timeout: 60_000 },
+    // The setup commands are mocked; each test owns a fresh browser context.
+    // Share only this suite's authenticated host, never a retained installation.
+    // Its cache and application readiness already allow 120s and 30s respectively.
+    { scope: "worker", timeout: 180_000 },
   ],
   signIn: async ({ factory }, use) => {
     await use(async (page) => {
