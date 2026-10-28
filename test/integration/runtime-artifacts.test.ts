@@ -120,3 +120,33 @@ test("runtime artifact selection follows persisted role, freezes before create a
     await processFixture.dispose();
   }
 }, 30_000);
+
+test("fresh execution on an existing worker retains its admitted resource envelope instead of new defaults", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const retainedProfile = { ...configuration.factoryboxProfile, cpuRequestMilli: 250 };
+    await database.client`UPDATE factory.factorybox_worker
+      SET profile=${JSON.stringify(retainedProfile)}::jsonb,
+        runtime_host_image=${configuration.hostImages.build}`;
+    const [original] = await database.client<Array<{ workspaceID: string }>>`
+      SELECT workspace_id AS "workspaceID" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    if (!original) throw new Error("Missing original Workspace");
+    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    const attemptID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${attemptID},${owned.projectID},${owned.changeID},${original.workspaceID},2,${"a".repeat(40)},'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+    const selected = await freezeRuntimeArtifacts(database.client, attemptID, {
+      ...configuration,
+      factoryboxProfile: { ...configuration.factoryboxProfile, cpuRequestMilli: 100 },
+    });
+    expect(selected.factoryboxProfile).toEqual(retainedProfile);
+    const [worker] = await database.client<Array<{ profile: unknown }>>`
+      SELECT profile FROM factory.factorybox_worker WHERE id=${selected.workerID}`;
+    expect(worker?.profile).toEqual(retainedProfile);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 30_000);

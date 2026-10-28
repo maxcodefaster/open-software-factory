@@ -14,6 +14,21 @@ cgroup delegation. Every administrative mutation verifies recorded Kubernetes re
 pins the live store/epoch inside the runtime CLI. Persist exact intent before the first external
 command. An uncertain operation cannot create a replacement identity or silently retry.
 
+CPU scheduling requests are distinct from that qualified ceiling. Fresh product workers
+reserve 100 millicores by default and can use spare node CPU up to the existing three-core
+limit. Kubernetes schedules against the reserve and shares available CPU dynamically; the
+reserve does not promise three dedicated cores or change the memory ceiling. The operator
+can select a whole-millicore reserve between 10 and 3000 before first admission. Product init
+containers request no more CPU than that reserve, so a completed image exporter does not
+silently retain a larger scheduling floor.
+
+The selected reserve is part of the immutable profile. Existing worker profiles without
+that field retain their original full reservation and exact declarations; an upgrade never
+changes their QoS class, resource UIDs, store or epoch. New execution and reserve preparation
+on an existing worker use its retained profile rather than new installation defaults.
+Lower requests require native target-cluster acceptance under the resulting QoS class.
+Unit tests and spare CPU observations alone do not qualify checkpoint/restore behavior.
+
 The command is an explicit admission lane for private OCI bundles, not another generic runtime
 provider. Workspace execution and the execution reserve now use the same admitted worker contract,
 with Factory-owned consumer preparation and lifecycle intent. The product integration and its

@@ -172,6 +172,71 @@ test("worker storage capacity is explicit before its immutable first admission",
   expect(config?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("48");
 });
 
+test("fresh worker CPU requests are distinct from their qualified burst ceiling", async () => {
+  const defaults = (await resources()).find(
+    (item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
+  );
+  expect(defaults?.data?.["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"]).toBe("100");
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "factorybox.cpuRequestMilli=250",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const config = parseAllDocuments(result.stdout)
+    .map((document) => document.toJSON() as Resource)
+    .find((item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]);
+  expect(config?.data?.["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"]).toBe("250");
+});
+
+test.each(["0", "9", "100.5", "3001", "invalid"])(
+  "invalid worker CPU request %s is refused before installation",
+  async (value) => {
+    const result = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set-string",
+      `factorybox.cpuRequestMilli=${value}`,
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("factorybox.cpuRequestMilli");
+  },
+);
+
+test("operators can right-size dependency CPU reservations without raising their limits", async () => {
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    ...["postgres", "forgejo", "openbao", "zero", "objectStorage"].flatMap((name) => [
+      "--set",
+      `${name}.resources.requests.cpu=25m`,
+    ]),
+  ]);
+  expect(result.exitCode).toBe(0);
+  const all = parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource);
+  for (const [component, limit] of [
+    ["postgres", "1"],
+    ["forgejo", "2"],
+    ["openbao", "1"],
+    ["zero", "2"],
+    ["objects", "1"],
+  ]) {
+    const workload = all.find(
+      (item) => item.metadata.name === `portable-${component}` && item.kind === "StatefulSet",
+    );
+    const container = workload?.spec?.template?.spec.containers[0];
+    expect(container?.resources?.requests["cpu"]).toBe("25m");
+    expect(container?.resources?.limits["cpu"]).toBe(limit);
+  }
+});
+
 test.each([
   { store: "7", claim: "32" },
   { store: "33", claim: "64" },

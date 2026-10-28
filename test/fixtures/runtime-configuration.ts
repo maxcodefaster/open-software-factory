@@ -7,6 +7,7 @@ export const ownedFactoryboxLocation = factoryboxLocation("68f16b47-92d3-493d-81
 export const ownedFactoryboxProfile = {
   image: `example.invalid/owned-worker@sha256:${"e".repeat(64)}`,
   executableSHA256: "f".repeat(64),
+  cpuRequestMilli: 100,
   architecture: "amd64",
   nodeName: "owned-node",
   kernel: "6.12.0",
@@ -19,6 +20,7 @@ export const ownedRuntimeConfiguration = {
   FACTORY_BROWSER_TOOLS_IMAGE: `example.invalid/owned-browser@sha256:${"d".repeat(64)}`,
   FACTORY_FACTORYBOX_WORKER_IMAGE: ownedFactoryboxProfile.image,
   FACTORY_FACTORYBOX_EXECUTABLE_SHA256: ownedFactoryboxProfile.executableSHA256,
+  FACTORY_FACTORYBOX_CPU_REQUEST_MILLI: String(ownedFactoryboxProfile.cpuRequestMilli),
   FACTORY_FACTORYBOX_ARCHITECTURE: ownedFactoryboxProfile.architecture,
   FACTORY_FACTORYBOX_NODE: ownedFactoryboxProfile.nodeName,
   FACTORY_FACTORYBOX_KERNEL: ownedFactoryboxProfile.kernel,

@@ -13,6 +13,10 @@ const name = z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/);
 const uid = z.string().min(1).max(128);
 const storeRoot = "/var/lib/sysbox/fixed-store/data/store";
 const binary = "/opt/factorybox/factorybox";
+export const factoryboxCPURequestMilli = z.number().int().min(10).max(3000);
+export function factoryboxCPUQuantity(milli: number) {
+  return milli % 1000 === 0 ? String(milli / 1000) : `${milli}m`;
+}
 
 // This is an administrative admission lane. Product Workspace source remains
 // owned by its existing Source controller and is never mounted into this store.
@@ -25,6 +29,9 @@ export const factoryboxWorkerRequest = z
     trustDomainID: token,
     image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
     executableSHA256: digest,
+    // Absent means the original fully reserved profile. Never rewrite a
+    // retained worker's scheduling inputs during an application upgrade.
+    cpuRequestMilli: factoryboxCPURequestMilli.optional(),
     architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
       .string()
@@ -165,7 +172,13 @@ export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
             ],
             securityContext: { privileged: true, runAsUser: 0, runAsGroup: 0 },
             resources: {
-              requests: { cpu: "3", memory: "3Gi" },
+              requests: {
+                cpu:
+                  input.cpuRequestMilli === undefined
+                    ? "3"
+                    : factoryboxCPUQuantity(input.cpuRequestMilli),
+                memory: "3Gi",
+              },
               limits: { cpu: "3", memory: "3Gi" },
             },
             env: [

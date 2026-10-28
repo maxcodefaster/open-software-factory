@@ -9,6 +9,8 @@ import {
 } from "./factorybox-location";
 import {
   type FactoryboxWorkerIdentity,
+  factoryboxCPURequestMilli,
+  factoryboxCPUQuantity,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -32,6 +34,7 @@ export const factoryboxRuntimeProfile = z
   .strictObject({
     image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
     executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+    cpuRequestMilli: factoryboxCPURequestMilli.optional(),
     architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
       .string()
@@ -60,6 +63,7 @@ export function configuredFactoryboxRuntimeProfile(
   return factoryboxRuntimeProfile.parse({
     image: environment["FACTORY_FACTORYBOX_WORKER_IMAGE"],
     executableSHA256: environment["FACTORY_FACTORYBOX_EXECUTABLE_SHA256"],
+    cpuRequestMilli: Number(environment["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"] ?? 100),
     architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
@@ -186,7 +190,10 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
               capabilities: { drop: ["ALL"] },
             },
             resources: {
-              requests: { cpu: "250m", memory: "64Mi" },
+              requests: {
+                cpu: factoryboxCPUQuantity(Math.min(request.cpuRequestMilli ?? 250, 250)),
+                memory: "64Mi",
+              },
               limits: { cpu: "250m", memory: "64Mi" },
             },
             env: environment,
@@ -204,7 +211,13 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
               capabilities: { drop: ["ALL"] },
             },
             resources: {
-              requests: { cpu: "1", memory: "256Mi" },
+              requests: {
+                cpu:
+                  request.cpuRequestMilli === undefined
+                    ? "1"
+                    : factoryboxCPUQuantity(Math.min(request.cpuRequestMilli, 1000)),
+                memory: "256Mi",
+              },
               limits: { cpu: "1", memory: "256Mi" },
             },
             env: environment,

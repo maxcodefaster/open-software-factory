@@ -13,6 +13,7 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
 import {
   type FactoryboxRuntimeProfile,
+  configuredFactoryboxRuntimeProfile,
   factoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
@@ -74,6 +75,17 @@ async function read(sql: SQL) {
     create_attempted AS attempted FROM factory.factorybox_worker WHERE singleton`;
   if (!worker) throw new Error("Factory worker intent is missing");
   return worker;
+}
+
+export async function retainedFactoryboxProfile(
+  sql: SQL,
+  configured?: FactoryboxRuntimeProfile,
+): Promise<FactoryboxRuntimeProfile> {
+  const [worker] = await sql<Array<{ profile: unknown | null }>>`
+    SELECT profile FROM factory.factorybox_worker WHERE singleton`;
+  return factoryboxRuntimeProfile.parse(
+    worker?.profile ?? configured ?? configuredFactoryboxRuntimeProfile(),
+  );
 }
 
 export async function factoryboxAllocation(sql: SQL, nodeName?: string | null) {

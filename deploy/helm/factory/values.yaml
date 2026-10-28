@@ -17,6 +17,9 @@ factorybox:
   architecture: ""
   nodeName: ""
   kernel: ""
+  # Scheduling reserve, not a fixed CPU allocation. Kubernetes shares spare CPU
+  # up to the qualified 3-core ceiling. Retained profiles are not resized.
+  cpuRequestMilli: 100
   # Choose before the first execution. Existing worker profiles are immutable.
   storeGiB: 8
   # Includes the bounded image, 16 GiB admission floor and metadata headroom.
@@ -36,6 +39,29 @@ zeroSyncWorkers: 1
 # One chart-managed private store for attachments, QA recordings and annotation stills.
 objectStorage:
   size: 16Gi
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+postgres:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+forgejo:
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "2", memory: 1Gi}
+
+openbao:
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+zero:
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "2", memory: 2Gi}
 
 attachments:
   fileBytes: 10485760

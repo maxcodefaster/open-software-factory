@@ -138,6 +138,22 @@ test("consumer selection changes no original Pod declaration, mounts no Source o
   expect(() => renderFactoryboxConsumer(input, identity, "seed")).toThrow("immutable image");
 });
 
+test.each([10, 100, 1000])(
+  "later consumer image exports retain the worker's %im CPU scheduling envelope",
+  (cpuRequestMilli) => {
+    const request = { ...input, profile: { ...input.profile, cpuRequestMilli } };
+    const declaration = renderFactoryboxConsumer(
+      request,
+      identity,
+      `consumer-seeds/${new Bun.CryptoHasher("sha256").update(input.runtimeHostImage).digest("hex")}`,
+    );
+    expect(declaration.spec.containers[0]?.resources).toEqual({
+      requests: { cpu: `${Math.min(cpuRequestMilli, 500)}m`, memory: "256Mi" },
+      limits: { cpu: "500m", memory: "256Mi" },
+    });
+  },
+);
+
 test.each([false, true])(
   "a confirmed export is shared, UID-cleaned and never recreated, lost reply=%s",
   async (lost) => {

@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { runCommand } from "./command";
 import { factoryboxSharedLabels } from "./factorybox-location";
 import type { FactoryboxRuntimeInput } from "./factorybox-runtime";
-import type { FactoryboxWorkerIdentity } from "./factorybox-worker";
+import { factoryboxCPUQuantity, type FactoryboxWorkerIdentity } from "./factorybox-worker";
 
 const program = readFileSync(new URL("./factorybox/consumer.py", import.meta.url), "utf8");
 const exportProgram = readFileSync(
@@ -77,7 +77,10 @@ export function renderFactoryboxConsumer(
             capabilities: { drop: ["ALL"] },
           },
           resources: {
-            requests: { cpu: "500m", memory: "256Mi" },
+            requests: {
+              cpu: factoryboxCPUQuantity(Math.min(input.profile.cpuRequestMilli ?? 500, 500)),
+              memory: "256Mi",
+            },
             limits: { cpu: "500m", memory: "256Mi" },
           },
           env: [

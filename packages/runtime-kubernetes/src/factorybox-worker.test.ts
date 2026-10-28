@@ -132,6 +132,29 @@ test("worker admission preserves the complete private store and finite worker ce
   ).toThrow();
 });
 
+test.each([10, 100, 1000, 3000])(
+  "worker CPU reservation %im remains separate from its qualified burst ceiling",
+  (cpuRequestMilli) => {
+    const admitted = factoryboxWorkerRequest.parse({ ...request, cpuRequestMilli });
+    const pod = renderFactoryboxWorker(admitted)[2];
+    expect(pod.spec.containers[0].resources).toEqual({
+      requests: {
+        cpu: cpuRequestMilli % 1000 === 0 ? String(cpuRequestMilli / 1000) : `${cpuRequestMilli}m`,
+        memory: "3Gi",
+      },
+      limits: { cpu: "3", memory: "3Gi" },
+    });
+    expect(admitted.cpuRequestMilli).toBe(cpuRequestMilli);
+  },
+);
+
+test.each([0, 9, 100.5, 3001, Number.NaN])(
+  "worker rejects an invalid CPU reservation %s before rendering",
+  (cpuRequestMilli) => {
+    expect(() => factoryboxWorkerRequest.parse({ ...request, cpuRequestMilli })).toThrow();
+  },
+);
+
 test("native state waits for a busy worker without manufacturing a failed Sandbox", async () => {
   const f = fixture();
   const identity = await inspectFactoryboxWorker(request, undefined, f.run);
