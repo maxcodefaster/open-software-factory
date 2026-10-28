@@ -280,6 +280,48 @@ test.each(["arm64", "amd64"] as const)(
   },
 );
 
+test.each(["arm64", "amd64"] as const)(
+  "fresh %s workers share available CPU instead of reserving their entire burst ceiling",
+  (architecture) => {
+    const profile = configuredFactoryboxRuntimeProfile({
+      FACTORY_FACTORYBOX_WORKER_IMAGE: input.profile.image,
+      FACTORY_FACTORYBOX_EXECUTABLE_SHA256: input.profile.executableSHA256,
+      FACTORY_FACTORYBOX_ARCHITECTURE: architecture,
+      FACTORY_FACTORYBOX_NODE: input.profile.nodeName,
+      FACTORY_FACTORYBOX_KERNEL: input.profile.kernel,
+    });
+    const { pod } = renderFactoryboxRuntime({ ...input, profile });
+    expect(fixtureValue(pod.spec.containers[0], "worker").resources).toEqual({
+      requests: { cpu: "100m", memory: "3Gi" },
+      limits: { cpu: "3", memory: "3Gi" },
+    });
+    for (const container of pod.spec.initContainers)
+      expect(container.resources.requests.cpu).toBe("100m");
+  },
+);
+
+test("the admitted CPU reservation also bounds init-container scheduling without changing old profiles", () => {
+  const profile = { ...input.profile, cpuRequestMilli: 10 };
+  const fresh = renderFactoryboxRuntime({ ...input, profile });
+  expect(fixtureValue(fresh.pod.spec.containers[0], "fresh worker").resources.requests.cpu).toBe(
+    "10m",
+  );
+  expect(
+    fresh.pod.spec.initContainers.map((container) => container.resources.requests.cpu),
+  ).toEqual(["10m", "10m"]);
+  expect(fresh.pod.spec.initContainers.map((container) => container.resources.limits.cpu)).toEqual([
+    "250m",
+    "1",
+  ]);
+  const retained = renderFactoryboxRuntime(input);
+  expect(
+    fixtureValue(retained.pod.spec.containers[0], "retained worker").resources.requests.cpu,
+  ).toBe("3");
+  expect(
+    retained.pod.spec.initContainers.map((container) => container.resources.requests.cpu),
+  ).toEqual(["250m", "1"]);
+});
+
 test.each([
   { storeGiB: 8, claimGiB: 32 },
   { storeGiB: 24, claimGiB: 48 },
@@ -301,7 +343,7 @@ test.each([
   const worker = fixtureValue(rendered.pod.spec.containers[0], "worker");
   expect(worker.args).toContain(String(capacity.storeGiB * 1024 ** 3));
   expect(worker.resources).toEqual({
-    requests: { cpu: "3", memory: "3Gi" },
+    requests: { cpu: "100m", memory: "3Gi" },
     limits: { cpu: "3", memory: "3Gi" },
   });
 });

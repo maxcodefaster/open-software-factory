@@ -44,6 +44,15 @@ or a mounted host Docker socket. Factorybox execution requires an admitted Linux
 profile, permission for privileged outer Pods and usable persistent storage. Supply the exact
 private worker image and executable hash in the chart's `factorybox` values.
 
+Fresh workers reserve 100 millicores for scheduling and share spare CPU up to their qualified
+three-core limit. `factorybox.cpuRequestMilli` selects the reserve before first admission;
+the 3 GiB memory ceiling remains unchanged. Existing workers retain their admitted profile,
+including an older full CPU reservation. Changing defaults never resizes or replaces them.
+Operator values can independently size `postgres.resources`, `forgejo.resources`,
+`openbao.resources`, `zero.resources` and `objectStorage.resources`; their defaults are unchanged.
+CPU requests are reservations, not instantaneous usage. Keep scheduling headroom for startup,
+storage checks and runtime helpers without bypassing admission or lowering required memory.
+
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's
 [installation and maintenance instructions](deploy/helm/factory/README.md) for local access,

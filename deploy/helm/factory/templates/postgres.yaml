@@ -35,8 +35,7 @@ spec:
               command: [pg_isready, -U, factory, -d, factory]
             periodSeconds: 2
           resources:
-            requests: {cpu: 100m, memory: 128Mi}
-            limits: {cpu: "1", memory: 512Mi}
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /var/lib/postgresql/data}
   volumeClaimTemplates:

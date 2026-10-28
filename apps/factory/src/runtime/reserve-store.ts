@@ -9,12 +9,12 @@ import {
   reserveIdentity,
 } from "../../../../packages/runtime-domain/src/reserve";
 import {
-  configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeProfile,
   factoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
 import { lockUsageIn } from "../usage/policy";
+import { retainedFactoryboxProfile } from "./worker";
 
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
 
@@ -78,9 +78,7 @@ export function createReserveStore(
       if (
         input.runtimeHostImage !== images.staging ||
         JSON.stringify(factoryboxRuntimeProfile.parse(input.profile)) !==
-          JSON.stringify(
-            factoryboxRuntimeProfile.parse(profile ?? configuredFactoryboxRuntimeProfile()),
-          )
+          JSON.stringify(await retainedFactoryboxProfile(sql, profile))
       )
         return;
       const budget = await counts(sql);
@@ -105,9 +103,7 @@ export function createReserveStore(
     },
     async plan(sql: SQL) {
       await lock(sql);
-      const selected = policy.readyTarget
-        ? (profile ?? configuredFactoryboxRuntimeProfile())
-        : null;
+      const selected = policy.readyTarget ? await retainedFactoryboxProfile(sql, profile) : null;
       // Finish an already-admitted clean template before retiring its backing.
       // Cancelling before native Start would strand an unregistered input tree.
       await sql`UPDATE factory.execution_slot SET state='retiring',reconcile_after=now()
@@ -200,7 +196,7 @@ export function createReserveStore(
                 [
                   owner.projectID,
                   images[role],
-                  JSON.stringify(profile ?? configuredFactoryboxRuntimeProfile()),
+                  JSON.stringify(await retainedFactoryboxProfile(sql, profile)),
                 ],
               )
             )[0]
