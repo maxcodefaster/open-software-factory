@@ -21,6 +21,42 @@ function connectorSocket(role: "parent" | "child") {
   } as unknown as ServerWebSocket<RuntimeSocketData>;
 }
 
+test("open Connector transports cannot announce readiness before the child's health checks", () => {
+  const phases: string[] = [];
+  const hub = new RuntimeHub(async (_id, phase) => {
+    phases.push(phase);
+  });
+  const parent = connectorSocket("parent");
+  const child = connectorSocket("child");
+  hub.open(parent);
+  hub.open(child);
+  try {
+    expect(hub.connected("attempt")).toBe(true);
+    hub.message(parent, JSON.stringify({ type: "hello", role: "parent" }));
+    expect(phases).toEqual([]);
+    expect(hub.ready("attempt")).toBe(false);
+    hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
+    expect(phases).toEqual(["ready"]);
+    expect(hub.ready("attempt")).toBe(true);
+    hub.close(child);
+    expect(hub.ready("attempt")).toBe(false);
+    hub.open(child);
+    hub.message(parent, JSON.stringify({ type: "hello", role: "parent" }));
+    expect(phases.at(-1)).toBe("reconnecting");
+    expect(hub.ready("attempt")).toBe(false);
+    hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
+    expect(phases.at(-1)).toBe("ready");
+    expect(hub.ready("attempt")).toBe(true);
+    hub.message(
+      child,
+      JSON.stringify({ type: "status", phase: "failed", error: "App startup failed" }),
+    );
+    expect(hub.ready("attempt")).toBe(false);
+  } finally {
+    hub.revoke("attempt");
+  }
+});
+
 test.each(["parent", "child"] as const)(
   "both connector hellos publish readiness when %s reconnects last",
   (lastRole) => {
@@ -367,6 +403,8 @@ describe("Runtime connection recovery", () => {
       const child = connectorSocket("child");
       hub.open(parent);
       hub.open(child);
+      hub.message(parent, JSON.stringify({ type: "hello", role: "parent" }));
+      hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
       try {
         if (lost === "parent" || lost === "both") hub.close(parent);
         if (lost === "child" || lost === "both") hub.close(child);
