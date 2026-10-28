@@ -49,6 +49,18 @@ test("only published releases build and publish both architectures natively", as
       { arch: "amd64", runner: "ubuntu-24.04" },
       { arch: "arm64", runner: "ubuntu-24.04-arm" },
     ]);
+  for (const job of ["roles", "factory"]) {
+    const build = workflow.jobs[job].steps.find((step: { run?: string }) =>
+      step.run?.includes("docker buildx build"),
+    );
+    expect(build.run).toContain(
+      '--label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY"',
+    );
+    expect(build.run).toContain(
+      '--label "org.opencontainers.image.revision=$(git rev-parse HEAD)"',
+    );
+    expect(build.run).toContain('--label "org.opencontainers.image.version=$RELEASE"');
+  }
   for (const job of ["roles", "manifests", "factory", "distribution"])
     expect(workflow.jobs[job].env.RELEASE).toBe(`\${{ needs.release.outputs.version }}`);
   expect(JSON.stringify(workflow)).not.toContain("setup-qemu");

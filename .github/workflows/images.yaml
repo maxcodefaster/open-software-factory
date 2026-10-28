@@ -71,6 +71,9 @@ jobs:
               target=()
             fi
             docker buildx build --platform "linux/$ARCH" --provenance=false --push \
+              --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+              --label "org.opencontainers.image.version=$RELEASE" \
               --file "$dockerfile" "${target[@]}" --tag "$image" .
           done
   manifests:
@@ -130,6 +133,9 @@ jobs:
             exit 1
           fi
           docker buildx build --platform "linux/$ARCH" --provenance=false --push \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
+            --label "org.opencontainers.image.version=$RELEASE" \
             --file deploy/factory/Dockerfile --build-arg FACTORY_RUNTIME_ARTIFACTS \
             --tag "$IMAGE_ROOT/factory:$RELEASE-$ARCH" .
   distribution:
