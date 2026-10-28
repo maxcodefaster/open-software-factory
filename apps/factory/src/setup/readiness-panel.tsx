@@ -1,4 +1,4 @@
-import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
+import { createEffect, createSignal, For, Show } from "solid-js";
 import type { SetupTask, SetupTaskView } from "../../../../packages/project-domain/src/setup";
 import { serverCall } from "../server-functions/result";
 import { getSetupReadiness, retrySetupTask } from "../server-functions/setup";
@@ -15,7 +15,7 @@ const labels = {
   "main-preview": "Main Preview",
 } as const satisfies Record<SetupTask, string>;
 
-export function SetupReadiness(props: { projectID: string }) {
+export function SetupReadiness(props: { projectID: string; canRetry?: boolean }) {
   const [rows, setRows] = createSignal<SetupTaskView[]>([]);
   const [error, setError] = createSignal("");
   const [retrying, setRetrying] = createSignal<SetupTask>();
@@ -41,10 +41,10 @@ export function SetupReadiness(props: { projectID: string }) {
         }
       }
       void load();
-      onCleanup(() => {
+      return () => {
         disposed = true;
         if (timer) clearTimeout(timer);
-      });
+      };
     },
   );
   async function retry(task: SetupTask) {
@@ -67,26 +67,26 @@ export function SetupReadiness(props: { projectID: string }) {
     <section class="setup-readiness" aria-label="Project preparation">
       <p>Planning is available while your Wiki and environments prepare.</p>
       <ul>
-        <For each={rows()}>
+        <For each={rows()} keyed={(row) => row.task}>
           {(row) => (
-            <li data-state={row.state}>
-              <span class="setup-task-indicator" role="img" aria-label={row.state}>
-                {row.state === "ready" ? "✓" : row.state === "failed" ? "!" : ""}
+            <li data-state={row().state}>
+              <span class="setup-task-indicator" role="img" aria-label={row().state}>
+                {row().state === "ready" ? "✓" : row().state === "failed" ? "!" : ""}
               </span>
               <span>
-                {labels[row.task]}
-                <Show when={row.state === "failed" && row.failure}>
-                  <small>{row.failure}</small>
+                {labels[row().task]}
+                <Show when={row().state === "failed" && row().failure}>
+                  <small>{row().failure}</small>
                 </Show>
               </span>
-              <Show when={row.state === "failed"}>
+              <Show when={row().state === "failed" && props.canRetry !== false}>
                 <button
                   class="quiet-button"
                   type="button"
                   disabled={Boolean(retrying())}
-                  onClick={() => void retry(row.task)}
+                  onClick={() => void retry(row().task)}
                 >
-                  {retrying() === row.task ? "Retrying…" : "Retry"}
+                  {retrying() === row().task ? "Retrying…" : "Retry"}
                 </button>
               </Show>
             </li>

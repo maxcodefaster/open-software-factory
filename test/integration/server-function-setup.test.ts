@@ -1,15 +1,17 @@
 import { expect, test } from "bun:test";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
 import type {
   ProjectSetupView,
   SetupInspectionView,
 } from "../../packages/project-domain/src/setup";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
-import { factoryBuildDirectory } from "../../apps/factory/src/build-directory";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Setup preserves command identities and ignores browser cancellation after admission", async () => {
   const origin = "https://factory.test";
@@ -50,6 +52,10 @@ test("compiled Setup preserves command identities and ignores browser cancellati
       },
       async begin(actor) {
         effects.push({ method: "begin", args: [actor] });
+        return draft;
+      },
+      async startAnother(actor, id) {
+        effects.push({ method: "start-another", args: [actor, id] });
         return draft;
       },
       async save(actor, input) {
@@ -121,6 +127,7 @@ test("compiled Setup preserves command identities and ignores browser cancellati
   maintenance = true;
   for (const [name, args] of [
     ["beginSetupDraft", []],
+    ["startAnotherSetupDraft", [setupID]],
     ["saveSetupDraft", [save]],
     ["createSetupProject", [create]],
     ["checkSetupProject", [setupID]],

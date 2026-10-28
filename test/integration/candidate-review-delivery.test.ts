@@ -802,17 +802,33 @@ test("an unresolved finding check requests no repair and explicit retry stays fo
   }
 });
 
-test.each(["stopped", "failed", "cleanup-failed", "starting", "ready"] as const)(
-  "review retry after bootstrap interruption only replaces settled compute: %s",
-  async (runtimeState) => {
+test.each(
+  (["starting", "failed"] as const).flatMap((changeState) =>
+    (["stopped", "failed", "cleanup-failed", "starting", "ready"] as const).map(
+      (runtimeState) => [changeState, runtimeState] as const,
+    ),
+  ),
+)(
+  "review retry after bootstrap interruption only replaces settled compute: %s / %s",
+  async (changeState, runtimeState) => {
     const f = await setup();
     try {
-      await f.complete(null);
-      await f.database.client`UPDATE factory.change SET state='starting' WHERE id=${f.changeID}`;
+      if (changeState === "failed") {
+        const interrupted = await f.activeReview();
+        await f.turns.settle(
+          interrupted.id,
+          interrupted.ownerToken,
+          "failed",
+          "Workspace bootstrap failed before review dispatch",
+        );
+      } else await f.complete(null);
+      const originalReview = await f.review(f.reviewID);
+      await f.database
+        .client`UPDATE factory.change SET state=${changeState} WHERE id=${f.changeID}`;
       await f.database.client`UPDATE factory.runtime_attempt SET state=${runtimeState}
         WHERE id=${f.attemptID}`;
       await f.database
-        .client`UPDATE factory.change_agent_session SET state='stopped',stop_pending=false
+        .client`UPDATE factory.change_agent_session SET state=${changeState === "failed" ? "failed" : "stopped"},stop_pending=false
         WHERE change_id=${f.changeID}`;
       const commandID = crypto.randomUUID();
       if (["stopped", "failed"].includes(runtimeState)) {
@@ -826,12 +842,16 @@ test.each(["stopped", "failed", "cleanup-failed", "starting", "ready"] as const)
           mode: "build",
           review: { commitSha: f.commit },
         });
+        const [change] = await f.database.client<{ state: string }[]>`
+          SELECT state FROM factory.change WHERE id=${f.changeID}`;
+        expect(change?.state).toBe("starting");
       } else {
         await expect(
           f.controller.retryReview(f.changeID, f.userID, commandID, f.reviewID),
         ).rejects.toMatchObject({ code: "conflict" });
         expect(f.reviews).toHaveLength(0);
       }
+      expect(await f.review(f.reviewID)).toEqual(originalReview);
       expect(f.requests()).toBe(0);
       expect(f.corrections).toEqual([]);
       await expect(f.controller.approve(f.changeID, f.userID)).rejects.toThrow();

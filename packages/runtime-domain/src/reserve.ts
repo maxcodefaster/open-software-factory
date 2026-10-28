@@ -18,6 +18,7 @@ export interface ExecutionSlot {
   readonly role: ReserveRole;
   readonly state: ReserveState;
   readonly runtimeHostImage: string;
+  readonly workerRuntimeHostImage?: string | null;
   readonly namespace: string;
   readonly workerID: string;
   readonly namespaceUID: string | null;

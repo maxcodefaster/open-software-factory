@@ -6,6 +6,7 @@ import { factoryboxReserveBootstrapProgram, factoryboxSandboxID } from "./factor
 import type { FactoryboxWorkerIdentity } from "./factorybox-worker";
 import {
   createReserveClient,
+  factoryboxReserveInput,
   renderReserveResources,
   slotActivationCommand,
   validateReserveObservation,
@@ -72,6 +73,19 @@ test("reserve uses the exact Factorybox topology without repository, user capabi
     podUID: "owned-Pod-worker",
     claimUID: "owned-PersistentVolumeClaim-store-e35856d5d0424226971c901cd27ec021",
   });
+});
+test("a new reserve consumer keeps the original worker declaration and its own image selection", () => {
+  const updated = {
+    ...slot,
+    workerRuntimeHostImage: slot.runtimeHostImage,
+    runtimeHostImage: `registry.invalid/updated@sha256:${"4".repeat(64)}`,
+  };
+  expect(renderReserveResources(updated, "approved-ca")).toEqual(
+    renderReserveResources(slot, "approved-ca"),
+  );
+  const input = factoryboxReserveInput(updated);
+  expect(input.runtimeHostImage).toBe(updated.runtimeHostImage);
+  expect(input.workerRuntimeHostImage).toBe(slot.runtimeHostImage);
 });
 test("reserve observation rejects changed tools, mounts, seeds, ownership and resource identities", () => {
   const resources = renderReserveResources(slot, "approved-ca");

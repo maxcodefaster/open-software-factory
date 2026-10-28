@@ -85,6 +85,18 @@ export function createProjectSetupController(options: {
     return view(userID);
   }
 
+  async function startAnother(userID: string, setupID: string) {
+    await access.requireSystemManager(userID);
+    // Keep every external intent immutable. A new draft is a new operation,
+    // never a retry with changed credentials or a replacement of retained Git.
+    const rows = await sql`UPDATE factory.project_setup_draft SET id=${crypto.randomUUID()},
+      version=1,name='',slug='',kind='starter',source_url='',state='draft',
+      project_id=NULL,command_id=NULL,failure=NULL,updated_at=now()
+      WHERE user_id=${userID} AND id=${setupID} AND state IN ('checking','failed') RETURNING id`;
+    if (!rows.length) throw conflict();
+    return view(userID);
+  }
+
   async function intent(commandID: string): Promise<Intent | undefined> {
     const [row] = await sql<
       Intent[]
@@ -326,9 +338,15 @@ export function createProjectSetupController(options: {
   }
 
   async function recover() {
-    const rows = await sql<{ userID: string; id: string }[]>`SELECT user_id AS "userID",id
-      FROM factory.project_setup_draft WHERE command_id IS NOT NULL AND state IN ('creating','checking')`;
-    for (const row of rows) await check(row.userID, row.id);
+    // An explicit new draft must not strand an older unconfirmed operation.
+    // Observation can settle it, but never authorizes another external create.
+    const rows = await sql<{ commandID: string }[]>`SELECT command_id AS "commandID"
+      FROM factory.project_repository_intent
+      WHERE state IN ('credential-intended','create-intended','repository-ready','uncertain')`;
+    for (const row of rows) {
+      const saved = await intent(row.commandID);
+      if (saved) await execute(saved, false);
+    }
     const completed = await sql<
       { commandID: string }[]
     >`SELECT command_id AS "commandID" FROM factory.project_repository_intent WHERE state='committed' AND credential_key IS NOT NULL AND credential_removed_at IS NULL`;
@@ -337,5 +355,5 @@ export function createProjectSetupController(options: {
       if (saved) await removeCredential(saved);
     }
   }
-  return { view, begin, save, create, check, retry, recover };
+  return { view, begin, startAnother, save, create, check, retry, recover };
 }

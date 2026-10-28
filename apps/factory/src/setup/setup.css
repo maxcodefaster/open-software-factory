@@ -3,6 +3,11 @@
   overflow: auto;
   flex: 1;
 }
+.setup-settings {
+  display: grid;
+  gap: var(--space-5);
+  padding: 0 var(--space-6) var(--space-6);
+}
 .setup-introduction h2 {
   margin: 0 0 var(--space-2);
   font-size: var(--text-lg);
@@ -181,18 +186,6 @@
   gap: var(--space-4);
   width: 100%;
   height: 100%;
-}
-.setup-empty-board section {
-  border: 1px solid var(--line-default);
-  border-radius: var(--radius-sm);
-  padding: var(--space-4);
-  background: var(--material-card);
-}
-.setup-empty-board h2 {
-  text-align: center;
-  color: var(--color-ink-muted);
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
 }
 @media (max-width: 760px) {
   .setup-empty-board {

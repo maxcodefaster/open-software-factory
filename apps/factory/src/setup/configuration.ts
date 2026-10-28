@@ -58,6 +58,7 @@ function devContainer(content: string, existingPaths: readonly string[]) {
         .optional(),
       dockerComposeFile: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]).optional(),
       service: z.string().optional(),
+      overrideCommand: z.boolean().optional(),
       workspaceFolder: z.literal("/workspace/project"),
     })
     .loose()
@@ -121,6 +122,20 @@ export function validateConfiguration(
           services: z.record(z.string(), z.record(z.string(), z.unknown())),
         })
         .parse(yaml(compose.content));
+      const contract = files.find((file) => file.path === ".factory/system.json");
+      const command = services[value.service ?? ""]?.["command"];
+      if (
+        !value.overrideCommand &&
+        contract &&
+        parseSystemContract(contract.content).apps.some((app) =>
+          Array.isArray(command)
+            ? JSON.stringify(command) === JSON.stringify(app.command)
+            : typeof command === "string" && command === app.command.join(" "),
+        )
+      )
+        throw new Error(
+          "Factory starts App commands after Dev Container hooks. Keep the primary service idle or set overrideCommand:true.",
+        );
       const volumes = services[value.service ?? ""]?.["volumes"];
       const mounted =
         Array.isArray(volumes) &&

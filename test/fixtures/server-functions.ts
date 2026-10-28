@@ -184,6 +184,7 @@ const serviceFunctions = {
   setup: {
     getSetupDraft: "draft",
     beginSetupDraft: "begin",
+    startAnotherSetupDraft: "startAnother",
     saveSetupDraft: "save",
     createSetupProject: "create",
     checkSetupProject: "check",

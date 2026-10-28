@@ -110,6 +110,7 @@ export class RuntimeHub {
   readonly #terminalSockets = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
   readonly #parents = new Map<string, ServerWebSocket<RuntimeSocketData>>();
   readonly #children = new Map<string, ServerWebSocket<RuntimeSocketData>>();
+  readonly #readyChildren = new WeakSet<ServerWebSocket<RuntimeSocketData>>();
   readonly #browsers = new Map<string, BrowserStream>();
   readonly #browserStreams = new Map<ServerWebSocket<RuntimeSocketData>, string>();
   readonly #pendingHTTP = new Map<string, PendingHTTP>();
@@ -276,6 +277,7 @@ export class RuntimeHub {
       socket.close(1008, "Connector role is already connected");
       return;
     }
+    this.#readyChildren.delete(socket);
     connections.set(socket.data.attemptID, socket);
     this.#touch(socket.data.attemptID);
   }
@@ -313,6 +315,7 @@ export class RuntimeHub {
     )
       this.#terminalSockets.add(socket);
     if (socket.data.role === "child" && message.type === "hello" && message.role === "child") {
+      this.#readyChildren.add(socket);
       const activity = this.#activity.get(socket.data.attemptID);
       if (activity) {
         activity.terminals = null;
@@ -333,7 +336,7 @@ export class RuntimeHub {
             .map((channel) => channel.name as string),
         ),
       );
-      if (this.#parents.has(socket.data.attemptID)) {
+      if (this.ready(socket.data.attemptID)) {
         this.#observeStatus(socket, "ready");
       }
       return;
@@ -396,7 +399,7 @@ export class RuntimeHub {
       const timer = this.#disconnectTimers.get(`${socket.data.attemptID}:parent`);
       if (timer) clearTimeout(timer);
       this.#disconnectTimers.delete(`${socket.data.attemptID}:parent`);
-      if (this.#children.has(socket.data.attemptID)) {
+      if (this.ready(socket.data.attemptID)) {
         this.#observeStatus(socket, "ready");
       }
       return;
@@ -812,6 +815,19 @@ export class RuntimeHub {
 
   connected(attemptID: string) {
     return this.#parents.has(attemptID) && this.#children.has(attemptID);
+  }
+  ready(attemptID: string) {
+    const parent = this.#parents.get(attemptID);
+    const child = this.#children.get(attemptID);
+    // The child opens its transport before starting processes and checking
+    // App health. Only its later hello confirms those checks have finished.
+    return !!(
+      parent &&
+      child &&
+      this.#readyChildren.has(child) &&
+      !this.#terminalSockets.has(parent) &&
+      !this.#terminalSockets.has(child)
+    );
   }
   parentConnected(attemptID: string) {
     return this.#parents.has(attemptID);

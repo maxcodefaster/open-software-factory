@@ -14,13 +14,19 @@ import { eventually, factoryProcess } from "../fixtures/factory-process";
 // Kubernetes and worker transport observations are fixtures. These cases prove
 // persisted Factory ownership, not native qualification of either architecture.
 test.each([
-  ["arm64", false],
-  ["amd64", false],
-  ["arm64", true],
-  ["amd64", true],
+  ["arm64", false, false, "none"],
+  ["amd64", false, false, "none"],
+  ["arm64", true, false, "none"],
+  ["amd64", true, false, "none"],
+  ["arm64", false, true, "none"],
+  ["arm64", false, false, "stopped"],
+  ["arm64", false, false, "running"],
+  ["arm64", false, false, "foreign-owner"],
+  ["arm64", false, false, "foreign-input"],
+  ["arm64", false, false, "no-stop"],
 ] as const)(
-  "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s",
-  async (architecture, reserveDeleted) => {
+  "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
+  async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
     const processFixture = await factoryProcess();
     const database = processFixture.connect();
     try {
@@ -169,6 +175,8 @@ test.each([
       const mutations: string[] = [];
       let preparations = 0;
       let releases = 0;
+      let cancellations = 0;
+      let deleteRefused = false;
       const reclaimed = new Set<string>();
       const resumeReclaimed = new Set<string>();
       let lostRetirementReply = false;
@@ -208,7 +216,18 @@ test.each([
         if (args.at(-1) === "worker-status")
           return { exitCode: 0, stderr: "", stdout: JSON.stringify(status) };
         if (args.includes("python3")) {
+          if (cancelPreparation && args.at(-1)?.endsWith("/prepared.json"))
+            return { exitCode: 1, stderr: "No private input was published", stdout: "" };
           expect(JSON.parse(body ?? "null").sandboxID).toBe(input.sandboxID);
+          if (args.at(-1) === "cancel") {
+            expect(JSON.parse(body ?? "null").assignment).toBeUndefined();
+            cancellations++;
+            return {
+              exitCode: 0,
+              stderr: "",
+              stdout: JSON.stringify({ version: 1, cancelled: true, sandboxID: input.sandboxID }),
+            };
+          }
           if (args.at(-1) === "release") {
             expect(JSON.parse(body ?? "null").assignment).toBeUndefined();
             releases++;
@@ -227,6 +246,12 @@ test.each([
             Array<{ attempted: boolean }>
           >`SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${owned.attemptID} AND action='prepare'`;
           expect(intent?.attempted).toBe(true);
+          if (cancelPreparation)
+            return {
+              exitCode: 1,
+              stderr: "Image preparation ran out of space before input creation",
+              stdout: "",
+            };
           return {
             exitCode: 0,
             stderr: "",
@@ -316,6 +341,14 @@ test.each([
           };
         }
         if (action === "delete") {
+          if (deleteContinuation !== "none" && !deleteRefused) {
+            deleteRefused = true;
+            return {
+              exitCode: 1,
+              stderr: "owned full-store refusal before native Delete",
+              stdout: "",
+            };
+          }
           record.phase = "deleted";
           return { exitCode: 1, stderr: "response lost after completed native Delete", stdout: "" };
         }
@@ -354,13 +387,51 @@ test.each([
           exitCode: 0,
           stderr: "",
           stdout: JSON.stringify({
-            record,
-            runtime: { status: record.phase === "running" ? "running" : "stopped" },
+            record:
+              deleteRefused && deleteContinuation === "foreign-owner"
+                ? { ...record, owner: "a".repeat(32) }
+                : deleteRefused && deleteContinuation === "foreign-input"
+                  ? { ...record, input_sha256: "a".repeat(64) }
+                  : record,
+            runtime: {
+              status:
+                record.phase === "running" &&
+                !(
+                  deleteRefused &&
+                  ["stopped", "foreign-owner", "foreign-input", "no-stop"].includes(
+                    deleteContinuation,
+                  )
+                )
+                  ? "running"
+                  : "stopped",
+            },
           }),
         };
       };
       const hub = new RuntimeHub(async () => {});
       const execution = createFactoryboxExecution(database, hub, run);
+      if (cancelPreparation) {
+        await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
+          "preparation is unconfirmed",
+        );
+        await expect(execution.ensureStarted(owned.attemptID)).rejects.toThrow(
+          "preparation remains unconfirmed",
+        );
+        expect(preparations).toBe(1);
+        await execution.deleteSandbox(owned.attemptID);
+        await execution.deleteSandbox(owned.attemptID);
+        expect(cancellations).toBe(1);
+        expect(mutations).toEqual([]);
+        const [retained] =
+          await database.client`SELECT runtime.inputs_released_at,operation.attempted_at,operation.completed_at
+          FROM factory.factorybox_runtime runtime JOIN factory.factorybox_lifecycle_operation operation
+            ON operation.runtime_attempt_id=runtime.runtime_attempt_id AND operation.action='prepare'
+          WHERE runtime.runtime_attempt_id=${owned.attemptID}`;
+        expect(retained?.["inputs_released_at"]).not.toBeNull();
+        expect(retained?.["attempted_at"]).not.toBeNull();
+        expect(retained?.["completed_at"]).toBeNull();
+        return;
+      }
       const holder = database.coordination();
       await holder`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
       const starting = execution.ensureStarted(owned.attemptID, [declared.pod]).then(
@@ -522,6 +593,18 @@ test.each([
         pod.metadata.uid = "pod-uid";
       }
       await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
+      if (deleteContinuation === "no-stop")
+        await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL WHERE id=${owned.attemptID}`;
+      if (deleteContinuation !== "none") {
+        await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
+        expect(record.phase).toBe("running");
+        expect(mutations.filter((action) => action === "delete")).toHaveLength(1);
+        if (deleteContinuation !== "stopped") {
+          await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow();
+          expect(mutations.filter((action) => action === "delete")).toHaveLength(1);
+          return;
+        }
+      }
       if (!reserveDeleted)
         await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
       await expect(execution.deleteSandbox(owned.attemptID, reserveDeleted)).rejects.toThrow(
@@ -537,7 +620,13 @@ test.each([
       expect(mutations.slice(settledMutations.length).sort()).toEqual(
         (reserveDeleted
           ? ["pause", "retire-resume", "retire-checkpoint", "retire-sandbox", "retire-sandbox"]
-          : ["delete", "retire-resume", "retire-sandbox", "retire-sandbox"]
+          : [
+              ...(deleteContinuation === "stopped" ? ["delete"] : []),
+              "delete",
+              "retire-resume",
+              "retire-sandbox",
+              "retire-sandbox",
+            ]
         ).sort(),
       );
       expect(reclaimed.size).toBe(reserveDeleted ? 3 : 2);

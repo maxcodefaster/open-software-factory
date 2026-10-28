@@ -20,34 +20,39 @@ export function nativeStepGuard(input: {
   requests?: { remaining: number };
   authorize?: (() => Promise<void>) | undefined;
 }) {
-  return async (step: { messages: readonly unknown[]; systemMessages: readonly unknown[] }) => {
+  return async (step: {
+    messages: readonly unknown[];
+    systemMessages: readonly unknown[];
+    messageList?: ProcessInputStepArgs["messageList"];
+  }) => {
     input.signal.throwIfAborted();
     await input.authorize?.();
     let mediaBytes = 0;
-    const serialized = JSON.stringify(
-      [step.systemMessages, step.messages],
-      (_key, value: unknown) => {
-        if (!value || typeof value !== "object" || !input.maxMediaBytes) return value;
-        const part = value as Record<string, unknown>;
-        if (part["type"] !== "image-data" && part["type"] !== "image") return value;
-        const media = part["data"] ?? part["image"];
-        if (
-          typeof media === "string" &&
-          /^(?:data:image\/[a-z+.-]+;base64,)?[A-Za-z0-9+/=\r\n]+$/.test(media)
-        ) {
-          mediaBytes += Math.ceil((media.replace(/^data:[^,]+,/, "").length * 3) / 4);
-          return {
-            ...part,
-            ...(part["data"] ? { data: "[bounded image]" } : { image: "[bounded image]" }),
-          };
-        }
-        if (media instanceof Uint8Array) {
-          mediaBytes += media.byteLength;
-          return { ...part, image: "[bounded image]" };
-        }
-        return value;
-      },
-    );
+    // Mastra's stored messages repeat text in both content.parts and
+    // content.content. Bound its native provider projection, not that storage
+    // duplication. The text/media limits and request admission stay unchanged.
+    const messages = step.messageList?.get.all.aiV5.model() ?? step.messages;
+    const serialized = JSON.stringify([step.systemMessages, messages], (_key, value: unknown) => {
+      if (!value || typeof value !== "object" || !input.maxMediaBytes) return value;
+      const part = value as Record<string, unknown>;
+      if (part["type"] !== "image-data" && part["type"] !== "image") return value;
+      const media = part["data"] ?? part["image"];
+      if (
+        typeof media === "string" &&
+        /^(?:data:image\/[a-z+.-]+;base64,)?[A-Za-z0-9+/=\r\n]+$/.test(media)
+      ) {
+        mediaBytes += Math.ceil((media.replace(/^data:[^,]+,/, "").length * 3) / 4);
+        return {
+          ...part,
+          ...(part["data"] ? { data: "[bounded image]" } : { image: "[bounded image]" }),
+        };
+      }
+      if (media instanceof Uint8Array) {
+        mediaBytes += media.byteLength;
+        return { ...part, image: "[bounded image]" };
+      }
+      return value;
+    });
     if (
       Buffer.byteLength(serialized) > input.maxInputBytes ||
       mediaBytes > (input.maxMediaBytes ?? 0)
@@ -76,3 +81,5 @@ export function knownModelRejection(cause: unknown) {
   }
   return false;
 }
+
+import type { ProcessInputStepArgs } from "@mastra/core/processors";

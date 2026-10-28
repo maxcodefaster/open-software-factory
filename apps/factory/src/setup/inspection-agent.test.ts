@@ -22,6 +22,9 @@ test("native setup inspection has a final-output step after sequential source re
       expect(JSON.stringify(body.messages)).toContain("cap_drop: [NET_RAW, SYS_PTRACE]");
       expect(JSON.stringify(body.messages)).toContain("--cap-drop=NET_RAW");
       expect(JSON.stringify(body.messages)).toContain("..:/workspace/project");
+      expect(JSON.stringify(body.messages)).toContain("sleep");
+      expect(JSON.stringify(body.messages)).toContain("postCreateCommand");
+      expect(JSON.stringify(body.messages)).toContain("Factory starts App commands");
       const path = paths[requests++];
       const message = path
         ? {

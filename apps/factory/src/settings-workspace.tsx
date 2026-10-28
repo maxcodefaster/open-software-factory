@@ -12,6 +12,9 @@ const AccessSettings = lazy(async () => ({
 const EnvironmentSettings = lazy(async () => ({
   default: (await import("./environments/settings")).EnvironmentSettings,
 }));
+const ProjectSetupSettings = lazy(async () => ({
+  default: (await import("./setup/settings")).ProjectSetupSettings,
+}));
 const MCPLibrary = lazy(async () => ({ default: (await import("./mcp/library")).MCPLibrary }));
 const ModelSettings = lazy(async () => ({
   default: (await import("./models/settings")).ModelSettings,
@@ -41,6 +44,7 @@ type Category =
   | "monitoring"
   | "people"
   | "environment"
+  | "setup"
   | "security"
   | "usage"
   | "repositories";
@@ -127,7 +131,7 @@ export function SettingsWorkspace(props: {
             label: `Project · ${props.project.name}`,
             categories: [
               ...(props.developer ? (["models"] as Category[]) : []),
-              ...(props.developer || canManage() ? (["environment"] as Category[]) : []),
+              ...(props.developer || canManage() ? (["setup", "environment"] as Category[]) : []),
               "monitoring",
               "releases",
               "usage",
@@ -164,6 +168,7 @@ export function SettingsWorkspace(props: {
       releases: "Releases",
       people: "People & access",
       environment: "Environments",
+      setup: "Project setup",
       usage: "Monitoring",
       repositories: "Repository mirrors",
       security: scope === "system" ? "Company sign-in" : "Login & security",
@@ -259,6 +264,17 @@ export function SettingsWorkspace(props: {
                   projectID={props.project?.id}
                 />
               </div>
+            </Show>
+            <Show
+              when={category() === "setup" && (props.developer || canManage()) && props.project}
+            >
+              {(project) => (
+                <ProjectSetupSettings
+                  projectID={project().id}
+                  userID={props.userID}
+                  canManage={canManage()}
+                />
+              )}
             </Show>
             <Show when={visited().has("models")}>
               <div class="settings-configuration-host" hidden={category() !== "models"}>

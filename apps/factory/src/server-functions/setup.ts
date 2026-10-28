@@ -36,6 +36,16 @@ export const saveSetupDraft = createServerFn({ method: "POST" })
       return context.setup.save(context.actorID, command);
     });
   });
+export const startAnotherSetupDraft = createServerFn({ method: "POST" })
+  .validator((args: [id: string]) => args)
+  .handler(async ({ data: [id] }) => {
+    return factoryFunction(async () => {
+      const identity = z.uuid().parse(id);
+      const context = factoryFunctionContext();
+      await context.beforeWrite(false);
+      return context.setup.startAnother(context.actorID, identity);
+    });
+  });
 export const createSetupProject = createServerFn({ method: "POST" })
   .validator((args: [input: z.input<typeof projectSetupCreate>]) => args)
   .handler(async ({ data: [input] }) => {

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { runCommand } from "./command";
+import { ensureFactoryboxConsumer } from "./factorybox-consumer";
 import {
   factoryboxAssignmentSecret,
   factoryboxLocation,
@@ -68,6 +69,8 @@ export interface FactoryboxRuntimeInput {
   readonly runtimeOwnerID: string;
   readonly labels: Readonly<Record<string, string>>;
   readonly runtimeHostImage: string;
+  // The original Pod's bootstrap export is not the selected Sandbox image.
+  readonly workerRuntimeHostImage?: string;
   readonly profile: FactoryboxRuntimeProfile;
   readonly sharedSource: boolean;
   readonly storageNode?: string;
@@ -104,6 +107,7 @@ export const factoryboxReserveBootstrapProgram = readFileSync(
 export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   const profile = factoryboxRuntimeProfile.parse(input.profile);
   exactImage.parse(input.runtimeHostImage);
+  if (input.workerRuntimeHostImage) exactImage.parse(input.workerRuntimeHostImage);
   const identifier = (value: string) =>
     z
       .string()
@@ -133,10 +137,11 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
   const worker = resources[2].spec.containers[0];
   const shared = factoryboxSharedLabels(input.workerID);
   const labels = { ...resources[2].metadata.labels, ...shared };
+  const bootstrapImage = input.workerRuntimeHostImage ?? input.runtimeHostImage;
   const environment = [
     { name: "FACTORY_POD_UID", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } },
     { name: "FACTORY_STORE_ID", value: request.storeID },
-    { name: "FACTORY_RUNTIME_IMAGE", value: input.runtimeHostImage },
+    { name: "FACTORY_RUNTIME_IMAGE", value: bootstrapImage },
   ];
   return {
     namespace: {
@@ -180,7 +185,7 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
           },
           {
             name: "runtime-image",
-            image: input.runtimeHostImage,
+            image: bootstrapImage,
             imagePullPolicy: "IfNotPresent",
             command: ["/bin/sh", "-ec", factoryboxExportProgram],
             securityContext: {
@@ -326,6 +331,7 @@ export async function prepareFactoryboxRuntime(
     run,
     factoryboxRuntimeDeclaration(input),
   );
+  await ensureFactoryboxConsumer(input, identity, run, deadline);
   const secret = await run([
     "get",
     "secret",
@@ -366,6 +372,46 @@ export async function prepareFactoryboxRuntime(
       storeID: z.literal(identity.storeID),
       epoch: z.literal(identity.epoch),
       podUID: z.literal(identity.podUID),
+    })
+    .parse(JSON.parse(result.stdout));
+}
+
+export async function cancelFactoryboxPreparation(
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  run: typeof runCommand = runFactoryboxKubernetes,
+) {
+  await inspectFactoryboxWorker(
+    factoryboxRuntimeRequest(input),
+    identity,
+    run,
+    factoryboxRuntimeDeclaration(input),
+  );
+  const result = await run(
+    [
+      "exec",
+      "-i",
+      input.podName,
+      "-n",
+      input.namespace,
+      "-c",
+      "worker",
+      "--",
+      "python3",
+      "-c",
+      factoryboxPrepareProgram,
+      "cancel",
+    ],
+    JSON.stringify(factoryboxPreparationIdentity(input, identity)),
+    { timeoutMS: 30_000, outputBytes: 16_384 },
+  );
+  if (result.exitCode !== 0)
+    throw new Error("Incomplete Factorybox preparation must remain retained for inspection");
+  return z
+    .strictObject({
+      version: z.literal(1),
+      cancelled: z.literal(true),
+      sandboxID: z.literal(input.sandboxID),
     })
     .parse(JSON.parse(result.stdout));
 }
