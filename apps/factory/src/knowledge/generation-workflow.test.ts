@@ -189,6 +189,12 @@ test.each([
           expect(system).toContain("Never request source-code changes");
           expect(system).toContain("Clearly labelled advice");
           expect(system).toContain("Do not invent an overclaim that the draft does not make");
+          expect(system).toContain(
+            "A topic purpose cannot require onward navigation to unpublished planned guides",
+          );
+          expect(system).toContain(
+            "Repository-document pointers are optional, not a substitute publication gate",
+          );
           output = {
             issues:
               scenario === "unsupported-claim" && prompt.topic.slug !== "overview"

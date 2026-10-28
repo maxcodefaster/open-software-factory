@@ -50,9 +50,13 @@ test.each([false, true])(
         { path: "drizzle/0000_auth.sql", sha: commit, size: 32 },
         { path: "src/web.css", sha: commit, size: 32 },
         { path: "index.html", sha: commit, size: 32 },
+        { path: "tools/workspace.mjs", sha: commit, size: 32 },
+        { path: "tools/config.cjs", sha: commit, size: 32 },
         { path: ".env.sql", sha: commit, size: 32 },
         { path: ".env.production.json", sha: commit, size: 32 },
+        { path: ".env.development.mjs", sha: commit, size: 32 },
         { path: "src/credentials.sql", sha: commit, size: 32 },
+        { path: "src/credentials.cjs", sha: commit, size: 32 },
       ],
       getFileInfo: async (_repo: unknown, path: string) => ({
         sha: path === "package.json" ? "b".repeat(40) : commit,
@@ -65,11 +69,29 @@ test.each([false, true])(
       if (failure) throw failureCause;
       const paths = input.inventory.map((entry) => entry.path);
       inventoryReceived = paths;
-      for (const path of ["drizzle/0000_auth.sql", "src/web.css", "index.html"])
+      for (const path of [
+        "drizzle/0000_auth.sql",
+        "src/web.css",
+        "index.html",
+        "tools/workspace.mjs",
+        "tools/config.cjs",
+      ])
         expect(paths).toContain(path);
-      for (const path of [".env.sql", ".env.production.json", "src/credentials.sql"])
+      for (const path of [
+        ".env.sql",
+        ".env.production.json",
+        ".env.development.mjs",
+        "src/credentials.sql",
+        "src/credentials.cjs",
+      ])
         expect(paths).not.toContain(path);
-      await input.readFiles(["drizzle/0000_auth.sql", "src/web.css", "index.html"]);
+      await input.readFiles([
+        "drizzle/0000_auth.sql",
+        "src/web.css",
+        "index.html",
+        "tools/workspace.mjs",
+        "tools/config.cjs",
+      ]);
       await expect(input.readFiles([".env.sql"])).rejects.toThrow(
         "Wiki source read is unavailable",
       );

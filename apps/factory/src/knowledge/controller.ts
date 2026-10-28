@@ -37,6 +37,8 @@ const sourceExtensions = new Set([
   ".tsx",
   ".js",
   ".jsx",
+  ".mjs",
+  ".cjs",
   ".go",
   ".py",
   ".rs",
