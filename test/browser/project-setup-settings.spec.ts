@@ -148,67 +148,84 @@ for (const device of [
       await page.screenshot({ path: `${evidence}/${device.name}.png` });
     });
 
-    test("retrying a failed inspection preserves its retained context and clears the old failure while submitting", async ({
-      page,
-    }) => {
-      const projectID = "10000000-0000-4000-8000-000000000001";
-      const failedID = crypto.randomUUID();
-      const failure = "Inspection timed out. Previous answers and source are unchanged.";
-      let current = setupInspectionView.parse({
-        id: failedID,
-        projectID,
-        sourceCommit: "a".repeat(40),
-        state: "failed",
-        output: null,
-        failure,
-      });
-      let submitted:
-        | { id: string; parentID?: string; answers?: Record<string, string> }
-        | undefined;
-      const received = Promise.withResolvers<void>();
-      const release = Promise.withResolvers<void>();
-      await mockFactoryFunctions(page, {
-        setup: {
-          inspection: async () => current,
-          readiness: async () => [],
-          inspect: async (_actor, project, id, continuation) => {
-            expect(project).toBe(projectID);
-            expect(submitted).toBeUndefined();
-            submitted = { id, ...continuation };
-            received.resolve();
-            await release.promise;
-            current = { ...current, id, state: "inspecting", failure: null };
-            return current;
-          },
-        },
-      });
-      try {
-        await page.goto(`${origin}/project-inputs.html`);
-        await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
-        const panel = page.getByRole("region", { name: "Project configuration", exact: true });
-        await expect(panel).toContainText(failure);
-        expect(submitted).toBeUndefined();
-        await page.screenshot({ path: `${evidence}/retry-before-${device.name}.png` });
-        const retry = panel.getByRole("button", {
-          name: /^(Inspect project setup|Retry setup inspection)$/,
+    for (const recovery of [
+      {
+        name: "timeout",
+        message: "Inspection timed out. Previous answers and source are unchanged.",
+      },
+      {
+        name: "recipe",
+        message:
+          "The proposal omitted a required recipe file. Retry to request a complete proposal. Answers and source are unchanged.",
+      },
+    ]) {
+      test(`retrying a ${recovery.name} failure preserves its retained context and clears the old failure while submitting`, async ({
+        page,
+      }) => {
+        const projectID = "10000000-0000-4000-8000-000000000001";
+        const failedID = crypto.randomUUID();
+        const failure = recovery.message;
+        let current = setupInspectionView.parse({
+          id: failedID,
+          projectID,
+          sourceCommit: "a".repeat(40),
+          state: "failed",
+          output: null,
+          failure,
         });
-        if (device.hasTouch) await retry.tap();
-        else await retry.press("Enter");
-        await received.promise;
-        expect(submitted).toMatchObject({ parentID: failedID, answers: {} });
-        await expect(panel).not.toContainText(failure);
-        release.resolve();
-        await expect(
-          panel.getByRole("button", { name: "Stop inspection", exact: true }),
-        ).toBeVisible();
-        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
-          device.width,
-        );
-        await page.screenshot({ path: `${evidence}/retry-running-${device.name}.png` });
-      } finally {
-        release.resolve();
-      }
-    });
+        let submitted:
+          | { id: string; parentID?: string; answers?: Record<string, string> }
+          | undefined;
+        const received = Promise.withResolvers<void>();
+        const release = Promise.withResolvers<void>();
+        await mockFactoryFunctions(page, {
+          setup: {
+            inspection: async () => current,
+            readiness: async () => [],
+            inspect: async (_actor, project, id, continuation) => {
+              expect(project).toBe(projectID);
+              expect(submitted).toBeUndefined();
+              submitted = { id, ...continuation };
+              received.resolve();
+              await release.promise;
+              current = { ...current, id, state: "inspecting", failure: null };
+              return current;
+            },
+          },
+        });
+        try {
+          await page.goto(`${origin}/project-inputs.html`);
+          await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+          const panel = page.getByRole("region", { name: "Project configuration", exact: true });
+          await expect(panel).toContainText(failure);
+          await expect(panel.getByRole("button", { name: "Confirm configuration" })).toHaveCount(0);
+          expect(submitted).toBeUndefined();
+          await page.screenshot({
+            path: `${evidence}/retry-${recovery.name}-before-${device.name}.png`,
+          });
+          const retry = panel.getByRole("button", {
+            name: /^(Inspect project setup|Retry setup inspection)$/,
+          });
+          if (device.hasTouch) await retry.tap();
+          else await retry.press("Enter");
+          await received.promise;
+          expect(submitted).toMatchObject({ parentID: failedID, answers: {} });
+          await expect(panel).not.toContainText(failure);
+          release.resolve();
+          await expect(
+            panel.getByRole("button", { name: "Stop inspection", exact: true }),
+          ).toBeVisible();
+          expect(
+            await page.evaluate(() => document.documentElement.scrollWidth),
+          ).toBeLessThanOrEqual(device.width);
+          await page.screenshot({
+            path: `${evidence}/retry-${recovery.name}-running-${device.name}.png`,
+          });
+        } finally {
+          release.resolve();
+        }
+      });
+    }
   });
 }
 

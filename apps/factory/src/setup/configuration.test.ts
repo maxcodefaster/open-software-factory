@@ -84,6 +84,66 @@ test("assisted Compose proposal must mount the repository into its primary works
     ).not.toThrow();
   }
 });
+test("a proposed Compose stack must actually be selected by the Dev Container", () => {
+  const recipe = {
+    path: ".devcontainer/devcontainer.json",
+    content: JSON.stringify({
+      build: { dockerfile: "Dockerfile" },
+      workspaceFolder: "/workspace/project",
+    }),
+  };
+  const dockerfile = { path: ".devcontainer/Dockerfile", content: "FROM node:24\n" };
+  const compose = {
+    path: ".devcontainer/compose.yaml",
+    content: JSON.stringify({
+      services: {
+        app: {
+          build: { context: ".", dockerfile: "Dockerfile" },
+          command: ["sleep", "infinity"],
+          volumes: ["..:/workspace/project"],
+        },
+        postgres: { image: "postgres:16" },
+      },
+    }),
+  };
+  const files = [recipe, dockerfile, compose];
+  const paths = files.map((file) => file.path);
+  expect(() => validateConfiguration(files, paths)).toThrow("must be referenced");
+  expect(() =>
+    validateConfiguration(
+      [
+        {
+          ...recipe,
+          content: JSON.stringify({
+            dockerComposeFile: "compose.yaml",
+            service: "app",
+            workspaceFolder: "/workspace/project",
+          }),
+        },
+        dockerfile,
+        compose,
+      ],
+      paths,
+    ),
+  ).not.toThrow();
+  expect(() =>
+    validateConfiguration(
+      [
+        {
+          ...recipe,
+          content: JSON.stringify({
+            dockerComposeFile: ["base.yaml", "compose.yaml"],
+            service: "app",
+            workspaceFolder: "/workspace/project",
+          }),
+        },
+        dockerfile,
+        compose,
+      ],
+      [...paths, ".devcontainer/base.yaml"],
+    ),
+  ).not.toThrow();
+});
 test("assisted Compose does not start the App before dependency hooks or duplicate Factory startup", () => {
   const recipe = {
     path: ".devcontainer/devcontainer.json",

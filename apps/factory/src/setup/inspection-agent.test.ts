@@ -1,6 +1,69 @@
 import { expect, test } from "bun:test";
 import { inspectConfiguration } from "./inspection-agent";
 
+test("caller Stop still fences a longer setup invocation without starting inference", async () => {
+  const abort = new AbortController();
+  abort.abort(new DOMException("Owned setup Stop", "AbortError"));
+  let reads = 0;
+  await expect(
+    inspectConfiguration({
+      modelID: "owned-model",
+      connection: { baseURL: "http://127.0.0.1:9/v1", apiKey: "owned-stop" },
+      signal: abort.signal,
+      paths: ["README.md"],
+      existingConfiguration: [],
+      read: async () => {
+        reads++;
+        return "Owned source";
+      },
+    }),
+  ).rejects.toThrow("Owned setup Stop");
+  expect(reads).toBe(0);
+});
+
+test("caller Stop interrupts an admitted setup request without another provider request", async () => {
+  const abort = new AbortController();
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let requests = 0;
+  let settled = "";
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch() {
+      requests++;
+      entered.resolve();
+      await release.promise;
+      return Response.json({ error: "Owned request was interrupted" }, { status: 500 });
+    },
+  });
+  try {
+    const generation = inspectConfiguration({
+      modelID: "owned-model",
+      connection: { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned-stop" },
+      signal: abort.signal,
+      paths: ["README.md"],
+      existingConfiguration: [],
+      usageSink: {
+        begin: async () => {},
+        record: async () => {},
+        settle: async (outcome) => {
+          settled = outcome;
+        },
+      },
+      read: async () => "Owned source",
+    });
+    await entered.promise;
+    abort.abort(new DOMException("Owned setup Stop", "AbortError"));
+    await expect(generation).rejects.toThrow();
+    expect(requests).toBe(1);
+    expect(settled).toBe("interrupted");
+  } finally {
+    release.resolve();
+    await provider.stop(true);
+  }
+});
+
 test("native setup inspection has a final-output step after sequential source reads", async () => {
   const paths = ["package.json", "README.md", "src/server.ts", "src/database.ts"];
   const loaded: string[] = [];
@@ -18,13 +81,34 @@ test("native setup inspection has a final-output step after sequential source re
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
-      const body = (await request.json()) as { stream?: boolean; messages: unknown[] };
+      const body = (await request.json()) as {
+        stream?: boolean;
+        messages: { role: string; content: string | { text: string }[] }[];
+      };
       expect(JSON.stringify(body.messages)).toContain("cap_drop: [NET_RAW, SYS_PTRACE]");
       expect(JSON.stringify(body.messages)).toContain("--cap-drop=NET_RAW");
       expect(JSON.stringify(body.messages)).toContain("..:/workspace/project");
       expect(JSON.stringify(body.messages)).toContain("sleep");
       expect(JSON.stringify(body.messages)).toContain("postCreateCommand");
       expect(JSON.stringify(body.messages)).toContain("Factory starts App commands");
+      expect(JSON.stringify(body.messages)).toContain(
+        "Setup readiness means a reproducible launch and Verification, not application/browser acceptance",
+      );
+      expect(JSON.stringify(body.messages)).toContain("must never be claimed resolved");
+      const userText = body.messages
+        .filter((message) => message.role === "user")
+        .flatMap((message) =>
+          typeof message.content === "string"
+            ? [message.content]
+            : message.content.map((part) => part.text),
+        )
+        .join("\n");
+      expect(userText).toContain(
+        '"missingConfiguration":[".devcontainer/devcontainer.json",".factory/system.json",".forgejo/workflows/factory-verification.yml"]',
+      );
+      expect(JSON.stringify(body.messages)).toContain(
+        "write standard installation commands for already-established system tools and exact approved versions",
+      );
       const path = paths[requests++];
       const message = path
         ? {
