@@ -16,12 +16,12 @@ import {
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
+import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
-import { compiledFactoryEndpoint } from "../fixtures/server-functions";
 import { memoryPrivateObjects } from "../fixtures/private-objects";
+import { compiledFactoryEndpoint } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
-import { productionBuildEnvironment } from "../../scripts/testing/test-prerequisites";
 
 test("Ticket video, shared feedback and permission-free Preview comments work in the Factory shell", async () => {
   const f = await candidateReviewFixture();
@@ -655,7 +655,52 @@ test("Ticket video, shared feedback and permission-free Preview comments work in
     await visible(panel().getByText("Feedback survives an unavailable image store.")).toBeVisible();
     await thread().getByRole("button", { name: "Resolve Thread" }).click();
     await visible(panel().getByText("Resolved (1)", { exact: true })).toBeVisible();
-    await panel().getByText("Resolved (1)", { exact: true }).click();
+    const resolved = panel().locator("details.review-resolved");
+    await resolved.locator(":scope > summary").click();
+    await visible(resolved).toHaveAttribute("open", "");
+    const reloaded = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname.startsWith("/_server/"),
+    );
+    await panel().getByRole("button", { name: "Reload review" }).click();
+    await (await reloaded).finished();
+    await visible(resolved).toHaveAttribute("open", "");
+    await page.screenshot({
+      path: resolve(directory, "resolved-reloaded-desktop.png"),
+      fullPage: true,
+    });
+    const touch = await browser.newContext({
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    try {
+      const touchPage = await touch.newPage();
+      touchPage.on("pageerror", (error) => errors.push(error.stack ?? error.message));
+      await touchPage.goto(page.url());
+      const touchPanel = touchPage.getByRole("region", { name: "Visual review", exact: true });
+      const touchResolved = touchPanel.locator("details.review-resolved");
+      await touchResolved.locator(":scope > summary").tap();
+      await visible(touchResolved).toHaveAttribute("open", "");
+      const touchReloaded = touchPage.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          new URL(response.url()).pathname.startsWith("/_server/"),
+      );
+      await touchPanel.getByRole("button", { name: "Reload review" }).tap();
+      await (await touchReloaded).finished();
+      await visible(touchResolved).toHaveAttribute("open", "");
+      expect(
+        await touchPage.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      ).toBe(true);
+      await touchPage.screenshot({
+        path: resolve(directory, "resolved-reloaded-touch.png"),
+        fullPage: true,
+      });
+    } finally {
+      await touch.close();
+    }
     await panel().getByRole("button", { name: "Reopen Thread" }).click();
     await visible(
       panel().getByText("1 open Thread blocks Delivery", { exact: true }),
