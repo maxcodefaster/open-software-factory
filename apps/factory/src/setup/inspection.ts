@@ -103,6 +103,7 @@ export function createSetupInspection(input: {
   }
   async function inspect(value: InspectionRow) {
     return inspectionLock(value.id, async () => {
+      let signal: AbortSignal | undefined;
       try {
         const current = await project(value.projectID, value.userID);
         const admitted = await row(value.id);
@@ -111,8 +112,19 @@ export function createSetupInspection(input: {
         aborts.set(value.id, abort);
         const files = await input.forge.listFiles(current.repository, value.sourceCommit);
         const existing = files.map((file) => file.path);
+        const availablePaths = files
+          .filter(
+            (file) =>
+              file.size <= 64000 &&
+              (readableCodePath(file.path) ||
+                configurationPath(file.path) ||
+                /(?:^|\/)Dockerfile$/.test(file.path)),
+          )
+          .map((file) => file.path);
+        const available = new Set(availablePaths);
         if (!value.modelID) throw new Error("Inspection model was not admitted");
         const connection = await input.connection(value);
+        signal = AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]);
         const output = await (input.generate ?? inspectConfiguration)({
           modelID: value.modelID,
           connection,
@@ -124,21 +136,15 @@ export function createSetupInspection(input: {
             provider: connection.provider ?? "openai",
             model: value.modelID,
           }),
-          signal: AbortSignal.any([abort.signal, AbortSignal.timeout(30_000)]),
+          signal,
           answers: value.answers,
           context: await questionContext(value),
           existingConfiguration: existing.filter(configurationPath),
-          paths: files
-            .filter(
-              (file) =>
-                file.size <= 64000 &&
-                (readableCodePath(file.path) ||
-                  configurationPath(file.path) ||
-                  /(?:^|\/)Dockerfile$/.test(file.path)),
-            )
-            .slice(0, 2000)
-            .map((file) => file.path),
+          paths: availablePaths.slice(0, 2000),
+          availablePaths,
           read: async (path) => {
+            if (!available.has(path))
+              throw new Error("Source is not available for setup inspection");
             await access.requireProject(value.userID, value.projectID, true);
             const admitted = await row(value.id);
             if (admitted?.state !== "inspecting") throw new Error("Inspection was stopped");
@@ -148,8 +154,16 @@ export function createSetupInspection(input: {
         validateSetupProposal(output, existing);
         await access.requireProject(value.userID, value.projectID, true);
         await sql`UPDATE factory.project_setup_inspection SET state='proposal',output=${JSON.stringify(output)}::jsonb,updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
-      } catch {
-        await sql`UPDATE factory.project_setup_inspection SET state='failed',failure='Inspection could not finish. Existing source is unchanged; retry when ready.',updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
+      } catch (cause) {
+        const timedOut =
+          (signal?.aborted &&
+            signal.reason instanceof Error &&
+            signal.reason.name === "TimeoutError") ||
+          (cause instanceof Error && cause.name === "TimeoutError");
+        const failure = timedOut
+          ? "Inspection timed out. Previous answers and source are unchanged. Retry explicitly when ready."
+          : "Inspection could not finish. Previous answers and source are unchanged; retry when ready.";
+        await sql`UPDATE factory.project_setup_inspection SET state='failed',failure=${failure},updated_at=now() WHERE id=${value.id} AND state='inspecting'`;
       } finally {
         aborts.delete(value.id);
       }
@@ -162,6 +176,10 @@ export function createSetupInspection(input: {
       const parent = await row(child.parentID);
       if (!parent || parent.projectID !== value.projectID)
         throw new Error("Question context is unavailable");
+      if (parent.state === "failed") {
+        child = parent;
+        continue;
+      }
       const output = setupInspectionOutput.parse(parent.output);
       rounds.unshift(
         !output.questions.length && child.answers[setupFeedbackKey]
@@ -225,31 +243,40 @@ export function createSetupInspection(input: {
           InspectionRow[]
         >`SELECT id,project_id AS "projectID",source_commit AS "sourceCommit",state,output,answers,parent_id AS "parentID"
           FROM factory.project_setup_inspection WHERE id=${command.parentID} FOR UPDATE`;
-        if (!parent || parent.projectID !== projectID || parent.state !== "proposal")
+        if (
+          !parent ||
+          parent.projectID !== projectID ||
+          !["proposal", "failed"].includes(parent.state)
+        )
           throw new CommandError("conflict", "The setup question changed");
         if (parent.sourceCommit !== head.headSha)
           throw new CommandError(
             "conflict",
             "Source changed. Inspect the current configuration again.",
           );
-        const output = setupInspectionOutput.parse(parent.output);
-        const refining = output.files.length > 0 && !output.questions.length;
-        if (
-          (refining && !command.answers[setupFeedbackKey]) ||
-          output.questions.some((question) => !command.answers[question.id]) ||
-          Object.keys(command.answers).some(
-            (key) =>
-              !(refining && key === setupFeedbackKey) &&
-              !output.questions.some((question) => question.id === key),
+        if (parent.state === "failed") {
+          if (Object.keys(command.answers).length)
+            throw new CommandError("conflict", "Retry keeps the confirmed answers unchanged");
+        } else {
+          const output = setupInspectionOutput.parse(parent.output);
+          const refining = output.files.length > 0 && !output.questions.length;
+          if (
+            (refining && !command.answers[setupFeedbackKey]) ||
+            output.questions.some((question) => !command.answers[question.id]) ||
+            Object.keys(command.answers).some(
+              (key) =>
+                !(refining && key === setupFeedbackKey) &&
+                !output.questions.some((question) => question.id === key),
+            )
           )
-        )
-          throw new CommandError(
-            "conflict",
-            refining
-              ? "Describe the required configuration changes before continuing"
-              : "Answer the current setup questions before continuing",
-          );
-        await transaction`UPDATE factory.project_setup_inspection SET state='superseded' WHERE id=${parent.id} AND state='proposal'`;
+            throw new CommandError(
+              "conflict",
+              refining
+                ? "Describe the required configuration changes before continuing"
+                : "Answer the current setup questions before continuing",
+            );
+          await transaction`UPDATE factory.project_setup_inspection SET state='superseded' WHERE id=${parent.id} AND state='proposal'`;
+        }
       }
       await projectAuthorityIn(transaction, userID, projectID, true);
       const active =

@@ -9,6 +9,133 @@ import { createForgejoClient } from "../../packages/forge/src/forge";
 import { factoryProcess } from "../fixtures/factory-process";
 import { ownedMonitoringForge } from "../fixtures/monitoring-native";
 
+test("an explicit retry retains confirmed setup answers after a failed continuation", async () => {
+  const isolated = await factoryProcess();
+  const database = isolated.connect();
+  const userID = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  const initialID = crypto.randomUUID();
+  const failedID = crypto.randomUUID();
+  const retryID = crypto.randomUUID();
+  let head = "a".repeat(40);
+  let calls = 0;
+  let sourceReads = 0;
+  const contexts: (readonly { question: string; answer: string }[] | undefined)[] = [];
+  const files = (await starterFiles()).filter((file) => configurationPath(file.path));
+  const inventory = [
+    { path: "package.json", size: 40 },
+    ...Array.from({ length: 2000 }, (_, index) => ({ path: `src/part-${index}.ts`, size: 40 })),
+    { path: "tools/forms-dev.mjs", size: 40 },
+    { path: ".env.local", size: 40 },
+    { path: "src/oversized.ts", size: 64001 },
+  ].map((file) => ({ ...file, type: "blob", sha: "b".repeat(40) }));
+  const forge = createForgejoClient({
+    apiURL: "https://forge.test/api/v1/",
+    token: "owned-fixture",
+    fetch: async (url) => {
+      const path = String(url);
+      if (path.endsWith("/branches/main"))
+        return Response.json({ name: "main", commit: { id: head } });
+      if (path.includes("/git/trees/")) {
+        const page = Number(new URL(path).searchParams.get("page") ?? 1);
+        return Response.json({
+          sha: head,
+          truncated: false,
+          total_count: inventory.length,
+          tree: inventory.slice((page - 1) * 1000, page * 1000),
+        });
+      }
+      if (new URL(path).pathname.endsWith("/contents/tools/forms-dev.mjs")) {
+        sourceReads++;
+        return Response.json({
+          type: "file",
+          encoding: "base64",
+          content: Buffer.from("Actual existing development harness").toString("base64"),
+          sha: "b".repeat(40),
+        });
+      }
+      if (path.endsWith("/repos/owned/retry"))
+        return Response.json({ name: "retry", owner: { login: "owned" }, default_branch: "main" });
+      throw new Error("Unsupported owned retry fixture request");
+    },
+  });
+  const controller = createSetupInspection({
+    database,
+    forge,
+    forgeURL: "https://forge.test",
+    forgeOwner: "owned",
+    model: async () => ({ modelID: "owned-model", connectionID: null, connectionVersion: null }),
+    connection: async () => ({ apiKey: "owned-key" }),
+    ready: async () => {},
+    generate: async (input) => {
+      contexts.push(input.context);
+      calls++;
+      expect(input.paths).toHaveLength(2000);
+      expect(input.paths).not.toContain("tools/forms-dev.mjs");
+      expect(input.availablePaths).toContain("tools/forms-dev.mjs");
+      expect(input.availablePaths).not.toContain(".env.local");
+      expect(input.availablePaths).not.toContain("src/oversized.ts");
+      await expect(input.read(".env.local")).rejects.toThrow("Source is not available");
+      expect(await input.read("tools/forms-dev.mjs")).toBe("Actual existing development harness");
+      if (calls === 2)
+        throw new DOMException("must-not-retain-provider-credentials", "TimeoutError");
+      return {
+        purpose: "Owned retry application",
+        services: [],
+        uncertainty: [],
+        questions: calls === 1 ? [{ id: "port", question: "Which port should Factory use?" }] : [],
+        files: calls === 1 ? [] : files,
+      };
+    },
+  });
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${userID},'Owned retry proof',${`${userID}@retry.test`})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
+      VALUES(${projectID},${`retry-${projectID.slice(0, 8)}`},'Retry proof','https://forge.test/owned/retry','main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
+      VALUES(${projectID},${userID},'developer',true,${userID})`;
+    await controller.start(projectID, userID, initialID);
+    await controller.settle();
+    await controller.start(projectID, userID, failedID, {
+      parentID: initialID,
+      answers: { port: "4321" },
+    });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("failed");
+    await controller.start(projectID, userID, retryID, { parentID: failedID });
+    await controller.settle();
+    expect((await controller.view(projectID, userID))?.state).toBe("proposal");
+    expect(contexts.at(-1)).toContainEqual({
+      question: "Which port should Factory use?",
+      answer: "4321",
+    });
+    await controller.start(projectID, userID, retryID, { parentID: failedID });
+    expect(calls).toBe(3);
+    expect(sourceReads).toBe(3);
+    const [failed] = await database.client<{ state: string; failure: string }[]>`
+      SELECT state,failure FROM factory.project_setup_inspection WHERE id=${failedID}`;
+    expect(failed?.state).toBe("failed");
+    expect(failed?.failure).toContain("timed out");
+    expect(failed?.failure).not.toContain("must-not-retain-provider-credentials");
+    await expect(
+      controller.start(projectID, userID, crypto.randomUUID(), {
+        parentID: failedID,
+        answers: { port: "9999" },
+      }),
+    ).rejects.toThrow("Retry keeps the confirmed answers");
+    head = "c".repeat(40);
+    await expect(
+      controller.start(projectID, userID, crypto.randomUUID(), { parentID: failedID }),
+    ).rejects.toThrow("Source changed");
+    expect(calls).toBe(3);
+  } finally {
+    await controller.settle();
+    await database.client.end();
+    await isolated.dispose();
+  }
+});
+
 test("setup inference does not retain the application's only pooled database connection", async () => {
   const isolated = await factoryProcess();
   const database = isolated.connect(1);

@@ -13,6 +13,8 @@ export async function inspectConfiguration(input: {
   connection: ResolvedModelConnection;
   signal: AbortSignal;
   paths: readonly string[];
+  // The prompt index is bounded; explicitly referenced source can be outside it.
+  availablePaths?: readonly string[];
   existingConfiguration: readonly string[];
   read(path: string): Promise<string>;
   answers?: Record<string, string>;
@@ -20,6 +22,7 @@ export async function inspectConfiguration(input: {
   usageSink?: MastraUsageSink;
 }) {
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(30_000)]);
+  const availablePaths = new Set(input.availablePaths ?? input.paths);
   const reads = new Map<string, Promise<{ body: string; truncated: boolean }>>();
   let reservedBytes = 0;
   const read = createTool({
@@ -29,7 +32,7 @@ export async function inspectConfiguration(input: {
     outputSchema: z.object({ body: z.string(), truncated: z.boolean() }).strict(),
     execute: async ({ path }) => {
       signal.throwIfAborted();
-      if (!input.paths.includes(path))
+      if (!availablePaths.has(path))
         throw new Error("Source is not available for setup inspection");
       let content = reads.get(path);
       if (!content) {

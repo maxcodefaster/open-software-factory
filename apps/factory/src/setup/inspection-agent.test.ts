@@ -197,3 +197,102 @@ test("native setup inspection reserves its last admitted step for questions inst
     await provider.stop(true);
   }
 });
+
+test.each([
+  { name: "known source", path: "tools/forms-dev.mjs", allowed: true },
+  { name: "excluded environment file", path: ".env.local", allowed: false },
+])("the bounded setup index does not replace source authorization: $name", async (entry) => {
+  const loaded: string[] = [];
+  let requests = 0;
+  const proposal = {
+    purpose: "An application with a referenced setup script",
+    services: [],
+    uncertainty: [],
+    questions: [{ id: "services", question: "Which application services should be exposed?" }],
+    files: [],
+  };
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const body = (await request.json()) as { stream?: boolean; messages: unknown[] };
+      requests++;
+      if (requests === 1) expect(JSON.stringify(body.messages)).not.toContain(entry.path);
+      const reading = requests === 1;
+      const message = reading
+        ? {
+            role: "assistant",
+            tool_calls: [
+              {
+                id: "referenced-source",
+                type: "function",
+                function: { name: "read", arguments: JSON.stringify({ path: entry.path }) },
+              },
+            ],
+          }
+        : { role: "assistant", content: JSON.stringify(proposal) };
+      const common = { id: `source-index-${requests}`, created: 1, model: "owned-model" };
+      const finish_reason = reading ? "tool_calls" : "stop";
+      if (!body.stream)
+        return Response.json({
+          ...common,
+          object: "chat.completion",
+          choices: [{ index: 0, message, finish_reason }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      return new Response(
+        `${[
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                index: 0,
+                delta: reading
+                  ? {
+                      ...message,
+                      tool_calls: message.tool_calls?.map((call, index) => ({ ...call, index })),
+                    }
+                  : message,
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: {}, finish_reason }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          },
+        ]
+          .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+          .join("")}data: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  try {
+    const output = inspectConfiguration({
+      modelID: "owned-model",
+      connection: { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned-index-test" },
+      signal: AbortSignal.timeout(5000),
+      paths: ["README.md"],
+      availablePaths: ["README.md", "tools/forms-dev.mjs"],
+      existingConfiguration: [],
+      read: async (path) => {
+        loaded.push(path);
+        return "Actual existing setup script";
+      },
+    });
+    if (entry.allowed) {
+      expect(await output).toEqual(proposal);
+      expect(loaded).toEqual([entry.path]);
+      expect(requests).toBe(2);
+    } else {
+      await expect(output).rejects.toThrow();
+      expect(loaded).toEqual([]);
+    }
+  } finally {
+    await provider.stop(true);
+  }
+});
