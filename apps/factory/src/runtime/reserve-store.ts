@@ -21,6 +21,7 @@ type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
 export type { ExecutionSlot } from "../../../../packages/runtime-domain/src/reserve";
 
 const fields =
+  '(SELECT worker.runtime_host_image FROM factory.factorybox_worker worker WHERE singleton) AS "workerRuntimeHostImage",' +
   'seed_expires_at AS "seedExpiresAt",' +
   'id,project_id AS "projectID",staging_attempt_id AS "stagingAttemptID",revision,template_id AS "templateID",template_key AS "templateKey",project_recipe AS "projectRecipe",source_import_sha256 AS "sourceImportSHA256",source_import_observation AS "sourceImportObservation",factorybox_fork_request AS "factoryboxForkRequest",factorybox_fork_attempted AS "factoryboxForkAttempted",factorybox_standby AS "factoryboxStandby",role,state,runtime_host_image AS "runtimeHostImage",factorybox_worker_id AS "workerID",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted",factorybox_delete_attempted AS "factoryboxDeleteAttempted"';
 export const executionCapacityLock = "factory-execution-capacity";
