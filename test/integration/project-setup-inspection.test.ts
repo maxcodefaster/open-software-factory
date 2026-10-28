@@ -21,11 +21,22 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
   let calls = 0;
   let sourceReads = 0;
   const contexts: (readonly { question: string; answer: string }[] | undefined)[] = [];
+  const recipeReads: {
+    available: readonly string[];
+    body: string | null;
+    denied: string[];
+  }[] = [];
   const files = (await starterFiles()).filter((file) => configurationPath(file.path));
   const inventory = [
     { path: "package.json", size: 40 },
     ...Array.from({ length: 2000 }, (_, index) => ({ path: `src/part-${index}.ts`, size: 40 })),
     { path: "tools/forms-dev.mjs", size: 40 },
+    { path: "infra/coder/workspace.Dockerfile", size: 40 },
+    { path: "infra/Dockerfile.development", size: 40 },
+    { path: "infra/private-key.Dockerfile", size: 40 },
+    { path: "node_modules/vendor.Dockerfile", size: 40 },
+    { path: ".env/Dockerfile", size: 40 },
+    { path: ".env.runtime.json", size: 40 },
     { path: ".env.local", size: 40 },
     { path: "src/oversized.ts", size: 64001 },
   ].map((file) => ({ ...file, type: "blob", sha: "b".repeat(40) }));
@@ -45,7 +56,11 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
           tree: inventory.slice((page - 1) * 1000, page * 1000),
         });
       }
-      if (new URL(path).pathname.endsWith("/contents/tools/forms-dev.mjs")) {
+      if (
+        ["/contents/tools/forms-dev.mjs", "/contents/infra/coder/workspace.Dockerfile"].some(
+          (suffix) => new URL(path).pathname.endsWith(suffix),
+        )
+      ) {
         sourceReads++;
         return Response.json({
           type: "file",
@@ -73,6 +88,23 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
       expect(input.paths).toHaveLength(2000);
       expect(input.paths).not.toContain("tools/forms-dev.mjs");
       expect(input.availablePaths).toContain("tools/forms-dev.mjs");
+      recipeReads.push({
+        available: input.availablePaths ?? [],
+        body: await input.read("infra/coder/workspace.Dockerfile").catch(() => null),
+        denied: await Promise.all(
+          [
+            "infra/private-key.Dockerfile",
+            "node_modules/vendor.Dockerfile",
+            ".env/Dockerfile",
+            ".env.runtime.json",
+          ].map((path) =>
+            input.read(path).then(
+              () => "Source was disclosed",
+              (cause) => String(cause),
+            ),
+          ),
+        ),
+      });
       expect(input.availablePaths).not.toContain(".env.local");
       expect(input.availablePaths).not.toContain("src/oversized.ts");
       await expect(input.read(".env.local")).rejects.toThrow("Source is not available");
@@ -97,6 +129,20 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
       VALUES(${projectID},${userID},'developer',true,${userID})`;
     await controller.start(projectID, userID, initialID);
     await controller.settle();
+    const recipe = recipeReads[0];
+    expect(recipe?.available).toContain("infra/coder/workspace.Dockerfile");
+    expect(recipe?.available).toContain("infra/Dockerfile.development");
+    expect(recipe?.body).toBe("Actual existing development harness");
+    for (const excluded of [
+      "infra/private-key.Dockerfile",
+      "node_modules/vendor.Dockerfile",
+      ".env/Dockerfile",
+      ".env.runtime.json",
+    ])
+      expect(recipe?.available).not.toContain(excluded);
+    expect(recipe?.denied.every((message) => message.includes("Source is not available"))).toBe(
+      true,
+    );
     await controller.start(projectID, userID, failedID, {
       parentID: initialID,
       answers: { port: "4321" },
@@ -112,7 +158,7 @@ test("an explicit retry retains confirmed setup answers after a failed continuat
     });
     await controller.start(projectID, userID, retryID, { parentID: failedID });
     expect(calls).toBe(3);
-    expect(sourceReads).toBe(3);
+    expect(sourceReads).toBe(6);
     const [failed] = await database.client<{ state: string; failure: string }[]>`
       SELECT state,failure FROM factory.project_setup_inspection WHERE id=${failedID}`;
     expect(failed?.state).toBe("failed");
