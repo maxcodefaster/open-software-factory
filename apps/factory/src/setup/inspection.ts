@@ -36,6 +36,20 @@ type InspectionRow = {
   parentID: string | null;
   answers: Record<string, string>;
 };
+
+function readableSetupSource(path: string) {
+  const parts = path.split("/");
+  if (parts.some((part) => /^\.env(?:$|\.)/i.test(part))) return false;
+  if (readableCodePath(path) || configurationPath(path)) return true;
+  return (
+    /^(?:Dockerfile(?:\.[A-Za-z0-9._-]+)?|[A-Za-z0-9][A-Za-z0-9._-]*\.Dockerfile)$/i.test(
+      parts.at(-1) ?? "",
+    ) &&
+    !parts.some((part) => /secret|credential|private[-_]?key/i.test(part)) &&
+    readableCodePath(`${path}.sh`)
+  );
+}
+
 export function createSetupInspection(input: {
   database: ReturnType<typeof createDatabase>;
   forge: ReturnType<typeof createForgejoClient>;
@@ -113,13 +127,7 @@ export function createSetupInspection(input: {
         const files = await input.forge.listFiles(current.repository, value.sourceCommit);
         const existing = files.map((file) => file.path);
         const availablePaths = files
-          .filter(
-            (file) =>
-              file.size <= 64000 &&
-              (readableCodePath(file.path) ||
-                configurationPath(file.path) ||
-                /(?:^|\/)Dockerfile$/.test(file.path)),
-          )
+          .filter((file) => file.size <= 64000 && readableSetupSource(file.path))
           .map((file) => file.path);
         const available = new Set(availablePaths);
         if (!value.modelID) throw new Error("Inspection model was not admitted");

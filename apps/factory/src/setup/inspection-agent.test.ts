@@ -296,3 +296,119 @@ test.each([
     await provider.stop(true);
   }
 });
+
+test.each([
+  { name: "parallel small files", batches: [12], source: "Small source", unicode: 0 },
+  { name: "sequential small batches", batches: [4, 4, 4], source: "Small source", unicode: 0 },
+  { name: "UTF-8 byte limit", batches: [7], source: "界".repeat(9000), unicode: 28000 },
+  { name: "file count remains bounded", batches: [12, 1], source: "Small source", blocked: 12 },
+  {
+    name: "total bytes remain bounded",
+    batches: [9, 1],
+    source: "§".repeat(20000),
+    blocked: 9,
+    unicode: 50000,
+    marker: "§",
+  },
+])("source byte accounting: $name", async (entry) => {
+  const paths = Array.from({ length: 13 }, (_, index) => `source-${index}.ts`);
+  const loaded: string[] = [];
+  let requests = 0;
+  let cursor = 0;
+  let observedUnicode = 0;
+  let sourceBoundReached = false;
+  const proposal = {
+    purpose: "An application inspected within the original source limits",
+    services: [],
+    uncertainty: [],
+    questions: [{ id: "services", question: "Which services should be exposed?" }],
+    files: [],
+  };
+  const provider = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const body = (await request.json()) as { stream?: boolean; messages: unknown[] };
+      const observed = JSON.stringify(body.messages);
+      observedUnicode = observed.split(entry.marker ?? "界").length - 1;
+      sourceBoundReached ||= observed.includes("Inspection source bound reached");
+      const count = entry.batches[requests++];
+      const selected = paths.slice(cursor, cursor + (count ?? 0));
+      cursor += count ?? 0;
+      const reading = selected.length > 0;
+      const message = reading
+        ? {
+            role: "assistant",
+            tool_calls: selected.map((path) => ({
+              id: `source-bytes-${path}`,
+              type: "function",
+              function: { name: "read", arguments: JSON.stringify({ path }) },
+            })),
+          }
+        : { role: "assistant", content: JSON.stringify(proposal) };
+      const common = { id: `source-bytes-${requests}`, created: 1, model: "owned-model" };
+      const finish_reason = reading ? "tool_calls" : "stop";
+      if (!body.stream)
+        return Response.json({
+          ...common,
+          object: "chat.completion",
+          choices: [{ index: 0, message, finish_reason }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      return new Response(
+        `${[
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                index: 0,
+                delta: reading
+                  ? {
+                      ...message,
+                      tool_calls: message.tool_calls?.map((call, index) => ({ ...call, index })),
+                    }
+                  : message,
+                finish_reason: null,
+              },
+            ],
+          },
+          {
+            ...common,
+            object: "chat.completion.chunk",
+            choices: [{ index: 0, delta: {}, finish_reason }],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          },
+        ]
+          .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`)
+          .join("")}data: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  });
+  try {
+    const output = inspectConfiguration({
+      modelID: "owned-model",
+      connection: { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned-byte-bound" },
+      signal: AbortSignal.timeout(5000),
+      paths,
+      existingConfiguration: [],
+      read: async (path) => {
+        loaded.push(path);
+        return entry.source;
+      },
+    });
+    expect(await output).toEqual(proposal);
+    if (entry.blocked !== undefined) {
+      expect(loaded).toHaveLength(entry.blocked);
+      expect(sourceBoundReached).toBe(true);
+      if (entry.unicode !== undefined) expect(observedUnicode).toBe(entry.unicode);
+    } else {
+      expect(loaded).toHaveLength(entry.batches.reduce((sum, count) => sum + count, 0));
+      expect(observedUnicode).toBe(entry.unicode);
+      expect(requests).toBe(entry.batches.length + 1);
+    }
+  } finally {
+    await provider.stop(true);
+  }
+});
