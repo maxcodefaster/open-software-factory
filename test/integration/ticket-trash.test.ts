@@ -13,6 +13,9 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
   const release = Promise.withResolvers<void>();
   try {
     const owned = await fixture(undefined, undefined, db);
+    const [originalWorkspace] = await db.client<Array<{ volume: string }>>`
+      SELECT volume_name AS volume FROM factory.development_workspace WHERE id=${owned.workspaceID}`;
+    if (!originalWorkspace) throw new Error("Owned Workspace is missing");
     const admission = createChangeAdmission(db, buildModelID);
     const admitted = await admission.admit(owned.changeID, owned.userID, {
       kind: "change-prompt",
@@ -109,7 +112,7 @@ test("Trash fences admission before Stop, retains workspace and approval, and Re
     expect(retained).toEqual({
       trashed: false,
       attemptState: "stopped",
-      volume: "never-created",
+      volume: originalWorkspace.volume,
       revisionID: owned.revisionID,
       turnCount: 1,
     });

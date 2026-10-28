@@ -1,19 +1,25 @@
-import { changesResponseSchema, agentViewSchema } from "../../apps/factory/src/api-contracts";
-import { mockAgentView } from "../fixtures/server-functions";
-import { browserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { deliveryViewSchema } from "../../apps/factory/src/api-contracts";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { test } from "bun:test";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
 import type { AgentView } from "../../apps/factory/src/api-contracts";
+import {
+  agentViewSchema,
+  changesResponseSchema,
+  deliveryViewSchema,
+} from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { turnObservationInput } from "../../packages/conversation-domain/src/turn-observation";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { mockBootstrap } from "../fixtures/server-functions";
+import {
+  browserFunction,
+  factoryFunctionMatcher,
+  mockAgentView,
+  mockBootstrap,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("Build preparation distinguishes lost history and retains correction routing after compute stops", async () => {
@@ -87,12 +93,24 @@ test("Build preparation distinguishes lost history and retains correction routin
     );
     page = await context.newPage();
     await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
+    const executionCommands = await Promise.all(
+      [
+        "startCoding",
+        "resumeCoding",
+        "stopCoding",
+        "checkCodingStop",
+        "newCodingConversation",
+        "sendCodingPrompt",
+        "requestCodingChanges",
+        "startPersonalWorkspace",
+        "startTicketWorkspace",
+        "stopRuntimeAttempt",
+      ].map(factoryFunctionMatcher),
+    );
     page.on("request", (request) => {
       if (
         request.method() === "POST" &&
-        /\/_server\/data\/(?:startCoding|resumeCoding|stopCoding|checkCodingStop|newCodingConversation|sendCodingPrompt|requestCodingChanges|startPersonalWorkspace|startTicketWorkspace|stopRuntimeAttempt)-/.test(
-          new URL(request.url()).pathname,
-        )
+        executionCommands.some((matches) => matches(new URL(request.url())))
       )
         mutations++;
     });
@@ -205,6 +223,7 @@ test("Build preparation distinguishes lost history and retains correction routin
       modelId: "controlled-model",
       skills: [],
     });
+    await database.client`UPDATE factory.change SET version=version+1 WHERE id=${changeID}`;
     await visible(panel.locator(".agent-state")).toHaveText("Failed");
     await page.getByRole("button", { name: "Ticket", exact: true }).click();
     const checks = page.locator(".ticket-checks");
@@ -222,10 +241,12 @@ test("Build preparation distinguishes lost history and retains correction routin
     });
     state = "committed";
     turn = { ...turn, state: "completed" };
+    await database.client`UPDATE factory.change SET version=version+1 WHERE id=${changeID}`;
     await visible(checks.locator("summary")).toContainText("Checks and independent review passed");
     await visible(checks.locator(".check-indicator")).toHaveClass(/passed/);
     state = "failed";
     turn = { ...turn, state: "failed" };
+    await database.client`UPDATE factory.change SET version=version+1 WHERE id=${changeID}`;
     await visible(checks.locator("summary")).toContainText("Corrections not submitted");
     await page.getByRole("button", { name: "IDE", exact: true }).click();
     await visible(panel.locator(".agent-state")).toHaveText("Failed");

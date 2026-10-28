@@ -1,7 +1,11 @@
 import { expect, test } from "bun:test";
-import { factoryProcess } from "../fixtures/factory-process";
-import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { factoryProcess } from "../fixtures/factory-process";
+import {
+  callFactoryFunction,
+  decodeFactoryResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled public Bootstrap is narrowly anonymous, strips native tokens, and is separate from HTTP readiness", async () => {
   const owned = await factoryProcess();
@@ -22,8 +26,10 @@ test("compiled public Bootstrap is narrowly anonymous, strips native tokens, and
         },
       ]),
     );
-    const { decodeResponse } = await import("@solidjs/web/server-functions/client");
-    expect(await decodeResponse(forged)).toMatchObject({ ok: true, value: { session: null } });
+    expect(await decodeFactoryResponse(forged)).toMatchObject({
+      ok: true,
+      value: { session: null },
+    });
     expect(
       (await fetch(await factoryFunctionRequest(owned.base, "getModelAvailability", []))).status,
     ).toBe(401);

@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { test } from "../fixtures/browser-test";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
@@ -365,7 +365,8 @@ test("personal conversation history keeps drafts scoped through selection and re
     await draft.fill("Unsent original conversation draft");
     await selector.click();
     await expect(page.getByRole("menuitem", { name: "New chat", exact: true })).toBeVisible();
-    await expect(page.getByRole("menu", { name: "Conversation history" })).toHaveCSS(
+    // The width belongs to the popover, not its padded inner menu.
+    await expect(page.getByRole("dialog", { name: "Conversation history" })).toHaveCSS(
       "width",
       "352px",
     );
@@ -384,7 +385,13 @@ test("personal conversation history keeps drafts scoped through selection and re
     await expect(draft).toHaveValue("Unsent fresh conversation draft");
     await page.reload();
     await expect(page.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
-    await select();
+    // Reload restores this resource before another deliberate selection. Opening
+    // the picker during that restoration races its legitimate navigation close
+    // and would hide a failure to retain the selected Project.
+    await expect(page).toHaveURL(new RegExp(`/projects/${projectID}(?:[/?#]|$)`));
+    await expect(
+      page.getByRole("button", { name: "Open project menu", exact: true }),
+    ).toContainText("Conversation draft proof");
     if (!(await selector.isVisible()))
       await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await expect(selector).toHaveAttribute("data-context-id", fresh);

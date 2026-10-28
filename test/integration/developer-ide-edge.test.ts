@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { chromium, expect as visible } from "@playwright/test";
 import { createAccountRevocation } from "../../apps/factory/src/access/account-revocation";
 import { createAccessRevocation } from "../../apps/factory/src/access/revocation";
@@ -25,6 +27,7 @@ async function verifyEditorIngress(protocol: string) {
   const otherUserID = crypto.randomUUID();
   const projectID = crypto.randomUUID();
   const sessionID = crypto.randomUUID();
+  const repository = await mkdtemp(join(tmpdir(), "factory-editor-edge-"));
   const previous = {
     editor: process.env["FACTORY_DEVELOPER_IDE_IMAGE"],
     files: process.env["FACTORY_WORKSPACE_FILES_IMAGE"],
@@ -178,9 +181,28 @@ async function verifyEditorIngress(protocol: string) {
   );
   let socket: WebSocket | undefined;
   try {
+    for (const args of [
+      ["init", "-b", "main"],
+      [
+        "-c",
+        "user.name=Factory",
+        "-c",
+        "user.email=factory@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "Owned editor source",
+      ],
+    ]) {
+      const git = Bun.spawn(["git", "-C", repository, ...args], {
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      if (await git.exited) throw new Error("Owned editor repository preparation failed");
+    }
     for (const id of [userID, otherUserID])
       await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Edge fixture',${`${id}@factory.invalid`})`;
-    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`edge-${projectID}`},'Edge fixture',${`file://${resolve(".factory/runtime-fixture-repository")}`},'main','.devcontainer/devcontainer.json',${userID})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,devcontainer_path,created_by) VALUES(${projectID},${`edge-${projectID}`},'Edge fixture',${`file://${repository}`},'main','.devcontainer/devcontainer.json',${userID})`;
     for (const id of [userID, otherUserID])
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${projectID},${id},'developer',${userID})`;
     await database.client`INSERT INTO auth.session(id,token,user_id,expires_at) VALUES(${sessionID},${crypto.randomUUID()},${userID},now()+interval '1 hour')`;
@@ -406,6 +428,7 @@ async function verifyEditorIngress(protocol: string) {
     } finally {
       await database.client.end({ timeout: 2 });
       await fixture.dispose();
+      await rm(repository, { recursive: true, force: true });
     }
   }
 }
