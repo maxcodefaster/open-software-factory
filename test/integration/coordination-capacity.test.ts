@@ -2,10 +2,15 @@ import { expect, test } from "bun:test";
 import { createForgeAccessReconciliation } from "../../apps/factory/src/access/forge";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
+import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { fixture } from "../fixtures/change-agent-turns";
+import { executionPoolFixture } from "../fixtures/execution-pool";
 import { factoryProcess } from "../fixtures/factory-process";
-import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
+import {
+  installOwnedRuntimeConfiguration,
+  ownedFactoryboxProfile,
+} from "../fixtures/runtime-configuration";
 
 async function bounded<T>(work: Promise<T>, boundary: string) {
   return Promise.race([
@@ -23,6 +28,7 @@ test("Forge reconciliation, writer handoff and reserve waits leave a one-connect
   const release = Promise.withResolvers<void>();
   let reserve: ReturnType<typeof createExecutionReserve> | undefined;
   let reconcile: Promise<void> | undefined;
+  let pool: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
   try {
     const owned = await fixture(undefined, undefined, database);
     await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
@@ -60,33 +66,37 @@ test("Forge reconciliation, writer handoff and reserve waits leave a one-connect
     await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
     const entered = Promise.withResolvers<void>();
     const image = `registry.invalid/runtime@sha256:${"1".repeat(64)}`;
-    reserve = createExecutionReserve(
+    const images = { staging: image, verification: image };
+    // Reserve preparation requires an exact healthy source template. An empty
+    // database no longer starts anonymous workers merely to fill the pool.
+    pool = await executionPoolFixture(
       database,
-      { staging: image, verification: image },
-      defaultReservePolicy,
-      {
-        async prepare() {
-          entered.resolve();
-          await release.promise;
-          return {
-            namespaceUID: "namespace",
-            podUID: "pod",
-            claimUID: "claim",
-            ready: false,
-            failed: false,
-          };
-        },
-        retire: async () => {},
-        activate: async () => ({
+      createReserveStore(defaultReservePolicy, images, ownedFactoryboxProfile),
+      ownedFactoryboxProfile,
+      images,
+    );
+    reserve = createExecutionReserve(database, images, defaultReservePolicy, {
+      async prepare() {
+        entered.resolve();
+        await release.promise;
+        return {
           namespaceUID: "namespace",
           podUID: "pod",
           claimUID: "claim",
-          ready: true,
+          ready: false,
           failed: false,
-        }),
-        removeAssigned: async () => true,
+        };
       },
-    );
+      retire: async () => {},
+      activate: async () => ({
+        namespaceUID: "namespace",
+        podUID: "pod",
+        claimUID: "claim",
+        ready: true,
+        failed: false,
+      }),
+      removeAssigned: async () => true,
+    });
     reconcile = reserve.reconcile();
     await bounded(entered.promise, "reserve entry");
     expect(
@@ -97,6 +107,7 @@ test("Forge reconciliation, writer handoff and reserve waits leave a one-connect
     await database.client.end({ timeout: 2 });
     await reconcile?.catch(() => undefined);
     await reserve?.close();
+    await pool?.cleanup();
     await host.dispose();
     restoreConfiguration();
   }

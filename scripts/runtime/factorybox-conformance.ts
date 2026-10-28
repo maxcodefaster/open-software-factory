@@ -138,11 +138,14 @@ export function createConformanceRuntime(
   certificate: string,
   artifacts: string,
   project?: Readonly<Record<string, unknown>>,
+  commandRunner: typeof runCommand = runCommand,
 ) {
   const resources = conformanceResources(owner, image, profile, certificate, project);
   const { input, declaration } = resources;
   const request = factoryboxRuntimeRequest(input);
-  const deadline = performance.now() + 420_000;
+  const workloadDeadline = performance.now() + 420_000;
+  let deadline = workloadDeadline;
+  let cleanupStarted = false;
   let identity: FactoryboxWorkerIdentity | undefined;
   let record: { id: string; owner: string; input_sha256: string; runtime_id: string } | undefined;
   type ForkRecord = NonNullable<typeof record>;
@@ -157,7 +160,7 @@ export function createConformanceRuntime(
   ) => {
     const remaining = deadline - performance.now();
     if (remaining <= 0) throw new Error("Factorybox conformance lifecycle exceeded 420 seconds");
-    return runCommand(kubernetesCommand(args), body, {
+    return commandRunner(kubernetesCommand(args), body, {
       timeoutMS: Math.min(remaining, limits?.timeoutMS ?? 15_000),
       outputBytes: limits?.outputBytes ?? 4 * 1024 ** 2,
     });
@@ -326,6 +329,36 @@ export function createConformanceRuntime(
         deadline - performance.now(),
       );
       await save("preparation.json", prepared);
+      const imported = await command([
+        "exec",
+        "-n",
+        input.namespace,
+        input.podName,
+        "-c",
+        "worker",
+        "--",
+        "python3",
+        "-c",
+        `import json,pathlib,subprocess,sys
+expected=json.loads(sys.argv[1])
+status=json.loads(subprocess.check_output(['/opt/factorybox/factorybox','worker-status'],timeout=5))
+assert status['store_id']==expected['storeID'] and status['epoch']==expected['epoch']
+root=pathlib.Path(status['store'])/'consumer-images'/expected['rootfsSHA256']
+receipt=json.loads((root/'source-retired.json').read_text())
+assert not (root/'source').exists()
+base=json.loads(subprocess.check_output(['/opt/factorybox/factorybox','--worker-run-root','/run/factorybox',
+ '--worker-store-id',expected['storeID'],'--worker-epoch',expected['epoch'],
+ 'prepare-base','--source',str(root/'source'),'factory-runtime'],timeout=120))
+assert base['source']==receipt['base']['source'] and base['tree']['sha256']==receipt['base']['tree']['sha256']
+assert base['tree']['saved']==receipt['base']['tree']['saved']
+print(json.dumps({'importSourceRetired':True,'nativeBaseReverified':True,'sealedBaseSHA256':base['tree']['sha256']}))`,
+        JSON.stringify({
+          storeID: identity.storeID,
+          epoch: identity.epoch,
+          rootfsSHA256: prepared.rootfsSHA256,
+        }),
+      ]);
+      await save("image-import-retirement.json", JSON.parse(imported));
       if (beforeStart) await beforeStart({ input, identity }, prepared.bundle);
       started = true;
       const view = await operation({
@@ -400,18 +433,25 @@ export function createConformanceRuntime(
       return paused;
     },
     async passed() {
-      if (performance.now() > deadline)
+      if (performance.now() > workloadDeadline)
         throw new Error("Conformance workload exceeded its 420-second deadline");
       if ([...forks.values()].some((value) => value === null))
         throw new Error("Conformance retains an unconfirmed Fork outcome");
       await save("workload-complete.json", {
         owner,
         passed: true,
-        elapsedMS: performance.now() - (deadline - 420_000),
+        elapsedMS: performance.now() - (workloadDeadline - 420_000),
       });
       succeeded = true;
     },
     async cleanup(): Promise<void> {
+      // Cold admission can consume most of the workload window. Cleanup has its
+      // own bounded window, without extending workload admission or restarting
+      // that window when a retirement failure recursively fences this worker.
+      if (!cleanupStarted) {
+        deadline = performance.now() + 420_000;
+        cleanupStarted = true;
+      }
       if (started && !succeeded) {
         await save("retained-failure.json", {
           owner,
@@ -419,7 +459,7 @@ export function createConformanceRuntime(
           reason:
             "Unresolved native evidence and private store are retained. The uniquely owned Pod is fenced to release fixture RAM; the PVCs must not be deleted.",
         });
-        const observed = await runCommand(
+        const observed = await commandRunner(
           kubernetesCommand(["get", "pod", input.podName, "-n", input.namespace, "-o", "json"]),
           undefined,
           { timeoutMS: 15_000, outputBytes: 1024 ** 2 },
@@ -430,7 +470,7 @@ export function createConformanceRuntime(
           JSON.parse(observed.stdout).metadata?.uid !== identity.podUID
         )
           throw new Error("Cannot fence a changed or unobserved failed conformance worker");
-        const diagnostics = await runCommand(
+        const diagnostics = await commandRunner(
           kubernetesCommand([
             "exec",
             "-n",
@@ -464,7 +504,7 @@ for name in ['factory-connector.log','factory-dockerd.log']:
           { timeoutMS: 15_000, outputBytes: 128 * 1024 },
         );
         await save("pre-fence-diagnostics.json", diagnostics);
-        const marked = await runCommand(
+        const marked = await commandRunner(
           kubernetesCommand([
             "patch",
             "namespace",
@@ -483,7 +523,7 @@ for name in ['factory-connector.log','factory-dockerd.log']:
         );
         if (marked.exitCode !== 0)
           throw new Error("Cannot preserve the failed fixture's storage ownership");
-        const fenced = await runCommand(
+        const fenced = await commandRunner(
           kubernetesCommand([
             "delete",
             "--raw",
@@ -501,7 +541,7 @@ for name in ['factory-connector.log','factory-dockerd.log']:
         );
         if (fenced.exitCode !== 0)
           throw new Error("Failed fixture worker fencing remains unconfirmed");
-        const absent = await runCommand(
+        const absent = await commandRunner(
           kubernetesCommand([
             "wait",
             "--for=delete",

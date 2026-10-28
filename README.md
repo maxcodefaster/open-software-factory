@@ -789,6 +789,17 @@ fails its first real Docker pull, restores the Registry and confirms the same ex
 FACTORY_RUN_BROWSER_IMAGE_RECOVERY_PROOF=1 mise exec -- bun --no-env-file test test/support/browser-image-recovery.live.test.ts
 ```
 
+The Connector's opt-in `TestBrowserRuntimeManagerLive` checks the actual browser and App proxy
+without model calls. Supply exact `FACTORY_BROWSER_PROOF_IMAGE` and
+`FACTORY_BROWSER_PROOF_PARENT_IMAGE` references. Its Docker daemon must match the pinned parent;
+a different host daemon is not the Factory execution environment.
+Inside an admitted Linux parent, `FACTORY_BROWSER_PROOF_NATIVE_SELF=1` reuses the matching
+prebuilt test executable and the parent's existing Docker CLI and Git, without another parent
+image or a Go installation. Set `FACTORY_BROWSER_PROOF_DOCKER_VERSION` to the exact version in
+`upstream.json`. `FACTORY_BROWSER_PROOF_STANDALONE=1` covers an image-only primary without a
+Compose label. Both paths retain the App, source, lease, isolation, recording and cleanup checks.
+This component proof does not update worker pins or replace the full Factory Delivery journey.
+
 The smaller `opencode-sol.live` proof runs the exact published OpenCode process in an owned
 fixture, implements and tests a small goal through Azure `gpt-6.1-sol` at medium reasoning,
 and checks the result independently without a final JSON form. Set `FACTORY_OPENCODE_SOL_LIVE=1`

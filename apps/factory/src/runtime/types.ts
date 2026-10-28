@@ -7,7 +7,14 @@ export type RuntimeAttemptView = {
   ownerUserId: string | null;
   generation: string;
   revision: string;
-  runtimeKind: "personal" | "ticket" | "staging" | "verification" | "publication" | null;
+  runtimeKind:
+    | "personal"
+    | "ticket"
+    | "staging"
+    | "verification"
+    | "prebuild"
+    | "publication"
+    | null;
   currentStaging?: boolean;
   state: string;
   computeWait?: string | null;

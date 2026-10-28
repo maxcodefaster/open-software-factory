@@ -160,6 +160,9 @@ export function factoryboxReserveInput(
     runtimeOwnerID: declared["factory.dev/runtime-owner"] ?? slot.id,
     labels: declared,
     runtimeHostImage: slot.runtimeHostImage,
+    ...(slot.workerRuntimeHostImage && slot.workerRuntimeHostImage !== slot.runtimeHostImage
+      ? { workerRuntimeHostImage: slot.workerRuntimeHostImage }
+      : {}),
     profile: factoryboxRuntimeProfile.parse(slot.factoryboxProfile),
     sharedSource: false,
   };

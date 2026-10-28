@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
 import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
+import { knownModelRejection } from "../models/execution-policy";
 import { generateWiki } from "./generation-workflow";
 import { WikiPublicationConflict } from "./publication";
-import { knownModelRejection } from "../models/execution-policy";
 
 test.each([
   "success",
@@ -24,6 +24,7 @@ test.each([
   "verbose-topic-plan",
   "source-hungry-checker",
   "bare-wiki-reference",
+  "large-repository",
 ])(
   "real Mastra checked progressive workflow: %s",
   async (scenario) => {
@@ -32,6 +33,14 @@ test.each([
       sha: "a".repeat(40),
       size: 30,
     }));
+    if (scenario === "large-repository")
+      files.push(
+        ...Array.from({ length: 3083 }, (_, index) => ({
+          path: `apps/web/src/components/modules/services/feature-${index}/entry.tsx`,
+          sha: "b".repeat(40),
+          size: 30,
+        })),
+      );
     const topics = Array.from({ length: 4 }, (_, index) => ({
       slug: index ? `guide-${index}` : "overview",
       title: `Flow ${index}`,
@@ -301,6 +310,7 @@ test.each([
           "verbose-topic-plan",
           "source-hungry-checker",
           "bare-wiki-reference",
+          "large-repository",
         ].includes(scenario)
       ) {
         await expect(run).rejects.toThrow(

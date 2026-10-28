@@ -60,8 +60,15 @@ Configured mirrors lead with status; another target opens an explicit form. Toke
 identifies Forgejo's unencrypted Git configuration rather than claiming OpenBao storage.
 See [repository mirrors](../../README.md#repository-mirrors).
 Small screens use a grouped title menu instead of a sidebar; desktop windows
-keep their sidebars, including alongside the assistant. Skills are an
-instance library with personal, Project and Factory ownership. Personal libraries span Projects,
+keep their sidebars, including alongside the assistant.
+
+Project setup remains reachable in each Project's Settings after leaving onboarding. Project managers
+can resume the retained configuration inspection and its answers there, and request a corrected
+proposal before confirming any source changes. Preparation status and
+explicit retries remain available without creating another Project or starting inference on read.
+Developers without management authority can read preparation status without configuration or retry controls.
+
+Skills are an instance library with personal, Project and Factory ownership. Personal libraries span Projects,
 but personal activation choices belong to a particular Project and work type.
 Skills use portrait book covers in the gallery and detail view. The MCP library shares the ownership
 controls and illustrated print style, but uses landscape connection covers. Source endpoints and connection states

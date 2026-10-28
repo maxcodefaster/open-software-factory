@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -89,6 +90,16 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		RemoteWorkspaceFolder: "/tmp/project",
 		BrowserToolsImage:     os.Getenv("FACTORY_BROWSER_FIXTURE_IMAGE"), ConnectorStateDir: filepath.Join(root, "runtime"),
 		Channels: []Channel{{Name: "web", Kind: "app", Target: "http://127.0.0.1:3000"}},
+	}
+	standalone := os.Getenv("FACTORY_BROWSER_FIXTURE_STANDALONE") == "1"
+	if standalone {
+		primary, err := inspectContainer(os.Getenv("FACTORY_BROWSER_FIXTURE_PRIMARY"))
+		if err != nil || primary.Config.Labels[attemptLabel] != owned ||
+			primary.Config.Labels[generationLabel] != "7" || primary.Config.Labels["com.docker.compose.project"] != "" {
+			t.Fatal("standalone proof has no exact native primary identity", err)
+		}
+		origin := containerOrigin{owned, 7, ""}
+		assignment.containerOrigin = &origin
 	}
 	manager := newBrowserRuntimeManager(context.Background(), assignment, os.Getenv("FACTORY_BROWSER_FIXTURE_PRIMARY"), "0:0")
 	t.Cleanup(func() {
@@ -414,7 +425,7 @@ quietRecording:
 	if response := manager.handle(connection, browserScopeMessage(manager, scope, "browser-call")); response.Error == "" {
 		t.Fatal("disconnected execution created a browser")
 	}
-	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage,
+	evidence, _ := json.Marshal(map[string]any{"primary": manager.primaryID, "image": assignment.BrowserToolsImage, "standalonePrimary": standalone,
 		"loopbackApp": true, "startupRenewal": true, "idleModelRenewal": true, "coldAppHeaders": true, "initialNavigationRecovery": true, "keyboardActivation": true, "mobileViewport": true, "authorityReadonly": true, "expiryCleanup": true, "disconnectCleanup": true, "screenshotCleanup": true, "sourceContext": shot.StructuredContent})
 	if err := os.WriteFile(filepath.Join(root, "inspection.json"), evidence, 0600); err != nil {
 		t.Fatal(err)
@@ -424,6 +435,7 @@ quietRecording:
 func TestBrowserRuntimeManagerLive(t *testing.T) {
 	imageReference := os.Getenv("FACTORY_BROWSER_PROOF_IMAGE")
 	parentReference := os.Getenv("FACTORY_BROWSER_PROOF_PARENT_IMAGE")
+	nativeSelf := os.Getenv("FACTORY_BROWSER_PROOF_NATIVE_SELF") == "1"
 	if imageReference == "" || parentReference == "" {
 		t.Skip("requires explicit browser and parent proof images")
 	}
@@ -438,7 +450,32 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 		return strings.TrimSpace(string(output))
 	}
 	image := docker("image", "inspect", "--format", "{{.Id}}", imageReference)
-	parentImage := docker("image", "inspect", "--format", "{{.Id}}", parentReference)
+	parentImage := parentReference
+	expectedDocker := ""
+	if nativeSelf {
+		expectedDocker = os.Getenv("FACTORY_BROWSER_PROOF_DOCKER_VERSION")
+		if runtime.GOOS != "linux" || expectedDocker == "" ||
+			docker("version", "--format", "{{.Client.Version}}") != expectedDocker {
+			t.Fatal("native self proof requires its admitted Linux parent and exact Docker CLI version")
+		}
+	} else {
+		parentImage = docker("image", "inspect", "--format", "{{.Id}}", parentReference)
+		var parentEnvironment []string
+		if err := json.Unmarshal([]byte(docker("image", "inspect", "--format", "{{json .Config.Env}}", parentImage)), &parentEnvironment); err != nil {
+			t.Fatal("proof parent environment is unavailable", err)
+		}
+		for _, entry := range parentEnvironment {
+			if value, ok := strings.CutPrefix(entry, "DOCKER_VERSION="); ok {
+				expectedDocker = value
+			}
+		}
+	}
+	observedDocker := docker("version", "--format", "{{.Server.Version}}")
+	if expectedDocker == "" || observedDocker != expectedDocker {
+		t.Fatalf("native browser proof requires the pinned private Docker %q, observed %q; run inside the admitted worker, not a different host daemon", expectedDocker, observedDocker)
+	}
+	standalone := os.Getenv("FACTORY_BROWSER_PROOF_STANDALONE") == "1"
+	var primaryID string
 	owned := "factory-browser-manager-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	root, err := filepath.Abs("../../../.factory/test-results/browser-tools/" + owned)
 	if err != nil || os.MkdirAll(root, 0700) != nil {
@@ -449,7 +486,7 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 	browserName, proxyName := browserRuntimeNames(owned)
 	stopBrowser, stopProxy := browserRuntimeNames(owned + "-stop")
 	names := []string{browserName, proxyName, stopBrowser, stopProxy, runnerName, primaryName, checkoutName}
-	intent, _ := json.Marshal(map[string]any{"fixture": owned, "names": names, "volume": volume, "image": image, "parentImage": parentImage})
+	intent, _ := json.Marshal(map[string]any{"fixture": owned, "names": names, "volume": volume, "image": image, "parentImage": parentImage, "nativeSelf": nativeSelf, "dockerVersion": observedDocker})
 	if err := os.WriteFile(filepath.Join(root, "intent.json"), intent, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -467,12 +504,17 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 				cleanup[name] = true
 				continue
 			}
-			labels, err := exec.CommandContext(cleanCtx, "docker", "inspect", "--format", `{{index .Config.Labels "com.docker.compose.project"}}`, name).Output()
-			if err != nil || strings.TrimSpace(string(labels)) != owned {
+			format, expected := `{{index .Config.Labels "com.docker.compose.project"}}`, owned
+			if standalone && name == primaryName {
+				format = `{{.Id}}|{{index .Config.Labels "factory.dev/runtime-attempt"}}|{{index .Config.Labels "factory.dev/runtime-generation"}}|{{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{end}}`
+				expected = primaryID + "|" + owned + "|7|"
+			}
+			labels, err := exec.CommandContext(cleanCtx, "docker", "inspect", "--format", format, name).Output()
+			if err != nil || strings.TrimSpace(string(labels)) != expected {
 				t.Error("refusing non-owned fixture cleanup", name)
 				continue
 			}
-			if err := exec.CommandContext(cleanCtx, "docker", "rm", "-f", name).Run(); err != nil {
+			if err := exec.CommandContext(cleanCtx, "docker", "rm", "--force", "--volumes", name).Run(); err != nil {
 				t.Error("fixture cleanup failed", name, err)
 				continue
 			}
@@ -498,43 +540,159 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 		t.Fatal("unsupported fixture architecture")
 	}
 	binary := filepath.Join(root, "fixture")
-	build := exec.CommandContext(ctx, "go", "test", "-c", "-o", binary, ".")
-	build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build manager fixture: %v: %s", err, output)
+	if nativeSelf {
+		// In an admitted Linux worker, reuse this already-built exact test
+		// executable. No Go installation or consumer-image change is required.
+		if runtime.GOOS != "linux" || runtime.GOARCH != arch {
+			t.Fatal("native self proof requires its matching Linux executable")
+		}
+		executable, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		content, err := os.ReadFile(executable)
+		if err != nil {
+			t.Fatal("native fixture executable could not be read", err)
+		}
+		if err := os.WriteFile(binary, content, 0500); err != nil {
+			t.Fatal("native fixture executable could not be copied", err)
+		}
+	} else {
+		build := exec.CommandContext(ctx, "go", "test", "-c", "-o", binary, ".")
+		build.Env = append(os.Environ(), "GOOS=linux", "GOARCH="+arch, "CGO_ENABLED=0")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build manager fixture: %v: %s", err, output)
+		}
 	}
 	docker("volume", "create", "--label", "factory.dev/browser-proof="+owned, volume)
 	statePath := docker("volume", "inspect", "--format", "{{.Mountpoint}}", volume)
-	docker("run", "--rm", "--name", checkoutName, "--label", "com.docker.compose.project="+owned,
-		"--mount", "type=volume,src="+volume+",dst="+statePath,
-		"--mount", "type=bind,src="+binary+",dst=/test,readonly",
-		"--env", "FACTORY_BROWSER_RUNTIME_CHECKOUT_FIXTURE=1", "--env", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath,
-		"--entrypoint", "/test", parentImage, "-test.run=^TestBrowserRuntimeCheckoutFixture$", "-test.timeout=30s")
-	primaryID := docker("run", "-d", "--name", primaryName, "--label", "com.docker.compose.project="+owned,
+	if nativeSelf {
+		checkout := exec.CommandContext(ctx, binary, "-test.run=^TestBrowserRuntimeCheckoutFixture$", "-test.timeout=30s")
+		checkout.Env = append(os.Environ(), "FACTORY_BROWSER_RUNTIME_CHECKOUT_FIXTURE=1", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath)
+		if output, err := checkout.CombinedOutput(); err != nil {
+			t.Fatalf("owned native checkout preparation failed: %v: %s", err, output)
+		}
+	} else {
+		docker("run", "--rm", "--name", checkoutName, "--label", "com.docker.compose.project="+owned,
+			"--mount", "type=volume,src="+volume+",dst="+statePath,
+			"--mount", "type=bind,src="+binary+",dst=/test,readonly",
+			"--env", "FACTORY_BROWSER_RUNTIME_CHECKOUT_FIXTURE=1", "--env", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath,
+			"--entrypoint", "/test", parentImage, "-test.run=^TestBrowserRuntimeCheckoutFixture$", "-test.timeout=30s")
+	}
+	primaryArguments := []string{"run", "-d", "--name", primaryName}
+	if !standalone {
+		primaryArguments = append(primaryArguments, "--label", "com.docker.compose.project="+owned)
+	}
+	primaryID = docker(append(primaryArguments,
 		"--label", attemptLabel+"="+owned, "--label", generationLabel+"=7", "--read-only", "--user", "0:0",
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=32m,mode=1777",
 		"--mount", "type=bind,src="+filepath.Join(statePath, "workspace")+",dst=/tmp/project",
 		"--mount", "type=bind,src="+binary+",dst=/test,readonly", "--env", "FACTORY_BROWSER_RUNTIME_APP_FIXTURE=1",
-		"--entrypoint", "/test", "docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20", "-test.run=^TestBrowserRuntimeAppFixture$", "-test.timeout=360s")
+		"--entrypoint", "/test", "docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20", "-test.run=^TestBrowserRuntimeAppFixture$", "-test.timeout=360s")...)
 	if output, err := exec.CommandContext(ctx, "docker", "exec", primaryID, "git", "--version").CombinedOutput(); err == nil {
 		t.Fatal("primary must exercise the no-Git Dev Container", string(output))
 	}
 	// Use the same exact Docker CLI bundled in Factory's runtime-host, not a
 	// downloaded or alternate runtime provider.
-	docker("create", "--name", runnerName, "--label", "com.docker.compose.project="+owned,
-		"--mount", "type=volume,src="+volume+",dst="+statePath,
-		"--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
-		"--mount", "type=bind,src="+binary+",dst=/test,readonly",
-		"--env", "FACTORY_BROWSER_RUNTIME_MANAGER_FIXTURE=1", "--env", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath,
-		"--env", "FACTORY_BROWSER_FIXTURE_ID="+owned, "--env", "FACTORY_BROWSER_FIXTURE_IMAGE="+image,
-		"--env", "FACTORY_BROWSER_FIXTURE_PRIMARY="+primaryID, "--entrypoint", "/test", parentImage,
-		"-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=360s")
-	output, startedErr := exec.CommandContext(ctx, "docker", "start", "--attach", runnerName).CombinedOutput()
+	var output []byte
+	var startedErr error
+	if nativeSelf {
+		manager := exec.CommandContext(ctx, binary, "-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=360s")
+		manager.Env = append(os.Environ(), "FACTORY_BROWSER_RUNTIME_MANAGER_FIXTURE=1",
+			"FACTORY_BROWSER_FIXTURE_ROOT="+statePath, "FACTORY_BROWSER_FIXTURE_ID="+owned,
+			"FACTORY_BROWSER_FIXTURE_IMAGE="+image, "FACTORY_BROWSER_FIXTURE_PRIMARY="+primaryID)
+		if standalone {
+			manager.Env = append(manager.Env, "FACTORY_BROWSER_FIXTURE_STANDALONE=1")
+		}
+		output, startedErr = manager.CombinedOutput()
+		if err := copyNativeBrowserEvidence(statePath, root); err != nil {
+			t.Error("owned native fixture evidence copy failed", err)
+		}
+	} else {
+		runnerArguments := []string{"create", "--name", runnerName, "--label", "com.docker.compose.project=" + owned}
+		if standalone {
+			runnerArguments = append(runnerArguments, "--env", "FACTORY_BROWSER_FIXTURE_STANDALONE=1")
+		}
+		docker(append(runnerArguments,
+			"--mount", "type=volume,src="+volume+",dst="+statePath,
+			"--mount", "type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock",
+			"--mount", "type=bind,src="+binary+",dst=/test,readonly",
+			"--env", "FACTORY_BROWSER_RUNTIME_MANAGER_FIXTURE=1", "--env", "FACTORY_BROWSER_FIXTURE_ROOT="+statePath,
+			"--env", "FACTORY_BROWSER_FIXTURE_ID="+owned, "--env", "FACTORY_BROWSER_FIXTURE_IMAGE="+image,
+			"--env", "FACTORY_BROWSER_FIXTURE_PRIMARY="+primaryID, "--entrypoint", "/test", parentImage,
+			"-test.run=^TestBrowserRuntimeManagerFixture$", "-test.v", "-test.timeout=360s")...)
+		output, startedErr = exec.CommandContext(ctx, "docker", "start", "--attach", runnerName).CombinedOutput()
+		exec.CommandContext(ctx, "docker", "cp", runnerName+":"+statePath+"/.", root).Run()
+	}
 	// Retain bounded fixture diagnostics and evidence even if an assertion failed.
 	os.WriteFile(filepath.Join(root, "fixture-output.txt"), output, 0600)
-	exec.CommandContext(ctx, "docker", "cp", runnerName+":"+statePath+"/.", root).Run()
-	if startedErr != nil || docker("inspect", "--format", "{{.State.ExitCode}}", runnerName) != "0" {
+	if startedErr != nil || (!nativeSelf && docker("inspect", "--format", "{{.State.ExitCode}}", runnerName) != "0") {
 		t.Fatalf("actual parent/browser/proxy proof failed: %v: %s", startedErr, output)
 	}
 	t.Logf("actual joined-primary browser manager proof passed; evidence %s", root)
+}
+
+func copyNativeBrowserEvidence(source, destination string) error {
+	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("owned native evidence escaped its volume")
+		}
+		target := filepath.Join(destination, relative)
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("owned native evidence contains a symlink")
+		}
+		if entry.IsDir() {
+			return os.MkdirAll(target, 0700)
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, content, 0600)
+	})
+}
+
+func TestNativeBrowserEvidenceCopyKeepsOnlyOwnedRegularFiles(t *testing.T) {
+	source, destination := t.TempDir(), t.TempDir()
+	if err := os.Mkdir(filepath.Join(source, "case"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "case", "result.json"), []byte(`{"passed":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyNativeBrowserEvidence(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(destination, "case", "result.json"))
+	if err != nil || string(content) != `{"passed":true}` {
+		t.Fatalf("owned evidence changed during copy: %s, %v", content, err)
+	}
+}
+
+func TestNativeBrowserEvidenceCopyRefusesSourceAliases(t *testing.T) {
+	source, destination, outside := t.TempDir(), t.TempDir(), t.TempDir()
+	target := filepath.Join(outside, "unrelated.txt")
+	if err := os.WriteFile(target, []byte("unrelated source remains private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(source, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyNativeBrowserEvidence(source, destination); err == nil {
+		t.Fatal("evidence copy followed a source alias")
+	}
+	if _, err := os.Stat(filepath.Join(destination, "alias")); !os.IsNotExist(err) {
+		t.Fatal("unrelated file entered the retained evidence")
+	}
+	content, err := os.ReadFile(target)
+	if err != nil || string(content) != "unrelated source remains private" {
+		t.Fatal("unrelated source changed", err)
+	}
 }

@@ -94,7 +94,7 @@ function infrastructure() {
   return { kubernetes, objects, writes, fault };
 }
 
-function resources(location: ReturnType<typeof factoryboxLocation>) {
+function resources(location: ReturnType<typeof factoryboxLocation>, image = runtimeImage) {
   const attemptID = crypto.randomUUID();
   const shared = renderFactoryboxRuntime({
     ...location,
@@ -102,7 +102,7 @@ function resources(location: ReturnType<typeof factoryboxLocation>) {
     sandboxID: factoryboxSandboxID(attemptID),
     runtimeOwnerID: attemptID,
     labels: { "factory.dev/runtime-attempt": attemptID },
-    runtimeHostImage: runtimeImage,
+    runtimeHostImage: image,
     sharedSource: false,
     profile,
   });
@@ -137,6 +137,30 @@ function resources(location: ReturnType<typeof factoryboxLocation>) {
     },
   ];
 }
+
+test("a new consumer image admits a new Sandbox without replacing the worker or its bootstrap image", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const kube = infrastructure();
+  const worker = createFactoryboxWorker(database, kube.kubernetes);
+  try {
+    const location = await worker.location();
+    const original = await worker.provision(resources(location), profile, runtimeImage);
+    const originalPod = structuredClone(kube.objects.get("pod/worker"));
+    const originalWorker = await factoryboxAllocation(database.client);
+    const nextImage = `registry.invalid/runtime@sha256:${"b".repeat(64)}`;
+    const next = await worker.provision(resources(location, nextImage), profile, nextImage);
+    expect(next).toMatchObject(original);
+    expect(kube.objects.get("pod/worker")).toEqual(originalPod);
+    expect(await factoryboxAllocation(database.client)).toEqual(originalWorker);
+    expect(kube.writes.filter((write) => write.kind === "Pod")).toHaveLength(1);
+    expect(kube.writes.filter((write) => write.kind === "PersistentVolumeClaim")).toHaveLength(2);
+    expect(kube.writes.filter((write) => write.action === "apply")).toHaveLength(2);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 30_000);
 
 test("Factory allocation is lazy, concurrent, isolated per installation and starts no compute", async () => {
   const hosts = await Promise.all([factoryProcess(), factoryProcess()]);
@@ -225,13 +249,6 @@ test("concurrent Sandboxes share one immutable worker and refuse missing storage
         resources(location),
         { ...profile, executableSHA256: "1".repeat(64) },
         runtimeImage,
-      ),
-    ).rejects.toThrow("already pinned");
-    await expect(
-      worker.provision(
-        resources(location),
-        profile,
-        `registry.invalid/other@sha256:${"1".repeat(64)}`,
       ),
     ).rejects.toThrow("already pinned");
     const claim = kube.objects.get("persistentvolumeclaim/runtime-data");

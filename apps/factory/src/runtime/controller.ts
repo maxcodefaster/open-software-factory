@@ -593,7 +593,7 @@ export function createRuntimeController(
       if (pod.ready) {
         try {
           await factorybox.ensureStarted(attemptID, resources, deadline);
-          if (hub.connected(attemptID)) await updateStatus(attemptID, "ready");
+          if (hub.ready(attemptID)) await updateStatus(attemptID, "ready");
         } catch (cause) {
           await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed"},updated_at=now()
                 WHERE id=${attemptID} AND state='starting'`;
@@ -974,7 +974,7 @@ export function createRuntimeController(
           throw new Error("create intent resources do not match persisted credentials");
         requireRuntimePodArtifacts(
           pod,
-          artifacts.runtimeHostImage,
+          applied.workerRuntimeHostImage ?? artifacts.runtimeHostImage,
           artifacts.factoryboxProfile.image,
         );
         if (!(await recordCreated(sql, attempt.id, pod.uid, namespace.uid))) return;
@@ -1019,7 +1019,7 @@ export function createRuntimeController(
           throw cause;
         }
       }
-      if (hub.connected(attemptID)) await updateStatus(attemptID, "ready");
+      if (hub.ready(attemptID)) await updateStatus(attemptID, "ready");
       return this.get(attemptID);
     },
     async pause(attemptID: string) {
@@ -1330,7 +1330,7 @@ export function createRuntimeController(
         if (attempt.state === "resuming") {
           deferredCreates.push(async () => {
             await factorybox.resume(attempt.id);
-            if (hub.connected(attempt.id)) await updateStatus(attempt.id, "ready");
+            if (hub.ready(attempt.id)) await updateStatus(attempt.id, "ready");
           });
           continue;
         }
@@ -1476,7 +1476,7 @@ export function createRuntimeController(
           const currentState = current?.state;
           if (currentState === "paused" || currentState === "resuming") {
             await factorybox.resume(existing.id);
-            if (hub.connected(existing.id)) await updateStatus(existing.id, "ready");
+            if (hub.ready(existing.id)) await updateStatus(existing.id, "ready");
             return this.get(existing.id);
           }
           if (["create-intended", "starting", "ready"].includes(String(currentState))) {
@@ -1840,7 +1840,7 @@ export function createRuntimeController(
         ) {
           if (["paused", "resuming"].includes(existingAttempt.state)) {
             await factorybox.resume(existingAttempt.id);
-            if (hub.connected(existingAttempt.id)) await updateStatus(existingAttempt.id, "ready");
+            if (hub.ready(existingAttempt.id)) await updateStatus(existingAttempt.id, "ready");
             return this.get(existingAttempt.id);
           }
           return existingAttempt;

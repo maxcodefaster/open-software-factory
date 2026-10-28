@@ -1,11 +1,15 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { resolve } from "node:path";
+import type { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import { fixtureValue } from "../../test/fixtures/value";
 import {
   conformanceLabel,
   conformanceNamespaceRemoved,
   conformanceResources,
+  createConformanceRuntime,
   ownedConformanceNamespace,
 } from "./factorybox-conformance";
-import { fixtureValue } from "../../test/fixtures/value";
 
 test.each(["arm64", "amd64"] as const)(
   "Factorybox %s conformance owns a separate worker/store and uses real product preparation",
@@ -114,4 +118,71 @@ test("lost namespace Delete output settles only through original-UID observation
       "original",
     ),
   ).toThrow();
+});
+
+test("successful workload cleanup gets its own deadline without extending workload admission", async () => {
+  const parent = resolve(".factory/test-results");
+  await mkdir(parent, { recursive: true });
+  const directory = await mkdtemp(resolve(parent, "conformance-deadline-"));
+  const owner = crypto.randomUUID();
+  const namespace = {
+    metadata: {
+      name: `factory-box-${owner.replaceAll("-", "")}`,
+      uid: "original",
+      labels: { [conformanceLabel]: owner },
+    },
+  };
+  let now = 0;
+  const clock = spyOn(performance, "now").mockImplementation(() => now);
+  let deleted = false;
+  const calls: Array<{ args: readonly string[]; timeoutMS: number | undefined }> = [];
+  const command: typeof runCommand = async (args, body, limits) => {
+    calls.push({ args, timeoutMS: limits?.timeoutMS });
+    if (args.includes("get"))
+      return {
+        exitCode: 0,
+        stdout: deleted ? "" : JSON.stringify(namespace),
+        stderr: "",
+      };
+    if (args.includes("delete")) {
+      expect(body && JSON.parse(body)).toMatchObject({
+        preconditions: { uid: namespace.metadata.uid },
+      });
+      deleted = true;
+      return { exitCode: 0, stdout: "", stderr: "" };
+    }
+    throw new Error("Unexpected conformance command");
+  };
+  const runtime = createConformanceRuntime(
+    owner,
+    `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
+    {
+      image: `registry.invalid/worker@sha256:${"b".repeat(64)}`,
+      executableSHA256: "c".repeat(64),
+      architecture: "arm64",
+      nodeName: "owned-node",
+      kernel: "owned-kernel",
+      boundedBytes: 8589934592,
+      claimGiB: 32,
+    },
+    "owned public certificate",
+    directory,
+    undefined,
+    command,
+  );
+  try {
+    now = 419_000;
+    await runtime.passed();
+    now = 420_001;
+    await runtime.cleanup();
+    expect(deleted).toBe(true);
+    expect(calls.find((call) => call.args.includes("delete"))?.timeoutMS).toBe(60_000);
+    expect(JSON.parse(await readFile(resolve(directory, "cleanup.json"), "utf8"))).toMatchObject({
+      absenceConfirmed: true,
+    });
+    await expect(runtime.passed()).rejects.toThrow("420-second deadline");
+  } finally {
+    clock.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+  }
 });

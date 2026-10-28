@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
+import type { SetupInspectionOutput } from "../../../../packages/project-domain/src/setup";
 import {
   requiredEnvironmentVariables,
   validateConfiguration,
   validateSetupProposal,
 } from "./configuration";
-import type { SetupInspectionOutput } from "../../../../packages/project-domain/src/setup";
 import { starterFiles } from "./starter";
 
 test("required environment discovery excludes defaults and values", () => {
@@ -81,6 +81,78 @@ test("assisted Compose proposal must mount the repository into its primary works
     };
     expect(() =>
       validateConfiguration([recipe, compose], [recipe.path, compose.path]),
+    ).not.toThrow();
+  }
+});
+test("assisted Compose does not start the App before dependency hooks or duplicate Factory startup", () => {
+  const recipe = {
+    path: ".devcontainer/devcontainer.json",
+    content: JSON.stringify({
+      dockerComposeFile: "compose.yaml",
+      service: "app",
+      workspaceFolder: "/workspace/project",
+    }),
+  };
+  const contract = {
+    path: ".factory/system.json",
+    content: JSON.stringify({
+      version: 1,
+      primaryApp: "web",
+      apps: [
+        {
+          id: "web",
+          label: "Web",
+          command: ["pnpm", "forms:dev"],
+          port: 4321,
+          healthPath: "/health",
+        },
+      ],
+    }),
+  };
+  for (const command of [["pnpm", "forms:dev"], "pnpm forms:dev"]) {
+    const compose = {
+      path: ".devcontainer/compose.yaml",
+      content: JSON.stringify({
+        services: { app: { image: "node:24", command, volumes: ["..:/workspace/project"] } },
+      }),
+    };
+    const paths = [recipe.path, compose.path, contract.path];
+    expect(() => validateConfiguration([recipe, compose, contract], paths)).toThrow(
+      "Factory starts App commands",
+    );
+    expect(() =>
+      validateConfiguration(
+        [
+          {
+            ...recipe,
+            content: JSON.stringify({ ...JSON.parse(recipe.content), overrideCommand: true }),
+          },
+          compose,
+          contract,
+        ],
+        paths,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      validateConfiguration(
+        [
+          recipe,
+          {
+            ...compose,
+            content: JSON.stringify({
+              services: {
+                app: {
+                  image: "node:24",
+                  command: ["sleep", "infinity"],
+                  volumes: ["..:/workspace/project"],
+                },
+              },
+            }),
+          },
+          contract,
+        ],
+        paths,
+      ),
     ).not.toThrow();
   }
 });

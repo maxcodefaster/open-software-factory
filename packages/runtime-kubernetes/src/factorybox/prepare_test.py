@@ -16,13 +16,16 @@ class PreparationTests(unittest.TestCase):
         self.module = runpy.run_path(sys.argv[1], run_name="factory_preparation_probe")
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.request = {
             "version": 3, "sandboxID": "runtime-" + "a" * 32,
             "storeID": "b" * 32, "epoch": "c" * 32, "podUID": "pod",
             "runtimeHostImage": "registry.invalid/runtime@sha256:" + "d" * 64,
             "sharedSource": False, "sourceWorkspaceID": None, "reserveSeed": False, "bootstrap": ":",
         }
+        environment = patch.dict(os.environ, {"FACTORY_RUNTIME_IMAGE": self.request["runtimeHostImage"]})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def assigned(self, **changes):
         request = {**self.request, **changes}
@@ -35,6 +38,30 @@ class PreparationTests(unittest.TestCase):
     def environment(self):
         return patch.dict(os.environ, {"FACTORY_POD_UID": self.request["podUID"],
                                        "FACTORY_STORE_ID": self.request["storeID"]})
+
+    def test_failed_metadata_write_removes_only_its_own_new_partial_file(self):
+        path = self.root / "owned-intent.json"
+        with patch("json.dump", side_effect=OSError("owned disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                self.module["publish"](path, {"version": 1})
+        self.assertFalse(path.exists())
+        path.write_text("preserve existing metadata")
+        with self.assertRaises(FileExistsError):
+            self.module["publish"](path, {"version": 1})
+        self.assertEqual(path.read_text(), "preserve existing metadata")
+
+    def test_failed_metadata_write_preserves_a_replacement_at_the_same_path(self):
+        path = self.root / "owned-intent.json"
+
+        def replaced(*_, **__):
+            path.unlink()
+            path.write_text("preserve successor")
+            raise OSError("owned interrupted metadata write")
+
+        with patch("json.dump", side_effect=replaced):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                self.module["publish"](path, {"version": 1})
+        self.assertEqual(path.read_text(), "preserve successor")
 
     def test_checkpoint_profile_denies_all_io_uring_entrypoints_on_each_native_architecture(self):
         for machine, architecture in [("aarch64", "SCMP_ARCH_AARCH64"),
@@ -109,6 +136,73 @@ class PreparationTests(unittest.TestCase):
         changed = {**request, "assignment": {**request["assignment"], "parent-token": "another-parent"}}
         self.assertNotEqual(plan, self.module["preparation_plan"](changed, "a" * 64, None))
 
+    def test_explicit_cancellation_fences_an_unpublished_preparation_without_replay(self):
+        request = self.request
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"],
+                  "lifecycle": {"root": str(self.root / "controller")}}
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run") as mutation, self.environment():
+            result = self.module["cancel_preparation"](request)
+            self.assertEqual(result, {"version": 1, "cancelled": True,
+                                      "sandboxID": request["sandboxID"]})
+            self.assertEqual(result, self.module["cancel_preparation"](request))
+            root = self.root / "input" / request["sandboxID"]
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["intent.json"])
+            self.assertNotIn("assignment", (root / "intent.json").read_text())
+            with self.assertRaisesRegex(ValueError, "explicitly cancelled"):
+                self.module["prepare"](self.assigned())
+            mutation.assert_not_called()
+
+    def test_cancellation_preserves_partial_inputs_and_native_objects(self):
+        request = self.request
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"],
+                  "lifecycle": {"root": str(self.root / "controller")}}
+        root = self.root / "input" / request["sandboxID"]
+        root.mkdir(parents=True)
+        (root / "intent.json").write_text('{"foreign":"preserve partial input"}')
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run") as mutation, self.environment():
+            with self.assertRaisesRegex(ValueError, "Incomplete preparation"):
+                self.module["cancel_preparation"](request)
+            self.assertEqual((root / "intent.json").read_text(),
+                             '{"foreign":"preserve partial input"}')
+            root.rename(root.parent / "retained-partial")
+            native = self.root / "controller/objects" / request["sandboxID"]
+            native.mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "native object"):
+                self.module["cancel_preparation"](request)
+            self.assertFalse(root.exists())
+            mutation.assert_not_called()
+
+    def test_cancellation_wins_a_prepare_racing_between_base_admission_and_input_creation(self):
+        request = self.assigned()
+        seed = self.root / "seed"
+        seed.mkdir()
+        (seed / "rootfs.tar").write_bytes(b"exact frozen image")
+        rootfs = hashlib.sha256((seed / "rootfs.tar").read_bytes()).hexdigest()
+        (seed / "rootfs.sha256").write_text(rootfs + "  rootfs.tar\n")
+        (seed / "intent").write_text(
+            "\n".join(request[key] for key in ["podUID", "storeID", "runtimeHostImage"]) + "\n")
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"],
+                  "lifecycle": {"root": str(self.root / "controller")}}
+
+        def admitted(*_):
+            self.module["cancel_preparation"](self.request)
+            return {"tree": {"saved": "/unused-independent-base"}}
+
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run") as mutation, self.environment(), \
+                patch.dict(self.module["prepare"].__globals__, {
+                    "Path": lambda path: seed if str(path) == "/var/lib/sysbox/seed" else Path(path),
+                    "image_base": admitted,
+                }):
+            with self.assertRaises(FileExistsError):
+                self.module["prepare"](request)
+            root = self.root / "input" / request["sandboxID"]
+            self.assertEqual(sorted(p.name for p in root.iterdir()), ["intent.json"])
+            self.assertTrue(json.loads((root / "intent.json").read_text())["cancelled"])
+            mutation.assert_not_called()
+
     def test_base_admission_refusal_does_not_poison_a_new_private_input(self):
         request = self.assigned()
         seed = self.root / "seed"
@@ -148,27 +242,163 @@ class PreparationTests(unittest.TestCase):
                 archive.addfile(info)
         digest = hashlib.sha256((seed / "rootfs.tar").read_bytes()).hexdigest()
         imported = []
+        status = {"store": str(self.root), "boot_id": "owned-boot",
+                  "lifecycle": {"root": str(self.root / "controller"),
+                                "runtime_sha256": "e" * 64}}
 
         def unpack(args, **kwargs):
             with tarfile.open(seed / "rootfs.tar") as archive:
-                archive.extractall(args[args.index("-C") + 1], filter="data")
+                destination = Path(args[args.index("-C") + 1])
+                for member in archive.getmembers():
+                    self.assertTrue(member.isdir())
+                    self.assertFalse(Path(member.name).is_absolute())
+                    self.assertNotIn("..", Path(member.name).parts)
+                    (destination / member.name).mkdir(parents=True, exist_ok=True)
 
         def base(args, **kwargs):
-            imported.append(args[args.index("--source") + 1])
-            return json.dumps({"tree": {"saved": "/owned/base"}}).encode()
+            source = args[args.index("--source") + 1]
+            imported.append(source)
+            saved = str(self.root / "controller/bases/factory-runtime/rootfs")
+            return json.dumps({"version": 1, "id": "factory-runtime", "source": source,
+                               "boot_id": "owned-boot", "runtime_sha256": "e" * 64,
+                               "prepared_at": "owned-time",
+                               "tree": {"source": source, "saved": saved, "sha256": "f" * 64,
+                                        "immutable": {"root": saved}}}).encode()
 
         with patch("subprocess.run", side_effect=unpack) as extraction, \
-                patch("subprocess.check_output", side_effect=base):
-            self.module["image_base"](self.request, {"store": str(self.root)}, seed, digest, ["cli"])
+                patch("subprocess.check_output", side_effect=base), \
+                patch.dict(self.module["image_base"].__globals__, {"image_source_mounts": lambda _: False}):
+            self.module["image_base"](self.request, status, seed, digest, ["cli"])
             sibling = {**self.request, "sandboxID": "runtime-" + "e" * 32}
-            self.module["image_base"](sibling, {"store": str(self.root)}, seed, digest, ["cli"])
+            self.module["image_base"](sibling, status, seed, digest, ["cli"])
             self.assertEqual(extraction.call_count, 1)
             self.assertEqual(imported[0], imported[1])
             self.assertFalse((Path(imported[0]) / "home/coder/project").exists())
+            self.assertFalse(Path(imported[0]).exists(),
+                             "redundant image import source consumes the bounded worker after native base verification")
             with self.assertRaisesRegex(ValueError, "another identity"):
                 self.module["image_base"](
-                    {**sibling, "runtimeHostImage": "foreign"}, {"store": str(self.root)}, seed, digest, ["cli"])
+                    {**sibling, "runtimeHostImage": "foreign"}, status, seed, digest, ["cli"])
             self.assertEqual(extraction.call_count, 1)
+
+    def test_upgraded_images_have_independent_bases_and_preserve_the_original_import(self):
+        requests = [self.request, {**self.request, "runtimeHostImage": "registry.invalid/runtime@sha256:"+"e"*64}]
+        seeds = []
+        imported = []
+        status = {"store": str(self.root), "boot_id": "owned-boot",
+                  "lifecycle": {"root": str(self.root/"controller"), "runtime_sha256": "e"*64}}
+        for index in range(2):
+            seed = self.root/("seed-"+str(index))
+            seed.mkdir()
+            with tarfile.open(seed/"rootfs.tar", "w") as archive:
+                info = tarfile.TarInfo("home")
+                info.type = tarfile.DIRTYPE
+                archive.addfile(info)
+            seeds.append(seed)
+
+        def unpack(args, **kwargs):
+            destination = Path(args[args.index("-C")+1])
+            (destination/"home").mkdir(exist_ok=True)
+
+        def base(args, **kwargs):
+            source, name = args[args.index("--source")+1], args[-1]
+            imported.append((source, name))
+            saved = str(self.root/"controller/bases"/name/"rootfs")
+            return json.dumps({"version": 1, "id": name, "source": source, "boot_id": "owned-boot",
+                               "runtime_sha256": "e"*64, "prepared_at": "owned-time",
+                               "tree": {"source": source, "saved": saved, "sha256": "f"*64,
+                                        "immutable": {"root": saved}}}).encode()
+
+        with patch("subprocess.run", side_effect=unpack) as extraction, \
+                patch("subprocess.check_output", side_effect=base), \
+                patch.dict(self.module["image_base"].__globals__, {"image_source_mounts": lambda _: False}):
+            for request, seed in zip(requests, seeds):
+                sha = hashlib.sha256((seed/"rootfs.tar").read_bytes()).hexdigest()
+                self.module["image_base"](request, status, seed, sha, ["cli"])
+            original = (self.root/"consumer-images"/sha/"prepared.json").read_bytes()
+            self.module["image_base"](requests[0], status, seeds[0], sha, ["cli"])
+            self.module["image_base"](requests[1], status, seeds[1], sha, ["cli"])
+            self.assertEqual(extraction.call_count, 2)
+            self.assertEqual(imported[0], imported[2])
+            self.assertEqual(imported[1], imported[3])
+            self.assertNotEqual(imported[0][1], imported[1][1])
+            self.assertEqual(imported[0][1], "factory-runtime")
+            self.assertLessEqual(len(imported[1][1]), 63)
+            self.assertEqual((self.root/"consumer-images"/sha/"prepared.json").read_bytes(), original)
+            self.assertEqual(Path(imported[1][0]).parent, seeds[1]/"import")
+            self.assertFalse(Path(imported[1][0]).exists())
+
+    def image_retirement_fixture(self):
+        root = self.root / "consumer-images" / ("a" * 64)
+        source = root / "source"
+        source.mkdir(parents=True)
+        (source / "only-import-payload").write_bytes(b"frozen image bytes")
+        status = {"boot_id": "owned-boot",
+                  "lifecycle": {"root": str(self.root / "controller"),
+                                "runtime_sha256": "e" * 64}}
+        saved = self.root / "controller/bases/factory-runtime/rootfs"
+        saved.mkdir(parents=True)
+        (saved / "immutable-base").write_bytes(b"preserve base")
+        base = {"version": 1, "id": "factory-runtime", "source": str(source),
+                "boot_id": "owned-boot", "runtime_sha256": "e" * 64,
+                "prepared_at": "owned-time",
+                "tree": {"source": str(source), "saved": str(saved), "sha256": "f" * 64,
+                         "immutable": {"root": str(saved)}}}
+        return root, source, saved, base, status
+
+    def test_import_retirement_requires_the_exact_independent_native_base(self):
+        root, source, saved, base, status = self.image_retirement_fixture()
+        for field in ["version", "id", "source", "boot_id", "runtime_sha256", "prepared_at"]:
+            with self.subTest(field=field):
+                invalid = {**base, field: None}
+                with self.assertRaisesRegex(ValueError, "independent immutable"):
+                    self.module["retire_image_source"](root, invalid, status)
+                self.assertTrue((source / "only-import-payload").is_file())
+        invalid = {**base, "tree": {**base["tree"], "saved": str(source)}}
+        with self.assertRaisesRegex(ValueError, "independent immutable"):
+            self.module["retire_image_source"](root, invalid, status)
+        self.assertEqual((saved / "immutable-base").read_bytes(), b"preserve base")
+        self.assertFalse((root / "source-retirement.json").exists())
+
+    def test_import_retirement_refuses_mounts_and_resumes_after_an_interrupted_unlink(self):
+        root, source, saved, base, status = self.image_retirement_fixture()
+        globals_ = self.module["retire_image_source"].__globals__
+        with patch.dict(globals_, {"image_source_mounts": lambda _: True}), \
+                patch("shutil.rmtree") as remove:
+            with self.assertRaisesRegex(ValueError, "identity or mounts"):
+                self.module["retire_image_source"](root, base, status)
+            remove.assert_not_called()
+        with patch.dict(globals_, {"image_source_mounts": lambda _: False}):
+            with patch("shutil.rmtree", side_effect=OSError("owned interrupted unlink")):
+                with self.assertRaisesRegex(OSError, "interrupted"):
+                    self.module["retire_image_source"](root, base, status)
+            self.assertTrue((root / "source-retirement.json").is_file())
+            self.assertFalse((root / "source-retired.json").exists())
+            self.module["retire_image_source"](root, base, status)
+            self.module["retire_image_source"](root, base, status)
+        self.assertFalse(source.exists())
+        self.assertEqual((saved / "immutable-base").read_bytes(), b"preserve base")
+        source.mkdir()
+        (source / "foreign-successor").write_bytes(b"preserve successor")
+        with self.assertRaisesRegex(ValueError, "successor"):
+            self.module["retire_image_source"](root, base, status)
+        self.assertEqual((source / "foreign-successor").read_bytes(), b"preserve successor")
+
+    def test_import_retirement_preserves_a_replaced_partial_source_directory(self):
+        root, source, saved, base, status = self.image_retirement_fixture()
+        with patch.dict(self.module["retire_image_source"].__globals__,
+                        {"image_source_mounts": lambda _: False}):
+            with patch("shutil.rmtree", side_effect=OSError("owned interruption")):
+                with self.assertRaises(OSError):
+                    self.module["retire_image_source"](root, base, status)
+            source.rename(root / "retained-original")
+            source.mkdir()
+            (source / "foreign-successor").write_bytes(b"preserve successor")
+            with self.assertRaisesRegex(ValueError, "identity or mounts"):
+                self.module["retire_image_source"](root, base, status)
+        self.assertEqual((source / "foreign-successor").read_bytes(), b"preserve successor")
+        self.assertTrue((root / "retained-original/only-import-payload").exists())
+        self.assertEqual((saved / "immutable-base").read_bytes(), b"preserve base")
 
     def test_unused_sibling_release_does_not_inspect_or_unmount_the_running_object(self):
         request = self.request

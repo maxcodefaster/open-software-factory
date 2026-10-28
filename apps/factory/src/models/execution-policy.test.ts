@@ -10,6 +10,55 @@ import {
 } from "./execution-policy";
 import { nativeModel } from "./native";
 
+test.each([
+  { length: 6000, admitted: true },
+  { length: 9000, admitted: false },
+])(
+  "native step input counts the provider prompt once: $length bytes",
+  async ({ length, admitted }) => {
+    let requests = 0;
+    const provider = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        requests++;
+        return Response.json({
+          id: "owned-input-bound",
+          object: "chat.completion",
+          created: 1,
+          model: "owned-input-bound",
+          choices: [
+            { index: 0, message: { role: "assistant", content: "Known" }, finish_reason: "stop" },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        });
+      },
+    });
+    try {
+      const agent = new Agent({
+        id: "owned-input-bound",
+        name: "Owned input bound",
+        ...nativeAgentPolicy,
+        instructions: "Return Known.",
+        model: await nativeModel(
+          { baseURL: `http://127.0.0.1:${provider.port}/v1`, apiKey: "owned-input-bound" },
+          "owned-input-bound",
+        ),
+      });
+      const run = agent.generate("x".repeat(length), {
+        maxSteps: 1,
+        modelSettings: { maxRetries: 0 },
+        prepareStep: nativeStepGuard({ signal: AbortSignal.timeout(2000), maxInputBytes: 8192 }),
+      });
+      if (admitted) expect((await run).text).toBe("Known");
+      else await expect(run).rejects.toThrow("Model input bound reached");
+      expect(requests).toBe(admitted ? 1 : 0);
+    } finally {
+      await provider.stop(true);
+    }
+  },
+);
+
 test("multimodal input has a separate bounded image allowance without relaxing authored text", async () => {
   const guard = nativeStepGuard({
     signal: AbortSignal.timeout(2000),
