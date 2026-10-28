@@ -1,7 +1,7 @@
 {
   "kubectl": {
-    "version": "1.33.9",
-    "image": "registry.k8s.io/kubectl:v1.33.9@sha256:ca9eb7966d4cae76fe34deca5c3096970e1494decac445a1e04df9e05af70790"
+    "version": "1.35.6",
+    "image": "registry.k8s.io/kubectl:v1.35.6@sha256:4d8c68e8c2bf360b1808927c4d39fb13998c106cac903622d127a2275c844126"
   },
   "mkcert": {
     "version": "1.4.4",
