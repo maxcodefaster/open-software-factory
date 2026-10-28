@@ -29,7 +29,9 @@ const test = base.extend<
         await postgres.dispose();
       }
     },
-    { scope: "worker", timeout: 60_000 },
+    // A cold owned PostgreSQL container took 64s through initdb before accepting
+    // TCP. This bounds fixture setup, not an application or inference deadline.
+    { scope: "worker", timeout: 120_000 },
   ],
   factory: [
     async ({ postgres }, use) => {
@@ -189,41 +191,149 @@ async function openImportedSetup(page: Page, signIn: SignIn) {
   };
 }
 
-test("successful preparation hides technical fallback notes but retains actionable failures", async ({
-  page,
-  signIn,
-}) => {
-  const fixture = await openImportedSetup(page, signIn);
-  await mockFactoryFunctions(page, {
-    setup: {
-      readiness: async () =>
-        setupReadiness.parse([
-          {
-            task: "development",
-            state: "ready",
-            commandID: crypto.randomUUID(),
-            operationID: null,
-            failure: "This configuration uses normal startup instead of a prebuilt image.",
+for (const device of [
+  { name: "desktop", width: 1440, height: 1000, hasTouch: false },
+  { name: "narrow", width: 390, height: 844, hasTouch: false },
+  { name: "touch", width: 390, height: 844, hasTouch: true },
+]) {
+  test.describe(`project preparation on ${device.name}`, () => {
+    test.use({
+      viewport: { width: device.width, height: device.height },
+      hasTouch: device.hasTouch,
+    });
+    test("normal startup is explicit without claiming a prebuilt image or offering a false retry", async ({
+      page,
+      signIn,
+    }) => {
+      const fixture = await openImportedSetup(page, signIn);
+      await mockFactoryFunctions(page, {
+        setup: {
+          readiness: async () =>
+            setupReadiness.parse([
+              {
+                task: "preview-image",
+                state: "ready",
+                commandID: crypto.randomUUID(),
+                operationID: null,
+                failure: "This configuration uses normal startup instead of a prebuilt image.",
+              },
+              {
+                task: "development",
+                state: "ready",
+                commandID: crypto.randomUUID(),
+                operationID: null,
+                failure: "This configuration uses normal startup instead of a prebuilt image.",
+              },
+              {
+                task: "main-preview",
+                state: "failed",
+                commandID: crypto.randomUUID(),
+                operationID: null,
+                failure: "The application did not become ready.",
+              },
+            ]),
+          inspection: async () => null,
+        },
+      });
+      await fixture.open();
+      const preparation = page.getByRole("region", { name: "Project preparation", exact: true });
+      await expect(
+        preparation.getByRole("listitem").filter({ hasText: "Development image preparation" }),
+      ).toBeVisible({ timeout: 2000 });
+      await expect(
+        preparation.getByRole("listitem").filter({ hasText: "Preview image preparation" }),
+      ).toBeVisible();
+      await expect(preparation.getByText(/normal startup/)).toHaveCount(2);
+      await expect(preparation.getByText("The application did not become ready.")).toBeVisible();
+      await expect(preparation.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        device.width,
+      );
+      await page.screenshot({
+        path: `.factory/test-results/setup-actionable-status-${device.name}.png`,
+      });
+    });
+
+    test("read-only recovery retains cached progress and never retries a task", async ({
+      page,
+      signIn,
+    }) => {
+      const fixture = await openImportedSetup(page, signIn);
+      let reads = 0,
+        writes = 0;
+      const received = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const commandID = crypto.randomUUID();
+      const operationID = crypto.randomUUID();
+      await mockFactoryFunctions(page, {
+        setup: {
+          readiness: async () => {
+            reads++;
+            if (reads === 2) throw new CommandError("unavailable", "Owned read failure");
+            if (reads === 3) {
+              received.resolve();
+              await release.promise;
+            }
+            return setupReadiness.parse([
+              {
+                task: "main-preview",
+                state: reads === 1 ? "running" : "ready",
+                commandID,
+                operationID,
+                failure: null,
+              },
+            ]);
           },
-          {
-            task: "main-preview",
-            state: "failed",
-            commandID: crypto.randomUUID(),
-            operationID: null,
-            failure: "The application did not become ready.",
+          inspection: async () => null,
+          retryTask: async () => {
+            writes++;
+            throw new Error("Status retry must not retry work");
           },
-        ]),
-      inspection: async () => null,
-    },
+          inspect: async () => {
+            writes++;
+            throw new Error("Status retry must not start inference");
+          },
+        },
+      });
+      try {
+        await page.clock.install();
+        await fixture.open();
+        const preparation = page.getByRole("region", { name: "Project preparation", exact: true });
+        await expect(preparation.getByRole("img", { name: "running", exact: true })).toBeVisible();
+        await page.clock.fastForward(2500);
+        await expect(preparation.getByRole("alert")).toContainText(
+          "Preparation status is unavailable",
+        );
+        await expect(preparation.getByText("Main Preview", { exact: true })).toBeVisible();
+        const retry = preparation.getByRole("button", {
+          name: "Retry preparation status",
+          exact: true,
+        });
+        await expect(retry).toBeVisible({ timeout: 2000 });
+        await page.screenshot({
+          path: `.factory/test-results/setup-status-read-retry-${device.name}.png`,
+        });
+        if (device.hasTouch) await retry.tap();
+        else await retry.press("Enter");
+        await received.promise;
+        await expect(
+          preparation.getByRole("button", { name: "Checking preparation status…", exact: true }),
+        ).toBeDisabled();
+        expect(writes).toBe(0);
+        release.resolve();
+        await expect(preparation.getByRole("alert")).toHaveCount(0);
+        await expect(preparation.getByRole("img", { name: "ready", exact: true })).toBeVisible();
+        expect(reads).toBe(3);
+        expect(writes).toBe(0);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+          device.width,
+        );
+      } finally {
+        release.resolve();
+      }
+    });
   });
-  await fixture.open();
-  const preparation = page.getByRole("region", { name: "Project preparation", exact: true });
-  await expect(preparation.getByText("Development image", { exact: true })).toBeVisible();
-  await expect(preparation.getByText(/normal startup/)).toHaveCount(0);
-  await expect(preparation.getByText("The application did not become ready.")).toBeVisible();
-  await expect(preparation.getByRole("button", { name: "Retry", exact: true })).toHaveCount(1);
-  await page.screenshot({ path: ".factory/test-results/setup-actionable-status.png" });
-});
+}
 
 test("an initial inspection read failure offers a read-only retry without starting inference", async ({
   page,

@@ -84,9 +84,10 @@ export async function nativeModel(
   if (id.startsWith(`${provider}/`))
     throw new CommandError("conflict", "Select the provider model ID without a provider prefix");
   const baseURL = connection.baseURL;
+  const responses = provider === "openai" && (id === "gpt-6-luna" || id === "gpt-6.1-sol");
   // Router URL overrides in pinned Mastra select chat-completions even for Anthropic.
   // Use the native SDK for enterprise endpoints, never translate Messages to OpenAI.
-  if (baseURL || (provider === "openai" && id === "gpt-6-luna")) {
+  if (baseURL || responses) {
     const options = { apiKey: connection.apiKey, ...(baseURL ? { baseURL } : {}) };
     switch (provider) {
       case "anthropic": {
@@ -100,7 +101,7 @@ export async function nativeModel(
       case "openai": {
         const { createOpenAI } = await import("@ai-sdk/openai");
         const sdk = createOpenAI(options);
-        return id === "gpt-6-luna" ? sdk.responses(id) : sdk.chat(id);
+        return responses ? sdk.responses(id) : sdk.chat(id);
       }
     }
   }
@@ -108,7 +109,8 @@ export async function nativeModel(
 }
 
 export function modelProviderOptions(connection: ResolvedModelConnection, modelId: string) {
-  return (connection.provider ?? "openai") === "openai" && modelId === "gpt-6-luna"
-    ? { openai: { reasoningEffort: "low", store: false } }
-    : undefined;
+  if ((connection.provider ?? "openai") !== "openai") return undefined;
+  if (modelId === "gpt-6-luna") return { openai: { reasoningEffort: "low", store: false } };
+  if (modelId === "gpt-6.1-sol") return { openai: { store: false } };
+  return undefined;
 }
