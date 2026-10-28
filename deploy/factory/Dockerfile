@@ -1,5 +1,5 @@
 FROM docker.io/oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS bun
-FROM registry.k8s.io/kubectl:v1.33.9@sha256:ca9eb7966d4cae76fe34deca5c3096970e1494decac445a1e04df9e05af70790 AS kubectl
+FROM registry.k8s.io/kubectl:v1.35.6@sha256:4d8c68e8c2bf360b1808927c4d39fb13998c106cac903622d127a2275c844126 AS kubectl
 
 FROM docker.io/library/node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS tools
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun

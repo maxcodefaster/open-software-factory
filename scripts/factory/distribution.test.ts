@@ -13,6 +13,8 @@ test("source-development Compose does not offer a second product installation", 
 });
 
 test("application build tools match the upstream artifact pins", async () => {
+  const toolVersions = await readFile(new URL("../../mise.toml", import.meta.url), "utf8");
+  expect(toolVersions).toContain(`kubectl = "${upstream.kubectl.version}"`);
   const dockerfile = await readFile(
     new URL("../../deploy/factory/Dockerfile", import.meta.url),
     "utf8",

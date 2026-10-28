@@ -29,6 +29,8 @@ The development Helm chart lives in [deploy/helm/factory](deploy/helm/factory/RE
 Install it directly from this repository; a public chart repository and release publication are
 not required during development. Kubernetes is provided by the operator. Factory does not
 install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
+Local tools and the Factory image pin `kubectl` 1.35.6. Use a Kubernetes API server
+within one minor version, 1.34 through 1.36, as required by the upstream version-skew policy.
 
 The chart and owned Forgejo fixtures pin 17.0.0 by image digest. Its native job/step/log API
 supplies Verification diagnostics. Upgrading an existing Forgejo is an explicit operator action:
