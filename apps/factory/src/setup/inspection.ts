@@ -5,6 +5,7 @@ import {
   setupInspectionCommand,
   setupInspectionOutput,
   setupInspectionView,
+  type SetupInspectionOutput,
 } from "../../../../packages/project-domain/src/setup";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
@@ -154,6 +155,7 @@ export function createSetupInspection(input: {
           ...(history.configurationFeedback
             ? { configurationFeedback: history.configurationFeedback }
             : {}),
+          ...(history.previousProposal ? { previousProposal: history.previousProposal } : {}),
           existingConfiguration: existing.filter(configurationPath),
           paths: availablePaths.slice(0, 2000),
           availablePaths,
@@ -190,6 +192,8 @@ export function createSetupInspection(input: {
     const rounds: { question: string; answer: string }[][] = [];
     const seen = new Set([value.id]);
     let configurationFeedback: string | undefined;
+    let previousProposal: SetupInspectionOutput | undefined;
+    let questionRounds = 0;
     let child = value;
     while (child.parentID) {
       signal.throwIfAborted();
@@ -205,6 +209,9 @@ export function createSetupInspection(input: {
         continue;
       }
       const output = setupInspectionOutput.parse(parent.output);
+      if (!previousProposal && output.files.length) previousProposal = output;
+      if (output.questions.length && ++questionRounds > setupQuestionRoundLimit)
+        throw new Error("Setup question round bound reached");
       const round =
         !output.questions.length && child.answers[setupFeedbackKey]
           ? [
@@ -218,13 +225,14 @@ export function createSetupInspection(input: {
               answer: child.answers[question.id] ?? "",
             }));
       if (round.length) {
-        if (rounds.length >= setupQuestionRoundLimit)
-          throw new Error("Setup question round bound reached");
+        // Explicit edits review a retained proposal; they are not another
+        // discovery question round. The existing model-input bound still
+        // covers all retained answers and the single latest draft.
         rounds.unshift(round);
       }
       child = parent;
     }
-    return { confirmedAnswers: rounds.flat(), configurationFeedback };
+    return { confirmedAnswers: rounds.flat(), configurationFeedback, previousProposal };
   }
   async function start(
     projectID: string,
