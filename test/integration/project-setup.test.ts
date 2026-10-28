@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import { createProjectSetupController } from "../../apps/factory/src/setup/controller";
 import type { ImportCredential } from "../../apps/factory/src/setup/secrets";
 import { createForgejoClient } from "../../packages/forge/src/forge";
-import { factoryProcess } from "../fixtures/factory-process";
 import { isDesktopBackgroundKey } from "../../packages/interface-domain/src/background";
+import { factoryProcess } from "../fixtures/factory-process";
 
 test("retained setup and ambiguous import recover without duplicate repositories with one application connection", async () => {
   const process = await factoryProcess();
@@ -165,6 +165,138 @@ test("retained setup and ambiguous import recover without duplicate repositories
       })(),
     ).rejects.toThrow("immutable");
     expect((await restarted.begin(manager))?.id).not.toBe(draft.id);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await process.dispose();
+  }
+}, 30_000);
+
+test("a rejected private import can start another setup without discarding or replaying the old intent", async () => {
+  const process = await factoryProcess();
+  const database = process.connect(1);
+  const manager = crypto.randomUUID();
+  const contributor = crypto.randomUUID();
+  const credentials = new Map<string, ImportCredential>();
+  const repositories = new Map<string, { empty: boolean }>();
+  let creates = 0;
+  const forge = createForgejoClient({
+    apiURL: "https://forge.test/api/v1/",
+    token: "owned-fixture",
+    fetch: async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (init?.method === "POST") {
+        creates++;
+        const body = JSON.parse(String(init.body));
+        const repository = {
+          name: body.repo_name,
+          owner: { login: body.repo_owner },
+          default_branch: "main",
+          private: true,
+          mirror: false,
+          empty: !body.auth_token,
+          description: body.description,
+        };
+        repositories.set(body.repo_name, repository);
+        return Response.json(repository, { status: body.auth_token ? 201 : 422 });
+      }
+      const name = path.split("/")[5];
+      const repository = name ? repositories.get(name) : undefined;
+      if (path.endsWith("/branches/main"))
+        return repository?.empty
+          ? new Response(null, { status: 404 })
+          : Response.json({ name: "main", commit: { id: "a".repeat(40) } });
+      return repository ? Response.json(repository) : new Response(null, { status: 404 });
+    },
+  });
+  const controller = createProjectSetupController({
+    database,
+    forge,
+    forgeOwner: "factory",
+    forgeOrigin: "https://forge.test",
+    signingKey: "owned-recovery",
+    importOrigins: ["https://github.com"],
+    secrets: {
+      configured: true,
+      read: async (key) => credentials.get(key),
+      create: async (key, value) => {
+        credentials.set(key, value);
+      },
+      remove: async (key) => {
+        credentials.delete(key);
+      },
+    },
+    onCreated: async () => {},
+  });
+  try {
+    for (const id of [manager, contributor])
+      await database.client`INSERT INTO auth."user"(id,name,email) VALUES(${id},'Owned user',${`${id}@setup.test`})`;
+    await database.client`INSERT INTO factory.administrator(user_id) VALUES(${manager})`;
+    const first = await controller.begin(manager);
+    if (!first) throw new Error("Missing draft");
+    await expect(controller.startAnother(contributor, first.id)).rejects.toThrow("System Manager");
+    await expect(controller.startAnother(manager, first.id)).rejects.toThrow("changed");
+    const saved = await controller.save(manager, {
+      id: first.id,
+      version: first.version,
+      name: "Private app",
+      slug: "first-import",
+      kind: "import",
+      sourceURL: "https://github.com/team/private.git",
+    });
+    if (!saved) throw new Error("Missing saved draft");
+    const rejected = await controller.create(manager, {
+      id: first.id,
+      version: saved.version,
+      commandID: crypto.randomUUID(),
+    });
+    expect(rejected?.state).toBe("failed");
+    const [original] = await database.client`SELECT * FROM factory.project_repository_intent`;
+    // Older versions classified this response as uncertain. Keep observing it
+    // after starting another setup, but never repeat its external write.
+    await database.client`UPDATE factory.project_repository_intent SET state='uncertain'`;
+    await database.client`UPDATE factory.project_setup_draft SET state='checking'`;
+    const second = await controller.startAnother(manager, first.id);
+    if (!second) throw new Error("Missing new draft");
+    expect(second?.id).not.toBe(first.id);
+    expect(second?.state).toBe("draft");
+    await expect(controller.startAnother(manager, first.id)).rejects.toThrow("changed");
+    const updated = await controller.save(manager, {
+      id: second.id,
+      version: second.version,
+      name: "Private app",
+      slug: "second-import",
+      kind: "import",
+      sourceURL: "https://github.com/team/private.git",
+    });
+    if (!updated) throw new Error("Missing updated draft");
+    expect(
+      (
+        await controller.create(manager, {
+          id: second.id,
+          version: updated.version,
+          commandID: crypto.randomUUID(),
+          importToken: "owned-private-token",
+        })
+      )?.state,
+    ).toBe("created");
+    await controller.recover();
+    expect(creates).toBe(2);
+    expect(repositories.size).toBe(2);
+    expect(credentials.size).toBe(0);
+    // A late successful observation of the previous operation still settles its
+    // exact intent and must not replace the new draft's selected Project.
+    const previousRepository = repositories.get("first-import");
+    if (!previousRepository) throw new Error("Previous repository was discarded");
+    previousRepository.empty = false;
+    await controller.recover();
+    const [retained] =
+      await database.client`SELECT * FROM factory.project_repository_intent WHERE setup_id=${first.id}`;
+    expect(retained?.["state"]).toBe("committed");
+    expect(retained?.["command_id"]).toBe(original?.["command_id"]);
+    expect(retained?.["source_url"]).toBe(original?.["source_url"]);
+    expect((await controller.view(manager))?.id).toBe(second?.id);
+    expect((await database.client`SELECT id FROM factory.project`).length).toBe(2);
+    expect(creates).toBe(2);
   } finally {
     await database.client.end({ timeout: 2 });
     await process.dispose();

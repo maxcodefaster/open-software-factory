@@ -107,6 +107,7 @@ const configurationPath = z
 export const setupFile = z
   .object({ path: configurationPath, content: z.string().min(1).max(64000) })
   .strict();
+export const setupFeedbackKey = "$feedback";
 export const setupQuestion = z
   .object({ id: z.string().min(1).max(40), question: z.string().min(1).max(500) })
   .strict();

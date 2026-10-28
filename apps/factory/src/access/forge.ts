@@ -16,13 +16,24 @@ export function createForgeAccessReconciliation(options: {
       await sql`SELECT pg_advisory_lock(hashtextextended(${`forge-branch:${projectID}:${branch}`},0))`;
       await sql`INSERT INTO factory.forge_branch_intent(project_id,branch,writers,merger)
         VALUES(${projectID},${branch},'{}',${owner}) ON CONFLICT(project_id,branch) DO NOTHING`;
+      const [setup] = await sql<{ pending: boolean }[]>`SELECT EXISTS(
+        SELECT 1 FROM factory.project_repository_intent intent
+        WHERE intent.project_id=${projectID} AND intent.kind='import' AND intent.state='committed'
+          AND NOT EXISTS(SELECT 1 FROM factory.project_setup_readiness task
+            WHERE task.project_id=${projectID} AND task.task='configuration' AND task.state='ready')
+      ) AS pending`;
       await forge.protectBranch({
         owner,
         repository,
         branch,
         writers: [],
         merger: owner,
-        protectedFiles: ".forgejo/workflows/factory-verification.yml",
+        // Initial setup owns the missing workflow's exact confirmed creation.
+        // Do not race that merge by adding its file rule before setup is ready.
+        // Omitting the field preserves existing rules; it never clears protection.
+        ...(setup?.pending
+          ? {}
+          : { protectedFiles: ".forgejo/workflows/factory-verification.yml" }),
       });
       await sql`UPDATE factory.forge_branch_intent SET confirmed=true WHERE project_id=${projectID} AND branch=${branch} AND writers='{}' AND merger=${owner}`;
     } finally {

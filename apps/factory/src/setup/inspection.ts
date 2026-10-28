@@ -1,6 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
 import {
+  setupFeedbackKey,
   setupInspectionCommand,
   setupInspectionOutput,
   setupInspectionView,
@@ -163,10 +164,17 @@ export function createSetupInspection(input: {
         throw new Error("Question context is unavailable");
       const output = setupInspectionOutput.parse(parent.output);
       rounds.unshift(
-        output.questions.map((question) => ({
-          question: question.question,
-          answer: child.answers[question.id] ?? "",
-        })),
+        !output.questions.length && child.answers[setupFeedbackKey]
+          ? [
+              {
+                question: "Requested configuration changes",
+                answer: child.answers[setupFeedbackKey],
+              },
+            ]
+          : output.questions.map((question) => ({
+              question: question.question,
+              answer: child.answers[question.id] ?? "",
+            })),
       );
       child = parent;
     }
@@ -225,15 +233,21 @@ export function createSetupInspection(input: {
             "Source changed. Inspect the current configuration again.",
           );
         const output = setupInspectionOutput.parse(parent.output);
+        const refining = output.files.length > 0 && !output.questions.length;
         if (
+          (refining && !command.answers[setupFeedbackKey]) ||
           output.questions.some((question) => !command.answers[question.id]) ||
           Object.keys(command.answers).some(
-            (key) => !output.questions.some((question) => question.id === key),
+            (key) =>
+              !(refining && key === setupFeedbackKey) &&
+              !output.questions.some((question) => question.id === key),
           )
         )
           throw new CommandError(
             "conflict",
-            "Answer the current setup questions before continuing",
+            refining
+              ? "Describe the required configuration changes before continuing"
+              : "Answer the current setup questions before continuing",
           );
         await transaction`UPDATE factory.project_setup_inspection SET state='superseded' WHERE id=${parent.id} AND state='proposal'`;
       }
@@ -330,13 +344,27 @@ export function createSetupInspection(input: {
           });
           if (pull.baseSha !== value.sourceCommit)
             throw new CommandError("conflict", "Main branch changed before setup merge");
-          await input.forge.mergeFastForward(
-            current.repository,
-            pull.number,
-            commit,
-            current.branch,
-          );
+          const merge = output.files.some(
+            (file) => file.path === ".forgejo/workflows/factory-verification.yml",
+          )
+            ? () =>
+                input.forge.mergeInitialSetupWorkflow(
+                  current.repository,
+                  pull.number,
+                  commit,
+                  current.branch,
+                  value.sourceCommit,
+                )
+            : () =>
+                input.forge.mergeFastForward(
+                  current.repository,
+                  pull.number,
+                  commit,
+                  current.branch,
+                );
+          await merge();
         }
+        await input.forge.protectSetupWorkflow(current.repository, current.branch);
         await sql`UPDATE factory.project_setup_inspection SET state='confirmed',failure=NULL,updated_at=now() WHERE id=${id} AND state='confirming'`;
         await input.ready(projectID, userID);
         return view(projectID, userID);

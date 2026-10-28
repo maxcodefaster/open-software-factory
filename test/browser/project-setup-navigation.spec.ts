@@ -1,15 +1,101 @@
 import { expect, test } from "@playwright/test";
-import { openProjectMenu } from "../fixtures/project-menu";
-import { signIn } from "../support/factory-fixture";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import {
   projectSetupView,
   setupInspectionView,
   setupReadiness,
 } from "../../packages/project-domain/src/setup";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { signIn } from "../support/factory-fixture";
 
 test.setTimeout(30_000);
+
+for (const device of [
+  { name: "desktop", width: 1440, height: 1000, hasTouch: false },
+  { name: "narrow", width: 390, height: 844, hasTouch: false },
+  { name: "touch", width: 390, height: 844, hasTouch: true },
+]) {
+  test.describe(`retained import recovery on ${device.name}`, () => {
+    test.use({
+      viewport: { width: device.width, height: device.height },
+      hasTouch: device.hasTouch,
+    });
+    test("starts another draft explicitly without replaying the previous import", async ({
+      page,
+    }) => {
+      let draft = projectSetupView.parse({
+        id: crypto.randomUUID(),
+        version: 1,
+        name: "Private app",
+        slug: "first-import",
+        kind: "import",
+        sourceURL: "https://github.com/team/private.git",
+        state: "checking",
+        projectID: null,
+        commandID: crypto.randomUUID(),
+        failure:
+          "Repository setup is unconfirmed. Factory is checking without repeating creation or import.",
+      });
+      const previousID = draft.id;
+      let starts = 0,
+        imports = 0;
+      await mockFactoryFunctions(page, {
+        setup: {
+          draft: async () => draft,
+          begin: async () => draft,
+          startAnother: async (_actor, id) => {
+            expect(id).toBe(previousID);
+            starts++;
+            draft = {
+              ...draft,
+              id: crypto.randomUUID(),
+              name: "",
+              slug: "",
+              sourceURL: "",
+              kind: "starter",
+              state: "draft",
+              commandID: null,
+              failure: null,
+            };
+            return draft;
+          },
+          create: async () => {
+            imports++;
+            throw new Error("Opening a draft must not import");
+          },
+        },
+      });
+      await signIn(page);
+      await openProjectMenu(page);
+      await page.getByRole("button", { name: "Continue setup", exact: true }).click();
+      const setup = page.getByRole("region", { name: "Project setup", exact: true });
+      await expect(
+        setup.getByText(
+          "Your previous repository and setup are retained. Use a different repository name for the new setup.",
+        ),
+      ).toBeVisible();
+      const emptyBoard = page.getByRole("region", { name: "Empty project board", exact: true });
+      await expect(emptyBoard.locator(".lane")).toHaveCount(4);
+      for (const lane of await emptyBoard.locator(".lane").all()) {
+        await expect(lane).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+        await expect(lane).toHaveCSS("border-top-width", "0px");
+        await expect(lane).toHaveCSS("border-radius", "0px");
+      }
+      await page.screenshot({ path: `.factory/test-results/setup-new-attempt-${device.name}.png` });
+      await setup.getByRole("button", { name: "Start another setup", exact: true }).click();
+      await expect(setup.getByRole("textbox", { name: "Project name", exact: true })).toHaveValue(
+        "",
+      );
+      await expect(setup.getByRole("button", { name: "Starter", exact: false })).toBeVisible();
+      expect(starts).toBe(1);
+      expect(imports).toBe(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        device.width,
+      );
+    });
+  });
+}
 
 async function openImportedSetup(page: Parameters<typeof signIn>[0]) {
   const projectID = crypto.randomUUID();

@@ -174,6 +174,76 @@ test("concurrent main protection creation observes the exact result after Forgej
   expect(reads).toBe(2);
 });
 
+describe("confirmed initial workflow merge", () => {
+  const workflow = ".forgejo/workflows/factory-verification.yml";
+  test.each([false, true])(
+    "only relaxes the missing workflow rule and restores protection after merge failure=%s",
+    async (failMerge) => {
+      let head = sha;
+      let patterns = `${workflow};secrets/**`;
+      const updates: string[] = [];
+      const client = createForgejoClient({
+        apiURL: "http://forge/api/v1/",
+        token: "owned-fixture",
+        fetch: async (input, init) => {
+          const path = new URL(String(input)).pathname;
+          if (path.endsWith("/branches/main")) return response(branch("main", head));
+          if (path.includes("/contents/")) return response({}, 404);
+          if (path.endsWith("/branch_protections/main")) {
+            if (init?.method === "PATCH") {
+              patterns = JSON.parse(String(init.body)).protected_file_patterns;
+              updates.push(patterns);
+            }
+            return response({
+              rule_name: "main",
+              enable_push: false,
+              protected_file_patterns: patterns,
+            });
+          }
+          if (path.endsWith("/pulls/1/merge")) {
+            expect(patterns).toBe("secrets/**");
+            if (failMerge) return response({}, 405);
+            head = "b".repeat(40);
+            return new Response(null, { status: 204 });
+          }
+          throw new Error(`Unexpected owned route ${path}`);
+        },
+      });
+      const merge = client.mergeInitialSetupWorkflow(repository, 1, "b".repeat(40), "main", sha);
+      if (failMerge) await expect(merge).rejects.toThrow("405");
+      else expect((await merge)?.headSha).toBe("b".repeat(40));
+      expect(updates).toEqual(["secrets/**", `secrets/**;${workflow}`]);
+    },
+  );
+  test.each(["existing-workflow", "changed-main", "writable-main"])(
+    "refuses to relax protection for %s",
+    async (boundary) => {
+      const client = createForgejoClient({
+        apiURL: "http://forge/api/v1/",
+        token: "owned-fixture",
+        fetch: async (input, init) => {
+          expect(init?.method ?? "GET").toBe("GET");
+          const path = new URL(String(input)).pathname;
+          if (path.endsWith("/branches/main"))
+            return response(branch("main", boundary === "changed-main" ? "c".repeat(40) : sha));
+          if (path.includes("/contents/"))
+            return boundary === "existing-workflow"
+              ? response({ content: Buffer.from("existing").toString("base64"), sha })
+              : response({}, 404);
+          return response({
+            rule_name: "main",
+            enable_push: true,
+            protected_file_patterns: workflow,
+          });
+        },
+      });
+      await expect(
+        client.mergeInitialSetupWorkflow(repository, 1, "b".repeat(40), "main", sha),
+      ).rejects.toThrow();
+    },
+  );
+});
+
 test.each(["absent", "writable", "wrong-branch", "unprotected-workflow"])(
   "a denied protection create does not claim success for %s observed state",
   async (boundary) => {

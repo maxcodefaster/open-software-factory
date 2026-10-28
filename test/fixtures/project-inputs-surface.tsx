@@ -8,7 +8,8 @@ import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
 import { fixtureValue } from "./value";
 
-const manager = new URLSearchParams(location.search).get("role") !== "viewer";
+const role = new URLSearchParams(location.search).get("role");
+const manager = role !== "viewer" && role !== "developer";
 render(
   () => (
     <main class="factory-desktop" aria-label="Isolated settings proof with synthetic requests">
@@ -34,7 +35,7 @@ render(
                 project={{ id: "10000000-0000-4000-8000-000000000001", name: "Invoice workspace" }}
                 systemManager={manager}
                 projectManager={manager}
-                developer={manager}
+                developer={role === "developer" || manager}
                 initialSelection={
                   new URLSearchParams(location.search).has("inputs-first")
                     ? { scope: "project", category: "monitoring" }

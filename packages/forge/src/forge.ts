@@ -316,10 +316,7 @@ export function createForgejoClient(options: {
           throw new ForgeConflictError("Created repository has an unexpected identity");
         return { defaultBranch: value.default_branch, empty: value.empty === true };
       } catch (error) {
-        if (
-          ambiguous(error) ||
-          (error instanceof ForgeHttpError && [409, 422].includes(error.status))
-        )
+        if (ambiguous(error) || (error instanceof ForgeHttpError && error.status === 409))
           throw new ForgeAmbiguousWriteError(
             "Repository creation needs an identity check before continuing",
           );
@@ -872,6 +869,58 @@ export function createForgejoClient(options: {
         });
       } catch (error) {
         if (!(error instanceof ForgeHttpError && error.status === 404)) throw error;
+      }
+    },
+    async mergeInitialSetupWorkflow(
+      repository: ForgeRepository,
+      pullRequestNumber: number,
+      expectedHeadSha: string,
+      defaultBranch: string,
+      baseCommit: string,
+    ) {
+      const workflow = ".forgejo/workflows/factory-verification.yml";
+      const current = await getBranch(repository, defaultBranch);
+      if (current?.headSha === expectedHeadSha) {
+        await this.protectSetupWorkflow(repository, defaultBranch);
+        return current;
+      }
+      if (current?.headSha !== baseCommit)
+        throw new ForgeConflictError("Main branch changed before initial setup merge");
+      if ((await this.getOptionalFile(repository, workflow, baseCommit)) !== null)
+        throw new ForgeConflictError(
+          "Initial setup cannot replace an existing Verification workflow",
+        );
+      const endpoint = `${repositoryPath(repository)}/branch_protections/${segment(defaultBranch)}`;
+      const protection = z.object({
+        rule_name: z.literal(defaultBranch),
+        enable_push: z.literal(false),
+        protected_file_patterns: z.string(),
+      });
+      const before = protection.parse(await json(endpoint));
+      const patterns = before.protected_file_patterns
+        .split(";")
+        .filter((pattern) => pattern !== workflow)
+        .join(";");
+      try {
+        // The workflow is proven absent at the exact confirmed source commit.
+        // Keep push/merge authority and every other protected path unchanged.
+        if (patterns !== before.protected_file_patterns) {
+          await json(endpoint, {
+            method: "PATCH",
+            body: JSON.stringify({ protected_file_patterns: patterns }),
+          });
+          const observed = protection.parse(await json(endpoint));
+          if (observed.protected_file_patterns !== patterns)
+            throw new ForgeConflictError("Initial setup protection change is unconfirmed");
+        }
+        return await this.mergeFastForward(
+          repository,
+          pullRequestNumber,
+          expectedHeadSha,
+          defaultBranch,
+        );
+      } finally {
+        await this.protectSetupWorkflow(repository, defaultBranch);
       }
     },
     async mergeFastForward(

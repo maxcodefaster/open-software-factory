@@ -1214,7 +1214,7 @@ async function main() {
   }
   console.log("Rejecting an unsafe outer-host bind mount before Docker create");
   await verifyUnsafeMountRejected();
-  console.log("Runtime conformance passed with Connector transport and complete inner cleanup", {
+  console.log("Runtime workload checks passed; owned worker/store cleanup is still required", {
     languageProof,
   });
 }
@@ -1264,3 +1264,6 @@ await writeFile(
     2,
   ),
 );
+console.log("Runtime conformance passed with confirmed owned worker/store cleanup", {
+  languageProof,
+});

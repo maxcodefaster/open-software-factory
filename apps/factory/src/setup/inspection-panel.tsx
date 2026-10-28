@@ -1,6 +1,9 @@
 import { createEffect, createSignal, For, onCleanup, Show } from "solid-js";
 import { z } from "zod";
-import type { SetupInspectionView } from "../../../../packages/project-domain/src/setup";
+import {
+  type SetupInspectionView,
+  setupFeedbackKey,
+} from "../../../../packages/project-domain/src/setup";
 import { APIRequestError } from "../api-client";
 import { serverCall } from "../server-functions/result";
 import {
@@ -31,6 +34,7 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
   const [reading, setReading] = createSignal(false);
   const [readFailed, setReadFailed] = createSignal(false);
   const [pending, setPending] = createSignal<z.infer<typeof retainedCommand>>();
+  const [correcting, setCorrecting] = createSignal(false);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   let readVersion = 0;
@@ -49,6 +53,7 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
     setValue(next);
     if (questionID === next?.id) return;
     questionID = next?.id;
+    setCorrecting(false);
     let retained: Record<string, string> = {};
     try {
       const saved = z
@@ -70,8 +75,7 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
       /* The current panel remains editable. */
     }
   }
-  async function load() {
-    const projectID = props.projectID;
+  async function load(projectID = props.projectID) {
     const version = ++readVersion;
     if (timer) clearTimeout(timer);
     setReading(true);
@@ -101,17 +105,17 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
     }
   }
   createEffect(
-    () => props.projectID,
-    () => {
+    () => ({ projectID: props.projectID, commandKey: commandKey() }),
+    ({ projectID, commandKey }) => {
       try {
         const saved = retainedCommand.safeParse(
-          JSON.parse(sessionStorage.getItem(commandKey()) ?? "null"),
+          JSON.parse(sessionStorage.getItem(commandKey) ?? "null"),
         );
         if (saved.success) setPending(saved.data);
       } catch {
         /* Current work remains available without local recovery storage. */
       }
-      void load();
+      void load(projectID);
     },
   );
   onCleanup(() => {
@@ -135,7 +139,8 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
           ? { id: current.id }
           : {
               id: crypto.randomUUID(),
-              ...(current?.output?.questions.length
+              ...(current?.state === "proposal" &&
+              (current.output?.questions.length || answers()[setupFeedbackKey])
                 ? { parentID: current.id, answers: { ...answers() } }
                 : {}),
             },
@@ -246,13 +251,51 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
                     )}
                   </For>
                 </details>
+                <Show when={value()?.state === "proposal"}>
+                  <button
+                    type="button"
+                    class="quiet-button"
+                    aria-expanded={correcting() ? "true" : "false"}
+                    onClick={() => setCorrecting((open) => !open)}
+                  >
+                    Request configuration changes
+                  </button>
+                  <Show when={correcting()}>
+                    <form
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void act();
+                      }}
+                    >
+                      <label>
+                        Requested configuration changes
+                        <textarea
+                          required
+                          maxlength={2000}
+                          disabled={blocked()}
+                          value={answers()[setupFeedbackKey] ?? ""}
+                          onInput={(event) => answer(setupFeedbackKey, event.currentTarget.value)}
+                        />
+                      </label>
+                      <p class="setup-note">
+                        Name the tools, ports or checks to correct. This requests another proposal;
+                        it does not apply configuration. Do not include credentials.
+                      </p>
+                      <button type="submit" class="quiet-button" disabled={blocked()}>
+                        {busy() && pending()?.operation === "inspect"
+                          ? "Revising proposal…"
+                          : "Request changes"}
+                      </button>
+                    </form>
+                  </Show>
+                </Show>
                 <button
                   type="button"
                   class="primary-button"
                   disabled={blocked()}
                   onClick={() => void act("confirm")}
                 >
-                  {busy()
+                  {busy() && pending()?.operation === "confirm"
                     ? "Applying configuration…"
                     : value()?.state === "confirming"
                       ? "Check confirmed setup"
