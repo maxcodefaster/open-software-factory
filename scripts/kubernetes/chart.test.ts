@@ -63,6 +63,10 @@ type Resource = {
           image: string;
           command?: string[];
           env?: Array<{ name: string; value?: string }>;
+          resources?: {
+            requests: Record<string, string>;
+            limits: Record<string, string>;
+          };
         }>;
         automountServiceAccountToken?: boolean;
         serviceAccountName?: string;
@@ -102,6 +106,43 @@ function resources() {
   })();
   return rendered;
 }
+
+test("maintenance resources are independently configurable without changing the upgrade fence", async () => {
+  const defaultJob = (await resources()).find((resource) => resource.kind === "Job");
+  expect(defaultJob?.spec?.template?.spec.containers[0]?.resources).toEqual({
+    requests: { cpu: "50m", memory: "64Mi" },
+    limits: { cpu: "1", memory: "256Mi" },
+  });
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set-string",
+    "maintenance.resources.requests.cpu=10m",
+    "--set-string",
+    "maintenance.resources.requests.memory=48Mi",
+    "--set-string",
+    "resources.requests.cpu=200m",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const all = parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource);
+  const job = all.find((resource) => resource.kind === "Job");
+  expect(job?.spec?.template?.spec.containers[0]?.resources).toEqual({
+    requests: { cpu: "10m", memory: "48Mi" },
+    limits: { cpu: "1", memory: "256Mi" },
+  });
+  expect(job?.spec?.template?.spec.containers[0]?.command).toEqual([
+    "bun",
+    "scripts/kubernetes/maintenance.ts",
+  ]);
+  expect(job?.metadata.annotations?.["helm.sh/hook"]).toBe("pre-upgrade");
+  expect(job?.spec?.template?.spec.automountServiceAccountToken).toBe(false);
+  expect(
+    all.find((resource) => resource.kind === "Deployment")?.spec?.template?.spec.containers[0]
+      ?.resources?.requests["cpu"],
+  ).toBe("200m");
+});
 
 test.each(["arm64", "amd64"] as const)(
   "the chart preserves an explicit %s worker profile independently of application placement",

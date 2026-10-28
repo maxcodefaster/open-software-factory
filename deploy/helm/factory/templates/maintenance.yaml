@@ -34,5 +34,4 @@ spec:
             - name: DATABASE_URL
               value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc:5432/factory"
           resources:
-            requests: {cpu: 50m, memory: 64Mi}
-            limits: {cpu: "1", memory: 256Mi}
+            {{- toYaml .Values.maintenance.resources | nindent 12 }}
