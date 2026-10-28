@@ -223,6 +223,13 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
 		return err
 	}
+	if prepared == nil {
+		// The CLI's standalone image path has no Compose label. Preserve that
+		// observed absence instead of substituting the logical Workspace name.
+		// Browser and cleanup still require this exact primary/attempt/generation.
+		origin := containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, result.ComposeProjectName}
+		assignment.containerOrigin = &origin
+	}
 	state := parentState{
 		RuntimeAttemptID:   assignment.RuntimeAttemptID,
 		Generation:         assignment.Generation,
@@ -1199,11 +1206,8 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	if err := validateContainerBoundary(container, assignment); err != nil {
 		return devcontainerResult{}, err
 	}
-	// Factory ownership still comes from exact attempt/generation labels. The
-	// standalone CLI path has no Compose project label and needs exact cleanup.
-	if result.ComposeProjectName == "" {
-		result.ComposeProjectName = assignment.ComposeProjectName
-	}
+	// A standalone primary has no Compose owner. Keep its actual CLI identity;
+	// exact attempt/generation and primary ID own browser access and cleanup.
 	return result, nil
 }
 
