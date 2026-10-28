@@ -28,21 +28,30 @@ const exactImage = z
         .every((part) => part !== "" && part !== "." && part !== ".."),
     { message: "Runtime images need a qualified registry and canonical repository path" },
   );
-export const factoryboxRuntimeProfile = z.strictObject({
-  image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
-  executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
-  architecture: z.enum(["arm64", "amd64"]),
-  nodeName: z
-    .string()
-    .regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/)
-    .max(253),
-  kernel: z
-    .string()
-    .regex(/^[a-zA-Z0-9._+-]+$/)
-    .max(256),
-  boundedBytes: z.literal(8 * 1024 ** 3),
-  claimGiB: z.literal(32),
-});
+export const factoryboxRuntimeProfile = z
+  .strictObject({
+    image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
+    executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+    architecture: z.enum(["arm64", "amd64"]),
+    nodeName: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/)
+      .max(253),
+    kernel: z
+      .string()
+      .regex(/^[a-zA-Z0-9._+-]+$/)
+      .max(256),
+    boundedBytes: z
+      .number()
+      .int()
+      .min(8 * 1024 ** 3)
+      .max(32 * 1024 ** 3)
+      .multipleOf(1024 ** 3),
+    claimGiB: z.number().int().min(32).max(1024),
+  })
+  .refine((value) => value.claimGiB * 1024 ** 3 >= value.boundedBytes + 17 * 1024 ** 3, {
+    message: "Worker PVC must cover the bounded image, 16 GiB host admission floor and metadata",
+  });
 export type FactoryboxRuntimeProfile = z.infer<typeof factoryboxRuntimeProfile>;
 
 export function configuredFactoryboxRuntimeProfile(
@@ -54,8 +63,8 @@ export function configuredFactoryboxRuntimeProfile(
     architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
-    boundedBytes: 8 * 1024 ** 3,
-    claimGiB: 32,
+    boundedBytes: Number(environment["FACTORY_FACTORYBOX_BOUNDED_BYTES"] ?? 8 * 1024 ** 3),
+    claimGiB: Number(environment["FACTORY_FACTORYBOX_CLAIM_GIB"] ?? 32),
   });
 }
 
@@ -157,7 +166,7 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
     claim: {
       ...resources[1],
       metadata: { ...resources[1].metadata, labels },
-      spec: runtimeVolumeClaimSpec("32Gi"),
+      spec: runtimeVolumeClaimSpec(`${request.claimGiB}Gi`),
     },
     pod: {
       ...resources[2],

@@ -17,6 +17,10 @@ factorybox:
   architecture: ""
   nodeName: ""
   kernel: ""
+  # Choose before the first execution. Existing worker profiles are immutable.
+  storeGiB: 8
+  # Includes the bounded image, 16 GiB admission floor and metadata headroom.
+  claimGiB: 32
 executionReserveTarget: 2
 
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.

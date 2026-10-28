@@ -144,6 +144,57 @@ test("maintenance resources are independently configurable without changing the 
   ).toBe("200m");
 });
 
+test("worker storage capacity is explicit before its immutable first admission", async () => {
+  const defaultConfig = (await resources()).find(
+    (resource) =>
+      resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
+  );
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(8 * 1024 ** 3));
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("32");
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set",
+    "factorybox.storeGiB=24",
+    "--set",
+    "factorybox.claimGiB=48",
+  ]);
+  expect(result.exitCode).toBe(0);
+  const config = parseAllDocuments(result.stdout)
+    .map((document) => document.toJSON() as Resource)
+    .find(
+      (resource) =>
+        resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
+    );
+  expect(config?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(24 * 1024 ** 3));
+  expect(config?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("48");
+});
+
+test.each([
+  { store: "7", claim: "32" },
+  { store: "33", claim: "64" },
+  { store: "8.5", claim: "32" },
+  { store: "24", claim: "40" },
+  { store: "8", claim: "31" },
+  { store: "8", claim: "32.5" },
+  { store: "8", claim: "2048" },
+])("worker storage capacity rejects invalid operator values $store/$claim", async (capacity) => {
+  const result = await helm([
+    "template",
+    "portable",
+    chart,
+    ...localValues,
+    "--set-string",
+    `factorybox.storeGiB=${capacity.store}`,
+    "--set-string",
+    `factorybox.claimGiB=${capacity.claim}`,
+  ]);
+  expect(result.exitCode).not.toBe(0);
+  expect(result.stderr).toContain("factorybox.");
+});
+
 test.each(["arm64", "amd64"] as const)(
   "the chart preserves an explicit %s worker profile independently of application placement",
   async (architecture) => {

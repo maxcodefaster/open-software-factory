@@ -280,6 +280,53 @@ test.each(["arm64", "amd64"] as const)(
   },
 );
 
+test.each([
+  { storeGiB: 8, claimGiB: 32 },
+  { storeGiB: 24, claimGiB: 48 },
+  { storeGiB: 32, claimGiB: 64 },
+])("operator storage profile retains $storeGiB GiB within its $claimGiB GiB claim", (capacity) => {
+  const profile = configuredFactoryboxRuntimeProfile({
+    FACTORY_FACTORYBOX_WORKER_IMAGE: input.profile.image,
+    FACTORY_FACTORYBOX_EXECUTABLE_SHA256: input.profile.executableSHA256,
+    FACTORY_FACTORYBOX_ARCHITECTURE: input.profile.architecture,
+    FACTORY_FACTORYBOX_NODE: input.profile.nodeName,
+    FACTORY_FACTORYBOX_KERNEL: input.profile.kernel,
+    FACTORY_FACTORYBOX_BOUNDED_BYTES: String(capacity.storeGiB * 1024 ** 3),
+    FACTORY_FACTORYBOX_CLAIM_GIB: String(capacity.claimGiB),
+  });
+  expect(profile.boundedBytes).toBe(capacity.storeGiB * 1024 ** 3);
+  expect(profile.claimGiB).toBe(capacity.claimGiB);
+  const rendered = renderFactoryboxRuntime({ ...input, profile });
+  expect(rendered.claim.spec.resources.requests.storage).toBe(`${capacity.claimGiB}Gi`);
+  const worker = fixtureValue(rendered.pod.spec.containers[0], "worker");
+  expect(worker.args).toContain(String(capacity.storeGiB * 1024 ** 3));
+  expect(worker.resources).toEqual({
+    requests: { cpu: "3", memory: "3Gi" },
+    limits: { cpu: "3", memory: "3Gi" },
+  });
+});
+
+test.each([
+  { bytes: String(7 * 1024 ** 3), claim: "32" },
+  { bytes: String(33 * 1024 ** 3), claim: "64" },
+  { bytes: String(8 * 1024 ** 3 + 1), claim: "32" },
+  { bytes: String(24 * 1024 ** 3), claim: "40" },
+  { bytes: String(8 * 1024 ** 3), claim: "32.5" },
+  { bytes: "not-a-capacity", claim: "32" },
+])("operator storage profile rejects an unadmitted capacity $bytes/$claim", (capacity) => {
+  expect(() =>
+    configuredFactoryboxRuntimeProfile({
+      FACTORY_FACTORYBOX_WORKER_IMAGE: input.profile.image,
+      FACTORY_FACTORYBOX_EXECUTABLE_SHA256: input.profile.executableSHA256,
+      FACTORY_FACTORYBOX_ARCHITECTURE: input.profile.architecture,
+      FACTORY_FACTORYBOX_NODE: input.profile.nodeName,
+      FACTORY_FACTORYBOX_KERNEL: input.profile.kernel,
+      FACTORY_FACTORYBOX_BOUNDED_BYTES: capacity.bytes,
+      FACTORY_FACTORYBOX_CLAIM_GIB: capacity.claim,
+    }),
+  ).toThrow();
+});
+
 for (const scenario of [
   "running",
   "failed",

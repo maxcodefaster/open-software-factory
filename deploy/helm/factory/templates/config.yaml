@@ -1,6 +1,14 @@
 {{- if not (has .Values.factorybox.architecture (list "arm64" "amd64")) }}
 {{- fail "factorybox.architecture must be arm64 or amd64" }}
 {{- end }}
+{{- $storeGiB := int .Values.factorybox.storeGiB }}
+{{- $claimGiB := int .Values.factorybox.claimGiB }}
+{{- if or (ne (toString .Values.factorybox.storeGiB) (printf "%d" $storeGiB)) (lt $storeGiB 8) (gt $storeGiB 32) }}
+{{- fail "factorybox.storeGiB must be a whole number between 8 and 32" }}
+{{- end }}
+{{- if or (ne (toString .Values.factorybox.claimGiB) (printf "%d" $claimGiB)) (lt $claimGiB 32) (gt $claimGiB 1024) (lt $claimGiB (add $storeGiB 17)) }}
+{{- fail "factorybox.claimGiB must be a whole number between 32 and 1024 and at least storeGiB + 17" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -46,6 +54,8 @@ data:
   FACTORY_FACTORYBOX_ARCHITECTURE: {{ required "factorybox.architecture must be arm64 or amd64" .Values.factorybox.architecture | quote }}
   FACTORY_FACTORYBOX_NODE: {{ required "factorybox.nodeName is required" .Values.factorybox.nodeName | quote }}
   FACTORY_FACTORYBOX_KERNEL: {{ required "factorybox.kernel is required" .Values.factorybox.kernel | quote }}
+  FACTORY_FACTORYBOX_BOUNDED_BYTES: {{ mul $storeGiB 1073741824 | quote }}
+  FACTORY_FACTORYBOX_CLAIM_GIB: {{ $claimGiB | quote }}
 ---
 apiVersion: v1
 kind: ConfigMap

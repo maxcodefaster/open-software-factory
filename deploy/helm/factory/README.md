@@ -63,6 +63,18 @@ its confirmed cleanup. The Factory Deployment uses the same progress window. Con
 validation exceeded the former ten-minute default before bootstrap settled; a
 timeout does not authorize resetting retained state or deleting an in-flight claim.
 
+Size private execution storage before the first execution pins the worker profile.
+`factorybox.storeGiB` defaults to 8 and accepts whole sizes from 8 through 32 GiB.
+`factorybox.claimGiB` defaults to 32 and must cover the bounded image plus 17 GiB
+for the host admission floor and metadata. For example, a 24 GiB bounded image needs
+at least a 41 GiB claim; a 48 GiB claim leaves additional room. The worker's
+3 CPU / 3 GiB limits do not change. Canonical Project source remains on its separate
+claim; source files are not moved into the bounded image.
+Changing these values is not an in-place storage expansion. An already observed
+worker refuses a different profile and retains its original objects and data.
+Larger storage does not qualify a new node, kernel or storage backend; native
+admission and lifecycle verification still apply.
+
 Factory bootstraps the retained database, encrypted OpenBao and its scoped credentials, Forgejo
 service identities and the native OIDC connection. It checks actual writable runtime storage.
 Public readiness requires that complete bootstrap, not merely an open application port.
