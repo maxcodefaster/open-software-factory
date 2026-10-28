@@ -1,5 +1,81 @@
 import { expect, test } from "bun:test";
 import { probeModel } from "./probe";
+import { fakeResponsesOutput } from "../../../../test/support/fake-openai-responses";
+
+test.each(["gpt-6-luna", "gpt-6.1-sol"])(
+  "native Planning probe uses Responses tools and structured output for %s",
+  async (modelID) => {
+    let requests = 0;
+    const paths: string[] = [];
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        requests++;
+        const path = new URL(request.url).pathname;
+        paths.push(path);
+        if (path !== "/v1/responses")
+          return Response.json(
+            { error: { message: "Reasoning tools need Responses" } },
+            { status: 422 },
+          );
+        const body = await request.json();
+        expect(body.model).toBe(modelID);
+        expect(body.store).toBe(false);
+        expect(body.reasoning?.effort).not.toBe("none");
+        if (requests === 2) expect(JSON.stringify(body.input)).toContain("factory-connection-ok");
+        const item =
+          requests === 1
+            ? {
+                type: "function_call" as const,
+                id: "owned-probe-item",
+                call_id: "owned-probe-call",
+                name: "probe",
+                arguments: "{}",
+              }
+            : {
+                type: "message" as const,
+                id: "owned-probe-answer",
+                role: "assistant" as const,
+                content: [
+                  {
+                    type: "output_text" as const,
+                    annotations: [] as never[],
+                    text: JSON.stringify({ verified: true, value: "factory-connection-ok" }),
+                  },
+                ],
+              };
+        if (body.stream) return fakeResponsesOutput(item);
+        return Response.json({
+          id: "resp_owned_probe",
+          created_at: 1,
+          status: "completed",
+          model: modelID,
+          output: [item],
+          error: null,
+          incomplete_details: null,
+          usage: { input_tokens: 3, output_tokens: 2 },
+        });
+      },
+    });
+    try {
+      const result = await probeModel({
+        connection: {
+          provider: "openai",
+          apiKey: "owned-responses-probe",
+          baseURL: `http://127.0.0.1:${server.port}/v1`,
+        },
+        modelId: modelID,
+        signal: AbortSignal.timeout(3000),
+      });
+      expect(result).toMatchObject({ status: "ready", toolCall: true, structuredOutput: true });
+      expect(requests).toBe(2);
+      expect(paths).toEqual(["/v1/responses", "/v1/responses"]);
+    } finally {
+      await server.stop(true);
+    }
+  },
+);
 
 test("actual native probe executes a tool and structured output in two requests with reported limits", async () => {
   let requests = 0;

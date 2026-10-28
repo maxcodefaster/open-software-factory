@@ -10,14 +10,15 @@ const labels = {
   protection: "Protected main branch",
   hook: "Automatic repository updates",
   wiki: "Project Wiki",
-  development: "Development image",
-  "preview-image": "Preview image",
+  development: "Development image preparation",
+  "preview-image": "Preview image preparation",
   "main-preview": "Main Preview",
 } as const satisfies Record<SetupTask, string>;
 
 export function SetupReadiness(props: { projectID: string; canRetry?: boolean }) {
   const [rows, setRows] = createSignal<SetupTaskView[]>([]);
   const [error, setError] = createSignal("");
+  const [reading, setReading] = createSignal(false);
   const [retrying, setRetrying] = createSignal<SetupTask>();
   const [refresh, setRefresh] = createSignal(0);
   createEffect(
@@ -26,6 +27,7 @@ export function SetupReadiness(props: { projectID: string; canRetry?: boolean })
       let disposed = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       async function load() {
+        setReading(true);
         try {
           const value = await serverCall(getSetupReadiness({ data: [projectID] }));
           if (disposed) return;
@@ -38,6 +40,8 @@ export function SetupReadiness(props: { projectID: string; canRetry?: boolean })
             timer = setTimeout(() => void load(), 2500);
         } catch {
           if (!disposed) setError("Preparation status is unavailable. Your project is retained.");
+        } finally {
+          if (!disposed) setReading(false);
         }
       }
       void load();
@@ -75,7 +79,14 @@ export function SetupReadiness(props: { projectID: string; canRetry?: boolean })
               </span>
               <span>
                 {labels[row().task]}
-                <Show when={row().state === "failed" && row().failure}>
+                <Show
+                  when={
+                    row().failure &&
+                    (row().state === "failed" ||
+                      (row().state === "ready" &&
+                        (row().task === "development" || row().task === "preview-image")))
+                  }
+                >
                   <small>{row().failure}</small>
                 </Show>
               </span>
@@ -94,9 +105,19 @@ export function SetupReadiness(props: { projectID: string; canRetry?: boolean })
         </For>
       </ul>
       <Show when={error()}>
-        <p class="form-error" role="alert">
-          {error()}
-        </p>
+        <div class="control-actions">
+          <p class="form-error" role="alert">
+            {error()}
+          </p>
+          <button
+            class="quiet-button"
+            type="button"
+            disabled={reading()}
+            onClick={() => setRefresh((value) => value + 1)}
+          >
+            {reading() ? "Checking preparation status…" : "Retry preparation status"}
+          </button>
+        </div>
       </Show>
     </section>
   );

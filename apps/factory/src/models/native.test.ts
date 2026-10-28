@@ -13,6 +13,15 @@ test("native catalogue comes from pinned Mastra and contains only Factory-suppor
   });
 });
 
+test.each(["gpt-6-luna", "gpt-6.1-sol"])(
+  "native %s reasoning uses the Responses SDK without an enterprise URL override too",
+  async (modelID) => {
+    const model = await nativeModel({ provider: "openai", apiKey: "unused-native-model" }, modelID);
+    if (typeof model !== "object" || model === null) throw new Error("Missing native SDK model");
+    expect(Reflect.get(model, "provider")).toBe("openai.responses");
+  },
+);
+
 test("conversation model choices omit known non-conversation OpenAI model families", async () => {
   const models = (await providerCatalogue()).find((entry) => entry.provider === "openai")?.models;
   expect(models).toContain("gpt-4.1");
