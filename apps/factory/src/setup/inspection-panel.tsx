@@ -142,7 +142,9 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
               ...(current?.state === "proposal" &&
               (current.output?.questions.length || answers()[setupFeedbackKey])
                 ? { parentID: current.id, answers: { ...answers() } }
-                : {}),
+                : current?.state === "failed"
+                  ? { parentID: current.id }
+                  : {}),
             },
     };
     setPending(command);
@@ -324,10 +326,14 @@ export function SetupInspection(props: { projectID: string; storageKey: string }
             disabled={blocked()}
             onClick={() => void act()}
           >
-            {busy() ? "Inspecting…" : "Inspect project setup"}
+            {busy()
+              ? "Inspecting…"
+              : value()?.state === "failed"
+                ? "Retry setup inspection"
+                : "Inspect project setup"}
           </button>
         </Show>
-        <Show when={value()?.failure}>
+        <Show when={value()?.failure && pending()?.operation !== "inspect"}>
           <p class="setup-note">{value()?.failure}</p>
         </Show>
       </Show>
