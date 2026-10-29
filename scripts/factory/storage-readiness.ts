@@ -6,18 +6,32 @@ import { kubernetesCommand } from "../../packages/runtime-kubernetes/src/config"
 import { runtimeVolumeClaimSpec } from "../../packages/runtime-kubernetes/src/storage";
 import { requirePinnedImage } from "./preflight";
 
-const intentSchema = z.object({
-  version: z.literal(1),
-  id: z.uuid(),
-  image: z.string(),
-  storageClass: z.string().optional(),
-  namespaceUID: z.string().nullable(),
-  claimUID: z.string().nullable(),
-  podUID: z.string().nullable(),
-  volume: z.object({ name: z.string(), uid: z.string() }).nullable(),
-  cleanupIntended: z.boolean(),
-  podDeleteIntended: z.boolean().default(false),
-});
+const intentSchema = z
+  .object({
+    version: z.literal(1),
+    id: z.uuid(),
+    image: z.string(),
+    storageClass: z.string().optional(),
+    namespaceUID: z.string().nullable(),
+    claimUID: z.string().nullable(),
+    podUID: z.string().nullable(),
+    volume: z.object({ name: z.string(), uid: z.string() }).nullable(),
+    cleanupIntended: z.boolean(),
+    podDeleteIntended: z.boolean().default(false),
+    writeVerified: z.boolean().default(false),
+  })
+  .refine(
+    (intent) =>
+      !intent.writeVerified ||
+      Boolean(
+        intent.cleanupIntended &&
+          intent.namespaceUID &&
+          intent.claimUID &&
+          intent.podUID &&
+          intent.volume,
+      ),
+    "Verified storage check is missing its original resource identities",
+  );
 type Intent = z.infer<typeof intentSchema>;
 const metadata = z.object({
   name: z.string(),
@@ -146,6 +160,7 @@ async function storageCheck(
         volume: null,
         cleanupIntended: false,
         podDeleteIntended: false,
+        writeVerified: false,
       };
   requirePinnedImage(intent.image);
   const namespace = `factory-storage-check-${intent.id.replaceAll("-", "")}`;
@@ -157,7 +172,7 @@ async function storageCheck(
   let deadline = Date.now() + (input.timeoutMS ?? 180_000);
   const snapshots: unknown[] = [];
   let fingerprint = "";
-  let verified = false;
+  let verified = intent.writeVerified;
   const started = performance.now();
   let retryFailedPod = Boolean(existing);
   async function protectedWrite(path: string, value: unknown) {
@@ -475,6 +490,22 @@ async function storageCheck(
       await persist();
       await cleanup();
       if (cleanupOnly) return;
+      // Complete this same checked operation after a delayed reclaimer or lost
+      // deletion reply. Starting another probe here can trap a slow cluster in
+      // endless successful checks whose cleanup never fits one startup.
+      if (
+        verified &&
+        intent.image === input.image &&
+        (intent.storageClass ?? "") === (process.env["FACTORY_STORAGE_CLASS"] ?? "")
+      ) {
+        await diagnostic();
+        return {
+          checkID: intent.id,
+          namespace,
+          elapsedMS: Math.round(performance.now() - started),
+          diagnosticFile,
+        };
+      }
       return requireWritableRuntimeStorage(input, command);
     }
     if (intent.podDeleteIntended) {
@@ -556,6 +587,7 @@ async function storageCheck(
             throw new Error("Storage-check volume identity differs from the owned claim");
           intent.volume = { name: volumeName, uid: volume.metadata.uid };
           verified = true;
+          intent.writeVerified = true;
           intent.cleanupIntended = true;
           await persist();
           await diagnostic();

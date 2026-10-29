@@ -38,6 +38,12 @@ before replacement. Upgrades preserve durable state and do not resubmit inferenc
 availability, automatic cluster management and migration of the disposable development
 installation are outside this decision.
 
+Startup retains a successful storage write/read result with its original probe identities until
+cleanup is confirmed. After interruption, it finishes that same cleanup instead of creating another
+probe. Changed image or storage-class inputs still require a fresh check. This is recovery of one
+unfinished operation, not cached readiness for later starts; replacement identities and foreign
+resources continue to refuse cleanup.
+
 The maintenance fence serializes with inference admission in PostgreSQL, including detached
 background workers. An idle-check followed by an unrelated deployment command would leave a
 window for new paid work. A busy installation refuses upgrade instead of interrupting it.
