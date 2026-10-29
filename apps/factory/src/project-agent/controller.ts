@@ -1,22 +1,24 @@
-import { z } from "zod";
 import { setTimeout as wait } from "node:timers/promises";
+import { z } from "zod";
 import {
   type AgentTurnCommand,
   agentTurnCommandInput,
 } from "../../../../packages/conversation-domain/src/agent-turn";
+import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 import {
   assertModeAuthority,
   type ConversationMode,
-  type PlanningIntent,
   type InterviewAnswer,
   interviewQuestionInput,
   normalizeInterviewAnswer,
+  type PlanningIntent,
   type ProjectAgentOutput,
   sourceCitationInput,
 } from "../../../../packages/conversation-domain/src/conversation";
 import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { ProjectAgentProgress } from "../../../../packages/conversation-domain/src/turn-observation";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { technicalPlanningBaseInput } from "../../../../packages/requirement-domain/src/technical-design";
 import {
   createAccessController,
   projectAuthorityIn,
@@ -29,46 +31,44 @@ import {
   createAgentTurnStore,
 } from "../agent/turn-store";
 import { createUsageObservations } from "../agent/usage-observations";
+import { attachmentContextIn, readableAttachmentIn } from "../attachments/store";
+import { createAttachmentTools } from "../attachments/tools";
 import type { ChangeView } from "../change/types";
 import { CommandError } from "../command-error";
-import { createAttachmentTools } from "../attachments/tools";
-import { attachmentContextIn, readableAttachmentIn } from "../attachments/store";
-import { attachmentURL } from "../../../../packages/conversation-domain/src/attachments";
 import { codeReadInput } from "../knowledge/code-read";
 import type { createKnowledgeController } from "../knowledge/controller";
+import { type LearningSourceArtifact, retainLearningArtifactsIn } from "../learning/artifacts";
+import type { createMCPConnections } from "../mcp/connections";
+import { mcpDigest } from "../mcp/controller";
+import { connectFactoryMCP } from "../mcp/factory";
+import { mcpSourceTools } from "../mcp/sources";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
 import { knownModelRejection, ModelExecutionBoundError } from "../models/execution-policy";
 import type { ResolvedModelConnection } from "../models/native";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { createSkillController } from "../skills/controller";
+import { renderArchitectureDiagrams } from "../technical-design/diagrams";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
 import { generateProjectResponse, projectModelConnection } from "./adapter";
 import { ProjectContextLimitError } from "./context";
+import { contextIn, contextsIn } from "./conversation-contexts";
 import {
   appendConversationEntry,
   type Citation,
   type ConversationEntry,
   type ConversationRow,
-  lockConversation,
   ensureConversationIn,
+  lockConversation,
 } from "./conversation-store";
 import { persistProjectOutput } from "./effects";
 import { createEpicConfirmation } from "./epic-confirmation";
-import { canAdvanceInterviewRound } from "./interview-round";
 import { isRequirementsInterview, planningRequest } from "./interview-intent";
-import { technicalPlanningBaseInput } from "../../../../packages/requirement-domain/src/technical-design";
-import { renderArchitectureDiagrams } from "../technical-design/diagrams";
+import { canAdvanceInterviewRound } from "./interview-round";
 import { readResearch, searchResearch } from "./research";
 import { ProjectAgentOutputError } from "./structured-output";
 import { admittedProjectContext, admittedTicketContext } from "./ticket-context";
-import type { createMCPConnections } from "../mcp/connections";
-import { mcpSourceTools } from "../mcp/sources";
-import { mcpDigest } from "../mcp/controller";
-import { contextIn, contextsIn } from "./conversation-contexts";
-import { connectFactoryMCP } from "../mcp/factory";
-import { retainLearningArtifactsIn, type LearningSourceArtifact } from "../learning/artifacts";
 
 export { projectAgentStructuredOutput, projectAgentStructuredOutputFor } from "./adapter";
 
@@ -675,6 +675,10 @@ export function createProjectAgentController(
         });
     }, 10_000);
     timer.unref();
+    // Observe normal dispatches too, not only work found at process startup.
+    // A provider promise may outlive its lease, or settlement may correctly
+    // refuse an expired owner. Neither may leave the UI busy indefinitely.
+    void track(recoverTurn(owner.id)).catch(() => {});
     try {
       let output: ProjectAgentOutput;
       const learningArtifacts: LearningSourceArtifact[] = [];
@@ -993,25 +997,30 @@ export function createProjectAgentController(
       // lease boundary until terminal, without stealing work or polling each second.
       // SQL remains authoritative if clocks drift or another owner renews the lease.
       while (!closed) {
-        const record = await turns.get(id);
-        if (!record || record.authority.mode === "build" || "changeId" in record.command) return;
-        if (record.state === "pending") {
-          await respond(record);
-          if ((await turns.get(id))?.state !== "pending") return;
-        } else if (record.state === "dispatching" || record.state === "running") {
-          if (await turns.quarantineExpiredProject(id)) {
-            await createUsageJournal(database).abandon(`turn:${id}`);
-            return;
-          }
-        } else return;
-        const expiry = record.ownerExpiresAt
-          ? new Date(record.ownerExpiresAt).getTime()
-          : Date.now();
-        await wait(Math.max(25, Math.min(30_000, expiry - Date.now() + 25)), undefined, {
-          signal: lifetime.signal,
-        }).catch((cause) => {
-          if (!closed) throw cause;
-        });
+        try {
+          const record = await turns.get(id);
+          if (!record || record.authority.mode === "build" || "changeId" in record.command) return;
+          if (record.state === "pending") {
+            // Dispatch is tracked independently. Awaiting a provider here would
+            // stop this very watcher from observing its lost lease.
+            void respond(record).catch(() => {});
+          } else if (record.state === "dispatching" || record.state === "running") {
+            if (await turns.quarantineExpiredProject(id)) {
+              await createUsageJournal(database).abandon(`turn:${id}`);
+              return;
+            }
+          } else return;
+          const expiry = record.ownerExpiresAt
+            ? new Date(record.ownerExpiresAt).getTime()
+            : Date.now();
+          await wait(Math.max(25, Math.min(30_000, expiry - Date.now() + 25)), undefined, {
+            signal: lifetime.signal,
+          });
+        } catch {
+          // A failed observation is not a terminal result. Keep observing the
+          // same identity at the existing lease cadence, never replay dispatch.
+          if (!closed) await wait(30_000, undefined, { signal: lifetime.signal }).catch(() => {});
+        }
       }
     } finally {
       recovering.delete(id);
