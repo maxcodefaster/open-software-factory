@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import {
   knowledgeGenerationSchema,
   knowledgeSearchSchema,
@@ -13,6 +12,7 @@ import { CommandError } from "../../apps/factory/src/command-error";
 import { documentBlocks } from "../../apps/factory/src/document-model";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
@@ -20,9 +20,9 @@ import {
   mockFactoryFunctions,
   requestFunction,
 } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
-import { fixtureValue } from "../fixtures/value";
 
 let userID = "";
 const evidenceDirectory = ".factory/test-results/document-coherence";
@@ -422,6 +422,7 @@ test("renders formatted Ticket revision summaries with current state and keyboar
   await page.keyboard.press("Escape");
   await expect(history).toBeHidden();
   await expect(page.getByRole("button", { name: "Ticket actions", exact: true })).toBeFocused();
+  await page.screenshot({ path: `${evidenceDirectory}/spec-history-focus-restored.png` });
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
   await opener.click();
   await page.getByRole("tab", { name: title, exact: true }).click();
@@ -436,6 +437,10 @@ test("renders formatted Ticket revision summaries with current state and keyboar
   await page.keyboard.press("Tab");
   await expect(history).toBeVisible();
   await expect(history.getByRole("button", { name: "Close history" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(history).toBeHidden();
+  await expect(page.getByRole("button", { name: "Ticket actions", exact: true })).toBeFocused();
+  await page.screenshot({ path: `${evidenceDirectory}/spec-history-focus-restored-narrow.png` });
 });
 
 test("Knowledge click-edit shares rich blocks, selection formatting and lossless immutable saves", async ({
