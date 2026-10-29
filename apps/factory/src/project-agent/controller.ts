@@ -906,11 +906,13 @@ export function createProjectAgentController(
           knownFailure ? "failed" : "uncertain",
           lostAuthority
             ? "The Project Agent execution authority changed. Your input is saved; no response was published."
-            : cause instanceof ProjectAgentOutputError || cause instanceof ProjectContextLimitError
-              ? cause.message
-              : knownFailure
-                ? "The provider rejected this request or a configured bound was reached. Your input is saved."
-                : "The provider outcome could not be established. The same command will not be submitted again.",
+            : cause instanceof ProjectAgentOutputError
+              ? cause.retainedMessage
+              : cause instanceof ProjectContextLimitError
+                ? cause.message
+                : knownFailure
+                  ? "The provider rejected this request or a configured bound was reached. Your input is saved."
+                  : "The provider outcome could not be established. The same command will not be submitted again.",
         );
         throw lostAuthority ?? cause;
       } finally {

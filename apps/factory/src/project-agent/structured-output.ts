@@ -118,7 +118,10 @@ export class ProjectAgentOutputError extends Error {
     }
     // Paths/codes only. Never retain provider request bodies, generated text,
     // credentials or raw SDK error details in a public-facing error.
-    this.diagnostic = diagnostic;
+    this.diagnostic = diagnostic.length > 1024 ? `${diagnostic.slice(0, 1021)}...` : diagnostic;
+  }
+  get retainedMessage() {
+    return `${this.message} Validation: ${this.diagnostic}`;
   }
 }
 
