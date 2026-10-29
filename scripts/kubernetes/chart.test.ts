@@ -63,6 +63,11 @@ type Resource = {
           image: string;
           command?: string[];
           env?: Array<{ name: string; value?: string }>;
+          startupProbe?: {
+            exec: { command: string[] };
+            periodSeconds: number;
+            failureThreshold: number;
+          };
           resources?: {
             requests: Record<string, string>;
             limits: Record<string, string>;
@@ -527,6 +532,11 @@ test("every upgrade replaces Factory even when its image and configuration are u
 test("cold installation progress allows the documented twenty-minute readiness window", async () => {
   const application = (await resources()).find((resource) => resource.kind === "Deployment");
   expect(application?.spec?.progressDeadlineSeconds).toBe(1_200);
+  const probe = application?.spec?.template?.spec.containers[0]?.startupProbe;
+  expect(probe?.exec.command).toEqual(["bun", "scripts/kubernetes/healthcheck.ts"]);
+  expect((probe?.periodSeconds ?? 0) * (probe?.failureThreshold ?? 0)).toBeGreaterThanOrEqual(
+    1_200,
+  );
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {
