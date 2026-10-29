@@ -1167,6 +1167,7 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	command.Stdout = &stdout
 	command.Stderr = &diagnostic
 	if err := command.Run(); err != nil {
+		detail := devcontainerFailureDiagnostic(stdout.String(), diagnostic.String(), assignment)
 		for _, line := range strings.Split(stdout.String(), "\n") {
 			var failure struct {
 				Outcome     string `json:"outcome"`
@@ -1175,12 +1176,14 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 			if json.Unmarshal([]byte(line), &failure) == nil && failure.Outcome == "error" {
 				for _, hook := range []string{"onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"} {
 					if strings.Contains(failure.Description, hook) {
+						if detail != "" {
+							return devcontainerResult{}, fmt.Errorf("Dev Container %s failed: %s", hook, detail)
+						}
 						return devcontainerResult{}, fmt.Errorf("Dev Container %s failed; check the repository hook and its environment grants", hook)
 					}
 				}
 			}
 		}
-		detail := devcontainerFailureDiagnostic(stdout.String(), diagnostic.String(), assignment)
 		if detail != "" {
 			return devcontainerResult{}, fmt.Errorf("start Dev Container: %w: %s", err, detail)
 		}

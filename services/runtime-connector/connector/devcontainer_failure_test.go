@@ -113,6 +113,37 @@ exit 1
 	}
 }
 
+func TestDevcontainerHookFailureKeepsRedactedCommandCause(t *testing.T) {
+	directory := t.TempDir()
+	script := `#!/bin/sh
+printf '%s\n' 'gh: Resource not accessible by integration (HTTP 403); GH_TOKEN=owned-private-value' >&2
+printf '%s\n' 'Error: reference archive download failed' >&2
+printf '%s\n' '{"outcome":"error","description":"An error occurred running postCreateCommand in the dev container.","message":"Command failed: mise run setup"}'
+exit 1
+`
+	for name, content := range map[string]string{
+		"docker": "#!/bin/sh\nexit 0\n", "devcontainer": script,
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(content), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err := startDevcontainer(context.Background(), Assignment{
+		WorkspaceFolder: directory, DevcontainerPath: ".devcontainer/devcontainer.json",
+		ComposeProjectName: "owned_hook", RuntimeAttemptID: "owned-hook", Generation: 1,
+		RuntimeEnvironment: map[string]string{"GH_TOKEN": "owned-private-value"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "postCreateCommand failed") ||
+		!strings.Contains(err.Error(), "reference archive download failed") ||
+		!strings.Contains(err.Error(), "HTTP 403") {
+		t.Fatalf("the hook label replaced the actual failed command cause: %v", err)
+	}
+	if strings.Contains(err.Error(), "owned-private-value") || len(err.Error()) > 1200 {
+		t.Fatalf("hook diagnostic is not bounded and redacted: %v", err)
+	}
+}
+
 func TestDevcontainerDiagnosticPrioritizesBuildCauseOverWrapperAndControlWarning(t *testing.T) {
 	stdout := `{"outcome":"error","description":"An error occurred building the Docker Compose images.","message":"Command failed: docker compose build"}`
 	stderr := `{"type":"raw","text":"#8 ERROR: failed to solve: process apt-get update did not complete successfully: exit code: 100; GH_TOKEN=owned-private-value\n"}
