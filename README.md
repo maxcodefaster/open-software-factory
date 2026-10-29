@@ -683,6 +683,11 @@ Playwright prepares one separate production build for direct browser runs and re
 afterward. A browser run nested in an integration proof reuses that proof's immutable build
 without rebuilding or deleting it. Isolated component journeys belong to `test:browser`;
 the controller lane does not launch duplicate browser-only wrappers.
+Direct UI runs also own a temporary Factory, PostgreSQL and Zero cache, including a synthetic
+Starter Project. They never adopt the source-development database. An explicit
+`FACTORY_BROWSER_BASE_URL` keeps the caller's existing fixture and its supplied database/build;
+native, paid and manual lanes retain their explicit installation requirements. Listing tests
+starts no services. Cleanup removes only the directly owned resources.
 The owned desktop browser group shares one immutable build and one empty migrated PostgreSQL
 daemon per invocation. Every journey still owns its database, application process and Zero cache.
 Playwright's dependent teardown removes only that invocation's resources after the journeys finish.
