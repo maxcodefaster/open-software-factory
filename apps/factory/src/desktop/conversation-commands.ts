@@ -114,7 +114,9 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
     const projectID = dependencies.selectedProjectID();
     if (!projectID) return;
     const ticketID = dependencies.assistantTicketID();
-    const contextID = dependencies.conversation()?.contextId ?? undefined;
+    const initialContextID = dependencies.conversation()?.contextId ?? undefined;
+    const initialKey = dependencies.assistantKey();
+    let contextID = initialContextID;
     if (
       !intent &&
       dependencies.clarificationPaused() &&
@@ -126,11 +128,18 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
     let streamTurnId: string | undefined;
     const clearStreamedAnswer = () => dependencies.clearProvisionalAnswer(streamKey, streamTurnId);
     let commandId: string | undefined;
-    const contextIsCurrent = () =>
-      !dependencies.workspaceDisposed &&
-      dependencies.selectedProjectID() === projectID &&
-      dependencies.assistantTicketID() === ticketID &&
-      (dependencies.conversation()?.contextId ?? undefined) === contextID;
+    const contextIsCurrent = () => {
+      const currentContextID = dependencies.conversation()?.contextId ?? undefined;
+      return (
+        !dependencies.workspaceDisposed &&
+        dependencies.selectedProjectID() === projectID &&
+        dependencies.assistantTicketID() === ticketID &&
+        ((contextID !== undefined && currentContextID === contextID) ||
+          (initialContextID === undefined &&
+            currentContextID === undefined &&
+            dependencies.assistantKey() === initialKey))
+      );
+    };
     const clearSubmittedDraft = () => {
       if (commandId) dependencies.acknowledgeCommand(scope, commandId);
       if (
@@ -154,7 +163,10 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
             }),
           );
           if (!contextIsCurrent()) return;
-          dependencies.publishConversation(contextualConversation);
+          contextID = contextualConversation.contextId ?? undefined;
+          // Preparing the first context is not human navigation. Keep the
+          // current pending/stream identity until admission or completion
+          // publishes retained work, rather than switching to an empty view.
         }
         commandId = dependencies.agentCommandIds.forInput(
           scope,
@@ -226,7 +238,9 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
     try {
       clearSubmittedDraft();
       dependencies.setError(
-        "Your message was saved, but the Project Agent could not finish its response.",
+        refreshed.turn?.commandId === commandId && refreshed.turn?.state === "completed"
+          ? ""
+          : "Your message was saved. The response stream disconnected; its recorded result is shown above.",
       );
     } catch (cause) {
       dependencies.setError(
