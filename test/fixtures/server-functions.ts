@@ -691,3 +691,8 @@ export async function factoryFunctionMatcher(name: string) {
 export async function factoryFunctionMatches(url: string, name: string) {
   return (await factoryFunctionMatcher(name))(new URL(url));
 }
+
+/** Service doubles do not write durable read versions. Wake existing read observers explicitly. */
+export async function wakeFactoryReads(page: Page) {
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+}
