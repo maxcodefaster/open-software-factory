@@ -922,6 +922,7 @@ export function createProjectAgentController(
       } finally {
         await factoryMCP?.close();
       }
+      let publicationStep = "source validation";
       try {
         output.citations = await validatedCitations(
           command.projectId,
@@ -930,6 +931,7 @@ export function createProjectAgentController(
           readCodeSources,
           projectSources,
         );
+        publicationStep = "technical source validation";
         if (
           output.kind === "technical-design" &&
           (!technicalPlanning ||
@@ -940,10 +942,12 @@ export function createProjectAgentController(
             ))
         )
           throw new ProjectAgentOutputError();
+        publicationStep = "architecture diagram rendering";
         const technical =
           output.kind === "technical-design" && technicalPlanning
             ? { base: technicalPlanning, renders: await renderArchitectureDiagrams(output.design) }
             : undefined;
+        publicationStep = "citation reference validation";
         const supported = new Set(output.citations.map((citation) => citation.reference));
         if (
           [...output.message.matchAll(/\[\^(\d+)\]/g)].some(
@@ -951,6 +955,7 @@ export function createProjectAgentController(
           )
         )
           throw new ProjectAgentOutputError();
+        publicationStep = "saving the response";
         const settled = await turns.settle(
           owner.id,
           token,
@@ -977,8 +982,24 @@ export function createProjectAgentController(
           owner.id,
           token,
           "failed",
-          "The Agent response could not be applied under current authority.",
+          cause instanceof ProjectAgentOutputError
+            ? `${cause.retainedMessage} Step: ${publicationStep}.`
+            : cause instanceof CommandError
+              ? cause.message
+              : `The Agent response could not be saved during ${publicationStep}. Your input is retained.`,
         );
+        // Keep diagnostics content-free. Provider/generated content and raw SDK
+        // errors may contain private source or credentials.
+        console.error("Project response publication failed", {
+          turnID: owner.id,
+          step: publicationStep,
+          category:
+            cause instanceof ProjectAgentOutputError
+              ? "invalid-output"
+              : cause instanceof CommandError
+                ? cause.code
+                : "persistence-or-renderer",
+        });
         throw cause;
       }
     } finally {
