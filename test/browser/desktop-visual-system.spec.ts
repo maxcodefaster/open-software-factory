@@ -1,10 +1,10 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { deleteFactoryProject } from "../support/factory-fixture";
 import { luminance } from "../support/visual-contrast";
 
@@ -262,18 +262,24 @@ test("persists curated backgrounds and centers the active app around the Agent p
   await page.getByRole("button", { name: "New Ticket" }).click();
   await expect(page.locator(".ticket-draft-workspace")).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  const primaryControlStyle = await page
+  const primaryAction = page
     .locator(".ticket-draft-workspace")
-    .getByRole("button", { name: "Write requirements", exact: true })
-    .evaluate((element) => {
-      const style = getComputedStyle(element);
-      return {
-        background: style.backgroundColor,
-        borderRadius: Number.parseFloat(style.borderRadius),
-        paddingInline: Number.parseFloat(style.paddingInlineStart),
-      };
-    });
-  expect(primaryControlStyle.background).not.toBe("rgba(0, 0, 0, 0)");
+    .getByRole("button", { name: "Write requirements", exact: true });
+  await expect(primaryAction).toHaveClass(/workspace-action/);
+  await expect(primaryAction).toHaveAttribute("data-primary", "true");
+  await expect(primaryAction).toBeDisabled();
+  const primaryControlStyle = await primaryAction.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      background: style.backgroundColor,
+      fontWeight: Number(style.fontWeight),
+      borderRadius: Number.parseFloat(style.borderRadius),
+      paddingInline: Number.parseFloat(style.paddingInlineStart),
+    };
+  });
+  // Document actions use the shared quiet text treatment, not filled standalone buttons.
+  expect(primaryControlStyle.background).toBe("rgba(0, 0, 0, 0)");
+  expect(primaryControlStyle.fontWeight).toBeGreaterThanOrEqual(600);
   expect(primaryControlStyle.borderRadius).toBeGreaterThan(0);
   expect(primaryControlStyle.paddingInline).toBeGreaterThan(0);
   await page.waitForTimeout(400);
@@ -404,16 +410,27 @@ test("persists curated backgrounds and centers the active app around the Agent p
     const send = element
       .querySelector<HTMLElement>("[aria-label='Send message']")
       ?.getBoundingClientRect();
+    const attachments = element
+      .querySelector<HTMLElement>(".attachment-toolbar")
+      ?.getBoundingClientRect();
     const styles = getComputedStyle(document.documentElement);
     return {
-      aligned: Boolean(input && send && Math.abs(input.bottom - send.bottom) <= 12),
+      actionsAligned: Boolean(
+        attachments &&
+          send &&
+          Math.abs(attachments.top + attachments.height / 2 - send.top - send.height / 2) <= 12,
+      ),
+      draftAboveActions: Boolean(
+        input && attachments && send && input.bottom <= Math.min(attachments.top, send.top),
+      ),
       inputHeight: input?.height,
       tabHeightToken: styles.getPropertyValue("--workspace-tab-height").trim(),
       windowControlToken: styles.getPropertyValue("--window-control-size").trim(),
       windowControlInsetToken: styles.getPropertyValue("--window-control-inset").trim(),
     };
   });
-  expect(composerAlignment.aligned).toBe(true);
+  expect(composerAlignment.actionsAligned).toBe(true);
+  expect(composerAlignment.draftAboveActions).toBe(true);
   expect(composerAlignment.inputHeight).toBeLessThanOrEqual(40);
   expect(composerAlignment.tabHeightToken).toBe("38px");
   expect(composerAlignment.windowControlToken).toBe("28px");
