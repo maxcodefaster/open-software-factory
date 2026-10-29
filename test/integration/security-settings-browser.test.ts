@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { chromium, expect as visible } from "@playwright/test";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { factoryProcess } from "../fixtures/factory-process";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
-  callFactoryFunction,
-  browserFunction,
   authenticatedBootstrap,
+  browserFunction,
+  callFactoryFunction,
 } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 
 test("security Settings is a keyboard-accessible tab, reauthenticates in place, and fits narrow screens", async () => {
@@ -213,11 +213,13 @@ test("a Product Contributor manages members without receiving code authority", a
       "Another Project Manager must grant Developer access",
     );
     await page.reload();
-    await openProjectMenu(page);
-    await page.getByRole("button", { name: /Team workspace/ }).click();
-    await page.getByRole("button", { name: "Settings", exact: true }).click();
-    await page.getByRole("button", { name: "Open settings", exact: true }).click();
+    // Reload must restore the same Project and Settings without another selection.
+    // Reopening the picker races route restoration and can hide a lost selection.
+    await visible(page).toHaveURL(new RegExp(`/projects/${projectID}/settings(?:[/?#]|$)`));
+    await visible(members).toContainText("Team workspace");
     await visible(members.getByLabel("Role for Product lead")).toHaveValue("product-contributor");
+    await visible(members.getByLabel("Manage project for Product lead")).toBeChecked();
+    await visible(members.getByLabel("Role for Team developer")).toHaveValue("developer");
     expect(
       await callFactoryFunction(owned.base, "getRepositoryDocuments", [projectID], { cookie }),
     ).toMatchObject({ ok: false, status: 403 });
