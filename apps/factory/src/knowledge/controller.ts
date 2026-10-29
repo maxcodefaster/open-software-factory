@@ -13,7 +13,12 @@ import { createOpenBaoModelSecrets } from "../models/secrets";
 import { projectModelConnection } from "../project-agent/adapter";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
-import { codeReadInput, codeReadResult, readableCodePath } from "./code-read";
+import {
+  codeReadInput,
+  codeReadResult,
+  findReadableCodePaths,
+  readableCodePath,
+} from "./code-read";
 import { createDocumentSearchCache } from "./document-search-cache";
 import { factoryForgeSource } from "./forge-source";
 import { generateWiki, type WikiGenerationInput } from "./generation-agent";
@@ -447,18 +452,11 @@ export function createKnowledgeController(
     async codePaths(projectID: string, query: string, userID: string, commitSha?: string) {
       await createAccessController(database).requireDevelopment(userID, projectID);
       const current = await inventory(projectID, commitSha);
-      const terms = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
-      const matches = current.files.filter(
-        (file) =>
-          readableCodePath(file.path) &&
-          file.size <= 250000 &&
-          terms.every((term) => file.path.toLowerCase().includes(term)),
-      );
+      const matches = findReadableCodePaths(current.files, query);
       await createAccessController(database).requireDevelopment(userID, projectID);
       return {
         commitSha: current.commitSha,
-        paths: matches.slice(0, 40).map((file) => file.path),
-        truncated: matches.length > 40,
+        ...matches,
       };
     },
     async code(projectID: string, value: unknown, userID: string) {

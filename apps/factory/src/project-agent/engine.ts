@@ -138,7 +138,7 @@ export async function generateProjectResponse(input: {
         findCode: createTool({
           id: "find-code-paths",
           description:
-            "Find readable repository code paths at one exact main commit, without a Sandbox. Query matches paths, not file contents. Empty query lists a bounded first page; narrow by directory or filename.",
+            "Find readable repository code paths at one exact main commit, without a Sandbox. Query terms rank matching paths, not file contents. Empty query lists a bounded first page. For empty or truncated results, narrow by an individual directory or filename before declaring source unavailable.",
           inputSchema: z.object({ query: z.string().max(500) }).strict(),
           outputSchema: z.object({
             commitSha: z.string(),

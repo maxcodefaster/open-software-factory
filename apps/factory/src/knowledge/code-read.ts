@@ -31,3 +31,28 @@ export function readableCodePath(path: string) {
     )
   );
 }
+
+export function findReadableCodePaths(
+  files: readonly { path: string; size: number }[],
+  query: string,
+) {
+  const terms = [...new Set(query.toLowerCase().split(/\s+/).filter(Boolean))];
+  // Agents often name several files in one lookup. Requiring every term in
+  // the same path made present sources look unavailable. Rank relevant paths,
+  // retaining the inventory order for ties and for the empty first page.
+  const matches = files
+    .map((file, index) => ({
+      ...file,
+      index,
+      score: terms.filter((term) => file.path.toLowerCase().includes(term)).length,
+    }))
+    .filter(
+      (file) =>
+        readableCodePath(file.path) && file.size <= 250000 && (!terms.length || file.score > 0),
+    )
+    .sort((a, b) => b.score - a.score || a.index - b.index);
+  return {
+    paths: matches.slice(0, 40).map((file) => file.path),
+    truncated: matches.length > 40,
+  };
+}
