@@ -1,12 +1,12 @@
 import { Mastra } from "@mastra/core";
 import { Agent } from "@mastra/core/agent";
 import { noopLogger } from "@mastra/core/logger";
+import type { ProcessInputStepArgs } from "@mastra/core/processors";
 import { createSkill } from "@mastra/core/skills";
 import type { LLMStepResult } from "@mastra/core/stream";
 import { createTool } from "@mastra/core/tools";
 import { formatSkillActivation } from "@mastra/core/workspace";
 import { z } from "zod";
-import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import {
   attachmentListInput,
   attachmentReadInput,
@@ -16,6 +16,7 @@ import type { BuildBrowserResult } from "../../../../packages/conversation-domai
 import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { ProjectAgentProgress } from "../../../../packages/conversation-domain/src/turn-observation";
 import type { TurnUsage } from "../../../../packages/conversation-domain/src/turn-usage";
+import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import { codeReadInput, codeReadResult } from "../knowledge/code-read";
 import type { MCPSourceTool } from "../mcp/sources";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
@@ -405,6 +406,7 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
     input.signal,
   );
   await usage.begin();
+  const researchSteps = 6;
   let failed = true;
   try {
     progress("guidance");
@@ -475,7 +477,10 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
         if (loaded.size) await input.skillsLoaded?.([...loaded]);
       },
       ...(providerOptions ? { providerOptions } : {}),
-      maxSteps: 6,
+      // Technical work can legitimately use the whole existing research
+      // allowance. Reserve one output-only step instead of ending on a tool
+      // result with no structured design. This is not a replay or more research.
+      maxSteps: researchSteps + (input.technicalPlanning ? 1 : 0),
       prepareStep: (() => {
         const guard = nativeStepGuard({
           signal: input.signal,
@@ -483,10 +488,12 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
           maxMediaBytes: 16 * 1024 * 1024,
           authorize: input.research.authorize,
         });
-        return async (step: Parameters<typeof guard>[0]) => {
+        return async (step: ProcessInputStepArgs) => {
           await guard(step);
           const remaining = input.inputTask?.remainingTools();
           if (remaining?.length) return { activeTools: remaining, toolChoice: "required" as const };
+          if (input.technicalPlanning && step.stepNumber >= researchSteps)
+            return { activeTools: [], toolChoice: "none" as const };
           return undefined;
         };
       })(),
