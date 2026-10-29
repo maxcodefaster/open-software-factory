@@ -277,10 +277,15 @@ test("planning Skill selection survives an unchanged conversation refresh withou
     await draft.fill("/rev");
     await expect(suggestions).toBeVisible();
     await expect(suggestions).toContainText("Loading available Skills…");
-    const reads = conversationReads;
-    await expect.poll(() => conversationReads).toBeGreaterThanOrEqual(reads + 2);
-    await expect(draft).toBeFocused({ timeout: 2_000 });
-    await expect(suggestions).toBeVisible({ timeout: 2_000 });
+    // Reads are change-driven, not polled. Explicit wake events exercise two
+    // unchanged refreshes while the pending Skill choice keeps its focus.
+    for (let refresh = 0; refresh < 2; refresh++) {
+      const reads = conversationReads;
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect.poll(() => conversationReads).toBeGreaterThan(reads);
+      await expect(draft).toBeFocused({ timeout: 2_000 });
+      await expect(suggestions).toBeVisible({ timeout: 2_000 });
+    }
     skillsReady.resolve();
     await expect(suggestions.getByRole("option", { name: /Review the reference/ })).toBeVisible();
     await expect(suggestions.locator(":scope > p:not([role]), :scope > small")).toHaveCount(0);
