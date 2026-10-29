@@ -2,14 +2,44 @@ import { expect, test } from "bun:test";
 import { CommandError } from "../command-error";
 import { createDeveloperIDEEdge } from "./developer-ide-edge";
 
+// These cases test HTTP/Socket.IO forwarding, not PostgreSQL semantics.
+// The retained-grant, concurrent redemption and revocation proof uses real
+// PostgreSQL in test/integration/developer-ide-access-recovery.test.ts.
+function editorAccessDatabase() {
+  const credentials = new Map<string, { id: string; value: string }>();
+  const execute = async (parts: TemplateStringsArray, ...values: unknown[]) => {
+    const query = parts.join("?").replace(/\s+/g, " ").trim();
+    const key = String(values[0]);
+    if (query.includes("INSERT INTO auth.verification")) {
+      credentials.set(String(values[1]), { id: key, value: String(values[2]) });
+      return [];
+    }
+    if (query.includes("SELECT value FROM auth.verification")) {
+      const row = credentials.get(key);
+      return row ? [row] : [];
+    }
+    if (query.includes("DELETE FROM auth.verification WHERE identifier=")) {
+      const row = credentials.get(key);
+      credentials.delete(key);
+      return row ? [row] : [];
+    }
+    if (query.includes("auth.verification")) return [];
+    return [{ id: "fixture-session" }];
+  };
+  const client = Object.assign(execute, {
+    async begin<T>(run: (sql: typeof execute) => Promise<T>): Promise<T> {
+      return run(execute);
+    },
+  });
+  return { client } as unknown as Parameters<typeof createDeveloperIDEEdge>[0];
+}
+
 test("streamed native file POSTs survive execution-route inspection and reach source exactly once", async () => {
   const userID = "abdabd34-6496-40f1-afbf-86187708037c";
   const workspaceID = "11111111-1111-4111-8111-111111111111";
   const calls: string[] = [];
   const edge = createDeveloperIDEEdge(
-    { client: async () => [{ id: "fixture-session" }] } as unknown as Parameters<
-      typeof createDeveloperIDEEdge
-    >[0],
+    editorAccessDatabase(),
     { get: async () => ({ epoch: 1, state: "ready" }) } as unknown as Parameters<
       typeof createDeveloperIDEEdge
     >[1],
@@ -74,9 +104,7 @@ test("the authenticated Editor edge admits native Theia Socket.IO and keeps orig
   const userID = "abdabd34-6496-40f1-afbf-86187708037c";
   const factoryOrigin = "http://127.0.0.1:3000";
   const edge = createDeveloperIDEEdge(
-    { client: async () => [{ id: "fixture-session" }] } as unknown as Parameters<
-      typeof createDeveloperIDEEdge
-    >[0],
+    editorAccessDatabase(),
     {
       get: async () => ({ epoch: 1, state: "ready" }),
       connection: async () => "http://127.0.0.1:12345",
@@ -115,9 +143,7 @@ test("Workspace presentation uses authenticated source authority without opening
   const workspaceID = "11111111-1111-4111-8111-111111111111";
   const reads: string[] = [];
   const edge = createDeveloperIDEEdge(
-    { client: async () => [{ id: "fixture-session" }] } as unknown as Parameters<
-      typeof createDeveloperIDEEdge
-    >[0],
+    editorAccessDatabase(),
     { get: async () => ({ epoch: 1, state: "ready" }) } as unknown as Parameters<
       typeof createDeveloperIDEEdge
     >[1],
@@ -175,9 +201,7 @@ test("temporary editor preparation keeps its grant and recovers the initial docu
     },
   });
   const edge = createDeveloperIDEEdge(
-    { client: async () => [{ id: "fixture-session" }] } as unknown as Parameters<
-      typeof createDeveloperIDEEdge
-    >[0],
+    editorAccessDatabase(),
     {
       get: async () => ({ epoch: 1, state }),
       async connection() {

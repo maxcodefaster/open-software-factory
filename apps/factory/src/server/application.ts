@@ -337,7 +337,7 @@ export async function createFactoryApplication() {
       await runtimeAccess.revokeMember(projectID, userID);
       await workspaceSources.revokeMember(projectID, userID);
       await developerEditors.revokeMember(projectID, userID);
-      developerIDEEdge.revokeUser(userID);
+      await developerIDEEdge.revokeUser(userID);
     },
     revokeAccount: revokeAccountAccess,
     forgeOrigin: forgeAccess ? forgePublicOrigin : undefined,
