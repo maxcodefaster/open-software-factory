@@ -574,6 +574,9 @@ export function createRuntimeController(
     resources: readonly unknown[],
   ) {
     const deadline = performance.now() + 420_000;
+    // Reconcile Start once per observer, including after Factory recovery.
+    // Waiting for repository hooks must not repeat native preparation checks.
+    let startConfirmed = false;
     while (performance.now() < deadline) {
       const attempt = await database.client<
         Array<{ state: string; uid: string | null; observedAt: string }>
@@ -605,9 +608,12 @@ export function createRuntimeController(
       }
       if (pod.ready) {
         try {
-          await factorybox.ensureStarted(attemptID, resources, deadline);
+          if (!startConfirmed) {
+            await factorybox.ensureStarted(attemptID, resources, deadline);
+            startConfirmed = true;
+          }
           if (hub.ready(attemptID)) await updateStatus(attemptID, "ready");
-          else if (await factorybox.hasExited(attemptID))
+          else if (!hub.parentConnected(attemptID) && (await factorybox.hasExited(attemptID)))
             await beginCleanup(
               attemptID,
               "Factorybox Sandbox exited before runtime connectors became ready. Source is retained.",
