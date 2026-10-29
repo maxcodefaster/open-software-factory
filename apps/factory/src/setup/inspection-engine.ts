@@ -4,8 +4,8 @@ import { noopLogger } from "@mastra/core/logger";
 import { createTool } from "@mastra/core/tools";
 import { z } from "zod";
 import {
-  setupInspectionOutput,
   type SetupInspectionOutput,
+  setupInspectionOutput,
 } from "../../../../packages/project-domain/src/setup";
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "../models/native";
@@ -88,6 +88,7 @@ Only System Contract App commands use argv, never shell -c. Primary port is >=10
 Dev Container lifecycle hooks and Forgejo run steps use their normal upstream shell syntax; sequential commands such as npm ci && npm run db:migrate are allowed there.
 Dev Container uses the upstream specification. Do not invent application dependencies, credentials, repository scripts or health endpoints.
 For a required missing Dockerfile, write standard installation commands for already-established system tools and exact approved versions. This is proposed configuration, not a claim that those commands already exist in the repository. Use official pinned upstream distribution URLs and the actual native architecture, never an AMD64-only asset or checksum on ARM64.
+Use bounded retry/backoff only for idempotent upstream artifact GET downloads. For curl, use --retry 3 --retry-all-errors with --fail --location and --output to a file, then verify the approved checksum before installing or executing it. A retry must replace a partial file, never append or pipe an unverified download into a shell. Persistent transfer errors and checksum mismatches must fail the build. Never retry a whole build, lifecycle hook, installer or verification command: these can have side effects.
 Factory requires the primary Dev Container to drop NET_RAW and SYS_PTRACE. For Compose put cap_drop: [NET_RAW, SYS_PTRACE] on its primary service. For an image recipe set runArgs: ["--cap-drop=NET_RAW", "--cap-drop=SYS_PTRACE"].
 Never add capabilities, privileged mode, host namespaces, infrastructure sockets or bind mounts outside the checkout. Keep normal repository-scoped mounts and named service data volumes.
 Dev Container MUST include "workspaceFolder":"/workspace/project" and "remoteUser":"node" for a Node image.
