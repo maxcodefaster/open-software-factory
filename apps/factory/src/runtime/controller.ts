@@ -1512,10 +1512,11 @@ export function createRuntimeController(
         INSERT INTO factory.runtime_attempt(
           id, project_id, workspace_id, generation, revision, state,
           parent_connector_token_hash, child_connector_token_hash,
-          create_intended_at, created_by
+          create_intended_at, created_by, declared_apps
         ) VALUES (
           ${identity.attemptID}, ${projectID}, ${workspace.id}, ${generation}, ${revision}, 'create-intended',
-          ${tokenHash}, ${childTokenHash}, now(), ${userID}
+          ${tokenHash}, ${childTokenHash}, now(), ${userID},
+          ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb
         )
       `;
           await lock`COMMIT`;
@@ -1668,12 +1669,13 @@ export function createRuntimeController(
             INSERT INTO factory.runtime_attempt(
               id, project_id, isolated_kind, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by
+              create_intended_at, created_by, declared_apps
             ) VALUES (
               ${identity.attemptID}, ${projectID}, 'staging', ${generation}, ${preview.revision},
               'create-intended',
               ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
-              ${userID}
+              ${userID},
+              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb
             )
           `;
           await artifactsFor(identity.attemptID, lock);
@@ -1895,11 +1897,12 @@ export function createRuntimeController(
             INSERT INTO factory.runtime_attempt(
               id, project_id, change_id, workspace_id, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by
+              create_intended_at, created_by, declared_apps
             ) VALUES (
               ${identity.attemptID}, ${projectID}, ${changeID}, ${workspace.id}, ${generation}, ${workspace.revision},
               'create-intended',
-              ${hashConnectorToken(parent)}, ${hashConnectorToken(child)}, now(), ${userID}
+              ${hashConnectorToken(parent)}, ${hashConnectorToken(child)}, now(), ${userID},
+              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb
             )
           `;
           await lock`
