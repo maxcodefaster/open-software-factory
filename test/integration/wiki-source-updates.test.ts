@@ -90,6 +90,9 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
     );
     expect((await controller.receive(request(), projectID)).status).toBe(202);
     expect((await controller.receive(request(), projectID)).status).toBe(202);
+    // Settle receive's expendable wake before advancing the persisted retry time.
+    // Otherwise drain() can join the earlier, not-yet-due read instead of this one.
+    await controller.drain();
     await database.client`UPDATE factory.wiki_source_update SET next_attempt_at=now()-interval '1 second' WHERE project_id=${projectID}`;
     await controller.drain();
     expect(reconciles).toBe(1);
@@ -99,6 +102,7 @@ test("Wiki webhook intent recovers ambiguous creates, coalesces signed pushes an
     expect(Number(row?.["handled_version"])).toBe(2);
     head = "c".repeat(40);
     await controller.receive(request(), projectID);
+    await controller.drain();
     await database.client`UPDATE factory.wiki_source_update SET next_attempt_at=now()-interval '1 second' WHERE project_id=${projectID}`;
     await controller.drain();
     [row] =
