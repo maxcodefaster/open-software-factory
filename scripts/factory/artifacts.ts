@@ -2,6 +2,7 @@ import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import { requirePinnedImage } from "./preflight";
+import { factoryboxRuntimeImage } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 
 export const runtimeArtifactNames = [
   "runtime-host",
@@ -12,7 +13,7 @@ export const runtimeArtifactNames = [
 
 export const runtimeArtifactsSchema = z.record(
   z.enum(runtimeArtifactNames),
-  z.string().regex(/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/),
+  factoryboxRuntimeImage,
 );
 export type RuntimeArtifacts = z.infer<typeof runtimeArtifactsSchema>;
 
@@ -63,5 +64,5 @@ export async function publishedRuntimeArtifacts(directory: string) {
     requirePinnedImage(value.trim());
     references[name] = value.trim();
   }
-  return references;
+  return runtimeArtifactsSchema.parse(references);
 }

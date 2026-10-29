@@ -11,6 +11,19 @@ import {
 } from "./artifacts";
 import { fixtureValue } from "../../test/fixtures/value";
 
+test("artifact publication rejects consumer references runtime admission cannot accept", () => {
+  const bundle = Object.fromEntries(
+    runtimeArtifactNames.map((name) => [name, `registry.example/${name}@sha256:${"a".repeat(64)}`]),
+  );
+  for (const reference of [
+    `runtime-host@sha256:${"a".repeat(64)}`,
+    `registry.example/team/../runtime-host@sha256:${"a".repeat(64)}`,
+  ])
+    expect(runtimeArtifactsSchema.safeParse({ ...bundle, "runtime-host": reference }).success).toBe(
+      false,
+    );
+});
+
 test("published defaults supersede installation bootstrap pins without changing retained identities", () => {
   const bootstrap = {
     runtimeImage: `registry.example/runtime-host@sha256:${"a".repeat(64)}`,

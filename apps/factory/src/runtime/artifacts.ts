@@ -3,6 +3,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   type FactoryboxRuntimeProfile,
   factoryboxRuntimeProfile,
+  factoryboxRuntimeImage,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { freezeRuntimeEnvironment } from "../environments/runtime";
 import { retainedFactoryboxProfile } from "./worker";
@@ -25,7 +26,7 @@ export interface RuntimeArtifactConfiguration {
 
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
 function pinnedImage(value: string | undefined, label: string): string {
-  if (!value || !/^[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}$/.test(value))
+  if (!value || !factoryboxRuntimeImage.safeParse(value).success)
     throw new Error(`${label} must be configured with an exact image digest`);
   return value;
 }
