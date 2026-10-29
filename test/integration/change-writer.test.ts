@@ -6,6 +6,7 @@ import {
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
+import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -348,6 +349,61 @@ test("settled completion releases editing once and a stale completion cannot sto
     await processFixture.dispose();
   }
 }, 30_000);
+
+test("failed bootstrap takeover tears down exact compute before confirming an unsubmitted Agent Stop", async () => {
+  const processFixture = await factoryProcess();
+  const owned = await fixture(undefined, undefined, processFixture.connect());
+  const stop = createChangeAgentStop(owned.database, owned.hub);
+  const events: string[] = [];
+  try {
+    await owned.database
+      .client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${owned.attemptID}`;
+    await owned.database.client`UPDATE factory.change_agent_session SET state='failed',
+      native_session_confirmed_at=NULL,implementation_session_confirmed_at=NULL
+      WHERE change_id=${owned.changeID}`;
+    const writers = createChangeWriterController({
+      database: owned.database,
+      agentUsername: "owned-control",
+      runtime: {
+        async stop(attemptID) {
+          expect(attemptID).toBe(owned.attemptID);
+          events.push("compute-stopped");
+          await owned.database.client`UPDATE factory.runtime_attempt SET state='stopped'
+            WHERE id=${attemptID}`;
+        },
+        async get(attemptID) {
+          const [row] = await owned.database.client<{ state: string }[]>`
+            SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
+          return row ?? null;
+        },
+      },
+      async stopAgent(changeID) {
+        await stop.persist(changeID);
+        events.push((await stop.confirm(changeID)) ? "agent-stop-confirmed" : "agent-stop-pending");
+      },
+      async fenceSource() {
+        events.push("source-fenced");
+      },
+      async protect(_changeID, writers) {
+        events.push(writers.length ? "human-protected" : "branch-fenced");
+      },
+    });
+    const view = await writers.takeOver(owned.changeID, owned.userID, crypto.randomUUID());
+    expect(view).toMatchObject({ state: "human", canWrite: true });
+    expect(events.indexOf("source-fenced")).toBeLessThan(events.indexOf("compute-stopped"));
+    expect(events.indexOf("branch-fenced")).toBeLessThan(events.indexOf("compute-stopped"));
+    expect(events.indexOf("compute-stopped")).toBeLessThan(events.indexOf("agent-stop-confirmed"));
+    expect(events.indexOf("agent-stop-confirmed")).toBeLessThan(events.indexOf("human-protected"));
+    expect(owned.requests()).toBe(0);
+    expect(owned.interrupts()).toBe(0);
+    const [session] = await owned.database.client<{ stop_pending: boolean }[]>`
+      SELECT stop_pending FROM factory.change_agent_session WHERE change_id=${owned.changeID}`;
+    expect(session?.stop_pending).toBe(false);
+  } finally {
+    await owned.dispose();
+    await processFixture.dispose();
+  }
+}, 60_000);
 
 test("Ticket writer fences saves, requires settled Stop and compute teardown, and retains handoff across restart", async () => {
   const processFixture = await factoryProcess();

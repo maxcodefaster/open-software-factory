@@ -510,6 +510,37 @@ export function createChangeWriterController(options: {
         AND (stop_pending OR state IN ('starting','working','failed'))
         UNION ALL SELECT change_id FROM factory.agent_turn WHERE change_id=${changeID} AND state IN ('pending','dispatching','running','uncertain')`;
         if (running) await options.stopAgent(changeID);
+        const [unsubmittedFailure] = await database.client`SELECT session.change_id
+          FROM factory.change_agent_session session
+          JOIN factory.change change ON change.id=session.change_id
+          JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
+          WHERE session.change_id=${changeID} AND session.state='stopped' AND session.stop_pending
+            AND session.native_session_confirmed_at IS NULL
+            AND session.implementation_session_confirmed_at IS NULL
+            AND session.runtime_attempt_id=${intended.fenceAttemptID}
+            AND change.runtime_attempt_id=session.runtime_attempt_id
+            AND attempt.state IN ('failed','cleanup-failed')
+            AND NOT EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
+              JOIN factory.agent_turn turn ON turn.id=intent.turn_id
+              WHERE turn.change_id=session.change_id AND intent.runtime_attempt_id=session.runtime_attempt_id
+                AND (intent.bootstrap IS DISTINCT FROM true
+                  OR intent.session_id IS DISTINCT FROM session.opencode_session_id))
+            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn
+              WHERE change_id=session.change_id AND state IN ('pending','dispatching','running','uncertain'))
+            AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation
+              WHERE change_id=session.change_id AND state NOT IN ('succeeded','failed'))`;
+        if (unsubmittedFailure) {
+          // Stop has already fenced late native confirmation and all prompts.
+          // A failed bootstrap cannot supply live OpenCode history. Confirm
+          // exact compute teardown first, then let the ordinary Stop verifier
+          // settle it. Confirmed/reused Sessions never take this path.
+          if (!(await stopped(intended.fenceAttemptID)))
+            throw new CommandError(
+              "conflict",
+              "Stopping failed startup compute before editing takeover. Its original identity is retained.",
+            );
+          await options.stopAgent(changeID);
+        }
         const [unsettled] =
           await database.client`SELECT change_id FROM factory.change_agent_session WHERE change_id=${changeID} AND stop_pending
         UNION ALL SELECT change_id FROM factory.agent_turn WHERE change_id=${changeID} AND state IN ('pending','dispatching','running','uncertain')
