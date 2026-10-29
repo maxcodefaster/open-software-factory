@@ -2,12 +2,59 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func TestDevcontainerBuildCauseSurvivesLargeCLIRawTransportEvent(t *testing.T) {
+	directory := t.TempDir()
+	text := strings.Repeat("ordinary build progress\n", 4096) +
+		"ERROR: failed to solve: actual-builder-cause; GH_TOKEN=owned-private-value\n"
+	raw, err := json.Marshal(map[string]string{"type": "raw", "text": text})
+	if err != nil {
+		t.Fatal(err)
+	}
+	jsonPath, textPath := filepath.Join(directory, "json.log"), filepath.Join(directory, "text.log")
+	if err := os.WriteFile(jsonPath, append(raw, '\n'), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(textPath, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := fmt.Sprintf(`#!/bin/sh
+case " $* " in
+  *" --log-format text "*) cat %q >&2 ;;
+  *) cat %q >&2 ;;
+esac
+printf '%%s\n' '{"type":"text","text":"Error: Command failed: docker compose build"}' >&2
+printf '%%s\n' '{"outcome":"error","description":"An error occurred building the Docker Compose images.","message":"Command failed: docker compose build"}'
+exit 1
+`, textPath, jsonPath)
+	for name, content := range map[string]string{
+		"docker": "#!/bin/sh\nexit 0\n", "devcontainer": script,
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(content), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	_, err = startDevcontainer(context.Background(), Assignment{
+		WorkspaceFolder: directory, DevcontainerPath: ".devcontainer/devcontainer.json",
+		ComposeProjectName: "owned_transport", RuntimeAttemptID: "owned-transport", Generation: 1,
+		RuntimeEnvironment: map[string]string{"GH_TOKEN": "owned-private-value"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "actual-builder-cause") {
+		t.Fatalf("bounded diagnostic dropped the entire oversized raw JSON event: %v", err)
+	}
+	if strings.Contains(err.Error(), "owned-private-value") || len(err.Error()) > 1200 {
+		t.Fatalf("build cause is not bounded and redacted: %v", err)
+	}
+}
 
 func TestDevcontainerFailureKeepsBoundedRedactedCause(t *testing.T) {
 	directory := t.TempDir()
@@ -83,6 +130,21 @@ func TestDevcontainerDiagnosticPrioritizesBuildCauseOverWrapperAndControlWarning
 	}
 	if strings.Contains(detail, "owned-private-value") {
 		t.Fatal("prioritized build cause exposed a credential")
+	}
+}
+
+func TestDevcontainerDiagnosticKeepsTerminalBakeEntitlementRefusal(t *testing.T) {
+	stderr := `[old] Error fetching image details: Could not parse image name; subsequent pull succeeded
+[new] additional privileges requested: pass "--allow=fs.read=/tmp/devcontainercli-root/features/Dockerfile-with-features" to grant requested privileges
+Error: Command failed: docker compose build
+`
+	detail := devcontainerFailureDiagnostic(
+		`{"outcome":"error","description":"An error occurred building the Docker Compose images."}`,
+		stderr, Assignment{},
+	)
+	if !strings.HasPrefix(detail, "[new] additional privileges requested:") ||
+		!strings.Contains(detail, "Dockerfile-with-features") {
+		t.Fatalf("a recovered metadata warning hid the actual terminal build refusal: %s", detail)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -50,7 +51,9 @@ func devcontainerFailureLines(text string) []string {
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n") {
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
-			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") {
+			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") ||
+			strings.Contains(lower, "not permitted") || strings.Contains(lower, "privileges requested") ||
+			strings.Contains(lower, "did not complete successfully") {
 			failures = append(failures, line)
 		}
 	}
@@ -97,8 +100,10 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 	}
 	tail := func(lines []string) []string {
 		if len(lines) > 4 {
-			return lines[len(lines)-4:]
+			lines = lines[len(lines)-4:]
 		}
+		lines = slices.Clone(lines)
+		slices.Reverse(lines)
 		return lines
 	}
 	// Preserve the actual build/process cause before repetitive CLI wrappers.
