@@ -1,21 +1,30 @@
 import { eventually } from "./factory-process";
 
+export function planningCacheDatabaseURL(databaseURL: string, network?: string) {
+  const database = new URL(databaseURL);
+  if (/^factory-test-postgres-[a-f0-9-]{36}$/.test(network ?? "")) {
+    database.hostname = network ?? "";
+    database.port = "5432";
+  } else database.hostname = "host.docker.internal";
+  return database.toString();
+}
+
 export async function ownedPlanningCache(
   databaseURL: string,
   base: string,
   observeWhileRunning = false,
   syncWorkers = 1,
   network?: string,
+  callbackBase?: string,
 ) {
   if (!Number.isSafeInteger(syncWorkers) || syncWorkers < 1)
     throw new Error("Owned planning cache requires a positive worker count");
   const owner = crypto.randomUUID();
   const name = `factory-owned-planning-cache-${owner}`;
   console.info(`Owned planning cache intended: ${name}`);
-  const database = new URL(databaseURL);
-  database.hostname = "host.docker.internal";
-  const server = new URL(base);
-  server.hostname = "host.docker.internal";
+  const database = planningCacheDatabaseURL(databaseURL, network);
+  const server = new URL(callbackBase ?? base);
+  if (!callbackBase) server.hostname = "host.docker.internal";
   async function docker(...args: string[]) {
     const child = Bun.spawn(["docker", ...args], { stdout: "pipe", stderr: "ignore" });
     const output = await new Response(child.stdout).text();

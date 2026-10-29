@@ -53,11 +53,19 @@ export async function runBrowserChecks(
 
 async function ownedHost(environment: Environment): Promise<BrowserHost> {
   const { factoryProcess } = await import("../../test/fixtures/factory-process");
+  const { ownedPostgresServer } = await import("../../test/fixtures/postgres-server");
+  const postgres = await ownedPostgresServer();
   const previous = process.env;
   let owned: Awaited<ReturnType<typeof factoryProcess>>;
   try {
-    process.env = environment;
+    process.env = {
+      ...environment,
+      FACTORY_TEST_POSTGRES: JSON.stringify(postgres.identity),
+    };
     owned = await factoryProcess();
+  } catch (cause) {
+    await postgres.dispose();
+    throw cause;
   } finally {
     process.env = previous;
   }
@@ -88,10 +96,20 @@ async function ownedHost(environment: Environment): Promise<BrowserHost> {
       databaseURL: owned.databaseURL,
       email: `owned-${owned.id}@factory.local`,
       password: "owned-process-password-not-a-secret",
-      dispose: () => owned.dispose(),
+      async dispose() {
+        try {
+          await owned.dispose();
+        } finally {
+          await postgres.dispose();
+        }
+      },
     };
   } catch (cause) {
-    await owned.dispose();
+    try {
+      await owned.dispose();
+    } finally {
+      await postgres.dispose();
+    }
     throw cause;
   }
 }

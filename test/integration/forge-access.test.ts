@@ -1,12 +1,12 @@
 import { expect, test } from "bun:test";
-import { chromium } from "@playwright/test";
 import { mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chromium } from "@playwright/test";
 import { z } from "zod";
+import { createForgeAccessReconciliation } from "../../apps/factory/src/access/forge";
 import { createForgejoAccess, forgeUsername } from "../../packages/forge/src/access";
 import { createForgejoClient } from "../../packages/forge/src/forge";
-import { createForgeAccessReconciliation } from "../../apps/factory/src/access/forge";
 import { ensureLocalForgeIdentity } from "../../scripts/factory/forge-identity";
 import { installForgeBrowserLogout } from "../../scripts/factory/forge-logout";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -43,6 +43,8 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       container,
       "--label",
       `factory.owned-access=${id}`,
+      "--add-host",
+      "host.docker.internal:host-gateway",
       "--volume",
       "/var/lib/gitea",
       "--volume",
@@ -108,7 +110,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       hostname: "0.0.0.0",
       port: 0,
       fetch(request) {
-        const root = `http://host.orb.internal:${discovery?.port}`;
+        const root = `http://host.docker.internal:${discovery?.port}`;
         return Response.json(
           new URL(request.url).pathname.endsWith("jwks")
             ? { keys: [] }
@@ -142,7 +144,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       "--secret",
       "owned-test-only-client-secret",
       "--auto-discover-url",
-      `http://host.orb.internal:${discovery.port}/.well-known/openid-configuration`,
+      `http://host.docker.internal:${discovery.port}/.well-known/openid-configuration`,
     ]);
     const listing = await command([
       "docker",
@@ -215,7 +217,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
       VALUES(${id},${repository.name},'Owned product',${`${origin}/${repository.owner}/${repository.name}`},'main','.devcontainer/devcontainer.json',${id})`;
     await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by) VALUES(${id},${id},'developer',${id})`;
     await database.client`INSERT INTO factory.forge_connection(source_name,discovery_url,redirect_uri,source_id,state,intended_by)
-      VALUES('Factory',${`http://host.orb.internal:${discovery.port}/.well-known/openid-configuration`},${`${origin}/user/oauth2/Factory/callback`},${sourceID},'ready',${id})`;
+      VALUES('Factory',${`http://host.docker.internal:${discovery.port}/.well-known/openid-configuration`},${`${origin}/user/oauth2/Factory/callback`},${sourceID},'ready',${id})`;
     const reconcile = createForgeAccessReconciliation({
       database,
       forge: access,
@@ -293,7 +295,7 @@ test("pinned Forgejo recovers passwordless identity creation and confirms privat
     const wiring = {
       factoryURL: wiredFactory.base,
       forgeURL: origin,
-      discoveryURL: `http://host.orb.internal:${new URL(wiredFactory.base).port}/api/auth/.well-known/openid-configuration`,
+      discoveryURL: `http://host.docker.internal:${new URL(wiredFactory.base).port}/api/auth/.well-known/openid-configuration`,
       email: `owned-${wiredFactory.id}@factory.local`,
       password: "owned-process-password-not-a-secret",
       signingKey: "owned-process-auth-secret-not-a-production-credential",

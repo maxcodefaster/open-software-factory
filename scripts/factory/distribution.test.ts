@@ -119,6 +119,9 @@ test("release images wait for the same non-live checks on both native architectu
     "mise exec -- bun --bun ./node_modules/@playwright/test/cli.js install --with-deps chromium",
   );
   expect(commands).toContain("mise exec -- mkcert -install");
+  expect(commands).toContain(
+    "mise exec -- bun run test:controllers /planning-cache-network.test.ts",
+  );
   expect(commands).toContain("mise exec -- bun run check:integration");
   expect(commands).toContain("mise exec -- bun run test:browser");
   expect(commands.some((command) => command.includes("upstream.json"))).toBe(true);
