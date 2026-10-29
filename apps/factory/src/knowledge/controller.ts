@@ -88,6 +88,7 @@ export function createKnowledgeController(
   const forgeOrigin = { apiURL: FACTORY_FORGEJO_API_URL, owner: FACTORY_FORGEJO_OWNER };
   const running = new Set<string>();
   const executions = new Set<Promise<void>>();
+  const lifetime = new AbortController();
   const repositoryCache = createRepositoryKnowledgeCache();
   const models = createModelSettingsController(database);
   const documentSearchCache = createDocumentSearchCache();
@@ -245,6 +246,7 @@ export function createKnowledgeController(
   }
 
   function runGeneration(generationID: string) {
+    if (lifetime.signal.aborted) return Promise.resolve();
     const execution = executeGeneration(generationID);
     executions.add(execution);
     void execution.finally(() => executions.delete(execution)).catch(() => {});
@@ -343,8 +345,16 @@ export function createKnowledgeController(
       const connection = reference
         ? await modelConnections.resolve(reference.connectionID, reference.version)
         : projectModelConnection("knowledge");
-      const signal = AbortSignal.timeout(360_000);
-      const providerRequests = { remaining: 32 };
+      const signal = lifetime.signal;
+      const authorize = async () => {
+        signal.throwIfAborted();
+        await database.client.begin(async (sql) => {
+          await projectAuthorityIn(sql, generation.userID, generation.projectID);
+          const [current] = await sql`SELECT id FROM factory.knowledge_generation
+            WHERE id=${generationID} AND attempt_id=${attemptId} AND state='running'`;
+          if (!current) throw new CommandError("conflict", "Wiki execution authority changed.");
+        });
+      };
       for (let retry = 0; retry < 3; retry++) {
         signal.throwIfAborted();
         failureMessage =
@@ -372,7 +382,7 @@ export function createKnowledgeController(
             sources: bundle.sources,
             readFiles: bundle.readFiles,
             signal,
-            providerRequests,
+            authorize,
             usageSink: (callID) =>
               recordedMastraUsage(database, {
                 id: `wiki:${generationID}:${attemptId}:${callID}`,
@@ -383,6 +393,7 @@ export function createKnowledgeController(
                 model: modelId,
               }),
             publish: async (output) => {
+              await authorize();
               validateWikiGeneration(output, pages, bundle.readPaths());
               const head = await (repositoryReader ?? forge).getDefaultBranch(
                 bundle.project.repository,
@@ -496,6 +507,10 @@ export function createKnowledgeController(
     async settle() {
       while (executions.size) await Promise.allSettled([...executions]);
     },
+    async close() {
+      lifetime.abort(new Error("Factory is shutting down; Wiki work was cancelled."));
+      while (executions.size) await Promise.allSettled([...executions]);
+    },
     async recover() {
       const abandoned = await database.client<
         Array<{ id: string }>
@@ -510,6 +525,7 @@ export function createKnowledgeController(
       for (const generation of generations) void runGeneration(generation.id);
     },
     async generate(projectID: string, userID: string, automatic = false) {
+      lifetime.signal.throwIfAborted();
       const settings = await models.getInherited(projectID, userID);
       if (!settings.projectEffective.planning.available)
         throw new CommandError("unavailable", "Project Wiki model is not approved.");

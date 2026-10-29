@@ -25,10 +25,12 @@ test.each([
   "source-hungry-checker",
   "bare-wiki-reference",
   "large-repository",
+  "many-topics",
+  "authority-change",
 ])(
   "real Mastra checked progressive workflow: %s",
   async (scenario) => {
-    const files = Array.from({ length: 64 }, (_, index) => ({
+    const files = Array.from({ length: scenario === "many-topics" ? 114 : 64 }, (_, index) => ({
       path: `src/flow-${index}.ts`,
       sha: "a".repeat(40),
       size: 30,
@@ -41,7 +43,7 @@ test.each([
           size: 30,
         })),
       );
-    const topics = Array.from({ length: 4 }, (_, index) => ({
+    const topics = Array.from({ length: scenario === "many-topics" ? 6 : 4 }, (_, index) => ({
       slug: index ? `guide-${index}` : "overview",
       title: `Flow ${index}`,
       purpose: "Explain an actual reader workflow",
@@ -51,6 +53,8 @@ test.each([
     }));
     const read = new Set<string>();
     const pages: WikiPageSnapshot[] = [];
+    const topicLookups = new Map<string, number>();
+    const checkedSources = new Set<string>();
     let writes = 0,
       checks = 0,
       publications = 0,
@@ -106,6 +110,7 @@ test.each([
         };
         let output: unknown;
         let sourceToolCall = false;
+        let sourcePaths: string[] | undefined;
         if (system.includes("Research manifests")) {
           plans++;
           if (parsed.correction) corrections.push(parsed);
@@ -125,6 +130,13 @@ test.each([
           if (scenario === "verbose-topic-plan" && plans === 2) expect(raw).toContain("800");
         } else if (system.includes("Follow relationships")) {
           researches++;
+          const replies = topicLookups.get(prompt.topic.slug) ?? 0;
+          if (scenario === "many-topics" && replies < 3) {
+            sourceToolCall = true;
+            topicLookups.set(prompt.topic.slug, replies + 1);
+            const topicIndex = topics.findIndex((topic) => topic.slug === prompt.topic.slug);
+            sourcePaths = [files[96 + topicIndex * 3 + replies]?.path ?? ""];
+          }
           const rejectedResearchAvailable =
             parsed.rejectedResult?.findings?.[0]?.claim?.length === 1201 &&
             parsed.correction?.includes("findings.0.claim");
@@ -182,7 +194,9 @@ test.each([
           };
         } else {
           checks++;
-          sourceToolCall = scenario === "source-hungry-checker" && incoming.tool_choice !== "none";
+          sourceToolCall =
+            scenario === "source-hungry-checker" && !checkedSources.has(prompt.topic.slug);
+          if (sourceToolCall) checkedSources.add(prompt.topic.slug);
           expect(system).toContain("normalized publication package, not a raw writer response");
           expect(system).toContain("Do not flag these fields or request schema changes");
           expect(system).toContain("Judge the current draft, not an earlier rejected version");
@@ -218,11 +232,13 @@ test.each([
                     content: null,
                     tool_calls: [
                       {
-                        id: `read-${checks}`,
+                        id: `read-${receivedRequests}`,
                         type: "function",
                         function: {
                           name: "readSource",
-                          arguments: JSON.stringify({ paths: prompt.topic.paths.slice(0, 1) }),
+                          arguments: JSON.stringify({
+                            paths: sourcePaths ?? prompt.topic.paths.slice(0, 1),
+                          }),
                         },
                       },
                     ],
@@ -252,7 +268,13 @@ test.each([
         changedPaths: files.map((file) => file.path),
         sources: [],
         signal: AbortSignal.timeout(15_000),
-        providerRequests: { remaining: scenario === "execution-bound" ? 1 : 32 },
+        authorize: async () => {
+          if (scenario === "authority-change" && receivedRequests > 0)
+            throw new Error("Wiki execution authority changed");
+        },
+        ...(scenario === "many-topics"
+          ? {}
+          : { providerRequests: { remaining: scenario === "execution-bound" ? 1 : 32 } }),
         readFiles: async (paths) =>
           paths.map((path) => {
             read.add(path);
@@ -281,6 +303,12 @@ test.each([
           return pages;
         },
       });
+      if (scenario === "authority-change") {
+        await expect(run).rejects.toThrow("Wiki execution authority changed");
+        expect(receivedRequests).toBe(1);
+        expect(publications).toBe(0);
+        return;
+      }
       if (scenario === "provider-failure-not-repaired") {
         await expect(run).rejects.toBeDefined();
         expect(receivedRequests).toBe(1);
@@ -317,6 +345,7 @@ test.each([
           "source-hungry-checker",
           "bare-wiki-reference",
           "large-repository",
+          "many-topics",
         ].includes(scenario)
       ) {
         await expect(run).rejects.toThrow(
@@ -343,6 +372,12 @@ test.each([
         );
       }
       expect(result.pages).toEqual([]);
+      if (scenario === "many-topics") {
+        expect(receivedRequests).toBeGreaterThan(32);
+        expect(publications).toBe(6);
+        expect(read.size).toBe(114);
+        return;
+      }
       expect(read.size).toBe(64);
       expect(publications).toBe(4);
       expect(writes).toBe(scenario === "bare-wiki-reference" ? 6 : 5);

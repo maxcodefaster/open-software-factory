@@ -18,6 +18,7 @@ export type WikiGenerationInput = {
   readFiles(paths: string[]): Promise<Array<{ path: string; content: string }>>;
   publish?(output: WikiGenerationOutput): Promise<WikiPageSnapshot[]>;
   providerRequests?: { remaining: number };
+  authorize?(): Promise<void>;
   usageSink?(callID: string): MastraUsageSink;
   signal: AbortSignal;
 };
