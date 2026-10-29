@@ -18,7 +18,7 @@ import {
 import { workspaceSourceKey } from "./source-manifest";
 import { runtimeVolumeClaimSpec } from "./storage";
 
-const exactImage = z
+export const factoryboxRuntimeImage = z
   .string()
   .regex(/^[a-zA-Z0-9][a-zA-Z0-9.:-]*\/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/)
   .refine(
@@ -119,8 +119,8 @@ export const factoryboxReserveBootstrapProgram = readFileSync(
 
 export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   const profile = factoryboxRuntimeProfile.parse(input.profile);
-  exactImage.parse(input.runtimeHostImage);
-  if (input.workerRuntimeHostImage) exactImage.parse(input.workerRuntimeHostImage);
+  factoryboxRuntimeImage.parse(input.runtimeHostImage);
+  if (input.workerRuntimeHostImage) factoryboxRuntimeImage.parse(input.workerRuntimeHostImage);
   const identifier = (value: string) =>
     z
       .string()
