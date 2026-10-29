@@ -167,6 +167,13 @@ test("native setup inspection has a final-output step after sequential source re
       expect(JSON.stringify(body.messages)).toContain(
         "write standard installation commands for already-established system tools and exact approved versions",
       );
+      expect(JSON.stringify(body.messages)).toContain(
+        "Use bounded retry/backoff only for idempotent upstream artifact GET downloads",
+      );
+      expect(JSON.stringify(body.messages)).toContain("--retry 3 --retry-all-errors");
+      expect(JSON.stringify(body.messages)).toContain(
+        "Never retry a whole build, lifecycle hook, installer or verification command",
+      );
       const path = paths[requests++];
       const message = path
         ? {
