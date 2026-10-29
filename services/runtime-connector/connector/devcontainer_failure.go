@@ -42,9 +42,23 @@ var diagnosticCredentials = regexp.MustCompile(`(?i)(https?://)[^\s/@]+@`)
 var diagnosticAuthorization = regexp.MustCompile(`(?i)(authorization:\s*(?:bearer|basic)\s+)\S+`)
 var diagnosticToken = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})\b`)
 var diagnosticAssignment = regexp.MustCompile(`\b[A-Z_]*(?:TOKEN|PASSWORD|SECRET|API_KEY)[A-Z_]*=(?:"[^"]*"|'[^']*'|[^\s;]+)`)
+var diagnosticTerminalEscape = regexp.MustCompile(`(?:\x1b\[|\x{009b})[0-?]*[ -/]*[@-~]`)
+
+func devcontainerFailureLines(text string) []string {
+	var failures []string
+	text = diagnosticTerminalEscape.ReplaceAllString(text, "")
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
+			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") {
+			failures = append(failures, line)
+		}
+	}
+	return failures
+}
 
 func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment) string {
-	var details []string
+	var summary []string
 	for _, line := range strings.Split(stdout, "\n") {
 		var result struct {
 			Outcome     string `json:"outcome"`
@@ -52,27 +66,48 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 			Message     string `json:"message"`
 		}
 		if json.Unmarshal([]byte(line), &result) == nil && result.Outcome == "error" {
-			details = append(details, result.Description, result.Message)
+			summary = append(summary, result.Description, result.Message)
 		}
 	}
-	var failures []string
+	var raw strings.Builder
+	var causes, fallback []string
 	for _, line := range strings.Split(stderr, "\n") {
 		var entry struct {
+			Type string `json:"type"`
 			Text string `json:"text"`
 		}
 		if json.Unmarshal([]byte(line), &entry) == nil {
+			if entry.Type == "raw" {
+				// Raw events are transport chunks, not complete lines. Join
+				// before selecting causes or masking split credentials.
+				raw.WriteString(entry.Text)
+				continue
+			}
 			line = entry.Text
 		}
-		lower := strings.ToLower(line)
-		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
-			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") {
-			failures = append(failures, line)
+		for _, failure := range devcontainerFailureLines(line) {
+			lower := strings.ToLower(failure)
+			if strings.Contains(lower, "command failed:") ||
+				strings.Contains(lower, "failed to fetch control manifest") {
+				fallback = append(fallback, failure)
+			} else {
+				causes = append(causes, failure)
+			}
 		}
 	}
-	if len(failures) > 4 {
-		failures = failures[len(failures)-4:]
+	tail := func(lines []string) []string {
+		if len(lines) > 4 {
+			return lines[len(lines)-4:]
+		}
+		return lines
 	}
-	details = append(details, failures...)
+	// Preserve the actual build/process cause before repetitive CLI wrappers.
+	// An optional control-manifest lookup is not the Compose build verdict.
+	details := append(tail(devcontainerFailureLines(raw.String())), tail(causes)...)
+	if len(details) == 0 {
+		details = tail(fallback)
+	}
+	details = append(details, summary...)
 	text := strings.Join(details, " ")
 	for _, value := range assignment.RuntimeEnvironment {
 		if value == "" {
