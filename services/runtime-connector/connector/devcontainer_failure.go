@@ -44,6 +44,7 @@ var diagnosticAuthorization = regexp.MustCompile(`(?i)(authorization:\s*(?:beare
 var diagnosticToken = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})\b`)
 var diagnosticAssignment = regexp.MustCompile(`\b[A-Z_]*(?:TOKEN|PASSWORD|SECRET|API_KEY)[A-Z_]*=(?:"[^"]*"|'[^']*'|[^\s;]+)`)
 var diagnosticTerminalEscape = regexp.MustCompile(`(?:\x1b\[|\x{009b})[0-?]*[ -/]*[@-~]`)
+var diagnosticHTTPFailure = regexp.MustCompile(`(?i)\bHTTP[ /][45][0-9]{2}\b`)
 
 func devcontainerFailureLines(text string) []string {
 	var failures []string
@@ -52,6 +53,7 @@ func devcontainerFailureLines(text string) []string {
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
 			strings.Contains(lower, "failure") || strings.Contains(lower, "curl: (") ||
+			diagnosticHTTPFailure.MatchString(line) ||
 			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") ||
 			strings.Contains(lower, "not permitted") || strings.Contains(lower, "privileges requested") ||
 			strings.Contains(lower, "did not complete successfully") {
