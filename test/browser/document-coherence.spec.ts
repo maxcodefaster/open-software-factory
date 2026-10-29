@@ -540,16 +540,14 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await expect(editor).toContainText("Recovered draft.");
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await openProjectMenu(page);
-  await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-  await page.getByRole("button", { name: title, exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
   await expect(editor).toContainText("Recovered draft.");
   const [before] = await database.client<
     Array<{ body: string; version: number }>
   >`SELECT current_body AS body,version::float8 AS version FROM factory.knowledge_page WHERE id=${pageID}`;
   if (!before) throw new Error("Missing page");
   await editor.press("ControlOrMeta+End");
+  await expect(editor).toBeFocused();
   const cursorBefore = await editor.evaluate(() => {
     const selection = window.getSelection();
     return { text: selection?.anchorNode?.textContent, offset: selection?.anchorOffset };
@@ -557,6 +555,7 @@ test("Wiki autosave keeps focused edits, merges remote prose and restores failed
   await database.client`UPDATE factory.knowledge_page SET current_body=${before.body.replace("Saved human", "Remote human")},version=version+1 WHERE id=${pageID}`;
   await expect(editor).toContainText("Remote human");
   await expect(editor).toContainText("Recovered draft.");
+  await expect(editor).toBeFocused();
   expect(
     await editor.evaluate(() => {
       const selection = window.getSelection();
@@ -631,10 +630,7 @@ test("Wiki typing and deletion survive delayed autosave acknowledgement and relo
       .toBe("Replacement Wiki intent.");
     await page.reload();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-    await openProjectMenu(page);
-    await page.getByRole("button").filter({ hasText: projectSlug }).click();
-    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-    await page.getByRole("button", { name: title, exact: true }).click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
     await expect(page.getByLabel("Edit Knowledge body", { exact: true })).toHaveText(
       "Replacement Wiki intent.",
     );
@@ -955,10 +951,13 @@ test("keeps History open beside the wide Agent during browser capture", async ({
   const history = page.getByRole("complementary", { name: "Specification history" });
   await expect(history).toBeVisible();
   await expect(history).toBeFocused();
-  const openedAt = refreshes;
-  await expect.poll(() => refreshes - openedAt, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
-  await expect(history).toBeVisible();
-  await expect(history).toBeFocused();
+  for (let refresh = 0; refresh < 3; refresh++) {
+    const observed = refreshes;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect.poll(() => refreshes, { timeout: 10_000 }).toBeGreaterThan(observed);
+    await expect(history).toBeVisible();
+    await expect(history).toBeFocused();
+  }
   await page.mouse.move(0, 0);
   await page.screenshot({ path: `${evidenceDirectory}/spec-history-agent-stable.png` });
   await expect(history).toBeFocused();
