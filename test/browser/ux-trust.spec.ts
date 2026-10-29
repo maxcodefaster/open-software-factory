@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import ts from "typescript";
 import {
   agentViewSchema,
@@ -18,16 +17,19 @@ import { CommandError } from "../../apps/factory/src/command-error";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
   completedConversation,
+  factoryFunctionMatcher,
   factoryFunctionMatches,
   factoryFunctionRequest,
   mockAgentView,
   mockBootstrap,
   mockFactoryFunctions,
   requestFunction,
+  wakeFactoryReads,
 } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
@@ -130,13 +132,17 @@ async function mockDeveloperIDE(
     computeRequests: [] as string[],
     stopRequests: [] as string[],
   };
+  const compute = await Promise.all(
+    ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
+  );
+  const stop = await Promise.all(
+    ["stopRuntimeAttempt", "stopDeveloperIDE", "stopWorkspaceSource"].map(factoryFunctionMatcher),
+  );
   page.on("request", (request) => {
     if (request.method() !== "POST") return;
-    const path = new URL(request.url()).pathname;
-    if (/\/(?:personal-workspace|ticket-workspace|staging)\/ensure$/.test(path))
-      fixture.computeRequests.push(path);
-    if (/\/_server\/data\/(?:stopDeveloperIDE|stopWorkspaceSource)-/.test(path))
-      fixture.stopRequests.push(path);
+    const url = new URL(request.url());
+    if (compute.some((matches) => matches(url))) fixture.computeRequests.push(url.pathname);
+    if (stop.some((matches) => matches(url))) fixture.stopRequests.push(url.pathname);
   });
   const source = sourceWorkspaceViewSchema.parse({
     workspaceID,
@@ -252,10 +258,12 @@ test("IDE retains its document during compute reconnect without restarting compu
   await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
   await editor.fill("Keep this exact document and draft");
   reconnecting = true;
+  await wakeFactoryReads(page);
   await expect.poll(() => reconnectReads).toBeGreaterThan(0);
   await expect(editor).toHaveValue("Keep this exact document and draft");
   await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
   reconnecting = false;
+  await wakeFactoryReads(page);
   await expect.poll(() => recoveredReads).toBeGreaterThan(0);
   await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
   await expect(frame).toHaveAttribute("data-editor-epoch", "1");
@@ -277,11 +285,11 @@ test("Preview retains its document during reconnect without restarting compute",
   let reconnecting = false;
   let documents = 0;
   let creates = 0;
+  const compute = await Promise.all(
+    ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
+  );
   page.on("request", (request) => {
-    if (
-      request.method() === "POST" &&
-      /\/(personal-workspace|ticket-workspace|staging)\/ensure$/.test(request.url())
-    )
+    if (request.method() === "POST" && compute.some((matches) => matches(new URL(request.url()))))
       creates++;
   });
   await mockFactoryFunctions(page, {
@@ -318,6 +326,7 @@ test("Preview retains its document during reconnect without restarting compute",
     .getByLabel("Unsaved runtime draft");
   await editor.fill("Keep this exact document and draft");
   reconnecting = true;
+  await wakeFactoryReads(page);
   const status = page.getByRole("status", { name: "Preview connection" });
   await expect(status).toHaveText("Connection interrupted. Reconnecting to the same Workspace…");
   await expect(frame).toHaveAttribute("inert", "");
@@ -327,6 +336,7 @@ test("Preview retains its document during reconnect without restarting compute",
     fullPage: true,
   });
   reconnecting = false;
+  await wakeFactoryReads(page);
   await expect(status).toHaveCount(0);
   await expect(editor).toHaveValue("Keep this exact document and draft");
   await expect(frame).not.toHaveAttribute("inert", "");
