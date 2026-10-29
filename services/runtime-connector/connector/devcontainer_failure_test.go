@@ -148,6 +148,47 @@ Error: Command failed: docker compose build
 	}
 }
 
+func TestDevcontainerDiagnosticKeepsInnerFailureBeforeLongBuildProcess(t *testing.T) {
+	command := strings.Repeat(`curl --fail "https://example.test/tool"; `, 100)
+	stderr := "#8 44.6 curl: (18) Send failure: Broken pipe; GH_TOKEN=owned-private-value\n" +
+		"#8 ERROR: process \"/bin/sh -c " + command +
+		"\" did not complete successfully: exit code: 18\n" +
+		"ERROR: failed to solve: process \"/bin/sh -c " + command +
+		"\" did not complete successfully: exit code: 18\n" +
+		"Error: Command failed: docker compose build\n"
+	detail := devcontainerFailureDiagnostic(
+		`{"outcome":"error","description":"An error occurred building the Docker Compose images."}`,
+		stderr, Assignment{RuntimeEnvironment: map[string]string{"GH_TOKEN": "owned-private-value"}},
+	)
+	if !strings.HasPrefix(detail, "#8 44.6 curl: (18) Send failure: Broken pipe; GH_TOKEN=[REDACTED]") ||
+		!strings.Contains(detail, "exit code: 18") || strings.Contains(detail, "owned-private-value") {
+		t.Fatalf("the Dockerfile command hid the actual inner failure or exit status: %s", detail)
+	}
+	if strings.Contains(detail, "https://example.test/tool") || len(detail) > 1024 {
+		t.Fatalf("the compact diagnostic retained an oversized build command: %s", detail)
+	}
+}
+
+func TestDevcontainerDiagnosticKeepsCompactProcessFailureWithoutInnerOutput(t *testing.T) {
+	command := strings.Repeat(`printf "ordinary output"; `, 100)
+	detail := devcontainerFailureDiagnostic("", "ERROR: failed to solve: process \"/bin/sh -c "+
+		command+"\" did not complete successfully: exit code: 137\n", Assignment{})
+	if !strings.Contains(detail, "exit code: 137") || strings.Contains(detail, "ordinary output") {
+		t.Fatalf("a silent process lost its terminal exit status: %s", detail)
+	}
+}
+
+func TestDevcontainerDiagnosticKeepsCurlProtocolFailure(t *testing.T) {
+	stderr := "#5 6.372 curl: (18) transfer closed with 85888 bytes remaining to read\n" +
+		"#5 ERROR: process \"/bin/sh -c curl --output /tmp/tool https://example.test/tool\" " +
+		"did not complete successfully: exit code: 18\n"
+	detail := devcontainerFailureDiagnostic("", stderr, Assignment{})
+	if !strings.HasPrefix(detail, "#5 6.372 curl: (18) transfer closed") ||
+		!strings.Contains(detail, "exit code: 18") {
+		t.Fatalf("the native incomplete-transfer diagnostic was lost: %s", detail)
+	}
+}
+
 func TestDevcontainerDiagnosticJoinsRawChunksBeforeRedaction(t *testing.T) {
 	stderr := `{"type":"raw","text":"\u001b[31mERROR: failed to solve; GH_TOKEN=owned-"}
 {"type":"text","text":"background observation"}

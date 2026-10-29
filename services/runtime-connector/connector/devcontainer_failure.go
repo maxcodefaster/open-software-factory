@@ -51,6 +51,7 @@ func devcontainerFailureLines(text string) []string {
 	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", "\n"), "\n") {
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "error") || strings.Contains(lower, "failed") ||
+			strings.Contains(lower, "failure") || strings.Contains(lower, "curl: (") ||
 			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") ||
 			strings.Contains(lower, "not permitted") || strings.Contains(lower, "privileges requested") ||
 			strings.Contains(lower, "did not complete successfully") {
@@ -58,6 +59,23 @@ func devcontainerFailureLines(text string) []string {
 		}
 	}
 	return failures
+}
+
+func devcontainerProcessFailures(lines []string) (causes, processes []string) {
+	for _, line := range lines {
+		start := strings.Index(line, `process "`)
+		end := strings.LastIndex(line, `" did not complete successfully:`)
+		if start >= 0 && end > start {
+			// A Dockerfile RUN can occupy the entire public diagnostic.
+			// Retain the terminal status, not its repeated shell command,
+			// and put the process's own error output ahead of this wrapper.
+			line = line[:start] + "build process" + line[end+1:]
+			processes = append(processes, line)
+		} else {
+			causes = append(causes, line)
+		}
+	}
+	return causes, processes
 }
 
 func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment) string {
@@ -108,7 +126,11 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 	}
 	// Preserve the actual build/process cause before repetitive CLI wrappers.
 	// An optional control-manifest lookup is not the Compose build verdict.
-	details := append(tail(devcontainerFailureLines(raw.String())), tail(causes)...)
+	rawCauses, rawProcesses := devcontainerProcessFailures(devcontainerFailureLines(raw.String()))
+	causes, processes := devcontainerProcessFailures(causes)
+	details := append(tail(rawCauses), tail(causes)...)
+	details = append(details, tail(rawProcesses)...)
+	details = append(details, tail(processes)...)
 	if len(details) == 0 {
 		details = tail(fallback)
 	}
