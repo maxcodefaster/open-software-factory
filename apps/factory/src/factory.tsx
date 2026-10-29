@@ -690,7 +690,16 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
         if (disposed || !panel) return;
         const handoff = () => {
           if (disposed || !workspaceVisible() || activeWorkspaceTab()?.id !== id) return;
-          if (panel.contains(document.activeElement)) {
+          const active = document.activeElement;
+          // A late document read must not steal a later control's focus.
+          if (
+            panel.contains(active) ||
+            projectMenuOpen() ||
+            settingsOpen() ||
+            (active instanceof HTMLElement &&
+              active !== document.body &&
+              active !== workspaceOpener)
+          ) {
             setWorkspaceFocusTarget(undefined);
             return;
           }
