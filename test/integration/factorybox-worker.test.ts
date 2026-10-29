@@ -259,7 +259,7 @@ test("concurrent Sandboxes share one immutable worker and refuse missing storage
       ),
     ).rejects.toThrow("already pinned");
     await expect(
-      worker.provision(resources(location), { ...profile, cpuRequestMilli: 100 }, runtimeImage),
+      worker.provision(resources(location), { ...profile, cpuRequestMilli: 200 }, runtimeImage),
     ).rejects.toThrow("already pinned");
     const claim = kube.objects.get("persistentvolumeclaim/runtime-data");
     if (!claim) throw new Error("Missing owned Source claim");
