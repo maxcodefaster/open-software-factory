@@ -6,7 +6,7 @@ import { codingReasoningInput } from "./model-settings";
 
 export const projectAgentProgressInput = z.object({
   phase: z.enum(["guidance", "thinking", "searching", "reading", "validating"]),
-  completedLookups: z.number().int().nonnegative().max(12),
+  completedLookups: z.number().int().nonnegative(),
 });
 export type ProjectAgentProgress = z.infer<typeof projectAgentProgressInput>;
 
