@@ -12,6 +12,14 @@ export function createComposerState(input: {
 
   const messageDrafts = new Map<string, string>();
 
+  function acknowledgeDraft(scope: string, ...commandIds: string[]) {
+    const pending = input.commands.latest(scope);
+    if (!pending?.draft || !commandIds.includes(pending.commandId)) return;
+    if (messageDrafts.get(scope) === pending.draft) messageDrafts.delete(scope);
+    const storageKey = `chat-draft:${input.userID}:${scope}`;
+    if (sessionStorage.getItem(storageKey) === pending.draft) sessionStorage.removeItem(storageKey);
+  }
+
   function restoreMessageDraft(element: HTMLTextAreaElement, scope: () => string) {
     let previousScope: string | undefined;
     let restoredCommand: ReturnType<typeof input.commands.latest>;
@@ -47,7 +55,8 @@ export function createComposerState(input: {
             ) {
               if (readAttachmentContent(element) === restoredCommand.draft) {
                 restoreAttachmentContent(element, "");
-                messageDrafts.delete(key);
+                retain();
+                resizeComposer(element);
               }
               restoredCommand = undefined;
               setRestoredMessageScope(undefined);
@@ -78,5 +87,6 @@ export function createComposerState(input: {
     drafts: messageDrafts as ReadonlyMap<string, string>,
     restored: restoredMessageScope,
     bind: restoreMessageDraft,
+    acknowledge: acknowledgeDraft,
   };
 }

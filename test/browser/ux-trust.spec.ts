@@ -1434,8 +1434,9 @@ test("restores an unacknowledged message and its command identity after browser 
   await expect(panel.getByLabel("Message conversation")).toBeEnabled();
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await selectProject(page);
-  await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}(?:[/?#]|$)`));
+  if (!(await panel.isVisible()))
+    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(panel.getByLabel("Message conversation")).toHaveValue(message, {
     timeout: 3_000,
   });
@@ -1516,9 +1517,11 @@ for (const action of ["start", "prompt"] as const) {
     await expect(button).toBeEnabled();
     await page.reload();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-    await selectProject(page);
-    await openTicket();
-    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`),
+    );
+    if (!(await panel.isVisible()))
+      await page.getByRole("button", { name: "Toggle Agent panel" }).click();
     await expect(button).toBeEnabled();
     if (action === "prompt")
       await expect(panel.getByLabel("Message conversation")).toHaveValue(text);
@@ -1599,8 +1602,9 @@ for (const type of ["free-text", "single-select", "multi-select"] as const) {
     await expect(panel.getByRole("button", { name: "Continue", exact: true })).toBeEnabled();
     await page.reload();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-    await selectProject(page);
-    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${projectID}(?:[/?#]|$)`));
+    if (!(await panel.isVisible()))
+      await page.getByRole("button", { name: "Toggle Agent panel" }).click();
     if (type === "free-text") await expect(panel.getByLabel("Custom answer")).toHaveValue(text);
     else {
       await expect(panel.getByLabel("First option", { exact: true })).toBeChecked();
@@ -1621,15 +1625,17 @@ test("only exact admitted command identity clears a recovered draft on read-only
   const text = "Identical text does not prove this command was admitted";
   let confirmed = false;
   const otherCommandID = crypto.randomUUID();
+  const conversationID = crypto.randomUUID();
+  const messageID = crypto.randomUUID();
   const view = () => ({
-    id: crypto.randomUUID(),
+    id: conversationID,
     projectId: projectID,
     mode: "investigate",
     version: 1,
     entries: submissions.length
       ? [
           {
-            id: crypto.randomUUID(),
+            id: messageID,
             ordinal: 1,
             kind: "user-message",
             actor: "user",
@@ -1664,8 +1670,9 @@ test("only exact admitted command identity clears a recovered draft on read-only
   const returnToConversation = async () => {
     await page.reload();
     await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-    await selectProject(page);
-    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+    await expect(page).toHaveURL(new RegExp(`/projects/${projectID}(?:[/?#]|$)`));
+    if (!(await panel.isVisible()))
+      await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   };
   await returnToConversation();
   await expect(panel.getByLabel("Message conversation")).toHaveValue(text);
@@ -1676,6 +1683,15 @@ test("only exact admitted command identity clears a recovered draft on read-only
   await expect(panel.getByLabel("Message conversation")).toHaveValue("");
   await expect(panel.getByRole("status", { name: "Message recovery" })).toHaveCount(0);
   expect(submissions).toHaveLength(1);
+  await returnToConversation();
+  await expect(panel.locator(".agent-message.user p")).toHaveText(text);
+  await expect(panel.getByLabel("Message conversation")).toHaveValue("");
+  expect(submissions).toHaveLength(1);
+  const directory = ".factory/test-results/ux-trust/browser-command-recovery";
+  await mkdir(directory, { recursive: true });
+  await page.screenshot({ path: `${directory}/confirmed-message-wide.png` });
+  await page.setViewportSize({ width: 760, height: 900 });
+  await page.screenshot({ path: `${directory}/confirmed-message-narrow.png` });
   await panel.getByLabel("Message conversation").fill(text);
   await panel.getByRole("button", { name: "Send message" }).click();
   await expect.poll(() => submissions.length).toBe(2);
@@ -2811,12 +2827,20 @@ for (const existingConversation of [true, false]) {
   test(`recovers a saved message after response failure with ${existingConversation ? "an existing" : "a first"} conversation`, async ({
     page,
   }) => {
-    let conversationID = existingConversation ? await insertConversation() : undefined;
+    let conversationID: string | undefined = existingConversation
+      ? await insertConversation()
+      : undefined;
     const message = "Explain the delivery process";
     await mockFactoryFunctions(page, {
       conversations: {
         message: async (_actor, _factoryTargetID, factoryCommand) => {
-          conversationID ??= await insertConversation();
+          if (!conversationID) {
+            const current = await serverCall(
+              browserFunction(page, "getConversation", [_factoryTargetID, {}]),
+            );
+            if (!current) throw new Error("The explicit mode command did not create its context");
+            conversationID = current.id;
+          }
           await insertUserMessage(conversationID, message, factoryCommand.commandId);
           return (() => {
             throw new CommandError("unavailable", String("Model response failed"));
@@ -2910,6 +2934,13 @@ test("preserves a new draft typed while saved-message recovery is loading", asyn
   releaseHistory();
   await expect(panel.locator(".agent-message.user p").last()).toHaveText("Accepted question");
   await expect(composer).toHaveValue("Next question draft");
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}(?:[/?#]|$)`));
+  if (!(await panel.isVisible()))
+    await page.getByRole("button", { name: "Toggle Agent panel" }).click();
+  await expect(composer).toHaveValue("Next question draft");
+  await expect(panel.locator(".agent-message.user")).toHaveCount(2);
 });
 
 for (const outcome of ["success", "failure"] as const) {
