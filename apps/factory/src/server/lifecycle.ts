@@ -125,6 +125,7 @@ export function startFactoryLifecycle(application: LifecycleServices) {
         deliveryController.close(),
         learningWorker.close(),
         projectAgentController.shutdown(),
+        knowledgeController.close(),
       ]);
       await reserveStarted;
       await Promise.all([

@@ -60,8 +60,8 @@ Preserve human business framing and hierarchy. Absence from code does not dispro
 Correct evidence-disproven stale paragraphs. Omit unaffected pages. No material change means pages:[].
 No generated timestamps, hashes or Sources footers. Factory supplies provenance.
 Factory binds page identities and parents from the validated plan and current pages.
-Use source tools before the final step when needed. The last step is reserved for your structured
-result, without tools. Report missing evidence or uncertainty rather than inventing unsupported facts.
+Use source tools when evidence is missing, then return your structured result once it is sufficient.
+Report missing evidence or uncertainty rather than inventing unsupported facts.
 Bodies exclude their separate title. Write internal Wiki links as Markdown [Page title](#wiki/page-slug),
 using the exact title and slug of an existing checked page. Never write a bare #wiki/ reference.
 Do not archive or delete pages. Cite only paths actually read. Never link to not-yet-published pages.`;
@@ -72,10 +72,9 @@ export const wikiReviewTask =
   "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands.";
 
 export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {
-  input = { ...input, signal: AbortSignal.any([input.signal, AbortSignal.timeout(360_000)]) };
   if (!input.publish) throw new Error("Wiki workflow requires checked publication");
   const publish: NonNullable<WikiGenerationInput["publish"]> = input.publish;
-  const providerRequests = input.providerRequests ?? { remaining: 32 };
+  const providerRequests = input.providerRequests;
   const connection = input.connection ?? projectModelConnection("knowledge");
   const providerOptions = modelProviderOptions(connection, input.modelId);
   let executionError: unknown;
@@ -87,7 +86,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       throw cause;
     }
   };
-  let activeSignal = input.signal;
+  const activeSignal = input.signal;
   let pages = input.pages.map((page) => ({ ...page }));
   const completedPageIDs = new Set(input.completedPageIDs ?? []);
   const known = new Set(input.inventory.map((file) => file.path));
@@ -98,6 +97,8 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       0,
     );
     async function readFiles(paths: string[]) {
+      activeSignal.throwIfAborted();
+      await input.authorize?.();
       const missing = [...new Set(paths)].filter((path) => !read.has(path));
       if (missing.some((path) => !known.has(path)) || read.size + missing.length > 48)
         throw new Error("Topic source count exceeded");
@@ -129,7 +130,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     prompt: unknown,
     sources: ReturnType<typeof sourceScope>,
     task: string,
-    steps = 4,
     validate?: (value: z.output<T>) => void,
   ): Promise<z.output<T>> {
     activeSignal.throwIfAborted();
@@ -154,7 +154,8 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       const guard = nativeStepGuard({
         signal: activeSignal,
         maxInputBytes: 1024 * 1024,
-        requests: providerRequests,
+        ...(providerRequests ? { requests: providerRequests } : {}),
+        authorize: input.authorize,
       });
       try {
         const result = await mastra
@@ -162,13 +163,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           .generate(
             JSON.stringify(correction ? { input: prompt, rejectedResult, correction } : prompt),
             {
-              maxSteps: steps,
+              maxSteps: Infinity,
               abortSignal: activeSignal,
               onStepFinish: usage.onStepFinish,
-              prepareStep: async (step) => {
-                await guard(step);
-                if (step.stepNumber >= steps - 1) return { toolChoice: "none" as const };
-              },
+              prepareStep: guard,
               modelSettings: { maxRetries: 0, maxOutputTokens: 8000 },
               ...(providerOptions ? { providerOptions } : {}),
               structuredOutput: { schema, jsonPromptInjection: "auto" },
@@ -290,7 +288,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           },
           planSources,
           "Research manifests and core flows, then plan only useful affected topics. New Wiki starts with a concise overview followed by coherent child guides. Small app needs 1-3 topics. Each purpose is at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
-          6,
           (plan) => validatePlan(remainingPlan(plan)),
         );
         return remainingPlan(plan);
@@ -311,7 +308,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     },
   });
   async function runTopic(topic: Topic, plannedTopics: Topic[]) {
-    activeSignal = AbortSignal.any([input.signal, AbortSignal.timeout(90_000)]);
     const sources = sourceScope();
     const research = createStep({
       id: "investigate-topic",
@@ -332,7 +328,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             },
             sources,
             "Follow relationships from seed files to actual flows, state, boundaries, failures and focused tests. Return individual concise verified findings with inspected paths and explicit uncertainties. Each claim is at most 1200 characters and 8 paths; split independent facts. Distinguish returned in-memory values from stored records, inventory mutation, or durable history. Never infer features from filenames.",
-            5,
             (result) => {
               const unread = [
                 ...new Set(
@@ -472,7 +467,6 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             },
             sources,
             wikiReviewTask,
-            2,
           );
           return { round: inputData.round + 1, issues: [...issues, ...review.issues], output };
         }),

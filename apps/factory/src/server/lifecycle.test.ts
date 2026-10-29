@@ -64,6 +64,12 @@ test("the process owns Delivery and Monitoring observations and drains them befo
         await finish.promise;
       },
     },
+    knowledgeController: {
+      ...observer,
+      async close() {
+        closed.push("wiki");
+      },
+    },
   } as unknown as Parameters<typeof startFactoryLifecycle>[0];
   const close = startFactoryLifecycle(application);
   try {
@@ -77,10 +83,11 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     expect(close()).toBe(close());
     await Bun.sleep(10);
     expect(closed).toContain("monitoring");
+    expect(closed).toContain("wiki");
     expect(drained).toBe(false);
     finish.resolve();
     await pending;
-    expect(closed.sort()).toEqual(["delivery", "monitoring"]);
+    expect(closed.sort()).toEqual(["delivery", "monitoring", "wiki"]);
     expect(deliveries).toBe(1);
   } finally {
     finish.resolve();
