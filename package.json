@@ -37,7 +37,7 @@
     "factory:restart": "bun scripts/factory/index.ts restart",
     "factory:status": "bun scripts/factory/index.ts status",
     "factory:reset": "bun scripts/factory/index.ts reset --data",
-    "test:browser": "bun --bun ./node_modules/@playwright/test/cli.js test",
+    "test:browser": "bun --no-env-file scripts/testing/browser.ts",
     "test:browser:native": "FACTORY_BROWSER_LANE=native bun run test:browser",
     "test:browser:paid": "FACTORY_BROWSER_LANE=paid bun run test:browser",
     "test:browser:manual": "FACTORY_BROWSER_LANE=manual bun run test:browser",
