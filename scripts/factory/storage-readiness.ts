@@ -70,6 +70,7 @@ function podState(pod: Resource) {
 }
 const probeName = "storage-check";
 const claimName = "runtime-data";
+const storageObservationTimeoutMS = 20 * 60_000;
 type StorageCheckInput = {
   stateDirectory: string;
   image: string;
@@ -169,7 +170,7 @@ async function storageCheck(
     "factory.dev/runtime-owner": intent.id,
     "factory.dev/storage-check": intent.id,
   };
-  let deadline = Date.now() + (input.timeoutMS ?? 180_000);
+  let deadline = Date.now() + (input.timeoutMS ?? storageObservationTimeoutMS);
   const snapshots: unknown[] = [];
   let fingerprint = "";
   let verified = intent.writeVerified;
@@ -370,7 +371,7 @@ async function storageCheck(
   async function cleanup() {
     // Each serial Kubernetes operation gets its own bounded convergence window.
     // A slow Pod or reclaimer must not leave the next operation a spent deadline.
-    const phaseTimeoutMS = input.cleanupTimeoutMS ?? 180_000;
+    const phaseTimeoutMS = input.cleanupTimeoutMS ?? storageObservationTimeoutMS;
     deadline = Date.now() + phaseTimeoutMS;
     const currentNamespace = await get("Namespace", namespace, false);
     if (currentNamespace) {
