@@ -7,7 +7,7 @@ export function createWorkspaceService(options: {
     "get" | "ensure" | "ensurePersonal" | "ensureChange" | "stop"
   >;
   editors: Pick<ReturnType<typeof createDeveloperIDEController>, "get" | "ensure" | "stop">;
-  revokeEditor(userID: string): void;
+  revokeEditor(userID: string): void | Promise<void>;
 }) {
   return {
     getSource: (userID: string, workspaceID: string) => options.sources.get(workspaceID, userID),
@@ -24,7 +24,7 @@ export function createWorkspaceService(options: {
       // Revoke established grants only after the same controller has recorded
       // Stop. Losing a browser response does not roll back that decision.
       await options.editors.stop(userID);
-      options.revokeEditor(userID);
+      await options.revokeEditor(userID);
     },
   };
 }
