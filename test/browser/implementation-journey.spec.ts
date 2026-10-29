@@ -26,10 +26,12 @@ import {
   browserBootstrap,
   browserFunction,
   completedConversation,
+  factoryFunctionMatcher,
   factoryFunctionMatches,
   mockAgentView,
   mockBootstrap,
   mockFactoryFunctions,
+  wakeFactoryReads,
 } from "../fixtures/server-functions";
 import { streamedAgentView } from "../support/agent-activity-route";
 import { serveChatAssets } from "../support/chat-assets";
@@ -104,6 +106,44 @@ async function selectProject(page: Parameters<typeof signIn>[0]) {
     .getByRole("button")
     .filter({ hasText: `implementation-ux-${projectID}` })
     .click();
+}
+
+async function mockCodingConversation(
+  page: Parameters<typeof signIn>[0],
+  options: { original?: boolean } = {},
+) {
+  const contextID = crypto.randomUUID();
+  const original = options.original !== false;
+  const view = conversationViewSchema.parse({
+    id: crypto.randomUUID(),
+    projectId: projectID,
+    ticketId: ticketID,
+    mode: "build",
+    version: 1,
+    entries: [],
+    contextId: contextID,
+    activeCodingContextId: contextID,
+    isActiveCoding: true,
+    contexts: [
+      {
+        id: contextID,
+        kind: "coding",
+        title: original ? "Original Coding" : "Fresh Coding",
+        ordinal: original ? 1 : 2,
+        original,
+        createdAt: new Date(0).toISOString(),
+      },
+    ],
+  });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      async get(_actor, id, input) {
+        if (id === view.projectId && input.ticketId === view.ticketId) return view;
+        return serverCall(browserFunction(page, "getConversation", [id, input]));
+      },
+    },
+  });
+  return contextID;
 }
 
 test("review distinguishes source checks from App video timing", async ({ page }) => {
@@ -655,16 +695,18 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
   await expect(
     page.getByRole("button", { name: "Resume implementation", exact: true }),
   ).toHaveCount(0);
-  await mkdir(".factory/screenshots/usage-limits", { recursive: true });
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/capacity-wait.png" });
+  const captures = ".factory/test-results/usage-limits";
+  await mkdir(captures, { recursive: true });
+  await page.screenshot({ path: `${captures}/capacity-wait.png` });
   paused = true;
+  await wakeFactoryReads(page);
   await expect(page.getByText("Coding paused at its allowance.", { exact: false })).toBeVisible({
     timeout: 10000,
   });
   const resume = page.getByRole("button", { name: "Resume implementation", exact: true });
   await expect(resume).toBeEnabled();
   expect(resumes).toEqual([]);
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/coding-pause.png" });
+  await page.screenshot({ path: `${captures}/coding-pause.png` });
   await resume.click();
   await expect(page.getByRole("alert")).toBeVisible();
   await resume.click();
@@ -676,7 +718,7 @@ test("capacity wait and Coding pause retain the Ticket and expose only an explic
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(resume).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: ".factory/screenshots/usage-limits/coding-pause-narrow.png" });
+  await page.screenshot({ path: `${captures}/coding-pause-narrow.png` });
 });
 
 test("a queued first Build shows preparation after reconnect, not active implementation or correction results", async ({
@@ -689,11 +731,16 @@ test("a queued first Build shows preparation after reconnect, not active impleme
   const errors: string[] = [];
   let working = false;
   let executionWrites = 0;
+  const executionCommands = await Promise.all(
+    ["implementTicket", "startTicketChange", "startCoding", "sendCodingPrompt", "resumeCoding"].map(
+      factoryFunctionMatcher,
+    ),
+  );
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
     if (
       request.method() === "POST" &&
-      /\/(?:implement|start|message|retry|prompt)$/.test(new URL(request.url()).pathname)
+      executionCommands.some((matches) => matches(new URL(request.url())))
     )
       executionWrites++;
   });
@@ -782,9 +829,10 @@ test("a queued first Build shows preparation after reconnect, not active impleme
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await page.screenshot({ path: `${captures}/pending-narrow.png` });
   await page.reload();
-  await open();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`));
   await expect(summary).toHaveText("Preparing implementation");
   working = true;
+  await wakeFactoryReads(page);
   await expect(summary).toHaveText("Implementation in progress");
   await summary.click();
   await expect(
@@ -810,8 +858,14 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
   const requests: unknown[] = [];
   const implementationRequests: string[] = [];
   let resumed = false;
+  const implementationCommands = await Promise.all(
+    ["startCoding", "sendCodingPrompt"].map(factoryFunctionMatcher),
+  );
   page.on("request", (request) => {
-    if (request.method() === "POST" && /\/agent\/(?:start|prompt)$/.test(request.url()))
+    if (
+      request.method() === "POST" &&
+      implementationCommands.some((matches) => matches(new URL(request.url())))
+    )
       implementationRequests.push(request.url());
   });
   await mockFactoryFunctions(page, {
@@ -888,8 +942,13 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
   await expect(summary.locator(".busy")).toHaveCount(0);
   await summary.click();
   await expect(
-    page.getByText("The submitted version is retained.", { exact: false }),
+    page
+      .locator(".ticket-checks")
+      .getByText("The submitted version is retained.", { exact: false }),
   ).toBeVisible();
+  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+    "The submitted version is retained.",
+  );
   await expect(page.getByText("Corrections not submitted", { exact: true })).toHaveCount(0);
   const captures = ".factory/test-results/checks-resume";
   await mkdir(captures, { recursive: true });
@@ -1048,11 +1107,10 @@ test("developer Coding options choose reasoning before the normal atomic Impleme
   await expect(reasoning).toHaveValue("high");
   await page.reload();
   await page.setViewportSize({ width: 1440, height: 900 });
-  await selectProject(page);
-  await page
-    .getByRole("region", { name: "requirements", exact: true })
-    .locator(".ticket-card-body")
-    .click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`));
+  await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+    codingTitle,
+  );
   await openOptions();
   await expect(reasoning).toHaveValue("high");
   expect(requests).toHaveLength(1);
@@ -1172,6 +1230,7 @@ test("an admitted Coding-options request with a lost response reconnects to its 
   await reasoning.selectOption("high");
   await panel.getByRole("button", { name: "Start implementation", exact: true }).click();
   await expect.poll(() => requests.length).toBe(1);
+  await wakeFactoryReads(page);
   await expect(reasoning).toBeVisible({ timeout: 10_000 });
   await expect(reasoning).toBeDisabled({ timeout: 10_000 });
   await expect(reasoning).toHaveValue("high");
@@ -1226,6 +1285,22 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
   page,
 }) => {
   const changeID = crypto.randomUUID();
+  const contextID = await mockCodingConversation(page);
+  const starts: Array<{ commandId: string; contextId?: string | undefined }> = [];
+  let prompts = 0;
+  await mockFactoryFunctions(page, {
+    agent: {
+      start: async (_actor, id, input) => {
+        expect(id).toBe(changeID);
+        starts.push(input);
+        throw new Error("Controlled lost Retry response");
+      },
+      prompt: async () => {
+        prompts++;
+        throw new Error("The original failed startup must retry its approved initial request");
+      },
+    },
+  });
   await mockFactoryFunctions(page, {
     runtime: {
       changes: async () =>
@@ -1252,7 +1327,7 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
     changeID,
     async () => ({
       state: "failed",
-      sessionAvailable: true,
+      sessionAvailable: false,
       runtimeConnected: false,
       messagesAvailable: true,
       messages: [],
@@ -1291,22 +1366,27 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
     .getByRole("region", { name: "implementation", exact: true })
     .getByRole("button")
     .click();
-  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
-  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  const panel = page.locator(".agent-panel");
+  if (!(await panel.isVisible()))
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   await expect(
     page.getByRole("button", { name: "Retry implementation", exact: true }),
   ).toBeEnabled();
-  const toolbar = page.locator(".agent-panel .agent-compose-toolbar");
+  const composer = panel.locator(".agent-composer");
+  await expect(composer).toHaveCSS("display", "grid");
   await expect
     .poll(() =>
-      toolbar.evaluate((element) => {
+      composer.evaluate((element) => {
         const retry = element.querySelector<HTMLButtonElement>(
           '[aria-label="Retry implementation"]',
         );
         if (!retry) return Number.POSITIVE_INFINITY;
+        const style = getComputedStyle(element);
         return Math.abs(
-          element.getBoundingClientRect().right - retry.getBoundingClientRect().right,
+          element.getBoundingClientRect().right -
+            Number.parseFloat(style.paddingRight) -
+            Number.parseFloat(style.borderRightWidth) -
+            retry.getBoundingClientRect().right,
         );
       }),
     )
@@ -1315,6 +1395,128 @@ test("a failed Sandbox leaves an explicit implementation retry in the Change Age
     page.locator(".agent-panel").getByRole("button", { name: "Send message", exact: true }),
   ).toHaveCount(0);
   await expect(page.locator(".agent-panel").getByLabel("Message conversation")).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+  await expect(panel.getByRole("alert")).toHaveText("Owned Sandbox startup failed");
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  expect(starts).toEqual([]);
+  expect(prompts).toBe(0);
+  const captures = ".factory/test-results/implementation-retry";
+  await mkdir(captures, { recursive: true });
+  await page.screenshot({ path: `${captures}/failed-sandbox-wide.png` });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(
+    panel.getByRole("button", { name: "Retry implementation", exact: true }),
+  ).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: `${captures}/failed-sandbox-narrow.png` });
+  const retry = panel.getByRole("button", { name: "Retry implementation", exact: true });
+  await retry.click();
+  await expect.poll(() => starts.length).toBe(1);
+  await expect(retry).toBeEnabled();
+  await retry.click();
+  await expect.poll(() => starts.length).toBe(2);
+  expect(starts[1]).toEqual(starts[0]);
+  expect(starts[0]).toMatchObject({ contextId: contextID });
+  expect(prompts).toBe(0);
+});
+
+test("a fresh Coding context accepts its first prompt without starting the original Build again", async ({
+  page,
+}) => {
+  const changeID = crypto.randomUUID();
+  const contextID = await mockCodingConversation(page, { original: false });
+  let working = false;
+  const prompts: Array<{ commandId: string; contextId?: string | undefined; text: string }> = [];
+  let starts = 0;
+  const writer = async () =>
+    writerViewSchema.parse({
+      state: working ? "agent" : "unassigned",
+      epoch: 1,
+      canWrite: false,
+      yours: false,
+      commandID: null,
+      actor: null,
+      requester: null,
+    });
+  const view = () => ({
+    state: working ? "working" : "idle",
+    runtimeState: working ? "ready" : "stopped",
+    sessionAvailable: working,
+    runtimeConnected: working,
+    messagesAvailable: true,
+    messages: [],
+    stopPending: false,
+    stopId: null,
+  });
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-fresh-coding",
+              baseSha: "a".repeat(40),
+              state: "active",
+              branchState: "succeeded",
+              runtimeState: "stopped",
+              implementationState: "stopped",
+              buildTurnState: "completed",
+            },
+          ],
+        }),
+    },
+    delivery: {
+      get: async () => deliveryViewSchema.parse({}),
+    },
+    writer: { status: writer, observe: writer },
+    agent: {
+      start: async () => {
+        starts++;
+        throw new Error("A fresh Coding conversation must use its explicit first prompt");
+      },
+      prompt: async (_actor, id, input) => {
+        expect(id).toBe(changeID);
+        prompts.push(input);
+        working = true;
+        return agentViewSchema.parse(view());
+      },
+    },
+  });
+  await mockAgentView(page, changeID, async () => view(), { activity: true });
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "implementation", exact: true })
+    .getByRole("button")
+    .click();
+  const panel = page.locator(".agent-panel");
+  if (!(await panel.isVisible()))
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  const draft = panel.getByLabel("Message conversation", { exact: true });
+  await expect(draft).toBeEnabled();
+  await expect(
+    panel.getByRole("button", { name: "Start implementation", exact: true }),
+  ).toHaveCount(0);
+  const text = "Continue the retained code with the new conversation's approved instructions.";
+  await draft.fill(text);
+  await expect(
+    page.getByRole("textbox", { name: "Specification summary", exact: true }),
+  ).toBeVisible();
+  expect(prompts).toEqual([]);
+  expect(starts).toBe(0);
+  const captures = ".factory/test-results/implementation-retry";
+  await mkdir(captures, { recursive: true });
+  await page.screenshot({ path: `${captures}/fresh-context-before-send.png` });
+  await panel.getByRole("button", { name: "Send message", exact: true }).click();
+  await expect.poll(() => prompts.length).toBe(1);
+  expect(prompts[0]).toMatchObject({ contextId: contextID, text });
+  expect(starts).toBe(0);
+  await expect(draft).toHaveValue("");
+  await expect(panel.locator(".agent-state")).toHaveText("Working");
+  await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });
 
 test("chat selects reasoning for the first Build, then shows the admitted value and only one execution action", async ({
@@ -1730,9 +1932,14 @@ for (const role of ["developer", "product-contributor"] as const) {
       await member.screenshot({ path: `${evidence}/${role}-plan.png` });
       hasChange = true;
       await member.reload();
-      await selectProject(member);
-      await member.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
-      await member.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+      await expect(member).toHaveURL(
+        new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`),
+      );
+      await expect(member.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+        title,
+      );
+      if (!(await panel.isVisible()))
+        await member.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
       await expect(panel.getByLabel("Message conversation", { exact: true })).toHaveAttribute(
         "placeholder",
         "Ask about this Ticket…",
@@ -2326,6 +2533,7 @@ test("admitted instructions remain visible before native dispatch and appear onc
   page,
 }) => {
   const changeID = crypto.randomUUID();
+  await mockCodingConversation(page);
   const commandId = crypto.randomUUID();
   const text = "Repair the signed-in inbox lifecycle without losing this correction.";
   const admitted = {
@@ -2413,13 +2621,13 @@ test("admitted instructions remain visible before native dispatch and appear onc
       .getByRole("region", { name: "implementation", exact: true })
       .getByRole("button")
       .click();
-    await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Open IDE", exact: true }).click();
-    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     const panel = page.locator(".agent-panel");
+    if (!(await panel.isVisible()))
+      await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
     await expect(panel.getByText(text, { exact: true })).toHaveCount(1);
     await expect(panel).toContainText("Activity will load when the Workspace resumes.");
-    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(panel.getByRole("alert")).toHaveText("Source Pod is no longer ready");
+    await expect(page.getByRole("alert")).toHaveCount(1);
     await mkdir(".factory/test-results/opencode-integration-fix-20261019", { recursive: true });
     await page.screenshot({
       path: ".factory/test-results/opencode-integration-fix-20261019/admitted-input-retained.png",
@@ -2430,6 +2638,7 @@ test("admitted instructions remain visible before native dispatch and appear onc
       runtimeState: "ready",
       runtimeConnected: true,
       messagesAvailable: true,
+      lastError: undefined,
       messages: [
         {
           id: admitted.id,
@@ -2442,6 +2651,8 @@ test("admitted instructions remain visible before native dispatch and appear onc
     await expect(panel.locator(".agent-state")).toHaveText("Working");
     await expect(panel.getByText(text, { exact: true })).toHaveCount(1);
     await expect(panel).not.toContainText("Internal injected native instructions.");
+    await expect(page.getByRole("tab", { name: /^IDE/ })).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
   } finally {
     await stream.dispose();
   }
@@ -3042,13 +3253,50 @@ test("Review corrections send to the retained Build without IDE; checks and cont
 test("Settings is a retained Project-bound workspace tab with no modal", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  await selectProject(page);
-  await page
-    .getByRole("region", { name: "requirements", exact: true })
-    .locator(".ticket-card-body")
-    .click();
-  await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Open settings", exact: true }).click();
+  const captures = ".factory/test-results/implementation-journey";
+  await mkdir(captures, { recursive: true });
+  const requested = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let delayed = true;
+  await mockFactoryFunctions(page, {
+    tickets: {
+      async detail(_actor, id) {
+        const value = await serverCall(browserFunction(page, "getTicketDetail", [id]));
+        if (id === ticketID && delayed) {
+          requested.resolve();
+          await release.promise;
+        }
+        return value;
+      },
+    },
+  });
+  const openSettings = page.getByRole("button", { name: "Open settings", exact: true });
+  try {
+    await selectProject(page);
+    await page
+      .getByRole("region", { name: "requirements", exact: true })
+      .locator(".ticket-card-body")
+      .click();
+    await requested.promise;
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await openSettings.focus();
+    await expect(openSettings).toBeFocused();
+    delayed = false;
+    release.resolve();
+    await expect(
+      page.getByRole("textbox", { name: "Specification summary", exact: true }),
+    ).toBeVisible();
+    await expect(openSettings).toBeFocused();
+    await expect(page.getByRole("button", { name: "Settings", exact: true })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    await page.screenshot({ path: `${captures}/settings-after-delayed-ticket.png` });
+  } finally {
+    delayed = false;
+    release.resolve();
+  }
+  await openSettings.click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });
   await expect(page.getByRole("tab", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -3072,15 +3320,14 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
   await expect(page.getByRole("tab", { name: "Settings", exact: true })).toHaveCount(1);
   await expect(skills).toHaveAttribute("aria-current", "page");
-  await mkdir(".factory/screenshots/implementation-journey", { recursive: true });
   await page.screenshot({
-    path: ".factory/screenshots/implementation-journey/settings-desktop.png",
+    path: `${captures}/settings-desktop.png`,
   });
   await page.setViewportSize({ width: 430, height: 900 });
   await expect(page.getByRole("button", { name: "Minimize workspace", exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
   await page.screenshot({
-    path: ".factory/screenshots/implementation-journey/settings-narrow.png",
+    path: `${captures}/settings-narrow.png`,
   });
   expect(errors).toEqual([]);
 });

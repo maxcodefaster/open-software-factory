@@ -213,13 +213,24 @@ export function createAssistantPresentation(dependencies: AssistantPresentationD
         ["failed", "stopped"].includes(selectedChange()?.runtimeState ?? "") &&
         ["failed", "stopped"].includes(dependencies.agent().state)));
 
-  const canPromptBuild = () =>
-    conversationMode() === "build" &&
-    agentCanRun() &&
-    !historicalCoding() &&
-    (Boolean(dependencies.conversation()?.contextId) ||
-      dependencies.correctionTarget() === selectedChange()?.id ||
-      !buildAgentNeedsStart(dependencies.agent()));
+  const canPromptBuild = () => {
+    const conversation = dependencies.conversation();
+    const separateCodingContext =
+      conversation?.contexts.some(
+        (context) =>
+          context.id === conversation.contextId && context.kind === "coding" && !context.original,
+      ) ?? false;
+    // The original Build already has an approved initial request. Its context
+    // does not replace Start/Retry when native startup failed before a session.
+    return (
+      conversationMode() === "build" &&
+      agentCanRun() &&
+      !historicalCoding() &&
+      (separateCodingContext ||
+        dependencies.correctionTarget() === selectedChange()?.id ||
+        !buildAgentNeedsStart(dependencies.agent()))
+    );
+  };
 
   const codingWriterBlocked = () => {
     const current = dependencies.codingWriter();
