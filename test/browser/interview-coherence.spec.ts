@@ -22,6 +22,7 @@ import {
   factoryFunctionMatches,
   mockAgentView,
   mockFactoryFunctions,
+  wakeFactoryReads,
 } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
@@ -250,6 +251,7 @@ for (const outcome of ["complete", "error"] as const) {
       expect(await history.evaluate((element) => element.scrollTop)).toBe(0);
       try {
         holdRead = true;
+        await wakeFactoryReads(page);
         await readStarted.promise;
         view = {
           ...view,
@@ -487,6 +489,8 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
     release = resolve;
   });
   let showProgress = false;
+  const turnID = crypto.randomUUID();
+  let commandID = "";
   const disposeRead = await mockFactoryFunctions(page, {
     conversations: {
       get: async (_actor, id, input) => {
@@ -495,8 +499,8 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
         return conversationViewSchema.parse({
           ...body,
           turn: {
-            id: crypto.randomUUID(),
-            commandId: crypto.randomUUID(),
+            id: turnID,
+            commandId: commandID,
             state: "running",
             engine: "mastra",
             mode: "plan",
@@ -510,9 +514,11 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      answer: async (_actor, _factoryTargetID, _factoryCommand) => {
+      answer: async (_actor, _factoryTargetID, factoryCommand) => {
+        commandID = interviewAnswerCommandInput.parse(factoryCommand).commandId;
         showProgress = true;
         await waiting;
+        showProgress = false;
         return (() => {
           throw new CommandError("unavailable", String("Owned delayed answer interrupted"));
         })();
@@ -524,6 +530,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
     const pending = page.getByRole("status", { name: "Assistant responding" });
     await expect(pending).toBeVisible();
     await expect(pending).toHaveAttribute("aria-busy", "true");
+    await wakeFactoryReads(page);
     await expect(pending).toContainText("Reading Project sources… · 2 research steps completed");
     await expect(page.locator(".assistant-skeleton span")).toHaveCount(3);
     expect(
@@ -542,6 +549,7 @@ test("keeps truthful pending Interview feedback in the transcript and retains a 
     await expect(
       page.getByRole("alert").filter({ hasText: "Owned delayed answer interrupted" }),
     ).toBeVisible();
+    await wakeFactoryReads(page);
     await expect(pending).toHaveCount(0);
     await expect(
       page.locator(".conversation-question").getByRole("radio", { name: /Developer/ }),
@@ -600,9 +608,11 @@ test("offers one single-select answer path and reveals custom input only when se
   await question.getByLabel("Custom answer").fill("Support engineers");
   await expect(next).toBeEnabled();
   const element = await question.elementHandle();
-  await page.waitForResponse(
+  const refreshed = page.waitForResponse(
     async (response) => await factoryFunctionMatches(response.url(), "getChanges"),
   );
+  await wakeFactoryReads(page);
+  await refreshed;
   await expect(question.getByLabel("Custom answer")).toHaveValue("Support engineers");
   expect(await element?.evaluate((node) => node.isConnected)).toBe(true);
   await page.screenshot({ path: `${evidenceDirectory}/interview-custom.png` });
@@ -745,9 +755,10 @@ test("minimize and pause preserve the exact answer; Wiki chat never retargets th
   ).toHaveCount(1);
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await openProjectMenu(page);
-  await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await page.getByRole("region", { name: "requirements" }).locator(".ticket-card-body").click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`));
+  await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+    ticketTitle,
+  );
   if (!(await panel.isVisible()))
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(panel.getByLabel("Message conversation")).toBeVisible();
