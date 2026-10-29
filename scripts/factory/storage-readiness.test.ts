@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { runCommand } from "../../packages/runtime-kubernetes/src/command";
@@ -409,7 +409,8 @@ test("an unconfirmed claim deletion resumes cleanup before admitting another pro
     const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
     expect(previous.cleanupIntended).toBe(true);
     const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
-    expect(result.checkID).not.toBe(previous.id);
+    expect(result.checkID).toBe(previous.id);
+    expect(cluster.podCreates).toBe(1);
     expect(cluster.resources.size).toBe(0);
   }));
 
@@ -421,6 +422,104 @@ test("a successful probe cannot announce readiness while its volume still exists
     );
     const intent = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
     expect(intent).toMatchObject({ cleanupIntended: true, volume: { uid: "volume-uid" } });
+  }));
+
+test("a verified probe resumes its exact cleanup after a delayed reclaimer without creating a second probe", () =>
+  fixture(async (directory, cluster) => {
+    cluster.keepVolume = true;
+    await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
+      "volume cleanup is not confirmed",
+    );
+    const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
+    // The provisioner settles its original deletion after Factory's observation timed out.
+    cluster.resources.delete(cluster.key("PersistentVolume", previous.volume.name));
+    cluster.keepVolume = false;
+    cluster.beforeCreate = async () => {
+      throw new Error("A second storage probe must not replace the completed write/read check");
+    };
+    const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
+    expect(result.checkID).toBe(previous.id);
+    expect(cluster.podCreates).toBe(1);
+    expect(cluster.resources.size).toBe(0);
+    const diagnostic = JSON.parse(await readFile(result.diagnosticFile, "utf8"));
+    expect(diagnostic).toMatchObject({
+      checkID: previous.id,
+      verified: true,
+      cleanupConfirmed: true,
+    });
+  }));
+
+test.each(["image", "storage-class"])("resumed cleanup cannot qualify a changed %s", (changed) =>
+  fixture(async (directory, cluster) => {
+    cluster.loseClaimDeletionResponse = true;
+    await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
+      "readiness was not confirmed",
+    );
+    const previous = JSON.parse(await readFile(join(directory, "storage-readiness.json"), "utf8"));
+    const previousClass = process.env["FACTORY_STORAGE_CLASS"];
+    const nextImage = `registry.invalid/workspace-files@sha256:${"b".repeat(64)}`;
+    if (changed === "storage-class") process.env["FACTORY_STORAGE_CLASS"] = "different-storage";
+    try {
+      const result = await requireWritableRuntimeStorage(
+        { ...options(directory), image: changed === "image" ? nextImage : image },
+        cluster.run,
+      );
+      expect(result.checkID).not.toBe(previous.id);
+      expect(cluster.podCreates).toBe(2);
+      const claims = cluster.calls.filter(
+        (call) => call.args[0] === "create" && call.body?.["kind"] === "PersistentVolumeClaim",
+      );
+      expect(claims).toHaveLength(2);
+      if (changed === "storage-class")
+        expect(claims[1]?.body?.["spec"]).toMatchObject({ storageClassName: "different-storage" });
+    } finally {
+      if (previousClass === undefined) delete process.env["FACTORY_STORAGE_CLASS"];
+      else process.env["FACTORY_STORAGE_CLASS"] = previousClass;
+    }
+  }),
+);
+
+test("cleanup without a retained write receipt still requires a new successful probe", () =>
+  fixture(async (directory, cluster) => {
+    cluster.loseClaimDeletionResponse = true;
+    await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
+      "readiness was not confirmed",
+    );
+    const path = join(directory, "storage-readiness.json");
+    const previous = JSON.parse(await readFile(path, "utf8"));
+    delete previous.writeVerified;
+    await writeFile(path, JSON.stringify(previous));
+    const result = await requireWritableRuntimeStorage(options(directory), cluster.run);
+    expect(result.checkID).not.toBe(previous.id);
+    expect(cluster.podCreates).toBe(2);
+  }));
+
+test("a write receipt without its exact resource identities cannot authorize cleanup or readiness", () =>
+  fixture(async (directory, cluster) => {
+    cluster.pending = true;
+    await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
+      "readiness was not confirmed",
+    );
+    const path = join(directory, "storage-readiness.json");
+    const previous = JSON.parse(await readFile(path, "utf8"));
+    await writeFile(
+      path,
+      JSON.stringify({ ...previous, writeVerified: true, cleanupIntended: true }),
+    );
+    const calls = cluster.calls.length;
+    await expect(requireWritableRuntimeStorage(options(directory), cluster.run)).rejects.toThrow(
+      "missing its original resource identities",
+    );
+    expect(cluster.calls).toHaveLength(calls);
+  }));
+
+test("a completed invocation does not cache storage readiness for a later startup", () =>
+  fixture(async (directory, cluster) => {
+    const first = await requireWritableRuntimeStorage(options(directory), cluster.run);
+    const second = await requireWritableRuntimeStorage(options(directory), cluster.run);
+    expect(second.checkID).not.toBe(first.checkID);
+    expect(cluster.podCreates).toBe(2);
+    expect(cluster.resources.size).toBe(0);
   }));
 
 test("unexpected resources prevent Namespace deletion instead of deleting someone else's data", () =>
