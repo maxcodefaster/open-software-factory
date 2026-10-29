@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import upstream from "../../upstream.json";
 import { connectArguments, localAccessConfiguration } from "./connect";
 
 const options = connectArguments(["--namespace", "owned-proof", "--release", "proof"]);
@@ -174,7 +175,9 @@ async function fixture(extraEnvironment: Record<string, string> = {}) {
   const directory = await mkdtemp(join(tmpdir(), "factory-connect-"));
   const configPath = join(directory, "config.json");
   const tracePath = join(directory, "trace.jsonl");
+  const httpTracePath = join(directory, "http.jsonl");
   const hangPath = join(directory, "hung-forward");
+  const unavailablePath = join(directory, "upstream-unavailable");
   const reservations = Array.from({ length: 3 }, () =>
     Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("reserved") }),
   );
@@ -187,16 +190,24 @@ async function fixture(extraEnvironment: Record<string, string> = {}) {
   for (const server of reservations) await server.stop(true);
   await writeFile(configPath, JSON.stringify(value));
   await writeFile(tracePath, "");
+  await writeFile(httpTracePath, "");
   await writeFile(
-    join(directory, "kubectl"),
+    join(directory, "pinned-kubectl"),
     `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.FAKE_TRACE, JSON.stringify({ args, pid: process.pid }) + "\\n");
-if (args.includes("current-context")) {
+if (args.includes("version") && args.includes("--client")) {
+  console.log(JSON.stringify({ clientVersion: {
+    gitVersion: process.env.FAKE_KUBECTL_VERSION ?? ${JSON.stringify(`v${upstream.kubectl.version}`)}
+  } }));
+} else if (args.includes("current-context")) {
   console.log("owned-context");
 } else if (args.includes("get") && args.includes("configmap")) {
   console.log(readFileSync(process.env.FAKE_CONFIG, "utf8"));
+} else if (args.includes("get") && args.includes("--raw")) {
+  if (existsSync(process.env.FAKE_UPSTREAM_UNAVAILABLE)) process.exit(1);
+  console.log("owned upstream response");
 } else if (args.includes("port-forward")) {
   if (process.env.FAKE_FAIL_SERVICE && args.includes("service/" + process.env.FAKE_FAIL_SERVICE)) {
     console.error("error: test-owned connection failure");
@@ -208,10 +219,15 @@ if (args.includes("current-context")) {
     server = Bun.serve({
       hostname: args[args.indexOf("--address") + 1],
       port: Number(mapping[0]),
-      fetch: () => {
+      fetch: async (request) => {
+        appendFileSync(process.env.FAKE_HTTP_TRACE, JSON.stringify({
+          method: request.method, connection: request.headers.get("connection")
+        }) + "\\n");
         if (existsSync(process.env.FAKE_HANG) &&
             readFileSync(process.env.FAKE_HANG, "utf8") === String(process.pid))
           return new Promise(() => {});
+        if (process.env.FAKE_HTTP_DELAY_MS)
+          await Bun.sleep(Number(process.env.FAKE_HTTP_DELAY_MS));
         return new Response("owned forward", { status: Number(process.env.FAKE_HTTP_STATUS ?? 200) });
       },
     });
@@ -227,6 +243,25 @@ if (args.includes("current-context")) {
 } else {
   process.exit(2);
 }
+`,
+    { mode: 0o700 },
+  );
+  await writeFile(
+    join(directory, "mise"),
+    `#!${process.execPath}
+if (process.argv.slice(2).join(" ") !== "which kubectl") process.exit(2);
+console.log(${JSON.stringify(join(directory, "pinned-kubectl"))});
+`,
+    { mode: 0o700 },
+  );
+  await writeFile(
+    join(directory, "kubectl"),
+    `#!${process.execPath}
+if (process.env.FAKE_SHADOW_KUBECTL) {
+  console.error("An unrelated PATH kubectl must not run");
+  process.exit(2);
+}
+await import(${JSON.stringify(join(directory, "pinned-kubectl"))});
 `,
     { mode: 0o700 },
   );
@@ -256,6 +291,12 @@ if (args.includes("current-context")) {
   return {
     value,
     trace,
+    requests: async () =>
+      (await readFile(httpTracePath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { method: string; connection: string | null }),
     output: () => output,
     error: () => error,
     update: async () => {
@@ -263,6 +304,10 @@ if (args.includes("current-context")) {
     },
     hang: async (pid: number) => {
       await writeFile(hangPath, String(pid));
+    },
+    upstreamAvailable: async (available: boolean) => {
+      if (available) await rm(unavailablePath, { force: true });
+      else await writeFile(unavailablePath, "unconfirmed");
     },
     start(args: string[] = ["--namespace", options.namespace, "--release", options.release]) {
       child = Bun.spawn(
@@ -273,7 +318,9 @@ if (args.includes("current-context")) {
             PATH: `${directory}:${process.env["PATH"]}`,
             FAKE_CONFIG: configPath,
             FAKE_TRACE: tracePath,
+            FAKE_HTTP_TRACE: httpTracePath,
             FAKE_HANG: hangPath,
+            FAKE_UPSTREAM_UNAVAILABLE: unavailablePath,
             ...extraEnvironment,
           },
           stdin: "ignore",
@@ -356,6 +403,41 @@ test("one CLI opens all public connections, pins current context and disconnects
   }
 });
 
+test("local access uses the pinned client even when PATH shadows kubectl", async () => {
+  const proof = await fixture({ FAKE_SHADOW_KUBECTL: "1" });
+  try {
+    proof.start();
+    await waitFor(
+      () => proof.output().includes("Local access connected."),
+      "pinned client connections",
+      3_000,
+    );
+    const calls = await proof.trace();
+    expect(calls.filter((call) => call.args.includes("version"))).toHaveLength(1);
+    expect(calls.filter((call) => call.args.includes("port-forward"))).toHaveLength(3);
+    expect(proof.error()).not.toContain("unrelated PATH");
+  } finally {
+    await proof.cleanup();
+  }
+}, 10_000);
+
+test("local access rejects a mismatched pinned client before touching the cluster", async () => {
+  const proof = await fixture({ FAKE_KUBECTL_VERSION: "v1.33.9" });
+  try {
+    const command = proof.start();
+    await waitFor(
+      () => proof.error().includes(`kubectl v${upstream.kubectl.version}`),
+      "client pin rejection",
+      3_000,
+    );
+    expect(await command.exited).toBe(1);
+    expect((await proof.trace()).every((call) => call.args.includes("version"))).toBe(true);
+    expect(proof.output()).not.toContain("Local access connected.");
+  } finally {
+    await proof.cleanup();
+  }
+}, 10_000);
+
 test("an interrupted forward reconnects automatically without replacing the other connections", async () => {
   const proof = await fixture();
   try {
@@ -372,11 +454,33 @@ test("an interrupted forward reconnects automatically without replacing the othe
     expect(forwards.filter((call) => call.args.includes("service/proof-factory"))).toHaveLength(2);
     expect(forwards.filter((call) => call.args.includes("service/proof-zero"))).toHaveLength(1);
     expect(forwards.filter((call) => call.args.includes("service/proof-forgejo"))).toHaveLength(1);
-    expect(calls.every((call) => call.args.includes("explicit-context"))).toBe(true);
+    expect(
+      calls
+        .filter((call) => !call.args.includes("version"))
+        .every((call) => call.args.includes("explicit-context")),
+    ).toBe(true);
     expect(
       calls.every(
         (call) => !call.args.some((arg) => ["apply", "delete", "exec", "rollout"].includes(arg)),
       ),
+    ).toBe(true);
+  } finally {
+    await proof.cleanup();
+  }
+});
+
+test("transport observations use fresh header-only requests", async () => {
+  const proof = await fixture();
+  try {
+    proof.start();
+    await waitFor(
+      () => proof.output().includes("Local access connected."),
+      "transport observations",
+    );
+    const requests = await proof.requests();
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    expect(
+      requests.every((request) => request.method === "HEAD" && request.connection === "close"),
     ).toBe(true);
   } finally {
     await proof.cleanup();
@@ -407,6 +511,46 @@ test("a half-open forward heals before a browser request, even when kubectl neve
   }
 }, 30_000);
 
+test("an unconfirmed upstream never causes healthy local transports to churn", async () => {
+  const proof = await fixture();
+  try {
+    proof.start();
+    await waitFor(() => proof.output().includes("Local access connected."), "initial connections");
+    const factory = (await proof.trace()).find((call) =>
+      call.args.includes("service/proof-factory"),
+    );
+    if (!factory) throw new Error("Owned Factory forward is missing");
+    await proof.upstreamAvailable(false);
+    await proof.hang(factory.pid);
+    await waitFor(
+      async () => {
+        const calls = await proof.trace();
+        return (
+          calls.some((call) => call.args.includes("--raw")) ||
+          calls.filter((call) => call.args.includes("port-forward")).length > 3
+        );
+      },
+      "an upstream observation instead of a local restart",
+      30_000,
+    );
+    expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
+      3,
+    );
+    expect(proof.output()).not.toContain("connection lost");
+    await proof.upstreamAvailable(true);
+    await waitFor(
+      () => proof.output().includes("Local access restored."),
+      "recovery after upstream confirmation",
+      30_000,
+    );
+    expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
+      4,
+    );
+  } finally {
+    await proof.cleanup();
+  }
+}, 60_000);
+
 test("an HTTP bootstrap failure is live transport, not permission to churn connections", async () => {
   const proof = await fixture({ FAKE_HTTP_STATUS: "503" });
   try {
@@ -420,6 +564,25 @@ test("an HTTP bootstrap failure is live transport, not permission to churn conne
     await proof.cleanup();
   }
 });
+
+test("a slow healthy HTTP response does not turn a working connection into an outage", async () => {
+  const proof = await fixture({ FAKE_HTTP_DELAY_MS: "3000" });
+  try {
+    proof.start();
+    await waitFor(
+      () => proof.output().includes("Local access connected."),
+      "slow but healthy HTTP connections",
+      10_000,
+    );
+    await Bun.sleep(12_000);
+    expect((await proof.trace()).filter((call) => call.args.includes("port-forward"))).toHaveLength(
+      3,
+    );
+    expect(proof.output()).not.toContain("connection lost");
+  } finally {
+    await proof.cleanup();
+  }
+}, 25_000);
 
 test("reconnection refuses an installation replaced under the same name", async () => {
   const proof = await fixture();
