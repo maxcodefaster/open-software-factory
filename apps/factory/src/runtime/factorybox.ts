@@ -445,6 +445,59 @@ export function createFactoryboxExecution(
     return result;
   }
   return {
+    async hasExited(attemptID: string) {
+      return locked(attemptID, async (connection) => {
+        const saved = await retained(connection, attemptID);
+        if (!saved) return false;
+        if (saved.released) return true;
+        if (!saved.identity) return false;
+        const [started] = await connection<{ observation: unknown }[]>`
+          SELECT observation FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${attemptID} AND action='start' AND completed_at IS NOT NULL`;
+        if (!started) return false;
+        const original = z
+          .object({
+            id: z.literal(saved.request.sandboxID),
+            owner: z.string().regex(/^[a-f0-9]{32}$/),
+            inputSHA256: z.string().regex(/^[a-f0-9]{64}$/),
+          })
+          .parse(started.observation);
+        const observed = await executeFactoryboxOperation(
+          factoryboxRuntimeRequest(saved.request),
+          saved.identity,
+          { action: "state", sandboxID: saved.request.sandboxID },
+          run,
+          factoryboxRuntimeDeclaration(saved.request),
+        );
+        if (!observed.confirmed)
+          throw new Error("Original Factorybox Sandbox observation is unavailable");
+        const current = z
+          .object({
+            record: z.object({
+              id: z.literal(original.id),
+              owner: z.literal(original.owner),
+              input_sha256: z.literal(original.inputSHA256),
+              runtime_id: z.literal(`fbx-${original.owner}`),
+              phase: z.string(),
+            }),
+            runtime: z
+              .object({ status: z.string(), pid: z.number().int().nonnegative() })
+              .optional(),
+          })
+          .parse(JSON.parse(observed.stdout));
+        // A shared worker can outlive its consumers. Only exact, completed
+        // execution or deletion can establish exit. Pause and in-flight native
+        // transitions retain their authority even when they have no live PID.
+        return (
+          (current.record.phase === "running" &&
+            current.runtime?.status === "stopped" &&
+            current.runtime.pid === 0) ||
+          (current.record.phase === "deleted" &&
+            (!current.runtime ||
+              (current.runtime.status === "stopped" && current.runtime.pid === 0)))
+        );
+      });
+    },
     reclaimStorage() {
       if (reclaiming) return reclaiming;
       reclaiming = (async () => {

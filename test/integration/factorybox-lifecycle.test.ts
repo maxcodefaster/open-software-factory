@@ -161,6 +161,7 @@ test.each([
         version: number;
         id: string;
         owner: string;
+        runtime_id: string;
         phase: string;
         input_sha256: string;
         pause?: NativePause;
@@ -169,6 +170,7 @@ test.each([
         version: 1,
         id: input.sandboxID,
         owner: "f".repeat(32),
+        runtime_id: `fbx-${"f".repeat(32)}`,
         phase: "starting",
         input_sha256: "1".repeat(64),
       };
@@ -183,6 +185,8 @@ test.each([
       let lostResumeRetirementReply = false;
       let lostBackingRetirementReply = false;
       let resumeCommands = 0;
+      let nativeStatusOverride: string | undefined;
+      let observationIdentity: "owner" | "input" | undefined;
       const activeSnapshot = () => {
         const snapshot = record.pause?.snapshot_id;
         if (!snapshot) throw new Error("Missing native snapshot");
@@ -383,6 +387,15 @@ test.each([
             }),
           };
         }
+        const runtimeStatus =
+          nativeStatusOverride ??
+          (record.phase === "running" &&
+          !(
+            deleteRefused &&
+            ["stopped", "foreign-owner", "foreign-input", "no-stop"].includes(deleteContinuation)
+          )
+            ? "running"
+            : "stopped");
         return {
           exitCode: 0,
           stderr: "",
@@ -392,18 +405,14 @@ test.each([
                 ? { ...record, owner: "a".repeat(32) }
                 : deleteRefused && deleteContinuation === "foreign-input"
                   ? { ...record, input_sha256: "a".repeat(64) }
-                  : record,
+                  : observationIdentity === "owner"
+                    ? { ...record, owner: "a".repeat(32) }
+                    : observationIdentity === "input"
+                      ? { ...record, input_sha256: "a".repeat(64) }
+                      : record,
             runtime: {
-              status:
-                record.phase === "running" &&
-                !(
-                  deleteRefused &&
-                  ["stopped", "foreign-owner", "foreign-input", "no-stop"].includes(
-                    deleteContinuation,
-                  )
-                )
-                  ? "running"
-                  : "stopped",
+              status: runtimeStatus,
+              pid: runtimeStatus === "running" ? 123 : 0,
             },
           }),
         };
@@ -465,8 +474,19 @@ test.each([
       >`SELECT request::text AS request FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
       expect(privateInput?.request).not.toContain("only-this-parent");
       expect(privateInput?.request).not.toContain("only-this-child");
+      expect(await recovered.hasExited(owned.attemptID)).toBe(false);
+      nativeStatusOverride = "stopped";
+      expect(await recovered.hasExited(owned.attemptID)).toBe(true);
+      observationIdentity = "owner";
+      await expect(recovered.hasExited(owned.attemptID)).rejects.toThrow();
+      observationIdentity = "input";
+      await expect(recovered.hasExited(owned.attemptID)).rejects.toThrow();
+      observationIdentity = undefined;
+      nativeStatusOverride = undefined;
+      expect(mutations).toEqual(["start"]);
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
       await execution.pause(owned.attemptID);
+      expect(await execution.hasExited(owned.attemptID)).toBe(false);
       const [paused] = await database.client<
         Array<{ state: string; generation: string; parent: string; child: string }>
       >`SELECT state,generation,parent_connector_token_hash AS parent,child_connector_token_hash AS child FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;

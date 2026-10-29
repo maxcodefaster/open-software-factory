@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { z } from "zod";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
+import { createFactoryboxExecution } from "../../apps/factory/src/runtime/factorybox";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
@@ -338,6 +339,125 @@ test.each(["live", "observation unavailable", "reconnected during observation"] 
     }
   },
   30_000,
+);
+
+test.each(["exited", "native-read-unavailable", "reconnected-during-native-read"] as const)(
+  "shared worker reconnect observes its original native Sandbox: %s",
+  async (scenario) => {
+    const processFixture = await factoryProcess();
+    const database = processFixture.connect();
+    const token = "owned-native-reconnect-capability";
+    const owned = await fixture(undefined, undefined, database, token);
+    const hub = new RuntimeHub(async () => {});
+    const observed = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let nativeReads = 0;
+    let nativeDeletes = 0;
+    let workerDeletes = 0;
+    try {
+      await database.client`UPDATE factory.runtime_attempt SET kubernetes_uid='owned-native-pod',
+        kubernetes_namespace_uid='owned-native-namespace',
+        updated_at='2026-10-29T10:00:00.123456Z'::timestamptz WHERE id=${owned.attemptID}`;
+      hub.allow(owned.attemptID, 1, hashConnectorToken(token), hashConnectorToken(token));
+      const execution = {
+        ...createFactoryboxExecution(database, hub),
+        async hasExited(attemptID: string) {
+          expect(attemptID).toBe(owned.attemptID);
+          nativeReads++;
+          if (scenario === "native-read-unavailable")
+            throw new Error("Owned native read unavailable");
+          if (scenario === "reconnected-during-native-read") {
+            observed.resolve();
+            await release.promise;
+          }
+          return true;
+        },
+        async deleteSandbox(attemptID: string) {
+          expect(attemptID).toBe(owned.attemptID);
+          nativeDeletes++;
+        },
+      };
+      const controller = createRuntimeController(
+        database,
+        hub,
+        "owned-native-reconnect-secret",
+        {
+          prepareExecution: async () => {
+            throw new Error("Observation cannot prepare source");
+          },
+        },
+        {
+          ...createKubernetesClient(),
+          getNamespace: async () => ({ uid: "owned-native-namespace", labels: {} }),
+          getPod: async () => ({
+            uid: "owned-native-pod",
+            phase: "Running",
+            labels: {},
+            factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
+            runtimeHostImage: "owned-native-image-not-used-by-observation",
+          }),
+          deleteSecret: async () => {},
+          deletePod: async () => {
+            workerDeletes++;
+          },
+          deleteNamespace: async () => {
+            workerDeletes++;
+          },
+        },
+        async () => "",
+        undefined,
+        execution,
+      );
+      const checking = controller.status(owned.attemptID, "disconnected");
+      if (scenario === "reconnected-during-native-read") {
+        await observed.promise;
+        await controller.status(owned.attemptID, "ready");
+        release.resolve();
+      }
+      await checking;
+      expect(nativeReads).toBe(1);
+      if (scenario === "exited")
+        await eventually(
+          () => controller.get(owned.attemptID),
+          (value) => value?.state === "failed",
+          "A stopped Sandbox remained reconnecting behind its live worker",
+        ).catch(async () => {
+          const current = await controller.get(owned.attemptID);
+          throw new Error(
+            `Native exit did not settle: ${current?.state}; ${current?.failure}; native cleanup calls=${nativeDeletes}`,
+          );
+        });
+      const current = await controller.get(owned.attemptID);
+      expect(current?.state).toBe(
+        scenario === "exited"
+          ? "failed"
+          : scenario === "native-read-unavailable"
+            ? "starting"
+            : "ready",
+      );
+      if (scenario === "exited") expect(current?.failure).toContain("Sandbox exited");
+      expect(nativeDeletes).toBe(scenario === "exited" ? 1 : 0);
+      expect(workerDeletes).toBe(0);
+      const authorization = hub.authorize(
+        new Request("http://factory.local/internal/connectors", {
+          headers: {
+            authorization: `Bearer ${token}`,
+            "x-factory-connector-role": "child",
+            "x-factory-runtime-attempt": owned.attemptID,
+            "x-factory-runtime-generation": "1",
+          },
+        }),
+        hashConnectorToken,
+      );
+      expect(authorization !== null).toBe(scenario !== "exited");
+      if (scenario !== "exited") await controller.status(owned.attemptID, "ready");
+    } finally {
+      release.resolve();
+      await database.client.end({ timeout: 1 });
+      await processFixture.dispose();
+    }
+  },
+  60_000,
 );
 
 test.each(["personal", "staging", "ticket"] as const)(

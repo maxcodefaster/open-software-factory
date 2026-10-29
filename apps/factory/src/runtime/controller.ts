@@ -91,6 +91,7 @@ export function createRuntimeController(
   kubernetes: KubernetesClient = createKubernetesClient(),
   readRegistryCA: () => Promise<string> = readRuntimeRegistryCA,
   reserve?: ExecutionReserve,
+  factorybox = createFactoryboxExecution(database, hub),
 ) {
   const pinnedRuntimeHostImage = requirePinnedRuntimeHostImage(
     process.env["FACTORY_RUNTIME_HOST_IMAGE"],
@@ -136,7 +137,6 @@ export function createRuntimeController(
   let cleanupTail: Promise<void> = Promise.resolve();
   const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
   const computeWait = createComputeWait(database, reserve);
-  const factorybox = createFactoryboxExecution(database, hub);
   const worker = createFactoryboxWorker(database, kubernetes);
   async function executionIdentity(ownerID: string, generation: number, sql: Database["client"]) {
     return { ...runtimeIdentity(ownerID, generation), ...(await worker.location(sql)) };
@@ -446,6 +446,8 @@ export function createRuntimeController(
     let changed = false;
     try {
       await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
+      // Bind observed timestamps as text: the driver's timestamp serializer
+      // would discard PostgreSQL microseconds and silently defeat this fence.
       const result = await lock`
         UPDATE factory.runtime_attempt SET state = 'stopping',
           failure = CASE
@@ -456,7 +458,7 @@ export function createRuntimeController(
           END, updated_at = now()
         WHERE id = ${attemptID}
           AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping')
-          AND (${observedAt ?? null}::timestamptz IS NULL OR updated_at=${observedAt ?? null}::timestamptz)
+          AND (${observedAt ?? null}::text IS NULL OR updated_at=${observedAt ?? null}::text::timestamptz)
       `;
       changed = result.count === 1;
     } finally {
@@ -498,6 +500,9 @@ export function createRuntimeController(
           failure = "Runtime Pod UID changed while connectors were reconnecting";
         else if (pod.phase === "Failed" || pod.phase === "Succeeded")
           failure = "Runtime Pod terminated while connectors were reconnecting";
+        else if (await factorybox.hasExited(attemptID))
+          failure =
+            "Factorybox Sandbox exited while runtime connectors were reconnecting. Source is retained.";
       } catch {
         // A failed observation proves neither resource loss nor permission to delete.
       }
@@ -509,7 +514,7 @@ export function createRuntimeController(
       const changed = await database.client`UPDATE factory.runtime_attempt SET state='starting',
         failure=${error ?? "Waiting for runtime connectors"}, updated_at=now()
         WHERE id=${attemptID} AND state IN ('starting','ready')
-          AND updated_at=${attempt.observedAt}::timestamptz`;
+          AND updated_at=${attempt.observedAt}::text::timestamptz`;
       if (changed.count === 1) observeReconnectLater(attemptID);
       return;
     }
@@ -570,8 +575,11 @@ export function createRuntimeController(
   ) {
     const deadline = performance.now() + 420_000;
     while (performance.now() < deadline) {
-      const attempt = await database.client<Array<{ state: string; uid: string | null }>>`
-          SELECT state, kubernetes_uid AS uid FROM factory.runtime_attempt WHERE id = ${attemptID}
+      const attempt = await database.client<
+        Array<{ state: string; uid: string | null; observedAt: string }>
+      >`
+          SELECT state, kubernetes_uid AS uid,updated_at::text AS "observedAt"
+          FROM factory.runtime_attempt WHERE id = ${attemptID}
         `;
       const current = attempt[0];
       if (current?.state !== "starting") return;
@@ -599,6 +607,12 @@ export function createRuntimeController(
         try {
           await factorybox.ensureStarted(attemptID, resources, deadline);
           if (hub.ready(attemptID)) await updateStatus(attemptID, "ready");
+          else if (await factorybox.hasExited(attemptID))
+            await beginCleanup(
+              attemptID,
+              "Factorybox Sandbox exited before runtime connectors became ready. Source is retained.",
+              current.observedAt,
+            );
         } catch (cause) {
           await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed"},updated_at=now()
                 WHERE id=${attemptID} AND state='starting'`;
