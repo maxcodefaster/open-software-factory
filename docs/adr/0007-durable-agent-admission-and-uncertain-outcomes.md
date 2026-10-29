@@ -26,8 +26,9 @@ becomes explicitly uncertain and needs a new human retry decision. An expired wo
 is never proof that external work did not happen. Stop and changed authority fence old outcomes
 before best-effort interruption. A definite provider rejection or validated output failure is failed;
 a lost response, timeout or ambiguous server error remains uncertain. Provider and native processor
-retries are disabled. A small shared native policy bounds per-step input bytes, output tokens and
-steps, with task deadlines. Wiki's shared request budget counts each provider step, including
+retries are disabled. A small shared native policy bounds per-step input bytes and output tokens,
+with task deadlines. Project research has no separate step or distinct-lookup ceiling that can
+terminate a response immediately after a tool call. Wiki's shared request budget counts each provider step, including
 deliberate schema repair, rather than each call to `generate`.
 
 Each Project provider step and research lookup rechecks the admitted conversation and execution
