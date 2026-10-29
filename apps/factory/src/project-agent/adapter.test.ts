@@ -443,7 +443,7 @@ test("Luna uses Responses with reasoning, retained search tools and no provider 
   }
 });
 
-test("native Mastra batches memoized research, rechecks authority and bounds distinct lookups", async () => {
+test("native Mastra batches memoized research and rechecks authority without a separate lookup ceiling", async () => {
   let requests = 0,
     loads = 0,
     authorities = 0;
@@ -545,7 +545,7 @@ test("native Mastra batches memoized research, rechecks authority and bounds dis
       },
     });
     expect(output.kind).toBe("answer");
-    expect(loads).toBe(12);
+    expect(loads).toBe(14);
     expect(queries.filter((query) => query.normalize("NFKC").trim() === "same")).toHaveLength(1);
     // PostgreSQL folds these differently even though JS lowercases them identically.
     expect(queries).toContain("İ");

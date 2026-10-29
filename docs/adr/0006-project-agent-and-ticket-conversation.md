@@ -10,8 +10,12 @@ Tickets, specifications, Epics and Wiki with weighted PostgreSQL full-text searc
 Exact references and titles rank first. Versioned bounded reads follow source relationships and
 page through full text. Relationships distinguish prerequisites, dependents, Epic membership and
 Wiki parent/child edges. Search snippets discover sources; full reads authorize citations.
-Request-local memoization prevents repeated reads; six Mastra steps and
-twelve distinct lookups bound one response. No embedding pipeline, BM25 or second code database.
+Request-local memoization prevents repeated reads. Research ends when the model has sufficient
+evidence and returns its structured result, not at a fixed step or distinct-lookup count.
+The admitted caller owns cancellation and task deadlines; the adapter adds no fixed one-minute
+deadline across an otherwise progressing research turn. Per-step context/media bounds and
+authority checks still apply. A tool result is not a completed answer.
+No embedding pipeline, BM25 or second code database.
 Investigate returns cited answers; Plan may also return independent question rounds, a Requirement
 proposal or an editable Epic/member proposal. Known Project/Ticket context is frozen at admission;
 later navigation cannot retarget submitted work. Ambiguous intended targets require clarification.

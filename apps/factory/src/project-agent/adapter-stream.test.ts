@@ -74,7 +74,6 @@ test("native stream coalesces a token burst without delaying first text or losin
             await release.promise;
             for (let index = 0; index < 100; index++) {
               send(" x");
-              await Bun.sleep(1);
             }
             send(' Tail","citations":[]}}');
             send("", true);
