@@ -499,6 +499,87 @@ test("Ticket writer fences saves, requires settled Stop and compute teardown, an
   }
 }, 30_000);
 
+test.each(["source", "branch", "compute"] as const)(
+  "an interrupted editing release resumes its exact intent after %s recovery without another command",
+  async (failure) => {
+    const processFixture = await factoryProcess();
+    const owned = await fixture(undefined, undefined, processFixture.connect());
+    let releasing = false;
+    let unavailable = true;
+    let stopCalls = 0;
+    const fences: string[] = [];
+    const interrupt = (stage: string) => {
+      if (releasing && unavailable && failure === stage)
+        throw new Error(`Owned ${stage} observation unavailable`);
+    };
+    const options = {
+      database: owned.database,
+      agentUsername: "owned-control",
+      stopDeadlineMs: 1,
+      runtime: {
+        stop: async () => {
+          interrupt("compute");
+          stopCalls++;
+        },
+        get: async () => ({ state: "stopped" }),
+      },
+      stopAgent: async () => {},
+      fenceSource: async (_changeID: string, epoch: string, writable: boolean) => {
+        expect(writable).toBe(false);
+        interrupt("source");
+        fences.push(epoch);
+      },
+      protect: async (_changeID: string, writers: readonly string[]) => {
+        interrupt("branch");
+        if (releasing) expect(writers).toEqual([]);
+      },
+    };
+    try {
+      await owned.database.client`UPDATE factory.change_agent_session SET state='committed'
+        WHERE change_id=${owned.changeID}`;
+      const controller = createChangeWriterController(options);
+      const human = await controller.takeOver(owned.changeID, owned.userID, crypto.randomUUID());
+      releasing = true;
+      const commandID = crypto.randomUUID();
+      await expect(
+        controller.release(owned.changeID, owned.userID, commandID, human.epoch),
+      ).rejects.toThrow(`Owned ${failure} observation unavailable`);
+      expect(await controller.status(owned.changeID, owned.userID)).toMatchObject({
+        state: "handoff",
+        canWrite: false,
+        commandID,
+        handoffKind: "release",
+      });
+      unavailable = false;
+      const recovered = createChangeWriterController(options);
+      const stopsBeforeObservation = stopCalls;
+      const fencesBeforeObservation = fences.length;
+      await expect(recovered.view(owned.changeID, crypto.randomUUID())).rejects.toThrow();
+      expect(stopCalls).toBe(stopsBeforeObservation);
+      expect(fences).toHaveLength(fencesBeforeObservation);
+      expect(await recovered.view(owned.changeID, owned.userID)).toMatchObject({
+        state: "unassigned",
+        canWrite: false,
+        epoch: human.epoch + 2,
+      });
+      const stopped = stopCalls;
+      expect(
+        await recovered.release(owned.changeID, owned.userID, commandID, human.epoch),
+      ).toMatchObject({ state: "unassigned", canWrite: false });
+      expect(stopCalls).toBe(stopped);
+      expect(fences.at(-1)).toBe(String(human.epoch + 1));
+      const [decisions] = await owned.database.client<{ count: number }[]>`
+        SELECT count(*)::integer AS count FROM factory.change_editing_decision
+        WHERE command_id=${commandID} AND kind='release' AND writer_epoch=${human.epoch}`;
+      expect(decisions?.count).toBe(1);
+    } finally {
+      await owned.dispose();
+      await processFixture.dispose();
+    }
+  },
+  30_000,
+);
+
 test("duplicate takeover commands cannot stop newly acquired compute, and Agent preparation waits for teardown", async () => {
   const processFixture = await factoryProcess();
   const owned = await fixture(undefined, undefined, processFixture.connect());
