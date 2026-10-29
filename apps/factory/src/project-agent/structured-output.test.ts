@@ -156,8 +156,20 @@ test("validation diagnostics retain only schema paths and codes, never provider 
     request: { authorization: "private-provider-token", body: "private model input" },
   });
   expect(error.diagnostic).toBe("design: invalid_type");
+  expect(error.retainedMessage).toContain("design: invalid_type");
+  expect(error.retainedMessage).not.toContain("private");
   expect(JSON.stringify(error)).not.toContain("private");
   expect(error.message).toBe(
     "The Project Agent returned an invalid response. Your input is saved.",
   );
+});
+
+test("retained validation diagnostics fit compact turn outcomes", () => {
+  const failure = z
+    .object({ design: z.object({ validation: z.array(z.object({ check: z.string() })) }) })
+    .safeParse({ design: { validation: Array.from({ length: 200 }, () => ({ check: 42 })) } });
+  const error = new ProjectAgentOutputError(failure.error);
+  expect(error.diagnostic).toContain("design.validation.0.check: invalid_type");
+  expect(error.diagnostic.length).toBeLessThanOrEqual(1024);
+  expect(error.retainedMessage.length).toBeLessThan(2000);
 });
