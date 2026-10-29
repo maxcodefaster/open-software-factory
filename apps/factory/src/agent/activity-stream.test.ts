@@ -65,32 +65,39 @@ test("authority is checked again after a slow snapshot read, before any source i
   await expect(result).rejects.toThrow("Build activity disconnected");
 });
 
-test("a slow reader keeps only the newest pending snapshot and receives it on pull", async () => {
-  let notify = () => {};
-  let version = 0;
-  let reads = 0;
-  const stream = agentActivityStream({
-    signal: new AbortController().signal,
-    authorize: async () => {},
-    read: async () => {
-      reads++;
-      return { version };
-    },
-    subscribe: async (listener) => {
-      notify = listener;
-      return () => {};
-    },
-    reconcileMS: 60_000,
-    coalesceMS: 0,
-  });
-  for (let i = 1; i <= 5; i++) {
-    while (reads < i) await Bun.sleep(1);
-    version = i;
-    notify();
-    await Bun.sleep(5);
-  }
-  const reader = stream.getReader();
-  expect((await reader.read()).value).toEqual({ type: "snapshot", view: { version: 0 } });
-  expect((await reader.read()).value).toEqual({ type: "snapshot", view: { version: 5 } });
-  await reader.cancel();
-});
+test.each([0, 20])(
+  "a slow reader keeps only the newest pending snapshot with %dms coalescing",
+  async (coalesceMS) => {
+    let notify = () => {};
+    let version = 0;
+    let reads = 0;
+    const stream = agentActivityStream({
+      signal: new AbortController().signal,
+      authorize: async () => {},
+      read: async () => {
+        reads++;
+        return { version };
+      },
+      subscribe: async (listener) => {
+        notify = listener;
+        return () => {};
+      },
+      reconcileMS: 60_000,
+      coalesceMS,
+    });
+    const reader = stream.getReader();
+    try {
+      while (reads < 1) await Bun.sleep(1);
+      for (let i = 1; i <= 5; i++) {
+        version = i;
+        notify();
+        // Join the replacement read instead of guessing when its timer will run.
+        while (reads < i + 1) await Bun.sleep(1);
+      }
+      expect((await reader.read()).value).toEqual({ type: "snapshot", view: { version: 0 } });
+      expect((await reader.read()).value).toEqual({ type: "snapshot", view: { version: 5 } });
+    } finally {
+      await reader.cancel();
+    }
+  },
+);

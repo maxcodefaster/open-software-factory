@@ -44,6 +44,7 @@
 }
 .settings-sidebar button {
   width: 100%;
+  scroll-margin-block: var(--space-1);
   min-height: 36px;
   font-family: var(--font-interface);
   font-weight: var(--weight-medium);
@@ -173,13 +174,7 @@
   }
   .settings-content:has(
       > .settings-configuration-host:not([hidden])
-        .skill-library-host:not([hidden])
-        .skill-library-heading:not([hidden])
-    )
-    > .settings-content-heading,
-  .settings-content:has(
-      > .settings-configuration-host:not([hidden])
-        .mcp-library:not([data-monitoring="true"])
+        .skill-library:not([data-monitoring="true"])
         > .skill-library-heading:not([hidden])
     )
     > .settings-content-heading {

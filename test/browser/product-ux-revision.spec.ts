@@ -101,9 +101,7 @@ test("Requirements offers the Interview directly", async ({ page }) => {
     .getByRole("region", { name: "requirements", exact: true })
     .locator(".ticket-card-body")
     .click();
-  await expect(
-    page.getByRole("button", { name: "Clarify requirements", exact: true }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Ask AI to clarify", exact: true })).toBeVisible();
 });
 
 test("Enter sends, Shift+Enter preserves a line and navigation selects context automatically", async ({

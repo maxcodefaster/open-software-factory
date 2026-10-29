@@ -1,5 +1,5 @@
 import { repositoryDocumentsSchema } from "../../apps/factory/src/api-contracts";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { factoryFunctionMatcher, mockFactoryFunctions } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import { test } from "../fixtures/browser-test";
@@ -68,15 +68,25 @@ for (const touch of [false, true]) {
       const projectName = `Responsive workspace ${projectId.slice(0, 8)}`;
       const errors: string[] = [];
       const execution: string[] = [];
+      const commissioning = await Promise.all(
+        [
+          "sendConversationMessage",
+          "answerConversationQuestion",
+          "implementTicket",
+          "startCoding",
+          "resumeCoding",
+          "sendCodingPrompt",
+          "startPersonalWorkspace",
+          "startTicketWorkspace",
+          "ensureStaging",
+          "generateKnowledge",
+        ].map(factoryFunctionMatcher),
+      );
       page.on("pageerror", (error) => errors.push(error.message));
       page.on("request", (request) => {
-        const path = new URL(request.url()).pathname;
-        if (
-          request.method() === "POST" &&
-          /\/(conversation|agent-turns|changes|ensure)(\/|$)/.test(path) &&
-          // Selecting a Project prepares source/IDE access without commissioning compute or AI.
-          !/\/(developer-ide|source-workspace)\/ensure$/.test(path)
-        )
+        const url = new URL(request.url());
+        // Source/IDE preparation is separate from commissioning compute or AI.
+        if (request.method() === "POST" && commissioning.some((matches) => matches(url)))
           execution.push(request.url());
       });
       try {
@@ -175,7 +185,8 @@ for (const touch of [false, true]) {
             .poll(() =>
               actions.evaluate((bar) => {
                 const title = bar
-                  .querySelector(".workspace-navigation-trigger")
+                  .closest(".workspace-heading")
+                  ?.querySelector(".workspace-navigation-trigger")
                   ?.getBoundingClientRect();
                 const action = bar.querySelector('[data-primary="true"]')?.getBoundingClientRect();
                 return title && action ? Math.abs(title.top - action.top) : Infinity;
@@ -227,6 +238,48 @@ for (const touch of [false, true]) {
           await page.keyboard.press("End");
           const last = navigation.getByRole("button", { name: "Company sign-in", exact: true });
           await expect(last).toBeFocused();
+          await test.info().attach(`navigation-end-${viewport.width}-${suffix}`, {
+            contentType: "application/json",
+            body: JSON.stringify(
+              await last.evaluate((element) => {
+                const geometry = (node: Element) => {
+                  const rect = node.getBoundingClientRect();
+                  const style = getComputedStyle(node);
+                  return {
+                    class: node.className,
+                    rect: rect.toJSON(),
+                    clientWidth: node.clientWidth,
+                    clientHeight: node.clientHeight,
+                    scrollWidth: node.scrollWidth,
+                    scrollHeight: node.scrollHeight,
+                    scrollLeft: node.scrollLeft,
+                    scrollTop: node.scrollTop,
+                    overflow: style.overflow,
+                  };
+                };
+                const ancestors = [];
+                for (let node = element.parentElement; node; node = node.parentElement) {
+                  ancestors.push(geometry(node));
+                  if (node.classList.contains("settings-workspace")) break;
+                }
+                return {
+                  width: innerWidth,
+                  height: innerHeight,
+                  viewport: visualViewport
+                    ? {
+                        width: visualViewport.width,
+                        height: visualViewport.height,
+                        offsetLeft: visualViewport.offsetLeft,
+                        offsetTop: visualViewport.offsetTop,
+                        scale: visualViewport.scale,
+                      }
+                    : null,
+                  target: geometry(element),
+                  ancestors,
+                };
+              }),
+            ),
+          });
           await expect(last).toBeInViewport({ ratio: 1 });
           await page.keyboard.press("Escape");
           await expect(navigation).toBeHidden();
@@ -235,7 +288,7 @@ for (const touch of [false, true]) {
         await resize(page, { width: 390, height: 844 });
         for (const [label, group] of [
           ["Models", "Factory administration"],
-          ["Usage & limits", "Factory administration"],
+          ["Monitoring", "Factory administration"],
           ["People & access", "Factory administration"],
           ["Login & security", "Personal"],
           ["Skills", "Libraries"],
@@ -245,6 +298,9 @@ for (const touch of [false, true]) {
         ]) {
           if (!label || !group) throw new Error("Missing settings fixture label.");
           await chooseSettingsPage(page, label, group);
+          if (label === "Skills" || label === "MCP connections")
+            await expect(settings.locator(".skill-library-heading:visible")).toBeVisible();
+          await expect(chooser).toHaveCount(1);
           await expect(chooser).toHaveText(label);
           await expect(navigation).toBeHidden();
           await withinViewport(page, true);

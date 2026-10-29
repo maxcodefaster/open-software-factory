@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
-import { expect } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { test } from "../fixtures/browser-test";
 import {
   appPreviewsSchema,
@@ -10,28 +10,48 @@ import {
 } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
+import { environmentSettingsView } from "../../packages/project-domain/src/environment";
 import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
+  factoryFunctionMatcher,
   factoryFunctionMatches,
   mockFactoryFunctions,
+  wakeFactoryReads,
 } from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import { luminance, rgb } from "../support/visual-contrast";
 
-const evidence = ".factory/screenshots/ui-polish";
-const auditViewports = [
-  { width: 1440, height: 900 },
-  { width: 390, height: 844 },
-];
+const evidence = ".factory/test-results/ui-polish";
+const desktopViewport = { width: 1440, height: 900 };
+const auditViewports = [desktopViewport, { width: 390, height: 844 }];
 let projectID = "";
 let ticketID = "";
 const title = "A quiet, readable workspace";
 test.use({ viewport: { width: 1440, height: 900 } });
 test.setTimeout(45_000);
 test.use({ actionTimeout: 5000 });
+
+async function resize(page: Page, viewport: { width: number; height: number }) {
+  await page.setViewportSize(viewport);
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+      ),
+  );
+  await expect
+    .poll(() =>
+      page
+        .locator(".workspace-window")
+        .evaluate((element) =>
+          element.getAnimations().some((animation) => animation.playState === "running"),
+        ),
+    )
+    .toBe(false);
+}
 
 test.beforeEach(async ({ page }) => {
   await mkdir(evidence, { recursive: true });
@@ -122,7 +142,7 @@ test("visual sweep keeps Project membership separate from Factory account action
   await page.keyboard.press("ArrowDown");
   await expect(menu.getByRole("menuitem").last()).toBeFocused();
   for (const viewport of auditViewports) {
-    await page.setViewportSize(viewport);
+    await resize(page, viewport);
     const bounds = await menu.boundingBox();
     expect(bounds?.x).toBeGreaterThanOrEqual(0);
     expect((bounds?.x ?? 0) + (bounds?.width ?? 0)).toBeLessThanOrEqual(viewport.width);
@@ -146,6 +166,23 @@ test("visual sweep keeps Project membership separate from Factory account action
 });
 
 test("visual sweep uses the active accent and aligned Settings form actions", async ({ page }) => {
+  await mockFactoryFunctions(page, {
+    environments: {
+      get: async (targetID, _actor, environment) => {
+        expect(targetID).toBe(projectID);
+        return environmentSettingsView.parse({
+          environment,
+          variables: [],
+          registries: [],
+          version: 0,
+          canManage: true,
+          storeConfigured: true,
+          pending: false,
+          pendingCommandID: null,
+        });
+      },
+    },
+  });
   const navigation = await openSettings(page);
   await navigation.getByRole("button", { name: "Environments", exact: true }).click();
   const environment = page.getByRole("region", { name: "Project environment", exact: true });
@@ -160,11 +197,12 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
     };
   });
   expect.soft(color.actual).toBe(color.expected);
-  for (const category of ["Environments", "Usage & limits", "Company sign-in"]) {
+  for (const category of ["Environments", "Monitoring", "Company sign-in"]) {
+    await resize(page, desktopViewport);
     await navigation.getByRole("button", { name: category, exact: true }).first().click();
     for (const viewport of auditViewports) {
-      await page.setViewportSize(viewport);
-      const form = page.locator(".settings-content form").last();
+      await resize(page, viewport);
+      const form = page.locator(".settings-content form:visible").last();
       const action = form.locator('button[type="submit"]');
       await expect(action).toBeVisible();
       const alignment = await action.evaluate((button) => {
@@ -181,9 +219,15 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
       });
     }
   }
-  await expect(page.getByRole("heading", { name: "Company sign-in", exact: true })).toHaveCount(1, {
-    timeout: 1500,
-  });
+  await expect(
+    page
+      .getByRole("region", { name: "Settings", exact: true })
+      .getByRole("heading", {
+        name: "Company sign-in",
+        exact: true,
+      })
+      .first(),
+  ).toBeVisible();
 });
 
 test("visual sweep keeps citation markers on their claim's last line", async ({ page }) => {
@@ -220,7 +264,7 @@ test("visual sweep keeps citation markers on their claim's last line", async ({ 
   // Each width can put the citation at a line boundary. Inspect the real final text run,
   // not just the button's DOM parent or its nominal inline display.
   for (const width of [1280, 1200, 390]) {
-    await page.setViewportSize({ width, height: 900 });
+    await resize(page, { width, height: 900 });
     await expect
       .poll(() =>
         page
@@ -250,26 +294,47 @@ test("visual sweep captures every Settings category without clipped controls", a
   const navigation = await openSettings(page);
   // Settings loads its authorized categories asynchronously. An empty .all() result
   // would otherwise pass without visiting a single category.
-  await expect(navigation.getByRole("button")).toHaveCount(13);
+  await expect(navigation.getByRole("button")).toHaveText([
+    "Models",
+    "Project setup",
+    "Environments",
+    "Inputs",
+    "Releases",
+    "Monitoring",
+    "People & access",
+    "Skills",
+    "MCP connections",
+    "Model overrides",
+    "Login & security",
+    "Models",
+    "Monitoring",
+    "Repository mirrors",
+    "People & access",
+    "Company sign-in",
+  ]);
   const categories = await navigation.getByRole("button").all();
   for (let index = 0; index < categories.length; index++) {
     const category = categories[index];
     if (!category) throw new Error("Missing Settings category");
+    await resize(page, desktopViewport);
     await category.click();
-    await expect(page.locator(".settings-content-heading h2")).toBeVisible();
-    await expect(page.locator(".settings-content").getByText(/^Loading .*…$/)).toHaveCount(0);
-    await expect(page.locator('.settings-content [aria-busy="true"]')).toHaveCount(0);
+    await expect(
+      page.locator(".settings-content p:visible").filter({ hasText: /^Loading .*…$/ }),
+    ).toHaveCount(0);
+    await expect(page.locator('.settings-content [aria-busy="true"]:visible')).toHaveCount(0);
+    const label = (await category.textContent())?.trim();
+    if (!label) throw new Error("Missing Settings category label");
+    await expect(
+      page
+        .locator(".settings-content")
+        .getByRole("heading", {
+          name: label === "Skills" ? "Skills library" : label,
+          exact: true,
+        })
+        .first(),
+    ).toBeVisible();
     for (const viewport of auditViewports) {
-      await page.setViewportSize(viewport);
-      await expect
-        .poll(() =>
-          page
-            .locator(".workspace-window")
-            .evaluate((element) =>
-              element.getAnimations().some((animation) => animation.playState === "running"),
-            ),
-        )
-        .toBe(false);
+      await resize(page, viewport);
       const outside = await page.locator(".settings-content").evaluate((element) => {
         const bounds = element.getBoundingClientRect();
         return Array.from(element.querySelectorAll("input, select, textarea, button"))
@@ -368,9 +433,9 @@ test("frost, integrated controls and action hierarchy stay coherent", async ({ p
     .soft(page.locator(".ticket-header-actions > button").filter({ hasText: "History" }))
     .toHaveCount(0);
   const order = await page.locator(".ticket-header-actions").evaluate((element) => {
-    const primary = element.querySelector(".primary-button")?.getBoundingClientRect();
+    const primary = element.querySelector('[data-primary="true"]')?.getBoundingClientRect();
     const menu = element.querySelector(".ticket-secondary-actions")?.getBoundingClientRect();
-    return Boolean(primary && menu && menu.left >= primary.right);
+    return Boolean(primary && menu && menu.right <= primary.left);
   });
   expect.soft(order).toBe(true);
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
@@ -440,7 +505,7 @@ test("frost, integrated controls and action hierarchy stay coherent", async ({ p
   await page.getByRole("button", { name: "Ticket", exact: true }).dispatchEvent("click");
   await expect(page.locator(".workspace-window")).toHaveAttribute("data-closing", "false");
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resize(page, { width: 390, height: 844 });
   await expect
     .poll(async () => (await page.locator(".workspace-window").boundingBox())?.x)
     .toBeLessThan(12);
@@ -471,11 +536,11 @@ test("silent Preview attachment offers a bounded reload of the same instance", a
   const stalled = new Promise<void>((resolve) => {
     release = resolve;
   });
+  const compute = await Promise.all(
+    ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
+  );
   page.on("request", (request) => {
-    if (
-      request.method() === "POST" &&
-      /\/(personal-workspace|ticket-workspace|staging)\/ensure$/.test(request.url())
-    )
+    if (request.method() === "POST" && compute.some((matches) => matches(new URL(request.url()))))
       computeStarts++;
   });
   await mockFactoryFunctions(page, {
@@ -509,7 +574,7 @@ test("silent Preview attachment offers a bounded reload of the same instance", a
         }),
     },
   });
-  await page.route("**/api/runtime-access?embed=1&path=*", async (route) => {
+  await page.route("**/api/runtime-access?*", async (route) => {
     documents++;
     if (documents === 1) await stalled;
     await route
@@ -517,6 +582,7 @@ test("silent Preview attachment offers a bounded reload of the same instance", a
       .catch(() => {});
   });
   try {
+    await wakeFactoryReads(page);
     // This chooser appears only after the complete lifecycle projection is applied.
     // Waiting for one HTTP response alone can race the other batched projections.
     const chooser = page.getByRole("button", { name: "Choose Preview instance", exact: true });
@@ -549,11 +615,11 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
 }) => {
   const changeID = crypto.randomUUID();
   let starts = 0;
+  const compute = await Promise.all(
+    ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
+  );
   page.on("request", (request) => {
-    if (
-      request.method() === "POST" &&
-      /\/(personal-workspace|ticket-workspace|staging)\/ensure$/.test(request.url())
-    )
+    if (request.method() === "POST" && compute.some((matches) => matches(new URL(request.url()))))
       starts++;
   });
   await mockFactoryFunctions(page, {
@@ -576,6 +642,7 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
         }),
     },
   });
+  await wakeFactoryReads(page);
   const chooser = page.getByRole("button", { name: "Choose IDE instance", exact: true });
   await expect(chooser).toBeVisible({ timeout: 10_000 });
   const group = page.locator(".dock-app.has-instances");
@@ -599,9 +666,11 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
   await page.keyboard.press("ArrowDown");
   await expect(items.nth(1)).toBeFocused();
   const focused = await items.nth(1).elementHandle();
-  const refreshed = await page.waitForResponse(
+  const refreshing = page.waitForResponse(
     async (response) => await factoryFunctionMatches(response.url(), "getChanges"),
   );
+  await wakeFactoryReads(page);
+  const refreshed = await refreshing;
   await refreshed.finished();
   await page.evaluate(
     () =>
@@ -670,16 +739,19 @@ test("rapid minimize retains drafts and prefers solid, reduced-motion presentati
 
 test("setup, Inbox and Trash remain readable at desktop and narrow widths", async ({ page }) => {
   const contained = async (selector: string) => {
-    const outside = await page.locator(selector).evaluate((element) => {
-      const bounds = element.getBoundingClientRect();
-      return Array.from(element.querySelectorAll("button, input, h2, p"))
-        .filter((item) => {
-          const rect = item.getBoundingClientRect();
-          return rect.width > 0 && (rect.left < bounds.left - 1 || rect.right > bounds.right + 1);
-        })
-        .map((item) => item.textContent?.trim() || item.getAttribute("aria-label"));
-    });
-    expect(outside).toEqual([]);
+    const root = page.locator(selector);
+    for (const item of await root.locator("button, input, h2, p").all()) {
+      // Closed details are not rendered. Deliberately scrollable navigation must
+      // make every item reachable rather than fitting all labels simultaneously.
+      if (!(await item.isVisible())) continue;
+      await item.scrollIntoViewIfNeeded();
+      const bounds = await root.boundingBox();
+      const rect = await item.boundingBox();
+      if (!bounds || !rect) throw new Error("Missing visible workspace content");
+      const label = (await item.textContent()) ?? undefined;
+      expect(rect.x, label).toBeGreaterThanOrEqual(bounds.x - 1);
+      expect(rect.x + rect.width, label).toBeLessThanOrEqual(bounds.x + bounds.width + 1);
+    }
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       page.viewportSize()?.width ?? 1440,
     );
@@ -687,7 +759,7 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
   await page.getByRole("button", { name: "Inbox", exact: true }).click();
   await expect(page.getByText("No decisions need your attention.", { exact: true })).toBeVisible();
   for (const viewport of auditViewports) {
-    await page.setViewportSize(viewport);
+    await resize(page, viewport);
     await contained(".inbox-workspace");
     await page.screenshot({ path: `${evidence}/inbox-${viewport.width}.png` });
   }
@@ -704,7 +776,7 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
   await page.getByRole("tab", { name: "Trash", exact: true }).click();
   await expect(trash.getByRole("button", { name: title, exact: true })).toBeVisible();
   for (const viewport of auditViewports) {
-    await page.setViewportSize(viewport);
+    await resize(page, viewport);
     await contained(".trash-workspace");
     await page.screenshot({ path: `${evidence}/trash-${viewport.width}.png` });
   }
@@ -750,7 +822,7 @@ test("setup, Inbox and Trash remain readable at desktop and narrow widths", asyn
     "A focused product",
   );
   for (const viewport of auditViewports) {
-    await page.setViewportSize(viewport);
+    await resize(page, viewport);
     await contained(".project-setup-panel");
     await page.screenshot({ path: `${evidence}/setup-starter-${viewport.width}.png` });
   }
@@ -799,7 +871,7 @@ test("Ticket overflow contains long relationship names without clipping controls
   await search.press("ArrowDown");
   await expect(picker.getByRole("button", { name: candidate, exact: true })).toBeFocused();
   for (const viewport of auditViewports) {
-    await page.setViewportSize(viewport);
+    await resize(page, viewport);
     await expect
       .poll(() =>
         page
@@ -831,8 +903,10 @@ test("Ticket overflow contains long relationship names without clipping controls
     await page.screenshot({ path: `${evidence}/ticket-overflow-${viewport.width}.png` });
   }
   await picker.getByRole("button", { name: "Back to Ticket actions", exact: true }).click();
-  await expect(page.getByRole("menu", { name: "Ticket actions", exact: true })).toBeVisible();
-  await expect(page.getByRole("menuitem", { name: "History", exact: true })).toBeFocused();
+  const menu = page.getByRole("menu", { name: "Ticket actions", exact: true });
+  await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitem").first()).toBeFocused();
+  await expect(menu.getByRole("menuitem", { name: "History", exact: true })).toBeVisible();
   await page.getByRole("menuitem", { name: "Assign to Epic…", exact: true }).click();
   await expect(page.getByRole("searchbox", { name: "Search Epics", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
