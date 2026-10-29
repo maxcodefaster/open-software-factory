@@ -322,6 +322,17 @@ export function createChangeWriterController(options: {
       // Continue only the same person's recorded request after positive teardown
       // evidence. Takeover rechecks permissions, Stop, source and branch fences.
       if (pending) return this.takeOver(changeID, userID, pending.commandID);
+      const [release] = await database.client<{ commandID: string; epoch: number }[]>`
+        SELECT writer.request_id AS "commandID",decision.writer_epoch::float8 AS epoch
+        FROM factory.change_writer writer
+        JOIN factory.change_editing_decision decision ON decision.command_id=writer.request_id
+          AND decision.change_id=writer.change_id AND decision.actor_id=writer.requested_by
+          AND decision.kind='release' AND decision.writer_epoch+1=writer.epoch
+        WHERE writer.change_id=${changeID} AND writer.state='handoff'
+          AND writer.handoff_kind='release' AND writer.requested_by=${userID}`;
+      // Reconcile the already commissioned release, not a new editing command.
+      // The exact decision rechecks authority and all fences after transport loss.
+      if (release) return this.release(changeID, userID, release.commandID, release.epoch);
       return readView(changeID, userID);
     },
     async prepareAgent(changeID: string, turnID: string) {
