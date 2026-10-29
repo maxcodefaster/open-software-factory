@@ -28,8 +28,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           git merge-base --is-ancestor HEAD origin/main
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-  roles:
+  verify:
     needs: release
+    uses: ./.github/workflows/checks.yaml
+  roles:
+    needs: [release, verify]
     strategy:
       fail-fast: false
       matrix:

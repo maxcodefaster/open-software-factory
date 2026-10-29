@@ -44,7 +44,7 @@ test("only published releases build and publish both architectures natively", as
   expect(validate.env.RELEASE_TAG).toBe(`\${{ github.event.release.tag_name }}`);
   expect(validate.run).toContain(`version="\${RELEASE_TAG#v}"`);
   expect(validate.run).toContain("git merge-base --is-ancestor HEAD origin/main");
-  expect(workflow.jobs.roles.needs).toBe("release");
+  expect(workflow.jobs.roles.needs).toEqual(["release", "verify"]);
   expect(workflow.jobs.distribution.needs).toEqual(["release", "factory"]);
   for (const job of ["roles", "factory"])
     expect(workflow.jobs[job].strategy.matrix.include).toEqual([
@@ -68,4 +68,63 @@ test("only published releases build and publish both architectures natively", as
   expect(JSON.stringify(workflow)).not.toContain("setup-qemu");
   expect(workflow.jobs.factory.needs).toContain("manifests");
   expect(workflow.jobs.manifests.needs).toContain("roles");
+});
+
+test("release images wait for the same non-live checks on both native architectures", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  expect(workflow.jobs.verify.needs).toBe("release");
+  expect(workflow.jobs.verify.uses).toBe("./.github/workflows/checks.yaml");
+  expect(workflow.jobs.verify["continue-on-error"]).not.toBe(true);
+  expect(workflow.jobs.roles.needs).toContain("verify");
+  const checks = parse(
+    await readFile(new URL("../../.github/workflows/checks.yaml", import.meta.url), "utf8"),
+  );
+  expect(checks.on).toEqual({
+    push: { branches: ["main"] },
+    pull_request: { branches: ["main"] },
+    workflow_call: null,
+  });
+  expect(checks.permissions).toEqual({ contents: "read" });
+  const verify = checks.jobs.verify;
+  expect(verify.strategy["fail-fast"]).toBe(false);
+  expect(verify.strategy.matrix.include).toEqual([
+    { arch: "amd64", runner: "ubuntu-24.04" },
+    { arch: "arm64", runner: "ubuntu-24.04-arm" },
+  ]);
+  expect(verify["runs-on"]).toBe(`\${{ matrix.runner }}`);
+  expect(verify["continue-on-error"]).not.toBe(true);
+  const steps = verify.steps as {
+    uses?: string;
+    run?: string;
+    with?: Record<string, unknown>;
+    if?: string;
+    "continue-on-error"?: boolean;
+  }[];
+  for (const step of steps) {
+    if (step.uses) expect(step.uses).toMatch(/^[\w/-]+@[a-f0-9]{40}$/);
+    expect(step["continue-on-error"]).not.toBe(true);
+    expect(step.if).toBeUndefined();
+  }
+  expect(steps.find((step) => step.uses?.startsWith("jdx/mise-action@"))?.with).toEqual({
+    version: "2026.10.3",
+  });
+  expect(steps.find((step) => step.uses?.startsWith("actions/checkout@"))?.with).toEqual({
+    "persist-credentials": false,
+  });
+  const commands = steps.flatMap((step) => (step.run ? [step.run] : []));
+  expect(commands).toContain("mise exec -- bun install --frozen-lockfile");
+  expect(commands).toContain(
+    "mise exec -- bun --bun ./node_modules/@playwright/test/cli.js install --with-deps chromium",
+  );
+  expect(commands).toContain("mise exec -- mkcert -install");
+  expect(commands).toContain("mise exec -- bun run check:integration");
+  expect(commands).toContain("mise exec -- bun run test:browser");
+  expect(commands.some((command) => command.includes("upstream.json"))).toBe(true);
+  expect(steps.find((step) => step.uses?.startsWith("actions/setup-go@"))?.with).toEqual({
+    "go-version": `\${{ steps.tools.outputs.go }}`,
+    "cache-dependency-path": "services/runtime-connector/go.sum",
+  });
+  expect(JSON.stringify(checks)).not.toMatch(/secrets\.|test:(?:live|native|browser:paid)/);
 });

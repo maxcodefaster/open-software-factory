@@ -1,0 +1,47 @@
+name: Verify Factory
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db
+        with:
+          version: 2026.10.3
+      - name: Read the Connector toolchain pin
+        id: tools
+        run: |
+          set -euo pipefail
+          go="$(mise exec -- bun -e 'console.log((await Bun.file("upstream.json").json()).go.version)')"
+          printf 'go=%s\n' "$go" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: ${{ steps.tools.outputs.go }}
+          cache-dependency-path: services/runtime-connector/go.sum
+      - name: Install locked dependencies
+        run: mise exec -- bun install --frozen-lockfile
+      - name: Prepare the pinned browser
+        run: mise exec -- bun --bun ./node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Prepare identity fixture trust on the disposable runner
+        run: mise exec -- mkcert -install
+      - name: Check source, Connector and owned controllers
+        run: mise exec -- bun run check:integration
+      - name: Check owned UI journeys
+        run: mise exec -- bun run test:browser
