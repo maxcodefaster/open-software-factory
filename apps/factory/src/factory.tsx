@@ -418,6 +418,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     drafts: messageDrafts,
     restored: restoredMessageScope,
     bind: restoreMessageDraft,
+    acknowledge: acknowledgeMessageDraft,
   } = createComposerState({
     userID: initialSession.user.id,
     commands: agentCommandIds,
@@ -438,6 +439,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     ]);
   }
   function acknowledgeCommand(scope: string, ...commandIds: string[]) {
+    acknowledgeMessageDraft(scope, ...commandIds);
     if (agentCommandIds.forget(scope, ...commandIds))
       setCommandAcknowledgements((value) => value + 1);
   }
