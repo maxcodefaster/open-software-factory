@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1156,8 +1155,9 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	command := exec.CommandContext(ctx, "devcontainer", arguments...)
 	command.Env = devcontainerEnvironment(assignment)
 	var stdout bytes.Buffer
+	var diagnostic devcontainerFailureOutput
 	command.Stdout = &stdout
-	command.Stderr = io.Discard
+	command.Stderr = &diagnostic
 	if err := command.Run(); err != nil {
 		for _, line := range strings.Split(stdout.String(), "\n") {
 			var failure struct {
@@ -1171,6 +1171,10 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 					}
 				}
 			}
+		}
+		detail := devcontainerFailureDiagnostic(stdout.String(), diagnostic.String(), assignment)
+		if detail != "" {
+			return devcontainerResult{}, fmt.Errorf("start Dev Container: %w: %s", err, detail)
 		}
 		return devcontainerResult{}, fmt.Errorf("start Dev Container: %w", err)
 	}
