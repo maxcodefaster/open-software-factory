@@ -1,4 +1,3 @@
-import { agentConfiguration } from "./agent-configuration";
 import { type ParseError, parse as parseJSONC } from "jsonc-parser";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient, type ForgeRepository } from "../../../../packages/forge/src/forge";
@@ -34,6 +33,7 @@ import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
 import { createComputeWait } from "../usage/compute-wait";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
+import { agentConfiguration } from "./agent-configuration";
 import { freezeRuntimeArtifacts } from "./artifacts";
 import { runtimeFactoryURL, runtimeForgeURL, runtimeReleaseRegistryURL } from "./endpoints";
 import { createFactoryboxExecution } from "./factorybox";
@@ -448,7 +448,12 @@ export function createRuntimeController(
       await lock`SELECT pg_advisory_lock(hashtext(${`runtime:${projectID}`}))`;
       const result = await lock`
         UPDATE factory.runtime_attempt SET state = 'stopping',
-          failure = COALESCE(CASE WHEN failure IN ('parent connector reconnecting','child connector reconnecting') THEN NULL ELSE failure END, ${failure ?? null}), updated_at = now()
+          failure = CASE
+            WHEN state IN ('create-intended','starting','ready') AND ${failure ?? null}::text IS NOT NULL
+              THEN ${failure ?? null}
+            ELSE COALESCE(CASE WHEN failure IN ('parent connector reconnecting','child connector reconnecting')
+              THEN NULL ELSE failure END, ${failure ?? null})
+          END, updated_at = now()
         WHERE id = ${attemptID}
           AND state IN ('create-intended', 'starting', 'ready', 'stop-intended', 'stopping')
           AND (${observedAt ?? null}::timestamptz IS NULL OR updated_at=${observedAt ?? null}::timestamptz)

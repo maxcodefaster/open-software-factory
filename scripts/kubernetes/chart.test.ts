@@ -67,9 +67,11 @@ type Resource = {
             exec: { command: string[] };
             periodSeconds: number;
             failureThreshold: number;
+            timeoutSeconds?: number;
           };
           readinessProbe?: {
-            exec: { command: string[] };
+            exec?: { command: string[] };
+            tcpSocket?: { port: number };
             periodSeconds: number;
             timeoutSeconds: number;
           };
@@ -548,10 +550,18 @@ test("PostgreSQL readiness allows its own connection check to finish under execu
   const postgres = (await resources()).find(
     (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-postgres",
   )?.spec?.template?.spec.containers[0];
-  const probe = postgres?.readinessProbe;
-  expect(probe?.exec.command).toEqual(["pg_isready", "-U", "factory", "-d", "factory", "-t", "3"]);
-  expect(probe?.timeoutSeconds).toBeGreaterThanOrEqual(5);
-  expect(probe?.periodSeconds).toBeGreaterThanOrEqual(probe?.timeoutSeconds ?? 5);
+  expect(postgres?.startupProbe?.exec.command).toEqual([
+    "pg_isready",
+    "-U",
+    "factory",
+    "-d",
+    "factory",
+    "-t",
+    "3",
+  ]);
+  expect(postgres?.startupProbe?.timeoutSeconds).toBeGreaterThanOrEqual(5);
+  expect(postgres?.readinessProbe?.tcpSocket).toEqual({ port: 5432 });
+  expect(postgres?.readinessProbe?.exec).toBeUndefined();
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {
