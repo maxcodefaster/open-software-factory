@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { createDatabase } from "../../packages/db/src/client";
+import { ownedContainerCallback } from "./container-callback";
 import { ownedPlanningCache } from "./planning-cache";
 import { ownedTestDatabase } from "./postgres-server";
 
@@ -64,6 +65,7 @@ export async function factoryProcess(
     FACTORY_FORGEJO_OWNER?: string;
     FACTORY_FORGEJO_ADMIN_TOKEN?: string;
     FACTORY_FORGE_ISSUER_URL?: string;
+    FACTORY_FORGE_ISSUER_HOST?: string;
     FACTORY_FORGE_DISCOVERY_URL?: string;
     FACTORY_HOST?: string;
     FACTORY_GIT_IMPORT_ORIGINS?: string;
@@ -95,6 +97,7 @@ export async function factoryProcess(
   let created = false;
   let shared: Awaited<ReturnType<typeof ownedTestDatabase>> | undefined;
   let planningCache: Awaited<ReturnType<typeof ownedPlanningCache>> | undefined;
+  let callback: Awaited<ReturnType<typeof ownedContainerCallback>> | undefined;
   async function shutdown() {
     for (const child of processes) {
       if (child.exitCode === null) child.kill("SIGKILL");
@@ -105,6 +108,8 @@ export async function factoryProcess(
     await shutdown();
     await planningCache?.dispose();
     planningCache = undefined;
+    await callback?.dispose();
+    callback = undefined;
     if (shared) {
       await shared.dispose();
       shared = undefined;
@@ -230,7 +235,8 @@ export async function factoryProcess(
     };
     if (modelOverrides?.FACTORY_FORGEJO_ADMIN_TOKEN) {
       environment.FACTORY_HOST = "0.0.0.0";
-      environment.FACTORY_FORGE_ISSUER_URL = `http://host.orb.internal:${port}/api/auth`;
+      environment.FACTORY_FORGE_ISSUER_HOST = "host.docker.internal";
+      environment.FACTORY_FORGE_ISSUER_URL = `http://host.docker.internal:${port}/api/auth`;
       environment.FACTORY_FORGE_DISCOVERY_URL = `${environment.FACTORY_FORGE_ISSUER_URL}/.well-known/openid-configuration`;
     }
     return {
@@ -243,6 +249,8 @@ export async function factoryProcess(
         await shutdown();
         await planningCache?.dispose();
         planningCache = undefined;
+        await callback?.dispose();
+        callback = undefined;
       },
       connect(max = 10) {
         const previousURL = process.env["DATABASE_URL"];
@@ -255,12 +263,14 @@ export async function factoryProcess(
         }
       },
       async startPlanningCache(observeWhileRunning = false, syncWorkers = 1, network?: string) {
+        callback ??= await ownedContainerCallback(base, network ?? shared?.network);
         planningCache ??= await ownedPlanningCache(
           databaseURL,
           base,
           observeWhileRunning,
           syncWorkers,
           network ?? shared?.network,
+          callback.base,
         );
         environment.FACTORY_ZERO_CACHE_URL = planningCache.url;
         return planningCache;

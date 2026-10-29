@@ -41,6 +41,8 @@ jobs:
         run: mise exec -- bun --bun ./node_modules/@playwright/test/cli.js install --with-deps chromium
       - name: Prepare identity fixture trust on the disposable runner
         run: mise exec -- mkcert -install
+      - name: Prove private database and container callbacks before the full suite
+        run: mise exec -- bun run test:controllers /planning-cache-network.test.ts
       - name: Check source, Connector and owned controllers
         run: mise exec -- bun run check:integration
       - name: Check owned UI journeys
