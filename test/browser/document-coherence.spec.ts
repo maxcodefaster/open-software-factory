@@ -673,13 +673,20 @@ test("Wiki organization moves through keyboard controls and retains icons across
   await expect(page.getByRole("button", { name: "Child page", exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await openProjectMenu(page);
-  await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${childId}(?:[/?#]|$)`));
+  await expect(page.locator(".knowledge-article")).toHaveText("Useful child prose.");
   await expect(page.getByRole("button", { name: "Child page", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Code docs", exact: true })).toHaveAttribute(
     "aria-expanded",
     "false",
+  );
+  await page.getByLabel("Organize Wiki page", { exact: true }).click();
+  await expect(page.getByRole("button", { name: "Use home icon", exact: true })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByRole("combobox", { name: "Parent page", exact: true })).toHaveValue(
+    pageID,
   );
 });
 
@@ -852,9 +859,8 @@ test("Wiki insertion targets do not reorder on hover and navigation resize is re
   await expect(divider).toHaveAttribute("aria-valuenow", "184");
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await openProjectMenu(page);
-  await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await openKnowledge(page);
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${pageID}(?:[/?#]|$)`));
+  await expect(page.locator(".knowledge-article")).toContainText("Saved human explanation");
   await expect(divider).toHaveAttribute("aria-valuenow", "184");
   await expect(page.locator(".knowledge-navigation")).toHaveCSS("width", "184px");
   const icon = await page.locator(".knowledge-title-row .page-organization").boundingBox();
@@ -1157,9 +1163,8 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
   expect(approvedDocument?.approvalId).toBeTruthy();
   await page.reload();
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
-  await openProjectMenu(page);
-  await page.getByRole("button").filter({ hasText: projectSlug }).click();
-  await page.getByRole("region", { name: "requirements" }).locator(".ticket-card-body").click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${ticketID}(?:[/?#]|$)`));
+  await expect(summary).toHaveText(original);
   await expect(summary).toHaveAttribute("aria-readonly", "false");
   await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
   await page.getByRole("menuitem", { name: "History", exact: true }).click();
@@ -1195,8 +1200,13 @@ for (const width of [1440, 900]) {
       if (!bounds || !textBounds) throw new Error("Missing document-edge geometry");
       const targetY =
         edge === "top" ? bounds.y + 16 : bounds.y + bounds.height - textBounds.height - 16;
-      await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
-      await page.mouse.wheel(0, textBounds.y - targetY);
+      // Position the edge fixture atomically. A compositor wheel can race the
+      // preceding scrollIntoView, while native pointer selection is tested below.
+      await paragraph.evaluate((element, target) => {
+        const viewport = element.closest(".ticket-workspace");
+        if (!viewport) throw new Error("Missing native selection viewport");
+        viewport.scrollTop += element.getBoundingClientRect().y - target;
+      }, targetY);
       await expect
         .poll(async () => {
           const current = await paragraph.boundingBox();
