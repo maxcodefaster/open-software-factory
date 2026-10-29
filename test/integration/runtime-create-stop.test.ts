@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
 import { createFactoryboxExecution } from "../../apps/factory/src/runtime/factorybox";
-import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
+import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
 import { createExecutionReserve } from "../../apps/factory/src/runtime/reserve-controller";
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import {
@@ -19,6 +20,7 @@ import {
   type KubernetesClient,
   KubernetesObservationUnavailableError,
 } from "../../packages/runtime-kubernetes/src/client";
+import { factoryboxRuntimeDeclaration } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { fixture } from "../fixtures/change-agent-turns";
 import { executionPoolFixture } from "../fixtures/execution-pool";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -87,6 +89,121 @@ async function sourceOnly(sql: Parameters<typeof factoryboxAllocation>[0], names
     storageNode: configuration.FACTORY_FACTORYBOX_NODE,
   });
 }
+
+test.each([true, false])(
+  "startup waits for child readiness without repeating confirmed native Start, parent connected=%s",
+  async (parentConnected) => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const owned = await fixture(undefined, undefined, database);
+    const thirdRead = Promise.withResolvers<void>();
+    const releaseRead = Promise.withResolvers<void>();
+    let podReads = 0;
+    let starts = 0;
+    let nativeReads = 0;
+    const hub = new RuntimeHub(async () => {});
+    try {
+      const [attempt] = await database.client<
+        { namespace: string; podName: string; workerID: string }[]
+      >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",
+        factorybox_worker_id AS "workerID" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      if (!attempt) throw new Error("Owned startup identity missing");
+      const declaration = factoryboxRuntimeDeclaration({
+        attemptID: owned.attemptID,
+        workerID: attempt.workerID,
+        sandboxID: `runtime-${owned.attemptID.replaceAll("-", "")}`,
+        namespace: attempt.namespace,
+        podName: attempt.podName,
+        runtimeOwnerID: owned.workspaceID,
+        labels: { "factory.dev/runtime-owner": owned.workspaceID },
+        runtimeHostImage: configuration.FACTORY_RUNTIME_HOST_IMAGE,
+        profile: ownedFactoryboxProfile,
+        sharedSource: true,
+      });
+      await database.client`UPDATE factory.runtime_attempt SET state='starting',
+        kubernetes_uid='owned-startup-pod',kubernetes_namespace_uid='owned-startup-namespace'
+        WHERE id=${owned.attemptID}`;
+      const socket = (role: "parent" | "child") =>
+        ({
+          data: { kind: "connector", role, attemptID: owned.attemptID, generation: 1 },
+          close() {},
+          send() {
+            return 1;
+          },
+        }) as unknown as ServerWebSocket<RuntimeSocketData>;
+      const parent = socket("parent");
+      if (parentConnected) hub.open(parent);
+      const execution = {
+        ...createFactoryboxExecution(database, hub),
+        async startupResources() {
+          return [declaration.pod];
+        },
+        async ensureStarted() {
+          starts++;
+        },
+        async hasExited() {
+          nativeReads++;
+          return false;
+        },
+      };
+      const controller = createRuntimeController(
+        database,
+        hub,
+        "owned-startup-cadence",
+        {
+          prepareExecution: async () => {
+            throw new Error("Observation cannot prepare source");
+          },
+        },
+        {
+          ...createKubernetesClient(),
+          getPod: async () => {
+            if (++podReads === 3) {
+              thirdRead.resolve();
+              await releaseRead.promise;
+            }
+            return {
+              uid: "owned-startup-pod",
+              phase: "Running",
+              ready: true,
+              labels: {},
+              factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
+              runtimeHostImage: configuration.FACTORY_RUNTIME_HOST_IMAGE,
+            };
+          },
+        },
+        async () => "",
+        undefined,
+        execution,
+      );
+      const observe = await controller.recover();
+      observe();
+      await thirdRead.promise;
+      expect(starts).toBe(1);
+      expect(nativeReads).toBe(parentConnected ? 0 : 2);
+      expect((await controller.get(owned.attemptID))?.state).toBe("starting");
+      if (!parentConnected) hub.open(parent);
+      const child = socket("child");
+      hub.open(child);
+      hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
+      releaseRead.resolve();
+      await eventually(
+        () => controller.get(owned.attemptID),
+        (current) => current?.state === "ready",
+        "Confirmed execution never became ready after the child completed setup",
+      );
+      expect(starts).toBe(1);
+    } finally {
+      await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+      releaseRead.resolve();
+      hub.revoke(owned.attemptID);
+      await Bun.sleep(1_100);
+      await database.client.end({ timeout: 1 });
+      await host.dispose();
+    }
+  },
+  30_000,
+);
 
 test.each(["reconnect", "Stop"] as const)(
   "startup observation timeout preserves live compute until %s without replaying creates",
