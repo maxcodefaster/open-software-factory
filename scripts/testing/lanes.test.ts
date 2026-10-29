@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { browserLane, integrationLane, controllerNeedsDatabase } from "./lanes";
 import playwright from "../../playwright.config";
+import { browserLane, controllerNeedsDatabase, integrationLane } from "./lanes";
 
 test("explicit lanes keep paid calls and retained-installation restarts outside defaults", () => {
   expect(integrationLane("test/integration/project-environment.test.ts")).toBe("controllers");
@@ -22,7 +22,8 @@ test("the default browser selection excludes explicitly paid cases in mixed jour
   expect((filter as RegExp).test("ticket journey personal rich draft")).toBe(false);
 });
 
-test("compiled native protocol proofs do not acquire a database they never use", () => {
+test("self-contained protocol and PostgreSQL proofs do not acquire an unused shared database", () => {
+  expect(controllerNeedsDatabase("test/integration/postgres-baseline.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-knowledge.test.ts")).toBe(false);
   expect(controllerNeedsDatabase("test/integration/server-function-workspaces.test.ts")).toBe(
     false,

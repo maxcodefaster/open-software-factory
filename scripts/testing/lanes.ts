@@ -19,7 +19,8 @@ const nativeNames = new Set([
   "native-forge-issuer",
   "openbao",
 ]);
-const compiledProtocolTests = new Set([
+const selfContainedControllerTests = new Set([
+  "postgres-baseline.test.ts",
   "server-function-repository-mirrors.test.ts",
   "client-budgets.test.ts",
   "server-function-learning.test.ts",
@@ -40,7 +41,7 @@ const compiledProtocolTests = new Set([
 ]);
 
 export function controllerNeedsDatabase(path: string) {
-  return !compiledProtocolTests.has(path.split("/").at(-1) ?? "");
+  return !selfContainedControllerTests.has(path.split("/").at(-1) ?? "");
 }
 export function integrationLane(path: string) {
   const name = basename(path).replace(/\.test\.ts$/, "");

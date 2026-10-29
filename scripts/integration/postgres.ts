@@ -2,11 +2,24 @@ import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import type postgres from "postgres";
 import { createDatabase } from "../../packages/db/src/client";
+import { ownedPostgresServer } from "../../test/fixtures/postgres-server";
 
-const database = createDatabase(2);
+const owned = await ownedPostgresServer();
+const previousURL = process.env["DATABASE_URL"];
+let database: ReturnType<typeof createDatabase>;
+try {
+  process.env["DATABASE_URL"] = owned.identity.url;
+  database = createDatabase(2);
+} catch (cause) {
+  await owned.dispose();
+  throw cause;
+} finally {
+  if (previousURL === undefined) delete process.env["DATABASE_URL"];
+  else process.env["DATABASE_URL"] = previousURL;
+}
 const { client } = database;
 const suffix = crypto.randomUUID().slice(0, 8);
-const userID = "01994a7d-0000-7000-8000-000000000001";
+const userID = crypto.randomUUID();
 const otherUserID = crypto.randomUUID();
 const projectID = crypto.randomUUID();
 const personalWorkspaceID = crypto.randomUUID();
@@ -43,6 +56,8 @@ try {
   if (migrations.map(({ version }) => version).join(",") !== expectedVersions.join(",")) {
     throw new Error("PostgreSQL clean baseline is not applied exactly once");
   }
+  await client`INSERT INTO auth."user"(id, name, email, email_verified)
+    VALUES (${userID}, 'Owned database probe', ${`probe-${suffix}@factory.invalid`}, true)`;
   await client.begin(async (transaction) => {
     await transaction`
       INSERT INTO auth."user"(id, name, email, email_verified)
@@ -717,7 +732,11 @@ try {
     await client`DELETE FROM factory.project WHERE id = ${concurrencyProjectID}`;
   }
 } finally {
-  await client.end();
+  try {
+    await client.end();
+  } finally {
+    await owned.dispose();
+  }
 }
 
 console.log("PostgreSQL clean baseline invariants passed");

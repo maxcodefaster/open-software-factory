@@ -736,6 +736,9 @@ Live proofs under `test/support` opt in through their documented environment fla
 model providers and incur usage. Test fixtures own separate databases, Projects and runtime
 identities; their cleanup must preserve unrelated work. Run the affected checks for a change rather
 than repeating every live journey after a documentation edit.
+`test:postgres` always creates and migrates its own empty PostgreSQL daemon, including its probe
+users, and removes only that owned daemon/network. It does not use `DATABASE_URL` or a pre-existing
+development administrator.
 
 Shared UI controls live in [controls.css](apps/factory/src/ui/controls.css), loaded by the
 application stylesheet. The [control fixture](test/fixtures/ui-controls-surface.tsx) covers
