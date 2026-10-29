@@ -1,14 +1,17 @@
 import { expect, test } from "bun:test";
 import { zeroDrizzle } from "@rocicorp/zero/server/adapters/drizzle";
+import { createProjectService } from "../../apps/factory/src/projects/service";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
 import { zeroQueries, zeroSchema } from "../../packages/zero-schema/src";
 import { zeroServerMutators } from "../../packages/zero-schema/src/server";
 import { factoryProcess } from "../fixtures/factory-process";
-import { createProjectService } from "../../apps/factory/src/projects/service";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("new Projects spread persistent backgrounds across the catalogue, including concurrent registrations", async () => {
@@ -182,7 +185,7 @@ test("new Projects receive catalogue backgrounds without changing identities or 
         id,slug,name,repository_url,default_branch,devcontainer_path,created_by)
         VALUES(${id},${`existing-${id}`},'Existing Project','https://example.invalid/existing.git',
           'main','.devcontainer/devcontainer.json',${user})`;
-    const before = await database.client`
+    const before = await database.client<{ project: { id: string; created_by: string } }[]>`
       SELECT to_jsonb(project) AS project FROM factory.project project ORDER BY id`;
     const preferences = await database.client`SELECT * FROM factory.user_ui_preference`;
     const backgrounds: string[] = [];
@@ -192,7 +195,17 @@ test("new Projects receive catalogue backgrounds without changing identities or 
       expect(desktopBackgroundKeys.some((key) => key === row?.key)).toBe(true);
       backgrounds.push(fixtureValue(row, "row").key);
     }
-    expect(new Set(backgrounds).size).toBe(2);
+    // Neither creator can see the other's Project. Their independent least-used
+    // catalogues can legitimately select the same painting.
+    expect(backgrounds).toHaveLength(2);
+    expect(before.map((row) => row.project.id).sort()).toEqual([projectId, otherProjectId].sort());
+    expect(before.map((row) => row.project.created_by).sort()).toEqual(
+      [creator, anotherCreator].sort(),
+    );
+    expect(
+      await database.client`SELECT project_id FROM factory.project_membership
+        WHERE project_id IN (${projectId},${otherProjectId})`,
+    ).toHaveLength(0);
     expect(
       await database.client`SELECT to_jsonb(project) AS project
         FROM factory.project project ORDER BY id`,
