@@ -81,7 +81,7 @@ spec:
               command: [bun, scripts/kubernetes/healthcheck.ts]
             periodSeconds: 5
             timeoutSeconds: 5
-            failureThreshold: 120
+            failureThreshold: 240
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
