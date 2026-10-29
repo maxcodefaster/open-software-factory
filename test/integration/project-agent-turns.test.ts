@@ -781,6 +781,52 @@ test("Project startup recovery quarantines expired dispatch without replaying in
   }
 });
 
+for (const startup of [false, true]) {
+  test(`Project live recovery observes lease loss without requiring a process restart (${startup ? "pending startup" : "direct dispatch"})`, async () => {
+    const owned = await fixture(answer);
+    const sleep = timers.setTimeout;
+    const waiting = spyOn(timers, "setTimeout").mockImplementation((duration, value, options) =>
+      sleep(Math.min(duration ?? 0, 25), value, options),
+    );
+    let original: Promise<unknown> | undefined;
+    try {
+      if (startup) {
+        await pendingProject(owned);
+        await owned.controller().recover();
+      } else {
+        original = owned
+          .controller()
+          .message(
+            owned.projectID,
+            undefined,
+            "Keep observing this admitted execution",
+            owned.userID,
+            crypto.randomUUID(),
+          );
+        void original.catch(() => {});
+      }
+      await owned.requested;
+      await owned.database.client`UPDATE factory.agent_turn
+      SET owner_expires_at=clock_timestamp()-interval '1 second'
+      WHERE project_id=${owned.projectID}`;
+      // No additional recover(), new controller or restart may be needed here.
+      await until(async () => (await owned.turns())[0]?.state === "uncertain");
+      expect(owned.requests()).toBe(1);
+      owned.release();
+      if (original) await expect(original).rejects.toMatchObject({ code: "conflict" });
+      expect(
+        (await owned.entries()).filter((entry) => entry.kind === "agent-message"),
+      ).toHaveLength(0);
+      expect((await owned.turns())[0]?.state).toBe("uncertain");
+    } finally {
+      waiting.mockRestore();
+      owned.release();
+      if (original) await Promise.allSettled([original]);
+      await owned.dispose();
+    }
+  });
+}
+
 test("Project startup recovery rejects pending input whose Conversation authority changed", async () => {
   const owned = await fixture(answer);
   try {
@@ -822,20 +868,24 @@ test("Project startup recovery retains pending intent beyond its first observati
   const sleep = timers.setTimeout;
   const leaseBoundary = Promise.withResolvers<void>();
   let simulatedWait = 0;
+  let expiredOriginalOwner = false;
   let waiting: ReturnType<typeof spyOn> | undefined;
   try {
     const { turn } = await pendingProject(owned);
     const owner = await createAgentTurnStore(owned.database).claimPending(turn.id, 60_000);
-    if (!owner) throw new Error("Owned pending lease required");
+    if (!owner?.ownerToken) throw new Error("Owned pending lease required");
     // Exercise the real SQL/claim path across a whole ownership window without
     // waiting a minute. SQL expiry remains authoritative, not the test's clock.
     waiting = spyOn(timers, "setTimeout").mockImplementation(async (duration, value, options) => {
       options?.signal?.throwIfAborted();
-      if (typeof duration === "number" && duration >= 1_000) {
+      if (!expiredOriginalOwner && typeof duration === "number" && duration >= 1_000) {
         simulatedWait += duration;
         if (simulatedWait >= 60_000) {
-          await owned.database.client`UPDATE factory.agent_turn
-            SET owner_expires_at = clock_timestamp() - interval '1 second' WHERE id = ${turn.id}`;
+          const expired = await owned.database.client`UPDATE factory.agent_turn
+            SET owner_expires_at = clock_timestamp() - interval '1 second'
+            WHERE id = ${turn.id} AND owner_token=${owner.ownerToken} RETURNING id`;
+          expect(expired).toHaveLength(1);
+          expiredOriginalOwner = true;
           leaseBoundary.resolve();
         }
         return sleep(0, value, options);
@@ -850,6 +900,7 @@ test("Project startup recovery retains pending intent beyond its first observati
       }),
     ]);
     await until(async () => (await owned.turns())[0]?.state === "completed");
+    expect(expiredOriginalOwner).toBe(true);
     expect(simulatedWait).toBeGreaterThanOrEqual(60_000);
     expect(owned.requests()).toBe(1);
     expect((await owned.turns())[0]?.id).toBe(turn.id);

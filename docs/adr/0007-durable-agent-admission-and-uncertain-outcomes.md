@@ -36,6 +36,10 @@ owner, not just Project membership. Known authority loss fails without publishin
 an existing Stop remains stopped. This says nothing about whether earlier inference was charged.
 Lease loss, process interruption and a timed-out provider without a recoverable result remain
 uncertain rather than authorizing a retry. Native error wrapping preserves Factory command codes.
+Normal Project dispatches retain the same lease-bound observation as startup recovery, including
+after a transient observation failure. Explicit maintenance also reconciles already-expired
+Project dispatches through that uncertainty boundary before checking admission. It never steals
+a live owner, treats uncertain Coding as settled, retries inference or erases observed usage.
 
 Setup inspection retains its existing PostgreSQL session lock on a short-lived coordination
 connection, not the application pool. This costs one connection per active inspection but preserves
