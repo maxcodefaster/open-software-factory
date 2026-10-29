@@ -64,7 +64,8 @@ type Resource = {
           command?: string[];
           env?: Array<{ name: string; value?: string }>;
           startupProbe?: {
-            exec: { command: string[] };
+            exec?: { command: string[] };
+            httpGet?: { path: string; port: number };
             periodSeconds: number;
             failureThreshold: number;
             timeoutSeconds?: number;
@@ -72,6 +73,7 @@ type Resource = {
           readinessProbe?: {
             exec?: { command: string[] };
             tcpSocket?: { port: number };
+            httpGet?: { path: string; port: number };
             periodSeconds: number;
             timeoutSeconds: number;
           };
@@ -539,8 +541,12 @@ test("every upgrade replaces Factory even when its image and configuration are u
 test("cold installation progress allows the documented twenty-minute readiness window", async () => {
   const application = (await resources()).find((resource) => resource.kind === "Deployment");
   expect(application?.spec?.progressDeadlineSeconds).toBe(1_200);
-  const probe = application?.spec?.template?.spec.containers[0]?.startupProbe;
-  expect(probe?.exec.command).toEqual(["bun", "scripts/kubernetes/healthcheck.ts"]);
+  const container = application?.spec?.template?.spec.containers[0];
+  const probe = container?.startupProbe;
+  expect(probe?.httpGet).toEqual({ path: "/health/ready?installation=complete", port: 3000 });
+  expect(container?.readinessProbe?.httpGet).toEqual(probe?.httpGet);
+  expect(probe?.exec).toBeUndefined();
+  expect(container?.readinessProbe?.exec).toBeUndefined();
   expect((probe?.periodSeconds ?? 0) * (probe?.failureThreshold ?? 0)).toBeGreaterThanOrEqual(
     1_200,
   );
@@ -550,7 +556,7 @@ test("PostgreSQL readiness allows its own connection check to finish under execu
   const postgres = (await resources()).find(
     (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-postgres",
   )?.spec?.template?.spec.containers[0];
-  expect(postgres?.startupProbe?.exec.command).toEqual([
+  expect(postgres?.startupProbe?.exec?.command).toEqual([
     "pg_isready",
     "-U",
     "factory",
