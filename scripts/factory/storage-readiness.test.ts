@@ -223,6 +223,27 @@ class Cluster {
   run: typeof runCommand = (argv, input) => this.invoke(argv, input);
 }
 
+test("a cold storage check can use the documented startup window instead of failing after three minutes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "factory-storage-cold-window-"));
+  const cluster = new Cluster();
+  let now = Date.now();
+  const clock = spyOn(Date, "now").mockImplementation(() => now);
+  cluster.beforeCreate = async () => {
+    if (cluster.calls.at(-1)?.body?.["kind"] === "Pod") now += 200_000;
+  };
+  try {
+    await requireWritableRuntimeStorage(
+      { stateDirectory: directory, image, intervalMS: 1 },
+      cluster.invoke.bind(cluster),
+    );
+    expect(cluster.podCreates).toBe(1);
+    expect(cluster.resources.size).toBe(0);
+  } finally {
+    clock.mockRestore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function fixture(run: (directory: string, cluster: Cluster) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "factory-storage-readiness-"));
   try {
