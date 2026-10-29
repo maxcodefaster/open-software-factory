@@ -1840,8 +1840,9 @@ function TicketDocument(props: TicketWorkspaceProps) {
       <Show when={historyOpen()}>
         <VersionHistory
           opener={
-            documentElement?.querySelector<HTMLElement>('[aria-label="Ticket actions"]') ??
-            undefined
+            documentElement?.querySelector<HTMLButtonElement>(
+              'button[aria-label="Ticket actions"]',
+            ) ?? undefined
           }
           label="Specification history"
           selectedID={historyRevisionID()}
