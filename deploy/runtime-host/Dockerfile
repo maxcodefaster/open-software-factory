@@ -7,6 +7,18 @@ COPY services/runtime-connector ./
 RUN --mount=type=cache,id=factory-connector-go-build,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-runtime-connector ./cmd/factory-runtime-connector
 RUN --mount=type=cache,id=factory-connector-go-build,target=/root/.cache/go-build CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /factory-project-prebuild ./cmd/factory-project-prebuild
 
+FROM docker.io/library/golang:1.27.2-alpine3.23@sha256:9e45f0eb4a63ed37ad6e604950407558b7c738e34e015ae77a5d4ad369cde079 AS compose
+WORKDIR /src/compose
+# Exact upstream fix for Bake's configured-input grants. Preserve filesystem
+# enforcement instead of disabling it for the CLI's generated Dockerfile.
+ADD --checksum=sha256:c7ba4001a9b927b78ef8a527ce3989428cd35a852d8fd7d679e9e460d1c54d8f https://github.com/docker/compose/archive/1e1c577eab08ceb5ff0fcf4d8e3cbbc08a34ef35.tar.gz /tmp/compose.tar.gz
+RUN tar -xzf /tmp/compose.tar.gz --strip-components=1 -C /src/compose && rm /tmp/compose.tar.gz
+RUN --mount=type=cache,id=factory-compose-go-mod,target=/go/pkg/mod \
+    --mount=type=cache,id=factory-compose-go-build,target=/root/.cache/go-build \
+    GOMAXPROCS=2 GOMEMLIMIT=2GiB CGO_ENABLED=0 go build -mod=readonly -trimpath -buildvcs=false \
+    -ldflags="-s -w -X github.com/docker/compose/v5/internal.Version=v5.7.0-dev.1e1c577" \
+    -o /docker-compose ./cmd
+
 FROM docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2 AS node
 
 FROM node AS language-node-musl
@@ -100,6 +112,8 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/npm
 COPY --from=connector /factory-runtime-connector /usr/local/bin/factory-runtime-connector
 COPY --from=connector /factory-project-prebuild /usr/local/bin/factory-project-prebuild
+COPY --from=compose /docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose
+COPY --from=compose /src/compose/LICENSE /usr/local/share/licenses/docker-compose/LICENSE
 COPY upstream.json /tmp/upstream.json
 RUN apk add --no-cache git libgcc libstdc++ \
   && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
@@ -107,6 +121,7 @@ RUN apk add --no-cache git libgcc libstdc++ \
   && node -e "const fs=require('fs'),crypto=require('crypto');const expected=JSON.parse(fs.readFileSync('/tmp/upstream.json')).devcontainersCli.integrity;const actual='sha512-'+crypto.createHash('sha512').update(fs.readFileSync(process.argv[1])).digest('base64');if(actual!==expected)throw new Error('Dev Containers CLI integrity mismatch')" "$cli_tarball" \
   && npm install --global --ignore-scripts --no-audit --no-fund "./$cli_tarball" \
   && test "$(devcontainer --version)" = "0.89.0" \
+  && test "$(docker compose version --short)" = "5.7.0-dev.1e1c577" \
   && factory-runtime-connector 2>&1 | grep -q 'usage: factory-runtime-connector' \
   && rm -f "$cli_tarball" /tmp/upstream.json \
   && npm cache clean --force

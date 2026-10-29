@@ -12,6 +12,11 @@ approved Changes. Forgejo owns Git and Verification runs. Every new execution Sa
 admitted Factorybox worker, pinned Sysbox and CRIU, a private Docker daemon, the Dev Containers CLI
 and the Factory Runtime Connector.
 
+The runtime host builds Docker Compose from the verified upstream source archive pinned in
+`upstream.json`. It includes the configured-input grants needed for Dev Containers' temporary
+Dockerfiles while keeping Bake's filesystem checks enabled. This is an upstream development
+commit, not an upstream stable release tag; the exact runtime image still needs its native gates.
+
 Shared updates are change-driven. Zero synchronizes permission-scoped read versions for the
 existing authenticated lifecycle, conversation, Review and Inbox reads rather than polling
 unchanged state. Board History and Trash load in explicit batches; Ticket quick-find searches
@@ -74,6 +79,9 @@ These non-live checks do not qualify a Factorybox worker or replace paid and nat
 Native AMD64 and ARM64 jobs build the runtime roles and Factory, then publish their combined
 manifests. Existing versioned architecture images are not overwritten. Publishing Factory does
 not admit a Factorybox worker or activate an installation.
+Before pushing each native runtime-host image, an offline Compose proof builds a configured
+Dockerfile outside its context and checks that raw Bake still refuses the same ungranted file.
+It uses no Project source, credentials or host Docker socket and does not qualify Factorybox.
 
 For local browser access, install with `deploy/helm/factory/values.local.yaml` and your
 cluster-reachable application image. Then run:

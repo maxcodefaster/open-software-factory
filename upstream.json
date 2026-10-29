@@ -27,6 +27,12 @@
     "version": "29.9.0",
     "image": "docker.io/library/docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470"
   },
+  "dockerCompose": {
+    "version": "5.7.0-dev.1e1c577",
+    "commit": "1e1c577eab08ceb5ff0fcf4d8e3cbbc08a34ef35",
+    "source": "https://github.com/docker/compose/archive/1e1c577eab08ceb5ff0fcf4d8e3cbbc08a34ef35.tar.gz",
+    "sha256": "c7ba4001a9b927b78ef8a527ce3989428cd35a852d8fd7d679e9e460d1c54d8f"
+  },
   "node": {
     "version": "24.21.0",
     "image": "docker.io/library/node:24.21.0-alpine3.23@sha256:9ec4a2e289874ed0d722e1772ec2de45d2801541db8612f3638b26f128c69ac2"
