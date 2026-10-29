@@ -30,9 +30,14 @@ spec:
             - name: POSTGRES_PASSWORD
               valueFrom:
                 secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
-          readinessProbe:
+          startupProbe:
             exec:
               command: [pg_isready, -U, factory, -d, factory, -t, "3"]
+            timeoutSeconds: 5
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            tcpSocket: {port: 5432}
             timeoutSeconds: 5
             periodSeconds: 5
           resources:

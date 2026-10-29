@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
@@ -7,6 +7,7 @@ import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createDatabase } from "../../packages/db/src/client";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
+import { eventually } from "../fixtures/factory-process";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
 import { installOwnedRuntimeConfiguration } from "../fixtures/runtime-configuration";
 
@@ -134,3 +135,46 @@ test.each(["personal", "staging", "ticket"] as const)(
   },
   30_000,
 );
+
+test("terminal bootstrap failure is not hidden by an earlier observation timeout", async () => {
+  const isolated = await ownedTestDatabase(server.identity, crypto.randomUUID());
+  const previousURL = process.env["DATABASE_URL"];
+  process.env["DATABASE_URL"] = isolated.url;
+  const database = createDatabase();
+  if (previousURL === undefined) delete process.env["DATABASE_URL"];
+  else process.env["DATABASE_URL"] = previousURL;
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.runtime_attempt
+      SET failure='Infrastructure command timed out; outcome is unconfirmed'
+      WHERE id=${owned.attemptID}`;
+    const controller = createRuntimeController(
+      database,
+      new RuntimeHub(async () => {}),
+      "owned-terminal-cause",
+      {
+        async prepareExecution() {
+          throw new Error("Status must not prepare source");
+        },
+      },
+      {
+        ...createKubernetesClient(),
+        getNamespace: async () => null,
+        getPod: async () => null,
+        deleteSecret: async () => {},
+      },
+      async () => "",
+    );
+    const cause = "Dev Container build failed: actual bootstrap cause";
+    await controller.status(owned.attemptID, "failed", cause);
+    await eventually(
+      async () => (await controller.get(owned.attemptID))?.state,
+      (state) => state === "failed",
+      "Owned terminal cleanup did not finish",
+    );
+    expect((await controller.get(owned.attemptID))?.failure).toBe(cause);
+  } finally {
+    await database.client.end();
+    await isolated.dispose();
+  }
+}, 30_000);
