@@ -73,11 +73,21 @@ jobs:
               dockerfile="deploy/$role/Dockerfile"
               target=()
             fi
-            docker buildx build --platform "linux/$ARCH" --provenance=false --push \
+            exporter=(--push)
+            if [[ "$role" == runtime-host ]]; then
+              exporter=(--load)
+            fi
+            docker buildx build --platform "linux/$ARCH" --provenance=false "${exporter[@]}" \
               --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
               --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" \
               --label "org.opencontainers.image.version=$RELEASE" \
               --file "$dockerfile" "${target[@]}" --tag "$image" .
+            if [[ "$role" == runtime-host ]]; then
+              image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+              bash scripts/runtime/compose-inputs-proof.sh "$image_id"
+              test "$(docker image inspect --format '{{.Id}}' "$image")" = "$image_id"
+              docker push "$image"
+            fi
           done
   manifests:
     needs: [release, roles]
