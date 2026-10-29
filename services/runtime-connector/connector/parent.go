@@ -635,8 +635,13 @@ func validateDevcontainerConfiguration(ctx context.Context, assignment Assignmen
 	}
 	command := exec.CommandContext(ctx, "devcontainer", arguments...)
 	command.Env = devcontainerEnvironment(assignment)
+	var diagnostic devcontainerFailureOutput
+	command.Stderr = &diagnostic
 	output, err := command.Output()
 	if err != nil {
+		if detail := devcontainerFailureDiagnostic(string(output), diagnostic.String(), assignment); detail != "" {
+			return nil, fmt.Errorf("read Dev Container configuration: %w: %s", err, detail)
+		}
 		return nil, fmt.Errorf("read Dev Container configuration: %w", err)
 	}
 	var result struct {
