@@ -32,8 +32,9 @@ spec:
                 secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
           readinessProbe:
             exec:
-              command: [pg_isready, -U, factory, -d, factory]
-            periodSeconds: 2
+              command: [pg_isready, -U, factory, -d, factory, -t, "3"]
+            timeoutSeconds: 5
+            periodSeconds: 5
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:

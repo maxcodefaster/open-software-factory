@@ -68,6 +68,11 @@ type Resource = {
             periodSeconds: number;
             failureThreshold: number;
           };
+          readinessProbe?: {
+            exec: { command: string[] };
+            periodSeconds: number;
+            timeoutSeconds: number;
+          };
           resources?: {
             requests: Record<string, string>;
             limits: Record<string, string>;
@@ -537,6 +542,16 @@ test("cold installation progress allows the documented twenty-minute readiness w
   expect((probe?.periodSeconds ?? 0) * (probe?.failureThreshold ?? 0)).toBeGreaterThanOrEqual(
     1_200,
   );
+});
+
+test("PostgreSQL readiness allows its own connection check to finish under execution load", async () => {
+  const postgres = (await resources()).find(
+    (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-postgres",
+  )?.spec?.template?.spec.containers[0];
+  const probe = postgres?.readinessProbe;
+  expect(probe?.exec.command).toEqual(["pg_isready", "-U", "factory", "-d", "factory", "-t", "3"]);
+  expect(probe?.timeoutSeconds).toBeGreaterThanOrEqual(5);
+  expect(probe?.periodSeconds).toBeGreaterThanOrEqual(probe?.timeoutSeconds ?? 5);
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {
