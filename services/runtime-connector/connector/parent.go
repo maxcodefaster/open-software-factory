@@ -1143,7 +1143,10 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 		"up",
 		"--workspace-folder", assignment.WorkspaceFolder,
 		"--config", configPath,
-		"--log-format", "json",
+		// CLI results on stdout remain JSON. Plain stderr keeps build lines
+		// usable in the bounded tail: one oversized JSON raw event would
+		// otherwise discard its actual terminal cause with the whole frame.
+		"--log-format", "text",
 		"--update-remote-user-uid-default", "never",
 		"--id-label", attemptLabel + "=" + assignment.RuntimeAttemptID,
 		"--id-label", generationLabel + "=" + strconv.FormatUint(assignment.Generation, 10),
