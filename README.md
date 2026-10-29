@@ -31,6 +31,10 @@ not required during development. Kubernetes is provided by the operator. Factory
 install a VM or cluster, require OrbStack, or manage the node's Docker daemon.
 Local tools and the Factory image pin `kubectl` 1.35.6. Use a Kubernetes API server
 within one minor version, 1.34 through 1.36, as required by the upstream version-skew policy.
+Use the repository-pinned Helm 4.2.2 for installation and upgrades. Helm 4.2.0 and 4.2.1
+can wait indefinitely for deletion of a missing pre-upgrade hook, including Factory's
+maintenance Job. The [upstream fix](https://github.com/helm/helm/issues/32231) is included in
+4.2.2; skipping hooks would bypass Factory's work-settlement guard rather than fix the wait.
 
 The chart and owned Forgejo fixtures pin 17.0.0 by image digest. Its native job/step/log API
 supplies Verification diagnostics. Upgrading an existing Forgejo is an explicit operator action:
@@ -663,6 +667,9 @@ lockfiles own application dependencies.
 For everyday work, use `factory:up` to prepare the source-development backend, `factory:dev`
 for frontend development and `check` for the standard checks. `factory:connect` is only the
 local browser connection to a Helm installation; it is not another server launcher.
+It resolves and checks the exact pinned kubectl executable through mise instead of trusting
+the inherited PATH. Restart this connection command after updating tool pins. That reconnects
+the browser without restarting Factory or repeating model work.
 Installed Factory lifecycle stays with Helm, including upgrades. Do not start the server directly
 to bypass bootstrap, readiness or owned process cleanup.
 The focused commands below remain available for diagnosing one area. Select a particular browser
@@ -688,6 +695,10 @@ Starter Project. They never adopt the source-development database. An explicit
 `FACTORY_BROWSER_BASE_URL` keeps the caller's existing fixture and its supplied database/build;
 native, paid and manual lanes retain their explicit installation requirements. Listing tests
 starts no services. Cleanup removes only the directly owned resources.
+Live UI inspection does not require a browser extension. If a browser update or its automation
+connection prevents inspection, use native desktop controls in that same browser. Check the
+rendered editor and Apps, not just service readiness. Do not disable browser security or install
+another browser to turn an automation failure into a claimed product pass.
 The owned desktop browser group shares one immutable build and one empty migrated PostgreSQL
 daemon per invocation. Every journey still owns its database, application process and Zero cache.
 Playwright's dependent teardown removes only that invocation's resources after the journeys finish.

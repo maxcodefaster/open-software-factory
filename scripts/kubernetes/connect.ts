@@ -1,6 +1,8 @@
 import { setTimeout as delay } from "node:timers/promises";
+import { isAbsolute } from "node:path";
 import { z } from "zod";
 import { runCommand } from "../../packages/runtime-kubernetes/src/command";
+import upstream from "../../upstream.json";
 
 const help = `Connect to a local Helm-installed Factory:
 
@@ -36,6 +38,33 @@ export function connectArguments(args: string[]) {
   return options;
 }
 type Options = ReturnType<typeof connectArguments>;
+type ConnectedOptions = Options & { executable: string };
+
+async function pinnedKubectl() {
+  const expected = `v${upstream.kubectl.version}`;
+  const message = `Local access requires kubectl ${expected} from mise. Run mise install, then restart factory:connect; Factory data is not changed.`;
+  try {
+    const resolved = await runCommand(["mise", "which", "kubectl"], undefined, {
+      timeoutMS: 10_000,
+      outputBytes: 32 * 1024,
+    });
+    const executable = resolved.stdout.trim();
+    if (resolved.exitCode !== 0 || !isAbsolute(executable) || /[\0\r\n]/.test(executable))
+      throw new Error(message);
+    const result = await runCommand([executable, "version", "--client", "-o", "json"], undefined, {
+      timeoutMS: 10_000,
+      outputBytes: 32 * 1024,
+    });
+    const version = z
+      .object({ clientVersion: z.object({ gitVersion: z.string() }) })
+      .parse(JSON.parse(result.stdout));
+    if (result.exitCode !== 0 || version.clientVersion.gitVersion !== expected)
+      throw new Error(message);
+    return executable;
+  } catch {
+    throw new Error(message);
+  }
+}
 
 const configSchema = z.object({
   metadata: z.object({
@@ -99,10 +128,10 @@ export function localAccessConfiguration(value: unknown, options: Options) {
 }
 type Target = ReturnType<typeof localAccessConfiguration>["targets"][number];
 
-async function kubectl(options: Options, args: string[]) {
+async function kubectl(options: ConnectedOptions, args: string[]) {
   const result = await runCommand(
     [
-      "kubectl",
+      options.executable,
       ...(options.context ? ["--context", options.context] : []),
       "--request-timeout=10s",
       ...args,
@@ -117,7 +146,7 @@ async function kubectl(options: Options, args: string[]) {
   return result.stdout.trim();
 }
 
-async function configuration(options: Options) {
+async function configuration(options: ConnectedOptions) {
   const name = options.release.slice(0, 40).replace(/-$/, "");
   return JSON.parse(
     await kubectl(options, [
@@ -133,7 +162,7 @@ async function configuration(options: Options) {
 }
 
 async function forward(
-  options: Options,
+  options: ConnectedOptions,
   target: Target,
   signal: AbortSignal,
   connected: () => void,
@@ -141,7 +170,7 @@ async function forward(
   signal.throwIfAborted();
   const child = Bun.spawn(
     [
-      "kubectl",
+      options.executable,
       "--context",
       options.context,
       "-n",
@@ -169,6 +198,7 @@ async function forward(
   if (signal.aborted) stop();
   let listening = false;
   let timedOut = false;
+  let healthProbeFailed = false;
   const timer = setTimeout(() => {
     timedOut = true;
     stop();
@@ -189,10 +219,13 @@ async function forward(
           : "/keepalive";
     while (!lifetime.signal.aborted) {
       const response = await fetch(new URL(path, target.url), {
+        method: "HEAD",
+        headers: { connection: "close" },
         redirect: "manual",
-        signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(2_000)]),
+        signal: AbortSignal.any([lifetime.signal, AbortSignal.timeout(5_000)]),
       }).catch(() => null);
-      await response?.body?.cancel().catch(() => {});
+      // Observe headers on a fresh socket. Idle HTTP reuse and cancelling a
+      // GET body must not become reasons to tear down a browser's transport.
       if (lifetime.signal.aborted) return;
       // Any HTTP response proves transport. A bootstrapping application's 503
       // must not cause a reconnect loop or be advertised as application readiness.
@@ -204,10 +237,25 @@ async function forward(
           connected();
         }
       } else if (++failures >= 2) {
-        // An idle kubectl can keep its local listener after its Pod has gone.
-        // Detect that without requiring a real browser request to trigger recovery.
-        stop();
-        return;
+        // A local timeout cannot distinguish a stale tunnel from an unavailable
+        // cluster/application. Restart only when the same upstream can answer
+        // independently. Denied/unavailable proxy access widens no permissions
+        // and leaves the existing listener and browser streams intact.
+        const upstream = await kubectl(options, [
+          "get",
+          "--raw",
+          `/api/v1/namespaces/${options.namespace}/services/http:${target.service}:${target.remotePort}/proxy${path}`,
+        ]).then(
+          () => true,
+          () => false,
+        );
+        if (lifetime.signal.aborted) return;
+        if (upstream) {
+          healthProbeFailed = true;
+          stop();
+          return;
+        }
+        failures = 0;
       }
       await delay(5_000, undefined, { signal: lifetime.signal }).catch(() => {});
     }
@@ -247,6 +295,11 @@ async function forward(
     return {
       portUnavailable: /address already in use|unable to listen on any/i.test(diagnostic),
       timedOut,
+      reason: timedOut
+        ? "the initial transport did not respond"
+        : healthProbeFailed
+          ? "local HTTP probes stopped responding"
+          : "kubectl exited",
     };
   } finally {
     clearTimeout(timer);
@@ -262,9 +315,14 @@ export async function connectLocalFactory(
   signal: AbortSignal,
   report: (message: string) => void = console.log,
 ) {
+  // mise can launch Bun directly while an inherited PATH still shadows its
+  // child tools. Resolve once and keep every read/forward on that exact client.
+  const executable = await pinnedKubectl();
   const options = {
     ...input,
-    context: input.context || (await kubectl(input, ["config", "current-context"])),
+    executable,
+    context:
+      input.context || (await kubectl({ ...input, executable }, ["config", "current-context"])),
   };
   const original = localAccessConfiguration(await configuration(options), options);
   signal.throwIfAborted();
@@ -324,7 +382,9 @@ export async function connectLocalFactory(
           `${target.role} connection ${result.timedOut ? "timed out" : "failed"}. Check that this Helm installation is running and accessible.`,
         );
       if (!reconnecting)
-        report(`${target.role} connection lost. Reconnecting to the same installation.`);
+        report(
+          `${target.role} connection lost: ${result.reason}. Reconnecting to the same installation.`,
+        );
       reconnecting = true;
       await delay(backoff, undefined, { signal: controller.signal });
       backoff = Math.min(backoff * 2, 10_000);
