@@ -72,13 +72,15 @@ spec:
               valueFrom:
                 secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: webhook-secret}
           readinessProbe:
-            exec:
-              command: [bun, scripts/kubernetes/healthcheck.ts]
+            httpGet:
+              path: /health/ready?installation=complete
+              port: 3000
             periodSeconds: 5
             timeoutSeconds: 5
           startupProbe:
-            exec:
-              command: [bun, scripts/kubernetes/healthcheck.ts]
+            httpGet:
+              path: /health/ready?installation=complete
+              port: 3000
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 240
