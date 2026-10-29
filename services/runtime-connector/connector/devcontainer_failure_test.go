@@ -66,6 +66,41 @@ exit 1
 	}
 }
 
+func TestDevcontainerDiagnosticPrioritizesBuildCauseOverWrapperAndControlWarning(t *testing.T) {
+	stdout := `{"outcome":"error","description":"An error occurred building the Docker Compose images.","message":"Command failed: docker compose build"}`
+	stderr := `{"type":"raw","text":"#8 ERROR: failed to solve: process apt-get update did not complete successfully: exit code: 100; GH_TOKEN=owned-private-value\n"}
+{"type":"text","text":"Error: Command failed: docker compose build"}
+{"type":"text","text":"Command failed: docker compose build"}
+{"type":"text","text":"Error: Command failed: docker compose build"}
+{"type":"text","text":"Command failed: docker compose build"}
+{"type":"text","text":"Failed to fetch control manifest: getaddrinfo EAI_AGAIN containers.dev"}
+`
+	detail := devcontainerFailureDiagnostic(stdout, stderr, Assignment{
+		RuntimeEnvironment: map[string]string{"GH_TOKEN": "owned-private-value"},
+	})
+	if !strings.HasPrefix(detail, "#8 ERROR: failed to solve: process apt-get update") {
+		t.Fatalf("the actual build cause was replaced by wrappers or an ancillary lookup: %s", detail)
+	}
+	if strings.Contains(detail, "owned-private-value") {
+		t.Fatal("prioritized build cause exposed a credential")
+	}
+}
+
+func TestDevcontainerDiagnosticJoinsRawChunksBeforeRedaction(t *testing.T) {
+	stderr := `{"type":"raw","text":"\u001b[31mERROR: failed to solve; GH_TOKEN=owned-"}
+{"type":"text","text":"background observation"}
+{"type":"raw","text":"private-value\u001b[0m\n"}
+`
+	detail := devcontainerFailureDiagnostic("", stderr, Assignment{
+		RuntimeEnvironment: map[string]string{"GH_TOKEN": "owned-private-value"},
+	})
+	if !strings.HasPrefix(detail, "ERROR: failed to solve; GH_TOKEN=[REDACTED]") ||
+		strings.Contains(detail, "private-value") || strings.Contains(detail, "owned-") ||
+		strings.Contains(detail, "[31m") || strings.Contains(detail, "[0m") {
+		t.Fatalf("raw transport chunks lost their cause or exposed split credentials: %s", detail)
+	}
+}
+
 func TestDevcontainerFailureTailDropsPartialLines(t *testing.T) {
 	var output devcontainerFailureOutput
 	_, _ = output.Write([]byte(strings.Repeat("private-partial-line", 4000)))
