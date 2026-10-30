@@ -403,8 +403,9 @@ test("Contributor citation filtering preserves the supported inline reference nu
 
 test("a Ticket interview receives its admitted Ticket and immutable Spec context", async () => {
   const owned = await fixture({
-    kind: "answer",
-    message: "Selected Ticket understood",
+    kind: "question",
+    message: "One consequential product decision remains.",
+    question: { type: "free-text", prompt: "What should the first run explain?", placeholder: "" },
     citations: [],
   });
   const ticketID = crypto.randomUUID();
@@ -1228,7 +1229,7 @@ test("a known local structured-output rejection is failed, not an unknown provid
     );
     const current = await owned.controller().get(owned.projectID, undefined, owned.userID);
     expect(current?.turn?.summary).toBe(
-      "The Project Agent returned an invalid response. Your input is saved.",
+      "The Project Agent returned an invalid response. Your input is saved. Validation: STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
     );
     await owned
       .controller()

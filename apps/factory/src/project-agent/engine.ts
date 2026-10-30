@@ -355,7 +355,11 @@ the same text. Criteria are open obligations, never claims of completed implemen
 AI is advisory; users may edit, skip clarification or commission a saved specification themselves.
 ${
   input.requirementsInterview
-    ? "This task clarifies one selected Ticket. Return an answer, question/round, or requirement, never an Epic proposal."
+    ? `This task clarifies one selected Ticket. This explicit Interview action returns a question/round
+when a consequential decision is missing, otherwise return the complete requirement proposal
+now, including immediately for detailed Ticket context. An acknowledgement, promise to prepare
+a proposal, or prose-only plan does not complete this action. Never return an answer or Epic.
+The human still confirms the proposal; this action never approves or starts implementation.`
     : `For larger intent spanning several independent outcomes, return kind epic with a concise Epic and
 2 to 12 member Tickets. Search and read existing work first; prefer reuse over duplicate Tickets.
 Reuse only returned Ticket IDs and observed versions. Reused Tickets retain their content; their
@@ -528,6 +532,7 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
       response.object,
       input.mode,
       Boolean(input.technicalPlanning),
+      input.requirementsInterview,
     );
     failed = false;
     return result;
