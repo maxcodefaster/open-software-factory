@@ -1,5 +1,6 @@
 import type { FrontendApplicationContribution } from "@theia/core/lib/browser/frontend-application-contribution";
 import { StatusBar, StatusBarAlignment } from "@theia/core/lib/browser/status-bar/status-bar";
+import { CommandRegistry } from "@theia/core/lib/common/command";
 import { DisposableCollection } from "@theia/core/lib/common/disposable";
 import { inject, injectable } from "@theia/core/shared/inversify";
 import { EditorManager } from "@theia/editor/lib/browser/editor-manager";
@@ -9,14 +10,17 @@ import { factoryRuntimeContext, factoryWorkspaceRuntimePath } from "./factory-ru
 import { observeFactoryRuntimeUse } from "./factory-runtime-use";
 import { workspaceScheme } from "./factory-workspace-files";
 import { factoryWriteContext } from "./factory-write-context";
+import { FactoryWriterDialog } from "./factory-writer-dialog";
 import { factoryWriterLabel } from "./factory-writer-label";
 
-// One quiet status/Take over action. Server enforcement does not trust this UI.
+const editingAccessCommand = "factory.editingAccess";
+
+// One status-bar entry opens deliberate editing actions without covering the IDE.
 @injectable()
 export class FactoryWriterContribution implements FrontendApplicationContribution {
-  readonly #bar = document.createElement("div");
-  readonly #copy = document.createElement("span");
-  readonly #action = document.createElement("button");
+  readonly #dialog = new FactoryWriterDialog(() => void this.#read(true));
+  readonly #copy = this.#dialog.copy;
+  readonly #action = this.#dialog.action;
   #workspaceID: string | undefined;
   #commandID: string = crypto.randomUUID();
   #busy = false;
@@ -59,6 +63,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
   constructor(
     @inject(StatusBar) private readonly statusBar: StatusBar,
     @inject(EditorManager) private readonly editors: EditorManager,
+    @inject(CommandRegistry) private readonly commands: CommandRegistry,
   ) {}
   onDidInitializeLayout() {
     for (const widget of this.editors.all) this.#observeEditor(widget);
@@ -71,13 +76,20 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
       if (!document.hidden && this.#workspaceID)
         this.#editing.queue(this.#workspaceID, "heartbeat");
     }, 15_000);
-    this.#bar.className = "factory-writer-status";
-    this.#bar.setAttribute("role", "status");
-    this.#action.type = "button";
-    this.#action.textContent = "Take over editing";
-    this.#action.addEventListener("click", () => void this.#read(true));
-    this.#bar.append(this.#copy, this.#action);
-    document.body.append(this.#bar);
+    this.#editorSubscriptions.push(
+      this.commands.registerCommand(
+        { id: editingAccessCommand, label: "Show editing access" },
+        {
+          isEnabled: () => Boolean(this.#workspaceID),
+          execute: () => {
+            if (!this.#workspaceID) return;
+            this.#dialog.open();
+            void this.#read();
+          },
+        },
+      ),
+    );
+    document.body.append(this.#dialog.element);
     this.#subscription = factoryRuntimeContext.subscribe((state) => {
       if (state?.workspaceID === this.#workspaceID) return;
       this.#workspaceID = state?.workspaceID;
@@ -89,7 +101,8 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
       this.#readCancellation = new AbortController();
       factoryWriteContext.select(this.#workspaceID);
       this.#commandID = crypto.randomUUID();
-      this.#bar.hidden = true;
+      this.#dialog.close();
+      this.#action.hidden = true;
       void this.statusBar.removeElement("factory-writing");
       void this.#read();
     });
@@ -160,7 +173,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
         typeof value.state !== "string"
       )
         throw new Error("Editing authority is unavailable.");
-      this.#bar.hidden = value.canWrite;
+      if (value.canWrite) this.#dialog.close();
       const editingEpoch =
         value.canWrite &&
         "epoch" in value &&
@@ -211,6 +224,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
         tooltip: label,
         alignment: StatusBarAlignment.LEFT,
         priority: 97,
+        command: editingAccessCommand,
       });
       this.#action.hidden =
         ("stopPending" in value && value.stopPending === true) ||
@@ -234,7 +248,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
       if (this.#workspaceID === workspaceID && !cancellation.signal.aborted) {
         factoryWriteContext.confirm(workspaceID, false);
         factoryRuntimeContext.setWritable(workspaceID, false);
-        this.#bar.hidden = false;
+        this.#action.hidden = true;
         this.#editing.confirm(workspaceID, undefined);
         this.#copy.textContent =
           cause instanceof Error ? cause.message : "Editing authority is unavailable.";
@@ -243,6 +257,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
           tooltip: this.#copy.textContent,
           alignment: StatusBarAlignment.LEFT,
           priority: 97,
+          command: editingAccessCommand,
         });
       }
     } finally {
@@ -259,6 +274,6 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
     void this.statusBar.removeElement("factory-writing");
     this.#subscription?.dispose();
     if (this.#timer) clearInterval(this.#timer);
-    this.#bar.remove();
+    this.#dialog.dispose();
   }
 }
