@@ -1,19 +1,19 @@
 import {
   type BaseDefaultContext,
   type BaseDefaultSchema,
-  type CustomMutatorDefs,
   type ConnectionState,
+  type CustomMutatorDefs,
   type DefaultContext,
   type DefaultSchema,
   type ErroredQuery,
   type HumanReadable,
+  type MaterializeOptions,
   type PullRow,
   type QueryOrQueryRequest,
   type ReadonlyJSONValue,
   type ResultType,
   Zero,
   type ZeroOptions,
-  type MaterializeOptions,
 } from "@rocicorp/zero";
 import { addContextToQuery, asQueryInternals } from "@rocicorp/zero/bindings";
 import {
@@ -27,7 +27,11 @@ import {
   untrack,
   useContext,
 } from "solid-js";
-import { listenToMaterializedView, ZeroClientLifecycle } from "./lifecycle";
+import {
+  isTransientAPIConnectionError,
+  listenToMaterializedView,
+  ZeroClientLifecycle,
+} from "./lifecycle";
 import { createQueryData } from "./query-data";
 import { createQuerySelection } from "./query-selection";
 
@@ -143,7 +147,11 @@ export function useZeroConnection() {
     setState(client?.connection.state.current);
     return client?.connection.state.subscribe(setState);
   });
-  return { state, reconnect: () => zero()?.connection.connect() };
+  return {
+    state,
+    automaticRecovery: () => isTransientAPIConnectionError(state()),
+    reconnect: () => zero()?.connection.connect(),
+  };
 }
 
 export function useZeroPreload<
@@ -178,4 +186,4 @@ export function useZeroPreload<
   });
 }
 
-export { ZeroClientLifecycle, listenToMaterializedView };
+export { listenToMaterializedView, ZeroClientLifecycle };
