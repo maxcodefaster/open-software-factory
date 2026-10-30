@@ -406,6 +406,7 @@ export async function prepareFactoryboxRuntime(
   identity: FactoryboxWorkerIdentity,
   run: typeof runCommand = runFactoryboxKubernetes,
   timeoutMS = 420_000,
+  beforeDispatch?: () => Promise<void>,
 ) {
   const deadline = performance.now() + timeoutMS;
   const assignmentID = input.reserve ? input.labels["factory.dev/execution-slot"] : input.attemptID;
@@ -428,6 +429,7 @@ export async function prepareFactoryboxRuntime(
   ]);
   if (secret.exitCode !== 0) throw new Error("Sandbox assignment observation is unavailable");
   const assignment = factoryboxPreparationAssignment(input, JSON.parse(secret.stdout));
+  await beforeDispatch?.();
   const result = await run(
     [
       "exec",

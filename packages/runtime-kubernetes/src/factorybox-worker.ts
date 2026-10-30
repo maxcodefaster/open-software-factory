@@ -462,6 +462,7 @@ export async function executeFactoryboxOperation(
   operation: FactoryboxOperation,
   run: Run = runFactoryboxKubernetes,
   declaration?: FactoryboxWorkerDeclaration,
+  beforeDispatch?: () => Promise<void>,
 ) {
   const deadline = performance.now() + 420_000;
   const input = factoryboxWorkerRequest.parse(request);
@@ -481,11 +482,12 @@ export async function executeFactoryboxOperation(
     for (;;) {
       const remainingMS = deadline - performance.now();
       if (remainingMS <= 0) throw new Error("Factorybox lifecycle deadline expired before command");
+      if (!observation) await beforeDispatch?.();
       const result = await run(
         ["exec", input.podName, "-n", input.namespace, "-c", "worker", "--", ...args],
         undefined,
         {
-          timeoutMS: observation ? Math.min(remainingMS, 15_000) : remainingMS,
+          timeoutMS: remainingMS,
           outputBytes: 4 * 1024 ** 2,
         },
       );

@@ -209,7 +209,21 @@ test.each([
         before: { root, filesystem_available_bytes: 1024 },
         after: { root, filesystem_available_bytes: 2048 },
       });
-      const run: typeof runFactoryboxKubernetes = async (args, body) => {
+      let assignmentReadUnavailable = cancelPreparation;
+      let startReadUnavailable =
+        architecture === "amd64" &&
+        !reserveDeleted &&
+        !cancelPreparation &&
+        deleteContinuation === "none";
+      const run: typeof runFactoryboxKubernetes = async (args, body, limits) => {
+        if (args[0] === "get" && args[1] === "pod" && preparations === 1 && startReadUnavailable) {
+          startReadUnavailable = false;
+          throw new Error("Native Start preflight observation is unconfirmed");
+        }
+        if (args[0] === "get" && args[1] === "secret" && assignmentReadUnavailable) {
+          assignmentReadUnavailable = false;
+          throw new Error("Assignment observation failed before native preparation dispatch");
+        }
         if (args[0] === "get")
           return {
             exitCode: 0,
@@ -220,8 +234,11 @@ test.each([
               ],
             ),
           };
-        if (args.at(-1) === "worker-status")
+        if (args.at(-1) === "worker-status") {
+          if (cancelPreparation && !assignmentReadUnavailable)
+            expect(limits?.timeoutMS).toBeGreaterThan(15_000);
           return { exitCode: 0, stderr: "", stdout: JSON.stringify(status) };
+        }
         if (args.includes("python3")) {
           if (cancelPreparation && args.at(-1)?.endsWith("/prepared.json"))
             return { exitCode: 1, stderr: "No private input was published", stdout: "" };
@@ -431,6 +448,18 @@ test.each([
       const execution = createFactoryboxExecution(database, hub, run);
       if (cancelPreparation) {
         await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
+          "Assignment observation failed before native preparation dispatch",
+        );
+        const [undispatched] = await database.client<
+          Array<{ attempted: boolean }>
+        >`SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='prepare'`;
+        expect(undispatched?.attempted).toBe(false);
+        expect(preparations).toBe(0);
+        // A new execution service must be able to retry a failed read without
+        // treating it as a lost extraction/mount mutation.
+        const recovered = createFactoryboxExecution(database, hub, run);
+        await expect(recovered.ensureStarted(owned.attemptID)).rejects.toThrow(
           "preparation is unconfirmed",
         );
         await expect(execution.ensureStarted(owned.attemptID)).rejects.toThrow(
@@ -451,6 +480,19 @@ test.each([
         expect(retained?.["completed_at"]).toBeNull();
         return;
       }
+      if (startReadUnavailable) {
+        await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
+          "Native Start preflight observation is unconfirmed",
+        );
+        const [undispatched] = await database.client<
+          Array<{ attempted: boolean }>
+        >`SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='start'`;
+        expect(undispatched?.attempted).toBe(false);
+        expect(preparations).toBe(1);
+        expect(mutations).toEqual([]);
+      }
+      const preparationsBeforeContention = preparations;
       const holder = database.coordination();
       await holder`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
       const starting = execution.ensureStarted(owned.attemptID, [declared.pod]).then(
@@ -465,7 +507,7 @@ test.each([
           (rows) => rows.length === 1,
           "Execution never waited for the shared native worker",
         );
-        expect(preparations).toBe(0);
+        expect(preparations).toBe(preparationsBeforeContention);
         expect(mutations).toEqual([]);
       } finally {
         await holder`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
