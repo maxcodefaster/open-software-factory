@@ -18,6 +18,26 @@ import {
 import { serverCall } from "../server-functions/result";
 import type { DesktopMutation, ReadTicketDetail, TicketDetail } from "./contracts";
 
+function savedResponseNotice(turn: ConversationView["turn"], commandID: string) {
+  if (turn?.commandId === commandID) {
+    switch (turn.state) {
+      case "completed":
+        return "";
+      case "failed":
+        return "Your message was saved, but the Project Agent could not finish its response.";
+      case "stopped":
+        return "Your message was saved. The Project Agent was stopped before completing its response.";
+      case "uncertain":
+        return "Your message was saved. The response outcome is unconfirmed; no request was replayed.";
+      case "pending":
+      case "dispatching":
+      case "running":
+        return "Your message was saved. The Project Agent is still working; no request was replayed.";
+    }
+  }
+  return "Your message was saved, but its response could not be confirmed. No request was replayed.";
+}
+
 interface ConversationCommandsDependencies {
   assistantContextLoading: () => boolean;
   assistantPending: () => boolean;
@@ -234,14 +254,10 @@ export function createConversationCommands(dependencies: ConversationCommandsDep
       refreshed.entries.some(
         (entry) => entry.kind === "user-message" && entry.payload["commandId"] === commandId,
       );
-    if (!admitted) return;
+    if (!admitted || !commandId) return;
     try {
       clearSubmittedDraft();
-      dependencies.setError(
-        refreshed.turn?.commandId === commandId && refreshed.turn?.state === "completed"
-          ? ""
-          : "Your message was saved. The response stream disconnected; its recorded result is shown above.",
-      );
+      dependencies.setError(savedResponseNotice(refreshed.turn, commandId));
     } catch (cause) {
       dependencies.setError(
         cause instanceof Error ? cause.message : "Browser recovery is unavailable.",
