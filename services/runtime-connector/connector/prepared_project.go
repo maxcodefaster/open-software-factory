@@ -232,7 +232,7 @@ func RunPreparedChild(ctx context.Context, assignment Assignment) error {
 	if err := processes.startAll(); err != nil {
 		return err
 	}
-	if err := waitForChannels(ctx, assignment); err != nil {
+	if err := waitForChannels(ctx, assignment, processes); err != nil {
 		return err
 	}
 	go func() { <-ctx.Done(); listener.Close() }()

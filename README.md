@@ -12,6 +12,11 @@ approved Changes. Forgejo owns Git and Verification runs. Every new execution Sa
 admitted Factorybox worker, pinned Sysbox and CRIU, a private Docker daemon, the Dev Containers CLI
 and the Factory Runtime Connector.
 
+Non-development App startup publishes authenticated process state before HTTP readiness.
+A required App process that has exited fails with its exit code and a bounded, redacted cause
+instead of waiting for the health timeout. HTTP readiness failures retain the last response
+status, not its body or credential-bearing URL. Startup output never establishes readiness.
+
 The runtime host builds Docker Compose from the verified upstream source archive pinned in
 `upstream.json`. It includes the configured-input grants needed for Dev Containers' temporary
 Dockerfiles while keeping Bake's filesystem checks enabled. This is an upstream development

@@ -87,6 +87,34 @@ func (manager *processManager) startAll() error {
 	return nil
 }
 
+func (manager *processManager) startupFailure(assignment Assignment) error {
+	for _, channel := range assignment.Channels {
+		manager.mutex.Lock()
+		process := manager.processes[channel.Name]
+		if process == nil || process.state != "failed" {
+			manager.mutex.Unlock()
+			continue
+		}
+		summary := fmt.Sprintf("channel %q process %q failed before readiness", channel.Name, process.spec.Name)
+		if process.exitCode != nil {
+			summary = fmt.Sprintf("channel %q process %q exited with code %d before readiness",
+				channel.Name, process.spec.Name, *process.exitCode)
+		}
+		retained := manager.recent[channel.Name]
+		// The rolling process tail may begin inside a line or credential.
+		// Reuse the complete-line rule before making a retained diagnostic.
+		output := (&devcontainerFailureOutput{
+			data: retained, truncated: len(retained) >= 32<<10,
+		}).String()
+		manager.mutex.Unlock()
+		if detail := devcontainerFailureDiagnostic("", output, assignment); detail != "" {
+			summary += ": " + detail
+		}
+		return errors.New(summary)
+	}
+	return nil
+}
+
 func (manager *processManager) action(name string, action string) error {
 	if !isAppProcess(name) {
 		return errors.New("only declared App processes can be controlled")

@@ -138,7 +138,19 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 	}
 	details = append(details, summary...)
 	text := strings.Join(details, " ")
+	// Process-local credentials, including the native Agent password, must not
+	// escape into a retained failure through an App's startup output.
+	var values []string
 	for _, value := range assignment.RuntimeEnvironment {
+		values = append(values, value)
+	}
+	for _, process := range assignment.Processes {
+		for _, value := range process.Env {
+			values = append(values, value)
+		}
+	}
+	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
+	for _, value := range values {
 		if value == "" {
 			continue
 		}

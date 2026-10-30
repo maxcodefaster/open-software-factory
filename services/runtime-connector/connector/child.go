@@ -75,6 +75,13 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		processes = newProcessManager(ctx, assignment, output)
 	}
 	defer processes.stopAll()
+	if !processes.development {
+		// Development announces its independent Terminal immediately below.
+		// Non-development Apps can take time to become healthy; publish their
+		// real process state and output without claiming channel readiness.
+		processes.connect(control)
+		defer processes.connect(nil)
+	}
 	if prepared == nil {
 		finishProcesses := startupPhase("process-start")
 		processErr := processes.startAll()
@@ -84,7 +91,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 		}
 	}
 	finishReadiness := startupPhase("channel-readiness")
-	readinessErr := waitForChannels(ctx, assignment)
+	readinessErr := waitForChannels(ctx, assignment, processes)
 	finishReadiness()
 	if readinessErr != nil {
 		return fail(readinessErr)
@@ -176,7 +183,7 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 	}
 }
 
-func waitForChannels(ctx context.Context, assignment Assignment) error {
+func waitForChannels(ctx context.Context, assignment Assignment, processes *processManager) error {
 	client := http.Client{Timeout: 2 * time.Second}
 	for _, channel := range assignment.Channels {
 		if channel.Kind == "ide" {
@@ -188,7 +195,13 @@ func waitForChannels(ctx context.Context, assignment Assignment) error {
 	for _, channel := range assignment.Channels {
 		healthURL := strings.TrimSuffix(channel.Target, "/") + channel.HealthPath
 		ready := false
+		lastFailure := "health endpoint has not responded"
 		for attempt := 0; attempt < 120; attempt++ {
+			if processes != nil {
+				if err := processes.startupFailure(assignment); err != nil {
+					return err
+				}
+			}
 			request, err := http.NewRequestWithContext(ctx, http.MethodGet, healthURL, nil)
 			if err != nil {
 				return fmt.Errorf("create health request for channel %q: %w", channel.Name, err)
@@ -202,15 +215,20 @@ func waitForChannels(ctx context.Context, assignment Assignment) error {
 					ready = true
 					break
 				}
+				lastFailure = fmt.Sprintf("last health response was HTTP %d", response.StatusCode)
+			} else {
+				// Do not retain response bodies or a URL-bearing transport error.
+				// Either may contain Project credentials.
+				lastFailure = "health connection failed"
 			}
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return fmt.Errorf("channel %q did not become ready: %s: %w", channel.Name, lastFailure, ctx.Err())
 			case <-time.After(250 * time.Millisecond):
 			}
 		}
 		if !ready {
-			return fmt.Errorf("channel %q did not become ready", channel.Name)
+			return fmt.Errorf("channel %q did not become ready: %s", channel.Name, lastFailure)
 		}
 	}
 	return nil
