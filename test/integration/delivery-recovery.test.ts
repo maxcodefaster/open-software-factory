@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createDeliveryController } from "../../apps/factory/src/delivery/controller";
 import { createForgejoClient } from "../../packages/forge/src/forge";
 import { fixture } from "../fixtures/change-agent-turns";
@@ -92,6 +93,123 @@ async function deliveryFixture() {
     throw cause;
   }
 }
+
+test("failed Verification compute is visible while human editing fences reconciliation", async () => {
+  const f = await deliveryFixture();
+  const verificationID = crypto.randomUUID();
+  const attemptID = crypto.randomUUID();
+  const replacementID = crypto.randomUUID();
+  const unavailable = async () => {
+    throw new Error("Status reads must not start compute, inference or external mutations");
+  };
+  try {
+    await f.database.client`INSERT INTO factory.branch_create_operation(
+      id,change_id,repository_owner,repository_name,branch_name,start_sha,idempotency_key,
+      state,observed_head_sha,completed_at)
+      SELECT ${crypto.randomUUID()},id,'owned','build',branch_name,base_sha,${crypto.randomUUID()},
+        'succeeded',base_sha,now() FROM factory.change WHERE id=${f.owned.changeID}`;
+    await f.database.client`INSERT INTO factory.verification(
+      id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,runner_token)
+      VALUES(${verificationID},${f.owned.changeID},${f.sha},1,'owned-startup-failure','runner-starting',1,${f.owned.userID},'owned-unused')`;
+    await f.database.client`INSERT INTO factory.runtime_attempt(
+      id,project_id,verification_id,isolated_kind,generation,revision,state,
+      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,failure)
+      VALUES(${attemptID},${f.owned.projectID},${verificationID},'verification',2,${f.sha},'failed',
+        ${"a".repeat(64)},${"b".repeat(64)},now(),${f.owned.userID},'no space left on device')`;
+    await f.database
+      .client`UPDATE factory.verification SET runtime_attempt_id=${attemptID} WHERE id=${verificationID}`;
+    await f.database
+      .client`UPDATE factory.change_writer SET state='human',user_id=${f.owned.userID},turn_id=NULL
+      WHERE change_id=${f.owned.changeID}`;
+    const config = {
+      FACTORY_FORGEJO_API_URL: "https://forge.invalid/api/v1",
+      FACTORY_FORGEJO_TOKEN: "owned",
+      FACTORY_FORGEJO_OWNER: "owned",
+    };
+    const previous = Object.fromEntries(Object.keys(config).map((key) => [key, process.env[key]]));
+    let changes: ReturnType<typeof createChangeController>;
+    try {
+      Object.assign(process.env, config);
+      changes = createChangeController(
+        f.database,
+        { stop: unavailable },
+        undefined,
+        undefined,
+        f.forge,
+      );
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+    const delivery = createDeliveryController(
+      f.database,
+      { startVerification: unavailable, startStagingReplacement: unavailable, stop: unavailable },
+      { prompt: unavailable },
+      unavailable,
+      { client: f.forge, owner: "owned" },
+    );
+    for (const state of ["failed", "cleanup-failed", "stopped"] as const) {
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state=${state}::factory.runtime_attempt_state WHERE id=${attemptID}`;
+      expect(await delivery.get(f.owned.changeID)).toMatchObject({
+        verificationState: "failed",
+        verificationFailureKind: "execution-failed",
+        verificationSummary: "no space left on device",
+      });
+      expect((await changes.get(f.owned.changeID))?.verificationState).toBe("failed");
+      expect((await changes.list(f.owned.projectID, f.owned.userID))[0]?.verificationState).toBe(
+        "failed",
+      );
+    }
+    // A replacement's actual startup clears the old presentation without
+    // rewriting the recorded Verification or manufacturing a passing result.
+    await f.database.client`INSERT INTO factory.runtime_attempt(
+      id,project_id,verification_id,isolated_kind,generation,revision,state,
+      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${replacementID},${f.owned.projectID},${verificationID},'verification',3,${f.sha},'starting',
+        ${"c".repeat(64)},${"d".repeat(64)},now(),${f.owned.userID})`;
+    await f.database
+      .client`UPDATE factory.verification SET runtime_attempt_id=${replacementID} WHERE id=${verificationID}`;
+    expect(await delivery.get(f.owned.changeID)).toMatchObject({
+      verificationState: "runner-starting",
+      verificationSummary: null,
+      verificationFailureKind: null,
+    });
+    expect((await changes.get(f.owned.changeID))?.verificationState).toBe("runner-starting");
+    // A native check result remains authoritative even if cleanup later fails.
+    await f.database
+      .client`UPDATE factory.verification SET state='succeeded',summary='Exact checks passed',completed_at=now() WHERE id=${verificationID}`;
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='cleanup-failed',failure='cleanup failed' WHERE id=${replacementID}`;
+    expect(await delivery.get(f.owned.changeID)).toMatchObject({
+      verificationState: "succeeded",
+      verificationSummary: "Exact checks passed",
+      verificationFailureKind: null,
+    });
+    expect((await changes.get(f.owned.changeID))?.verificationState).toBe("succeeded");
+    expect((await changes.list(f.owned.projectID, f.owned.userID))[0]?.verificationState).toBe(
+      "succeeded",
+    );
+    const [writer] = await f.database
+      .client`SELECT state,user_id FROM factory.change_writer WHERE change_id=${f.owned.changeID}`;
+    expect(writer).toEqual({ state: "human", user_id: f.owned.userID });
+    const [original] = await f.database
+      .client`SELECT state,failure FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    expect(original).toEqual({ state: "stopped", failure: "no space left on device" });
+    expect(
+      await f.database
+        .client`SELECT id FROM factory.runtime_attempt WHERE verification_id=${verificationID}`,
+    ).toHaveLength(2);
+    expect(
+      await f.database
+        .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.owned.changeID}`,
+    ).toHaveLength(0);
+  } finally {
+    await f.close();
+  }
+}, 60_000);
 
 test("failed exact Verification requests one bounded repair on the same Change", async () => {
   const f = await deliveryFixture();

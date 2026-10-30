@@ -1,11 +1,10 @@
-import { createDeliveryPromotion } from "./promotion";
 import type { z } from "zod";
 import type { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
 import { candidateReviewResultInput } from "../../../../packages/conversation-domain/src/candidate-review";
 import {
+  verificationChangeScope,
   verificationDiagnosisInput,
   verificationRepairInstructions,
-  verificationChangeScope,
 } from "../../../../packages/conversation-domain/src/verification";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
@@ -25,6 +24,7 @@ import { monitoringCandidate } from "../monitoring/candidate";
 import type { RuntimeAttemptView } from "../runtime/types";
 import { createDeliveryCoordination, deliveryDelegationIn } from "./coordination";
 import type { createChangeIntegration } from "./integration";
+import { createDeliveryPromotion } from "./promotion";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -1399,9 +1399,13 @@ export function createDeliveryController(
           review.id AS "reviewId",
           pr.pull_request_url AS "pullRequestUrl", pr.state AS "pullRequestState",
           verification.commit_sha AS "verificationCommitSha",
-          verification.state AS "verificationState",
-          verification.summary AS "verificationSummary",
-          CASE WHEN verification.state='failed' THEN verification.diagnosis->>'kind' END AS "verificationFailureKind",
+          CASE WHEN failed_verification.id IS NOT NULL THEN 'failed'
+            ELSE verification.state::text END AS "verificationState",
+          CASE WHEN failed_verification.id IS NOT NULL THEN
+            COALESCE(left(failed_verification.failure,1000),'Verification compute failed before checks completed.')
+            ELSE verification.summary END AS "verificationSummary",
+          CASE WHEN failed_verification.id IS NOT NULL THEN 'execution-failed'
+            WHEN verification.state='failed' THEN verification.diagnosis->>'kind' END AS "verificationFailureKind",
           CASE WHEN latest_turn.input->>'kind'='change-repair' THEN latest_turn.state::text END AS "correctionState",
           verification.action_run_url AS "actionRunUrl",
           CASE WHEN review.state IN ('pending','running') AND review_turn.state IN ('failed','stopped','uncertain')
@@ -1437,6 +1441,10 @@ export function createDeliveryController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
+        LEFT JOIN factory.runtime_attempt failed_verification ON failed_verification.id=verification.runtime_attempt_id
+          AND verification.state IN ('pending','runner-starting','running')
+          AND (failed_verification.state IN ('failed','cleanup-failed')
+            OR (failed_verification.state='stopped' AND failed_verification.failure IS NOT NULL))
         LEFT JOIN LATERAL (
           SELECT * FROM factory.candidate_review WHERE verification_id=verification.id ORDER BY ordinal DESC LIMIT 1
         ) review ON true
