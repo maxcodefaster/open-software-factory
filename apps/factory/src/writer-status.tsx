@@ -11,6 +11,7 @@ import {
 } from "./server-functions/writer";
 
 export function writerStatusText(view: WriterView) {
+  if (view.stopPending) return "Agent Stop unconfirmed. Check Stop in this Ticket.";
   if (view.state === "human")
     return view.canWrite
       ? "You are editing"

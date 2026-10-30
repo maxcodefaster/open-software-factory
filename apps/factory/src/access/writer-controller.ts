@@ -10,6 +10,7 @@ type WriterView = {
   state: string;
   epoch: number;
   canWrite: boolean;
+  stopPending: boolean;
   yours: boolean;
   commandID: string | null;
   actor: {
@@ -92,6 +93,10 @@ export function createChangeWriterController(options: {
         ? await sql<{ id: string; name: string }[]>`SELECT id,left(name,160) AS name
           FROM auth."user" WHERE id=${writer.requestedBy}`
         : [];
+      const [agent] = await sql<{ stopPending: boolean }[]>`
+        SELECT stop_pending AS "stopPending" FROM factory.change_agent_session
+        WHERE change_id=${changeID}`;
+      const stopPending = agent?.stopPending ?? false;
       const presence =
         writer.state === "human" && writer.userID
           ? activity.snapshot(changeID, writer.userID, writer.epoch)
@@ -110,7 +115,8 @@ export function createChangeWriterController(options: {
       return {
         state: writer.state,
         epoch: Number(writer.epoch),
-        canWrite: writer.state === "human" && writer.userID === userID,
+        canWrite: !stopPending && writer.state === "human" && writer.userID === userID,
+        stopPending,
         yours: writer.userID === userID || writer.requestedBy === userID,
         commandID: writer.requestedBy === userID ? writer.requestID : null,
         actor: ["human", "agent", "agent-preparing"].includes(writer.state)

@@ -160,10 +160,11 @@ export type RuntimeAttempt = z.infer<typeof runtimeAttemptSchema>;
 export const appPreviewsSchema = z.object({
   previews: z.array(
     z.object({
-      attemptID: z.string(),
+      attemptID: z.string().optional(),
       projectID: z.string(),
       channel: z.string(),
       label: z.string(),
+      state: z.string().optional(),
     }),
   ),
 });
@@ -261,6 +262,7 @@ export const writerViewSchema = z.object({
   state: z.enum(["unassigned", "human", "agent-preparing", "agent", "handoff"]),
   epoch: z.number().int().positive(),
   canWrite: z.boolean(),
+  stopPending: z.boolean().optional(),
   yours: z.boolean(),
   commandID: z.uuid().nullable(),
   actor: z

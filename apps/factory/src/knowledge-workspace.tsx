@@ -38,6 +38,7 @@ export type { KnowledgeDraft } from "./knowledge/draft";
 export function KnowledgeWorkspace(props: {
   pages: KnowledgePageOutline[];
   selectedPage?: KnowledgePage | undefined;
+  loading: boolean;
   documents: RepositoryDocument[];
   openDocument?: OpenRepositoryDocument | undefined;
   generation?: KnowledgeGeneration | undefined;
@@ -52,6 +53,7 @@ export function KnowledgeWorkspace(props: {
   drafts: Map<string, KnowledgeDraft>;
   onSelectPage(pageID: string): void;
   onOpenDocument(path: string): void;
+  onLoadDocuments?: (() => Promise<void>) | undefined;
   onGenerate(): void;
   onSearch(query: string): void;
   onSavePage(
@@ -412,6 +414,7 @@ export function KnowledgeWorkspace(props: {
               navigation.close(true);
             }}
             onMove={props.onMove}
+            onLoadDocuments={props.onLoadDocuments}
           />
           <Show when={["pending", "running", "failed"].includes(props.generation?.state ?? "")}>
             <div class="knowledge-generation">
@@ -470,21 +473,28 @@ export function KnowledgeWorkspace(props: {
               <div class="empty-workspace">
                 <div class="wiki-empty-navigation">{navigationTitle()}</div>
                 <Icon name="knowledge" />
-                <p>
-                  {["pending", "running"].includes(props.generation?.state ?? "")
-                    ? "Project Knowledge is being generated."
-                    : "Generate Project Knowledge from the current commit."}
-                </p>
-                <Show when={!["pending", "running"].includes(props.generation?.state ?? "")}>
-                  <button
-                    type="button"
-                    class="workspace-action"
-                    data-primary="true"
-                    disabled={props.pending}
-                    onClick={props.onGenerate}
+                <Show when={!props.loading} fallback={<p role="status">Loading Wiki…</p>}>
+                  <Show
+                    when={!props.pages.some((page) => page.state === "active")}
+                    fallback={<p>Choose a Wiki page to read.</p>}
                   >
-                    Create Project Wiki
-                  </button>
+                    <p>
+                      {["pending", "running"].includes(props.generation?.state ?? "")
+                        ? "Project Knowledge is being generated."
+                        : "Generate Project Knowledge from the current commit."}
+                    </p>
+                    <Show when={!["pending", "running"].includes(props.generation?.state ?? "")}>
+                      <button
+                        type="button"
+                        class="workspace-action"
+                        data-primary="true"
+                        disabled={props.pending}
+                        onClick={props.onGenerate}
+                      >
+                        Create Project Wiki
+                      </button>
+                    </Show>
+                  </Show>
                 </Show>
               </div>
             }

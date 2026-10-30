@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 
@@ -39,6 +40,36 @@ test("shared writer projection names the Agent commissioner without calling them
       SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
     expect(runtime?.state).toBe("ready");
     expect(owned.requests()).toBe(0);
+  } finally {
+    await owned.dispose();
+  }
+});
+
+test("shared writer reads expose pending Stop without clearing it or offering writing", async () => {
+  const owned = await fixture();
+  try {
+    const admitted = await createChangeAdmission(owned.database, buildModelID).admit(
+      owned.changeID,
+      owned.userID,
+      { kind: "change-start", commandId: crypto.randomUUID() },
+    );
+    await owned.writers.prepareAgent(owned.changeID, admitted.turn.id);
+    await createChangeAgentStop(owned.database, owned.hub).persist(owned.changeID);
+    const before = await owned.writers.status(owned.changeID, owned.userID);
+    const after = await owned.writers.status(owned.changeID, owned.userID);
+    expect(before).toMatchObject({
+      state: "agent",
+      canWrite: false,
+      stopPending: true,
+      actor: { workState: "stopped", user: { id: owned.userID } },
+    });
+    expect(after).toEqual(before);
+    const [session] = await owned.database.client<{ pending: boolean }[]>`
+      SELECT stop_pending AS pending FROM factory.change_agent_session
+      WHERE change_id=${owned.changeID}`;
+    expect(session?.pending).toBe(true);
+    expect(owned.requests()).toBe(0);
+    expect(owned.interrupts()).toBe(0);
   } finally {
     await owned.dispose();
   }

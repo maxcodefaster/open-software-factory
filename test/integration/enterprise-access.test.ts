@@ -346,6 +346,7 @@ test("personal App previews are project-wide, files and runtime management remai
       "channel",
       "label",
       "projectID",
+      "state",
     ]);
     await expect(previews(project, stranger)).rejects.toThrow("Project not found");
     await expect(access.requireRuntime(contributor, attempt, "ide")).rejects.toThrow(

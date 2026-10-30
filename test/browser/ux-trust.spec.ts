@@ -3,10 +3,12 @@ import { readFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
 import ts from "typescript";
+import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import {
   agentViewSchema,
   attemptsResponseSchema,
   conversationViewSchema,
+  deliveryViewSchema,
   developerIDEViewSchema,
   knowledgeGenerationSchema,
   repositoryDocumentsSchema,
@@ -17,9 +19,12 @@ import { CommandError } from "../../apps/factory/src/command-error";
 import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { desktopBackgroundKeys } from "../../packages/interface-domain/src/background";
+import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
 import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
+  browserBootstrap,
   browserFunction,
   completedConversation,
   factoryFunctionMatcher,
@@ -37,6 +42,19 @@ import { luminance, rgb } from "../support/visual-contrast";
 const userID = "01994a7d-0000-7000-8000-000000000001";
 const evidenceDirectory = ".factory/test-results/ux-trust";
 const cleanupEvidenceDirectory = evidenceDirectory;
+async function watchCommands(page: Page, names: readonly string[]) {
+  const matchers = await Promise.all(
+    names.map(async (name) => ({ name, matches: await factoryFunctionMatcher(name) })),
+  );
+  const seen: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST") return;
+    const url = new URL(request.url());
+    const command = matchers.find((item) => item.matches(url));
+    if (command) seen.push(command.name);
+  });
+  return seen;
+}
 const frameFocusScript = ts.transpileModule(
   readFileSync(
     new URL(
@@ -278,6 +296,130 @@ test("IDE retains its document during compute reconnect without restarting compu
   });
 });
 
+test("source admission failure stays visible inside the IDE and an explicit retry connects the same editor", async ({
+  page,
+}) => {
+  const fixture = await mockDeveloperIDE(page);
+  let rejected = true;
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => {
+        if (rejected)
+          throw new CommandError(
+            "unavailable",
+            "Source connection is unavailable. Your files are retained.",
+          );
+        return {
+          workspaceID: fixture.workspaceID,
+          label: "Owned source",
+          serviceID: `fixture-source-${fixture.workspaceID}`,
+          epoch: 1,
+          state: "ready",
+          failure: null,
+        };
+      },
+    },
+  });
+  await signIn(page);
+  await selectProject(page);
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  const panel = page.getByRole("tabpanel", { name: "IDE · My workspace", exact: true });
+  await expect(
+    panel.getByRole("status").filter({ hasText: "Source connection is unavailable." }),
+  ).toBeVisible();
+  await expect(panel.getByText("Preparing Workspace files…", { exact: true })).toHaveCount(0);
+  const frame = page.locator('iframe[title="Factory IDE"]');
+  await expect(frame).toHaveAttribute("data-editor-epoch", "1");
+  await page.screenshot({ path: `${evidenceDirectory}/ide-source-failure.png`, fullPage: true });
+  rejected = false;
+  await panel.getByRole("button", { name: "Retry file access", exact: true }).click();
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  await expect(panel.getByRole("button", { name: "Retry file access", exact: true })).toHaveCount(
+    0,
+  );
+  expect(fixture.documentRequests).toBe(1);
+  expect(fixture.computeRequests).toEqual([]);
+  expect(fixture.stopRequests).toEqual([]);
+});
+
+test("a slow Wiki status read never locks the Ticket board", async ({ page }) => {
+  if (!database) throw new Error("Missing owned Wiki fixture database");
+  const ticketID = crypto.randomUUID();
+  await database.client`INSERT INTO factory.ticket
+    (id,project_id,title,description,state,created_by)
+    VALUES(${ticketID},${projectID},'Wiki must not lock this Ticket','','inbox',${userID})`;
+  const release = Promise.withResolvers<void>();
+  const requested = Promise.withResolvers<void>();
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      generation: async () => {
+        requested.resolve();
+        await release.promise;
+        return null;
+      },
+    },
+  });
+  try {
+    await signIn(page);
+    await selectProject(page);
+    const ticket = page.getByRole("button").filter({ hasText: "Wiki must not lock this Ticket" });
+    await expect(ticket).toBeEnabled();
+    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await requested.promise;
+    await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
+    await expect(ticket).toBeEnabled({ timeout: 2_000 });
+    await ticket.click();
+    await expect(page.getByRole("article", { name: "Ticket document" })).toBeVisible();
+  } finally {
+    release.resolve();
+  }
+});
+
+test("Wiki opening leaves collapsed Code docs unloaded and slow source inventory never blocks its pages", async ({
+  page,
+}) => {
+  if (!database) throw new Error("Missing owned Wiki fixture database");
+  const pageID = crypto.randomUUID();
+  await database.client`INSERT INTO factory.knowledge_page
+    (id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
+    VALUES(${pageID},${projectID},'deferred-docs','Deferred source inventory',
+      'Saved Wiki text stays readable.','Saved Wiki text stays readable.',${"a".repeat(40)},${userID})`;
+  const release = Promise.withResolvers<void>();
+  const requested = Promise.withResolvers<void>();
+  let reads = 0;
+  await mockFactoryFunctions(page, {
+    knowledge: {
+      documents: async () => {
+        reads++;
+        requested.resolve();
+        await release.promise;
+        return { commitSha: "a".repeat(40), documents: [] };
+      },
+    },
+  });
+  try {
+    await signIn(page);
+    await selectProject(page);
+    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await expect(page.getByText("Saved Wiki text stays readable.", { exact: true })).toBeVisible();
+    expect(reads).toBe(0);
+    await page.getByRole("button", { name: "Code docs", exact: true }).click();
+    await requested.promise;
+    await expect(
+      page.getByRole("status").filter({ hasText: "Loading code documents…" }),
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Page options", exact: true })).toBeEnabled();
+    await expect(page.getByText("Saved Wiki text stays readable.", { exact: true })).toBeVisible();
+    release.resolve();
+    await expect(
+      page.getByText("This repository has no code documents.", { exact: true }),
+    ).toBeVisible();
+    expect(reads).toBe(1);
+  } finally {
+    release.resolve();
+  }
+});
+
 test("Preview retains its document during reconnect without restarting compute", async ({
   page,
 }) => {
@@ -357,20 +499,20 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   let state: "stopped" | "working" = "stopped";
   let runtimeConnected = false;
   let sessionAvailable = false;
-  const attemptID = crypto.randomUUID();
   const pageErrors: string[] = [];
   page.on("pageerror", (error) => pageErrors.push(error.stack ?? error.message));
-  const mutations: string[] = [];
-  let computeCreates = 0;
+  const mutations = await watchCommands(page, [
+    "startCoding",
+    "stopCoding",
+    "resumeCoding",
+    "sendCodingPrompt",
+  ]);
+  const computeCreates = await watchCommands(page, [
+    "startPersonalWorkspace",
+    "startTicketWorkspace",
+    "ensureStaging",
+  ]);
   const projectMessages: Array<{ ticketId?: string | undefined; text: string }> = [];
-  page.on("request", (request) => {
-    const name = new URL(request.url()).pathname.match(
-      /\/_server\/data\/(startCoding|stopCoding|resumeCoding|sendCodingPrompt)-/,
-    )?.[1];
-    if (name) mutations.push(name);
-    if (/\/_server\/data\/(?:startPersonalWorkspace|startTicketWorkspace)-/.test(request.url()))
-      computeCreates++;
-  });
   await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
   const view = () => ({
     state,
@@ -394,7 +536,8 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   await mockAgentView(page, change.id, async () => view(), { activity: true });
   await mockFactoryFunctions(page, {
     agent: {
-      start: async (_actor, _factoryTargetID, _factoryCommand) => {
+      start: async (_actor, targetID, _factoryCommand) => {
+        expect(targetID).toBe(change.id);
         state = "working";
         sessionAvailable = true;
         return agentViewSchema.parse(view());
@@ -403,7 +546,8 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
   });
   await mockFactoryFunctions(page, {
     agent: {
-      stop: async (_actor, _factoryTargetID) => {
+      stop: async (_actor, targetID) => {
+        expect(targetID).toBe(change.id);
         state = "stopped";
         return agentViewSchema.parse(view());
       },
@@ -419,30 +563,6 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
       },
     },
   });
-  await mockFactoryFunctions(page, {
-    runtime: {
-      attempts: async () =>
-        attemptsResponseSchema.parse({
-          attempts: [
-            {
-              id: attemptID,
-              projectId: projectID,
-              changeId: change.id,
-              workspaceId: "owned-stop-workspace",
-              workspaceKind: "ticket",
-              runtimeKind: "ticket",
-              state: "ready",
-            },
-          ],
-        }),
-    },
-  });
-  await page.route("**/api/runtime-access?*", (route) =>
-    route.fulfill({
-      contentType: "text/html",
-      body: "<!doctype html><html><body>Owned implementation IDE</body></html>",
-    }),
-  );
   await openConversation(page);
   await page
     .getByRole("region", { name: "implementation" })
@@ -456,19 +576,16 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
     { timeout: 5_000 },
   );
   expect(pageErrors).toEqual([]);
-  await expect(start).toHaveCount(0);
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
-  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
-    "data-runtime-attempt-id",
-    attemptID,
-  );
+  // The retained Coding context owns execution. Opening an IDE is not an
+  // admission requirement and must not be used to manufacture Build context.
   await expect(start).toBeEnabled();
-  await expect(panel.getByLabel("Message conversation")).toBeVisible();
-  await expect(panel).toContainText(
+  await expect(panel.getByLabel("Message conversation")).toHaveCount(0);
+  await expect(start).toHaveAttribute(
+    "title",
     "Stopped before Build started. Start implementation when ready.",
   );
   await page.screenshot({
-    path: ".factory/screenshots/build-stopped-before-session.png",
+    path: `${evidenceDirectory}/build-stopped-before-session.png`,
     fullPage: true,
   });
   await start.click();
@@ -479,39 +596,35 @@ test("startup Stop, reconnect and detached chat preserve the same Build ownershi
     "Waiting for the same Build. Work is not restarted.",
   );
   await panel.getByLabel("Message conversation").fill("Retain next instructions");
-  await page.screenshot({ path: ".factory/screenshots/build-reconnecting.png", fullPage: true });
+  await page.screenshot({ path: `${evidenceDirectory}/build-reconnecting.png`, fullPage: true });
   runtimeConnected = true;
   await expect(panel.locator(".agent-state")).toHaveText("Working");
   await expect(panel.getByLabel("Message conversation")).toHaveValue("Retain next instructions");
   expect(mutations).toEqual(["startCoding"]);
-  expect(computeCreates).toBe(0);
+  expect(computeCreates).toEqual([]);
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
-  await panel.getByRole("button", { name: "Remove Ticket context" }).click();
+  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
   await expect(panel.locator(".agent-message.assistant")).toHaveCount(0);
   await expect(panel.getByRole("button", { name: "Stop OpenCode" })).toBeVisible();
   await expect(
     page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }),
   ).toHaveCount(1);
-  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
-    "data-runtime-attempt-id",
-    attemptID,
-  );
   await panel.getByLabel("Message conversation").fill("Project-wide research");
   await panel.getByLabel("Message conversation").press("Enter");
   await expect.poll(() => projectMessages.length).toBe(1);
   expect(projectMessages[0]).not.toHaveProperty("ticketId");
   expect(mutations).toEqual(["startCoding"]);
-  await panel.getByRole("button", { name: "Attach selected Ticket" }).click();
+  await page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }).click();
   await expect(panel.locator(".agent-message.assistant strong")).toHaveText("owned Build");
   await expect(panel.locator(".agent-state")).toHaveText("Working");
-  await panel.getByRole("button", { name: "Remove Ticket context" }).click();
+  await expect(panel.getByLabel("Message conversation")).toHaveValue("Retain next instructions");
+  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
   await panel.getByRole("button", { name: "Stop OpenCode" }).click();
   await expect.poll(() => mutations).toEqual(["startCoding", "stopCoding"]);
-  expect(computeCreates).toBe(0);
-  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveAttribute(
-    "data-runtime-attempt-id",
-    attemptID,
-  );
+  await page.getByRole("tab", { name: "Startup Stop and reconnect", exact: true }).click();
+  await expect(panel.locator(".agent-state")).toHaveText("Stopped");
+  expect(computeCreates).toEqual([]);
+  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveCount(0);
   expect(pageErrors).toEqual([]);
 });
 
@@ -531,7 +644,7 @@ test("a failed Change without a Session does not claim Build is ready", async ({
   await expect(
     panel.getByRole("button", { name: "Start implementation", exact: true }),
   ).toHaveCount(0);
-  await page.screenshot({ path: ".factory/screenshots/build-unavailable.png", fullPage: true });
+  await page.screenshot({ path: `${evidenceDirectory}/build-unavailable.png`, fullPage: true });
 });
 
 test("Review keeps updating when the PR number is a PostgreSQL bigint", async ({ page }) => {
@@ -571,16 +684,16 @@ test("Review keeps updating when the PR number is a PostgreSQL bigint", async ({
   const browserResponse = await browserDetail;
   expect(browserResponse.ok()).toBe(true);
   await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(title);
-  const metadata = page.locator(".ticket-metadata");
-  await expect
-    .poll(
-      async () => {
-        if (pageErrors.length) throw new Error(pageErrors.join("\n"));
-        return metadata.getByRole("link", { name: /#28/ }).isVisible();
-      },
-      { timeout: 5_000 },
-    )
-    .toBe(true);
+  const delivery = deliveryViewSchema.parse(
+    await serverCall(browserFunction(page, "getDelivery", [change.id])),
+  );
+  expect(delivery.pullRequestNumber).toBe(28);
+  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await expect(page.getByRole("menuitem", { name: "Open in Git", exact: true })).toHaveAttribute(
+    "href",
+    "https://example.invalid/ux-trust/pulls/28",
+  );
+  expect(pageErrors).toEqual([]);
   await expect(page.getByText("Updates paused. Showing the last known state.")).toHaveCount(0);
 });
 test.use({
@@ -759,15 +872,23 @@ test.beforeEach(async ({ page }) => {
       stopSource: noWorkspace,
       stopEditor: noWorkspace,
     },
+    runtime: {
+      startPersonal: noWorkspace,
+      startTicket: noWorkspace,
+      ensureStaging: noWorkspace,
+      stop: noWorkspace,
+    },
+    agent: {
+      start: noWorkspace,
+      resume: noWorkspace,
+      prompt: noWorkspace,
+      requestChanges: noWorkspace,
+      stop: noWorkspace,
+      checkStop: noWorkspace,
+    },
+    conversations: { message: noWorkspace, answer: noWorkspace },
+    knowledge: { generate: noWorkspace },
   });
-  await page.route(
-    /\/api\/(?:projects\/[^/]+\/(?:personal-workspace|staging)\/ensure|changes\/[^/]+\/ticket-workspace\/ensure|(?:projects|changes)\/[^/]+\/(?:conversation\/message|agent\/(?:start|message|stop)))(?:\?|$)/,
-    (route) =>
-      route.fulfill({
-        status: 503,
-        json: { error: "Controlled UI fixture does not prepare native resources" },
-      }),
-  );
   database = createDatabase(1);
   projectID = crypto.randomUUID();
   projectSlug = `ux-trust-${projectID.slice(0, 8)}`;
@@ -888,7 +1009,6 @@ test("keeps unsaved Ticket drafts attached to their Ticket across tabs and minim
     fullPage: true,
   });
   expect(draftLayout.gap).toBeGreaterThanOrEqual(0);
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
   await page.getByRole("button", { name: "Minimize workspace" }).click();
   const agentBounds = await page.getByRole("complementary", { name: "Agent panel" }).boundingBox();
   const boardBounds = await page.getByRole("region", { name: "Ticket board" }).boundingBox();
@@ -901,27 +1021,33 @@ test("keeps unsaved Ticket drafts attached to their Ticket across tabs and minim
   });
 });
 
-test("keeps New Ticket keyboard focus inside the dialog and restores it on Escape", async ({
+test("New Ticket draft focuses its title, permits navigation and restores its opener on minimize", async ({
   page,
 }) => {
   await signIn(page);
   await selectProject(page);
   const opener = page.getByRole("button", { name: "New Ticket", exact: true });
   await opener.click();
-  const dialog = page.getByRole("dialog", { name: "New ticket" });
-  await expect(dialog.getByRole("textbox", { name: "Ticket title" })).toBeFocused();
-  await dialog.getByRole("button", { name: "Create Ticket", exact: true }).focus();
-  await page.keyboard.press("Tab");
-  await expect(dialog.getByRole("button", { name: "Close workspace" })).toBeFocused();
-  await page.keyboard.press("Escape");
-  await expect(dialog).toBeHidden();
+  const draft = page.getByRole("region", { name: "New ticket draft", exact: true });
+  const title = draft.getByRole("textbox", { name: "Ticket title" });
+  await expect(title).toBeFocused();
+  await expect(page.getByRole("dialog", { name: "New ticket" })).toHaveCount(0);
+  await title.fill("Retained personal ticket draft");
+  const settings = page.getByRole("button", { name: "Settings", exact: true });
+  await settings.focus();
+  await expect(settings).toBeFocused();
+  await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
+  await expect(draft).toBeHidden();
   await expect(opener).toBeFocused();
+  await opener.click();
+  await expect(title).toHaveValue("Retained personal ticket draft");
 });
 
-test("updates keyed Change activity on polling without remounting its disclosure", async ({
+test("updates keyed Change activity on streamed snapshots without remounting its disclosure", async ({
   page,
 }) => {
   const ticketID = await insertChangedTicket("Live activity fixture", "active");
+  await insertConversation(projectID, ticketID, "build");
   if (!database) throw new Error("Database is not ready");
   const [change] = await database.client<{ id: string }[]>`
     SELECT id FROM factory.change WHERE ticket_id = ${ticketID}
@@ -933,6 +1059,11 @@ test("updates keyed Change activity on polling without remounting its disclosure
     change.id,
     async () => ({
       state: "working",
+      messagesAvailable: true,
+      sessionAvailable: true,
+      runtimeConnected: true,
+      stopPending: false,
+      stopId: null,
       messages: [
         {
           id: "fixture-test-run",
@@ -956,7 +1087,7 @@ test("updates keyed Change activity on polling without remounting its disclosure
     .filter({ hasText: "Live activity fixture" })
     .click();
   const activity = panel.locator(".agent-activity");
-  await expect(activity.locator(".activity-status")).toHaveText("running");
+  await expect(activity.locator(".activity-status")).toHaveText("Running");
   const indicator = activity.locator(".activity-indicator");
   const readMotion = () =>
     indicator.evaluate((element) => {
@@ -981,15 +1112,15 @@ test("updates keyed Change activity on polling without remounting its disclosure
     reduced: true,
     animation: "none",
   });
-  await expect(activity.locator(".activity-status")).toHaveText("running");
+  await expect(activity.locator(".activity-status")).toHaveText("Running");
   await activity.locator("summary").click();
-  await expect(activity.locator("pre")).toHaveText("Running fixture tests");
+  await expect(activity.locator(".activity-output")).toHaveText("Running fixture tests");
   const original = await activity.elementHandle();
   completed = true;
-  await expect(activity.locator(".activity-status")).toHaveText("completed");
-  await expect(activity.locator("pre")).toHaveText("All fixture tests passed");
+  await expect(activity.locator(".activity-status")).toHaveText("Done");
+  await expect(activity.locator(".activity-output")).toHaveText("All fixture tests passed");
   expect(await original?.evaluate((node) => node.isConnected)).toBe(true);
-  await expect(activity.locator("details")).toHaveAttribute("open", "");
+  await expect(activity).toHaveAttribute("open", "");
 });
 
 test("keeps unconfirmed Stop distinct from a resumable stopped session", async ({ page }) => {
@@ -1014,18 +1145,19 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
     modelId: "controlled-stop-model",
     skills: [],
   };
-  let reads = 0;
-  let mutations = 0;
-  page.on("request", (request) => {
-    if (request.method() === "POST" && request.url().includes(`/changes/${change.id}/agent`))
-      mutations++;
-  });
+  const reads = await watchCommands(page, ["getAgentView"]);
+  const mutations = await watchCommands(page, [
+    "startCoding",
+    "resumeCoding",
+    "sendCodingPrompt",
+    "stopCoding",
+    "checkCodingStop",
+  ]);
   await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
   await mockAgentView(
     page,
     change.id,
     async (_factoryTargetID, _factoryHistory) => {
-      reads++;
       return agentViewSchema.parse({
         state,
         runtimeState,
@@ -1054,8 +1186,8 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
   await expect(panel.locator(".agent-state")).toHaveText("Stop unconfirmed", { timeout: 3_000 });
   const check = panel.getByRole("button", { name: "Check Stop status" });
   await expect(check).toBeVisible();
-  // Hold the next lifecycle read before it reaches Agent status. The manual
-  // check must work independently, not pass through the one-second poller.
+  // Hold a deliberately invalidated lifecycle read. The manual status request
+  // must remain independent of it and of the existing native activity stream.
   const releaseBackground = Promise.withResolvers<void>();
   let backgroundBlocked = false;
   await mockFactoryFunctions(page, {
@@ -1068,14 +1200,14 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
     },
   });
   try {
+    await wakeFactoryReads(page);
     await expect.poll(() => backgroundBlocked).toBe(true);
-    const before = reads;
+    const before = reads.length;
     await check.click();
-    await expect.poll(() => reads).toBe(before + 1);
+    await expect.poll(() => reads.length).toBe(before + 1);
     await expect(panel.locator(".agent-state")).toHaveText("Stop unconfirmed");
-    expect(mutations).toBe(0);
-    await mkdir(".factory/screenshots", { recursive: true });
-    await page.screenshot({ path: ".factory/screenshots/unconfirmed-stop.png" });
+    expect(mutations).toEqual([]);
+    await page.screenshot({ path: `${evidenceDirectory}/unconfirmed-stop.png` });
     // Defensive fallback projections are a separate sequence from draft
     // retention: idle/failed legitimately unmount the existing composer.
     for (const nextState of ["idle", "failed"] as const) {
@@ -1110,13 +1242,16 @@ test("keeps unconfirmed Stop distinct from a resumable stopped session", async (
     messagesAvailable = true;
     await check.click();
     await expect(panel.locator(".agent-state")).toHaveText("Stopped");
-    await expect(panel).toContainText("Your next message resumes the session.");
+    await expect(panel.getByRole("button", { name: "Send message" })).toHaveAttribute(
+      "title",
+      "Stopped. Your next message resumes the session.",
+    );
     await expect(check).toHaveCount(0);
     await expect(panel.getByRole("button", { name: "Send message" })).toBeEnabled();
     await expect(panel.getByLabel("Message conversation")).toHaveValue(
       "Retain my next instructions",
     );
-    expect(mutations).toBe(0);
+    expect(mutations).toEqual([]);
   } finally {
     releaseBackground.resolve();
   }
@@ -1135,7 +1270,7 @@ test("explicit Stop confirmation preserves the draft and sends only the displaye
   const stopId = crypto.randomUUID();
   let stopPending = true;
   let canConfirm = false;
-  const mutations: string[] = [];
+  const mutations = await watchCommands(page, ["checkCodingStop"]);
   const confirmations: unknown[] = [];
   const view = () => ({
     state: "stopped",
@@ -1147,9 +1282,6 @@ test("explicit Stop confirmation preserves the draft and sends only the displaye
     runtimeConnected: true,
     messages: [],
     lastError: stopPending ? "Stop remains unconfirmed. Ordered history is incomplete." : null,
-  });
-  page.on("request", (request) => {
-    if (/\/_server\/data\/checkCodingStop-/.test(request.url())) mutations.push("checkCodingStop");
   });
   await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
   await mockAgentView(page, change.id, async () => view(), { activity: true });
@@ -1853,7 +1985,7 @@ test("does not offer a partial IDE target list before scoped lifecycle data arri
   await intercepted;
   await expect(page.getByRole("button", { name: "IDE", exact: true })).toHaveCount(0);
   release();
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Choose IDE instance", exact: true }).click();
   const menu = page.getByRole("menu", { name: "IDE instances" });
   await expect(menu.getByRole("menuitem", { name: /My workspace/ })).toBeVisible();
   await expect(menu.getByRole("menuitem", { name: /Delayed runtime target/ })).toBeVisible();
@@ -1879,7 +2011,7 @@ test("shows a retryable refresh failure without losing the desktop", async ({ pa
     fullPage: true,
   });
   unavailable = false;
-  await page.getByRole("button", { name: "Retry", exact: true }).click();
+  await notice.getByRole("button", { name: "Retry sync", exact: true }).click();
   await expect(notice).toBeHidden();
 });
 
@@ -1899,6 +2031,7 @@ test("can retry opening Factory after bootstrap is unavailable", async ({ page }
 
 test("keeps a delayed Workspace response in its original Project", async ({ page }) => {
   const other = await insertOtherProjectConversation();
+  const fixture = await mockDeveloperIDE(page);
   let release = () => {};
   let observed = () => {};
   const gate = new Promise<void>((resolve) => {
@@ -1908,37 +2041,48 @@ test("keeps a delayed Workspace response in its original Project", async ({ page
     observed = resolve;
   });
   await mockFactoryFunctions(page, {
-    runtime: {
-      startPersonal: async () => {
+    workspaces: {
+      ensurePersonalSource: async (_actor, targetID) => {
+        if (targetID !== projectID)
+          throw new CommandError("unavailable", "Other Project has no source in this fixture");
         observed();
         await gate;
         return {
-          id: "delayed-attempt",
-          projectId: projectID,
-          state: "starting",
-          runtimeKind: "personal" as const,
-          workspaceKind: "personal" as const,
-          workspaceId: "workspace",
-          ownerUserId: userID,
+          label: "Owned source",
+          ...sourceWorkspaceViewSchema.parse({
+            workspaceID: fixture.workspaceID,
+            serviceID: `fixture-source-${fixture.workspaceID}`,
+            epoch: 1,
+            state: "ready",
+            failure: null,
+          }),
         };
       },
     },
   });
-  await signIn(page);
-  await selectProject(page);
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
-  await intercepted;
-  await selectProject(page, other.slug);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-  release();
-  const tabs = page.getByRole("tablist", { name: "Open workspace views" });
-  await expect(tabs.getByRole("tab", { name: /^IDE ·/ })).toHaveCount(0);
-  await selectProject(page);
-  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
-  await expect(tabs.getByRole("tab", { name: "IDE · My workspace", exact: true })).toHaveCount(1);
-  await tabs.getByRole("tab", { name: "IDE · My workspace", exact: true }).click();
-  await expect(page.locator('iframe[title="Factory IDE"]')).toHaveCount(0);
-  await expect(page.getByText("The Workspace is not running. Open IDE to retry.")).toBeVisible();
+  try {
+    await signIn(page);
+    await selectProject(page);
+    await page.getByRole("button", { name: "IDE", exact: true }).click();
+    await intercepted;
+    await selectProject(page, other.slug);
+    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    release();
+    const tabs = page.getByRole("tablist", { name: "Open workspace views" });
+    await expect(tabs.getByRole("tab", { name: /^IDE ·/ })).toHaveCount(0);
+    await selectProject(page);
+    await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+    await expect(tabs.getByRole("tab", { name: "IDE · My workspace", exact: true })).toHaveCount(1);
+    await tabs.getByRole("tab", { name: "IDE · My workspace", exact: true }).click();
+    const frame = page.locator('iframe[title="Factory IDE"]');
+    await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+    await expect(
+      page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Unsaved editor draft"),
+    ).toBeVisible();
+    expect(fixture.computeRequests).toEqual([]);
+  } finally {
+    release();
+  }
 });
 
 test("narrow Agent keeps global navigation available and restores the same Ticket context", async ({
@@ -2069,7 +2213,7 @@ test("dismisses Project and Settings popovers with keyboard focus returned to th
 }) => {
   await signIn(page);
   await selectProject(page);
-  const projectOpener = page.getByRole("button", { name: "Settings", exact: true });
+  const projectOpener = page.getByRole("button", { name: "Open project menu", exact: true });
   await openProjectMenu(page);
   const projects = page.getByRole("region", { name: "Projects", exact: true });
   await expect(projects).toBeVisible();
@@ -2086,7 +2230,9 @@ test("dismisses Project and Settings popovers with keyboard focus returned to th
   await page.keyboard.press("End");
   await expect(projects.locator("button").last()).toBeFocused();
   await page.keyboard.press("Home");
-  await expect(projects.getByRole("button", { name: "Add project", exact: true })).toBeFocused();
+  await expect(
+    projects.getByRole("button", { name: /Create project|Continue setup/ }),
+  ).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(projects).toHaveCount(0);
   await expect(projectOpener).toBeFocused();
@@ -2180,53 +2326,81 @@ test("aligns workspace and Agent Minimize geometry and preserves the Agent contr
   }
 });
 
-test("opens Project registration as a focused dialog and preserves rejected input", async ({
-  page,
-}) => {
-  await signIn(page);
-  await selectProject(page);
-  const opener = page.getByRole("button", { name: "Settings", exact: true });
-  await openProjectMenu(page);
-  await page.getByRole("button", { name: "Add project", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Connect a repository", exact: true });
-  await expect(dialog).toBeVisible({ timeout: 5_000 });
-  await expect(page.getByRole("region", { name: "Projects" })).toHaveCount(0);
-  const name = dialog.getByRole("textbox", { name: "Name", exact: true });
-  await expect(name).toBeFocused();
-  await name.fill("A rejected project draft");
-  await dialog.getByRole("textbox", { name: "Slug", exact: true }).fill("draft-registration");
-  await dialog
-    .getByRole("textbox", { name: "Repository URL", exact: true })
-    .fill("https://example.invalid/draft.git");
-  await dialog.getByText("Advanced settings", { exact: true }).click();
-  await expect(dialog.getByRole("textbox", { name: "Default branch", exact: true })).toHaveValue(
-    "main",
-  );
+test("Project setup keeps rejected input and permits non-modal navigation", async ({ page }) => {
+  let draft: ProjectSetupView = projectSetupView.parse({
+    id: crypto.randomUUID(),
+    version: 1,
+    state: "draft",
+    projectID: null,
+    commandID: null,
+    failure: null,
+    name: "",
+    slug: "",
+    kind: "starter",
+    sourceURL: "",
+  });
+  let creates = 0;
   await mockFactoryFunctions(page, {
-    projects: {
-      async register() {
-        throw new CommandError("invalid", "Repository cannot be registered");
+    setup: {
+      draft: async () => draft,
+      begin: async () => draft,
+      save: async (_actor, input) => {
+        expect(input.id).toBe(draft.id);
+        expect(input.version).toBe(draft.version);
+        draft = projectSetupView.parse({ ...draft, ...input, version: draft.version + 1 });
+        return draft;
+      },
+      create: async () => {
+        creates++;
+        throw new CommandError("invalid", "Repository cannot be imported");
       },
     },
   });
-  await dialog.getByRole("button", { name: "Register Project", exact: true }).click();
-  await expect(dialog.getByRole("alert")).toHaveText("Repository cannot be registered");
+  await signIn(page);
+  await selectProject(page);
+  await openProjectMenu(page);
+  await page
+    .locator(".project-menu")
+    .getByRole("button", { name: /Create project|Continue setup/ })
+    .click();
+  const panel = page.getByRole("region", { name: "Project setup", exact: true });
+  await expect(panel).toBeVisible();
+  await expect(page.getByRole("region", { name: "Projects" })).toHaveCount(0);
+  await panel.getByRole("button", { name: "Import Git" }).click();
+  const name = panel.getByRole("textbox", { name: "Project name", exact: true });
+  await name.fill("A rejected project draft");
+  await panel
+    .getByRole("textbox", { name: "Repository name", exact: true })
+    .fill("draft-registration");
+  await panel
+    .getByRole("textbox", { name: "Git URL", exact: true })
+    .fill("https://example.invalid/draft.git");
+  await panel.getByRole("button", { name: "Import project", exact: true }).click();
+  await expect(panel.getByRole("alert")).toHaveText("Repository cannot be imported");
   await expect(name).toHaveValue("A rejected project draft");
-  for (const key of ["Tab", "Shift+Tab"]) {
-    for (let index = 0; index < 12; index++) {
-      await page.keyboard.press(key);
-      const focus = await dialog.evaluate((element) => ({
-        inside: element.contains(document.activeElement),
-        tag: document.activeElement?.tagName,
-        id: document.activeElement?.id,
-      }));
-      expect(focus, `Focus after ${key} at step ${index}`).toMatchObject({ inside: true });
-    }
-  }
-  await page.screenshot({ path: `${evidenceDirectory}/project-registration-dialog.png` });
-  await page.keyboard.press("Escape");
-  await expect(dialog).toHaveCount(0);
-  await expect(opener).toBeFocused();
+  const globalNavigation = page.getByRole("button", { name: "Open project menu", exact: true });
+  await globalNavigation.focus();
+  await expect(globalNavigation).toBeFocused();
+  await page.screenshot({ path: `${evidenceDirectory}/project-setup-retained.png` });
+  await selectProject(page);
+  await expect(panel).toHaveCount(0);
+  await openProjectMenu(page);
+  await page
+    .locator(".project-menu")
+    .getByRole("button", { name: "Continue setup", exact: true })
+    .click();
+  await expect(name).toHaveValue("A rejected project draft");
+  await expect(panel.getByRole("textbox", { name: "Git URL", exact: true })).toHaveValue(
+    "https://example.invalid/draft.git",
+  );
+  await page.reload();
+  await expect(name).toHaveValue("A rejected project draft");
+  await selectProject(page);
+  await expect(panel).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
+  await expect(panel).toHaveCount(0);
+  expect(creates).toBe(1);
 });
 
 test("uses readable workspace tabs with keyboard navigation and an accessible overflow chooser", async ({
@@ -2369,6 +2543,12 @@ test("keeps outer workspace geometry when switching Ticket, Inbox, and Knowledge
 test("retains exact runtime frames across tab switches and minimize, disposing only closed or replaced frames", async ({
   page,
 }) => {
+  const execution = await watchCommands(page, [
+    "startPersonalWorkspace",
+    "startTicketWorkspace",
+    "ensureStaging",
+    "stopRuntimeAttempt",
+  ]);
   let attemptID = crypto.randomUUID();
   let boots = 0;
   const originalAttemptID = attemptID;
@@ -2380,9 +2560,8 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
             {
               id: attemptID,
               projectId: projectID,
-              workspaceId: "personal-workspace",
-              workspaceKind: "personal",
-              runtimeKind: "personal",
+              runtimeKind: "staging",
+              currentStaging: true,
               ownerUserId: userID,
               state: "ready",
             },
@@ -2399,10 +2578,12 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
   });
   await signIn(page);
   await selectProject(page);
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
-  const frame = page.locator('iframe[title="Factory IDE"]');
+  // Preview frames belong to Runtime Attempts. The independent IDE belongs to
+  // its source Workspace/editor epoch and must not be keyed by compute.
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
+  const frame = page.locator('iframe[title="Factory Preview"]');
   const editor = page
-    .frameLocator('iframe[title="Factory IDE"]')
+    .frameLocator('iframe[title="Factory Preview"]')
     .locator('textarea[aria-label="Unsaved editor"]');
   await editor.fill("unsaved buffer and selection");
   expect(boots).toBe(1);
@@ -2423,7 +2604,9 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
     .click();
   await expect(frame).toHaveCount(1);
   await expect(frame).toBeHidden();
-  await expect(page.locator(".runtime-workspace-tab[hidden]")).toHaveAttribute("inert", "");
+  const frameContainer = page.locator(".runtime-workspace-tab").filter({ has: frame });
+  await expect(frameContainer).toHaveAttribute("hidden", "");
+  await expect(frameContainer).toHaveAttribute("inert", "");
   await editor.evaluate((input) => input.focus());
   expect(await frame.evaluate((element) => document.activeElement === element)).toBe(false);
   for (let index = 0; index < 6; index++) {
@@ -2431,22 +2614,19 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
     expect(await frame.evaluate((element) => document.activeElement === element)).toBe(false);
   }
   const tabs = page.getByRole("tablist", { name: "Open workspace views" });
-  await tabs.getByRole("tab", { name: "IDE · My workspace", exact: true }).click();
+  await tabs.getByRole("tab", { name: "Preview · Staging", exact: true }).click();
   await expect(editor).toHaveValue("unsaved buffer and selection");
   expect(boots).toBe(1);
   await page.getByRole("button", { name: "Minimize workspace" }).click();
   await expect(frame).toHaveCount(1);
   await expect(frame).toBeHidden();
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(editor).toHaveValue("unsaved buffer and selection");
   expect(boots).toBe(1);
   attemptID = crypto.randomUUID();
-  await expect
-    .poll(async () => {
-      await page.getByRole("button", { name: "IDE", exact: true }).click();
-      return frame.getAttribute("src");
-    })
-    .toContain(attemptID);
+  await wakeFactoryReads(page);
+  await expect(frame).toHaveAttribute("data-runtime-attempt-id", attemptID);
+  await expect(frame).toHaveAttribute("src", new RegExp(attemptID));
   await expect(frame).toHaveCount(1);
   await expect(editor).toHaveValue("");
   expect(await frame.getAttribute("src")).not.toContain(originalAttemptID);
@@ -2455,23 +2635,24 @@ test("retains exact runtime frames across tab switches and minimize, disposing o
     .getByRole("navigation", { name: "Workspace dock" })
     .getByRole("button", { name: "Inbox", exact: true })
     .click();
-  await tabs.getByRole("button", { name: "Close IDE · My workspace", exact: true }).click();
+  await tabs.getByRole("button", { name: "Close Preview · Staging", exact: true }).click();
   await expect(frame).toHaveCount(0);
   await expect(tabs.getByRole("tab", { name: "Inbox", exact: true })).toHaveAttribute(
     "aria-selected",
     "true",
   );
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(editor).toHaveValue("");
   expect(boots).toBe(3);
   const otherProject = await insertOtherProjectConversation();
   await selectProject(page, otherProject.slug);
   await expect(frame).toHaveCount(0);
   await selectProject(page);
-  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await page.getByRole("button", { name: "Preview", exact: true }).click();
   await expect(frame).toHaveAttribute("data-runtime-attempt-id", attemptID);
   await expect(editor).toHaveValue("");
   expect(boots).toBe(4);
+  expect(execution).toEqual([]);
 });
 
 test("keeps board labels readable without repeating lane status and uses a full-width archive", async ({
@@ -2502,7 +2683,7 @@ test("keeps board labels readable without repeating lane status and uses a full-
   });
   expect(separation.gap).toBeGreaterThanOrEqual(separation.minimum);
   await page.screenshot({ path: `${evidenceDirectory}/board-active.png` });
-  await board.getByRole("button", { name: "Completed 2", exact: true }).click();
+  await board.getByRole("button", { name: "History 2", exact: true }).click();
   const archive = board.getByRole("region", { name: "history", exact: true });
   await expect(
     archive.getByRole("button").filter({ hasText: "Delivered implementation" }),
@@ -2535,7 +2716,7 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
   await selectProject(page);
   const board = page.getByRole("region", { name: "Ticket board" });
   // Zero Tickets can arrive before their lifecycle projection. Capture resolved stages.
-  await expect(board.getByRole("button", { name: "Completed 2", exact: true })).toBeVisible();
+  await expect(board.getByRole("button", { name: "History 2", exact: true })).toBeVisible();
   await expect(
     board.getByRole("button").filter({ hasText: "Delivered implementation" }),
   ).toHaveCount(0);
@@ -2551,7 +2732,7 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
   const readings: { width: number; background: string; minimumContrast: number }[] = [];
   for (const width of [1440, 1280, 900]) {
     await page.setViewportSize({ width, height: 900 });
-    for (const background of ["river-landscape", "mountainous-landscape", "the-harvesters"]) {
+    for (const background of desktopBackgroundKeys) {
       // Presentation-only variants, never a write to the signed-in user's preference.
       await desktop.evaluate(async (element, key) => {
         element.setAttribute("data-background", key);
@@ -2565,9 +2746,12 @@ test("keeps board text readable on every artwork at desktop and narrow widths", 
       const observed = await desktop.evaluate((element) => ({
         art: getComputedStyle(element, "::before").backgroundImage,
         scrim: getComputedStyle(element, "::after").backgroundImage,
-        cards: [...element.querySelectorAll(".lane-heading, .ticket-card")].map((card) => ({
+        cards: [...element.querySelectorAll(".lane-heading > h2, .ticket-card")].map((card) => ({
           background: getComputedStyle(card).backgroundColor,
-          colors: [...card.querySelectorAll("span, small, strong")].map((text) => ({
+          colors: (card.matches("h2")
+            ? [card]
+            : [...card.querySelectorAll("span, small, strong")]
+          ).map((text) => ({
             label: text.textContent,
             color: getComputedStyle(text).color,
           })),
@@ -2651,10 +2835,11 @@ test("respects reduced motion for the board, workspace, Agent and popovers", asy
 
 test("keeps Knowledge drafts with their page across navigation and minimize", async ({ page }) => {
   if (!database) throw new Error("Database is not ready");
+  const firstID = crypto.randomUUID();
   for (const name of ["First", "Second"]) {
     await database.client`
       INSERT INTO factory.knowledge_page(id, project_id, slug, title, current_body, generated_body, source_commit_sha, created_by)
-      VALUES (${crypto.randomUUID()}, ${projectID}, ${name.toLowerCase()}, ${`${name} knowledge`}, ${`${name} original body`}, ${`${name} original body`}, ${"a".repeat(40)}, ${userID})
+      VALUES (${name === "First" ? firstID : crypto.randomUUID()}, ${projectID}, ${name.toLowerCase()}, ${`${name} knowledge`}, ${`${name} original body`}, ${`${name} original body`}, ${"a".repeat(40)}, ${userID})
     `;
   }
   await mockFactoryFunctions(page, {
@@ -2663,17 +2848,31 @@ test("keeps Knowledge drafts with their page across navigation and minimize", as
         repositoryDocumentsSchema.parse({ commitSha: "a".repeat(40), documents: [] }),
     },
   });
+  const restoreSave = await mockFactoryFunctions(page, {
+    knowledge: {
+      save: async () => {
+        throw new CommandError("unavailable", "Owned Wiki save interrupted");
+      },
+    },
+  });
   await signIn(page);
   await selectProject(page);
   await page.getByRole("button", { name: "Knowledge", exact: true }).click();
   await page.getByRole("button", { name: "First knowledge", exact: true }).click();
-  await page.getByRole("button", { name: "Edit", exact: true }).click();
-  await page.getByRole("button", { name: "Markdown", exact: true }).click();
-  await page.getByRole("textbox", { name: "Markdown source" }).fill("Unsaved first-page draft");
+  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
+  await page
+    .getByRole("textbox", { name: "Knowledge body", exact: true })
+    .fill("Unsaved first-page draft");
+  await expect(page.getByRole("alert")).toContainText("Owned Wiki save interrupted");
   await page.getByRole("button", { name: "Second knowledge", exact: true }).click();
   await expect(page.locator(".knowledge-article")).toContainText("Second original body");
   await expect(page.locator(".knowledge-article")).not.toContainText("Unsaved first-page draft");
   await page.getByRole("button", { name: "First knowledge", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
+    "Unsaved first-page draft",
+  );
+  await page.reload();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/wiki/${firstID}(?:[/?#]|$)`));
   await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
     "Unsaved first-page draft",
   );
@@ -2682,8 +2881,27 @@ test("keeps Knowledge drafts with their page across navigation and minimize", as
   await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
     "Unsaved first-page draft",
   );
-  await page.getByRole("button", { name: "Cancel", exact: true }).click();
-  await expect(page.locator(".knowledge-article")).toContainText("First original body");
+  const [before] = await database.client<
+    { body: string }[]
+  >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${firstID}`;
+  expect(before?.body).toBe("First original body");
+  await restoreSave();
+  await expect
+    .poll(async () => {
+      if (!database) throw new Error("Database is not ready");
+      const [saved] = await database.client<
+        { body: string }[]
+      >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${firstID}`;
+      return saved?.body;
+    })
+    .toContain("Unsaved first-page draft");
+  const [writes] = await database.client<
+    { count: number }[]
+  >`SELECT count(*)::integer AS count FROM factory.knowledge_revision WHERE page_id=${firstID} AND kind='human'`;
+  expect(writes?.count).toBe(1);
+  await page.getByRole("button", { name: "Page options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
+  await expect(page.locator(".knowledge-article")).toContainText("Unsaved first-page draft");
 });
 
 test("rejects specification rewrites after approval on the server", async ({ page }) => {
@@ -2699,7 +2917,9 @@ test("rejects specification rewrites after approval on the server", async ({ pag
   expect(response.message).toContain("approved");
 });
 
-test("shows Knowledge proposals and saves past their immutable ordinals", async ({ page }) => {
+test("Knowledge History preserves exact bodies and new saves advance immutable ordinals", async ({
+  page,
+}) => {
   if (!database) throw new Error("Database is not ready");
   const pageID = crypto.randomUUID();
   const original =
@@ -2727,35 +2947,54 @@ test("shows Knowledge proposals and saves past their immutable ordinals", async 
   await selectProject(page);
   await page.getByRole("button", { name: "Knowledge", exact: true }).click();
   await page.getByRole("button", { name: "Cleanup knowledge", exact: true }).click();
-  await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+  await page.getByRole("button", { name: "Page options", exact: true }).click();
   await page.getByRole("menuitem", { name: "History", exact: true }).click();
-  await page.locator(".knowledge-history summary").filter({ hasText: "Revision 2" }).click();
-  await expect(page.locator(".knowledge-history")).toContainText("New generated content.");
+  const history = page.getByRole("complementary", { name: "Knowledge history" });
+  await history.getByRole("button", { name: /Proposed/ }).click();
+  // Retained proposed baselines are not the saved Markdown snapshot. History
+  // must neither adopt that baseline nor rewrite the immutable historical body.
+  await expect(page.getByLabel("Historical page")).toContainText("Human content stays visible.");
+  await expect(page.getByLabel("Historical page")).not.toContainText("New generated content.");
   await page.screenshot({
     path: `${cleanupEvidenceDirectory}/knowledge-proposal.png`,
     fullPage: true,
   });
-  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.keyboard.press("Escape");
+  await page.getByLabel("Edit Knowledge body", { exact: true }).click();
   const visual = page.getByRole("textbox", { name: "Knowledge body" });
   await expect(visual).toContainText("Human content stays visible.");
   await visual.click();
-  await page.keyboard.press("ControlOrMeta+End");
+  const mac = await visual.evaluate(() => navigator.platform.startsWith("Mac"));
+  await visual.press(mac ? "Meta+ArrowDown" : "Control+End");
   await page.keyboard.press("Enter");
   await page.keyboard.type("Manual addition.");
-  await page.getByRole("button", { name: "Markdown", exact: true }).click();
-  const source = page.getByRole("textbox", { name: "Markdown source" });
-  await expect(source).toHaveValue(/```ts\n {2}const x = 1;\n```/);
-  await expect(source).toHaveValue(/3\. Third/);
-  await page.getByRole("button", { name: "Visual", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "Knowledge body" })).toContainText(
     "Manual addition.",
   );
-  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect
+    .poll(async () => {
+      if (!database) throw new Error("Database is not ready");
+      const [saved] = await database.client<
+        { body: string }[]
+      >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${pageID}`;
+      return saved?.body;
+    })
+    .toContain("Manual addition.");
+  const [saved] = await database.client<
+    { body: string }[]
+  >`SELECT current_body AS body FROM factory.knowledge_page WHERE id=${pageID}`;
+  expect(saved?.body).toMatch(/```ts\n {2}const x = 1;\n```/);
+  expect(saved?.body).toMatch(/3\. Third/);
+  await page.getByRole("button", { name: "Page options", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Read page", exact: true }).click();
   await expect(page.locator(".knowledge-article")).toContainText("Manual addition.");
   const revisions = await database.client<
-    Array<{ ordinal: number }>
-  >`SELECT ordinal FROM factory.knowledge_revision WHERE page_id = ${pageID} ORDER BY ordinal`;
+    Array<{ ordinal: number; body: string; generatedBody: string }>
+  >`SELECT ordinal,body,generated_body AS "generatedBody" FROM factory.knowledge_revision WHERE page_id = ${pageID} ORDER BY ordinal`;
   expect(revisions.map((revision) => revision.ordinal)).toEqual([1, 2, 3]);
+  expect(revisions[0]?.body).toBe(original);
+  expect(revisions[1]?.body).toBe(original);
+  expect(revisions[1]?.generatedBody).toBe("## Proposed section\n\nNew generated content.");
 });
 
 test("keeps lifecycle, conversation mode, delivery and Inbox signals truthful", async ({
@@ -2785,7 +3024,7 @@ test("keeps lifecycle, conversation mode, delivery and Inbox signals truthful", 
   await page.screenshot({ path: `${evidenceDirectory}/investigate.png` });
   await panel.getByRole("button", { name: "Minimize Agent panel" }).click();
 
-  await page.getByRole("button", { name: /Completed/ }).click();
+  await page.getByRole("button", { name: "History 2", exact: true }).click();
   const history = page.getByRole("region", { name: "history" });
   await expect(
     history.getByRole("button").filter({ hasText: "Cancelled implementation" }),
@@ -2795,24 +3034,18 @@ test("keeps lifecycle, conversation mode, delivery and Inbox signals truthful", 
   await page.screenshot({ path: `${evidenceDirectory}/history.png` });
   await deliveredCard.click();
 
-  await expect(page.getByText("This approved revision was delivered.")).toBeVisible();
-  const metadata = page.locator(".ticket-metadata");
-  await expect(metadata.locator(".state-heading")).toHaveText("Delivered");
-  await expect(metadata.getByText("Base commit", { exact: true })).toBeHidden();
-  await expect(metadata.getByText("Branch", { exact: true })).toBeHidden();
-  await metadata.locator("summary").filter({ hasText: "Change details" }).click();
-  await expect(metadata.getByText("Base commit", { exact: true })).toBeVisible();
-  await expect(metadata.getByText("Branch", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create follow-up", exact: true })).toBeEnabled();
   await expect(page.locator(".ticket-status-context")).toContainText("Delivered");
-  await expect(metadata.getByText("Runtime", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Implement", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Toggle Agent panel" }).click();
-  await expect(panel.locator(".runtime-presence")).toHaveText("Delivered");
+  await expect(panel.locator(".runtime-presence")).toHaveCount(0);
+  await expect(panel.getByRole("region", { name: "Ticket conversations" })).toContainText(
+    "Delivered implementation",
+  );
   await expect(panel.getByRole("button", { name: "Start implementation" })).toHaveCount(0);
   await page.screenshot({ path: `${evidenceDirectory}/delivered.png` });
-  // A single personal IDE target bypasses the chooser. Reject the ensure request to avoid compute.
-  await page.route("**/personal-workspace/ensure", (route) =>
-    route.fulfill({ status: 409, json: { error: "Fixture does not start compute" } }),
-  );
+  // The default native Source double refuses preparation. Reading delivered
+  // work or opening the editor never restarts its implementation.
   await dock.getByRole("button", { name: "IDE", exact: true }).click();
   await expect(
     page
@@ -2820,7 +3053,13 @@ test("keeps lifecycle, conversation mode, delivery and Inbox signals truthful", 
       .getByRole("tab", { name: "IDE · My workspace", exact: true }),
   ).toBeVisible();
   await expect(page.getByRole("menu", { name: "IDE instances" })).toHaveCount(0);
-  await expect(page.getByText("The Workspace is not running. Open IDE to retry.")).toBeVisible();
+  await expect(
+    page
+      .getByRole("tabpanel", { name: "IDE · My workspace" })
+      .getByRole("status")
+      .filter({ hasText: "Controlled UI fixture does not prepare native resources" })
+      .first(),
+  ).toBeVisible();
 });
 
 for (const existingConversation of [true, false]) {
@@ -2830,17 +3069,54 @@ for (const existingConversation of [true, false]) {
     let conversationID: string | undefined = existingConversation
       ? await insertConversation()
       : undefined;
+    let messages = 0;
     const message = "Explain the delivery process";
     await mockFactoryFunctions(page, {
       conversations: {
-        message: async (_actor, _factoryTargetID, factoryCommand) => {
-          if (!conversationID) {
-            const current = await serverCall(
-              browserFunction(page, "getConversation", [_factoryTargetID, {}]),
-            );
-            if (!current) throw new Error("The explicit mode command did not create its context");
-            conversationID = current.id;
-          }
+        message: async (_actor, targetID, factoryCommand) => {
+          messages++;
+          if (!database) throw new Error("Database is not ready");
+          const current = await serverCall(
+            browserFunction(page, "getConversation", [
+              targetID,
+              factoryCommand.contextId ? { contextId: factoryCommand.contextId } : {},
+            ]),
+          );
+          if (!current) throw new Error("The explicit mode command did not create its context");
+          if (current.mode === "build") throw new Error("This fixture must not admit Build");
+          const { session } = await browserBootstrap(page);
+          conversationID = current.id;
+          const turns = createAgentTurnStore(database);
+          const admitted = await turns.admit(
+            {
+              kind: "project-message",
+              commandId: factoryCommand.commandId,
+              projectId: targetID,
+              ticketId: null,
+              conversationId: current.id,
+              ...(current.contextId ? { contextId: current.contextId } : {}),
+              createdBy: session.user.id,
+              text: message,
+            },
+            {
+              mode: current.mode,
+              conversationVersion: current.version,
+              modelId: "owned-no-provider",
+              skillRevisionIds: [],
+            },
+          );
+          const owner = await turns.claimPending(admitted.turn.id);
+          if (!owner?.ownerToken || !(await turns.beginDispatch(owner.id, owner.ownerToken)))
+            throw new Error("Owned failed-response fixture could not claim its exact turn");
+          if (
+            !(await turns.settle(
+              owner.id,
+              owner.ownerToken,
+              "failed",
+              "Controlled model rejection",
+            ))
+          )
+            throw new Error("Owned failed-response fixture could not record its failure");
           await insertUserMessage(conversationID, message, factoryCommand.commandId);
           return (() => {
             throw new CommandError("unavailable", String("Model response failed"));
@@ -2855,9 +3131,11 @@ for (const existingConversation of [true, false]) {
     await panel.getByRole("button", { name: "Send message" }).click();
     await expect(panel.locator(".agent-message.user p")).toHaveText(message);
     await expect(composer).toHaveValue("");
-    await expect(page.getByRole("alert")).toContainText(
-      "Your message was saved, but the Project Agent could not finish its response.",
-    );
+    await expect(
+      page.getByRole("alert").filter({ hasText: "Your message was saved," }),
+    ).toContainText("Your message was saved, but the Project Agent could not finish its response.");
+    await expect(panel.getByRole("alert")).toContainText("Controlled model rejection");
+    expect(messages).toBe(1);
     if (!existingConversation) {
       await page.screenshot({ path: `${evidenceDirectory}/saved-message-recovery.png` });
     }
@@ -2953,6 +3231,7 @@ for (const outcome of ["success", "failure"] as const) {
     const responseGate = new Promise<void>((resolve) => {
       releaseResponse = resolve;
     });
+    const admitted = Promise.withResolvers<void>();
     await mockFactoryFunctions(page, {
       conversations: {
         message: async (_actor, _factoryTargetID, factoryCommand) => {
@@ -2961,6 +3240,7 @@ for (const outcome of ["success", "failure"] as const) {
             "Old Project request",
             factoryCommand.commandId,
           );
+          admitted.resolve();
           await responseGate;
           if (outcome === "failure") {
             return (() => {
@@ -2982,11 +3262,8 @@ for (const outcome of ["success", "failure"] as const) {
     const panel = await openConversation(page);
     const composer = panel.getByLabel("Message conversation");
     await composer.fill("Old Project request");
-    const requestStarted = page.waitForRequest((request) =>
-      request.url().endsWith(`/projects/${projectID}/conversation/message`),
-    );
     await panel.getByRole("button", { name: "Send message" }).click();
-    await requestStarted;
+    await admitted.promise;
     await selectProject(page, otherProject.slug);
     await expect(panel.locator(".agent-message.user p")).toHaveText("New Project history");
     await expect(composer).toHaveValue("");
@@ -3013,8 +3290,10 @@ test("ignores an older History read after a Project switch", async ({ page }) =>
   });
   await mockFactoryFunctions(page, {
     conversations: {
-      get: async (_actor, _factoryTargetID, _factoryCommand) => {
-        const response = await requestFunction(page.request, "getConversation", [projectID, {}]);
+      get: async (_actor, targetID, input) => {
+        if (targetID !== projectID)
+          return serverCall(browserFunction(page, "getConversation", [targetID, input]));
+        const response = await requestFunction(page.request, "getConversation", [targetID, input]);
         historyRequested();
         await responseGate;
         return conversationViewSchema.nullable().parse(await serverCall(Promise.resolve(response)));
@@ -3026,8 +3305,8 @@ test("ignores an older History read after a Project switch", async ({ page }) =>
   await requestStarted;
   await selectProject(page, otherProject.slug);
   await expect(panel.locator(".agent-message.user p")).toHaveText("New Project history");
-  const oldResponse = page.waitForResponse((response) =>
-    response.url().endsWith(`/projects/${projectID}/conversation`),
+  const oldResponse = page.waitForResponse(async (response) =>
+    factoryFunctionMatches(response.url(), "getConversation"),
   );
   releaseResponse();
   await oldResponse;

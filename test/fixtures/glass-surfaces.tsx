@@ -58,6 +58,7 @@ function Wiki() {
   return (
     <KnowledgeWorkspace
       pages={pages}
+      loading={false}
       selectedPage={pages.find((page) => page.id === selected())}
       openDocument={document}
       documents={[]}

@@ -30,6 +30,10 @@ The [architecture reference](../../docs/README.md) owns domain terminology and s
 ## Operating context
 
 Requirements are manual by default. An optional AI Interview requires an explicit request.
+For developers, the single clarification action includes technical planning after Product
+confirmation. Contributors keep their product-only Interview. Reading or saving starts neither.
+If technical planning remains unfinished, that same action continues the technical task instead
+of starting another Product Interview.
 Implement approves the saved requirements and commissions Coding. Verification and independent
 exact-commit review precede deliberate human Delivery approval. A Project manager with development
 authority can delegate eligible monitoring Autofix through a Project-bound webhook and shared
@@ -37,11 +41,13 @@ read-only MCP connection. Background work does not inherit personal configuratio
 context creates no Ticket; disabling the delegation fences further automatic work. See
 [the monitoring decision](../../docs/adr/0016-delegated-monitoring-autofix.md).
 
-Developers can commission full Planning or a technical design of saved Product Requirements.
+Developers can commission full Planning or replan an existing technical design.
 Product confirmation durably starts the technical continuation only for an explicit full Planning
-request. The Ticket is one document with chapter navigation for Product, Technical design,
+request. The Ticket is one document with compact chapter navigation for Product, Technical design,
 optional Architecture and Validation. Technical Designs, inspected source references and PlantUML
-diagrams remain development-only. Implement approves the exact product and technical revisions;
+diagrams remain development-only. A single-chapter Ticket has no navigation rail and an absent
+technical design has no empty placeholder. Responsibility and following share one People menu.
+Implement approves the exact product and technical revisions;
 reading and ordinary saving never start Planning. See
 [Ticket technical planning](../../docs/adr/0024-ticket-technical-planning.md).
 
@@ -51,8 +57,9 @@ must be consulted; an empty selection inherits shared Project defaults. Prepared
 human implementation approval unless bounded Autofix was explicitly delegated.
 See [Project Inputs](../../docs/adr/0018-project-inputs.md).
 
-Settings group Project configuration first, then Libraries, Personal and admin-only Factory
-administration. Repository mirrors in Factory administration configure native Forgejo push
+Settings show one selected scope at a time: Project, Libraries, Personal or admin-only Factory
+administration. The scope chooser replaces a repeated list of all scopes.
+Repository mirrors in Factory administration configure native Forgejo push
 mirrors for a selected Project, with explicit target-overwrite consent, native attempt status,
 manual synchronization and removal that preserves the external repository. They copy pushed
 Git history, not Factory accounts, Tickets, secrets, uploads or unpushed Workspace work.
@@ -62,7 +69,7 @@ See [repository mirrors](../../README.md#repository-mirrors).
 Small screens use a grouped title menu instead of a sidebar; desktop windows
 keep their sidebars, including alongside the assistant.
 
-Project setup remains reachable in each Project's Settings after leaving onboarding. Project managers
+Project setup remains reachable under Environments → Setup & recovery after leaving onboarding. Project managers
 can resume the retained configuration inspection and its answers there, and request a corrected
 proposal before confirming any source changes. Preparation status and
 explicit retries remain available without creating another Project or starting inference on read.

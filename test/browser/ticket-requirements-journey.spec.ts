@@ -1,20 +1,20 @@
-import { requestFunction } from "../fixtures/server-functions";
-import {
-  mockFactoryFunctions,
-  browserFunction,
-  browserConversation,
-} from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserConversation,
+  browserFunction,
+  mockFactoryFunctions,
+  requestFunction,
+} from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const userID = "01994a7d-0000-7000-8000-000000000001";
-const captures = ".factory/screenshots/ticket-requirements-journey";
+const captures = ".factory/test-results/ticket-requirements-journey";
 let db: ReturnType<typeof createDatabase>;
 let projectID: string;
 let slug: string;
@@ -51,6 +51,14 @@ test.afterEach(async () => {
 });
 async function selectProject(page: Page) {
   await expect(page.getByRole("region", { name: "Ticket board" })).toBeVisible();
+  if (new URL(page.url()).pathname.startsWith(`/projects/${projectID}`)) {
+    // Reload restores its authorized resource URL. Do not race that restore
+    // with another imperative selection and discard the retained context.
+    await expect(
+      page.getByRole("button", { name: "Open project menu", exact: true }),
+    ).toContainText("Requirements journey");
+    return;
+  }
   await openProjectMenu(page);
   await page.getByRole("button").filter({ hasText: slug }).click();
 }
@@ -241,8 +249,12 @@ test("Ticket keystrokes and undo survive delayed autosave acknowledgement and re
       })
       .toBe("Replacement human intent.");
     await page.reload();
-    await selectProject(page);
-    await page.getByRole("button", { name: /Delayed editor probe$/ }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/${projectID}/tickets/${ticket.id}(?:[/?#]|$)`),
+    );
+    await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+      "Delayed editor probe",
+    );
     await expect(editor).toHaveText("Replacement human intent.");
   } finally {
     release.resolve();
@@ -360,8 +372,12 @@ test("continued focused Ticket typing stays recoverable after a completed autosa
   await page.getByRole("button", { name: /Continued focused editing$/ }).click();
   await expect(editor).toHaveText("Saved first phrase.X");
   await page.reload();
-  await selectProject(page);
-  await page.getByRole("button", { name: /Continued focused editing$/ }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${projectID}/tickets/${ticket.id}(?:[/?#]|$)`),
+  );
+  await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+    "Continued focused editing",
+  );
   await expect(editor).toHaveText("Saved first phrase.X");
 });
 
@@ -617,10 +633,15 @@ test("editable Epic preview keeps focus, restores drafts and confirms every memb
     "currency and total. The result remains readable without scrolling individual fields, " +
     "including when reviewing the complete proposal on a narrow phone screen.";
   await criterion.fill(longCriterion);
+  const resourceURL = page.url();
   await page.reload();
-  await selectProject(page);
+  await expect(page).toHaveURL(resourceURL);
+  // The URL names shared Project/Ticket work, not the private proposal draft.
+  // Deliberately reopen its retained proposal without racing Project selection.
+  await page.getByRole("button", { name: "Desktop", exact: true }).click();
   await page.locator(".ticket-card-body").filter({ hasText: "Invoice intent" }).click();
-  await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
+  if (!(await page.getByRole("complementary", { name: "Agent panel" }).isVisible()))
+    await page.getByRole("button", { name: "Toggle Agent panel", exact: true }).click();
   await page.getByRole("button", { name: "Review proposed work", exact: true }).click();
   await expect(title).toHaveValue("Export invoices safely");
   await expect(criterion).toHaveValue(longCriterion);
@@ -810,7 +831,9 @@ test("partial interview answers survive polling, reload and tab switches; queued
   await expect(answer).toHaveValue("Product contributors and developers");
   await page.reload();
   await selectProject(page);
-  await page.locator(".ticket-card-body").filter({ hasText: "Retained answers" }).click();
+  await expect(page.getByRole("textbox", { name: "Ticket title", exact: true })).toHaveText(
+    "Retained answers",
+  );
   if (!(await page.getByRole("complementary", { name: "Agent panel" }).isVisible()))
     await page.getByRole("button", { name: "Toggle Agent panel" }).click();
   await expect(answer).toHaveValue("Product contributors and developers");

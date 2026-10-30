@@ -1,6 +1,6 @@
 import { requestFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
+import { mockBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
@@ -22,6 +22,9 @@ test("named prerequisites block Build and remain linked after cancellation until
   const slug = `dependency-qa-${projectId.slice(0, 8)}`;
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  // Isolate prerequisite presentation from model connection readiness. Native
+  // admission below still runs on the real authenticated Factory service.
+  await mockBootstrap(page, (value) => ({ ...value, modelRelayConfigured: true }));
   await mockFactoryFunctions(page, {
     workspaces: {
       ensurePersonalSource: async () => {
@@ -124,6 +127,11 @@ test("named prerequisites block Build and remain linked after cancellation until
       await requestFunction(page.request, "approveRequirementRevision", [second, revision.id]),
     ).toMatchObject({ ok: true });
     await page.reload();
+    await expect(page).toHaveURL(new RegExp(`/projects/${projectId}/tickets/${second}(?:[/?#]|$)`));
+    await expect(page.getByLabel("Ticket title", { exact: true })).toHaveText(
+      "Build onboarding on the sign-in contract",
+    );
+    await page.getByRole("button", { name: "Minimize workspace", exact: true }).click();
     const board = page.getByRole("region", { name: "Ticket board", exact: true });
     await board.getByRole("button", { name: "Open Epic Release", exact: true }).first().click();
     const rootFolder = page.getByRole("dialog", { name: "Release", exact: true });
@@ -132,7 +140,10 @@ test("named prerequisites block Build and remain linked after cancellation until
     await childFolder
       .getByRole("button", { name: /Build onboarding on the sign-in contract/ })
       .click();
-    await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Implement", exact: true })).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Queue implementation", exact: true }),
+    ).toBeEnabled();
     const denied = await requestFunction(page.request, "startTicketChange", [second]);
     expect(denied).toMatchObject({ ok: false, status: 409 });
     if (denied.ok) throw new Error("Dependent Ticket was unexpectedly admitted");
@@ -178,7 +189,21 @@ test("named prerequisites block Build and remain linked after cancellation until
     await expect(
       prerequisites.getByText("Cancelled · still blocking", { exact: true }),
     ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    await expect(
+      page.getByRole("button", { name: "Queue implementation", exact: true }),
+    ).toBeEnabled();
+    const stillDenied = await requestFunction(page.request, "startTicketChange", [second]);
+    expect(stillDenied).toMatchObject({ ok: false, status: 409 });
+    if (stillDenied.ok) throw new Error("Cancelled prerequisite was treated as delivered");
+    expect(stillDenied.message).toContain("Publish the sign-in contract");
+    const [work] = await database.client<
+      Array<{ changes: number; orders: number; turns: number; runtimes: number }>
+    >`SELECT
+      (SELECT count(*)::integer FROM factory.change WHERE project_id=${projectId}) AS changes,
+      (SELECT count(*)::integer FROM factory.implementation_order WHERE project_id=${projectId}) AS orders,
+      (SELECT count(*)::integer FROM factory.agent_turn WHERE project_id=${projectId}) AS turns,
+      (SELECT count(*)::integer FROM factory.runtime_attempt WHERE project_id=${projectId}) AS runtimes`;
+    expect(work).toEqual({ changes: 0, orders: 0, turns: 0, runtimes: 0 });
     await page.setViewportSize({ width: 430, height: 860 });
     await page.screenshot({
       path: ".factory/test-results/epic-folders/dependencies-ticket-narrow.png",

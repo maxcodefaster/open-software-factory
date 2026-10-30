@@ -3,10 +3,13 @@
 }
 .ticket-reading-layout {
   display: grid;
-  grid-template-columns: 2.75rem minmax(0, 1fr);
-  gap: var(--space-4);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
   align-items: start;
   margin-block-start: var(--space-8);
+}
+.ticket-reading-layout:has(> .ticket-chapter-navigation) {
+  grid-template-columns: 1.75rem minmax(0, 1fr);
 }
 .ticket-chapter-navigation {
   position: sticky;
@@ -22,11 +25,11 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 44px;
+  min-height: 36px;
   width: 100%;
   border: 0;
   border-radius: var(--radius-xs);
-  padding: var(--space-2);
+  padding: var(--space-1);
   background: transparent;
   color: var(--color-ink-muted);
   font: inherit;
@@ -35,7 +38,7 @@
   line-height: var(--leading-label);
 }
 .ticket-chapter-mark {
-  width: var(--space-4);
+  width: var(--space-2);
   height: 2px;
   border-radius: var(--radius-pill);
   background: currentColor;
@@ -48,7 +51,7 @@
 .ticket-chapter-links button.is-current .ticket-chapter-mark,
 .ticket-chapter-links button:hover .ticket-chapter-mark,
 .ticket-chapter-links button:focus-visible .ticket-chapter-mark {
-  width: var(--space-6);
+  width: var(--space-3);
 }
 .ticket-chapter-links button:focus-visible {
   outline: 2px solid var(--color-focus);
@@ -257,6 +260,11 @@
 .ticket-diagram-editor {
   display: grid;
   gap: var(--space-4);
+}
+@media (pointer: coarse) {
+  .ticket-chapter-links button {
+    min-height: 44px;
+  }
 }
 
 @media (max-width: 760px) {

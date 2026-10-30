@@ -73,9 +73,7 @@ export function SettingsWorkspace(props: {
       props.initialSelection ?? {
         scope:
           props.project && (props.developer || props.projectManager)
-            ? props.developer
-              ? "personal"
-              : "project"
+            ? "project"
             : props.systemManager
               ? "system"
               : "personal",
@@ -91,6 +89,7 @@ export function SettingsWorkspace(props: {
   const [visited, setVisited] = createSignal<ReadonlySet<Category>>(
     new Set([initialSelection.category]),
   );
+  const [setupOpen, setSetupOpen] = createSignal(false);
   function setSelection(next: { scope: Scope; category: Category }) {
     setVisited((previous) =>
       previous.has(next.category) ? previous : new Set([...previous, next.category]),
@@ -127,11 +126,12 @@ export function SettingsWorkspace(props: {
     ...(props.project
       ? [
           {
+            id: "project",
             scope: "project" as const,
             label: `Project · ${props.project.name}`,
             categories: [
               ...(props.developer ? (["models"] as Category[]) : []),
-              ...(props.developer || canManage() ? (["setup", "environment"] as Category[]) : []),
+              ...(props.developer || canManage() ? (["environment"] as Category[]) : []),
               "monitoring",
               "releases",
               "usage",
@@ -140,8 +140,14 @@ export function SettingsWorkspace(props: {
           },
         ]
       : []),
-    { scope: "personal" as const, label: "Libraries", categories: ["skills", "mcp"] as Category[] },
     {
+      id: "libraries",
+      scope: "personal" as const,
+      label: "Libraries",
+      categories: ["skills", "mcp"] as Category[],
+    },
+    {
+      id: "personal",
       scope: "personal" as const,
       label: "Personal",
       categories: [
@@ -152,6 +158,7 @@ export function SettingsWorkspace(props: {
     ...(props.systemManager
       ? [
           {
+            id: "system",
             scope: "system" as const,
             label: "Factory administration",
             categories: ["models", "usage", "repositories", "people", "security"] as Category[],
@@ -159,6 +166,12 @@ export function SettingsWorkspace(props: {
         ]
       : []),
   ];
+  const currentGroup = () => {
+    const current = navigationSelection();
+    return groups().find(
+      (group) => group.scope === current.scope && group.categories.includes(current.category),
+    );
+  };
   const label = (value: Category, scope: Scope = selection().scope) =>
     ({
       models: scope === "personal" ? "Model overrides" : "Models",
@@ -200,11 +213,27 @@ export function SettingsWorkspace(props: {
           aria-label="Settings navigation"
         >
           <h2>Settings</h2>
+          <label class="settings-scope-picker">
+            <span>Settings for</span>
+            <select
+              aria-label="Settings scope"
+              value={currentGroup()?.id}
+              onChange={(event) => {
+                const group = groups().find((item) => item.id === event.currentTarget.value);
+                const first = group?.categories[0];
+                if (group && first) setSelection({ scope: group.scope, category: first });
+              }}
+            >
+              <For each={groups()}>
+                {(group) => <option value={group.id}>{group.label}</option>}
+              </For>
+            </select>
+          </label>
           <div class="settings-navigation-groups">
-            <For each={groups()}>
+            <For each={groups().filter((group) => group.id === currentGroup()?.id)}>
               {(group) => (
                 <section class={group.scope === "system" ? "settings-admin-group" : undefined}>
-                  <h3>{group.label}</h3>
+                  <h3 class="sr-only">{group.label}</h3>
                   <For each={group.categories}>
                     {(value) => (
                       <button
@@ -238,6 +267,7 @@ export function SettingsWorkspace(props: {
             <header
               class="settings-content-heading"
               data-library={category() === "skills" || category() === "mcp" ? "true" : undefined}
+              data-inputs={category() === "monitoring" ? "true" : undefined}
             >
               <h2 class="settings-wide-title">{label(category())}</h2>
               {navigationTitle()}
@@ -375,6 +405,19 @@ export function SettingsWorkspace(props: {
               {(project) => (
                 <div hidden={category() !== "environment"}>
                   <EnvironmentSettings projectID={project().id} navigation={navigationTitle()} />
+                  <details
+                    class="settings-setup-recovery"
+                    onToggle={(event) => setSetupOpen(event.currentTarget.open)}
+                  >
+                    <summary>Setup & recovery</summary>
+                    <Show when={setupOpen()}>
+                      <ProjectSetupSettings
+                        projectID={project().id}
+                        userID={props.userID}
+                        canManage={canManage()}
+                      />
+                    </Show>
+                  </details>
                 </div>
               )}
             </Show>

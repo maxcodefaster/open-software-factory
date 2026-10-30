@@ -35,6 +35,9 @@ const noAction = () => {};
 
 function Wiki() {
   const drafts = new Map();
+  const [loadStage, setLoadStage] = createSignal(
+    new URLSearchParams(location.search).has("loading") ? "outline" : "ready",
+  );
   const [selected, setSelected] = createSignal(0);
   const [pages, setPages] = createSignal<KnowledgePage[]>(
     ["First reference", "Second reference"].map((title, index) => ({
@@ -53,60 +56,79 @@ function Wiki() {
     })),
   );
   return (
-    <KnowledgeWorkspace
-      pages={pages()}
-      selectedPage={pages()[selected()]}
-      documents={[]}
-      revisions={[]}
-      searchResults={[]}
-      searchQuery=""
-      pending={false}
-      projectID={projectID}
-      userID={userID}
-      repositoryURL="https://example.invalid/owned-feedback.git"
-      canDevelop={false}
-      drafts={drafts}
-      onSelectPage={(id) => setSelected(pages().findIndex((page) => page.id === id))}
-      onOpenDocument={noAction}
-      onGenerate={noAction}
-      onSearch={noAction}
-      onSavePage={async (id, expectedVersion, title, body) => {
-        // Synthetic component callback, not a Factory command transport.
-        const response = await fetch("/fixture/wiki-save", {
-          method: "POST",
-          body: JSON.stringify({ id, expectedVersion, title, body }),
-        });
-        const value: unknown = await response.json();
-        if (!response.ok)
-          throw new APIRequestError(
-            response.status,
-            value &&
-              typeof value === "object" &&
-              "error" in value &&
-              typeof value.error === "string"
-              ? value.error
-              : "Fixture save failed",
+    <>
+      <Show when={new URLSearchParams(location.search).has("loading")}>
+        <nav aria-label="Owned Wiki loading fixture">
+          <button type="button" onClick={() => setLoadStage("page")}>
+            Receive Wiki outline
+          </button>
+          <button type="button" onClick={() => setLoadStage("ready")}>
+            Receive Wiki body
+          </button>
+          <button type="button" onClick={() => setLoadStage("unselected")}>
+            Clear Wiki selection
+          </button>
+          <button type="button" onClick={() => setLoadStage("empty")}>
+            Receive empty Wiki
+          </button>
+        </nav>
+      </Show>
+      <KnowledgeWorkspace
+        loading={["outline", "page"].includes(loadStage())}
+        pages={["outline", "empty"].includes(loadStage()) ? [] : pages()}
+        selectedPage={loadStage() === "ready" ? pages()[selected()] : undefined}
+        documents={[]}
+        revisions={[]}
+        searchResults={[]}
+        searchQuery=""
+        pending={false}
+        projectID={projectID}
+        userID={userID}
+        repositoryURL="https://example.invalid/owned-feedback.git"
+        canDevelop={false}
+        drafts={drafts}
+        onSelectPage={(id) => setSelected(pages().findIndex((page) => page.id === id))}
+        onOpenDocument={noAction}
+        onGenerate={noAction}
+        onSearch={noAction}
+        onSavePage={async (id, expectedVersion, title, body) => {
+          // Synthetic component callback, not a Factory command transport.
+          const response = await fetch("/fixture/wiki-save", {
+            method: "POST",
+            body: JSON.stringify({ id, expectedVersion, title, body }),
+          });
+          const value: unknown = await response.json();
+          if (!response.ok)
+            throw new APIRequestError(
+              response.status,
+              value &&
+                typeof value === "object" &&
+                "error" in value &&
+                typeof value.error === "string"
+                ? value.error
+                : "Fixture save failed",
+            );
+          const saved = knowledgeSaveSchema.parse(value);
+          setPages((previous) =>
+            previous.map((page) =>
+              page.id === id
+                ? { ...page, version: saved.version, title: saved.title, currentBody: saved.body }
+                : page,
+            ),
           );
-        const saved = knowledgeSaveSchema.parse(value);
-        setPages((previous) =>
-          previous.map((page) =>
-            page.id === id
-              ? { ...page, version: saved.version, title: saved.title, currentBody: saved.body }
-              : page,
-          ),
-        );
-        return saved;
-      }}
-      onHistory={async () => {}}
-      onSources={async () => []}
-      onArchive={noAction}
-      onMove={async () => {}}
-      onIcon={async () => {}}
-      onOpenIDE={noAction}
-      onRestore={async () => {
-        throw new Error("History is outside this owned feedback fixture.");
-      }}
-    />
+          return saved;
+        }}
+        onHistory={async () => {}}
+        onSources={async () => []}
+        onArchive={noAction}
+        onMove={async () => {}}
+        onIcon={async () => {}}
+        onOpenIDE={noAction}
+        onRestore={async () => {
+          throw new Error("History is outside this owned feedback fixture.");
+        }}
+      />
+    </>
   );
 }
 
