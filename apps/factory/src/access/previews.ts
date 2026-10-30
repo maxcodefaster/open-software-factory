@@ -63,7 +63,7 @@ export function createProjectAppPreviews(
       FROM factory.project project
       LEFT JOIN factory.staging_preview preview ON preview.project_id=project.id
       LEFT JOIN factory.runtime_attempt attempt ON attempt.id=preview.runtime_attempt_id
-      WHERE project.id=${projectID} AND (preview.project_id IS NOT NULL OR EXISTS(
+      WHERE project.id=${projectID} AND (preview.runtime_attempt_id IS NOT NULL OR EXISTS(
         SELECT 1 FROM factory.project_setup_readiness readiness
         WHERE readiness.project_id=project.id AND readiness.task='configuration' AND readiness.state='ready'
       ))`;

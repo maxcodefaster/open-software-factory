@@ -3,6 +3,8 @@ import { createProjectAppPreviews } from "../../apps/factory/src/access/previews
 import { factoryProcess } from "../fixtures/factory-process";
 
 test.each([
+  "unconfigured",
+  "configuring",
   "first-open",
   "not-started",
   "stopped",
@@ -44,6 +46,8 @@ test.each([
         if (url.pathname === "/api/v1/repos/owned/adac/branches/main")
           return Response.json({ name: "main", commit: { id: revision } });
         if (url.pathname === "/api/v1/repos/owned/adac/contents/.factory/system.json") {
+          if (state === "unconfigured" || state === "configuring")
+            return Response.json({ message: "Configuration is not confirmed" }, { status: 404 });
           expect(url.searchParams.get("ref")).toBe(revision);
           return Response.json({
             encoding: "base64",
@@ -73,9 +77,12 @@ test.each([
       await database.client`INSERT INTO factory.project_membership(project_id,user_id,role,updated_by)
         VALUES(${project},${owner},'developer',${owner}),
           (${project},${contributor},'product-contributor',${owner})`;
-      await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
-        VALUES(${project},'configuration','ready',${crypto.randomUUID()})`;
-      const hasAttempt = !["first-open", "not-started"].includes(state);
+      if (state !== "unconfigured")
+        await database.client`INSERT INTO factory.project_setup_readiness(project_id,task,state,command_id)
+          VALUES(${project},'configuration',${state === "configuring" ? "pending" : "ready"},${crypto.randomUUID()})`;
+      const hasAttempt = !["unconfigured", "configuring", "first-open", "not-started"].includes(
+        state,
+      );
       if (hasAttempt)
         await database.client`INSERT INTO factory.runtime_attempt(
           id,project_id,isolated_kind,generation,revision,state,
@@ -92,6 +99,14 @@ test.each([
       await expect(previews(project, stranger)).rejects.toThrow("Project not found");
       expect(calls).toEqual([]);
       const first = await previews(project, contributor);
+      if (state === "unconfigured" || state === "configuring") {
+        expect(first).toEqual([]);
+        expect(calls).toEqual([]);
+        expect(
+          await database.client`SELECT id FROM factory.runtime_attempt WHERE project_id=${project}`,
+        ).toHaveLength(0);
+        return;
+      }
       expect(first.map((app) => [app.channel, app.label])).toEqual([
         ["app", "Staging · Website"],
         ["app-forms-web", "Staging · Forms editor"],
