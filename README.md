@@ -84,6 +84,11 @@ selected size in its immutable native identity. The worker must support `bounded
 its native qualification. Insufficient space fails explicitly rather than waiting indefinitely.
 This does not resize a retained worker or reclaim unrelated node data.
 
+Before dispatching a fresh Sandbox Start or Fork, Factory observes the original worker's native
+write-admission decision. A known disk refusal leaves the mutation unattempted, so Stop can release
+its prepared inputs without inventing a native Delete receipt. The native runtime still checks
+again at dispatch; an uncertain result after dispatch remains retained and is never replayed.
+
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's
 [installation and maintenance instructions](deploy/helm/factory/README.md) for local access,

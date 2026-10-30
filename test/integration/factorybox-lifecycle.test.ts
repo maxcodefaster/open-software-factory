@@ -15,6 +15,7 @@ import { eventually, factoryProcess } from "../fixtures/factory-process";
 // persisted Factory ownership, not native qualification of either architecture.
 test.each([
   ["arm64", false, false, "none"],
+  ["arm64", false, false, "capacity-refusal"],
   ["amd64", false, false, "none"],
   ["arm64", true, false, "none"],
   ["amd64", true, false, "none"],
@@ -243,6 +244,21 @@ test.each([
             expect(limits?.timeoutMS).toBeGreaterThan(15_000);
           return { exitCode: 0, stderr: "", stdout: JSON.stringify(status) };
         }
+        if (args.at(-1) === "capacity") {
+          const [start] = await database.client<Array<{ attempted: boolean }>>`
+            SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
+            WHERE runtime_attempt_id=${owned.attemptID} AND action='start'`;
+          expect(start?.attempted).toBe(false);
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              version: 1,
+              root,
+              new_write_admitted: deleteContinuation !== "capacity-refusal",
+            }),
+          };
+        }
         if (args.includes("python3")) {
           if (cancelPreparation && args.at(-1)?.endsWith("/prepared.json"))
             return { exitCode: 1, stderr: "No private input was published", stdout: "" };
@@ -256,7 +272,10 @@ test.each([
               stdout: JSON.stringify({ version: 1, cancelled: true, sandboxID: input.sandboxID }),
             };
           }
-          if (args.at(-1) === "release") {
+          if (args.at(-1) === "release" || args.at(-2) === "release") {
+            expect(args.at(-1) === "--never-started").toBe(
+              deleteContinuation === "capacity-refusal",
+            );
             expect(JSON.parse(body ?? "null").assignment).toBeUndefined();
             releases++;
             return {
@@ -450,6 +469,25 @@ test.each([
       };
       const hub = new RuntimeHub(async () => {});
       const execution = createFactoryboxExecution(database, hub, run);
+      if (deleteContinuation === "capacity-refusal") {
+        await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
+          "capacity refused Start before dispatch",
+        );
+        const [start] = await database.client<Array<{ attempted: boolean }>>`
+          SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='start'`;
+        expect(start?.attempted).toBe(false);
+        expect(mutations).toEqual([]);
+        await execution.deleteSandbox(owned.attemptID);
+        await execution.deleteSandbox(owned.attemptID);
+        const [saved] = await database.client<Array<{ released: boolean }>>`
+          SELECT inputs_released_at IS NOT NULL AS released FROM factory.factorybox_runtime
+          WHERE runtime_attempt_id=${owned.attemptID}`;
+        expect(saved?.released).toBe(true);
+        expect(releases).toBe(1);
+        expect(mutations).toEqual([]);
+        return;
+      }
       if (cancelPreparation) {
         await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
           "Assignment observation failed before native preparation dispatch",
