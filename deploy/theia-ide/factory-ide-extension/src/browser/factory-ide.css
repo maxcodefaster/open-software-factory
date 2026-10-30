@@ -499,47 +499,36 @@
   --factory-ide-control-radius: 4px;
 }
 .factory-writer-status {
-  position: fixed;
-  z-index: 1000;
-  bottom: calc(6 * var(--factory-ide-space));
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  gap: calc(3 * var(--factory-ide-space));
-  padding: calc(2 * var(--factory-ide-space)) calc(3 * var(--factory-ide-space));
-  max-width: calc(100% - 8 * var(--factory-ide-space));
+  padding: calc(4 * var(--factory-ide-space));
+  width: min(440px, calc(100% - 8 * var(--factory-ide-space)));
+  box-sizing: border-box;
   border: 1px solid var(--theia-panel-border);
   border-radius: var(--factory-ide-control-radius);
   background: var(--theia-panel-background);
   color: var(--theia-editor-foreground);
   font-size: var(--theia-ui-font-size1);
 }
-.factory-writer-status[hidden] {
+.factory-writer-status:not([open]),
+.factory-writer-status button[hidden] {
   display: none;
 }
-.factory-writer-status span {
-  min-width: 0;
+.factory-writer-status p {
+  margin: 0 0 calc(4 * var(--factory-ide-space));
   overflow-wrap: anywhere;
 }
-.factory-writer-status button {
-  border: 0;
-  border-radius: var(--factory-ide-control-radius);
-  padding: var(--factory-ide-space) calc(2 * var(--factory-ide-space));
-  background: var(--theia-button-background);
-  color: var(--theia-button-foreground);
-  white-space: nowrap;
-  cursor: pointer;
+.factory-writer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: calc(2 * var(--factory-ide-space));
+}
+.factory-writer-actions .theia-button {
+  margin: 0;
+  white-space: normal;
 }
 .factory-writer-status button:focus-visible {
   outline: 1px solid var(--theia-focusBorder);
   outline-offset: var(--factory-ide-space);
-}
-@media (max-width: 480px) {
-  .factory-writer-status {
-    flex-wrap: wrap;
-    width: max-content;
-  }
 }
 .factory-writer-status button:disabled {
   opacity: 0.5;

@@ -314,6 +314,15 @@ test.skipIf(process.env["FACTORY_RUN_CHANGE_WRITER_RUNTIME_PROOF"] !== "1")(
       const page = await context.newPage();
       await page.goto(`${owned.base}/api/developer-ide/access?workspace=${workspaceID}`);
       const writerStatus = page.locator(".factory-writer-status");
+      const writerEntry = page.locator("#status-bar-factory-writing");
+      await visible(writerEntry).toContainText("Observation mode.");
+      await visible(writerStatus).toBeHidden();
+      await visible(page.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
+      await visible(page.getByRole("button", { name: "Restart", exact: true })).toBeDisabled();
+      await page.screenshot({
+        path: resolve(artifacts, "ticket-observation-desktop.png"),
+      });
+      await writerEntry.click();
       await visible(writerStatus).toContainText("Agent working.");
       await visible(writerStatus).toContainText("Observation mode.");
       await visible(
@@ -321,13 +330,12 @@ test.skipIf(process.env["FACTORY_RUN_CHANGE_WRITER_RUNTIME_PROOF"] !== "1")(
       ).toBeVisible();
       await visible(page.getByRole("button", { name: "Stop", exact: true })).toBeDisabled();
       await visible(page.getByRole("button", { name: "Restart", exact: true })).toBeDisabled();
-      await page.screenshot({
-        path: resolve(artifacts, "ticket-observation-desktop.png"),
-      });
       await page.setViewportSize({ width: 900, height: 760 });
       await page.screenshot({
         path: resolve(artifacts, "ticket-observation-narrow.png"),
       });
+      await page.keyboard.press("Escape");
+      await visible(writerStatus).toBeHidden();
       const documentID = await page.evaluate(() => performance.timeOrigin);
       const observedWriter = await serverCall(
         callFactoryFunction(owned.base, "getChangeWriterStatus", [identity.changeID], { cookie }),
