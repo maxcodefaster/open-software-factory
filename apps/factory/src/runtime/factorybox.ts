@@ -209,11 +209,14 @@ export function createFactoryboxExecution(
       ["running", "paused", "deleting"].includes(result.record.phase) &&
       result.runtime?.status === "stopped"
     ) {
+      // Failed startup also records compensating cleanup before Native Delete.
+      // Continue that exact intent without inventing a human Stop or clearing
+      // its failure. Native owner/input and process-exit checks still apply.
       const [closing] = await connection`SELECT id FROM factory.runtime_attempt
-        WHERE id=${attemptID} AND stop_intended_at IS NOT NULL
+        WHERE id=${attemptID} AND (stop_intended_at IS NOT NULL OR failure IS NOT NULL)
           AND state IN ('stopping','cleanup-failed')`;
       if (!closing)
-        throw new Error("Native Delete continuation requires the original explicit Stop");
+        throw new Error("Native Delete continuation requires the original recorded cleanup");
       const [started] = await connection<{ observation: unknown }[]>`
         SELECT observation FROM factory.factorybox_lifecycle_operation
         WHERE runtime_attempt_id=${attemptID} AND action='start' AND completed_at IS NOT NULL`;
