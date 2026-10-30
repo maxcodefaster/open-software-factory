@@ -92,6 +92,11 @@ export function startFactoryLifecycle(application: LifecycleServices) {
     2_000,
   );
   jobs.every(
+    "Retained Stop settlement is unavailable",
+    async () => agentController?.recoverRetainedStops(),
+    2_000,
+  );
+  jobs.every(
     "Wiki reconciliation failed",
     () => knowledgeController.reconcile(),
     15 * 60_000,

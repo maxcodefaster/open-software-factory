@@ -340,6 +340,7 @@ export async function pinnedOpenCode(
     return {
       client,
       container,
+      artifactImage,
       control,
       transport,
       dispose,

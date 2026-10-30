@@ -22,6 +22,7 @@ import { createBuildBrowserEndpoint } from "../agent/browser-endpoint";
 import { createCandidateReviewController } from "../agent/candidate-review";
 import { createAgentController } from "../agent/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
+import { createRetainedStopSettlement } from "../agent/retained-stop";
 import { createAgentService } from "../agent/service";
 import { createVerificationTools } from "../agent/verification-tools";
 import { createAttachmentRoutes } from "../attachments/routes";
@@ -378,6 +379,7 @@ export async function createFactoryApplication() {
     runtimeController,
     buildBrowserController,
     changeWriters,
+    createRetainedStopSettlement(database, runtimeController, runtimeHub),
   );
   await agentController.recover();
   const implementationOrders = createImplementationOrders(
