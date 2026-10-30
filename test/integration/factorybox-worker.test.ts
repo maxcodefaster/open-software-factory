@@ -3,7 +3,9 @@ import { z } from "zod";
 import {
   createFactoryboxWorker,
   factoryboxAllocation,
+  rememberFactoryboxIdentity,
   rememberFactoryboxSource,
+  retainedFactoryboxProfile,
 } from "../../apps/factory/src/runtime/worker";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import {
@@ -12,6 +14,7 @@ import {
   factoryboxSharedLabels,
 } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import {
+  type FactoryboxRuntimeProfile,
   factoryboxSandboxID,
   renderFactoryboxRuntime,
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
@@ -37,9 +40,11 @@ const key = (kind: string, name: string) => `${kind.toLowerCase()}/${name}`;
 function infrastructure() {
   const objects = new Map<string, z.infer<typeof manifest>>();
   const writes: Array<{ action: string; kind: string; name: string }> = [];
-  const fault = { losePodCreate: false };
+  const fault = { losePodCreate: false, unavailableRead: false };
   const kubernetes = createKubernetesClient(async (args, body) => {
     if (args[0] === "get") {
+      if (fault.unavailableRead)
+        return { stdout: "", stderr: "Owned fixture API unavailable", exitCode: 1 };
       const item = objects.get(key(args[1] ?? "", args[2] ?? ""));
       return item
         ? { stdout: JSON.stringify(item), stderr: "", exitCode: 0 }
@@ -94,7 +99,11 @@ function infrastructure() {
   return { kubernetes, objects, writes, fault };
 }
 
-function resources(location: ReturnType<typeof factoryboxLocation>, image = runtimeImage) {
+function resources(
+  location: ReturnType<typeof factoryboxLocation>,
+  image = runtimeImage,
+  selected: FactoryboxRuntimeProfile = profile,
+) {
   const attemptID = crypto.randomUUID();
   const shared = renderFactoryboxRuntime({
     ...location,
@@ -104,7 +113,7 @@ function resources(location: ReturnType<typeof factoryboxLocation>, image = runt
     labels: { "factory.dev/runtime-attempt": attemptID },
     runtimeHostImage: image,
     sharedSource: false,
-    profile,
+    profile: selected,
   });
   return [
     shared.namespace,
@@ -137,6 +146,235 @@ function resources(location: ReturnType<typeof factoryboxLocation>, image = runt
     },
   ];
 }
+
+async function failedBootstrap() {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const kube = infrastructure();
+  const worker = createFactoryboxWorker(database, kube.kubernetes);
+  const actorID = crypto.randomUUID();
+  const projectID = crypto.randomUUID();
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${actorID},'Owned bootstrap recovery',${`${actorID}@recovery.test`})`;
+    await database.client`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,
+      devcontainer_path,created_by,desktop_background_key)
+      VALUES(${projectID},${`recovery-${projectID}`},'Owned recovery',
+        'https://example.invalid/recovery.git','main','.devcontainer/devcontainer.json',
+        ${actorID},'river-landscape')`;
+    const location = await worker.location();
+    await worker.provision(resources(location), profile, runtimeImage);
+    const original = await factoryboxAllocation(database.client);
+    const pod = kube.objects.get("pod/worker");
+    if (!pod) throw new Error("Missing failed bootstrap fixture");
+    Reflect.set(pod, "status", { phase: "Failed" });
+    return {
+      database,
+      kube,
+      worker,
+      actorID,
+      projectID,
+      location,
+      original,
+      pod,
+      async attempt(state: "create-intended" | "failed") {
+        const id = crypto.randomUUID();
+        await database.client`INSERT INTO factory.runtime_attempt(
+          id,project_id,isolated_kind,generation,revision,state,
+          parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${id},${projectID},'staging',1,${"a".repeat(40)},${state},
+            ${"b".repeat(64)},${"c".repeat(64)},now(),${actorID})`;
+        return id;
+      },
+      async dispose() {
+        await database.client.end({ timeout: 2 });
+        await host.dispose();
+      },
+    };
+  } catch (cause) {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+    throw cause;
+  }
+}
+
+test.each([
+  "active execution",
+  "unavailable observation",
+  "changed Pod UID",
+  "changed Namespace UID",
+  "disabled actor",
+  "native identity",
+  "missing original Pod",
+] as const)(
+  "bootstrap recovery refuses %s without creating or changing an admission",
+  async (scenario) => {
+    const f = await failedBootstrap();
+    try {
+      if (scenario === "active execution") await f.attempt("create-intended");
+      if (scenario === "unavailable observation") f.kube.fault.unavailableRead = true;
+      if (scenario === "changed Pod UID") f.pod.metadata.uid = crypto.randomUUID();
+      if (scenario === "changed Namespace UID") {
+        const namespace = f.kube.objects.get(key("Namespace", f.location.namespace));
+        if (!namespace) throw new Error("Missing original Namespace");
+        namespace.metadata.uid = crypto.randomUUID();
+      }
+      if (scenario === "disabled actor")
+        await f.database
+          .client`UPDATE factory.account_access SET disabled_at=now() WHERE user_id=${f.actorID}`;
+      if (scenario === "native identity") {
+        if (!f.original.namespaceUID || !f.original.podUID || !f.original.claimUID)
+          throw new Error("Missing original worker identities");
+        await rememberFactoryboxIdentity(f.database.client, f.original.id, {
+          version: 1,
+          namespaceUID: f.original.namespaceUID,
+          podUID: f.original.podUID,
+          claimUID: f.original.claimUID,
+          storeID: f.original.admissionID.replaceAll("-", ""),
+          epoch: "e".repeat(32),
+          bootID: "original-boot",
+          nodeBootID: "original-node-boot",
+          executableSHA256: profile.executableSHA256,
+          controllerRoot: "/factorybox",
+        });
+      }
+      if (scenario === "missing original Pod") f.kube.objects.delete("pod/worker");
+      const before = [
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ];
+      const writes = f.kube.writes.length;
+      const recover = () =>
+        f.worker.location(f.database.client, {
+          actorID: f.actorID,
+          requestID: crypto.randomUUID(),
+        });
+      if (scenario === "native identity") {
+        expect(await recover()).toEqual(f.location);
+        await expect(
+          f.worker.provision(resources(f.location), profile, runtimeImage),
+        ).rejects.toThrow("Original Factorybox worker terminated");
+      } else await expect(recover()).rejects.toThrow();
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ]).toEqual(before);
+      expect(f.kube.writes).toHaveLength(writes);
+    } finally {
+      await f.dispose();
+    }
+  },
+  30_000,
+);
+
+test("concurrent commissions recover once and retain old execution and admission history", async () => {
+  const f = await failedBootstrap();
+  try {
+    const oldAttempt = await f.attempt("failed");
+    const locations = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        f.worker.location(f.database.client, {
+          actorID: f.actorID,
+          requestID: crypto.randomUUID(),
+        }),
+      ),
+    );
+    expect(locations.every((location) => location.podName === locations[0]?.podName)).toBe(true);
+    expect(locations[0]?.podName).not.toBe(f.location.podName);
+    const [active] = await f.database.client<{ id: string }[]>`
+      SELECT id FROM factory.factorybox_worker_admission WHERE retired_at IS NULL`;
+    if (!active) throw new Error("Missing successor admission");
+    const [old] = await f.database.client`
+      SELECT factorybox_admission_id,kubernetes_pod_name FROM factory.runtime_attempt WHERE id=${oldAttempt}`;
+    expect(old).toMatchObject({
+      factorybox_admission_id: f.original.admissionID,
+      kubernetes_pod_name: "worker",
+    });
+    const nextAttempt = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.runtime_attempt(
+      id,project_id,isolated_kind,generation,revision,state,
+      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${nextAttempt},${f.projectID},'staging',2,${"a".repeat(40)},'create-intended',
+        ${"d".repeat(64)},${"f".repeat(64)},now(),${f.actorID})`;
+    const [next] = await f.database.client`
+      SELECT factorybox_admission_id,kubernetes_pod_name FROM factory.runtime_attempt WHERE id=${nextAttempt}`;
+    expect(next).toMatchObject({
+      factorybox_admission_id: active.id,
+      kubernetes_pod_name: locations[0]?.podName,
+    });
+    await expect(
+      (async () => {
+        await f.database
+          .client`UPDATE factory.runtime_attempt SET factorybox_admission_id=${active.id}
+        WHERE id=${oldAttempt}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await expect(
+      (async () => {
+        await f.database
+          .client`UPDATE factory.factorybox_worker_admission SET retired_at=NULL,retirement_observation=NULL
+        WHERE id=${f.original.admissionID}`;
+      })(),
+    ).rejects.toThrow("immutable");
+    await expect(
+      (async () => {
+        await f.database
+          .client`DELETE FROM factory.factorybox_worker_admission WHERE id=${f.original.admissionID}`;
+      })(),
+    ).rejects.toThrow("cannot be deleted");
+    expect(
+      await f.database.client`SELECT id FROM factory.factorybox_worker_admission`,
+    ).toHaveLength(2);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
+test("an explicit fresh execution recovers failed bootstrap with new admission identities and the same canonical Source", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const kube = infrastructure();
+  const worker = createFactoryboxWorker(database, kube.kubernetes);
+  const actorID = crypto.randomUUID();
+  const requestID = crypto.randomUUID();
+  try {
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${actorID},'Owned bootstrap recovery',${`${actorID}@recovery.test`})`;
+    const originalLocation = await worker.location();
+    await worker.provision(resources(originalLocation), profile, runtimeImage);
+    const [originalRoot] = await database.client`SELECT * FROM factory.factorybox_worker`;
+    if (!originalRoot) throw new Error("Missing retained original worker");
+    const original = await factoryboxAllocation(database.client);
+    const originalPod = kube.objects.get("pod/worker");
+    if (!originalPod) throw new Error("Missing failed bootstrap fixture");
+    Reflect.set(originalPod, "status", { phase: "Failed" });
+    const recovered = await worker.location(database.client, { actorID, requestID });
+    expect(recovered.namespace).toBe(originalLocation.namespace);
+    expect(recovered.workerID).toBe(originalLocation.workerID);
+    expect(recovered.podName).not.toBe(originalLocation.podName);
+    const selected = await retainedFactoryboxProfile(database.client);
+    expect(selected).toMatchObject({ ...profile, storageAdmission: 1 });
+    const next = await worker.provision(
+      resources(recovered, runtimeImage, selected),
+      selected,
+      runtimeImage,
+    );
+    expect(next.podUID).not.toBe(original.podUID);
+    expect(kube.objects.get("pod/worker")).toBe(originalPod);
+    expect([...kube.objects.values()].filter((item) => item.kind === "Pod")).toHaveLength(2);
+    const allocation = await factoryboxAllocation(database.client);
+    expect(allocation.sourceClaimUID).toBe(original.sourceClaimUID);
+    expect(allocation.claimUID).not.toBe(original.claimUID);
+    expect([...(await database.client`SELECT * FROM factory.factorybox_worker`)]).toEqual([
+      originalRoot,
+    ]);
+    expect(await worker.location(database.client, { actorID, requestID })).toEqual(recovered);
+    expect(await database.client`SELECT id FROM factory.factorybox_worker_admission`).toHaveLength(
+      2,
+    );
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 30_000);
 
 test("a new consumer image admits a new Sandbox without replacing the worker or its bootstrap image", async () => {
   const host = await factoryProcess();
@@ -325,6 +563,15 @@ test("lost worker create output observes only the original worker and cannot rec
     kube.fault.losePodCreate = true;
     await expect(worker.provision(requested, profile, runtimeImage)).rejects.toThrow(
       "Lost Pod create response",
+    );
+    const actorID = crypto.randomUUID();
+    await database.client`INSERT INTO auth."user"(id,name,email)
+      VALUES(${actorID},'Owned uncertain create',${`${actorID}@recovery.test`})`;
+    expect(
+      await worker.location(database.client, { actorID, requestID: crypto.randomUUID() }),
+    ).toEqual(location);
+    expect(await database.client`SELECT id FROM factory.factorybox_worker_admission`).toHaveLength(
+      1,
     );
     expect(kube.writes.filter((write) => write.action === "apply")).toHaveLength(0);
     const observed = await worker.provision(requested, profile, runtimeImage);

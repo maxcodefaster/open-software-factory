@@ -81,6 +81,30 @@ test("fresh and repeated installs preserve typed schema, allowed Zero tables and
     expect([...(await candidate`SELECT version FROM factory.schema_migration`)]).toEqual([
       { version: 1 },
     ]);
+    await candidate`INSERT INTO factory.factorybox_worker(
+      profile,runtime_host_image,node_name,namespace_uid,source_claim_uid,claim_uid,pod_uid,create_attempted)
+      VALUES('{"retained":"original"}'::jsonb,${`registry.invalid/runtime@sha256:${"a".repeat(64)}`},
+        'owned-node','original-namespace','original-source','original-store','original-pod',true)`;
+    const [retainedWorker] = await candidate`SELECT * FROM factory.factorybox_worker`;
+    if (!retainedWorker) throw new Error("Missing retained baseline worker");
+    const actorID = crypto.randomUUID();
+    const projectID = crypto.randomUUID();
+    const attemptID = crypto.randomUUID();
+    await candidate`INSERT INTO auth."user"(id,name,email)
+      VALUES(${actorID},'Owned retained baseline',${`${actorID}@baseline.test`})`;
+    await candidate`INSERT INTO factory.project(id,slug,name,repository_url,default_branch,
+      devcontainer_path,created_by,desktop_background_key)
+      VALUES(${projectID},${`baseline-${projectID}`},'Owned retained baseline',
+        'https://example.invalid/baseline.git','main','.devcontainer/devcontainer.json',
+        ${actorID},'river-landscape')`;
+    await candidate`INSERT INTO factory.runtime_attempt(
+      id,project_id,isolated_kind,generation,revision,state,
+      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${attemptID},${projectID},'staging',1,${"a".repeat(40)},'failed',
+        ${"b".repeat(64)},${"c".repeat(64)},now(),${actorID})`;
+    const [retainedAttempt] =
+      await candidate`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`;
+    if (!retainedAttempt) throw new Error("Missing retained baseline Runtime Attempt");
     for (const table of Object.values(schema)) {
       if (!is(table, PgTable)) continue;
       const config = getTableConfig(table);
@@ -88,6 +112,7 @@ test("fresh and repeated installs preserve typed schema, allowed Zero tables and
         `SELECT ${config.columns.map((column) => `"${column.name}"`).join(",")} FROM "${config.schema}"."${config.name}" LIMIT 0`,
       );
     }
+    let upgradedDigest = "";
     for (let run = 0; run < 2; run++) {
       const migration = Bun.spawn(
         [process.execPath, "--no-env-file", "packages/db/src/migrate.ts"],
@@ -102,9 +127,38 @@ test("fresh and repeated installs preserve typed schema, allowed Zero tables and
         migration.exited,
       ]);
       if (status !== 0) throw new Error(`Repeated owned migration failed: ${error}`);
-      expect(digest(await dump(container, probeName))).toBe(baselineDigest);
+      const currentDigest = digest(await dump(container, probeName));
+      if (run === 0) upgradedDigest = currentDigest;
+      else expect(currentDigest).toBe(upgradedDigest);
+      expect([...(await candidate`SELECT * FROM factory.factorybox_worker`)]).toEqual([
+        retainedWorker,
+      ]);
+      const [upgradedAttempt] =
+        await candidate`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`;
+      if (!upgradedAttempt) throw new Error("Upgrade lost the retained Runtime Attempt");
+      const { factorybox_admission_id, ...unchangedAttempt } = upgradedAttempt;
+      expect(factorybox_admission_id).toBe(retainedWorker["id"]);
+      expect(unchangedAttempt).toEqual(retainedAttempt);
+      expect([
+        ...(await candidate`SELECT id,worker_id,profile,runtime_host_image,claim_uid,pod_uid,
+          identity,create_attempted,previous_id,retired_at FROM factory.factorybox_worker_admission`),
+      ]).toEqual([
+        {
+          id: retainedWorker["id"],
+          worker_id: retainedWorker["id"],
+          profile: { retained: "original" },
+          runtime_host_image: `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
+          claim_uid: "original-store",
+          pod_uid: "original-pod",
+          identity: null,
+          create_attempted: true,
+          previous_id: null,
+          retired_at: null,
+        },
+      ]);
     }
-    expect(baselineDigest).toBe(digest(original));
+    expect(upgradedDigest).not.toBe(baselineDigest);
+    expect(upgradedDigest).toBe(digest(original));
     const versions = (await readdir("packages/db/migrations"))
       .filter((file) => /^\d{4}_.+\.sql$/.test(file))
       .map((file) => ({ version: Number(file.slice(0, 4)) }))
@@ -170,9 +224,9 @@ test.each(["historical versions", "partial schema"] as const)(
         [{ name: "Retained owner" }],
       );
       if (state === "historical versions")
-        expect([...(await database.client`SELECT version FROM factory.schema_migration`)]).toEqual([
-          { version: 0 },
-        ]);
+        expect([
+          ...(await database.client`SELECT version FROM factory.schema_migration ORDER BY version`),
+        ]).toEqual([{ version: 0 }, { version: 2 }]);
       else {
         const [schema] = await database.client<{ relation: string | null }[]>`
           SELECT to_regclass('factory.schema_migration')::text AS relation`;

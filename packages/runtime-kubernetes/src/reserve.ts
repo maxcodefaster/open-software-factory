@@ -156,7 +156,7 @@ export function factoryboxReserveInput(
     workerID: slot.workerID,
     reserve: true,
     namespace: slot.namespace,
-    podName: "worker",
+    podName: factoryboxLocation(slot.workerID, slot.admissionID ?? slot.workerID).podName,
     runtimeOwnerID: declared["factory.dev/runtime-owner"] ?? slot.id,
     labels: declared,
     runtimeHostImage: slot.runtimeHostImage,
@@ -249,14 +249,16 @@ export function validateReserveObservation(
   if (assignedOwner && (slot.state !== "assigned" || assignedOwner !== slot.assignedAttemptID))
     throw new Error("Execution slot observation requires its durable assignment owner");
   const actual = observed.map((value) => object.parse(value));
-  const pod = actual.find((value) => value.kind === "Pod" && value.metadata.name === "worker");
+  const request = factoryboxRuntimeRequest(factoryboxReserveInput(slot));
+  const pod = actual.find(
+    (value) => value.kind === "Pod" && value.metadata.name === request.podName,
+  );
   const namespace = actual.find(
     (value) => value.kind === "Namespace" && value.metadata.name === slot.namespace,
   );
   const claim = actual.find(
     (value) =>
-      value.kind === "PersistentVolumeClaim" &&
-      value.metadata.name === `store-${slot.workerID.replaceAll("-", "")}`,
+      value.kind === "PersistentVolumeClaim" && value.metadata.name === `store-${request.storeID}`,
   );
   if (!pod || !namespace || !claim) throw new Error("Execution slot resources are incomplete");
   for (const item of actual) {
@@ -463,13 +465,14 @@ export function createReserveClient(
   },
 ): ReserveClient {
   async function read(slot: ExecutionSlot) {
+    const request = factoryboxRuntimeRequest(factoryboxReserveInput(slot));
     const resources: ObservedObject[] = [];
     const namespace = await run(["get", "namespace", slot.namespace, "-o", "json"]);
     if (namespace) resources.push(object.parse(JSON.parse(namespace)));
     const listing = await run([
       "get",
-      "pod/worker",
-      `pvc/store-${slot.workerID.replaceAll("-", "")}`,
+      `pod/${request.podName}`,
+      `pvc/store-${request.storeID}`,
       "pvc/runtime-data",
       "secret/registry-ca",
       `secret/${factoryboxAssignmentSecret(slot.id)}`,
@@ -638,7 +641,8 @@ export function createReserveClient(
     const namespace = current.find((item) => item.kind === "Namespace");
     if (!namespace) throw new Error("Execution slot has resources without its Namespace");
     const shared = factoryboxSharedLabels(slot.workerID);
-    const storeName = `store-${slot.workerID.replaceAll("-", "")}`;
+    const request = factoryboxRuntimeRequest(factoryboxReserveInput(slot));
+    const storeName = `store-${request.storeID}`;
     const assignmentName = factoryboxAssignmentSecret(slot.id);
     for (const item of current) {
       const { kind, metadata } = item;
@@ -655,7 +659,7 @@ export function createReserveClient(
       } else if (
         ![
           `Namespace/${slot.namespace}`,
-          "Pod/worker",
+          `Pod/${request.podName}`,
           `PersistentVolumeClaim/${storeName}`,
           "PersistentVolumeClaim/runtime-data",
           "Secret/registry-ca",

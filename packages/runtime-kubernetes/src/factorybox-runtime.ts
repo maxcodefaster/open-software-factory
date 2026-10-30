@@ -3,14 +3,15 @@ import { z } from "zod";
 import type { runCommand } from "./command";
 import { ensureFactoryboxConsumer } from "./factorybox-consumer";
 import {
+  factoryboxAdmissionID,
   factoryboxAssignmentSecret,
   factoryboxLocation,
   factoryboxSharedLabels,
 } from "./factorybox-location";
 import {
   type FactoryboxWorkerIdentity,
-  factoryboxCPURequestMilli,
   factoryboxCPUQuantity,
+  factoryboxCPURequestMilli,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -35,6 +36,7 @@ export const factoryboxRuntimeProfile = z
     image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
     executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
     cpuRequestMilli: factoryboxCPURequestMilli.optional(),
+    storageAdmission: z.literal(1).optional(),
     architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
       .string()
@@ -64,6 +66,7 @@ export function configuredFactoryboxRuntimeProfile(
     image: environment["FACTORY_FACTORYBOX_WORKER_IMAGE"],
     executableSHA256: environment["FACTORY_FACTORYBOX_EXECUTABLE_SHA256"],
     cpuRequestMilli: Number(environment["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"] ?? 100),
+    storageAdmission: 1,
     architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
@@ -104,6 +107,10 @@ export const factoryboxInitializeStoreProgram = readFileSync(
   new URL("./factorybox/initialize-store.py", import.meta.url),
   "utf8",
 );
+export const factoryboxStorageAdmissionProgram = readFileSync(
+  new URL("./factorybox/storage-admission.py", import.meta.url),
+  "utf8",
+);
 export const factoryboxPrepareProgram = readFileSync(
   new URL("./factorybox/prepare.py", import.meta.url),
   "utf8",
@@ -119,6 +126,10 @@ export const factoryboxReserveBootstrapProgram = readFileSync(
 
 export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   const profile = factoryboxRuntimeProfile.parse(input.profile);
+  const nativeProfile = { ...profile };
+  // The concrete consumer declaration owns this pre-admission init stage.
+  // It is not a new option on the pinned standalone worker CLI.
+  delete nativeProfile.storageAdmission;
   factoryboxRuntimeImage.parse(input.runtimeHostImage);
   if (input.workerRuntimeHostImage) factoryboxRuntimeImage.parse(input.workerRuntimeHostImage);
   const identifier = (value: string) =>
@@ -131,15 +142,16 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   const executionID = input.reserve ? input.labels["factory.dev/execution-slot"] : input.attemptID;
   if (!executionID || input.sandboxID !== factoryboxSandboxID(executionID))
     throw new Error("Sandbox identity differs from its immutable execution or reserve slot");
-  const location = factoryboxLocation(input.workerID);
+  const admissionID = factoryboxAdmissionID(input.workerID, input.podName);
+  const location = factoryboxLocation(input.workerID, admissionID);
   if (input.namespace !== location.namespace || input.podName !== location.podName)
     throw new Error("Sandbox execution must use its Factory's shared worker");
   return {
     version: 1 as const,
-    ...profile,
+    ...nativeProfile,
     namespace: input.namespace,
     podName: input.podName,
-    storeID: identifier(input.workerID),
+    storeID: identifier(admissionID),
     trustDomainID: identifier(input.workerID),
   };
 }
@@ -223,6 +235,35 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
             env: environment,
             volumeMounts: [{ name: "store", mountPath: "/factory-seed", subPath: "seed" }],
           },
+          ...(input.profile.storageAdmission === 1
+            ? [
+                {
+                  name: "storage-admission",
+                  image: request.image,
+                  imagePullPolicy: "IfNotPresent",
+                  command: ["python3", "-c", factoryboxStorageAdmissionProgram],
+                  securityContext: {
+                    runAsUser: 0,
+                    runAsGroup: 0,
+                    allowPrivilegeEscalation: false,
+                    readOnlyRootFilesystem: true,
+                    capabilities: { drop: ["ALL"] },
+                  },
+                  resources: {
+                    requests: {
+                      cpu: factoryboxCPUQuantity(Math.min(request.cpuRequestMilli ?? 100, 100)),
+                      memory: "32Mi",
+                    },
+                    limits: { cpu: "100m", memory: "32Mi" },
+                  },
+                  env: [
+                    ...environment,
+                    { name: "FACTORY_BOUNDED_BYTES", value: String(request.boundedBytes) },
+                  ],
+                  volumeMounts: [{ name: "store", mountPath: "/factory-store", readOnly: true }],
+                },
+              ]
+            : []),
         ],
         containers: [
           {

@@ -2,7 +2,11 @@ import { expect, test } from "bun:test";
 import type { ExecutionSlot } from "../../runtime-domain/src/reserve";
 import { createKubernetesClient } from "./client";
 import { factoryboxAssignmentSecret, factoryboxLocation } from "./factorybox-location";
-import { factoryboxReserveBootstrapProgram, factoryboxSandboxID } from "./factorybox-runtime";
+import {
+  factoryboxReserveBootstrapProgram,
+  factoryboxRuntimeRequest,
+  factoryboxSandboxID,
+} from "./factorybox-runtime";
 import type { FactoryboxWorkerIdentity } from "./factorybox-worker";
 import {
   createReserveClient,
@@ -33,8 +37,8 @@ const slot: ExecutionSlot = {
     claimGiB: 32,
   },
 };
-function observations() {
-  return renderReserveResources(slot, "approved-ca").map((resource) => ({
+function observations(target: ExecutionSlot = slot) {
+  return renderReserveResources(target, "approved-ca").map((resource) => ({
     ...resource,
     metadata: { ...resource.metadata, uid: `owned-${resource.kind}-${resource.metadata.name}` },
     ...("stringData" in resource
@@ -52,6 +56,24 @@ function observations() {
       : {}),
   }));
 }
+test("reserve observations and native requests bind the successor admission without moving Source", () => {
+  const admissionID = "17164fe7-7c86-451e-ae6e-0b0fe6b8bf5e";
+  const successor = { ...slot, admissionID };
+  const request = factoryboxRuntimeRequest(factoryboxReserveInput(successor));
+  expect(request.namespace).toBe(slot.namespace);
+  expect(request.podName).toBe(`worker-${admissionID.replaceAll("-", "")}`);
+  expect(request.storeID).toBe(admissionID.replaceAll("-", ""));
+  expect(request.trustDomainID).toBe(slot.workerID.replaceAll("-", ""));
+  const resources = renderReserveResources(successor, "approved-ca");
+  expect(validateReserveObservation(successor, resources, observations(successor))).toMatchObject({
+    ready: true,
+    podUID: `owned-Pod-${request.podName}`,
+    claimUID: `owned-PersistentVolumeClaim-store-${request.storeID}`,
+  });
+  expect(() => validateReserveObservation(successor, resources, observations())).toThrow(
+    "resources are incomplete",
+  );
+});
 test("reserve uses the exact Factorybox topology without repository, user capabilities or shared Docker graphs", () => {
   const resources = renderReserveResources(slot, "approved-ca");
   const payload = JSON.stringify(resources) + factoryboxReserveBootstrapProgram;

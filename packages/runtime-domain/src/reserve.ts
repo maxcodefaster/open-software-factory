@@ -21,6 +21,7 @@ export interface ExecutionSlot {
   readonly workerRuntimeHostImage?: string | null;
   readonly namespace: string;
   readonly workerID: string;
+  readonly admissionID?: string;
   readonly namespaceUID: string | null;
   readonly podUID: string | null;
   readonly claimUID: string | null;
