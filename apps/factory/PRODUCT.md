@@ -181,6 +181,11 @@ The IDE's Git tab shows personal-Workspace status and diffs, commits saved chang
 Fetch/Pull. Pull never resets or stashes work and stops on divergent history. Unsaved buffers block
 Commit and Pull. Ticket commits and Delivery remain in Factory's reviewed workflow.
 
+An unavailable Preview shows its recorded startup cause. A settled current Main Preview offers
+one explicit Retry in that error view, preserving the previous attempt until the command confirms
+the recorded successor. Reading, reconnecting, historical previews and unconfirmed cleanup cannot
+commission another Start. Ticket compute remains controlled from its existing work context.
+
 Each Project has one shared background from six curated public-domain paintings. Creation picks
 an artwork automatically, preferring less-used choices, and retains it on later visits. Project
 managers can change it in the desktop Settings menu; other members see the same saved choice.

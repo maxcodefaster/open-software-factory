@@ -1439,6 +1439,7 @@ export function createRuntimeController(
         JOIN factory.project project ON project.id = staging.project_id
         LEFT JOIN factory.runtime_attempt attempt ON attempt.id=staging.runtime_attempt_id
         WHERE attempt.stop_intended_at IS NULL AND attempt.state IS DISTINCT FROM 'stopped'
+          AND attempt.state IS DISTINCT FROM 'failed'
       `;
       let observing = false;
       return () => {

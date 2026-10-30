@@ -7,6 +7,7 @@ import type {
   RuntimeDockTarget,
 } from "../api-contracts";
 import type { ActivityNavigationRequest } from "../ide-messages";
+import { retryableMainPreview } from "../runtime-workspace-state";
 import { serverCall } from "../server-functions/result";
 import { ensureStaging } from "../server-functions/runtime";
 import { ensureChangeSource, ensurePersonalSource } from "../server-functions/workspaces";
@@ -181,6 +182,35 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     }
   }
 
+  async function retryMainPreview(tab: WorkspaceTab) {
+    const projectID = dependencies.selectedProjectID();
+    if (!projectID || preparingPreviews.has(tab.id)) return;
+    const original = dependencies
+      .attempts()
+      .find((attempt) => attempt.id === tab.attemptID && attempt.projectId === projectID);
+    if (tab.view !== "preview" || !retryableMainPreview(original, projectID))
+      throw new Error("Only a settled current Main Preview can be started again.");
+    preparingPreviews.add(tab.id);
+    try {
+      // Keep the failed view and its cause until this command has returned its
+      // recorded Attempt. Unknown starts are observed by ensureStaging itself.
+      const attempt = await serverCall(ensureStaging({ data: [projectID] }));
+      dependencies.updateWorkspaceTab(
+        {
+          id: tab.id,
+          view: "preview",
+          label: tab.label,
+          attemptID: attempt.id,
+          ...(tab.appChannel ? { appChannel: tab.appChannel } : {}),
+        },
+        projectID,
+      );
+      await dependencies.refreshServerState();
+    } finally {
+      preparingPreviews.delete(tab.id);
+    }
+  }
+
   function ticketPreviewTarget(changeID: string | undefined) {
     if (!changeID) return undefined;
     const owned = new Set(
@@ -223,6 +253,7 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     openIDETarget,
     openChatActivity,
     openPreviewTarget,
+    retryMainPreview,
     ticketPreviewTarget,
     openDevelopmentPreview,
   };

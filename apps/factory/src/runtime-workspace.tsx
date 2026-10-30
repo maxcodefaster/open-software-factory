@@ -1,10 +1,14 @@
 import { createEffect, createMemo, createSignal, For, Show } from "solid-js";
 import { workspacePresence } from "../../../packages/interface-domain/src/workspace-presence";
 import type { AppPreview, RuntimeAttempt } from "./api-contracts";
-import { runtimeReconnecting, runtimeWorkspaceURL } from "./runtime-workspace-state";
-import type { WorkspaceTab } from "./workspace-tabs";
 import { PreviewReview } from "./review/preview";
 import { appRuntimeOrigin } from "./runtime-origins";
+import {
+  retryableMainPreview,
+  runtimeReconnecting,
+  runtimeWorkspaceURL,
+} from "./runtime-workspace-state";
+import type { WorkspaceTab } from "./workspace-tabs";
 
 export function RuntimeWorkspaceTabs(props: {
   projectID: string;
@@ -16,6 +20,7 @@ export function RuntimeWorkspaceTabs(props: {
   userID: string;
   canDevelop: boolean;
   onOpenTicket?(changeID: string): void;
+  onRetryMainPreview?: ((tab: WorkspaceTab) => Promise<void>) | undefined;
 }) {
   const runtimeTabs = () => props.tabs.filter((tab) => tab.view === "preview");
   return (
@@ -55,6 +60,10 @@ export function RuntimeWorkspaceTabs(props: {
         const status = () => {
           if (reconnecting()) return "Connection interrupted. Reconnecting to the same Workspace…";
           const current = attempt();
+          if (current?.state === "cleanup-failed")
+            return "Preview cleanup is unconfirmed. A new Start is blocked.";
+          if (current?.runtimeKind === "staging" && current.state === "failed")
+            return "Main Preview failed to start.";
           if (current?.computeWait)
             return "Waiting for execution capacity. The Preview starts automatically when space is available.";
           if (current) return workspacePresence({ runtimeState: current.state });
@@ -71,6 +80,14 @@ export function RuntimeWorkspaceTabs(props: {
               url={url()}
               reconnecting={reconnecting()}
               loadingLabel={status()}
+              failure={
+                reconnecting() ? undefined : (attempt()?.failure ?? tab().preparationFailure)
+              }
+              onRetry={
+                props.onRetryMainPreview && retryableMainPreview(attempt(), props.projectID)
+                  ? () => props.onRetryMainPreview?.(tab()) ?? Promise.resolve()
+                  : undefined
+              }
               active={active()}
               review={review()}
             />
@@ -86,6 +103,8 @@ export function RuntimeWorkspace(props: {
   attemptID?: string | undefined;
   url?: string | undefined;
   loadingLabel: string;
+  failure?: string | null | undefined;
+  onRetry?: (() => Promise<void>) | undefined;
   reconnecting?: boolean;
   active?: boolean | undefined;
   review?:
@@ -98,13 +117,41 @@ export function RuntimeWorkspace(props: {
       }
     | undefined;
 }) {
+  const [retrying, setRetrying] = createSignal(false);
+  const [retryError, setRetryError] = createSignal("");
+  async function retry() {
+    if (retrying() || !props.onRetry) return;
+    setRetrying(true);
+    setRetryError("");
+    try {
+      await props.onRetry();
+    } catch (cause) {
+      setRetryError(
+        cause instanceof Error ? cause.message : "The Main Preview start could not be confirmed.",
+      );
+    } finally {
+      setRetrying(false);
+    }
+  }
   return (
     <div class="runtime-workspace">
       <Show
         when={props.url}
         fallback={
-          <div class="empty-workspace" role="status">
+          <div class="empty-workspace runtime-start-state" role="status">
             <p>{props.loadingLabel}</p>
+            <Show when={props.failure}>{(failure) => <p role="note">{failure()}</p>}</Show>
+            <Show when={props.onRetry}>
+              <button
+                type="button"
+                class="primary-button"
+                disabled={retrying()}
+                onClick={() => void retry()}
+              >
+                {retrying() ? "Starting Main Preview…" : "Retry Main Preview"}
+              </button>
+            </Show>
+            <Show when={retryError()}>{(error) => <p role="alert">{error()}</p>}</Show>
           </div>
         }
       >

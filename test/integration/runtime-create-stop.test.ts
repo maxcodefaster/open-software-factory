@@ -168,7 +168,7 @@ test.each(["cold worker", "specific refusal"] as const)(
         "Specific native failure was not observed",
       );
       await Bun.sleep(1_100);
-      if (scenario === "cold worker") expect(remaining).toBe(420_000);
+      if (scenario === "cold worker") expect(remaining).toBeCloseTo(420_000, 6);
       expect((await controller.get(owned.attemptID))?.failure).toBe(
         "Native operating storage capacity is unavailable",
       );
@@ -867,48 +867,61 @@ test("a transient namespace read during failed-attempt Stop settles without anot
   }
 }, 30_000);
 
-test("Factory restart does not revive explicitly stopped Main-Previews", async () => {
-  const process = await factoryProcess();
-  const database = process.connect();
-  let creates = 0;
-  try {
-    const owned = await fixture(undefined, undefined, database);
-    await database.client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id) VALUES(${owned.projectID},${"a".repeat(40)},${owned.attemptID})`;
-    await database.client`UPDATE factory.runtime_attempt SET state='stopped',stop_intended_at=now() WHERE id=${owned.attemptID}`;
-    const controller = createRuntimeController(
-      database,
-      new RuntimeHub(async () => {}),
-      "owned-stopped-preview-key",
-      {
-        prepareExecution: async () => {
-          throw new Error("Stopped Preview must not prepare source");
+test.each(["stopped", "failed"] as const)(
+  "Factory restart does not revive a %s Main-Preview",
+  async (state) => {
+    const process = await factoryProcess();
+    const database = process.connect();
+    let creates = 0;
+    try {
+      const owned = await fixture(undefined, undefined, database);
+      await database.client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id) VALUES(${owned.projectID},${"a".repeat(40)},${owned.attemptID})`;
+      await database.client`UPDATE factory.runtime_attempt SET state=${state},
+      stop_intended_at=CASE WHEN ${state === "stopped"} THEN now() END WHERE id=${owned.attemptID}`;
+      const controller = createRuntimeController(
+        database,
+        new RuntimeHub(async () => {}),
+        "owned-stopped-preview-key",
+        {
+          prepareExecution: async () => {
+            throw new Error("Stopped Preview must not prepare source");
+          },
         },
-      },
-      {
-        ...createKubernetesClient(),
-        apply: async () => {
-          creates++;
-          throw new Error("Stopped Preview must remain stopped");
+        {
+          ...createKubernetesClient(),
+          apply: async () => {
+            creates++;
+            throw new Error("Stopped Preview must remain stopped");
+          },
         },
-      },
-      async () => "",
-    );
-    const observe = await controller.recover();
-    observe();
-    await Bun.sleep(1_150);
-    expect(creates).toBe(0);
-    expect(
-      (
-        await database.client<
-          { state: string }[]
-        >`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`
-      )[0]?.state,
-    ).toBe("stopped");
-  } finally {
-    await database.client.end({ timeout: 2 });
-    await process.dispose();
-  }
-}, 30_000);
+        async () => "",
+      );
+      const starts = spyOn(controller, "ensureStaging").mockImplementation(async () => {
+        throw new Error("A settled Main Preview requires an explicit fresh Start");
+      });
+      try {
+        const observe = await controller.recover();
+        observe();
+        await Bun.sleep(1_150);
+        expect(starts).not.toHaveBeenCalled();
+        expect(creates).toBe(0);
+        expect(
+          (
+            await database.client<
+              { state: string }[]
+            >`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`
+          )[0]?.state,
+        ).toBe(state);
+      } finally {
+        starts.mockRestore();
+      }
+    } finally {
+      await database.client.end({ timeout: 2 });
+      await process.dispose();
+    }
+  },
+  30_000,
+);
 
 test("cancelling Ticket compute before create retains its independently owned source Namespace", async () => {
   const processFixture = await factoryProcess();

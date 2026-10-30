@@ -3566,6 +3566,17 @@ dt {
   line-height: var(--leading-body);
 }
 
+.runtime-start-state {
+  padding: var(--space-5);
+  overflow: auto;
+}
+
+.runtime-start-state p {
+  max-width: 60ch;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
 .agent-composer textarea {
   width: 100%;
   min-height: var(--agent-composer-textarea-height);
