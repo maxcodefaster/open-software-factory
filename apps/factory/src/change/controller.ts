@@ -677,7 +677,9 @@ export function createChangeController(
           change.branch_name AS "branchName", change.base_sha AS "baseSha", change.state,
           change.version, change.runtime_attempt_id AS "runtimeAttemptId", change.failure,
           operation.state AS "branchState", operation.observed_head_sha AS "branchHeadSha",
-          attempt.state AS "runtimeState", verification.state AS "verificationState",
+          attempt.state AS "runtimeState",
+          CASE WHEN failed_verification.id IS NOT NULL THEN 'failed'
+            ELSE verification.state::text END AS "verificationState",
           build.state AS "buildTurnState",build.purpose AS "buildTurnPurpose", session.state AS "implementationState",
           approval.approved_at AS "deliveryApprovedAt", merge.state AS "mergeState",
           promotion.state AS "promotionState"
@@ -696,6 +698,10 @@ export function createChangeController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
+        LEFT JOIN factory.runtime_attempt failed_verification ON failed_verification.id=verification.runtime_attempt_id
+          AND verification.state IN ('pending','runner-starting','running')
+          AND (failed_verification.state IN ('failed','cleanup-failed')
+            OR (failed_verification.state='stopped' AND failed_verification.failure IS NOT NULL))
         LEFT JOIN LATERAL (
           SELECT * FROM factory.merge_operation WHERE change_id=change.id AND commit_sha=verification.commit_sha
           ORDER BY (state<>'failed') DESC,requested_at DESC,id DESC LIMIT 1
@@ -717,7 +723,9 @@ export function createChangeController(
           change.branch_name AS "branchName", change.base_sha AS "baseSha", change.state,
           change.version, change.runtime_attempt_id AS "runtimeAttemptId", change.failure,
           operation.state AS "branchState", operation.observed_head_sha AS "branchHeadSha",
-          attempt.state AS "runtimeState", verification.state AS "verificationState",
+          attempt.state AS "runtimeState",
+          CASE WHEN failed_verification.id IS NOT NULL THEN 'failed'
+            ELSE verification.state::text END AS "verificationState",
           build.state AS "buildTurnState",build.purpose AS "buildTurnPurpose", session.state AS "implementationState",
           approval.approved_at AS "deliveryApprovedAt", merge.state AS "mergeState",
           promotion.state AS "promotionState"
@@ -736,6 +744,10 @@ export function createChangeController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
+        LEFT JOIN factory.runtime_attempt failed_verification ON failed_verification.id=verification.runtime_attempt_id
+          AND verification.state IN ('pending','runner-starting','running')
+          AND (failed_verification.state IN ('failed','cleanup-failed')
+            OR (failed_verification.state='stopped' AND failed_verification.failure IS NOT NULL))
         LEFT JOIN LATERAL (
           SELECT * FROM factory.merge_operation WHERE change_id=change.id AND commit_sha=verification.commit_sha
           ORDER BY (state<>'failed') DESC,requested_at DESC,id DESC LIMIT 1
