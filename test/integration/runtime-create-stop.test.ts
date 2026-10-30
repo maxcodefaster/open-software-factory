@@ -981,11 +981,14 @@ test.each([
       },
       getPod: async () => {
         if (!exists) return null;
-        if (boundary === "terminal worker observation" && ++podReads >= 2) entered.resolve();
+        if (boundary === "terminal worker observation" && ++podReads >= 3) entered.resolve();
         return exists
           ? {
               uid: podUID,
-              phase: boundary === "terminal worker observation" ? "Failed" : "Pending",
+              // Fail after create is confirmed. An already-terminal worker is
+              // now refused before private writes, before this observer exists.
+              phase:
+                boundary === "terminal worker observation" && podReads >= 3 ? "Failed" : "Pending",
               labels: manifest.find((resource) => resource.kind === "Pod")?.metadata.labels ?? {},
               factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
               runtimeHostImage:
