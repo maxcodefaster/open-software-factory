@@ -1,13 +1,14 @@
 import { expect, test } from "bun:test";
 import { ModelExecutionBoundError } from "../models/execution-policy";
 import {
-  wikiGenerationFailureMessage,
+  rejectedWikiStructuredResult,
+  WikiHumanEditConflict,
   WikiSourceEvidenceError,
+  WikiStructuredResultError,
+  WikiTopicCoverageError,
   WikiTopicPlanError,
   WikiTopicQualityError,
-  WikiHumanEditConflict,
-  WikiStructuredResultError,
-  rejectedWikiStructuredResult,
+  wikiGenerationFailureMessage,
 } from "./generation-failure";
 
 test("Wiki diagnostics distinguish known failures without exposing model prose or paths", () => {
@@ -15,6 +16,12 @@ test("Wiki diagnostics distinguish known failures without exposing model prose o
   expect(
     wikiGenerationFailureMessage(new WikiTopicPlanError("private source path"), fallback),
   ).toContain("topic plan");
+  expect(
+    wikiGenerationFailureMessage(
+      new WikiTopicCoverageError(["private source and prose"]),
+      fallback,
+    ),
+  ).toContain("essential reader guidance");
   expect(
     wikiGenerationFailureMessage(
       new WikiTopicQualityError("private-slug", ["private prose"]),
@@ -32,6 +39,7 @@ test("Wiki diagnostics distinguish known failures without exposing model prose o
   );
   for (const cause of [
     new WikiTopicPlanError("private source path"),
+    new WikiTopicCoverageError(["private source and prose"]),
     new WikiTopicQualityError("private-slug", ["private prose"]),
     new WikiSourceEvidenceError(["private/path"]),
     new Error("Authorization: private provider key"),

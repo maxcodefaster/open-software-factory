@@ -78,6 +78,13 @@ proposal before confirming any source changes. Preparation status and
 explicit retries remain available without creating another Project or starting inference on read.
 Developers without management authority can read preparation status without configuration or retry controls.
 
+Wiki topic plans receive a whole-Wiki coverage check before progressive publication, including
+proposed no-op updates. A short overview that defers useful source-supported guides is not their
+replacement. Page options → Update Project Wiki explicitly requests another source-grounded update,
+even after a previous update completed. Saved pages remain readable and human edits retain their
+existing publication protections. Reading the Wiki starts no inference.
+See [revisioned Project Knowledge](../../docs/adr/0004-generated-project-knowledge.md).
+
 Skills are an instance library with personal, Project and Factory ownership. Personal libraries span Projects,
 but personal activation choices belong to a particular Project and work type.
 Skills use portrait book covers in the gallery and detail view. The MCP library shares the ownership

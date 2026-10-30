@@ -416,6 +416,24 @@ export function KnowledgeWorkspace(props: {
             onMove={props.onMove}
             onLoadDocuments={props.onLoadDocuments}
           />
+        </aside>
+        <WikiNavigationResize projectID={props.projectID} workspace={() => workspace} />
+        <Show when={searchOpen()}>
+          <WikiSearch
+            query={props.searchQuery}
+            results={props.searchResults}
+            canDevelop={props.canDevelop}
+            onSearch={props.onSearch}
+            onClose={() => setSearchOpen(false)}
+            onSelect={(result) => {
+              if (result.kind === "page") props.onSelectPage(result.id);
+              else if (props.canDevelop) props.onOpenDocument(result.path);
+              setSearchOpen(false);
+            }}
+          />
+        </Show>
+
+        <main class="knowledge-content">
           <Show when={["pending", "running", "failed"].includes(props.generation?.state ?? "")}>
             <div class="knowledge-generation">
               <Show when={["pending", "running"].includes(props.generation?.state ?? "")}>
@@ -449,24 +467,6 @@ export function KnowledgeWorkspace(props: {
               </Show>
             </div>
           </Show>
-        </aside>
-        <WikiNavigationResize projectID={props.projectID} workspace={() => workspace} />
-        <Show when={searchOpen()}>
-          <WikiSearch
-            query={props.searchQuery}
-            results={props.searchResults}
-            canDevelop={props.canDevelop}
-            onSearch={props.onSearch}
-            onClose={() => setSearchOpen(false)}
-            onSelect={(result) => {
-              if (result.kind === "page") props.onSelectPage(result.id);
-              else if (props.canDevelop) props.onOpenDocument(result.path);
-              setSearchOpen(false);
-            }}
-          />
-        </Show>
-
-        <main class="knowledge-content">
           <Show
             when={props.selectedPage || props.openDocument}
             fallback={
@@ -657,6 +657,22 @@ export function KnowledgeWorkspace(props: {
                           >
                             <Icon name="history" />
                             History
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            disabled={
+                              props.pending ||
+                              ["pending", "running"].includes(props.generation?.state ?? "")
+                            }
+                            title="Updates this Project's Wiki from its current source. Keeps saved pages and human edits."
+                            onClick={() => {
+                              setPageMenuOpen(false);
+                              props.onGenerate();
+                            }}
+                          >
+                            <Icon name="refresh" />
+                            Update Project Wiki
                           </button>
                           <Show when={editing()}>
                             <button
