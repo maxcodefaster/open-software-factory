@@ -48,6 +48,13 @@ export const factoryboxWorkerRequest = z
       .min(512 * 1024 ** 2)
       .max(32 * 1024 ** 3)
       .multipleOf(4096),
+    minimumBoundedBytes: z
+      .number()
+      .int()
+      .min(1024 ** 3)
+      .max(32 * 1024 ** 3)
+      .multipleOf(1024 ** 3)
+      .optional(),
     // Leave at least the worker's 12 GiB host reserve + 4 GiB admission headroom.
     claimGiB: z.number().int().min(20).max(1024),
     storageClass: z
@@ -58,7 +65,15 @@ export const factoryboxWorkerRequest = z
   })
   .refine((value) => value.claimGiB * 1024 ** 3 >= value.boundedBytes + 17 * 1024 ** 3, {
     message: "Worker PVC must cover the bounded image, 16 GiB host admission floor and metadata",
-  });
+  })
+  .refine(
+    (value) =>
+      value.minimumBoundedBytes === undefined ||
+      (value.minimumBoundedBytes <= value.boundedBytes && value.boundedBytes % 1024 ** 3 === 0),
+    {
+      message: "Automatic worker capacity requires whole-GiB bounds within the requested maximum",
+    },
+  );
 export type FactoryboxWorkerRequest = z.infer<typeof factoryboxWorkerRequest>;
 
 export const factoryboxWorkerIdentity = z.strictObject({
@@ -72,6 +87,13 @@ export const factoryboxWorkerIdentity = z.strictObject({
   nodeBootID: uid,
   executableSHA256: digest,
   controllerRoot: z.string(),
+  boundedBytes: z
+    .number()
+    .int()
+    .min(1024 ** 3)
+    .max(32 * 1024 ** 3)
+    .multipleOf(1024 ** 3)
+    .optional(),
 });
 export type FactoryboxWorkerIdentity = z.infer<typeof factoryboxWorkerIdentity>;
 
@@ -167,6 +189,9 @@ export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
               "/var/lib/sysbox/fixed-store",
               "--bounded-bytes",
               String(input.boundedBytes),
+              ...(input.minimumBoundedBytes === undefined
+                ? []
+                : ["--bounded-min-bytes", String(input.minimumBoundedBytes)]),
               "--health-listen",
               "0.0.0.0:8081",
             ],
@@ -378,6 +403,13 @@ export async function inspectFactoryboxWorker(
       supervisor_sha256: z.literal(input.executableSHA256),
       supervisor: z.object({ pid: z.literal(1) }),
       ready_at: z.string().min(1),
+      bounded_capacity:
+        input.minimumBoundedBytes === undefined
+          ? z.undefined().optional()
+          : z.strictObject({
+              minimum_bytes: z.literal(input.minimumBoundedBytes),
+              maximum_bytes: z.literal(input.boundedBytes),
+            }),
       lifecycle: z.object({
         root: z.string(),
         manager_root: z.literal(`${storeRoot}/manager`),
@@ -386,7 +418,15 @@ export async function inspectFactoryboxWorker(
           direct_io: z.literal(true),
           image: z.object({
             owner: z.literal(input.storeID),
-            bytes: z.literal(input.boundedBytes),
+            bytes:
+              input.minimumBoundedBytes === undefined
+                ? z.literal(input.boundedBytes)
+                : z
+                    .number()
+                    .int()
+                    .min(input.minimumBoundedBytes)
+                    .max(input.boundedBytes)
+                    .multipleOf(1024 ** 3),
           }),
         }),
       }),
@@ -405,6 +445,11 @@ export async function inspectFactoryboxWorker(
     nodeBootID: node.status.nodeInfo.bootID,
     executableSHA256: status.supervisor_sha256,
     controllerRoot: status.lifecycle.root,
+    ...(input.minimumBoundedBytes === undefined
+      ? {}
+      : {
+          boundedBytes: status.lifecycle.bounded_store.image.bytes,
+        }),
   };
   if (previous && !isDeepStrictEqual(identity, factoryboxWorkerIdentity.parse(previous)))
     throw new Error("Factorybox live identity changed; recovery is a separate explicit operation");

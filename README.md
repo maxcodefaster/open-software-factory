@@ -76,9 +76,12 @@ was recorded and all previous execution is settled. The new admission has its ow
 store; canonical Source, old Pods, stores and Runtime Attempts retain their original identities.
 Opening a Project or reconnecting does not replace a worker. Recovery of an already admitted
 worker remains an operator decision. See [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
-Fresh admissions check actual backing-filesystem availability before native allocation. Insufficient
-space fails explicitly rather than waiting indefinitely. This does not resize a retained worker or
-reclaim unrelated node data.
+Fresh admissions check actual backing-filesystem availability before native allocation. The chart
+defaults to an 8 GiB minimum, 32 GiB maximum and 64 GiB claim. The pinned worker selects a fixed
+size in that range on the actual volume while preserving its native host floor. Factory records the
+selected size in its immutable native identity. The worker must support `bounded-min-bytes` and pass
+its native qualification. Insufficient space fails explicitly rather than waiting indefinitely.
+This does not resize a retained worker or reclaim unrelated node data.
 
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's

@@ -132,6 +132,63 @@ test("worker admission preserves the complete private store and finite worker ce
   ).toThrow();
 });
 
+test("automatic storage freezes the admitted native capacity within the declared range", async () => {
+  const automatic = factoryboxWorkerRequest.parse({
+    ...request,
+    boundedBytes: 32 * 1024 ** 3,
+    minimumBoundedBytes: 8 * 1024 ** 3,
+    claimGiB: 64,
+  });
+  const f = fixture(automatic);
+  expect(f.pod.spec.containers[0].args).toEqual(
+    expect.arrayContaining(["--bounded-min-bytes", String(8 * 1024 ** 3)]),
+  );
+  f.status.lifecycle.bounded_store.image.bytes = 17 * 1024 ** 3;
+  Reflect.set(f.status, "bounded_capacity", {
+    minimum_bytes: 8 * 1024 ** 3,
+    maximum_bytes: 32 * 1024 ** 3,
+  });
+  const identity = await inspectFactoryboxWorker(automatic, undefined, f.run);
+  expect(identity).toMatchObject({ boundedBytes: 17 * 1024 ** 3 });
+  expect(await inspectFactoryboxWorker(automatic, identity, f.run)).toEqual(identity);
+  f.status.lifecycle.bounded_store.image.bytes = 18 * 1024 ** 3;
+  await expect(inspectFactoryboxWorker(automatic, identity, f.run)).rejects.toThrow(
+    "identity changed",
+  );
+});
+
+test("automatic admission refuses unconfirmed ranges and capacities before publishing a worker identity", async () => {
+  const automatic = factoryboxWorkerRequest.parse({
+    ...request,
+    boundedBytes: 32 * 1024 ** 3,
+    minimumBoundedBytes: 8 * 1024 ** 3,
+    claimGiB: 64,
+  });
+  for (const selected of [7 * 1024 ** 3, 33 * 1024 ** 3, 17 * 1024 ** 3 + 1]) {
+    const f = fixture(automatic);
+    Reflect.set(f.status, "bounded_capacity", {
+      minimum_bytes: 8 * 1024 ** 3,
+      maximum_bytes: 32 * 1024 ** 3,
+    });
+    f.status.lifecycle.bounded_store.image.bytes = selected;
+    await expect(inspectFactoryboxWorker(automatic, undefined, f.run)).rejects.toThrow();
+  }
+  const unknown = fixture(automatic);
+  await expect(inspectFactoryboxWorker(automatic, undefined, unknown.run)).rejects.toThrow();
+  Reflect.set(unknown.status, "bounded_capacity", {
+    minimum_bytes: 9 * 1024 ** 3,
+    maximum_bytes: 32 * 1024 ** 3,
+  });
+  await expect(inspectFactoryboxWorker(automatic, undefined, unknown.run)).rejects.toThrow();
+  for (const minimumBoundedBytes of [0, -1, 33 * 1024 ** 3, 8 * 1024 ** 3 + 1]) {
+    expect(() => factoryboxWorkerRequest.parse({ ...automatic, minimumBoundedBytes })).toThrow();
+  }
+  const fixed = fixture();
+  expect(await inspectFactoryboxWorker(request, undefined, fixed.run)).not.toHaveProperty(
+    "boundedBytes",
+  );
+});
+
 test.each([10, 100, 1000, 3000])(
   "worker CPU reservation %im remains separate from its qualified burst ceiling",
   (cpuRequestMilli) => {

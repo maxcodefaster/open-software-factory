@@ -73,8 +73,9 @@ export function factoryboxBuildCandidate(request: BuildRequest, value: unknown) 
       architecture: request.platform.split("/")[1],
       nodeName: request.nodeName,
       kernel: request.kernel,
-      boundedBytes: 8 * 1024 ** 3,
-      claimGiB: 32,
+      boundedBytes: 32 * 1024 ** 3,
+      minimumBoundedBytes: 8 * 1024 ** 3,
+      claimGiB: 64,
     }),
   };
 }

@@ -163,8 +163,11 @@ test("worker storage capacity is explicit before its immutable first admission",
     (resource) =>
       resource.kind === "ConfigMap" && resource.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
   );
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(8 * 1024 ** 3));
-  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("32");
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(32 * 1024 ** 3));
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]).toBe(
+    String(8 * 1024 ** 3),
+  );
+  expect(defaultConfig?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("64");
   const result = await helm([
     "template",
     "portable",
@@ -184,7 +187,24 @@ test("worker storage capacity is explicit before its immutable first admission",
     );
   expect(config?.data?.["FACTORY_FACTORYBOX_BOUNDED_BYTES"]).toBe(String(24 * 1024 ** 3));
   expect(config?.data?.["FACTORY_FACTORYBOX_CLAIM_GIB"]).toBe("48");
+  expect(config?.data?.["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]).toBe(String(8 * 1024 ** 3));
 });
+
+test.each(["0", "7", "8.5", "33"])(
+  "worker rejects an invalid automatic minimum %s",
+  async (minimum) => {
+    const result = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set-string",
+      `factorybox.minimumStoreGiB=${minimum}`,
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("factorybox.minimumStoreGiB");
+  },
+);
 
 test("fresh worker CPU requests are distinct from their qualified burst ceiling", async () => {
   const defaults = (await resources()).find(

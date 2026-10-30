@@ -52,11 +52,25 @@ export const factoryboxRuntimeProfile = z
       .min(8 * 1024 ** 3)
       .max(32 * 1024 ** 3)
       .multipleOf(1024 ** 3),
+    minimumBoundedBytes: z
+      .number()
+      .int()
+      .min(8 * 1024 ** 3)
+      .max(32 * 1024 ** 3)
+      .multipleOf(1024 ** 3)
+      .optional(),
     claimGiB: z.number().int().min(32).max(1024),
   })
   .refine((value) => value.claimGiB * 1024 ** 3 >= value.boundedBytes + 17 * 1024 ** 3, {
     message: "Worker PVC must cover the bounded image, 16 GiB host admission floor and metadata",
-  });
+  })
+  .refine(
+    (value) =>
+      value.minimumBoundedBytes === undefined || value.minimumBoundedBytes <= value.boundedBytes,
+    {
+      message: "Automatic storage minimum cannot exceed the requested maximum",
+    },
+  );
 export type FactoryboxRuntimeProfile = z.infer<typeof factoryboxRuntimeProfile>;
 
 export function configuredFactoryboxRuntimeProfile(
@@ -71,6 +85,11 @@ export function configuredFactoryboxRuntimeProfile(
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
     boundedBytes: Number(environment["FACTORY_FACTORYBOX_BOUNDED_BYTES"] ?? 8 * 1024 ** 3),
+    ...(environment["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"] === undefined
+      ? {}
+      : {
+          minimumBoundedBytes: Number(environment["FACTORY_FACTORYBOX_MINIMUM_BOUNDED_BYTES"]),
+        }),
     claimGiB: Number(environment["FACTORY_FACTORYBOX_CLAIM_GIB"] ?? 32),
   });
 }
@@ -258,7 +277,10 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
                   },
                   env: [
                     ...environment,
-                    { name: "FACTORY_BOUNDED_BYTES", value: String(request.boundedBytes) },
+                    {
+                      name: "FACTORY_BOUNDED_BYTES",
+                      value: String(request.minimumBoundedBytes ?? request.boundedBytes),
+                    },
                   ],
                   volumeMounts: [{ name: "store", mountPath: "/factory-store", readOnly: true }],
                 },

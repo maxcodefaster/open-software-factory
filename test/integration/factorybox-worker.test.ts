@@ -328,6 +328,59 @@ test("concurrent commissions recover once and retain old execution and admission
   }
 }, 30_000);
 
+test("bootstrap recovery commissions the new pinned adaptive profile without changing the original allocation", async () => {
+  const f = await failedBootstrap();
+  try {
+    const [originalRoot] = await f.database.client`SELECT * FROM factory.factorybox_worker`;
+    if (!originalRoot) throw new Error("Missing original allocation");
+    const adaptive = {
+      ...profile,
+      image: `registry.invalid/next-worker@sha256:${"6".repeat(64)}`,
+      executableSHA256: "7".repeat(64),
+      boundedBytes: 32 * 1024 ** 3,
+      minimumBoundedBytes: 8 * 1024 ** 3,
+      claimGiB: 64,
+    };
+    const worker = createFactoryboxWorker(f.database, f.kube.kubernetes, () => adaptive);
+    const recovered = await worker.location(f.database.client, {
+      actorID: f.actorID,
+      requestID: crypto.randomUUID(),
+    });
+    const selected = await retainedFactoryboxProfile(f.database.client);
+    expect(selected).toEqual({ ...adaptive, storageAdmission: 1 });
+    await worker.provision(resources(recovered, runtimeImage, selected), selected, runtimeImage);
+    const allocation = await factoryboxAllocation(f.database.client);
+    if (!allocation.podUID || !allocation.claimUID || !allocation.namespaceUID)
+      throw new Error("Missing adaptive worker identities");
+    const identity = {
+      version: 1 as const,
+      namespaceUID: allocation.namespaceUID,
+      podUID: allocation.podUID,
+      claimUID: allocation.claimUID,
+      storeID: allocation.admissionID.replaceAll("-", ""),
+      epoch: "e".repeat(32),
+      bootID: "original-boot",
+      nodeBootID: "original-node-boot",
+      executableSHA256: adaptive.executableSHA256,
+      controllerRoot: "/factorybox",
+      boundedBytes: 17 * 1024 ** 3,
+    };
+    await expect(
+      rememberFactoryboxIdentity(f.database.client, allocation.id, {
+        ...identity,
+        boundedBytes: 7 * 1024 ** 3,
+      }),
+    ).rejects.toThrow("differs");
+    await rememberFactoryboxIdentity(f.database.client, allocation.id, identity);
+    expect((await factoryboxAllocation(f.database.client)).identity).toEqual(identity);
+    expect([...(await f.database.client`SELECT * FROM factory.factorybox_worker`)]).toEqual([
+      originalRoot,
+    ]);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
 test("an explicit fresh execution recovers failed bootstrap with new admission identities and the same canonical Source", async () => {
   const host = await factoryProcess();
   const database = host.connect();
