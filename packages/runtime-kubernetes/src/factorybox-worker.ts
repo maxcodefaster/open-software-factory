@@ -14,8 +14,31 @@ const uid = z.string().min(1).max(128);
 const storeRoot = "/var/lib/sysbox/fixed-store/data/store";
 const binary = "/opt/factorybox/factorybox";
 export const factoryboxCPURequestMilli = z.number().int().min(10).max(3000);
+export const factoryboxWorkerResources = z.strictObject({
+  cpuMilli: z.number().int().positive().safe(),
+  memoryMiB: z
+    .number()
+    .int()
+    .positive()
+    .safe()
+    .max(Math.floor(Number.MAX_SAFE_INTEGER / 1024 ** 2)),
+});
 export function factoryboxCPUQuantity(milli: number) {
   return milli % 1000 === 0 ? String(milli / 1000) : `${milli}m`;
+}
+
+function factoryboxMemoryQuantity(mib: number) {
+  // Match Kubernetes Quantity serialization. Immutable declaration checks
+  // must not mistake the API's 12288Mi -> 12Gi normalization for drift.
+  for (const [power, unit] of [
+    [3, "Pi"],
+    [2, "Ti"],
+    [1, "Gi"],
+  ] as const) {
+    const divisor = 1024 ** power;
+    if (mib % divisor === 0) return `${mib / divisor}${unit}`;
+  }
+  return `${mib}Mi`;
 }
 
 // This is an administrative admission lane. Product Workspace source remains
@@ -32,6 +55,8 @@ export const factoryboxWorkerRequest = z
     // Absent means the original fully reserved profile. Never rewrite a
     // retained worker's scheduling inputs during an application upgrade.
     cpuRequestMilli: factoryboxCPURequestMilli.optional(),
+    // Absent retains the original 3 CPU / 3 GiB worker declaration.
+    resources: factoryboxWorkerResources.optional(),
     architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
       .string()
@@ -62,6 +87,9 @@ export const factoryboxWorkerRequest = z
       .max(253)
       .regex(/^[a-z0-9][a-z0-9.-]*$/)
       .optional(),
+  })
+  .refine((value) => (value.cpuRequestMilli ?? 3000) <= (value.resources?.cpuMilli ?? 3000), {
+    message: "Worker CPU scheduling reserve exceeds its selected CPU ceiling",
   })
   .refine((value) => value.claimGiB * 1024 ** 3 >= value.boundedBytes + 17 * 1024 ** 3, {
     message: "Worker PVC must cover the bounded image, 16 GiB host admission floor and metadata",
@@ -150,6 +178,7 @@ export function factoryboxOperationFailure(action: FactoryboxOperation["action"]
 
 export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
   const input = factoryboxWorkerRequest.parse(request);
+  const memory = input.resources ? factoryboxMemoryQuantity(input.resources.memoryMiB) : "3Gi";
   const labels = {
     "app.kubernetes.io/managed-by": "open-software-factory",
     "factory.dev/factorybox-store": input.storeID,
@@ -213,9 +242,12 @@ export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
                   input.cpuRequestMilli === undefined
                     ? "3"
                     : factoryboxCPUQuantity(input.cpuRequestMilli),
-                memory: "3Gi",
+                memory,
               },
-              limits: { cpu: "3", memory: "3Gi" },
+              limits: {
+                cpu: factoryboxCPUQuantity(input.resources?.cpuMilli ?? 3000),
+                memory,
+              },
             },
             env: [
               { name: "GOMAXPROCS", value: "2" },

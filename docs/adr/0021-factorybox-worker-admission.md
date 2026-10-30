@@ -9,15 +9,17 @@ Kubernetes objects and the current installation connection. Keep Factory as the 
 control plane and preserve its existing execution-reserve coordination.
 
 One worker and complete persistent store belong to one customer or trust domain. The worker runs
-as PID 1 with a 3 CPU / 3 GiB ceiling. Native HTTP readiness avoids exec tasks during initial
+as PID 1. The original 3 CPU / 3 GiB aggregate ceiling is superseded for fresh admissions by
+[ADR 0030](0030-select-aggregate-worker-resources-before-admission.md); retained workers and native
+qualification fixtures keep their original declarations. Native HTTP readiness avoids exec tasks during initial
 cgroup delegation. Every administrative mutation verifies recorded Kubernetes resource UIDs and
 pins the live store/epoch inside the runtime CLI. Persist exact intent before the first external
 command. An uncertain operation cannot create a replacement identity or silently retry.
 
 CPU scheduling requests are distinct from that qualified ceiling. Fresh product workers
-reserve 100 millicores by default and can use spare node CPU up to the existing three-core
+reserve 100 millicores by default and can use spare node CPU up to the selected aggregate
 limit. Kubernetes schedules against the reserve and shares available CPU dynamically; the
-reserve does not promise three dedicated cores or change the memory ceiling. The operator
+reserve does not promise dedicated cores or change the memory ceiling. The operator
 can select a whole-millicore reserve between 10 and 3000 before first admission. Product init
 containers request no more CPU than that reserve, so a completed image exporter does not
 silently retain a larger scheduling floor.

@@ -287,7 +287,12 @@ contract used by Workspace Start and the existing execution reserve. The consume
 lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execution.md).
 
 Each immutable worker profile includes its explicit `arm64` or `amd64` architecture, exact image
-and executable, node and kernel. The same Factory commands render and check either architecture;
+and executable, node and kernel. Fresh automatic admissions also retain the aggregate CPU and
+memory budget selected from that node's schedulable resources before any worker create.
+Later samples never resize an admitted worker. The original profiles without that budget keep
+their exact 3 CPU / 3 GiB declaration. See
+[resource admission](adr/0030-select-aggregate-worker-resources-before-admission.md).
+The same Factory commands render and check either architecture;
 the control-plane host does not select the worker's CPU. Node mismatch fails before the first
 worker exec. This adapter contract is not native runtime qualification; the exact Linux profile
 still needs the standalone Factorybox qualification gates for its architecture.

@@ -14,6 +14,7 @@ import {
   factoryboxCPUQuantity,
   factoryboxCPURequestMilli,
   factoryboxWorkerDeclaration,
+  factoryboxWorkerResources,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -38,6 +39,12 @@ export const factoryboxRuntimeProfile = z
     image: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9.:/-]*@sha256:[a-f0-9]{64}$/),
     executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
     cpuRequestMilli: factoryboxCPURequestMilli.optional(),
+    resources: factoryboxWorkerResources.optional(),
+    resourceAdmission: z
+      .strictObject({
+        memoryHeadroomMiB: z.number().int().nonnegative().safe(),
+      })
+      .optional(),
     storageAdmission: z.literal(1).optional(),
     architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
@@ -63,6 +70,9 @@ export const factoryboxRuntimeProfile = z
       .optional(),
     claimGiB: z.number().int().min(32).max(1024),
   })
+  .refine((value) => (value.cpuRequestMilli ?? 3000) <= (value.resources?.cpuMilli ?? 3000), {
+    message: "Worker CPU scheduling reserve exceeds its selected CPU ceiling",
+  })
   .refine((value) => value.claimGiB * 1024 ** 3 >= value.boundedBytes + 17 * 1024 ** 3, {
     message: "Worker PVC must cover the bounded image, 16 GiB host admission floor and metadata",
   })
@@ -82,6 +92,13 @@ export function configuredFactoryboxRuntimeProfile(
     image: environment["FACTORY_FACTORYBOX_WORKER_IMAGE"],
     executableSHA256: environment["FACTORY_FACTORYBOX_EXECUTABLE_SHA256"],
     cpuRequestMilli: Number(environment["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"] ?? 100),
+    ...(environment["FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB"] === undefined
+      ? {}
+      : {
+          resourceAdmission: {
+            memoryHeadroomMiB: Number(environment["FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB"]),
+          },
+        }),
     storageAdmission: 1,
     architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
@@ -152,6 +169,7 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   // The concrete consumer declaration owns this pre-admission init stage.
   // It is not a new option on the pinned standalone worker CLI.
   delete nativeProfile.storageAdmission;
+  delete nativeProfile.resourceAdmission;
   factoryboxRuntimeImage.parse(input.runtimeHostImage);
   if (input.workerRuntimeHostImage) factoryboxRuntimeImage.parse(input.workerRuntimeHostImage);
   const identifier = (value: string) =>
@@ -179,6 +197,8 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
 }
 
 export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
+  if (input.profile.resourceAdmission && !input.profile.resources)
+    throw new Error("Worker resources must be selected and retained before rendering execution");
   const request = factoryboxRuntimeRequest(input);
   const resources = renderFactoryboxWorker(request);
   const worker = resources[2].spec.containers[0];

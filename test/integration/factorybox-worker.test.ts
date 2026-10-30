@@ -37,6 +37,128 @@ const manifest = z
 const runtimeImage = `registry.invalid/runtime@sha256:${"a".repeat(64)}`;
 const key = (kind: string, name: string) => `${kind.toLowerCase()}/${name}`;
 
+test("node-derived worker budget is retained before create and never reselected for an admitted worker", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const kube = infrastructure();
+  const worker = createFactoryboxWorker(database, kube.kubernetes);
+  const configured: FactoryboxRuntimeProfile = {
+    ...profile,
+    resourceAdmission: { memoryHeadroomMiB: 2048 },
+  };
+  let observations = 0;
+  try {
+    const selected = await retainedFactoryboxProfile(
+      database.client,
+      configured,
+      runtimeImage,
+      async (input) => {
+        observations++;
+        expect(kube.writes).toHaveLength(0);
+        return { ...input, resources: { cpuMilli: 8000, memoryMiB: 12288 } };
+      },
+    );
+    const before = await factoryboxAllocation(database.client);
+    expect(before.profile).toEqual(selected);
+    expect(before.runtimeHostImage).toBe(runtimeImage);
+    expect(before.attempted).toBe(false);
+    expect(before.podUID).toBeNull();
+    expect(selected.resources).toEqual({ cpuMilli: 8000, memoryMiB: 12288 });
+    const location = await worker.location();
+    const laterConsumer = `registry.invalid/runtime@sha256:${"c".repeat(64)}`;
+    await worker.provision(resources(location, laterConsumer, selected), selected, laterConsumer);
+    const after = await factoryboxAllocation(database.client);
+    expect(after.attempted).toBe(true);
+    expect(after.profile).toEqual(selected);
+    expect(after.id).toBe(before.id);
+    expect(after.admissionID).toBe(before.admissionID);
+    expect(after.runtimeHostImage).toBe(runtimeImage);
+    const [original] = await database.client<Array<{ image: string }>>`
+      SELECT runtime_host_image AS image FROM factory.factorybox_worker WHERE id=${after.id}`;
+    expect(original?.image).toBe(runtimeImage);
+    expect(
+      await retainedFactoryboxProfile(
+        database.client,
+        { ...configured, resourceAdmission: { memoryHeadroomMiB: 4096 } },
+        runtimeImage,
+        async () => {
+          throw new Error("An admitted budget must not depend on later node availability");
+        },
+      ),
+    ).toEqual(selected);
+    expect(observations).toBe(1);
+    await expect(
+      worker.provision(
+        resources(location, runtimeImage, selected),
+        { ...selected, resources: { cpuMilli: 8000, memoryMiB: 16384 } },
+        runtimeImage,
+      ),
+    ).rejects.toThrow("already pinned");
+    const final = await factoryboxAllocation(database.client);
+    expect(final.podUID).toBe(after.podUID);
+    expect(final.claimUID).toBe(after.claimUID);
+    expect(final.profile).toEqual(selected);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+});
+
+test("resource observation neither commissions a worker nor pins a budget without execution", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const configured: FactoryboxRuntimeProfile = {
+    ...profile,
+    resourceAdmission: { memoryHeadroomMiB: 2048 },
+  };
+  try {
+    expect(await retainedFactoryboxProfile(database.client, configured)).toEqual(configured);
+    expect(await database.client`SELECT id FROM factory.factorybox_worker`).toHaveLength(0);
+    await expect(
+      retainedFactoryboxProfile(database.client, configured, runtimeImage, async () => {
+        throw new Error("Owned node observation unavailable");
+      }),
+    ).rejects.toThrow("observation unavailable");
+    const allocation = await factoryboxAllocation(database.client);
+    expect(allocation.profile).toBeNull();
+    expect(allocation.runtimeHostImage).toBeNull();
+    expect(allocation.attempted).toBe(false);
+    expect(allocation.podUID).toBeNull();
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+});
+
+test("concurrent first executions share one selected resource budget and bootstrap image", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const configured: FactoryboxRuntimeProfile = {
+    ...profile,
+    resourceAdmission: { memoryHeadroomMiB: 2048 },
+  };
+  const otherImage = `registry.invalid/runtime@sha256:${"b".repeat(64)}`;
+  try {
+    const selections = await Promise.all(
+      [runtimeImage, otherImage].map((image, index) =>
+        retainedFactoryboxProfile(database.client, configured, image, async (input) => ({
+          ...input,
+          resources: { cpuMilli: 8000, memoryMiB: 12288 + index * 1024 },
+        })),
+      ),
+    );
+    expect(selections[0]).toEqual(selections[1]);
+    const allocation = await factoryboxAllocation(database.client);
+    expect(allocation.profile).toEqual(selections[0]);
+    if (!allocation.runtimeHostImage) throw new Error("Missing retained worker bootstrap image");
+    expect([runtimeImage, otherImage]).toContain(allocation.runtimeHostImage);
+    expect(allocation.attempted).toBe(false);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+});
+
 function infrastructure() {
   const objects = new Map<string, z.infer<typeof manifest>>();
   const writes: Array<{ action: string; kind: string; name: string }> = [];

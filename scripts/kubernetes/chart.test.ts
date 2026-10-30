@@ -211,6 +211,7 @@ test("fresh worker CPU requests are distinct from their qualified burst ceiling"
     (item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"],
   );
   expect(defaults?.data?.["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"]).toBe("100");
+  expect(defaults?.data?.["FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB"]).toBe("2048");
   const result = await helm([
     "template",
     "portable",
@@ -225,6 +226,44 @@ test("fresh worker CPU requests are distinct from their qualified burst ceiling"
     .find((item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]);
   expect(config?.data?.["FACTORY_FACTORYBOX_CPU_REQUEST_MILLI"]).toBe("250");
 });
+
+test.each(["-1", "1.5", "invalid"])(
+  "invalid worker memory headroom %s is refused",
+  async (value) => {
+    const result = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set-string",
+      `factorybox.memoryHeadroomMiB=${value}`,
+    ]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("factorybox.memoryHeadroomMiB");
+  },
+);
+
+test.each([
+  ["0", "0"],
+  ["null", "2048"],
+] as const)(
+  "worker memory headroom %s preserves explicit zero or an older values document's default",
+  async (value, expected) => {
+    const result = await helm([
+      "template",
+      "portable",
+      chart,
+      ...localValues,
+      "--set",
+      `factorybox.memoryHeadroomMiB=${value}`,
+    ]);
+    expect(result.exitCode).toBe(0);
+    const config = parseAllDocuments(result.stdout)
+      .map((document) => document.toJSON() as Resource)
+      .find((item) => item.kind === "ConfigMap" && item.data?.["FACTORY_FACTORYBOX_ARCHITECTURE"]);
+    expect(config?.data?.["FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB"]).toBe(expected);
+  },
+);
 
 test.each(["0", "9", "100.5", "3001", "invalid"])(
   "invalid worker CPU request %s is refused before installation",

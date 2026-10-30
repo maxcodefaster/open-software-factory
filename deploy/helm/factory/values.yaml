@@ -17,9 +17,12 @@ factorybox:
   architecture: ""
   nodeName: ""
   kernel: ""
-  # Scheduling reserve, not a fixed CPU allocation. Kubernetes shares spare CPU
-  # up to the qualified 3-core ceiling. Retained profiles are not resized.
+  # Scheduling reserve, not a fixed CPU allocation. Fresh workers select their
+  # aggregate ceiling from the admitted node; retained profiles are not resized.
   cpuRequestMilli: 100
+  # Subtract other Pods' scheduling reservations and leave this additional
+  # memory for helpers and future Source/IDE startup before admitting a worker.
+  memoryHeadroomMiB: 2048
   # A fresh worker selects within these bounds from actual backing capacity.
   # The admitted size and existing worker profiles remain immutable.
   storeGiB: 32

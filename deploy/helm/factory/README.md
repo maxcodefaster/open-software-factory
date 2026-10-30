@@ -72,13 +72,21 @@ host floor and existing 4 GiB operating write reserve. Factory retains the actua
 installation setting. Existing admitted profiles and stores are never resized by an upgrade.
 `factorybox.claimGiB` defaults to 64 and must cover the maximum bounded image plus 17 GiB
 for the host admission floor and metadata. For example, a 24 GiB bounded image needs
-at least a 41 GiB claim; a 48 GiB claim leaves additional room. The worker's
-3 CPU / 3 GiB limits do not change. Canonical Project source remains on its separate
+at least a 41 GiB claim; a 48 GiB claim leaves additional room. Canonical Project source remains on its separate
 claim; source files are not moved into the bounded image.
 Changing these values is not an in-place storage expansion. An already observed
 worker refuses a different profile and retains its original objects and data.
 Larger storage does not qualify a new node, kernel or storage backend; native
 admission and lifecycle verification still apply.
+
+Fresh worker resource admission checks the configured node's readiness and allocatable resources
+and its assigned Pods before selecting a finite aggregate budget. The worker reserves the remaining
+memory after other scheduling requests and `factorybox.memoryHeadroomMiB`, 2048 MiB by default.
+Its CPU ceiling follows node allocatable CPU; `factorybox.cpuRequestMilli` remains the smaller
+scheduling reserve. The selected profile and bootstrap image are retained before worker creation.
+The pinned native binary must admit finite aggregate budgets. Existing workers, including the
+original 3 CPU / 3 GiB profile, never resize during an upgrade. Native qualification fixtures keep
+their original ceilings; a different worker budget still needs native deployment evidence.
 
 Factory bootstraps the retained database, encrypted OpenBao and its scoped credentials, Forgejo
 service identities and the native OIDC connection. It checks actual writable runtime storage.

@@ -2,8 +2,8 @@ import type { TransactionSql } from "postgres";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   type FactoryboxRuntimeProfile,
-  factoryboxRuntimeProfile,
   factoryboxRuntimeImage,
+  factoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { freezeRuntimeEnvironment } from "../environments/runtime";
 import { retainedFactoryboxProfile } from "./worker";
@@ -75,7 +75,7 @@ export async function freezeRuntimeArtifacts(
   >`SELECT factorybox_profile AS profile FROM factory.execution_slot WHERE assigned_attempt_id=${attemptID}`;
   const profile = slot
     ? factoryboxRuntimeProfile.parse(slot.profile)
-    : await retainedFactoryboxProfile(sql, configuration.factoryboxProfile);
+    : await retainedFactoryboxProfile(sql, configuration.factoryboxProfile, runtimeHostImage);
   await sql`
     INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image,factorybox_profile)
     VALUES(${attemptID},${attempt.role},${runtimeHostImage},${browserToolsImage},${JSON.stringify(profile)}::text::jsonb)

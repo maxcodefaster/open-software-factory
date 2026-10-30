@@ -11,9 +11,11 @@ import {
   factoryboxLocation,
   factoryboxSharedLabels,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
+import { admitFactoryboxWorkerResources } from "../../../../packages/runtime-kubernetes/src/factorybox-resource-admission";
 import {
   configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeProfile,
+  factoryboxRuntimeImage,
   factoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
   factoryboxSandboxID,
@@ -95,14 +97,36 @@ async function read(sql: SQL) {
 export async function retainedFactoryboxProfile(
   sql: SQL,
   configured?: FactoryboxRuntimeProfile,
+  bootstrapImage?: string,
+  admitResources = admitFactoryboxWorkerResources,
 ): Promise<FactoryboxRuntimeProfile> {
   const [worker] = await sql<Array<{ profile: unknown | null }>>`
     SELECT admission.profile FROM factory.factorybox_worker worker
     LEFT JOIN factory.factorybox_worker_admission admission
       ON admission.worker_id=worker.id AND admission.retired_at IS NULL WHERE worker.singleton`;
-  return factoryboxRuntimeProfile.parse(
-    worker?.profile ?? configured ?? configuredFactoryboxRuntimeProfile(),
+  if (worker?.profile) return factoryboxRuntimeProfile.parse(worker.profile);
+  const selected = factoryboxRuntimeProfile.parse(
+    configured ?? configuredFactoryboxRuntimeProfile(),
   );
+  // Pool observation does not commission execution or pin a budget. A fresh
+  // execution supplies its exact bootstrap image, retained with the profile.
+  if (!selected.resourceAdmission || !bootstrapImage) return selected;
+  factoryboxRuntimeImage.parse(bootstrapImage);
+  const allocation = await factoryboxAllocation(sql, selected.nodeName);
+  // Another commissioner may have selected a budget while we allocated Source.
+  if (allocation.profile) return factoryboxRuntimeProfile.parse(allocation.profile);
+  const admitted = factoryboxRuntimeProfile.parse(await admitResources(selected));
+  if (!admitted.resources)
+    throw new Error("Worker resource admission did not select a finite budget");
+  const [retained] = await sql<Array<{ profile: unknown }>>`
+    UPDATE factory.factorybox_worker_admission
+    SET profile=coalesce(profile,${JSON.stringify(admitted)}::text::jsonb),
+      runtime_host_image=coalesce(runtime_host_image,${bootstrapImage})
+    WHERE id=${allocation.admissionID} AND retired_at IS NULL
+      AND (profile IS NOT NULL OR NOT create_attempted)
+    RETURNING profile`;
+  if (!retained) throw new Error("Worker admission changed before resource selection was retained");
+  return factoryboxRuntimeProfile.parse(retained.profile);
 }
 
 export async function factoryboxAllocation(sql: SQL, nodeName?: string | null) {
@@ -149,10 +173,11 @@ async function bindProfile(sql: SQL, profileInput: unknown, image: string) {
     throw new Error(
       "Factory worker profile is already pinned; refusing a different worker profile",
     );
+  const bound = await read(sql);
   if (worker.admissionID === worker.id)
     await sql`UPDATE factory.factorybox_worker
       SET profile=coalesce(profile,${JSON.stringify(profile)}::text::jsonb),
-        runtime_host_image=coalesce(runtime_host_image,${image}) WHERE id=${worker.id}`;
+        runtime_host_image=coalesce(runtime_host_image,${bound.runtimeHostImage}) WHERE id=${worker.id}`;
   return read(sql);
 }
 
@@ -226,7 +251,9 @@ export function createFactoryboxWorker(
             );
           if (pod.phase !== "Failed" && pod.phase !== "Succeeded") return current;
           const profile = factoryboxRuntimeProfile.parse(current.profile);
-          const selected = factoryboxRuntimeProfile.parse(nextProfile?.() ?? profile);
+          const selected = factoryboxRuntimeProfile.parse(
+            await admitFactoryboxWorkerResources(nextProfile?.() ?? profile),
+          );
           if (selected.nodeName !== current.nodeName)
             throw new Error("Bootstrap recovery cannot move canonical Source to another node");
           if (!current.runtimeHostImage)
@@ -417,6 +444,7 @@ export function createFactoryboxWorker(
             );
           const nativeProfile = { ...profile };
           delete nativeProfile.storageAdmission;
+          delete nativeProfile.resourceAdmission;
           declaration = factoryboxWorkerDeclaration.parse(
             await observeOriginalFactoryboxDeclaration(
               factoryboxWorkerRequest.parse({
