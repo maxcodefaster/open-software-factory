@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import type { runCommand } from "./command";
 import {
   ensureFactoryboxConsumer,
   factoryboxConsumerIntent,
@@ -7,7 +8,6 @@ import {
 import { factoryboxLocation } from "./factorybox-location";
 import { type FactoryboxRuntimeInput, renderFactoryboxRuntime } from "./factorybox-runtime";
 import type { FactoryboxWorkerIdentity } from "./factorybox-worker";
-import type { runCommand } from "./command";
 
 const workerID = "01234567-89ab-4def-8123-456789abcdef";
 const bootstrap = `registry.invalid/runtime@sha256:${"a".repeat(64)}`;
@@ -132,6 +132,7 @@ test("consumer selection changes no original Pod declaration, mounts no Source o
     requests: { cpu: "500m", memory: "256Mi" },
     limits: { cpu: "500m", memory: "256Mi" },
   });
+  expect(declaration.spec.containers[0]?.command[2]).toContain("fdatasyncSync(descriptor)");
   expect(declaration.spec.automountServiceAccountToken).toBe(false);
   expect(JSON.stringify(declaration)).not.toContain("runtime-data");
   expect(JSON.stringify(declaration)).not.toContain("Secret");

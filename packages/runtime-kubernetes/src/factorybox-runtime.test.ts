@@ -48,6 +48,26 @@ test.each([
   expect(script).not.toContain("dockerd-entrypoint");
 });
 
+test.each(["arm64", "amd64"] as const)(
+  "%s bootstrap export bounds dirty writeback without increasing its helper or worker budget",
+  (architecture) => {
+    const { pod } = renderFactoryboxRuntime({
+      ...input,
+      profile: { ...input.profile, architecture, cpuRequestMilli: 100 },
+    });
+    const exporter = fixtureValue(
+      pod.spec.initContainers.find((container) => container.name === "runtime-image"),
+      "runtime image exporter",
+    );
+    const worker = fixtureValue(pod.spec.containers[0], "worker");
+    expect(worker.resources.limits.memory).toBe("3Gi");
+    expect(exporter.resources.requests.memory).toBe("256Mi");
+    expect(exporter.resources.limits.memory).toBe("256Mi");
+    expect(exporter.command[2]).toContain("fdatasyncSync(descriptor)");
+    expect(exporter.command[2]).toContain("dirty >= 8 * 1024 * 1024");
+  },
+);
+
 test("a successor uses its new native store and Pod but retains the canonical Source trust domain", () => {
   const admissionID = "17164fe7-7c86-451e-ae6e-0b0fe6b8bf5e";
   const successor = {
