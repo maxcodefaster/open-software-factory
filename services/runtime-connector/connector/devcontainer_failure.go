@@ -40,11 +40,12 @@ func (output *devcontainerFailureOutput) String() string {
 }
 
 var diagnosticCredentials = regexp.MustCompile(`(?i)(https?://)[^\s/@]+@`)
-var diagnosticAuthorization = regexp.MustCompile(`(?i)(authorization:\s*(?:bearer|basic)\s+)\S+`)
+var diagnosticAuthorization = regexp.MustCompile(`(?i)(authorization["']?\s*:\s*["']?(?:bearer|basic)\s+)[^\s"']+`)
 var diagnosticToken = regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,})\b`)
-var diagnosticAssignment = regexp.MustCompile(`\b[A-Z_]*(?:TOKEN|PASSWORD|SECRET|API_KEY)[A-Z_]*=(?:"[^"]*"|'[^']*'|[^\s;]+)`)
+var diagnosticAssignment = regexp.MustCompile(`(?i)\b[A-Z_]*(?:TOKEN|PASSWORD|SECRET|API_KEY)[A-Z_]*=(?:"[^"]*"|'[^']*'|[^\s;]+)`)
 var diagnosticTerminalEscape = regexp.MustCompile(`(?:\x1b\[|\x{009b})[0-?]*[ -/]*[@-~]`)
 var diagnosticHTTPFailure = regexp.MustCompile(`(?i)\bHTTP[ /][45][0-9]{2}\b`)
+var diagnosticJSONCredential = regexp.MustCompile(`(?i)("[^"\\]*(?:token|password|secret|credential|api[_-]?key|cookie|authorization)[^"\\]*"\s*:\s*")((?:\\.|[^"\\])*)(")`)
 
 func devcontainerFailureLines(text string) []string {
 	var failures []string
@@ -137,7 +138,15 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 		details = tail(fallback)
 	}
 	details = append(details, summary...)
-	text := strings.Join(details, " ")
+	return redactRuntimeDiagnostic(strings.Join(details, " "), assignment)
+}
+
+func redactRuntimeDiagnostic(text string, assignment Assignment) string {
+	return compactRuntimeDiagnostic(maskRuntimeDiagnostic(text, assignment))
+}
+
+func maskRuntimeDiagnostic(text string, assignment Assignment) string {
+	text = diagnosticTerminalEscape.ReplaceAllString(text, "")
 	// Process-local credentials, including the native Agent password, must not
 	// escape into a retained failure through an App's startup output.
 	var values []string
@@ -149,21 +158,40 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 			values = append(values, value)
 		}
 	}
+	// A rolling tail or a selected error line can begin inside a multiline
+	// secret. Retain no complete secret line merely because its prefix was
+	// outside the bounded capture.
+	for _, value := range slices.Clone(values) {
+		if strings.ContainsAny(value, "\r\n") {
+			values = append(values, strings.FieldsFunc(value, func(r rune) bool {
+				return r == '\r' || r == '\n'
+			})...)
+		}
+	}
 	slices.SortFunc(values, func(a, b string) int { return len(b) - len(a) })
 	for _, value := range values {
 		if value == "" {
 			continue
 		}
-		for _, form := range []string{value, url.QueryEscape(value), url.PathEscape(value)} {
+		encoded, _ := json.Marshal(value)
+		// Native App loggers can emit JSON rather than the CLI's text events.
+		// Mask the escaped value before shortening that raw diagnostic too.
+		jsonValue := string(encoded[1 : len(encoded)-1])
+		for _, form := range []string{value, url.QueryEscape(value), url.PathEscape(value), jsonValue} {
 			text = strings.ReplaceAll(text, form, "[REDACTED]")
 		}
 	}
 	text = diagnosticCredentials.ReplaceAllString(text, "${1}[REDACTED]@")
 	text = diagnosticAuthorization.ReplaceAllString(text, "${1}[REDACTED]")
 	text = diagnosticToken.ReplaceAllString(text, "[REDACTED]")
+	text = diagnosticJSONCredential.ReplaceAllString(text, "${1}[REDACTED]${3}")
 	text = diagnosticAssignment.ReplaceAllStringFunc(text, func(value string) string {
 		return strings.SplitN(value, "=", 2)[0] + "=[REDACTED]"
 	})
+	return text
+}
+
+func compactRuntimeDiagnostic(text string) string {
 	text = strings.Map(func(value rune) rune {
 		if unicode.IsControl(value) {
 			return ' '

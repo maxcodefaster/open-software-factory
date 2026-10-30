@@ -204,11 +204,17 @@ test("Main Preview errors wrap on desktop, narrow and synthetic touch layouts", 
   const touch = await browser.newContext({
     viewport: { width: 390, height: 844 },
     hasTouch: true,
+    isMobile: true,
     reducedMotion: "reduce",
   });
   try {
     const phone = await touch.newPage();
     await phone.goto(`${origin}/runtime-attachment.html?failed=1`);
+    expect(
+      await phone
+        .getByRole("button", { name: "Retry Main Preview", exact: true })
+        .evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
     await phone.screenshot({ path: `${evidence}/main-error-touch.png`, fullPage: true });
     await phone.getByRole("button", { name: "Retry Main Preview", exact: true }).tap();
     await expect(phone.getByText("Scripted Main Preview starts: 1", { exact: true })).toBeVisible();

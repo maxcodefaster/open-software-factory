@@ -118,7 +118,22 @@ func (manager *processManager) startupDiagnostic(name string, assignment Assignm
 		data: retained, truncated: len(retained) >= 32<<10,
 	}).String()
 	manager.mutex.Unlock()
-	return devcontainerFailureDiagnostic("", output, assignment)
+	if detail := devcontainerFailureDiagnostic("", output, assignment); detail != "" {
+		return detail
+	}
+	// A nonzero process or failed health probe is already authoritative.
+	// CLI badges, version explanations and structured App logs do not need an
+	// English "error" keyword to be useful. Label plain output as context.
+	// Mask the complete captured output before choosing lines or trimming.
+	// Either operation could otherwise remove part of a multiline credential.
+	lines := strings.Split(strings.TrimSpace(maskRuntimeDiagnostic(output, assignment)), "\n")
+	if len(lines) > 4 {
+		lines = lines[len(lines)-4:]
+	}
+	if detail := compactRuntimeDiagnostic(strings.Join(lines, " ")); detail != "" {
+		return "last App output: " + detail
+	}
+	return ""
 }
 
 func (manager *processManager) action(name string, action string) error {
