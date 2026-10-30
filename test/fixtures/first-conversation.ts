@@ -1,5 +1,5 @@
-import { strict as assert } from "node:assert";
 import { mock } from "bun:test";
+import { strict as assert } from "node:assert";
 import { createAgentCommandIds } from "../../apps/factory/src/agent-command-ids";
 import {
   type ConversationView,
@@ -50,6 +50,20 @@ let commissions = 0;
 let refreshes = 0;
 let pendingAtAdmission = false;
 let sentContext: string | undefined;
+const recoveryNotices = {
+  "recovered-failed":
+    "Your message was saved, but the Project Agent could not finish its response.",
+  "recovered-stopped":
+    "Your message was saved. The Project Agent was stopped before completing its response.",
+  "recovered-uncertain":
+    "Your message was saved. The response outcome is unconfirmed; no request was replayed.",
+  "recovered-running":
+    "Your message was saved. The Project Agent is still working; no request was replayed.",
+  "recovered-missing":
+    "Your message was saved, but its response could not be confirmed. No request was replayed.",
+  "recovered-other":
+    "Your message was saved, but its response could not be confirmed. No request was replayed.",
+};
 function switchContext() {
   current = { ...initial, contextId: otherContextID };
   key = `assistant:${projectID}:${ticketID}:${otherContextID}`;
@@ -88,12 +102,32 @@ mock.module("../../apps/factory/src/server-functions/conversations", () => ({
         { ...completed.entries[0], ordinal: 2 },
       ],
     });
+    if (scenario.startsWith("recovered-")) {
+      if (scenario === "recovered-missing") delete saved.turn;
+      else if (saved.turn) {
+        saved.turn = {
+          ...saved.turn,
+          state:
+            scenario === "recovered-failed"
+              ? "failed"
+              : scenario === "recovered-stopped"
+                ? "stopped"
+                : scenario === "recovered-uncertain"
+                  ? "uncertain"
+                  : "running",
+          ...(scenario === "recovered-other"
+            ? { commandId: crypto.randomUUID(), state: "completed" }
+            : {}),
+        };
+      }
+      saved.entries = saved.entries.filter((entry) => entry.kind === "user-message");
+    }
     return {
       ok: true,
       value: new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "admitted", turnId: turnID });
-          if (scenario === "recovered") {
+          if (scenario.startsWith("recovered")) {
             controller.error(new Error("Controlled stream disconnection after server completion"));
             return;
           }
@@ -180,7 +214,7 @@ const commands = createConversationCommands({
   pendingInterviewAnswer: () => undefined,
 } as unknown as Parameters<typeof createConversationCommands>[0]);
 await commands.beginRequirementsInterview("full-planning");
-if (scenario !== "recovered") assert.deepEqual(errors, []);
+if (!scenario.startsWith("recovered")) assert.deepEqual(errors, []);
 if (scenario === "first") {
   assert(
     current?.entries.some((entry) => entry.kind === "question"),
@@ -206,6 +240,14 @@ if (scenario === "first") {
     "A recovered completed turn must clear the transport error, not claim Agent failure",
   );
   assert.equal(commissions, 1, "Recovery must not repeat inference");
+} else if (scenario in recoveryNotices) {
+  assert.equal(errors.at(-1), recoveryNotices[scenario as keyof typeof recoveryNotices]);
+  assert.equal(commissions, 1, "Recovery must not repeat inference");
+  assert.equal(
+    current?.entries.length,
+    1,
+    "Keep the saved user message without inventing a response",
+  );
 } else {
   assert.equal(
     current?.contextId,

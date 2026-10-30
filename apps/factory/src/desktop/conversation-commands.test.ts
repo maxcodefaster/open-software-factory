@@ -8,6 +8,12 @@ for (const [scenario, behavior] of [
     "recovered",
     "recovers a completed first response without replaying inference or claiming failure",
   ],
+  ["recovered-failed", "reports a recorded failed response after stream disconnection"],
+  ["recovered-stopped", "reports a recorded Stop after stream disconnection"],
+  ["recovered-uncertain", "preserves an uncertain response outcome after stream disconnection"],
+  ["recovered-running", "keeps observing admitted work after stream disconnection"],
+  ["recovered-missing", "does not invent a response result when retained outcome is missing"],
+  ["recovered-other", "does not use another command's result for a disconnected response"],
 ] as const) {
   test(behavior, async () => {
     const child = Bun.spawn(
