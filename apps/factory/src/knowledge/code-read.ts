@@ -13,8 +13,39 @@ export const codeReadInput = codeReference.extend({
 export const codeReadResult = codeReadInput.extend({
   body: z.string().max(16000),
   truncated: z.boolean(),
+  nextStartLine: z.number().int().positive().nullable().optional(),
+  totalLines: z.number().int().nonnegative().optional(),
   url: z.string().url(),
 });
+export function readCodePage(
+  content: string,
+  input: Pick<z.infer<typeof codeReadInput>, "startLine" | "lineCount">,
+) {
+  const lines = content.split("\n");
+  const selected: string[] = [];
+  let length = 0;
+  for (
+    let index = input.startLine - 1;
+    index < Math.min(lines.length, input.startLine - 1 + input.lineCount);
+    index++
+  ) {
+    const line = `${index + 1}: ${lines[index]}`;
+    if (line.length > 16000 && selected.length === 0)
+      throw new Error(`Code line ${index + 1} exceeds the readable page size`);
+    const size = line.length + (selected.length ? 1 : 0);
+    if (length + size > 16000) break;
+    selected.push(line);
+    length += size;
+  }
+  const next = input.startLine + selected.length;
+  const nextStartLine = next <= lines.length ? next : null;
+  return {
+    body: selected.join("\n"),
+    truncated: nextStartLine !== null,
+    nextStartLine,
+    totalLines: lines.length,
+  };
+}
 export function readableCodePath(path: string) {
   return (
     !path.startsWith("/") &&

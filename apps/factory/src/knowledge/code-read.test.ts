@@ -1,5 +1,48 @@
 import { expect, test } from "bun:test";
-import { findReadableCodePaths } from "./code-read";
+import { findReadableCodePaths, readCodePage } from "./code-read";
+
+test("a truncated configuration gives Planning the exact next unread line", () => {
+  const content = Array.from({ length: 205 }, (_, index) =>
+    index === 180 ? "watch: { ignored: ['**/.pnpm-store/**'] }" : `configuration ${index + 1}`,
+  ).join("\n");
+  const first = readCodePage(content, { startLine: 1, lineCount: 80 });
+  expect(first).toMatchObject({ truncated: true, nextStartLine: 81, totalLines: 205 });
+  const second = readCodePage(content, { startLine: 81, lineCount: 80 });
+  expect(second).toMatchObject({ truncated: true, nextStartLine: 161, totalLines: 205 });
+  const last = readCodePage(content, { startLine: 161, lineCount: 80 });
+  expect(last).toMatchObject({ truncated: false, nextStartLine: null, totalLines: 205 });
+  expect(last.body).toContain("181: watch: { ignored: ['**/.pnpm-store/**'] }");
+});
+
+test("a full text page resumes before the first omitted line, without clipping source", () => {
+  const content = Array.from({ length: 160 }, (_, index) => `${index + 1}-${"x".repeat(300)}`).join(
+    "\n",
+  );
+  const first = readCodePage(content, { startLine: 1, lineCount: 160 });
+  const completeLines = first.body.split("\n");
+  expect(completeLines.every((line) => /x{300}$/.test(line))).toBe(true);
+  expect(first.body.length).toBeLessThanOrEqual(16000);
+  expect(first).toMatchObject({ nextStartLine: completeLines.length + 1 });
+  const second = readCodePage(content, {
+    startLine: completeLines.length + 1,
+    lineCount: 160,
+  });
+  expect(second.body.split("\n")[0]).toBe(
+    `${completeLines.length + 1}: ${completeLines.length + 1}-${"x".repeat(300)}`,
+  );
+});
+
+test("an oversized single line is explicit, never a partial line or repeated cursor", () => {
+  expect(() => readCodePage("x".repeat(16000), { startLine: 1, lineCount: 1 })).toThrow(
+    "Code line 1 exceeds the readable page size",
+  );
+  expect(readCodePage("last line", { startLine: 2, lineCount: 80 })).toEqual({
+    body: "",
+    truncated: false,
+    nextStartLine: null,
+    totalLines: 1,
+  });
+});
 
 test("a real multi-target Planning query finds the CLI, README and related tests", () => {
   const files = [
