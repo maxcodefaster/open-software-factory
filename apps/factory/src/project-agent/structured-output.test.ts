@@ -3,14 +3,55 @@ import { z } from "zod";
 import { planningDesign } from "../../../../test/fixtures/technical-planning";
 import {
   isStructuredOutputFailure,
+  ProjectAgentOutputError,
   parseProjectAgentOutput,
   projectAgentProviderOutputFor,
-  ProjectAgentOutputError,
 } from "./structured-output";
 
 const id = crypto.randomUUID();
 const answer = (citation: unknown) => ({
   output: { kind: "answer", message: "An observed fact.[^1]", citations: [citation] },
+});
+
+test("an explicitly commissioned Ticket interview cannot finish with only a promise", () => {
+  const noProposal = {
+    output: {
+      kind: "answer",
+      message: "The Ticket is already detailed. I will prepare the proposal for confirmation.",
+      citations: [],
+    },
+  };
+  expect(projectAgentProviderOutputFor("plan", true).safeParse(noProposal).success).toBe(false);
+  expect(() => parseProjectAgentOutput(noProposal, "plan", false, true)).toThrow();
+  // Ordinary questions in Planning remain ordinary answers. Only the explicit
+  // Interview action requires the next question or a confirmable proposal.
+  expect(parseProjectAgentOutput(noProposal, "plan").kind).toBe("answer");
+  const interview = projectAgentProviderOutputFor("plan", true);
+  expect(
+    interview.safeParse({
+      output: {
+        kind: "question",
+        message: "One consequential decision is missing.",
+        question: { type: "free-text", prompt: "Which supported architecture is required?" },
+        citations: [],
+      },
+    }).success,
+  ).toBe(true);
+  expect(
+    interview.safeParse({
+      output: {
+        kind: "requirement",
+        message: "Confirm the supplied scope.",
+        ticket: { title: "Native repository checks", description: "" },
+        requirement: {
+          summary: "Run the existing repository checks on both supported Linux architectures.",
+          acceptanceCriteria: ["The existing checks pass natively on ARM64 and AMD64."],
+          nonGoals: [],
+        },
+        citations: [],
+      },
+    }).success,
+  ).toBe(true);
 });
 
 test("generated choice questions retain their type and always admit a custom answer", () => {

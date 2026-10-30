@@ -34,7 +34,6 @@ const planning = z.discriminatedUnion("kind", [
   epic.extend({ citations }),
 ]);
 const interview = z.discriminatedUnion("kind", [
-  answer.extend({ citations }),
   question.extend({ citations }),
   round.extend({ citations }),
   requirement.extend({ citations }),
@@ -78,10 +77,14 @@ export function parseProjectAgentOutput(
   value: unknown,
   mode: ConversationMode,
   technicalPlanning = false,
+  requirementsInterview = false,
 ) {
-  const { output } = projectAgentProviderOutputFor(mode, false, false, technicalPlanning).parse(
-    value,
-  );
+  const { output } = projectAgentProviderOutputFor(
+    mode,
+    requirementsInterview,
+    false,
+    technicalPlanning,
+  ).parse(value);
   // The Agent proposes choices, but cannot remove the human's own answer path.
   // Keep this at model admission, not in the generic question/answer contract.
   const withCustomAnswer = (question: InterviewQuestion): InterviewQuestion =>
