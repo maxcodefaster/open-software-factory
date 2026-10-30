@@ -74,7 +74,7 @@ export function createFactoryboxExecution(
     if (remaining <= 0)
       throw new Error("Factorybox lifecycle deadline expired; original intent was retained");
     return transport(args, input, {
-      timeoutMS: Math.min(remaining, limits?.timeoutMS ?? 15_000),
+      timeoutMS: Math.min(remaining, limits?.timeoutMS ?? remaining),
       outputBytes: limits?.outputBytes ?? 4 * 1024 ** 2,
     });
   };
@@ -175,10 +175,9 @@ export function createFactoryboxExecution(
             run,
             declaration,
           )
-        : await (async () => {
-            await attempted(connection, record);
-            return executeFactoryboxOperation(request, identity, op, run, declaration);
-          })();
+        : await executeFactoryboxOperation(request, identity, op, run, declaration, () =>
+            attempted(connection, record),
+          );
     if (!observation.confirmed) throw new Error(`Factorybox ${op.action} outcome is unconfirmed`);
     const nativeResult = z.object({
       runtime: z.object({ status: z.string() }).optional(),
@@ -441,9 +440,10 @@ export function createFactoryboxExecution(
       await completed(connection, operation, observed);
       return observed;
     }
-    await attempted(connection, operation);
     if (!saved.identity) throw new Error("Factorybox preparation identity is missing");
-    const result = await prepareFactoryboxRuntime(saved.request, saved.identity, run);
+    const result = await prepareFactoryboxRuntime(saved.request, saved.identity, run, 420_000, () =>
+      attempted(connection, operation),
+    );
     await completed(connection, operation, result);
     return result;
   }
