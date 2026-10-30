@@ -2,18 +2,23 @@ import { createMemo, createSignal, For, Show } from "solid-js";
 import {
   type InterviewAnswer,
   type InterviewQuestion,
-  interviewQuestionInput,
   interviewAnswerInput,
+  interviewQuestionInput,
 } from "../../../packages/conversation-domain/src/conversation";
 import type { AgentMessage, ConversationEntry } from "./api-contracts";
-import { markdownHTML } from "./markdown";
 import { composerKeyDown, resizeComposer } from "./assistant-interaction";
-import { interviewOptions } from "./interview-options";
-import { TextareaAttachments } from "./attachments/ui";
 import { attachmentText, readAttachmentContent } from "./attachments/composer";
-import { CopyButton } from "./ui/feedback";
+import { TextareaAttachments } from "./attachments/ui";
+import {
+  activeActivity,
+  activityGroupState,
+  activityGroupSummary,
+  activityStatus,
+} from "./conversation-activity";
 import { Icon } from "./icon";
-import { activeActivity, activityGroupSummary } from "./conversation-activity";
+import { interviewOptions } from "./interview-options";
+import { markdownHTML } from "./markdown";
+import { CopyButton } from "./ui/feedback";
 
 function MessageCopy(props: { text: string; scope: string; user?: boolean }) {
   return (
@@ -173,6 +178,7 @@ function InterviewAnswerForm(props: {
 
 export function ChangeAgentMessage(props: {
   message: AgentMessage;
+  stopped?: boolean;
   onActivityToggle?: (open: boolean) => void;
   onNavigate?: ((message: AgentMessage, kind: "file" | "diff") => void) | undefined;
 }) {
@@ -204,7 +210,7 @@ export function ChangeAgentMessage(props: {
     >
       {(activity) => (
         <details
-          class={`agent-activity ${activity().status}`}
+          class={`agent-activity ${activityStatus(props.message, props.stopped)}`}
           onToggle={(event) => props.onActivityToggle?.(event.currentTarget.open)}
         >
           <summary class="agent-activity-heading">
@@ -215,16 +221,24 @@ export function ChangeAgentMessage(props: {
             </span>
             <span class="activity-status">
               <span class="activity-indicator" aria-hidden="true" />
-              {activity().status === "completed"
-                ? "Done"
-                : activity().status === "error"
-                  ? "Failed"
-                  : activity().status === "pending"
-                    ? "Queued"
-                    : "Running"}
+              {activityStatus(props.message, props.stopped) === "interrupted"
+                ? "Interrupted"
+                : activity().status === "completed"
+                  ? "Done"
+                  : activity().status === "error"
+                    ? "Failed"
+                    : activity().status === "pending"
+                      ? "Queued"
+                      : "Running"}
             </span>
           </summary>
           <div class="agent-activity-content">
+            <Show when={activityStatus(props.message, props.stopped) === "interrupted"}>
+              <p class="activity-truncation" role="note">
+                Workspace stopped before a final tool result was recorded. Retained output is not a
+                successful check.
+              </p>
+            </Show>
             <Show when={activity().navigation && props.onNavigate}>
               <div class="agent-activity-navigation">
                 <button
@@ -263,12 +277,11 @@ export function ChangeAgentMessage(props: {
 
 export function ChangeAgentActivityGroup(props: {
   messages: AgentMessage[];
+  stopped?: boolean;
   onNavigate?: ((message: AgentMessage, kind: "file" | "diff") => void) | undefined;
 }) {
   const [expanded, setExpanded] = createSignal(false);
   const [opened, setOpened] = createSignal<ReadonlySet<string>>(new Set());
-  const active = () => props.messages.filter(activeActivity).length;
-  const failed = () => props.messages.filter((item) => item.activity?.status === "error").length;
   const contentID = () =>
     `activity-group-${props.messages[0]?.id.replaceAll(/[^a-zA-Z0-9_-]/g, "-")}`;
   return (
@@ -286,9 +299,7 @@ export function ChangeAgentActivityGroup(props: {
             {activityGroupSummary(props.messages)}
           </span>
           <span class="activity-group-state">
-            {[active() ? `${active()} active` : "", failed() ? `${failed()} failed` : ""]
-              .filter(Boolean)
-              .join(" · ") || "Completed"}
+            {activityGroupState(props.messages, props.stopped)}
           </span>
         </button>
       </Show>
@@ -299,13 +310,15 @@ export function ChangeAgentActivityGroup(props: {
               hidden={
                 props.messages.length > 1 &&
                 !expanded() &&
-                !activeActivity(message()) &&
+                !activeActivity(message(), props.stopped) &&
+                activityStatus(message(), props.stopped) !== "interrupted" &&
                 message().activity?.status !== "error" &&
                 !opened().has(message().id)
               }
             >
               <ChangeAgentMessage
                 message={message()}
+                stopped={props.stopped ?? false}
                 onNavigate={props.onNavigate}
                 onActivityToggle={(open) =>
                   setOpened((previous) => {

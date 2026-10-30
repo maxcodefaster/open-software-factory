@@ -1,16 +1,17 @@
 import { expect, test } from "bun:test";
+import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
+import { fixtureValue } from "../../../test/fixtures/value";
 import {
-  buildAgentHint,
+  buildAgentActivityNotice,
+  buildAgentActivityStopped,
   buildAgentEmptyMessage,
+  buildAgentHint,
   buildAgentNeedsStart,
   buildAgentStatus,
-  buildAgentActivityNotice,
   createAgentReadFence,
   retainAgentActivity,
 } from "./agent-view-state";
 import type { AgentView } from "./api-contracts";
-import { turnObservationInput } from "../../../packages/conversation-domain/src/turn-observation";
-import { fixtureValue } from "../../../test/fixtures/value";
 
 test("an older activity read cannot undo Stop or another settled command", () => {
   const fence = createAgentReadFence();
@@ -42,6 +43,14 @@ const unavailable: AgentView = {
   messages: [],
 };
 
+test("only confirmed Agent and Workspace Stop can interrupt retained tool indicators", () => {
+  const stopped = { ...loaded, state: "stopped" as const, runtimeState: "stopped" };
+  expect(buildAgentActivityStopped(stopped)).toBe(true);
+  expect(buildAgentActivityStopped({ ...stopped, stopPending: true })).toBe(false);
+  expect(buildAgentActivityStopped({ ...stopped, runtimeState: "cleanup-failed" })).toBe(false);
+  expect(buildAgentActivityStopped({ ...stopped, state: "working" })).toBe(false);
+  expect(buildAgentActivityStopped({ ...loaded, runtimeConnected: false })).toBe(false);
+});
 test("the panel identifies independent review without claiming source changes or Delivery approval", () => {
   const turn = turnObservationInput.parse({
     id: crypto.randomUUID(),

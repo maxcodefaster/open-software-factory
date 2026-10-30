@@ -116,6 +116,10 @@ export function buildAgentActivityNotice(view: AgentView) {
     : "Live activity temporarily unavailable.";
 }
 
+export function buildAgentActivityStopped(view: AgentView) {
+  return view.state === "stopped" && view.runtimeState === "stopped" && !view.stopPending;
+}
+
 export function retainAgentActivity(
   previous: AgentSnapshot | undefined,
   changeID: string,

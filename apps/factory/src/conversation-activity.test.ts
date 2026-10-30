@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import type { AgentMessage } from "./api-contracts";
-import { activityGroupSummary, groupConversationActivities } from "./conversation-activity";
+import {
+  activeActivity,
+  activityGroupState,
+  activityGroupSummary,
+  activityStatus,
+  groupConversationActivities,
+} from "./conversation-activity";
 import { conversationTimeline } from "./conversation-timeline";
 
 function message(id: string, at: number, name?: string): AgentMessage {
@@ -56,4 +62,32 @@ test("group summaries report calls rather than claiming tests passed", () => {
   expect(activityGroupSummary([message("one", 1, "search"), message("two", 2, "grep")])).toBe(
     "2 searches",
   );
+});
+
+test("confirmed Stop leaves unfinished tool output interrupted, never running or successful", () => {
+  const command: AgentMessage = {
+    ...message("build", 1, "shell"),
+    activity: { name: "shell", status: "running" },
+  };
+  expect(activeActivity(command)).toBe(true);
+  expect(activeActivity(command, true)).toBe(false);
+  expect(command.activity?.status).toBe("running");
+});
+
+test("stopped activity keeps failure and success receipts and distinguishes missing results", () => {
+  const activities = ["pending", "streaming", "running", "completed", "error"] as const;
+  const messages = activities.map((status, at) => ({
+    ...message(status, at, "shell"),
+    activity: { name: "shell", status },
+  }));
+  expect(messages.map((message) => activityStatus(message, true))).toEqual([
+    "interrupted",
+    "interrupted",
+    "interrupted",
+    "completed",
+    "error",
+  ]);
+  expect(activityGroupState(messages, false)).toBe("3 active · 1 failed");
+  expect(activityGroupState(messages, true)).toBe("3 interrupted · 1 failed");
+  expect(activityGroupState([message("complete", 1, "read")], true)).toBe("Completed");
 });

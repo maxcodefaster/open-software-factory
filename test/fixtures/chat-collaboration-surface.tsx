@@ -72,6 +72,7 @@ function Surface() {
   const [selected, setSelected] = createSignal<string | null>(null);
   const [fresh, setFresh] = createSignal(0);
   const [running, setRunning] = createSignal(false);
+  const [stopped, setStopped] = createSignal(false);
   const [structured, setStructured] = createSignal(false);
   const question: ConversationEntry = {
     id: "10000000-0000-4000-8000-000000000009",
@@ -175,6 +176,9 @@ function Surface() {
           <button type="button" class="quiet-button" onClick={() => setRunning((value) => !value)}>
             Toggle busy Coding
           </button>
+          <button type="button" class="quiet-button" onClick={() => setStopped(true)}>
+            Confirm Workspace Stop
+          </button>
           <p role="status">
             Opened activity: {opened() || "none"} · Fresh contexts: {fresh()}
           </p>
@@ -218,6 +222,7 @@ function Surface() {
                       {(value) => (
                         <ChangeAgentMessage
                           message={value()}
+                          stopped={stopped()}
                           onNavigate={(message, kind) =>
                             setOpened(`${kind} ${message.activity?.navigation?.path}`)
                           }
@@ -229,6 +234,7 @@ function Surface() {
                   {(value) => (
                     <ChangeAgentActivityGroup
                       messages={value()}
+                      stopped={stopped()}
                       onNavigate={(message, kind) =>
                         setOpened(`${kind} ${message.activity?.navigation?.path}`)
                       }

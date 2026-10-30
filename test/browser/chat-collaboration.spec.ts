@@ -1,10 +1,10 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { writerViewSchema } from "../../apps/factory/src/api-contracts";
+import { test } from "../fixtures/browser-test";
 import { chooseConversation, startNewConversation } from "../fixtures/conversation-navigation";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -550,6 +550,38 @@ test("grouping keeps active work and failures visible and preserves disclosure o
   await page.screenshot({ path: `${evidence}/activities-narrow.png`, fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   expect(errors).toEqual([]);
+});
+
+test("confirmed Stop interrupts retained tool indicators without claiming a passing result", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/chat-collaboration.html`);
+  const group = page.getByRole("region", { name: "Grouped tool activity" });
+  const command = group.locator("details").filter({ hasText: "Running view checks." });
+  await expect(command.locator("summary")).toContainText("Running");
+  await expect(group.locator(".activity-group-state")).toHaveText("1 active · 1 failed");
+  await command.locator("summary").click();
+  await page.getByRole("button", { name: "Confirm Workspace Stop", exact: true }).click();
+  await expect(command).toHaveClass("agent-activity interrupted");
+  await expect(command.locator("summary")).toContainText("Interrupted");
+  await expect(group.locator(".activity-group-state")).toHaveText("1 interrupted · 1 failed");
+  await expect(command.getByRole("note").filter({ hasText: "Workspace stopped" })).toContainText(
+    "not a successful check",
+  );
+  await expect(group.locator(".agent-activity.running, .agent-activity.streaming")).toHaveCount(0);
+  await expect(command.locator(".activity-indicator")).toHaveCSS("animation-name", "none");
+  await expect(group.locator("details.error")).toBeVisible();
+  await page.getByRole("button", { name: "Reconnect snapshot", exact: true }).click();
+  await expect(command).toHaveClass("agent-activity interrupted");
+  await expect(command).toHaveAttribute("open", "");
+  for (const width of [1440, 900, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await expect(command).toBeVisible();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({ path: `${evidence}/interrupted-${width}.png`, fullPage: true });
+  }
 });
 
 test("conversation selection is observational and a fresh Coding context needs a settled-work confirmation", async ({
