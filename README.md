@@ -717,6 +717,9 @@ Live UI inspection does not require a browser extension. If a browser update or 
 connection prevents inspection, use native desktop controls in that same browser. Check the
 rendered editor and Apps, not just service readiness. Do not disable browser security or install
 another browser to turn an automation failure into a claimed product pass.
+If an isolated frame's document remains pending with an automation debugger attached, detach that
+debugger and inspect the same navigation natively before restarting Factory, the editor or compute.
+Repeat a fresh first-open journey without Retry; a successful manual reload is not a product fix.
 The owned desktop browser group shares one immutable build and one empty migrated PostgreSQL
 daemon per invocation. Every journey still owns its database, application process and Zero cache.
 Playwright's dependent teardown removes only that invocation's resources after the journeys finish.

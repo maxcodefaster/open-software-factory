@@ -101,6 +101,54 @@ test("distinguishes prepared editor access from a still-attaching IDE document",
   }
 });
 
+test("first opening from a Ticket link preserves the already loaded hidden editor document", async ({
+  page,
+}) => {
+  const ticketID = await insertChangedTicket("Prepared Ticket editor", "failed");
+  const fixture = await mockDeveloperIDE(page, {
+    documentBody: '<textarea aria-label="Unsaved editor draft">Prepared editor document</textarea>',
+  });
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensureChangeSource: async () => ({
+        label: "Owned Ticket source",
+        ...sourceWorkspaceViewSchema.parse({
+          workspaceID: fixture.workspaceID,
+          serviceID: `fixture-source-${fixture.workspaceID}`,
+          epoch: 1,
+          state: "ready",
+          failure: null,
+        }),
+      }),
+    },
+  });
+  await signIn(page);
+  await expect(page.getByRole("button", { name: "Open project menu", exact: true })).toBeVisible();
+  await page.goto(`/projects/${projectID}/tickets/${ticketID}`);
+  await expect(page.getByRole("status", { name: "Ticket progress" })).toBeVisible();
+  const frame = page.locator('iframe[title="Factory IDE"]');
+  const draft = page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Unsaved editor draft");
+  await expect(frame).toHaveAttribute("data-editor-epoch", "1");
+  await expect(draft).toBeAttached();
+  await expect(frame).not.toBeVisible();
+  expect(fixture.documentRequests).toBe(1);
+
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await expect(draft).toBeVisible();
+  await expect(draft).toHaveValue("Prepared editor document");
+  await expect(frame).toHaveAttribute("data-workspace-id", fixture.workspaceID);
+  await expect(frame.locator("..")).toHaveAttribute("aria-busy", "false");
+  await draft.fill("Keep the opened editor and this unsaved draft");
+  await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+  await page.getByRole("button", { name: "IDE", exact: true }).click();
+  await expect(draft).toHaveValue("Keep the opened editor and this unsaved draft");
+  expect(fixture.documentRequests).toBe(1);
+  expect(fixture.computeRequests).toEqual([]);
+  expect(fixture.stopRequests).toEqual([]);
+  await page.mouse.move(0, 0);
+  await page.screenshot({ path: `${evidenceDirectory}/ide-first-open-prepared.png` });
+});
+
 test("recovers a rejected IDE access document without restarting compute", async ({ page }) => {
   const fixture = await mockDeveloperIDE(page, { rejectFirstAccess: true });
   await signIn(page);
