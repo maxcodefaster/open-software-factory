@@ -1,15 +1,75 @@
 import { expect, test } from "bun:test";
-import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
-import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
+import { createVisualReviewController } from "../../apps/factory/src/review/controller";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
+import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
-import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+
+test("direct review admission also waits for exact Verification cleanup and runner revocation", async () => {
+  const f = await candidateReviewFixture();
+  const attemptID = crypto.randomUUID();
+  const admit = createReviewAdmission(f.database);
+  try {
+    await f.database.client`INSERT INTO factory.runtime_attempt(
+      id,project_id,verification_id,isolated_kind,generation,revision,state,
+      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${attemptID},${f.projectID},${f.verificationID},'verification',2,${f.commit},'ready',
+        ${"a".repeat(64)},${"b".repeat(64)},now(),${f.userID})`;
+    await f.database.client`UPDATE factory.verification
+      SET runtime_attempt_id=${attemptID},runner_id=27,runner_uuid=${crypto.randomUUID()},
+        runner_token='owned-unused' WHERE id=${f.verificationID}`;
+    for (const state of [
+      "ready",
+      "stop-intended",
+      "stopping",
+      "cleanup-failed",
+      "stopped",
+    ] as const) {
+      await f.database
+        .client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${attemptID}`;
+      await expect(admit(f.changeID, f.reviewID, f.userID)).rejects.toMatchObject({
+        code: "conflict",
+      });
+      expect(await f.turns.getByCommand(f.reviewID)).toBeNull();
+    }
+    await f.database
+      .client`UPDATE factory.verification SET runner_id=NULL WHERE id=${f.verificationID}`;
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='stopping' WHERE id=${attemptID}`;
+    await expect(admit(f.changeID, f.reviewID, f.userID)).rejects.toMatchObject({
+      code: "conflict",
+    });
+    await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
+      WHERE id=${attemptID}`;
+    const accepted = await admit(f.changeID, f.reviewID, f.userID);
+    expect(accepted.replayed).toBe(false);
+    expect((await admit(f.changeID, f.reviewID, f.userID)).turn.id).toBe(accepted.turn.id);
+    // A retained admission from an older process still revalidates cleanup
+    // before native dispatch. Reuse its exact Turn after confirmation.
+    const claimed = await f.turns.claimPending(accepted.turn.id);
+    if (!claimed?.ownerToken) throw new Error("Missing owned pending review");
+    await f.database
+      .client`UPDATE factory.verification SET runner_id=27 WHERE id=${f.verificationID}`;
+    expect(await f.turns.beginDispatch(claimed.id, claimed.ownerToken)).toBeNull();
+    await f.database
+      .client`UPDATE factory.verification SET runner_id=NULL WHERE id=${f.verificationID}`;
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='stopping' WHERE id=${attemptID}`;
+    expect(await f.turns.beginDispatch(claimed.id, claimed.ownerToken)).toBeNull();
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${attemptID}`;
+    expect((await f.turns.beginDispatch(claimed.id, claimed.ownerToken))?.id).toBe(claimed.id);
+    expect(f.requests()).toBe(0);
+  } finally {
+    await f.dispose();
+  }
+});
 
 function sourceFixture(ui = false) {
   const path = ui ? "src/app.tsx" : "src/sum.ts";

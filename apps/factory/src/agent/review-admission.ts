@@ -76,6 +76,11 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
               WHERE attempt.id=change.runtime_attempt_id AND attempt.state IN ('stopped','failed'))))
           AND change.cancel_requested_at IS NULL
           AND ticket.trashed_at IS NULL AND verification.state='succeeded'
+          AND verification.runner_id IS NULL
+          AND (verification.runtime_attempt_id IS NULL OR EXISTS(
+            SELECT 1 FROM factory.runtime_attempt execution
+            WHERE execution.id=verification.runtime_attempt_id AND execution.state='stopped'
+          ))
           AND (review.finding_source_id IS NULL OR (source.result IS NOT NULL AND source.finding_source_id IS NULL
             AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=source.turn_id AND state='completed')))
           AND (review.focus_review_id IS NULL OR focus.id IS NOT NULL)
@@ -86,7 +91,10 @@ export function createReviewAdmission(database: ReturnType<typeof createDatabase
           AND revision.id=(SELECT id FROM factory.requirement_revision WHERE ticket_id=ticket.id ORDER BY ordinal DESC LIMIT 1)
           AND (conversation.id IS NULL OR conversation.mode='build')`;
       if (!change)
-        throw new CommandError("conflict", "Review needs the current verified candidate");
+        throw new CommandError(
+          "conflict",
+          "Review needs the current verified candidate and confirmed Verification cleanup",
+        );
       const [session] = await sql<
         { state: string; stopPending: boolean }[]
       >`SELECT state,stop_pending AS "stopPending" FROM factory.change_agent_session WHERE change_id=${changeID}`;

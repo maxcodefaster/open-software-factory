@@ -238,7 +238,13 @@ export function createDeliveryController(
     verification: { id: string; runtimeAttemptID: string | null; runnerID: string | null },
   ) {
     if (verification.runtimeAttemptID) {
-      await runtime.stop(verification.runtimeAttemptID).catch(() => undefined);
+      const [attempt] = await database.client<{ state: string; stopping: boolean }[]>`
+        SELECT state,stop_intended_at IS NOT NULL AS stopping FROM factory.runtime_attempt
+        WHERE id=${verification.runtimeAttemptID}`;
+      // Stop is durable intent, not completed cleanup. Its runtime owner keeps
+      // reconciling; another Delivery sweep must not reset its retry policy.
+      if (attempt && attempt.state !== "stopped" && !attempt.stopping)
+        await runtime.stop(verification.runtimeAttemptID).catch(() => undefined);
     }
     if (verification.runnerID) {
       try {
@@ -249,6 +255,17 @@ export function createDeliveryController(
         // The retained runner identity lets cancellation retry revocation.
       }
     }
+  }
+
+  async function verificationCleanupConfirmed(verificationID: string) {
+    const [confirmed] = await database.client`SELECT verification.id
+      FROM factory.verification verification
+      WHERE verification.id=${verificationID} AND verification.runner_id IS NULL
+        AND (verification.runtime_attempt_id IS NULL OR EXISTS(
+          SELECT 1 FROM factory.runtime_attempt attempt
+          WHERE attempt.id=verification.runtime_attempt_id AND attempt.state='stopped'
+        ))`;
+    return Boolean(confirmed);
   }
 
   async function ensureVerification(
@@ -321,7 +338,11 @@ export function createDeliveryController(
       `;
     }
     const verification = rows[0];
-    if (!verification || ["succeeded", "cancelled"].includes(verification.state)) return;
+    if (!verification || verification.state === "cancelled") return;
+    if (verification.state === "succeeded") {
+      await stopVerification(repository, verification);
+      return;
+    }
     const activeVerificationID = verification.id;
     async function stillActive() {
       const [current] = await database.client<Array<{ active: boolean }>>`
@@ -414,6 +435,9 @@ export function createDeliveryController(
           : null;
       }
       await stopVerification(repository, verification);
+      // The next Build/Review has its own private Docker state. Wait for the
+      // previous runtime's confirmed cleanup, not just its completed checks.
+      if (!(await verificationCleanupConfirmed(verification.id))) return;
       if (!succeeded && diagnosis?.kind === "check-failed" && !verification.repairPromptedAt) {
         if (!(await stillActive())) return;
         const sessions = await database.client<Array<{ state: string }>>`
@@ -554,7 +578,7 @@ export function createDeliveryController(
     const [verification] = await database.client<{ id: string }[]>`
       SELECT id FROM factory.verification
       WHERE change_id=${change.id} AND commit_sha=${change.commitSHA} AND state='succeeded'`;
-    if (!verification) return;
+    if (!verification || !(await verificationCleanupConfirmed(verification.id))) return;
     await database.client`INSERT INTO factory.candidate_review(id,verification_id,change_id,commit_sha,base_sha,created_by,focus_review_id)
       VALUES(${crypto.randomUUID()},${verification.id},${change.id},${change.commitSHA},${change.baseSHA},${change.userID},
         (SELECT review.id FROM factory.candidate_review review JOIN factory.agent_turn turn ON turn.id=review.turn_id
