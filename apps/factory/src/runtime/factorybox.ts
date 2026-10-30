@@ -669,8 +669,8 @@ export function createFactoryboxExecution(
             throw new Error("Runtime resources belong to another Factory worker");
           const owner = attempt.slotID ?? attempt.workspaceID ?? attemptID;
           const worker = await factoryboxAllocation(connection);
-          if (worker.workerID !== attempt.workerID)
-            throw new Error("Runtime Attempt belongs to another Factory worker");
+          if (worker.workerID !== attempt.workerID || worker.podName !== attempt.podName)
+            throw new Error("Runtime Attempt belongs to another Factory worker admission");
           const request: FactoryboxRuntimeInput = {
             attemptID,
             workerID: attempt.workerID,

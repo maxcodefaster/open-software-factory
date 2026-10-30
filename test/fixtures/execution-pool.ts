@@ -88,6 +88,13 @@ export async function executionPoolFixture(
       }
       await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
         VALUES(${stagingID},${projectID},'staging',1,${revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${userID})`;
+      // A healthy Staging basis already has an admitted worker profile. Retain
+      // that profile instead of comparing an old synthetic declaration to the
+      // current fresh-worker defaults.
+      await sql`UPDATE factory.factorybox_worker SET
+        profile=coalesce(profile,${JSON.stringify(profile)}::text::jsonb),
+        runtime_host_image=coalesce(runtime_host_image,${images.staging}),
+        node_name=coalesce(node_name,${profile.nodeName}) WHERE singleton`;
       await freezeRuntimeArtifacts(sql, stagingID, artifactConfiguration);
       await freezeStagingConfiguration(sql, stagingID, [
         {

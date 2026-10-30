@@ -70,6 +70,16 @@ Operator values can independently size `postgres.resources`, `forgejo.resources`
 CPU requests are reservations, not instantaneous usage. Keep scheduling headroom for startup,
 storage checks and runtime helpers without bypassing admission or lowering required memory.
 
+There is one active worker admission per Factory. A fresh commissioned Start can recover a failed
+initial setup only after the exact original terminal Pod is observed, no native worker identity
+was recorded and all previous execution is settled. The new admission has its own Pod and private
+store; canonical Source, old Pods, stores and Runtime Attempts retain their original identities.
+Opening a Project or reconnecting does not replace a worker. Recovery of an already admitted
+worker remains an operator decision. See [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
+Fresh admissions check actual backing-filesystem availability before native allocation. Insufficient
+space fails explicitly rather than waiting indefinitely. This does not resize a retained worker or
+reclaim unrelated node data.
+
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's
 [installation and maintenance instructions](deploy/helm/factory/README.md) for local access,
@@ -887,6 +897,13 @@ Exact-commit code research has its own paid proof. With the explicit Luna Planni
 set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.
 It checks native code discovery, inspected-file citations and visibility after a permission
 downgrade. It is not part of the ordinary controller lane.
+
+The worker's read-only storage admission check has a separate Linux proof. Set
+`FACTORY_STORAGE_ADMISSION_LIVE=1` and `FACTORY_STORAGE_ADMISSION_IMAGE` to the exact pinned worker
+image already available locally, then run `bun run test:live factorybox-storage-admission.live`.
+It checks real insufficient capacity on an owned small filesystem, exact capacity boundaries and
+foreign-storage refusal without Project source, network, native filesystem allocation or model
+calls. This is not a full worker lifecycle or replacement qualification.
 
 Retrospective work review has a separate configured Planning-model calibration. Set
 `FACTORY_LEARNING_MODEL_LIVE=1` and run `mise exec -- bun run test:live learning-model`.

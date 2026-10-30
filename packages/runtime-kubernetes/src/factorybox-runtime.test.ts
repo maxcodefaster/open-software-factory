@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { fixtureValue } from "../../../test/fixtures/value";
 import { factoryboxLocation } from "./factorybox-location";
 import {
   configuredFactoryboxRuntimeProfile,
@@ -6,11 +7,11 @@ import {
   factoryboxOriginalWorkerRetired,
   factoryboxPreparationAssignment,
   factoryboxPreparationRequest,
+  factoryboxRuntimeRequest,
   prepareFactoryboxRuntime,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
 import type { runFactoryboxKubernetes } from "./factorybox-worker";
-import { fixtureValue } from "../../../test/fixtures/value";
 
 const input: FactoryboxRuntimeInput = {
   attemptID: "01234567-89ab-5def-8123-456789abcdef",
@@ -30,6 +31,30 @@ const input: FactoryboxRuntimeInput = {
     claimGiB: 32,
   },
 };
+
+test("a successor uses its new native store and Pod but retains the canonical Source trust domain", () => {
+  const admissionID = "17164fe7-7c86-451e-ae6e-0b0fe6b8bf5e";
+  const successor = {
+    ...input,
+    ...factoryboxLocation(input.workerID, admissionID),
+    profile: { ...input.profile, storageAdmission: 1 as const },
+  };
+  const request = factoryboxRuntimeRequest(successor);
+  expect(request.storeID).toBe(admissionID.replaceAll("-", ""));
+  expect(request.trustDomainID).toBe(input.workerID.replaceAll("-", ""));
+  expect(request).not.toHaveProperty("storageAdmission");
+  const rendered = renderFactoryboxRuntime(successor);
+  expect(rendered.namespace.metadata).toEqual(renderFactoryboxRuntime(input).namespace.metadata);
+  expect(rendered.sourceClaim).toEqual(renderFactoryboxRuntime(input).sourceClaim);
+  expect(rendered.pod.metadata.name).toBe(request.podName);
+  expect(rendered.claim.metadata.name).toBe(`store-${request.storeID}`);
+  expect(() =>
+    factoryboxRuntimeRequest({
+      ...successor,
+      podName: `worker-${input.workerID.replaceAll("-", "")}`,
+    }),
+  ).toThrow("original Pod name");
+});
 
 function assignmentFiles(execution = input): Readonly<Record<string, string>> {
   return execution.reserve

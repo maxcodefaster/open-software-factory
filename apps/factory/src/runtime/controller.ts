@@ -16,7 +16,10 @@ import {
   readRuntimeRegistryCA,
   requireRuntimePodArtifacts,
 } from "../../../../packages/runtime-kubernetes/src/client";
-import { factoryboxAssignmentSecret } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
+import {
+  factoryboxAdmissionID,
+  factoryboxAssignmentSecret,
+} from "../../../../packages/runtime-kubernetes/src/factorybox-location";
 import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
 import {
   parseSystemContract,
@@ -143,8 +146,22 @@ export function createRuntimeController(
   const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
   const computeWait = createComputeWait(database, reserve);
   const worker = createFactoryboxWorker(database, kubernetes);
-  async function executionIdentity(ownerID: string, generation: number, sql: Database["client"]) {
-    return { ...runtimeIdentity(ownerID, generation), ...(await worker.location(sql)) };
+  async function executionIdentity(
+    ownerID: string,
+    generation: number,
+    sql: Database["client"],
+    actorID?: string,
+  ) {
+    const identity = runtimeIdentity(ownerID, generation);
+    const location = await worker.location(
+      sql,
+      actorID ? { actorID, requestID: identity.attemptID } : undefined,
+    );
+    return {
+      ...identity,
+      ...location,
+      admissionID: factoryboxAdmissionID(location.workerID, location.podName),
+    };
   }
   let drainingCompute = false;
   async function admitOrWait(
@@ -1171,8 +1188,8 @@ export function createRuntimeController(
               return;
             }
             await admitOrWait(lock, attemptID, job.projectID, "prebuild");
-            await lock`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-              VALUES(${attemptID},${job.projectID},'prebuild',${generation},${job.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${job.userID})`;
+            await lock`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,factorybox_admission_id)
+              VALUES(${attemptID},${job.projectID},'prebuild',${generation},${job.revision},'create-intended',${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${job.userID},${identity.admissionID})`;
             await lock`UPDATE factory.project_image_preparation SET runtime_attempt_id=${attemptID},state='running',updated_at=now() WHERE id=${preparationID}`;
             await artifactsFor(attemptID, lock);
             await lock`COMMIT`;
@@ -1523,7 +1540,7 @@ export function createRuntimeController(
         FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
       `;
         const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(workspace.id, generation, lock);
+        const identity = await executionIdentity(workspace.id, generation, lock, userID);
         if (identity.namespace !== workspace.namespace)
           throw new Error("Workspace belongs to another Factory");
         const revision = workspace.revision;
@@ -1541,11 +1558,12 @@ export function createRuntimeController(
         INSERT INTO factory.runtime_attempt(
           id, project_id, workspace_id, generation, revision, state,
           parent_connector_token_hash, child_connector_token_hash,
-          create_intended_at, created_by, declared_apps
+          create_intended_at, created_by, declared_apps, factorybox_admission_id
         ) VALUES (
           ${identity.attemptID}, ${projectID}, ${workspace.id}, ${generation}, ${revision}, 'create-intended',
           ${tokenHash}, ${childTokenHash}, now(), ${userID},
-          ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb
+          ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
+          ${identity.admissionID}
         )
       `;
           await lock`COMMIT`;
@@ -1696,7 +1714,7 @@ export function createRuntimeController(
           WHERE project_id = ${projectID} AND change_id IS NULL AND workspace_id IS NULL
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(`staging:${projectID}`, generation, lock);
+        const identity = await executionIdentity(`staging:${projectID}`, generation, lock, userID);
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         await lock`BEGIN`;
         try {
@@ -1705,13 +1723,14 @@ export function createRuntimeController(
             INSERT INTO factory.runtime_attempt(
               id, project_id, isolated_kind, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, declared_apps
+              create_intended_at, created_by, declared_apps, factorybox_admission_id
             ) VALUES (
               ${identity.attemptID}, ${projectID}, 'staging', ${generation}, ${preview.revision},
               'create-intended',
               ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
               ${userID},
-              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb
+              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
+              ${identity.admissionID}
             )
           `;
           await artifactsFor(identity.attemptID, lock);
@@ -1908,7 +1927,7 @@ export function createRuntimeController(
           FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
         `;
         const generation = Number(generations[0]?.generation ?? 1);
-        const identity = await executionIdentity(workspace.id, generation, lock);
+        const identity = await executionIdentity(workspace.id, generation, lock, userID);
         if (identity.namespace !== workspace.namespace)
           throw new Error("Workspace belongs to another Factory");
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
@@ -1933,12 +1952,13 @@ export function createRuntimeController(
             INSERT INTO factory.runtime_attempt(
               id, project_id, change_id, workspace_id, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by, declared_apps
+              create_intended_at, created_by, declared_apps, factorybox_admission_id
             ) VALUES (
               ${identity.attemptID}, ${projectID}, ${changeID}, ${workspace.id}, ${generation}, ${workspace.revision},
               'create-intended',
               ${hashConnectorToken(parent)}, ${hashConnectorToken(child)}, now(), ${userID},
-              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb
+              ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
+              ${identity.admissionID}
             )
           `;
           await lock`
@@ -2136,11 +2156,11 @@ export function createRuntimeController(
             INSERT INTO factory.runtime_attempt(
               id, project_id, verification_id, isolated_kind, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by
+              create_intended_at, created_by, factorybox_admission_id
             ) VALUES (
               ${identity.attemptID}, ${verification.projectID}, ${verificationID}, 'verification',
               ${generation}, ${verification.commitSHA}, 'create-intended', ${hashConnectorToken(tokens.parent)},
-              ${hashConnectorToken(tokens.child)}, now(), ${userID}
+              ${hashConnectorToken(tokens.child)}, now(), ${userID}, ${identity.admissionID}
             )
           `;
           await artifactsFor(identity.attemptID, lock);
@@ -2238,9 +2258,9 @@ export function createRuntimeController(
             "publication",
           );
           await tx`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,
-            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+            parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,factorybox_admission_id)
             VALUES(${identity.attemptID},${row.projectID},'publication',${generation},${row.revision},'create-intended',
-            ${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID})`;
+            ${hashConnectorToken(tokens.parent)},${hashConnectorToken(tokens.child)},now(),${userID},${identity.admissionID})`;
           await tx`UPDATE factory.release_attempt SET runtime_attempt_id=${identity.attemptID} WHERE id=${publicationID}`;
           await artifactsFor(identity.attemptID, tx as unknown as Database["client"]);
         });
@@ -2330,12 +2350,12 @@ export function createRuntimeController(
             INSERT INTO factory.runtime_attempt(
               id, project_id, isolated_kind, generation, revision, state,
               parent_connector_token_hash, child_connector_token_hash,
-              create_intended_at, created_by
+              create_intended_at, created_by, factorybox_admission_id
             ) VALUES (
               ${identity.attemptID}, ${promotion.projectID}, 'staging', ${generation},
               ${promotion.commitSHA}, 'create-intended',
               ${hashConnectorToken(tokens.parent)}, ${hashConnectorToken(tokens.child)}, now(),
-              ${userID}
+              ${userID}, ${identity.admissionID}
             )
           `;
           await artifactsFor(identity.attemptID, lock);
