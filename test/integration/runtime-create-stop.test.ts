@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
+import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { createRuntimeController } from "../../apps/factory/src/runtime/controller";
@@ -89,6 +89,100 @@ async function sourceOnly(sql: Parameters<typeof factoryboxAllocation>[0], names
     storageNode: configuration.FACTORY_FACTORYBOX_NODE,
   });
 }
+
+test.each(["cold worker", "specific refusal"] as const)(
+  "startup separates worker admission from Sandbox lifecycle and preserves %s evidence",
+  async (scenario) => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const owned = await fixture(undefined, undefined, database);
+    const hub = new RuntimeHub(async () => {});
+    let clockValue = performance.now();
+    const clock = spyOn(performance, "now").mockImplementation(() => clockValue);
+    let reads = 0,
+      remaining: number | undefined;
+    try {
+      const [attempt] = await database.client<
+        { namespace: string; podName: string; workerID: string }[]
+      >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",
+        factorybox_worker_id AS "workerID" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      if (!attempt) throw new Error("Missing owned startup identity");
+      const declaration = factoryboxRuntimeDeclaration({
+        ...attempt,
+        attemptID: owned.attemptID,
+        sandboxID: `runtime-${owned.attemptID.replaceAll("-", "")}`,
+        runtimeOwnerID: owned.workspaceID,
+        labels: { "factory.dev/runtime-owner": owned.workspaceID },
+        runtimeHostImage: configuration.FACTORY_RUNTIME_HOST_IMAGE,
+        profile: ownedFactoryboxProfile,
+        sharedSource: true,
+      });
+      await database.client`UPDATE factory.runtime_attempt SET state='starting',
+        kubernetes_uid='owned-startup-pod',kubernetes_namespace_uid='owned-startup-namespace'
+        WHERE id=${owned.attemptID}`;
+      const controller = createRuntimeController(
+        database,
+        hub,
+        "owned-startup-phases",
+        {
+          async prepareExecution() {
+            throw new Error("Recovery must not replace Source");
+          },
+        },
+        {
+          ...createKubernetesClient(),
+          async getPod() {
+            reads++;
+            const cold = scenario === "cold worker" && reads === 1;
+            if (cold) clockValue += 419_000;
+            return {
+              uid: "owned-startup-pod",
+              phase: "Running",
+              ready: !cold,
+              labels: {},
+              factoryboxImage: configuration.FACTORY_FACTORYBOX_WORKER_IMAGE,
+              runtimeHostImage: configuration.FACTORY_RUNTIME_HOST_IMAGE,
+            };
+          },
+        },
+        async () => "",
+        undefined,
+        {
+          ...createFactoryboxExecution(database, hub),
+          async startupResources() {
+            return [declaration.pod];
+          },
+          async ensureStarted(_id, _resources, deadline) {
+            if (deadline === undefined) throw new Error("Missing Sandbox lifecycle deadline");
+            remaining = deadline - clockValue;
+            clockValue = deadline + 1;
+            throw new Error("Native operating storage capacity is unavailable");
+          },
+        },
+      );
+      const observe = await controller.recover();
+      observe();
+      await eventually(
+        () => controller.get(owned.attemptID),
+        (value) => value?.failure === "Native operating storage capacity is unavailable",
+        "Specific native failure was not observed",
+      );
+      await Bun.sleep(1_100);
+      if (scenario === "cold worker") expect(remaining).toBe(420_000);
+      expect((await controller.get(owned.attemptID))?.failure).toBe(
+        "Native operating storage capacity is unavailable",
+      );
+      expect((await controller.get(owned.attemptID))?.state).toBe("starting");
+    } finally {
+      clock.mockRestore();
+      await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+      hub.revoke(owned.attemptID);
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  30_000,
+);
 
 test.each([true, false])(
   "startup waits for child readiness without repeating confirmed native Start, parent connected=%s",

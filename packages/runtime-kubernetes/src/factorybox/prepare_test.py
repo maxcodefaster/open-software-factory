@@ -39,6 +39,15 @@ class PreparationTests(unittest.TestCase):
         return patch.dict(os.environ, {"FACTORY_POD_UID": self.request["podUID"],
                                        "FACTORY_STORE_ID": self.request["storeID"]})
 
+    def test_preparation_consumes_one_lifecycle_and_does_not_restart_expired_work(self):
+        remaining = self.module["remaining_preparation_seconds"]
+        deadline = self.module["PREPARATION_DEADLINE"]
+        with patch("time.monotonic", return_value=deadline - 300):
+            self.assertEqual(remaining(), 300)
+        with patch("time.monotonic", return_value=deadline):
+            with self.assertRaisesRegex(TimeoutError, "lifecycle deadline expired"):
+                remaining()
+
     def test_failed_metadata_write_removes_only_its_own_new_partial_file(self):
         path = self.root / "owned-intent.json"
         with patch("json.dump", side_effect=OSError("owned disk full")):
@@ -247,6 +256,8 @@ class PreparationTests(unittest.TestCase):
                                 "runtime_sha256": "e" * 64}}
 
         def unpack(args, **kwargs):
+            self.assertGreater(kwargs["timeout"], 120,
+                               "cold extraction must use its remaining lifecycle, not a 90-second cap")
             with tarfile.open(seed / "rootfs.tar") as archive:
                 destination = Path(args[args.index("-C") + 1])
                 for member in archive.getmembers():
@@ -256,6 +267,8 @@ class PreparationTests(unittest.TestCase):
                     (destination / member.name).mkdir(parents=True, exist_ok=True)
 
         def base(args, **kwargs):
+            self.assertGreater(kwargs["timeout"], 120,
+                               "cold native import must use its remaining lifecycle, not a two-minute cap")
             source = args[args.index("--source") + 1]
             imported.append(source)
             saved = str(self.root / "controller/bases/factory-runtime/rootfs")

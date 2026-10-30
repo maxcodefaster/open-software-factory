@@ -9,12 +9,20 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 
 
 SOURCE_ROOT = Path('/factory-source')
 SOURCE_USER = (101000, 101000)
+PREPARATION_DEADLINE = time.monotonic() + 420
 IDENTITY_FIELDS = {'version', 'sandboxID', 'storeID', 'epoch', 'podUID', 'runtimeHostImage',
                    'sharedSource', 'sourceWorkspaceID', 'bootstrap', 'reserveSeed'}
+
+def remaining_preparation_seconds():
+    remaining = PREPARATION_DEADLINE - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('Factory preparation lifecycle deadline expired')
+    return remaining
 
 
 def digest(path):
@@ -245,7 +253,7 @@ def image_base(request, status, seed, rootfs_sha256, cli):
             source = root/'source'
             source.mkdir(mode=0o755)
             subprocess.run(['tar', '--numeric-owner', '--same-owner', '-xpf', str(seed/'rootfs.tar'),
-                            '-C', str(source)], check=True, timeout=90)
+                            '-C', str(source)], check=True, timeout=remaining_preparation_seconds())
             for directory in ['proc', 'sys', 'dev', 'run', 'tmp', 'workspace',
                               'factory/assignment', 'factory/registry-ca', 'home/coder']:
                 (source/directory).mkdir(parents=True, exist_ok=True)
@@ -257,7 +265,8 @@ def image_base(request, status, seed, rootfs_sha256, cli):
             (source/'tmp').chmod(0o1777)
             publish(root/'prepared.json', intent)
         base = json.loads(subprocess.check_output(
-            [*cli, 'prepare-base', '--source', str(root/'source'), base_id], timeout=120))
+            [*cli, 'prepare-base', '--source', str(root/'source'), base_id],
+            timeout=remaining_preparation_seconds()))
         retire_image_source(root, base, status, base_id)
         return base
 

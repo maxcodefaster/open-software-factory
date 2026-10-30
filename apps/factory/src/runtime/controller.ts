@@ -596,7 +596,8 @@ export function createRuntimeController(
     podName: string,
     resources: readonly unknown[],
   ) {
-    const deadline = performance.now() + 420_000;
+    let deadline = performance.now() + 420_000;
+    let workerReady = false;
     // Reconcile Start once per observer, including after Factory recovery.
     // Waiting for repository hooks must not repeat native preparation checks.
     let startConfirmed = false;
@@ -629,6 +630,12 @@ export function createRuntimeController(
         return;
       }
       if (pod.ready) {
+        if (!workerReady) {
+          // Worker/PVC admission is platform preparation, not time spent on
+          // this Sandbox's qualified lifecycle. Keep each window bounded.
+          workerReady = true;
+          deadline = performance.now() + 420_000;
+        }
         try {
           if (!startConfirmed) {
             await factorybox.ensureStarted(attemptID, resources, deadline);
@@ -648,7 +655,8 @@ export function createRuntimeController(
       }
       await Bun.sleep(1_000);
     }
-    await database.client`UPDATE factory.runtime_attempt SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
+    await database.client`UPDATE factory.runtime_attempt
+          SET failure=coalesce(nullif(failure,''),'Factorybox startup deadline expired; original execution was retained'),updated_at=now()
           WHERE id=${attemptID} AND state='starting'`;
   }
 

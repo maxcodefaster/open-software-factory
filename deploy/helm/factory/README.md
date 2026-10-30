@@ -68,7 +68,7 @@ Size private execution storage before the first execution pins the worker profil
 `factorybox.minimumStoreGiB` defaults to 8 and must not exceed that maximum.
 The pinned worker must support the `bounded-min-bytes` contract. On its actual backing
 filesystem it chooses the largest whole-GiB size in the range while preserving its 12 GiB
-host floor. Factory retains the actual selected size in its native identity, not as a mutable
+host floor and existing 4 GiB operating write reserve. Factory retains the actual selected size in its native identity, not as a mutable
 installation setting. Existing admitted profiles and stores are never resized by an upgrade.
 `factorybox.claimGiB` defaults to 64 and must cover the maximum bounded image plus 17 GiB
 for the host admission floor and metadata. For example, a 24 GiB bounded image needs
