@@ -338,6 +338,54 @@ test("a surviving worker cannot recreate even an unrecorded missing shared resou
   expect(writes).toHaveLength(0);
 });
 
+test("changed worker Registry trust identifies the configuration conflict without disclosing or overwriting certificates", async () => {
+  const writes: string[][] = [];
+  const trust = {
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: {
+      name: "registry-ca",
+      namespace: namespace.metadata.name,
+      labels: sharedLabels,
+    },
+    stringData: { "ca.crt": "new-private-certificate" },
+  };
+  const client = createKubernetesClient(async (args) => {
+    if (args[0] !== "get") writes.push(args);
+    return {
+      stdout: JSON.stringify(
+        args[1] === "namespace"
+          ? { metadata: { uid: "namespace-uid", labels: namespace.metadata.labels } }
+          : {
+              apiVersion: "v1",
+              kind: "Secret",
+              metadata: { ...trust.metadata, uid: "trust-uid" },
+              data: { "ca.crt": Buffer.from("original-private-certificate").toString("base64") },
+            },
+      ),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  let message = "";
+  try {
+    await client.apply([namespace, trust, privateAssignment], {
+      ownerID: "workspace",
+      uid: "namespace-uid",
+      createShared: false,
+    });
+  } catch (cause) {
+    if (!(cause instanceof Error)) throw cause;
+    message = cause.message;
+  }
+  expect(message).toContain("Secret/registry-ca");
+  expect(message).toContain("Registry CA");
+  expect(message).toContain("existing worker");
+  expect(message).not.toContain("new-private-certificate");
+  expect(message).not.toContain("original-private-certificate");
+  expect(writes).toHaveLength(0);
+});
+
 test.each([
   "original",
   "foreign-namespace",
