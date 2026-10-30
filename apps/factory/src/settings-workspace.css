@@ -16,6 +16,27 @@
   font-size: var(--text-lg);
   font-weight: var(--weight-medium);
 }
+.settings-scope-picker {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0 var(--space-2) var(--space-4);
+}
+.settings-scope-picker > span {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+.settings-scope-picker select {
+  width: 100%;
+}
+.settings-setup-recovery {
+  margin: var(--space-4) var(--space-6) var(--space-6);
+  padding-block-start: var(--space-4);
+  border-top: 1px solid var(--line-subtle);
+}
+.settings-setup-recovery > summary {
+  cursor: pointer;
+  color: var(--color-ink-muted);
+}
 .settings-content[data-skills="true"] {
   display: flex;
   flex-direction: column;
@@ -80,8 +101,7 @@
   gap: var(--space-1) var(--space-4);
   padding: var(--space-5) var(--space-6) var(--space-3);
 }
-.settings-content:has(> .settings-configuration-host:not([hidden]) .input-overview-heading)
-  > .settings-content-heading {
+.settings-content-heading[data-inputs="true"] {
   display: none;
 }
 .settings-content-heading[data-library="true"] {

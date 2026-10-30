@@ -100,34 +100,36 @@ export function TicketChapterNavigation(props: {
     },
   );
   return (
-    <nav class="ticket-chapter-navigation" aria-label="Ticket chapters">
-      <div class="ticket-chapter-links">
-        <For each={chapters()} keyed={(chapter) => chapter.id}>
-          {(chapter) => (
-            <button
-              type="button"
-              class={active() === chapter().id ? "is-current" : ""}
-              aria-label={chapter().label}
-              aria-current={active() === chapter().id ? "location" : "false"}
-              onClick={() => go(chapter().id)}
-            >
-              <span class="ticket-chapter-mark" aria-hidden="true" />
-              <span class="ticket-chapter-label" aria-hidden="true">
-                {chapter().label}
-              </span>
-            </button>
-          )}
-        </For>
-      </div>
-      <label class="ticket-chapter-select">
-        <span class="sr-only">Ticket chapter</span>
-        <select value={active()} onChange={(event) => go(event.currentTarget.value)}>
+    <Show when={chapters().length > 1}>
+      <nav class="ticket-chapter-navigation" aria-label="Ticket chapters">
+        <div class="ticket-chapter-links">
           <For each={chapters()} keyed={(chapter) => chapter.id}>
-            {(chapter) => <option value={chapter().id}>{chapter().label}</option>}
+            {(chapter) => (
+              <button
+                type="button"
+                class={active() === chapter().id ? "is-current" : ""}
+                aria-label={chapter().label}
+                aria-current={active() === chapter().id ? "location" : "false"}
+                onClick={() => go(chapter().id)}
+              >
+                <span class="ticket-chapter-mark" aria-hidden="true" />
+                <span class="ticket-chapter-label" aria-hidden="true">
+                  {chapter().label}
+                </span>
+              </button>
+            )}
           </For>
-        </select>
-      </label>
-    </nav>
+        </div>
+        <label class="ticket-chapter-select">
+          <span class="sr-only">Ticket chapter</span>
+          <select value={active()} onChange={(event) => go(event.currentTarget.value)}>
+            <For each={chapters()} keyed={(chapter) => chapter.id}>
+              {(chapter) => <option value={chapter().id}>{chapter().label}</option>}
+            </For>
+          </select>
+        </label>
+      </nav>
+    </Show>
   );
 }
 

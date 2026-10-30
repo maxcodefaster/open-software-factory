@@ -66,6 +66,9 @@ export function createKnowledgeState(options: {
     accessEpoch = 0;
   let accessKey: string | undefined,
     inventory = "";
+  let documentsRequested = false;
+  let documentsLoaded = "";
+  let documentsRead: Promise<void> | undefined;
   createEffect(
     () => ({
       key: `${options.projectID()}:${options.canDevelop()}`,
@@ -80,6 +83,8 @@ export function createKnowledgeState(options: {
       setHistory([]);
       setResults([]);
       if (!canDevelop) {
+        documentsRequested = false;
+        documentsLoaded = "";
         setDocuments([]);
         setDocument(undefined);
       }
@@ -107,14 +112,35 @@ export function createKnowledgeState(options: {
     setGeneration(value ?? undefined);
     const next = `${projectId}:${options.canDevelop()}:${value?.id ?? ""}:${value?.state ?? ""}`;
     if (next === inventory) return;
-    const source = options.canDevelop()
-      ? await serverCall(
-          getRepositoryDocuments({ ...(signal ? { signal } : {}), data: [projectId] }),
-        )
-      : { documents: [] };
-    if (options.projectID() !== projectId) return;
-    setDocuments(options.canDevelop() ? source.documents : []);
     inventory = next;
+    if (documentsRequested) await loadDocuments(signal);
+  }
+  async function loadDocuments(signal?: AbortSignal): Promise<void> {
+    const projectId = options.projectID();
+    if (!projectId || !options.canDevelop()) return;
+    documentsRequested = true;
+    if (documentsLoaded === inventory && documentsLoaded) return;
+    if (documentsRead) {
+      await documentsRead;
+      if (documentsLoaded && documentsLoaded === inventory) return;
+    }
+    const epoch = accessEpoch;
+    const key = inventory;
+    const read = (async () => {
+      const source = await serverCall(
+        getRepositoryDocuments({ ...(signal ? { signal } : {}), data: [projectId] }),
+      );
+      if (options.projectID() !== projectId || accessEpoch !== epoch || !options.canDevelop())
+        return;
+      setDocuments(source.documents);
+      documentsLoaded = key;
+    })();
+    documentsRead = read;
+    try {
+      await read;
+    } finally {
+      if (documentsRead === read) documentsRead = undefined;
+    }
   }
   async function open(publish = true) {
     const projectId = options.projectID();
@@ -126,12 +152,22 @@ export function createKnowledgeState(options: {
       { id: `knowledge:${projectId}`, view: "knowledge", label: "Knowledge" },
       publish,
     );
-    await options.mutate(refresh);
+    try {
+      await refresh();
+    } catch (cause) {
+      if (options.projectID() === projectId)
+        options.onError(
+          cause instanceof Error ? cause.message : "Wiki status could not be loaded.",
+        );
+    }
   }
   return {
     drafts,
     pages,
     page,
+    loading: () =>
+      pages.completeness() !== "complete" ||
+      Boolean(selectedPageID() && page.completeness() !== "complete"),
     selectedPageID,
     documents,
     document,
@@ -140,6 +176,7 @@ export function createKnowledgeState(options: {
     results,
     query,
     refresh,
+    loadDocuments,
     open,
     select(pageID: string | undefined) {
       documentRequest++;
@@ -149,6 +186,8 @@ export function createKnowledgeState(options: {
     },
     reset() {
       inventory = "";
+      documentsRequested = false;
+      documentsLoaded = "";
       searchRequest++;
       documentRequest++;
       setSelectedPageID(undefined);

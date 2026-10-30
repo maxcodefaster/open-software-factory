@@ -13,6 +13,31 @@ const ide: WorkspaceTab = { id: "ide:1", view: "ide", label: "IDE" };
 const preview: WorkspaceTab = { id: "preview:1", view: "preview", label: "Preview" };
 
 describe("workspace tabs", () => {
+  test("every declared Staging App follows a ready promotion without retargeting development", () => {
+    const website = {
+      ...preview,
+      id: "preview:staging:project:app",
+      appChannel: "app",
+      attemptID: "old",
+    };
+    const forms = {
+      ...preview,
+      id: "preview:staging:project:app-forms",
+      appChannel: "app-forms",
+      attemptID: "old",
+    };
+    const development = {
+      ...preview,
+      id: "preview:app:dev:app-forms",
+      appChannel: "app-forms",
+      attemptID: "dev",
+    };
+    const state = { tabs: [website, forms, development], activeTabID: forms.id };
+    expect(followStagingPromotion(state, "project", "new")).toEqual({
+      tabs: [{ ...website, attemptID: "new" }, { ...forms, attemptID: "new" }, development],
+      activeTabID: forms.id,
+    });
+  });
   test("only the existing Project Staging tab follows a confirmed ready promotion", () => {
     const staging = { ...preview, id: "preview:staging:project", attemptID: "old" };
     const development = {

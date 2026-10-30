@@ -23,6 +23,8 @@ export function DeveloperIDEWorkspace(props: {
   allowed: boolean;
   preparingSelection?: boolean;
   workspaceID: string | undefined;
+  preparationFailure?: string | undefined;
+  onRetrySelection?: (() => void) | undefined;
   active: boolean;
   onDevelopmentPreview: (message: DevelopmentPreviewMessage) => void;
   navigation?: ActivityNavigationRequest | undefined;
@@ -36,6 +38,8 @@ export function DeveloperIDEWorkspace(props: {
   const [editorError, setEditorError] = createSignal("");
   const [editorSlow, setEditorSlow] = createSignal(false);
   const [sourceError, setSourceError] = createSignal("");
+  const fileError = () =>
+    availableSource() ? "" : sourceError() || props.preparationFailure || "";
   const [sourceState, setSourceState] = createSignal<WorkspaceSourceState>();
   const [sourceRecovering, setSourceRecovering] = createSignal(false);
   const [editorRecovering, setEditorRecovering] = createSignal(false);
@@ -78,6 +82,10 @@ export function DeveloperIDEWorkspace(props: {
   );
   async function retrySource(restart: boolean) {
     const workspaceID = props.workspaceID;
+    if (!workspaceID) {
+      props.onRetrySelection?.();
+      return;
+    }
     if (!workspaceID || !props.allowed || sourceRecovering() || editorRecovering()) return;
     const cancel = new AbortController();
     sourceRecovery = cancel;
@@ -371,21 +379,19 @@ export function DeveloperIDEWorkspace(props: {
           )}
         </Show>
         <Show
-          when={
-            !sourceError() && ready() && (!props.workspaceID || selected() !== props.workspaceID)
-          }
+          when={!fileError() && ready() && (!props.workspaceID || selected() !== props.workspaceID)}
         >
           <div class="editor-source-status" role="status">
             Preparing Workspace files…
           </div>
         </Show>
-        <Show when={editorError() || editorSlow() || sourceError() || editorRecovering()}>
+        <Show when={editorError() || editorSlow() || fileError() || editorRecovering()}>
           <div class="editor-recovery">
-            <Show when={sourceError()}>
-              <p role="status">{sourceError()}</p>
+            <Show when={fileError()}>
+              <p role="status">{fileError()}</p>
             </Show>
             <div class="editor-recovery-actions">
-              <Show when={sourceError()}>
+              <Show when={fileError()}>
                 <button
                   class="quiet-button"
                   type="button"

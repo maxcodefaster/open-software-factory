@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
 import { createWriterService } from "../../apps/factory/src/access/writer-service";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
 import { writerViewSchema } from "../../apps/factory/src/api-contracts";
@@ -11,7 +10,10 @@ import { createReviewService } from "../../apps/factory/src/review/service";
 import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
 import { createServerFunctionEndpoint } from "../../apps/factory/src/server-functions/endpoint";
 import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
-import { factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 test("compiled Writer and Review commands preserve actors, epochs, immutable batches and admitted work after browser cancellation", async () => {
   const origin = "https://factory.test",
@@ -31,15 +33,18 @@ test("compiled Writer and Review commands preserve actors, epochs, immutable bat
     writerRelease = Promise.withResolvers<void>();
   const reviewAdmitted = Promise.withResolvers<void>(),
     reviewRelease = Promise.withResolvers<void>();
-  const view = writerViewSchema.parse({
-    state: "human",
-    epoch: 3,
-    canWrite: true,
-    yours: true,
-    commandID: null,
-    actor: null,
-    requester: null,
-  });
+  const view = {
+    ...writerViewSchema.parse({
+      state: "human",
+      epoch: 3,
+      canWrite: true,
+      yours: true,
+      commandID: null,
+      actor: null,
+      requester: null,
+    }),
+    stopPending: false,
+  };
   const access = {
     async requireChange(userID: string, id: string) {
       expect([userID, id]).toEqual([actor, change]);

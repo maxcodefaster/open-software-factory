@@ -27,7 +27,9 @@ const preview: WorkspaceTab = {
 
 describe("runtime workspace frame identity", () => {
   test("App-only projection opens a member Preview without exposing another developer's IDE", () => {
-    const apps = [{ attemptID: ready.id, projectID, channel: "web", label: "Developer · Web" }];
+    const apps = [
+      { attemptID: ready.id, projectID, channel: "web", label: "Developer · Web", state: "ready" },
+    ];
     expect(runtimeWorkspaceURL(preview, projectID, [], undefined, apps)).toBe(
       "/api/runtime-access?embed=1&path=%2Fruntime%2Fattempt-1%2Fpreview%2Fweb%2F",
     );
@@ -37,6 +39,24 @@ describe("runtime workspace frame identity", () => {
       runtimeWorkspaceURL({ ...preview, appChannel: "app-admin" }, projectID, [], undefined, apps),
     ).toBeUndefined();
     expect(runtimeWorkspaceURL(preview, projectID, [], undefined, [])).toBeUndefined();
+  });
+  test("declared staging Apps are listed before compute is ready without mounting an unusable frame", () => {
+    const staged = { ...ready, runtimeKind: "staging" as const, workspaceId: undefined };
+    const apps = [
+      {
+        attemptID: staged.id,
+        projectID,
+        channel: "app-forms",
+        label: "Staging · Forms",
+        state: "starting",
+      },
+    ];
+    const tab = { ...preview, appChannel: "app-forms" };
+    expect(
+      runtimeWorkspaceURL(tab, projectID, [{ ...staged, state: "starting" }], undefined, apps),
+    ).toBeUndefined();
+    expect(runtimeWorkspaceURL(tab, projectID, [staged], undefined, apps)).toContain("app-forms");
+    expect(runtimeWorkspaceURL(tab, projectID, [], undefined, apps)).toBeUndefined();
   });
   test("never falls back to a runtime IDE while declared development Previews remain scoped", () => {
     expect(runtimeWorkspaceURL(ide, projectID, [ready])).toBeUndefined();

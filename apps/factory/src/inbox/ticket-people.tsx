@@ -98,7 +98,7 @@ export function TicketPeople(props: {
             {name().trim().slice(0, 1).toLocaleUpperCase()}
           </span>
         </Show>
-        <span class="ticket-person-name">{props.value.responsibleId ? name() : "Add person"}</span>
+        <span class="ticket-person-name">{props.value.responsibleId ? name() : "People"}</span>
       </button>
       <Show when={open()}>
         <Portal>
@@ -159,18 +159,20 @@ export function TicketPeople(props: {
                 </p>
               </Show>
             </div>
+            <div class="ticket-person-follow">
+              <button
+                type="button"
+                class="quiet-button"
+                disabled={props.busy}
+                aria-pressed={props.value.following ? "true" : "false"}
+                onClick={() => void props.onFollow(!props.value.following)}
+              >
+                {props.value.following ? "Following" : "Follow"}
+              </button>
+            </div>
           </section>
         </Portal>
       </Show>
-      <button
-        type="button"
-        class="quiet-button"
-        disabled={props.busy}
-        aria-pressed={props.value.following ? "true" : "false"}
-        onClick={() => void props.onFollow(!props.value.following)}
-      >
-        {props.value.following ? "Following" : "Follow"}
-      </button>
     </div>
   );
 }

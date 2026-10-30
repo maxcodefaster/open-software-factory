@@ -37,6 +37,7 @@ interface RuntimeNavigationDependencies {
 }
 
 export function createRuntimeNavigation(dependencies: RuntimeNavigationDependencies) {
+  const preparingPreviews = new Set<string>();
   async function openIDETarget(target: RuntimeDockTarget) {
     if (!dependencies.canDevelopProject()) return;
     const projectID = dependencies.selectedProjectID();
@@ -52,20 +53,33 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
       dependencies.resetAgentView();
       dependencies.setConversation(undefined);
     }
-    dependencies.openWorkspaceTab({
+    const previous = dependencies.workspaceTabs().find((tab) => tab.id === tabID);
+    const opening: WorkspaceTab = {
       id: tabID,
       view: "ide",
       label: `IDE · ${target.label}`,
+      ...(previous?.workspaceID ? { workspaceID: previous.workspaceID } : {}),
       ...(target.attemptId ? { attemptID: target.attemptId } : {}),
       ...(target.changeId ? { changeID: target.changeId } : {}),
       ...(change ? { ticketID: change.ticketId } : {}),
-    });
+    };
+    dependencies.openWorkspaceTab(opening);
     await dependencies.mutate(async () => {
       const source = await serverCall(
         target.changeId
           ? ensureChangeSource({ data: [target.changeId] })
           : ensurePersonalSource({ data: [projectID] }),
-      );
+      ).catch((cause: unknown) => {
+        dependencies.updateWorkspaceTab(
+          {
+            ...opening,
+            preparationFailure:
+              cause instanceof Error ? cause.message : "Workspace files could not be prepared.",
+          },
+          projectID,
+        );
+        throw cause;
+      });
       dependencies.updateWorkspaceTab(
         {
           id: tabID,
@@ -121,7 +135,14 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
                 tab.appChannel === target.appChannel,
             )),
       );
-    if (existing && (existing.attemptID || existing.appChannel)) {
+    const sameAttempt = target.attemptId
+      ? existing?.attemptID === target.attemptId
+      : !existing?.attemptID;
+    if (
+      existing &&
+      (preparingPreviews.has(existing.id) ||
+        (sameAttempt && (existing.attemptID || existing.appChannel)))
+    ) {
       dependencies.activateWorkspaceTab(existing);
       return;
     }
@@ -139,19 +160,25 @@ export function createRuntimeNavigation(dependencies: RuntimeNavigationDependenc
     }
     const stagingProjectID = target.projectId;
     if (!stagingProjectID) return;
-    await dependencies.mutate(async () => {
-      const attempt = await serverCall(ensureStaging({ data: [stagingProjectID] }));
-      dependencies.updateWorkspaceTab(
-        {
-          id: tabID,
-          view: "preview",
-          label: `Preview · ${target.label}`,
-          attemptID: attempt.id,
-        },
-        projectID,
-      );
-      await dependencies.refreshServerState();
-    });
+    preparingPreviews.add(tabID);
+    try {
+      await dependencies.mutate(async () => {
+        const attempt = await serverCall(ensureStaging({ data: [stagingProjectID] }));
+        dependencies.updateWorkspaceTab(
+          {
+            id: tabID,
+            view: "preview",
+            label: `Preview · ${target.label}`,
+            attemptID: attempt.id,
+            ...(target.appChannel ? { appChannel: target.appChannel } : {}),
+          },
+          projectID,
+        );
+        await dependencies.refreshServerState();
+      });
+    } finally {
+      preparingPreviews.delete(tabID);
+    }
   }
 
   function ticketPreviewTarget(changeID: string | undefined) {

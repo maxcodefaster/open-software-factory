@@ -26,6 +26,9 @@ function Surface() {
   const [second, setSecond] = createSignal(false);
   const [action, setAction] = createSignal("");
   const [busy, setBusy] = createSignal(query.has("busy"));
+  const [technicalPending, setTechnicalPending] = createSignal(
+    query.has("unresolved") || query.has("busy"),
+  );
   const [commands, setCommands] = createSignal({ work: 0, saves: 0, approvals: 0 });
   const [queued, setQueued] = createSignal(query.has("queued"));
   const [commissioned, setCommissioned] = createSignal(query.has("queued"));
@@ -83,6 +86,7 @@ function Surface() {
   });
   const plan = () => {
     commission("Technical planning commissioned");
+    setTechnicalPending(true);
     setBusy(true);
   };
   return (
@@ -141,7 +145,7 @@ function Surface() {
               followUps: [],
               technicalDesigns: contributor || empty ? [] : [design()],
               technicalDesignPresent: !empty,
-              technicalPlanningPending: query.has("unresolved") || busy(),
+              technicalPlanningPending: technicalPending(),
               implementationOrder: queued()
                 ? {
                     commandId: "10000000-0000-4000-8000-000000000012",
@@ -203,7 +207,10 @@ function Surface() {
               />
             }
             onInterview={() => commission("Product interview commissioned")}
-            onFullPlanning={() => commission("Full planning commissioned")}
+            onFullPlanning={() => {
+              commission("Full planning commissioned");
+              setBusy(true);
+            }}
             onTechnicalPlanning={plan}
             planningBusy={busy()}
             onSaveTechnicalDesign={async (_id, content) => {

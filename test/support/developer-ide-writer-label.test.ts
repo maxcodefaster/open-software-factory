@@ -47,3 +47,14 @@ test("missing identity never invents an owner or changes writing authority", () 
     }),
   ).toBe("Agent outcome unconfirmed · requested by Anna. Observation mode.");
 });
+
+test("a stopped Turn with unconfirmed Agent Stop is not presented as settled editing", () => {
+  expect(
+    factoryWriterLabel({
+      state: "agent",
+      canWrite: false,
+      stopPending: true,
+      actor: { user: { name: "Anna" }, workState: "stopped" },
+    }),
+  ).toBe("Agent Stop unconfirmed. Check Stop in this Ticket. Files remain available to read.");
+});

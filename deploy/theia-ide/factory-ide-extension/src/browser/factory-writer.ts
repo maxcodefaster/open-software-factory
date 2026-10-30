@@ -200,6 +200,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
       const label = factoryWriterLabel({
         state: value.state,
         canWrite: value.canWrite,
+        stopPending: "stopPending" in value && value.stopPending === true,
         ...("actor" in value ? { actor: value.actor } : {}),
         ...("requester" in value ? { requester: value.requester } : {}),
         ...("presence" in value ? { presence: value.presence } : {}),
@@ -212,6 +213,7 @@ export class FactoryWriterContribution implements FrontendApplicationContributio
         priority: 97,
       });
       this.#action.hidden =
+        ("stopPending" in value && value.stopPending === true) ||
         value.canWrite ||
         (value.state === "handoff" &&
           (("yours" in value && !value.yours) ||

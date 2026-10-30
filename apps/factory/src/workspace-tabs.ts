@@ -16,6 +16,7 @@ export type WorkspaceTab = {
   ticketID?: string;
   attemptID?: string;
   workspaceID?: string;
+  preparationFailure?: string;
   appChannel?: string;
   changeID?: string;
   settingsProject?: { id: string; name: string };
@@ -74,9 +75,16 @@ export function followStagingPromotion(
 ): ProjectWorkspaceState {
   if (!readyAttemptID) return state;
   const stagingID = `preview:staging:${projectID}`;
-  const tab = state.tabs.find((candidate) => candidate.id === stagingID);
-  if (tab?.view !== "preview" || tab.appChannel || tab.attemptID === readyAttemptID) return state;
-  return updateWorkspaceTabState(state, { ...tab, attemptID: readyAttemptID });
+  let next = state;
+  for (const tab of state.tabs) {
+    if (
+      tab.view === "preview" &&
+      (tab.id === stagingID || tab.id.startsWith(`${stagingID}:`)) &&
+      tab.attemptID !== readyAttemptID
+    )
+      next = updateWorkspaceTabState(next, { ...tab, attemptID: readyAttemptID });
+  }
+  return next;
 }
 
 export type ClosedWorkspaceTab = {

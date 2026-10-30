@@ -43,9 +43,35 @@ export function KnowledgeTree(props: {
   snippet(id: string): string | undefined;
   onSelectPage(id: string): void;
   onOpenDocument(path: string): void;
+  onLoadDocuments?: (() => Promise<void>) | undefined;
   onMove(move: PageMove): Promise<void>;
 }) {
   const [expanded, setExpanded] = createSignal<Set<string>>(new Set(["wiki"]));
+  const [documentsLoading, setDocumentsLoading] = createSignal(false);
+  const [documentsError, setDocumentsError] = createSignal("");
+  createEffect(
+    () => props.canDevelop && expanded().has("source") && props.projectID,
+    (projectID) => {
+      if (!projectID || !props.onLoadDocuments) return;
+      let disposed = false;
+      setDocumentsLoading(true);
+      setDocumentsError("");
+      void props
+        .onLoadDocuments()
+        .catch((cause: unknown) => {
+          if (!disposed)
+            setDocumentsError(
+              cause instanceof Error ? cause.message : "Code documents could not be loaded.",
+            );
+        })
+        .finally(() => {
+          if (!disposed) setDocumentsLoading(false);
+        });
+      return () => {
+        disposed = true;
+      };
+    },
+  );
   const [notice, setNotice] = createSignal("");
   const [rejected, setRejected] = createSignal("");
   const [dropTarget, setDropTarget] = createSignal("");
@@ -343,7 +369,17 @@ export function KnowledgeTree(props: {
         </button>
         <Show when={isExpanded("source")}>
           <SourceBranch folder={repositoryFolders(props.documents)} depth={0} />
-          <Show when={props.documents.length === 0}>
+          <Show when={documentsLoading()}>
+            <p class="tree-empty" role="status">
+              Loading code documents…
+            </p>
+          </Show>
+          <Show when={documentsError()}>
+            <p class="tree-empty" role="status">
+              {documentsError()}
+            </p>
+          </Show>
+          <Show when={props.documents.length === 0 && !documentsLoading() && !documentsError()}>
             <p class="tree-empty">This repository has no code documents.</p>
           </Show>
         </Show>

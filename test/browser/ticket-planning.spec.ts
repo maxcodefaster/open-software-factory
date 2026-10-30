@@ -56,6 +56,81 @@ test.afterAll(async () => {
   await rm(cache, { recursive: true, force: true });
 });
 
+for (const width of [1440, 390]) {
+  test(`single-chapter Tickets omit empty navigation and keep one clarification action at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${origin}/ticket-planning.html?empty`);
+    await expect(page.getByRole("navigation", { name: "Ticket chapters" })).toHaveCount(0);
+    await expect(page.getByRole("region", { name: "Technical design", exact: true })).toHaveCount(
+      0,
+    );
+    await expect(
+      page.getByRole("button", { name: "Plan product & tech", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("button", { name: "Plan technical design", exact: true }),
+    ).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Follow", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Add person", exact: true }).click();
+    const people = page.getByRole("dialog", { name: "Assign responsibility" });
+    await people.getByRole("button", { name: "Follow", exact: true }).click();
+    await expect(people.getByRole("button", { name: "Following", exact: true })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await page.keyboard.press("Escape");
+    if (width <= 760) {
+      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await page.getByRole("menuitem", { name: "Ask AI to clarify", exact: true }).click();
+    } else await page.getByRole("button", { name: "Ask AI to clarify", exact: true }).click();
+    await expect(page.getByLabel("Fixture action")).toHaveText("Full planning commissioned");
+    await expect(page.getByLabel("Fixture commands")).toHaveText(
+      JSON.stringify({ work: 1, saves: 0, approvals: 0 }),
+    );
+    await page.screenshot({ path: `${directory}/single-chapter-${width}.png`, fullPage: true });
+  });
+}
+
+test("Contributor clarification remains product-only and does not commission technical work", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/ticket-planning.html?empty&contributor`);
+  await page.getByRole("button", { name: "Ask AI to clarify", exact: true }).click();
+  await expect(page.getByLabel("Fixture action")).toHaveText("Product interview commissioned");
+  await expect(page.getByRole("navigation", { name: "Ticket chapters" })).toHaveCount(0);
+});
+
+for (const width of [1440, 390]) {
+  test(`unfinished technical planning resumes from the single Ticket action at ${width}px`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`${origin}/ticket-planning.html?empty&unresolved`);
+    await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    await expect(page.getByRole("navigation", { name: "Ticket chapters" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Ask AI to clarify", exact: true })).toHaveCount(
+      0,
+      { timeout: 1_500 },
+    );
+    if (width <= 760) {
+      await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+      await page
+        .getByRole("menuitem", { name: "Continue technical planning", exact: true })
+        .click();
+    } else {
+      await page.getByRole("button", { name: "Continue technical planning", exact: true }).click();
+    }
+    await expect(page.getByLabel("Fixture action")).toHaveText("Technical planning commissioned");
+    await expect(page.getByLabel("Fixture commands")).toHaveText(
+      JSON.stringify({ work: 1, saves: 0, approvals: 0 }),
+    );
+    await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
+    await page.screenshot({ path: `${directory}/continue-technical-${width}.png`, fullPage: true });
+  });
+}
+
 test("a prerequisite queues one implementation order and cancellation starts no work", async ({
   page,
 }) => {
@@ -96,7 +171,8 @@ for (const width of [1440, 768, 390]) {
     await ticketDocument.getByRole("button", { name: "Add person", exact: true }).click();
     const picker = page.getByRole("dialog", { name: "Assign responsibility" });
     await picker.getByRole("searchbox").fill("Lisa");
-    await expect(picker.getByRole("button")).toHaveCount(1);
+    await expect(picker.locator("[data-popover-option]")).toHaveCount(1);
+    await expect(picker.getByRole("button", { name: "Follow", exact: true })).toBeVisible();
     await page.screenshot({ path: `${directory}/people-${width}.png`, fullPage: true });
     const bounds = await picker.boundingBox();
     if (!bounds) throw new Error("People picker is not visible");
@@ -108,6 +184,7 @@ for (const width of [1440, 768, 390]) {
     ).toBeFocused();
     await expect(page.getByLabel("Fixture action")).toHaveText("");
     const nav = page.getByRole("navigation", { name: "Ticket chapters" });
+    if (width === 1440) expect((await nav.boundingBox())?.width).toBeLessThanOrEqual(28);
     if (width <= 760) await nav.getByLabel("Ticket chapter").selectOption("ticket-architecture");
     else await nav.getByRole("button", { name: "Architecture", exact: true }).click();
     const diagram = page.getByRole("img", { name: /The new export command/ });
@@ -401,7 +478,8 @@ test("chapter marks expose labels on hover and focus and track manual scrolling"
   await expect(technical.locator(".ticket-chapter-label")).toBeVisible();
   const bounds = await technical.boundingBox();
   if (!bounds) throw new Error("Technical chapter control is not visible");
-  expect(bounds.height).toBeGreaterThanOrEqual(44);
+  expect(bounds.height).toBeGreaterThanOrEqual(36);
+  expect(bounds.width).toBeGreaterThanOrEqual(24);
   await page.screenshot({ path: `${directory}/chapter-focus.png`, fullPage: true });
   await page
     .locator("#ticket-technical")
@@ -426,6 +504,20 @@ test("chapter marks expose labels on hover and focus and track manual scrolling"
     .evaluate((section) => section.scrollIntoView({ block: "start" }));
   await expect(product).toHaveClass("is-current");
   await expect(page.getByLabel("Fixture action")).toHaveText("");
+});
+
+test.describe("touch chapter controls", () => {
+  test.use({ hasTouch: true });
+  test("keep a 44px touch height without widening the reading rail", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 960 });
+    await page.goto(`${origin}/ticket-planning.html`);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const nav = page.getByRole("navigation", { name: "Ticket chapters" });
+    expect((await nav.boundingBox())?.width).toBeLessThanOrEqual(28);
+    const target = nav.getByRole("button", { name: "Technical design", exact: true });
+    expect((await target.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+    await page.screenshot({ path: `${directory}/chapter-touch-1440.png`, fullPage: true });
+  });
 });
 
 test("stale scope, contributors and manual tickets keep their authority boundaries", async ({
@@ -453,17 +545,20 @@ test("stale scope, contributors and manual tickets keep their authority boundari
   await page.screenshot({ path: `${directory}/contributor-product-only.png`, fullPage: true });
   await page.goto(`${origin}/ticket-planning.html?empty`);
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeEnabled();
-  await page.getByRole("button", { name: "Plan technical design", exact: true }).click();
-  await expect(page.getByLabel("Fixture action")).toHaveText("Technical planning commissioned");
+  await expect(
+    page.getByRole("button", { name: "Plan technical design", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Ask AI to clarify", exact: true }).click();
+  await expect(page.getByLabel("Fixture action")).toHaveText("Full planning commissioned");
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
-  await page
-    .getByText("Planning is in progress. Your product specification is retained.", { exact: true })
-    .scrollIntoViewIfNeeded();
+  await expect(page.getByLabel("Ticket progress", { exact: true })).toContainText(
+    "Planning is in progress.",
+  );
   await page.screenshot({ path: `${directory}/technical-planning-pending.png`, fullPage: true });
   await page.goto(`${origin}/ticket-planning.html?empty&unresolved`);
   await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
   await expect(
-    page.getByText("Technical Planning is not complete.", { exact: false }),
+    page.getByRole("button", { name: "Continue technical planning", exact: true }),
   ).toBeVisible();
 });
 

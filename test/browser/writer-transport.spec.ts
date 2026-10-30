@@ -1,12 +1,12 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { type WriterView, writerViewSchema } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { visualReviewSchema } from "../../packages/conversation-domain/src/visual-review";
+import { test } from "../fixtures/browser-test";
 import { factoryFunctionMatches, mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
@@ -62,6 +62,34 @@ const requested = () =>
       },
     ],
   });
+
+test("pending Agent Stop stays explicit instead of claiming settled work", async ({ page }) => {
+  const view = writerViewSchema.parse({
+    ...initial(),
+    state: "agent",
+    canWrite: false,
+    stopPending: true,
+    actor: {
+      kind: "agent",
+      user: { id: "10000000-0000-4000-8000-000000000004", name: "Anna" },
+      delegated: false,
+      workState: "stopped",
+    },
+  });
+  await mockFactoryFunctions(page, { writer: { status: async () => view } });
+  await page.goto(`${origin}/writer-status.html`);
+  const status = page.getByRole("region", { name: "Shared editing" });
+  await expect(status).toContainText("Agent Stop unconfirmed. Check Stop in this Ticket.");
+  await expect(status).not.toContainText("Agent work settled");
+  await expect(status.getByRole("button", { name: "Take over editing", exact: true })).toHaveCount(
+    0,
+  );
+  await page.screenshot({ path: `${directory}/pending-agent-stop-desktop.png`, fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(status).toContainText("Agent Stop unconfirmed");
+  expect(await page.locator("body").evaluate((body) => body.scrollWidth)).toBeLessThanOrEqual(390);
+  await page.screenshot({ path: `${directory}/pending-agent-stop-narrow.png`, fullPage: true });
+});
 
 test("Writer ignores a delayed pre-command status after the exact editing request succeeds", async ({
   page,

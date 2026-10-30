@@ -324,8 +324,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const [technicalEditing, setTechnicalEditing] = createSignal<() => boolean>();
   const technicalDirty = () => technicalEditing()?.() ?? false;
   const technical = createMemo(() => props.current.technicalDesigns?.[0]);
-  const showTechnical = () =>
-    props.canDevelop && Boolean(technical() || (props.latestRevision && !props.change));
+  const showTechnical = () => props.canDevelop && Boolean(technical());
   const [openReviewThreads, setOpenReviewThreads] = createSignal<number>();
   const [reviewActionSource, setReviewActionSource] =
     createSignal<() => ReviewActions | undefined>();
@@ -1079,19 +1078,23 @@ function TicketDocument(props: TicketWorkspaceProps) {
     const actions: TicketHeaderAction[] = [];
     const ticket = props.current.ticket;
     const review = reviewActions();
+    const continueTechnical =
+      props.canDevelop && props.current.technicalPlanningPending
+        ? props.onTechnicalPlanning
+        : undefined;
     if (canInterview() && !props.clarificationAction.status)
       actions.push({
         id: "interview",
-        label: props.clarificationAction.label,
-        disabled: hasChanges(),
-        run: props.onInterview,
-      });
-    if (canInterview() && props.canDevelop && props.onFullPlanning)
-      actions.push({
-        id: "full-planning",
-        label: "Plan product & tech",
+        label: continueTechnical ? "Continue technical planning" : props.clarificationAction.label,
+        title: continueTechnical
+          ? "Continues the technical design for the confirmed product specification without restarting the product Interview."
+          : props.canDevelop && props.onFullPlanning
+            ? "Clarifies the product requirements, then prepares the technical design after you confirm them."
+            : undefined,
         disabled: hasChanges() || technicalDirty() || props.planningBusy || props.pending,
-        run: props.onFullPlanning,
+        run:
+          continueTechnical ??
+          (props.canDevelop && props.onFullPlanning ? props.onFullPlanning : props.onInterview),
       });
     if (ticket.convertedToEpicId)
       actions.push({
@@ -1688,46 +1691,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                 </section>
 
                 <Show when={showTechnical()}>
-                  <Show
-                    when={technical()}
-                    fallback={
-                      <section
-                        id="ticket-technical"
-                        class="ticket-chapter ticket-technical-empty"
-                        aria-label="Technical design"
-                        tabindex="-1"
-                      >
-                        <div class="ticket-chapter-heading">
-                          <h3>Technical design</h3>
-                          <Show when={props.onTechnicalPlanning}>
-                            <button
-                              type="button"
-                              class="workspace-action"
-                              data-primary="true"
-                              disabled={
-                                props.pending ||
-                                props.planningBusy ||
-                                hasChanges() ||
-                                Boolean(proposal())
-                              }
-                              onClick={props.onTechnicalPlanning}
-                            >
-                              {props.planningBusy ? "Planning…" : "Plan technical design"}
-                            </button>
-                          </Show>
-                        </div>
-                        <p>
-                          Research the existing code and propose an implementation plan, with
-                          architecture diagrams when they help.
-                        </p>
-                        <Show when={props.planningBusy}>
-                          <p role="status">
-                            Planning is in progress. Your product specification is retained.
-                          </p>
-                        </Show>
-                      </section>
-                    }
-                  >
+                  <Show when={technical()}>
                     {(revision) => (
                       <TechnicalDesignSections
                         revision={revision()}

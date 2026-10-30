@@ -226,6 +226,7 @@ export interface DocumentWindowModel {
   canDevelopProject: () => boolean;
   browserRepository: () => string | undefined;
   knowledgeDrafts: ReturnType<typeof createKnowledgeState>["drafts"];
+  knowledgeLoading: ReturnType<typeof createKnowledgeState>["loading"];
   knowledgePageList: () => {
     readonly id: string;
     readonly projectId: string;
@@ -260,6 +261,7 @@ export interface DocumentWindowModel {
       }
     | undefined;
   repositoryDocuments: ReturnType<typeof createKnowledgeState>["documents"];
+  loadRepositoryDocuments: ReturnType<typeof createKnowledgeState>["loadDocuments"];
   openRepositoryDocument: ReturnType<typeof createKnowledgeState>["document"];
   knowledgeGeneration: ReturnType<typeof createKnowledgeState>["generation"];
   knowledgeHistory: ReturnType<typeof createKnowledgeState>["history"];
@@ -514,6 +516,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                 }
                 drafts={model.knowledgeDrafts}
                 pages={model.knowledgePageList()}
+                loading={model.knowledgeLoading()}
                 selectedPage={model.selectedKnowledgePage()}
                 documents={model.repositoryDocuments()}
                 openDocument={model.openRepositoryDocument()}
@@ -524,6 +527,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                 pending={model.pending()}
                 onSelectPage={model.selectKnowledgePage}
                 onOpenDocument={(path) => void model.openDocument(path)}
+                onLoadDocuments={model.loadRepositoryDocuments}
                 onGenerate={() => void model.mutate(model.generateKnowledge)}
                 onSearch={(query) => void model.searchProjectKnowledge(query)}
                 onSavePage={model.editKnowledgePage}
@@ -671,6 +675,16 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
           projectID={model.selectedProjectID()}
           allowed={model.canDevelopProject()}
           preparingSelection={model.projectMenuOpen()}
+          preparationFailure={
+            model.activeWorkspaceTab()?.view === "ide"
+              ? model.activeWorkspaceTab()?.preparationFailure
+              : undefined
+          }
+          onRetrySelection={() => {
+            const tab = model.activeWorkspaceTab();
+            const target = model.ideTargets().find((item) => `ide:${item.id}` === tab?.id);
+            if (target) void model.openIDETarget(target);
+          }}
           workspaceID={
             model.activeWorkspaceTab()?.view === "ide"
               ? model.activeWorkspaceTab()?.workspaceID

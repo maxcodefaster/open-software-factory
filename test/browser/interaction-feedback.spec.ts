@@ -168,6 +168,31 @@ async function capture(page: Page, name: string) {
   expect(content.scroll).toBeLessThanOrEqual(content.width);
 }
 
+test("Wiki loading never offers generation before an authoritative empty outline", async ({
+  page,
+}) => {
+  await open(page, "wiki&loading=1");
+  const create = page.getByRole("button", { name: "Create Project Wiki", exact: true });
+  await expect(create).toHaveCount(0);
+  await expect(page.getByRole("status")).toHaveText("Loading Wiki…");
+  await page.getByRole("button", { name: "Receive Wiki outline", exact: true }).click();
+  await expect(page.getByRole("button", { name: "First reference", exact: true })).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("Loading Wiki…");
+  await expect(create).toHaveCount(0);
+  await capture(page, "wiki-body-loading-desktop");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await capture(page, "wiki-body-loading-narrow");
+  await page.getByRole("button", { name: "Receive Wiki body", exact: true }).click();
+  await expect(page.getByLabel("Edit Knowledge body")).toContainText("A retained reference.");
+  await expect(page.getByRole("status").filter({ hasText: "Loading Wiki…" })).toHaveCount(0);
+  await expect(create).toHaveCount(0);
+  await page.getByRole("button", { name: "Clear Wiki selection", exact: true }).click();
+  await expect(page.getByText("Choose a Wiki page to read.", { exact: true })).toBeVisible();
+  await expect(create).toHaveCount(0);
+  await page.getByRole("button", { name: "Receive empty Wiki", exact: true }).click();
+  await expect(create).toBeVisible();
+});
+
 for (const width of [1440, 390, 320]) {
   test(`the workspace Copy link action stays quiet and icon-only at ${width}px`, async ({
     page,

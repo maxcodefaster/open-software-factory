@@ -8,12 +8,15 @@ function name(value: unknown) {
 export function factoryWriterLabel(value: {
   state: string;
   canWrite: boolean;
+  stopPending?: boolean;
   actor?: unknown;
   requester?: unknown;
   presence?: unknown;
 }) {
   const actor = value.actor && typeof value.actor === "object" ? value.actor : undefined;
   const person = actor && "user" in actor ? name(actor.user) : undefined;
+  if (value.stopPending)
+    return "Agent Stop unconfirmed. Check Stop in this Ticket. Files remain available to read.";
   if (value.canWrite) return "You are editing this implementation.";
   if (value.state === "handoff") {
     const requester = name(value.requester);

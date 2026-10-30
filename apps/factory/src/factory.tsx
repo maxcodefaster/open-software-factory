@@ -1,5 +1,3 @@
-import { createComposerState } from "./desktop/composer-state";
-import { createConversationState } from "./desktop/conversation-state";
 import {
   createEffect,
   createMemo,
@@ -51,8 +49,10 @@ import { AssistantPanel, type AssistantPanelModel } from "./desktop/assistant-pa
 import { createAssistantPresentation } from "./desktop/assistant-presentation";
 import { createBoardProjection } from "./desktop/board-projection";
 import { createCodingCommands } from "./desktop/coding-commands";
+import { createComposerState } from "./desktop/composer-state";
 import type { FactoryDesktopProps, TicketDetail } from "./desktop/contracts";
 import { createConversationCommands } from "./desktop/conversation-commands";
+import { createConversationState } from "./desktop/conversation-state";
 import { DocumentWindow, type DocumentWindowModel } from "./desktop/document-window";
 import { ProjectBoard, type ProjectBoardModel } from "./desktop/project-board";
 import { createProjectCommands } from "./desktop/project-commands";
@@ -516,6 +516,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     results: knowledgeSearch,
     query: knowledgeSearchQuery,
     refresh: refreshKnowledge,
+    loadDocuments: loadRepositoryDocuments,
     open: openKnowledge,
     generate: generateKnowledge,
     save: editKnowledgePage,
@@ -1288,7 +1289,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       setInboxQueue(undefined);
       setInboxSourceOpening(false);
     }
-    projectSetup?.show(false);
+    if (publish || fromInbox) projectSetup?.show(false);
     resetAgentView();
     setSelectedProjectID(projectID);
     setSelectedTicketID(undefined);
@@ -1475,6 +1476,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     )
       publishLocation({ view: "knowledge", projectID });
   }
+  let restoredLocation = false;
   const desktopNavigation = createDesktopNavigation({
     navigation,
     ready: () =>
@@ -1487,6 +1489,11 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     },
     async apply(destination, current) {
       if (destination.view === "unavailable") throw new Error(unavailableLink);
+      // Initial Board hydration is not a human decision to leave retained
+      // setup. Explicit resource links and later history navigation are.
+      if (restoredLocation || !["home", "project"].includes(destination.view))
+        projectSetup?.show(false);
+      restoredLocation = true;
       if ("projectID" in destination && destination.projectID) {
         if (!projects.data()?.some((project) => project.id === destination.projectID))
           throw new Error(unavailableLink);
@@ -1626,29 +1633,43 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     const project = selectedProject();
     if (!project || lifecycleProjectID() !== project.id) return [];
     const staging = stagingRuntimeFor(project.id);
-    const targets: RuntimeDockTarget[] = staging
-      ? [
-          {
-            id: `staging:${project.id}`,
-            label: "Staging",
-            detail: staging.state,
-            attemptId: staging.id,
-          },
-        ]
-      : [
-          {
-            id: `staging:${project.id}`,
-            label: "Staging",
-            detail: "Opens when selected",
-            projectId: project.id,
-          },
-        ];
+    const stagedApps = appPreviews().filter(
+      (preview) =>
+        preview.projectID === project.id &&
+        (!preview.attemptID || preview.attemptID === staging?.id),
+    );
+    const targets: RuntimeDockTarget[] = stagedApps.length
+      ? []
+      : staging
+        ? [
+            {
+              id: `staging:${project.id}`,
+              label: "Staging",
+              detail: staging.state,
+              attemptId: staging.id,
+            },
+          ]
+        : [
+            {
+              id: `staging:${project.id}`,
+              label: "Staging",
+              detail: "Opens when selected",
+              projectId: project.id,
+            },
+          ];
     for (const preview of appPreviews().filter((item) => item.projectID === project.id)) {
+      const staged = !preview.attemptID || preview.attemptID === staging?.id;
       targets.push({
-        id: `app:${preview.attemptID}:${preview.channel}`,
+        id: staged
+          ? `staging:${project.id}:${preview.channel}`
+          : `app:${preview.attemptID}:${preview.channel}`,
         label: preview.label,
-        detail: "Development",
-        attemptId: preview.attemptID,
+        detail: !preview.attemptID
+          ? "Starts when selected"
+          : staged
+            ? (staging?.state ?? preview.state ?? "Preparing")
+            : "Development",
+        ...(preview.attemptID ? { attemptId: preview.attemptID } : { projectId: project.id }),
         appChannel: preview.channel,
       });
     }
@@ -1794,9 +1815,11 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     canDevelopProject,
     browserRepository,
     knowledgeDrafts,
+    knowledgeLoading: knowledge.loading,
     knowledgePageList,
     selectedKnowledgePage,
     repositoryDocuments,
+    loadRepositoryDocuments,
     openRepositoryDocument,
     knowledgeGeneration,
     knowledgeHistory,

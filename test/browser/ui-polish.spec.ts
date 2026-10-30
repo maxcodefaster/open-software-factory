@@ -1,18 +1,19 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import {
   appPreviewsSchema,
   attemptsResponseSchema,
   changesResponseSchema,
   conversationViewSchema,
+  runtimeAttemptSchema,
 } from "../../apps/factory/src/api-contracts";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
 import { environmentSettingsView } from "../../packages/project-domain/src/environment";
 import { type ProjectSetupView, projectSetupView } from "../../packages/project-domain/src/setup";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
@@ -27,6 +28,18 @@ import { luminance, rgb } from "../support/visual-contrast";
 const evidence = ".factory/test-results/ui-polish";
 const desktopViewport = { width: 1440, height: 900 };
 const auditViewports = [desktopViewport, { width: 390, height: 844 }];
+const settingsGroups = [
+  {
+    scope: "project",
+    labels: ["Models", "Environments", "Inputs", "Releases", "Monitoring", "People & access"],
+  },
+  { scope: "libraries", labels: ["Skills", "MCP connections"] },
+  { scope: "personal", labels: ["Model overrides", "Login & security"] },
+  {
+    scope: "system",
+    labels: ["Models", "Monitoring", "Repository mirrors", "People & access", "Company sign-in"],
+  },
+];
 let projectID = "";
 let ticketID = "";
 const title = "A quiet, readable workspace";
@@ -109,6 +122,24 @@ async function openSettings(page: import("@playwright/test").Page) {
   return page.getByRole("navigation", { name: "Settings navigation" });
 }
 
+test("Settings scope chooser exposes one compact group instead of every scope at once", async ({
+  page,
+}) => {
+  const navigation = await openSettings(page);
+  const scope = navigation.getByRole("combobox", { name: "Settings scope" });
+  for (const group of settingsGroups) {
+    await scope.selectOption(group.scope);
+    await expect(navigation.getByRole("button")).toHaveText(group.labels);
+  }
+  await scope.selectOption("project");
+  await page.screenshot({ path: `${evidence}/compact-settings-1440.png` });
+  await resize(page, { width: 390, height: 844 });
+  await page.getByRole("button", { name: "Choose settings page", exact: true }).click();
+  await expect(scope).toBeVisible();
+  await expect(navigation.getByRole("button")).toHaveCount(6);
+  await page.screenshot({ path: `${evidence}/compact-settings-390.png` });
+});
+
 test("visual sweep keeps Project membership separate from Factory account actions", async ({
   page,
 }) => {
@@ -119,7 +150,8 @@ test("visual sweep keeps Project membership separate from Factory account action
     .soft(page.getByRole("region", { name: "Managed accounts" }))
     .toHaveCount(0, { timeout: 1500 });
   await page.screenshot({ path: `${evidence}/sweep-project-access.png` });
-  await navigation.getByRole("button", { name: "People & access", exact: true }).last().click();
+  await navigation.getByRole("combobox", { name: "Settings scope" }).selectOption("system");
+  await navigation.getByRole("button", { name: "People & access", exact: true }).click();
   const accounts = page.getByRole("region", { name: "Managed accounts" });
   await expect(accounts).toBeVisible();
   const opener = accounts.getByRole("button", {
@@ -197,9 +229,14 @@ test("visual sweep uses the active accent and aligned Settings form actions", as
     };
   });
   expect.soft(color.actual).toBe(color.expected);
-  for (const category of ["Environments", "Monitoring", "Company sign-in"]) {
+  for (const { scope, category } of [
+    { scope: "project", category: "Environments" },
+    { scope: "project", category: "Monitoring" },
+    { scope: "system", category: "Company sign-in" },
+  ]) {
     await resize(page, desktopViewport);
-    await navigation.getByRole("button", { name: category, exact: true }).first().click();
+    await navigation.getByRole("combobox", { name: "Settings scope" }).selectOption(scope);
+    await navigation.getByRole("button", { name: category, exact: true }).click();
     for (const viewport of auditViewports) {
       await resize(page, viewport);
       const form = page.locator(".settings-content form:visible").last();
@@ -294,59 +331,47 @@ test("visual sweep captures every Settings category without clipped controls", a
   const navigation = await openSettings(page);
   // Settings loads its authorized categories asynchronously. An empty .all() result
   // would otherwise pass without visiting a single category.
-  await expect(navigation.getByRole("button")).toHaveText([
-    "Models",
-    "Project setup",
-    "Environments",
-    "Inputs",
-    "Releases",
-    "Monitoring",
-    "People & access",
-    "Skills",
-    "MCP connections",
-    "Model overrides",
-    "Login & security",
-    "Models",
-    "Monitoring",
-    "Repository mirrors",
-    "People & access",
-    "Company sign-in",
-  ]);
-  const categories = await navigation.getByRole("button").all();
-  for (let index = 0; index < categories.length; index++) {
-    const category = categories[index];
-    if (!category) throw new Error("Missing Settings category");
+  for (const group of settingsGroups) {
     await resize(page, desktopViewport);
-    await category.click();
-    await expect(
-      page.locator(".settings-content p:visible").filter({ hasText: /^Loading .*…$/ }),
-    ).toHaveCount(0);
-    await expect(page.locator('.settings-content [aria-busy="true"]:visible')).toHaveCount(0);
-    const label = (await category.textContent())?.trim();
-    if (!label) throw new Error("Missing Settings category label");
-    await expect(
-      page
-        .locator(".settings-content")
-        .getByRole("heading", {
-          name: label === "Skills" ? "Skills library" : label,
-          exact: true,
-        })
-        .first(),
-    ).toBeVisible();
-    for (const viewport of auditViewports) {
-      await resize(page, viewport);
-      const outside = await page.locator(".settings-content").evaluate((element) => {
-        const bounds = element.getBoundingClientRect();
-        return Array.from(element.querySelectorAll("input, select, textarea, button"))
-          .filter((item) => item.getClientRects().length > 0)
-          .filter((item) => {
-            const r = item.getBoundingClientRect();
-            return r.left < bounds.left - 1 || r.right > bounds.right + 1;
+    await navigation.getByRole("combobox", { name: "Settings scope" }).selectOption(group.scope);
+    await expect(navigation.getByRole("button")).toHaveText(group.labels);
+    for (const label of group.labels) {
+      await resize(page, desktopViewport);
+      await navigation.getByRole("button", { name: label, exact: true }).click();
+      await expect(
+        page.locator(".settings-content p:visible").filter({ hasText: /^Loading .*…$/ }),
+      ).toHaveCount(0);
+      await expect(page.locator('.settings-content [aria-busy="true"]:visible')).toHaveCount(0);
+      await expect(
+        page
+          .locator(".settings-content")
+          .getByRole("heading", {
+            name: label === "Skills" ? "Skills library" : label,
+            exact: true,
           })
-          .map((item) => item.getAttribute("aria-label") ?? item.textContent?.trim());
-      });
-      expect.soft(outside, `Settings category ${index}, width ${viewport.width}`).toEqual([]);
-      await page.screenshot({ path: `${evidence}/sweep-settings-${index}-${viewport.width}.png` });
+          .first(),
+      ).toBeVisible();
+      if (group.scope === "project" && label === "Environments")
+        await expect(page.getByText("Setup & recovery", { exact: true })).toBeVisible();
+      for (const viewport of auditViewports) {
+        await resize(page, viewport);
+        const outside = await page.locator(".settings-content").evaluate((element) => {
+          const bounds = element.getBoundingClientRect();
+          return Array.from(element.querySelectorAll("input, select, textarea, button"))
+            .filter((item) => item.getClientRects().length > 0)
+            .filter((item) => {
+              const r = item.getBoundingClientRect();
+              return r.left < bounds.left - 1 || r.right > bounds.right + 1;
+            })
+            .map((item) => item.getAttribute("aria-label") ?? item.textContent?.trim());
+        });
+        expect
+          .soft(outside, `Settings ${group.scope}/${label}, width ${viewport.width}`)
+          .toEqual([]);
+        await page.screenshot({
+          path: `${evidence}/sweep-settings-${group.scope}-${label.replaceAll(" ", "-")}-${viewport.width}.png`,
+        });
+      }
     }
   }
 });
@@ -525,6 +550,102 @@ test("frost, integrated controls and action hierarchy stay coherent", async ({ p
   });
   expect(overlaps).toBe(false);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test("declared Preview Apps remain selectable before compute and retain their channel after startup", async ({
+  page,
+}) => {
+  const firstAttemptID = crypto.randomUUID();
+  const replacementAttemptID = crypto.randomUUID();
+  let attemptID = firstAttemptID;
+  let starts = 0;
+  let running = false;
+  const apps = [
+    { channel: "app", label: "Staging · Website" },
+    { channel: "app-forms-web", label: "Staging · Forms editor" },
+    { channel: "app-forms-api", label: "Staging · Forms API" },
+    { channel: "app-forms-admin", label: "Staging · Forms administration" },
+  ];
+  await mockFactoryFunctions(page, {
+    runtime: {
+      attempts: async () =>
+        attemptsResponseSchema.parse({
+          attempts: starts
+            ? [
+                {
+                  id: attemptID,
+                  projectId: projectID,
+                  runtimeKind: "staging",
+                  currentStaging: true,
+                  state: running ? "ready" : "stopped",
+                },
+              ]
+            : [],
+        }),
+      previews: async () =>
+        appPreviewsSchema.parse({
+          previews: apps.map((app) => ({
+            ...app,
+            projectID,
+            state: running ? "ready" : starts ? "stopped" : "not-started",
+            ...(running ? { attemptID } : {}),
+          })),
+        }),
+      ensureStaging: async () => {
+        if (starts) attemptID = replacementAttemptID;
+        starts++;
+        running = true;
+        return runtimeAttemptSchema.parse({
+          id: attemptID,
+          projectId: projectID,
+          runtimeKind: "staging",
+          currentStaging: true,
+          state: "ready",
+        });
+      },
+    },
+  });
+  const paths: string[] = [];
+  await page.route("**/api/runtime-access?*", async (route) => {
+    paths.push(new URL(route.request().url()).searchParams.get("path") ?? "");
+    await route.fulfill({
+      contentType: "text/html",
+      body: "<!doctype html><p>Owned selected App</p>",
+    });
+  });
+  await wakeFactoryReads(page);
+  const chooser = page.getByRole("button", { name: "Choose Preview instance", exact: true });
+  await expect(chooser).toBeVisible();
+  await chooser.click();
+  const menu = page.getByRole("menu", { name: "Preview instances" });
+  await expect(menu.getByRole("menuitem")).toHaveCount(4);
+  await page.screenshot({ path: `${evidence}/declared-preview-apps-before-start.png` });
+  expect(starts).toBe(0);
+  await menu.getByRole("menuitem", { name: /^Staging · Forms editor/ }).click();
+  await expect(
+    page.frameLocator('iframe[title="Factory Preview"]').getByText("Owned selected App"),
+  ).toBeVisible();
+  expect(paths).toEqual([`/runtime/${attemptID}/preview/app-forms-web/`]);
+  expect(starts).toBe(1);
+  await expect(
+    page.getByRole("tab", { name: "Preview · Staging · Forms editor", exact: true }),
+  ).toBeVisible();
+  running = false;
+  await wakeFactoryReads(page);
+  expect(starts).toBe(1);
+  await chooser.click();
+  await page.getByRole("menuitem", { name: /^Staging · Forms editor/ }).click();
+  await expect
+    .poll(() => paths.at(-1))
+    .toBe(`/runtime/${replacementAttemptID}/preview/app-forms-web/`);
+  expect(starts).toBe(2);
+  expect(paths).toEqual([
+    `/runtime/${firstAttemptID}/preview/app-forms-web/`,
+    `/runtime/${replacementAttemptID}/preview/app-forms-web/`,
+  ]);
+  await expect(
+    page.getByRole("tab", { name: "Preview · Staging · Forms editor", exact: true }),
+  ).toHaveCount(1);
 });
 
 test("silent Preview attachment offers a bounded reload of the same instance", async ({ page }) => {
