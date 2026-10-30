@@ -100,19 +100,25 @@ func (manager *processManager) startupFailure(assignment Assignment) error {
 			summary = fmt.Sprintf("channel %q process %q exited with code %d before readiness",
 				channel.Name, process.spec.Name, *process.exitCode)
 		}
-		retained := manager.recent[channel.Name]
-		// The rolling process tail may begin inside a line or credential.
-		// Reuse the complete-line rule before making a retained diagnostic.
-		output := (&devcontainerFailureOutput{
-			data: retained, truncated: len(retained) >= 32<<10,
-		}).String()
 		manager.mutex.Unlock()
-		if detail := devcontainerFailureDiagnostic("", output, assignment); detail != "" {
+		if detail := manager.startupDiagnostic(channel.Name, assignment); detail != "" {
 			summary += ": " + detail
 		}
 		return errors.New(summary)
 	}
 	return nil
+}
+
+func (manager *processManager) startupDiagnostic(name string, assignment Assignment) string {
+	manager.mutex.Lock()
+	retained := manager.recent[name]
+	// The rolling process tail may begin inside a line or credential.
+	// Reuse the complete-line rule before making a retained diagnostic.
+	output := (&devcontainerFailureOutput{
+		data: retained, truncated: len(retained) >= 32<<10,
+	}).String()
+	manager.mutex.Unlock()
+	return devcontainerFailureDiagnostic("", output, assignment)
 }
 
 func (manager *processManager) action(name string, action string) error {

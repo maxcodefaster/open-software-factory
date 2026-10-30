@@ -139,10 +139,17 @@ func TestChannelTimeoutKeepsHTTPStatusButNeverTheHealthResponseBody(t *testing.T
 	defer application.Close()
 	assignment := validAssignment()
 	assignment.Channels = []Channel{{Name: "app", Kind: "app", Target: application.URL, HealthPath: "/health"}}
+	assignment.Processes = []Process{{Name: "app"}}
+	assignment.RuntimeEnvironment = map[string]string{"APP_SECRET": "owned-startup-private-value"}
+	manager := newProcessManager(context.Background(), assignment, io.Discard)
+	manager.processes["app"].state = "running"
+	manager.recent["app"] = []byte("Error: missing Content configuration; APP_SECRET=owned-startup-private-value\n")
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	err := waitForChannels(ctx, assignment, nil)
+	err := waitForChannels(ctx, assignment, manager)
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "HTTP 503") ||
+		!strings.Contains(err.Error(), "missing Content configuration") ||
+		strings.Contains(err.Error(), "owned-startup-private-value") ||
 		strings.Contains(err.Error(), "owned-private-health-body") || strings.Contains(err.Error(), application.URL) {
 		t.Fatalf("readiness lost its last HTTP status, cancellation cause or privacy boundary: %v", err)
 	}

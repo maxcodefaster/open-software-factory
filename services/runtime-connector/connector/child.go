@@ -196,6 +196,18 @@ func waitForChannels(ctx context.Context, assignment Assignment, processes *proc
 		healthURL := strings.TrimSuffix(channel.Target, "/") + channel.HealthPath
 		ready := false
 		lastFailure := "health endpoint has not responded"
+		readinessFailure := func(cause error) error {
+			detail := lastFailure
+			if processes != nil {
+				if output := processes.startupDiagnostic(channel.Name, assignment); output != "" {
+					detail += "; " + output
+				}
+			}
+			if cause != nil {
+				return fmt.Errorf("channel %q did not become ready: %s: %w", channel.Name, detail, cause)
+			}
+			return fmt.Errorf("channel %q did not become ready: %s", channel.Name, detail)
+		}
 		for attempt := 0; attempt < 120; attempt++ {
 			if processes != nil {
 				if err := processes.startupFailure(assignment); err != nil {
@@ -223,12 +235,12 @@ func waitForChannels(ctx context.Context, assignment Assignment, processes *proc
 			}
 			select {
 			case <-ctx.Done():
-				return fmt.Errorf("channel %q did not become ready: %s: %w", channel.Name, lastFailure, ctx.Err())
+				return readinessFailure(ctx.Err())
 			case <-time.After(250 * time.Millisecond):
 			}
 		}
 		if !ready {
-			return fmt.Errorf("channel %q did not become ready: %s", channel.Name, lastFailure)
+			return readinessFailure(nil)
 		}
 	}
 	return nil
