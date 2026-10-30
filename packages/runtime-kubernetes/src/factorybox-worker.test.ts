@@ -28,6 +28,39 @@ const request: FactoryboxWorkerRequest = {
 const epoch = "e".repeat(32);
 const root = `/var/lib/sysbox/fixed-store/data/store/epochs/${epoch}/controller`;
 
+test("aggregate worker budgets do not inherit one Sandbox's qualification ceiling", () => {
+  const selected = factoryboxWorkerRequest.parse({
+    ...request,
+    cpuRequestMilli: 100,
+    resources: { cpuMilli: 8000, memoryMiB: 12288 },
+  });
+  expect(renderFactoryboxWorker(selected)[2].spec.containers[0].resources).toEqual({
+    requests: { cpu: "100m", memory: "12Gi" },
+    limits: { cpu: "8", memory: "12Gi" },
+  });
+  expect(renderFactoryboxWorker(request)[2].spec.containers[0].resources).toEqual({
+    requests: { cpu: "3", memory: "3Gi" },
+    limits: { cpu: "3", memory: "3Gi" },
+  });
+});
+
+test.each([
+  [12922, "12922Mi"],
+  [1024, "1Gi"],
+  [1024 ** 2, "1Ti"],
+] as const)(
+  "selected %s MiB memory matches Kubernetes canonical quantity %s",
+  (memoryMiB, expected) => {
+    const selected = factoryboxWorkerRequest.parse({
+      ...request,
+      resources: { cpuMilli: 3000, memoryMiB },
+    });
+    const resource = renderFactoryboxWorker(selected)[2].spec.containers[0].resources;
+    expect(resource.requests.memory).toBe(expected);
+    expect(resource.limits.memory).toBe(expected);
+  },
+);
+
 test("unconfirmed native work retains a compact actual cause without implying a safe mutation retry", () => {
   const reason = "available filesystem space is below the native write reserve";
   const error = factoryboxOperationFailure(

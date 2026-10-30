@@ -14,6 +14,13 @@
 {{- if or (ne (toString .Values.factorybox.cpuRequestMilli) (printf "%d" $cpuRequestMilli)) (lt $cpuRequestMilli 10) (gt $cpuRequestMilli 3000) }}
 {{- fail "factorybox.cpuRequestMilli must be a whole number between 10 and 3000" }}
 {{- end }}
+{{- $memoryHeadroomMiB := 2048 }}
+{{- if hasKey .Values.factorybox "memoryHeadroomMiB" }}
+{{- $memoryHeadroomMiB = int .Values.factorybox.memoryHeadroomMiB }}
+{{- if or (ne (toString .Values.factorybox.memoryHeadroomMiB) (printf "%d" $memoryHeadroomMiB)) (lt $memoryHeadroomMiB 0) }}
+{{- fail "factorybox.memoryHeadroomMiB must be a nonnegative whole number" }}
+{{- end }}
+{{- end }}
 {{- if or (lt $minimumStoreGiB 8) (gt $minimumStoreGiB $storeGiB) }}
 {{- fail "factorybox.minimumStoreGiB must be a whole number between 8 and storeGiB" }}
 {{- end }}
@@ -66,6 +73,7 @@ data:
   FACTORY_FACTORYBOX_WORKER_IMAGE: {{ required "factorybox.image requires an admitted private worker digest" .Values.factorybox.image | quote }}
   FACTORY_FACTORYBOX_EXECUTABLE_SHA256: {{ required "factorybox.executableSHA256 is required" .Values.factorybox.executableSHA256 | quote }}
   FACTORY_FACTORYBOX_CPU_REQUEST_MILLI: {{ $cpuRequestMilli | quote }}
+  FACTORY_FACTORYBOX_MEMORY_HEADROOM_MIB: {{ $memoryHeadroomMiB | quote }}
   FACTORY_FACTORYBOX_ARCHITECTURE: {{ required "factorybox.architecture must be arm64 or amd64" .Values.factorybox.architecture | quote }}
   FACTORY_FACTORYBOX_NODE: {{ required "factorybox.nodeName is required" .Values.factorybox.nodeName | quote }}
   FACTORY_FACTORYBOX_KERNEL: {{ required "factorybox.kernel is required" .Values.factorybox.kernel | quote }}

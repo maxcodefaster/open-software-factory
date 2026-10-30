@@ -198,7 +198,7 @@ export function createReserveStore(
                 [
                   owner.projectID,
                   images[role],
-                  JSON.stringify(await retainedFactoryboxProfile(sql, profile)),
+                  JSON.stringify(await retainedFactoryboxProfile(sql, profile, images[role])),
                 ],
               )
             )[0]
