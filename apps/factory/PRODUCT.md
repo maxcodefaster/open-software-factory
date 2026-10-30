@@ -133,7 +133,9 @@ The current chat title opens conversation history, with New chat inside that men
 the header. Long histories can be filtered by name without changing active Coding. History
 identifies private Project chats, shared Ticket chats and active Coding. Tool
 activity uses compact command rows, with running calls and failures visible outside the collapsed
-completed history. Message Copy actions appear on hover or keyboard focus, and stay available on
+completed history. Confirmed Agent and Workspace Stop marks unfinished retained calls as interrupted,
+never as running or successfully completed. Unconfirmed Stop and disconnection remain distinct.
+Message Copy actions appear on hover or keyboard focus, and stay available on
 touch devices without hover.
 
 The Board has no separate Epic filter. Epic stacks open a focused folder with child Epics and

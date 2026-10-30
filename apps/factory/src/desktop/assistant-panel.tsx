@@ -12,6 +12,7 @@ import { BuildModelControls } from "../agent/build-model-controls";
 import { AgentBlockers } from "../agent/configuration";
 import {
   buildAgentActivityNotice,
+  buildAgentActivityStopped,
   buildAgentEmptyMessage,
   buildAgentHint,
   buildAgentStatus,
@@ -522,6 +523,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
                             {(message) => (
                               <ChangeAgentMessage
                                 message={message()}
+                                stopped={buildAgentActivityStopped(model.agent())}
                                 onNavigate={
                                   model.canDevelopProject()
                                     ? (message, kind) => void model.openChatActivity(message, kind)
@@ -535,6 +537,7 @@ export function AssistantPanel(props: { model: AssistantPanelModel }) {
                         {(messages) => (
                           <ChangeAgentActivityGroup
                             messages={messages()}
+                            stopped={buildAgentActivityStopped(model.agent())}
                             onNavigate={
                               model.canDevelopProject()
                                 ? (message, kind) => void model.openChatActivity(message, kind)

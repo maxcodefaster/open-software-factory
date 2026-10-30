@@ -43,8 +43,29 @@ export function groupConversationActivities<
   return result;
 }
 
-export function activeActivity(message: Pick<AgentMessage, "activity">) {
-  return ["pending", "streaming", "running"].includes(message.activity?.status ?? "");
+export function activeActivity(message: Pick<AgentMessage, "activity">, stopped = false) {
+  return !stopped && ["pending", "streaming", "running"].includes(message.activity?.status ?? "");
+}
+
+export function activityStatus(message: Pick<AgentMessage, "activity">, stopped = false) {
+  return stopped && activeActivity(message) ? "interrupted" : message.activity?.status;
+}
+
+export function activityGroupState(messages: Pick<AgentMessage, "activity">[], stopped = false) {
+  const active = messages.filter((message) => activeActivity(message, stopped)).length;
+  const interrupted = messages.filter(
+    (message) => activityStatus(message, stopped) === "interrupted",
+  ).length;
+  const failed = messages.filter((message) => message.activity?.status === "error").length;
+  return (
+    [
+      active ? `${active} active` : "",
+      interrupted ? `${interrupted} interrupted` : "",
+      failed ? `${failed} failed` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ") || "Completed"
+  );
 }
 
 /** Describe observed calls, never infer that a shell command is a successful check. */
