@@ -54,7 +54,7 @@ func TestDevelopmentAppHealthDoesNotBlockIDE(t *testing.T) {
 	assignment.Channels = []Channel{{Name: "app", Kind: "app", Target: "http://127.0.0.1:1", HealthPath: "/"}, {Name: "ide", Kind: "ide", Target: ide.URL, HealthPath: "/"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := waitForChannels(ctx, assignment); err != nil {
+	if err := waitForChannels(ctx, assignment, nil); err != nil {
 		t.Fatalf("healthy IDE blocked by development App: %v", err)
 	}
 }
@@ -85,7 +85,7 @@ func TestDevelopmentReadinessNeedsNoRuntimeEditor(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := waitForChannels(ctx, assignment); err != nil {
+	if err := waitForChannels(ctx, assignment, nil); err != nil {
 		t.Fatalf("connected PTY still waits for an editor or App: %v", err)
 	}
 }
@@ -97,7 +97,7 @@ func TestDevelopmentAgentHealthDoesNotBlockIDE(t *testing.T) {
 	assignment.Channels = []Channel{{Name: "agent", Kind: "agent", Target: "http://127.0.0.1:1", HealthPath: "/api/info"}, {Name: "ide", Kind: "ide", Target: ide.URL, HealthPath: "/"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	if err := waitForChannels(ctx, assignment); err != nil {
+	if err := waitForChannels(ctx, assignment, nil); err != nil {
 		t.Fatalf("healthy IDE blocked by development Agent: %v", err)
 	}
 }
@@ -144,7 +144,7 @@ func TestVerificationStillRequiresDeclaredChannels(t *testing.T) {
 	assignment.Channels = []Channel{{Name: "agent", Kind: "agent", Target: "http://127.0.0.1:1", HealthPath: "/api/info"}}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if err := waitForChannels(ctx, assignment); err == nil {
+	if err := waitForChannels(ctx, assignment, nil); err == nil {
 		t.Fatal("non-development readiness ignored a required channel")
 	}
 }
