@@ -19,6 +19,7 @@ import {
   rejectedWikiStructuredResult,
   WikiSourceEvidenceError,
   WikiStructuredResultError,
+  WikiTopicCoverageError,
   WikiTopicPlanError,
   WikiTopicQualityError,
 } from "./generation-failure";
@@ -70,6 +71,14 @@ export const wikiReviewTask =
   "Check only this topic package for claims against inspected source, internal links, preservation of human context, meaningful coverage, duplicate prose, readability and useful density. The draft is Factory's normalized publication package, not a raw writer response: id, slug, title, parentSlug and sources are required metadata already validated by Factory. Do not flag these fields or request schema changes. Review the page bodies and titles. This is progressive publication: other plannedTopics deliberately publish later. Do not require those guides or links to them yet, do not request new pages, and do not request edits outside topic.pageIDs or its single new slug. A topic purpose cannot require onward navigation to unpublished planned guides. That part of the plan is deferred, not missing coverage in the current overview. Repository-document pointers are optional, not a substitute publication gate. Still reject broken or invented destinations actually present in the draft. A concise summary in a published parent is valid alongside a detailed guide. A root overview must not repeat a capability description or duplicate guide-level interface/test details. Reject repeated descriptions of the same state transition and long lists of irrelevant missing features. " +
   "Judge the current draft, not an earlier rejected version or the source code's quality. A source defect accurately described in the Wiki is not a documentation defect. Never request source-code changes from this read-only writing task. Clearly labelled advice for improving an example is not a claim that the existing example already follows that advice. Do not infer application-wide guarantees from a statement explicitly scoped to one helper, instance or connection pool. " +
   "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands.";
+
+export const wikiPlanReviewTask =
+  "Review the whole proposed Wiki topic plan against the current pages and inspected repository evidence. This is a coverage check before progressive publication, not a review of one page draft. " +
+  "Check whether existing pages plus the proposed topics give useful orientation and essential guidance for the real reader tasks supported by this Project. Inspect genuinely missing source with readSource. " +
+  "A short overview that says setup, architecture or verification guides are planned is not coverage of those tasks when inspected source already supports useful guidance. A previous partial publication does not establish a complete Wiki. " +
+  "Accept an empty plan only when current pages already cover the useful supported guidance and no material correction is needed. Do not invent a minimum number of pages, require a page per feature, duplicate existing guidance, or demand unrelated rewrites. A small Project or one substantial guide can already be complete. " +
+  "completedPageIDs are read-only checked publications for this exact commit, not proof that other useful topics exist. Keep valid human framing, hierarchy and exact completed pages. Do not demand links to guides that will publish later. " +
+  "Report only concrete essential omissions or unsupported planned claims. Each issue must name the actual current text or proposed topic, the missing reader task, and the inspected source that supports it. Unknown behavior and accurately described source defects are not documentation defects. Ignore personal wording preferences. Never request source-code changes. Return issues:[] for a genuinely sufficient plan.";
 
 export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {
   if (!input.publish) throw new Error("Wiki workflow requires checked publication");
@@ -130,7 +139,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     prompt: unknown,
     sources: ReturnType<typeof sourceScope>,
     task: string,
-    validate?: (value: z.output<T>) => void,
+    validate?: (value: z.output<T>) => void | Promise<void>,
   ): Promise<z.output<T>> {
     activeSignal.throwIfAborted();
     const agent = new Agent({
@@ -183,7 +192,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     try {
       rejectedResult = (await generate()).object;
       const result = schema.parse(rejectedResult);
-      validate?.(result);
+      await validate?.(result);
       return result;
     } catch (cause) {
       if (
@@ -199,7 +208,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           ? "Each topic purpose is at most 800 characters, with at most 16 existing seed paths and 12 existing pageIDs. Topics must have unique slugs and cannot claim the same pageID."
           : id === "investigator"
             ? "Return at most 24 findings, each at most 1200 characters with at most 8 inspected paths, and at most 8 uncertainties of 400 characters each."
-            : id === "checker"
+            : id === "checker" || id === "topic-plan-checker"
               ? "Return at most 12 concise issues, each at most 800 characters."
               : "Respect the declared page and source bounds and this topic's writing instructions.";
       let repaired: unknown;
@@ -215,7 +224,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       }
       const checked = schema.safeParse(repaired);
       if (!checked.success) throw new WikiStructuredResultError();
-      validate?.(checked.data);
+      await validate?.(checked.data);
       return checked.data;
     }
   }
@@ -288,7 +297,26 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           },
           planSources,
           "Research manifests and core flows, then plan only useful affected topics. New Wiki starts with a concise overview followed by coherent child guides. Small app needs 1-3 topics. Each purpose is at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
-          (plan) => validatePlan(remainingPlan(plan)),
+          async (plan) => {
+            const remaining = remainingPlan(plan);
+            validatePlan(remaining);
+            const coverage = await ask(
+              "topic-plan-checker",
+              reviewSchema,
+              {
+                project: input.name,
+                files: input.inventory,
+                changedPaths: input.changedPaths,
+                currentPages: pages,
+                completedPageIDs: [...completedPageIDs],
+                proposedTopics: remaining.topics,
+                sources: [...planSources.read.values()],
+              },
+              planSources,
+              wikiPlanReviewTask,
+            );
+            if (coverage.issues.length) throw new WikiTopicCoverageError(coverage.issues);
+          },
         );
         return remainingPlan(plan);
       }),

@@ -21,6 +21,13 @@ export class WikiTopicPlanError extends Error {
   }
 }
 
+export class WikiTopicCoverageError extends WikiTopicPlanError {
+  constructor(issues: readonly string[]) {
+    super(`Wiki topic plan omits essential reader coverage: ${issues.join("\n")}`);
+    this.name = "WikiTopicCoverageError";
+  }
+}
+
 export class WikiTopicQualityError extends Error {
   constructor(
     readonly slug: string,
@@ -45,6 +52,8 @@ export function wikiGenerationFailureMessage(cause: unknown, fallback: string) {
     return "A Wiki update overlaps human edits. That page was not overwritten. Review its text before retrying.";
   if (cause instanceof WikiStructuredResultError || isStructuredOutputFailure(cause))
     return "The Wiki result did not match its required format. Saved pages are retained; retry the update.";
+  if (cause instanceof WikiTopicCoverageError)
+    return "The Wiki plan did not cover essential reader guidance. Saved pages are retained; retry the update.";
   if (cause instanceof WikiTopicPlanError)
     return "The Wiki topic plan references unavailable source or pages. Saved pages are retained; retry the update.";
   if (cause instanceof WikiTopicQualityError)

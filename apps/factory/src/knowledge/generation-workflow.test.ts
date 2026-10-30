@@ -111,7 +111,9 @@ test.each([
         let output: unknown;
         let sourceToolCall = false;
         let sourcePaths: string[] | undefined;
-        if (system.includes("Research manifests")) {
+        if (system.includes("Review the whole proposed Wiki topic plan")) {
+          output = { issues: [] };
+        } else if (system.includes("Research manifests")) {
           plans++;
           if (parsed.correction) corrections.push(parsed);
           output = {

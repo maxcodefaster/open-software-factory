@@ -423,6 +423,70 @@ test("a slow Wiki status read never locks the Ticket board", async ({ page }) =>
   }
 });
 
+for (const device of [
+  { name: "desktop", width: 1440, hasTouch: false },
+  { name: "touch", width: 390, hasTouch: true },
+]) {
+  test.describe(`Project Wiki update at ${device.name}`, () => {
+    test.use({ viewport: { width: device.width, height: 900 }, hasTouch: device.hasTouch });
+    test("Wiki update remains available after success and retains readable saved pages", async ({
+      page,
+    }) => {
+      if (!database) throw new Error("Missing owned Wiki fixture database");
+      const pageID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.knowledge_page
+        (id,project_id,slug,title,current_body,generated_body,source_commit_sha,created_by)
+        VALUES(${pageID},${projectID},'saved-guide','Saved project guide',
+          'Keep this saved guide and human context.','Keep this saved guide and human context.',
+          ${"a".repeat(40)},${userID})`;
+      let updates = 0;
+      let generation = knowledgeGenerationSchema.parse({
+        id: crypto.randomUUID(),
+        state: "succeeded",
+        pageCount: 0,
+      });
+      await mockFactoryFunctions(page, {
+        knowledge: {
+          generation: async () => generation,
+          generate: async (_actor, id) => {
+            expect(id).toBe(projectID);
+            updates++;
+            generation = { ...generation, id: crypto.randomUUID(), state: "pending" };
+            return generation;
+          },
+        },
+      });
+      await signIn(page);
+      await selectProject(page);
+      await page.getByRole("button", { name: "Knowledge", exact: true }).click();
+      await expect(
+        page.getByText("Keep this saved guide and human context.", { exact: true }),
+      ).toBeVisible();
+      expect(updates).toBe(0);
+      await page.getByRole("button", { name: "Page options", exact: true }).click();
+      const update = page.getByRole("menuitem", { name: "Update Project Wiki", exact: true });
+      await expect(update).toBeEnabled();
+      await update.click();
+      await expect(page.getByText("Updating Wiki…", { exact: true })).toBeVisible();
+      expect(updates).toBe(1);
+      await expect(
+        page.getByText("Keep this saved guide and human context.", { exact: true }),
+      ).toBeVisible();
+      if (!device.hasTouch) await page.setViewportSize({ width: 390, height: 900 });
+      await page.getByRole("button", { name: "Page options", exact: true }).click();
+      await expect(update).toBeDisabled();
+      expect(updates).toBe(1);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        390,
+      );
+      await page.screenshot({
+        path: `${evidenceDirectory}/wiki-update-${device.name}.png`,
+        fullPage: true,
+      });
+    });
+  });
+}
+
 test("Wiki opening leaves collapsed Code docs unloaded and slow source inventory never blocks its pages", async ({
   page,
 }) => {
