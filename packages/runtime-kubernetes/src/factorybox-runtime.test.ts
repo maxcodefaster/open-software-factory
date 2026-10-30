@@ -4,9 +4,11 @@ import { factoryboxLocation } from "./factorybox-location";
 import {
   configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeInput,
+  factoryboxBootstrapProgram,
   factoryboxOriginalWorkerRetired,
   factoryboxPreparationAssignment,
   factoryboxPreparationRequest,
+  factoryboxReserveBootstrapProgram,
   factoryboxRuntimeRequest,
   prepareFactoryboxRuntime,
   renderFactoryboxRuntime,
@@ -31,6 +33,20 @@ const input: FactoryboxRuntimeInput = {
     claimGiB: 32,
   },
 };
+
+test.each([
+  ["assigned", factoryboxBootstrapProgram],
+  ["reserve", factoryboxReserveBootstrapProgram],
+] as const)("%s execution selects the qualified private Docker storage driver", (_kind, script) => {
+  const daemons = script
+    .split("\n")
+    .filter((line) => /^dockerd\s/.test(line))
+    .map((line) => line.split(/\s+/));
+  expect(daemons).toHaveLength(1);
+  expect(daemons[0]).toContain("--storage-driver=overlay2");
+  expect(daemons[0]).toContain("--host=unix:///var/run/docker.sock");
+  expect(script).not.toContain("dockerd-entrypoint");
+});
 
 test("a successor uses its new native store and Pod but retains the canonical Source trust domain", () => {
   const admissionID = "17164fe7-7c86-451e-ae6e-0b0fe6b8bf5e";
