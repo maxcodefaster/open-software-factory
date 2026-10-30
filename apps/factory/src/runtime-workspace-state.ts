@@ -1,6 +1,15 @@
 import type { AppPreview, RuntimeAttempt } from "./api-contracts";
 import { type WorkspaceTab, workspaceTabRuntimeURL } from "./workspace-tabs";
 
+export function retryableMainPreview(attempt: RuntimeAttempt | undefined, projectID: string) {
+  return Boolean(
+    attempt?.projectId === projectID &&
+      attempt.runtimeKind === "staging" &&
+      attempt.currentStaging &&
+      ["failed", "stopped"].includes(attempt.state),
+  );
+}
+
 export function runtimeReconnecting(attempt: RuntimeAttempt | undefined) {
   return (
     attempt?.state === "starting" &&

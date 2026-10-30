@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RuntimeAttempt } from "./api-contracts";
-import { runtimeWorkspaceURL } from "./runtime-workspace-state";
+import { retryableMainPreview, runtimeWorkspaceURL } from "./runtime-workspace-state";
 import type { WorkspaceTab } from "./workspace-tabs";
 
 const projectID = "project-1";
@@ -24,6 +24,20 @@ const preview: WorkspaceTab = {
   view: "preview",
   appChannel: "web",
 };
+
+test("only settled current Main Previews may commission another Start", () => {
+  const staging = { ...ready, runtimeKind: "staging" as const, currentStaging: true };
+  expect(retryableMainPreview({ ...staging, state: "failed" }, projectID)).toBe(true);
+  expect(retryableMainPreview({ ...staging, state: "stopped" }, projectID)).toBe(true);
+  for (const state of ["starting", "create-intended", "stopping", "cleanup-failed", "ready"])
+    expect(retryableMainPreview({ ...staging, state }, projectID)).toBe(false);
+  expect(retryableMainPreview({ ...staging, state: "failed" }, "other-project")).toBe(false);
+  expect(
+    retryableMainPreview({ ...staging, currentStaging: false, state: "failed" }, projectID),
+  ).toBe(false);
+  expect(retryableMainPreview({ ...ready, state: "failed" }, projectID)).toBe(false);
+  expect(retryableMainPreview(undefined, projectID)).toBe(false);
+});
 
 describe("runtime workspace frame identity", () => {
   test("App-only projection opens a member Preview without exposing another developer's IDE", () => {

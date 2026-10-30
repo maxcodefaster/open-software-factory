@@ -33,6 +33,21 @@ test("open Connector transports cannot announce readiness before the child's hea
   try {
     expect(hub.connected("attempt")).toBe(true);
     hub.message(parent, JSON.stringify({ type: "hello", role: "parent" }));
+    hub.message(
+      child,
+      JSON.stringify({ type: "process-state", process: "app", processState: "running" }),
+    );
+    hub.message(
+      child,
+      JSON.stringify({
+        type: "process-output",
+        process: "app",
+        data: Buffer.from("Waiting for HTTP readiness\n").toString("base64"),
+      }),
+    );
+    expect(hub.processes("attempt")).toEqual([
+      { name: "app", state: "running", output: "Waiting for HTTP readiness\n" },
+    ]);
     expect(phases).toEqual([]);
     expect(hub.ready("attempt")).toBe(false);
     hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
