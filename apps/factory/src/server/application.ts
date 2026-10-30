@@ -209,7 +209,7 @@ export async function createFactoryApplication() {
     try {
       agentController?.runtimeActivityChanged();
       if (phase === "ready") {
-        if (agentController) await agentController.recoverRuntimeCommits(attemptID);
+        if (agentController) await agentController.recoverRuntimeWork(attemptID);
         if (agentController) await agentController.dispatchRuntimePending(attemptID);
         if (buildBrowserController) await buildBrowserController.recover(attemptID);
       }

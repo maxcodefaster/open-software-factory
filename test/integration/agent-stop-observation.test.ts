@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
+import { eventually } from "../fixtures/factory-process";
 
 test("automatic Stop observation ends without clearing the admission barrier or replaying work", async () => {
   const owned = await fixture();
@@ -68,12 +69,82 @@ test("automatic Stop observation ends without clearing the admission barrier or 
       new URL(args[2].url).searchParams.get("limit") === "1"
         ? Response.json({ data: [], cursor: {} })
         : request(...args);
-    expect(await stop.confirm(owned.changeID)).toBe(true);
+    // The Connector may become ready after the first finite observer ended.
+    // Its normal readiness callback must resume this saved Stop, not require a
+    // process restart or a new human Stop command.
+    await controller.recoverRuntimeWork(owned.attemptID);
+    await eventually(
+      () => controller.get(owned.changeID),
+      (current) => !current.stopPending,
+      "A later ready observation did not resume the saved Stop",
+    );
     expect(await controller.get(owned.changeID)).toMatchObject({
       stopPending: false,
       lastError: null,
     });
+    const settledReads = historyReads;
+    await controller.recoverRuntimeWork(owned.attemptID);
+    expect(historyReads).toBe(settledReads);
+    expect(owned.interrupts()).toBe(0);
+    expect(owned.requests()).toBe(0);
   } finally {
+    await controller.shutdown();
+    clock.mockRestore();
+    owned.hub.request = request;
+    await owned.dispose();
+  }
+});
+
+test("runtime readiness during the final stale Stop read retains one follow-up observation", async () => {
+  const owned = await fixture();
+  const controller = owned.controller();
+  const request = owned.hub.request.bind(owned.hub);
+  const sleep = Bun.sleep;
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let historyReads = 0;
+  let historySettled = false;
+  owned.hub.request = async (...args) => {
+    if (
+      new URL(args[2].url).pathname.endsWith("/message") &&
+      new URL(args[2].url).searchParams.get("limit") === "1"
+    ) {
+      const empty = historySettled;
+      historyReads++;
+      if (historyReads === 5) {
+        entered.resolve();
+        await release.promise;
+      }
+      return Response.json({
+        data: empty ? [] : [{ id: "owned-final-stale-message" }],
+        cursor: {},
+      });
+    }
+    return request(...args);
+  };
+  const clock = spyOn(Bun, "sleep").mockImplementation((duration) =>
+    typeof duration === "number" && duration >= 1_000 ? Promise.resolve() : sleep(duration),
+  );
+  try {
+    await createChangeAgentStop(owned.database, owned.hub).persist(owned.changeID);
+    await owned.database.client`UPDATE factory.change_agent_session SET stop_dispatched=true
+      WHERE change_id=${owned.changeID}`;
+    await controller.recover();
+    await entered.promise;
+    await controller.recoverRuntimeWork(owned.attemptID);
+    historySettled = true;
+    release.resolve();
+    await eventually(
+      () => controller.get(owned.changeID),
+      (current) => !current.stopPending,
+      "Readiness was lost while the final stale Stop observation was in flight",
+    );
+    expect(historyReads).toBe(6);
+    expect(owned.interrupts()).toBe(0);
+    expect(owned.requests()).toBe(0);
+    expect(owned.commitCalls).toEqual([]);
+  } finally {
+    release.resolve();
     await controller.shutdown();
     clock.mockRestore();
     owned.hub.request = request;

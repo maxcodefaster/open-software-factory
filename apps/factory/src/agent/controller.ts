@@ -1,6 +1,3 @@
-import { bounded, readableError } from "./native-errors";
-import { navigationMessages, projectMessages } from "./message-projection";
-import { classifyAgentTurn } from "./turn-outcome";
 import {
   candidateReviewPermissions,
   candidateReviewResultInput,
@@ -25,6 +22,8 @@ import { createChangeAdmission } from "./change-admission";
 import { createChangeAgentTransport } from "./change-transport";
 import { createAgentCommitTransport } from "./commit-transport";
 import { createCodingContexts } from "./conversation-contexts";
+import { navigationMessages, projectMessages } from "./message-projection";
+import { bounded, readableError } from "./native-errors";
 import { connectOpenCodeBrowser, connectOpenCodeSources } from "./opencode-browser";
 import {
   confirmSettledOpenCodeInput,
@@ -42,6 +41,7 @@ import { createReviewAdmission } from "./review-admission";
 import { waitForBuildSandbox } from "./runtime-readiness";
 import { createChangeAgentStop } from "./stop";
 import { readTurnObservation } from "./turn-observation";
+import { classifyAgentTurn } from "./turn-outcome";
 import {
   type AgentTurnRecord,
   type AgentTurnTransaction,
@@ -1229,10 +1229,23 @@ export function createAgentController(
   }
 
   const stopping = new Set<string>();
-  async function reconcileStop(changeID: string) {
+  const readyStops = new Set<string>();
+  async function reconcileStop(changeID: string, runtimeReady = false, expectedStopID?: string) {
     if (closed) return;
     const target = await row(changeID);
-    if (closed || !target?.stopPending || !target.stopID || stopping.has(target.stopID)) return;
+    if (
+      closed ||
+      !target?.stopPending ||
+      !target.stopID ||
+      (expectedStopID && target.stopID !== expectedStopID)
+    )
+      return;
+    if (stopping.has(target.stopID)) {
+      // Readiness can arrive while the final old observation still sees a
+      // disconnected runtime. Coalesce one follow-up instead of losing it.
+      if (runtimeReady) readyStops.add(target.stopID);
+      return;
+    }
     stopping.add(target.stopID);
     try {
       for (let observation = 0; observation < 5 && !closed; observation += 1) {
@@ -1253,6 +1266,8 @@ export function createAgentController(
         });
     } finally {
       stopping.delete(target.stopID);
+      const becameReady = readyStops.delete(target.stopID);
+      if (becameReady && !closed) run(reconcileStop(changeID, false, target.stopID));
     }
   }
 
@@ -1326,10 +1341,18 @@ export function createAgentController(
       for (const session of stopped) run(reconcileStop(session.changeID));
     },
 
-    // Startup runs before the Connector listener exists. Its first read may fail;
-    // readiness resumes only recorded commit work, never an inference request.
-    recoverRuntimeCommits(attemptID: string) {
-      const work = recoverRuntimeCommits(attemptID);
+    // Startup runs before the Connector listener exists. Readiness resumes
+    // recorded commits and Stop only, never an inference request or new runtime.
+    recoverRuntimeWork(attemptID: string) {
+      const work = Promise.all([
+        recoverRuntimeCommits(attemptID),
+        (async () => {
+          const stopped = await database.client<{ changeID: string }[]>`
+            SELECT change_id AS "changeID" FROM factory.change_agent_session
+            WHERE runtime_attempt_id=${attemptID} AND stop_pending`;
+          await Promise.all(stopped.map((session) => reconcileStop(session.changeID, true)));
+        })(),
+      ]).then(() => {});
       run(work);
       return work;
     },
