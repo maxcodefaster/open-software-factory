@@ -4,7 +4,7 @@ import { z } from "zod";
 import type { runCommand } from "./command";
 import { factoryboxSharedLabels } from "./factorybox-location";
 import type { FactoryboxRuntimeInput } from "./factorybox-runtime";
-import { factoryboxCPUQuantity, type FactoryboxWorkerIdentity } from "./factorybox-worker";
+import { type FactoryboxWorkerIdentity, factoryboxCPUQuantity } from "./factorybox-worker";
 
 const program = readFileSync(new URL("./factorybox/consumer.py", import.meta.url), "utf8");
 const exportProgram = readFileSync(
