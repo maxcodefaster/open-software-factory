@@ -244,6 +244,39 @@ export interface FactoryboxWorkerDeclaration {
     readonly spec: object;
   };
 }
+export const factoryboxWorkerDeclaration = z.object({
+  namespace: z
+    .object({
+      metadata: z
+        .object({ name: z.string(), labels: z.record(z.string(), z.string()) })
+        .passthrough(),
+    })
+    .passthrough(),
+  claim: z
+    .object({
+      metadata: z
+        .object({
+          name: z.string(),
+          namespace: z.string(),
+          labels: z.record(z.string(), z.string()),
+        })
+        .passthrough(),
+      spec: z.record(z.string(), z.unknown()),
+    })
+    .passthrough(),
+  pod: z
+    .object({
+      metadata: z
+        .object({
+          name: z.string(),
+          namespace: z.string(),
+          labels: z.record(z.string(), z.string()),
+        })
+        .passthrough(),
+      spec: z.record(z.string(), z.unknown()),
+    })
+    .passthrough(),
+});
 export const runFactoryboxKubernetes: Run = (args, input, limits) =>
   runCommand(
     kubernetesCommand([
@@ -292,6 +325,60 @@ function requireFields(expected: unknown, actual: unknown): boolean {
       )
     );
   return expected === actual;
+}
+
+// Backfill the original declaration of an already admitted, exact-UID Pod.
+// Kubernetes does not permit command/args updates on that Pod. Image and
+// resource updates are mutable, so they still have to match the pinned profile.
+// Native epoch, executable, node boot and all other declaration checks remain.
+export async function observeOriginalFactoryboxDeclaration(
+  request: FactoryboxWorkerRequest,
+  previous: FactoryboxWorkerIdentity,
+  expected: FactoryboxWorkerDeclaration,
+  run: Run = runFactoryboxKubernetes,
+): Promise<FactoryboxWorkerDeclaration> {
+  const pod = resource
+    .extend({
+      spec: z
+        .object({
+          initContainers: z.array(
+            z.object({
+              name: z.string(),
+              command: z.array(z.string()),
+              args: z.array(z.string()).optional(),
+            }),
+          ),
+        })
+        .passthrough(),
+    })
+    .parse(await read(run, ["pod", request.podName, "-n", request.namespace]));
+  if (pod.metadata.uid !== previous.podUID)
+    throw new Error("Original worker UID changed before declaration observation");
+  const declaration = structuredClone(factoryboxWorkerDeclaration.parse(expected));
+  const containers = z
+    .array(
+      z
+        .object({
+          name: z.string(),
+          command: z.array(z.string()),
+          args: z.array(z.string()).optional(),
+        })
+        .passthrough(),
+    )
+    .parse(declaration.pod.spec["initContainers"]);
+  if (containers.length !== pod.spec.initContainers.length)
+    throw new Error("Original worker initialization differs from its admitted declaration");
+  for (const [index, container] of containers.entries()) {
+    const original = pod.spec.initContainers[index];
+    if (!original || original.name !== container.name)
+      throw new Error("Original worker initialization order changed");
+    container.command = original.command;
+    if (original.args) container.args = original.args;
+    else delete container.args;
+  }
+  declaration.pod.spec["initContainers"] = containers;
+  await inspectFactoryboxWorker(request, previous, run, declaration);
+  return declaration;
 }
 
 export async function inspectFactoryboxWorker(

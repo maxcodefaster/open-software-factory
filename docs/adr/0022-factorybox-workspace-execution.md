@@ -18,6 +18,14 @@ original Pod UIDs and bootstrap declaration remain immutable once observed. Each
 separately freezes its selected consumer image. A later published consumer can serve new
 Sandboxes on that same worker without changing existing execution, Pause or Resume inputs.
 
+Retain the public worker bootstrap declaration before dispatching its first create. Lifecycle
+observation and later consumer preparation use that declaration, not a reconstruction from the
+currently installed Factory code. For an already admitted worker without this receipt, observe its
+original exact-UID Pod and native identity before retaining the original immutable init commands.
+The pinned images, resources, volumes, security policy, node boot and native epoch must still match.
+Kubernetes permits image and resource updates, so the Pod UID alone never admits those changes.
+An unavailable observation or an unconfirmed initial admission cannot authorize this backfill.
+
 Shared resource creation is serialized and admitted before its external effect. A lost create
 response can be reconciled through the surviving original objects. A surviving Pod cannot
 authorize recreation of missing storage or trust inputs. Missing or replacement worker UIDs

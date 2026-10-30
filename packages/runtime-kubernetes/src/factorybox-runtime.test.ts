@@ -9,6 +9,7 @@ import {
   factoryboxPreparationAssignment,
   factoryboxPreparationRequest,
   factoryboxReserveBootstrapProgram,
+  factoryboxRuntimeDeclaration,
   factoryboxRuntimeRequest,
   prepareFactoryboxRuntime,
   renderFactoryboxRuntime,
@@ -33,6 +34,18 @@ const input: FactoryboxRuntimeInput = {
     claimGiB: 32,
   },
 };
+
+test("observing a retained worker uses its admitted bootstrap, not today's exporter command", () => {
+  const original = structuredClone(renderFactoryboxRuntime(input));
+  const exporter = fixtureValue(
+    original.pod.spec.initContainers.find((container) => container.name === "runtime-image"),
+    "original exporter",
+  );
+  Reflect.set(exporter.command, 2, "original immutable bootstrap exporter");
+  const retained = { ...input, workerDeclaration: original };
+  expect(factoryboxRuntimeDeclaration(retained).pod).toEqual(original.pod);
+  expect(renderFactoryboxRuntime(input).pod).not.toEqual(original.pod);
+});
 
 test.each([
   ["assigned", factoryboxBootstrapProgram],

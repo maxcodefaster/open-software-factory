@@ -22,13 +22,13 @@ import {
   factoryboxSandboxID,
   prepareFactoryboxRuntime,
   releaseFactoryboxRuntime,
-  renderFactoryboxRuntime,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
   executeFactoryboxOperation,
   type FactoryboxOperation,
   type FactoryboxWorkerIdentity,
   factoryboxOperation,
+  factoryboxWorkerDeclaration,
   factoryboxWorkerIdentity,
   inspectFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -100,11 +100,24 @@ export function createFactoryboxExecution(
     }
   }
   async function retained(connection: SQL, attemptID: string) {
-    return (
-      await connection<
-        Retained[]
-      >`SELECT request,identity,inputs_released_at IS NOT NULL AS released FROM factory.factorybox_runtime WHERE runtime_attempt_id=${attemptID}`
-    )[0];
+    const [saved] = await connection<
+      Array<Retained & { workerDeclaration: unknown | null }>
+    >`SELECT runtime.request,runtime.identity,runtime.inputs_released_at IS NOT NULL AS released,
+      admission.declaration AS "workerDeclaration"
+      FROM factory.factorybox_runtime runtime
+      JOIN factory.runtime_attempt attempt ON attempt.id=runtime.runtime_attempt_id
+      JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
+      WHERE runtime.runtime_attempt_id=${attemptID}`;
+    if (!saved) return undefined;
+    return {
+      ...saved,
+      request: {
+        ...saved.request,
+        ...(saved.workerDeclaration
+          ? { workerDeclaration: factoryboxWorkerDeclaration.parse(saved.workerDeclaration) }
+          : {}),
+      },
+    };
   }
   async function intent(
     connection: SQL,
@@ -531,7 +544,7 @@ export function createFactoryboxExecution(
     },
     async startupResources(attemptID: string) {
       const saved = await retained(database.client, attemptID);
-      if (saved) return [renderFactoryboxRuntime(saved.request).pod];
+      if (saved) return [factoryboxRuntimeDeclaration(saved.request).pod];
       const [attempt] = await database.client<
         Array<{
           namespace: string;
@@ -544,13 +557,17 @@ export function createFactoryboxExecution(
           profile: unknown;
           runtimeHostImage: string;
           workerID: string;
+          workerRuntimeHostImage: string;
+          workerDeclaration: unknown | null;
         }>
       >`SELECT attempt.kubernetes_namespace AS namespace,attempt.kubernetes_pod_name AS "podName",
         attempt.project_id AS "projectID",coalesce(attempt.workspace_id,attempt.id) AS "ownerID",
         attempt.generation,attempt.workspace_id IS NOT NULL AS "sharedSource",slot.id AS "slotID",
         artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",
-        attempt.factorybox_worker_id AS "workerID"
+        attempt.factorybox_worker_id AS "workerID",
+        admission.runtime_host_image AS "workerRuntimeHostImage",admission.declaration AS "workerDeclaration"
         FROM factory.runtime_attempt attempt JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id
+        JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
         LEFT JOIN factory.execution_slot slot ON slot.assigned_attempt_id=attempt.id
         WHERE attempt.id=${attemptID} AND attempt.state='starting' AND attempt.stop_intended_at IS NULL`;
       if (!attempt?.profile) return null;
@@ -571,10 +588,14 @@ export function createFactoryboxExecution(
         },
         profile: factoryboxRuntimeProfile.parse(attempt.profile),
         runtimeHostImage: attempt.runtimeHostImage,
+        workerRuntimeHostImage: attempt.workerRuntimeHostImage,
+        ...(attempt.workerDeclaration
+          ? { workerDeclaration: factoryboxWorkerDeclaration.parse(attempt.workerDeclaration) }
+          : {}),
         sharedSource: attempt.sharedSource,
         ...(attempt.slotID ? { reserve: true } : {}),
       };
-      return [renderFactoryboxRuntime(input).pod];
+      return [factoryboxRuntimeDeclaration(input).pod];
     },
     async deleteSandbox(attemptID: string, nativeDeleteObserved = false) {
       return locked(attemptID, async (connection) => {
@@ -619,7 +640,7 @@ export function createFactoryboxExecution(
           if (!resources) {
             const saved = await retained(connection, attemptID);
             if (!saved) throw new Error("Factorybox startup has no retained preparation request");
-            resources = [renderFactoryboxRuntime(saved.request).pod];
+            resources = [factoryboxRuntimeDeclaration(saved.request).pod];
           }
           const [attempt] = await connection<
             Array<{
@@ -689,6 +710,9 @@ export function createFactoryboxExecution(
             runtimeHostImage: attempt.runtimeHostImage,
             ...(worker.runtimeHostImage && worker.runtimeHostImage !== attempt.runtimeHostImage
               ? { workerRuntimeHostImage: worker.runtimeHostImage }
+              : {}),
+            ...(worker.declaration
+              ? { workerDeclaration: factoryboxWorkerDeclaration.parse(worker.declaration) }
               : {}),
             profile: factoryboxRuntimeProfile.parse(attempt.profile),
             sharedSource: Boolean(attempt.workspaceID),

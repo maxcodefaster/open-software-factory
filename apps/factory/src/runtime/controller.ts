@@ -1057,7 +1057,10 @@ export function createRuntimeController(
   }
 
   return {
-    reclaimStorage: () => factorybox.reclaimStorage(),
+    async reclaimStorage() {
+      await worker.retainDeclaration();
+      await factorybox.reclaimStorage();
+    },
     async resumeForApp(attemptID: string, userID: string, deadline?: number) {
       await createAccessController(database).requireRuntime(userID, attemptID, "app");
       const current = await this.get(attemptID);
@@ -1300,6 +1303,9 @@ export function createRuntimeController(
       }
     },
     async recover() {
+      await worker.retainDeclaration().catch(() => {
+        console.error("Original Factorybox declaration needs observation");
+      });
       // Failed attempts have already left active allocation. A retained Stop must
       // clean their exact resources without competing with a newer Workspace attempt.
       const failedStops = await database.client<{ id: string }[]>`

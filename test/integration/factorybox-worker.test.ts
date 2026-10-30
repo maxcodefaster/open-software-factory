@@ -40,7 +40,11 @@ const key = (kind: string, name: string) => `${kind.toLowerCase()}/${name}`;
 function infrastructure() {
   const objects = new Map<string, z.infer<typeof manifest>>();
   const writes: Array<{ action: string; kind: string; name: string }> = [];
-  const fault = { losePodCreate: false, unavailableRead: false };
+  const fault = {
+    losePodCreate: false,
+    unavailableRead: false,
+    beforePodCreate: async (_pod: z.infer<typeof manifest>) => {},
+  };
   const kubernetes = createKubernetesClient(async (args, body) => {
     if (args[0] === "get") {
       if (fault.unavailableRead)
@@ -56,6 +60,7 @@ function infrastructure() {
     }
     if (args[0] === "create") {
       const item = manifest.parse(JSON.parse(body ?? ""));
+      if (item.kind === "Pod") await fault.beforePodCreate(item);
       const identity = key(item.kind, item.metadata.name);
       if (objects.has(identity)) throw new Error("Duplicate external create");
       item.metadata.uid = crypto.randomUUID();
@@ -436,17 +441,55 @@ test("a new consumer image admits a new Sandbox without replacing the worker or 
   const worker = createFactoryboxWorker(database, kube.kubernetes);
   try {
     const location = await worker.location();
+    kube.fault.beforePodCreate = async (pod) => {
+      const [admission] = await database.client<
+        Array<{ attempted: boolean; declaration: unknown }>
+      >`
+        SELECT create_attempted AS attempted,declaration FROM factory.factorybox_worker_admission
+        WHERE worker_id=${location.workerID} AND retired_at IS NULL`;
+      expect(admission?.attempted).toBe(true);
+      expect(admission?.declaration).toMatchObject({
+        pod: { metadata: pod.metadata, spec: Reflect.get(pod, "spec") },
+      });
+    };
     const original = await worker.provision(resources(location), profile, runtimeImage);
     const originalPod = structuredClone(kube.objects.get("pod/worker"));
     const originalWorker = await factoryboxAllocation(database.client);
     const nextImage = `registry.invalid/runtime@sha256:${"b".repeat(64)}`;
-    const next = await worker.provision(resources(location, nextImage), profile, nextImage);
+    const upgraded = resources(location, nextImage);
+    const upgradedPod = upgraded.find((item) => item.kind === "Pod");
+    if (!upgradedPod) throw new Error("Missing upgraded renderer Pod");
+    const spec = z
+      .object({
+        initContainers: z.array(
+          z.object({ name: z.string(), command: z.array(z.string()) }).passthrough(),
+        ),
+      })
+      .passthrough()
+      .parse(Reflect.get(upgradedPod, "spec"));
+    const exporter = spec.initContainers.find((container) => container.name === "runtime-image");
+    if (!exporter) throw new Error("Missing upgraded exporter");
+    exporter.command[2] = "upgraded exporter must not replace the original";
+    Reflect.set(upgradedPod, "spec", spec);
+    const next = await worker.provision(upgraded, profile, nextImage);
     expect(next).toMatchObject(original);
     expect(kube.objects.get("pod/worker")).toEqual(originalPod);
     expect(await factoryboxAllocation(database.client)).toEqual(originalWorker);
     expect(kube.writes.filter((write) => write.kind === "Pod")).toHaveLength(1);
     expect(kube.writes.filter((write) => write.kind === "PersistentVolumeClaim")).toHaveLength(2);
     expect(kube.writes.filter((write) => write.action === "apply")).toHaveLength(2);
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.factorybox_worker_admission SET declaration='{}'::jsonb
+          WHERE id=${originalWorker.admissionID}`;
+      })(),
+    ).rejects.toThrow("bootstrap declaration is immutable");
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.factorybox_worker_admission SET declaration=NULL
+          WHERE id=${originalWorker.admissionID}`;
+      })(),
+    ).rejects.toThrow("bootstrap declaration is immutable");
   } finally {
     await database.client.end({ timeout: 2 });
     await host.dispose();

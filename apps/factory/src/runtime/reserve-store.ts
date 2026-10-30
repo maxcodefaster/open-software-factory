@@ -21,6 +21,7 @@ type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
 export type { ExecutionSlot } from "../../../../packages/runtime-domain/src/reserve";
 
 const fields =
+  '(SELECT admission.declaration FROM factory.factorybox_worker_admission admission WHERE admission.id=factorybox_admission_id) AS "workerDeclaration",' +
   '(SELECT admission.runtime_host_image FROM factory.factorybox_worker_admission admission WHERE admission.id=factorybox_admission_id) AS "workerRuntimeHostImage",' +
   'factorybox_admission_id AS "admissionID",' +
   'seed_expires_at AS "seedExpiresAt",' +
