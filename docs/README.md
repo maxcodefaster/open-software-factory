@@ -550,7 +550,7 @@ usable fallbacks. Embedded IDE, Terminal and Preview content remains opaque.
 | Requirement Revision | Immutable Product Requirements of one Ticket |
 | Technical Planning | Explicit source-grounded design work against confirmed Product Requirements |
 | Technical Design Revision | Immutable developer-only implementation proposal bound to one Requirement Revision and source commit |
-| Architecture Diagram | Optional explained PlantUML view of a Technical Design, retained with its validated render |
+| Architecture Diagram | Optional explained, self-contained PlantUML view retained with its validated render or an explicit unavailable rendering outcome |
 | Epic | Project-local grouping; a Ticket has at most one Epic and an Epic at most one parent |
 | Epic Proposal | Proposed new/reused Ticket grouping, confirmed without commissioning implementation |
 | Ticket Dependency | Same-Project prerequisite satisfied by delivery, not cancellation |

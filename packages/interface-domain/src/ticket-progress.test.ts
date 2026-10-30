@@ -1,11 +1,21 @@
 import { expect, test } from "bun:test";
-import { ticketProgress, type TicketProgressInput } from "./ticket-progress";
+import { type TicketProgressInput, ticketProgress } from "./ticket-progress";
 
 const submitted: TicketProgressInput = {
   ticketState: "in-progress",
   changeState: "active",
   implementationState: "committed",
 };
+test("unfinished technical planning is not described as an active model operation", () => {
+  const text = ticketProgress({
+    ticketState: "ready",
+    technicalPlanningOutstanding: true,
+    planning: false,
+  });
+  expect(text).toContain("Technical planning is unfinished");
+  expect(text).not.toContain("in progress");
+});
+
 test.each([
   [{ ...submitted, verificationState: "running" }, "running fresh checks"],
   [{ ...submitted, verificationState: "succeeded", reviewState: "running" }, "Independent review"],

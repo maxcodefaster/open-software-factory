@@ -41,7 +41,7 @@ import { TicketChecks } from "./ticket-checks";
 import { TicketDependencies, type TicketDependenciesProps } from "./ticket-dependencies";
 import { TechnicalDesignSections, TicketChapterNavigation } from "./ticket-planning";
 import { TicketSecondaryActions } from "./ticket-secondary-actions";
-import { SaveFeedback } from "./ui/feedback";
+import { Feedback, SaveFeedback } from "./ui/feedback";
 import { VersionHistory } from "./version-history";
 
 type TicketView = {
@@ -1354,6 +1354,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                   <Show
                     when={
                       !props.change &&
+                      !proposal() &&
                       props.current.ticket.state === "ready" &&
                       props.latestRevision
                     }
@@ -1375,24 +1376,38 @@ function TicketDocument(props: TicketWorkspaceProps) {
                       </span>
                     )}
                   </Show>
+                  <Show when={proposal()}>
+                    <span>Review proposal</span>
+                  </Show>
                   <Show when={canInterview() && props.clarificationAction.status}>
                     <span class="clarification-status" role="status">
                       {props.clarificationAction.label}
                     </span>
                   </Show>
-                  <SaveFeedback
-                    state={
-                      saving()
-                        ? "saving"
-                        : editorError()
-                          ? "error"
-                          : editing() && hasChanges()
-                            ? "dirty"
-                            : savedDocument()
-                              ? "saved"
-                              : "idle"
+                  <Show
+                    when={proposal() && editing() && hasChanges() && !saving() && !editorError()}
+                    fallback={
+                      <SaveFeedback
+                        state={
+                          saving()
+                            ? "saving"
+                            : editorError()
+                              ? "error"
+                              : editing() && hasChanges()
+                                ? "dirty"
+                                : savedDocument()
+                                  ? "saved"
+                                  : "idle"
+                        }
+                      />
                     }
-                  />
+                  >
+                    <Feedback
+                      class="save-feedback"
+                      state="idle"
+                      message="Proposal edits are private until you confirm."
+                    />
+                  </Show>
                 </div>
                 <Show
                   when={
@@ -1416,27 +1431,30 @@ function TicketDocument(props: TicketWorkspaceProps) {
                           "Queued implementation needs attention. Review the current scope and commission it again.")
                         : technicalDirty()
                           ? "Save design or Discard edits in the Technical design chapter before using Implement. Saving does not start work."
-                          : ticketProgress({
-                              ticketState: props.current.ticket.state,
-                              changeState: props.change?.state,
-                              turnState: props.change?.buildTurnState,
-                              turnPurpose: props.change?.buildTurnPurpose,
-                              implementationState: props.change?.implementationState,
-                              building: implementationBusy(),
-                              preparing: implementationPreparing(),
-                              verificationState: props.delivery?.verificationState,
-                              verificationFailureKind: props.delivery?.verificationFailureKind,
-                              verificationSummary: props.delivery?.verificationSummary,
-                              correctionState: props.delivery?.correctionState,
-                              reviewState: props.delivery?.reviewState,
-                              checksPaused: Boolean(props.delivery?.checksStopId),
-                              threads: openReviewThreads() ?? props.delivery?.openReviewThreads,
-                              approved: Boolean(props.delivery?.approvedAt),
-                              cleanupError: props.delivery?.cleanupError,
-                              canDevelop: props.canDevelop,
-                              planning:
-                                props.planningBusy || props.current.technicalPlanningPending,
-                            })}
+                          : proposal() && !props.planningBusy
+                            ? "Review this proposal. Your edits stay private until you confirm."
+                            : ticketProgress({
+                                ticketState: props.current.ticket.state,
+                                changeState: props.change?.state,
+                                turnState: props.change?.buildTurnState,
+                                turnPurpose: props.change?.buildTurnPurpose,
+                                implementationState: props.change?.implementationState,
+                                building: implementationBusy(),
+                                preparing: implementationPreparing(),
+                                verificationState: props.delivery?.verificationState,
+                                verificationFailureKind: props.delivery?.verificationFailureKind,
+                                verificationSummary: props.delivery?.verificationSummary,
+                                correctionState: props.delivery?.correctionState,
+                                reviewState: props.delivery?.reviewState,
+                                checksPaused: Boolean(props.delivery?.checksStopId),
+                                threads: openReviewThreads() ?? props.delivery?.openReviewThreads,
+                                approved: Boolean(props.delivery?.approvedAt),
+                                cleanupError: props.delivery?.cleanupError,
+                                canDevelop: props.canDevelop,
+                                planning: props.planningBusy,
+                                technicalPlanningOutstanding:
+                                  props.current.technicalPlanningPending,
+                              })}
                   </p>
                 </Show>
                 <Show

@@ -1,16 +1,16 @@
 import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
+import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { appendConversationEntry, lockConversation } from "./conversation-store";
-import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import { saveTechnicalDesignIn } from "../technical-design/store";
+import { appendConversationEntry, lockConversation } from "./conversation-store";
 
 export async function persistProjectOutput(
   transaction: AgentTurnTransaction,
   turn: AgentTurnRecord,
   output: ProjectAgentOutput,
   developerOnly = false,
-  technical?: { base: TechnicalPlanningBase; renders: string[] },
+  technical?: { base: TechnicalPlanningBase; renders: (string | null)[] },
   fullPlanningSource?: string,
 ) {
   const { command, authority } = turn;
@@ -45,7 +45,9 @@ export async function persistProjectOutput(
       kind: "agent-message",
       actor: "project-agent",
       mode: "plan",
-      body: output.message,
+      body: technical.renders.some((render) => render === null)
+        ? `${output.message}\n\nAn optional architecture diagram could not be rendered. Its source is retained in the Technical design.`
+        : output.message,
       payload: { visibility: "developer", technicalDesignRevisionId: turn.id },
       citations: output.citations,
       inReplyToEntryId: null,

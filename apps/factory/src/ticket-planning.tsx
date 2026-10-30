@@ -135,12 +135,16 @@ export function TicketChapterNavigation(props: {
 
 function ArchitectureFigure(props: {
   diagram: TechnicalDesignContent["diagrams"][number];
-  svg: string;
+  svg: string | null;
 }) {
   const [url, setURL] = createSignal("");
   createEffect(
     () => props.svg,
     (svg) => {
+      if (!svg) {
+        setURL("");
+        return;
+      }
       const value = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
       setURL(value);
       return () => URL.revokeObjectURL(value);
@@ -151,21 +155,30 @@ function ArchitectureFigure(props: {
       <figcaption>
         <div class="ticket-architecture-heading">
           <h4>{props.diagram.title}</h4>
-          <a class="workspace-action" href={url()} target="_blank" rel="noopener noreferrer">
-            Open diagram
-          </a>
+          <Show when={url()}>
+            <a class="workspace-action" href={url()} target="_blank" rel="noopener noreferrer">
+              Open diagram
+            </a>
+          </Show>
         </div>
         <p>{props.diagram.description}</p>
       </figcaption>
-      <a
-        href={url()}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`Open ${props.diagram.title} diagram`}
-      >
-        <img src={url()} alt={props.diagram.description} />
-      </a>
-      <details class="ticket-diagram-source">
+      <Show when={url()}>
+        <a
+          href={url()}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open ${props.diagram.title} diagram`}
+        >
+          <img src={url()} alt={props.diagram.description} />
+        </a>
+      </Show>
+      <Show when={!props.svg}>
+        <p role="status">
+          Diagram not rendered. The technical design and diagram source are retained.
+        </p>
+      </Show>
+      <details class="ticket-diagram-source" open={!props.svg}>
         <summary>PlantUML source</summary>
         <pre>
           <code>{props.diagram.source}</code>
@@ -553,7 +566,7 @@ function TechnicalDesignDocument(props: TechnicalDesignSectionProps) {
             {(diagram, index) => (
               <ArchitectureFigure
                 diagram={diagram()}
-                svg={props.revision.diagramRenders[index] ?? ""}
+                svg={props.revision.diagramRenders[index] ?? null}
               />
             )}
           </For>

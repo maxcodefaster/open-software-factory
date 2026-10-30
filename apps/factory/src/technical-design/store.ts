@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
-import type { AgentTurnTransaction } from "../agent/turn-store";
-import { projectDevelopmentAuthorityIn } from "../access/controller";
-import { CommandError } from "../command-error";
+import type { z } from "zod";
+import type { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
+import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
 import {
   type TechnicalDesignContent,
   type TechnicalPlanningBase,
   technicalDesignContentInput,
   validateTechnicalDesignCoverage,
 } from "../../../../packages/requirement-domain/src/technical-design";
-import { requirementContentInput } from "../../../../packages/requirement-domain/src/content";
-import type { z } from "zod";
-import type { sourceCitationInput } from "../../../../packages/conversation-domain/src/conversation";
+import { projectDevelopmentAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
+import { CommandError } from "../command-error";
 import { diagramRendererVersion } from "./diagrams";
 
 export async function technicalPlanningOutstandingIn(
@@ -42,7 +42,7 @@ export async function saveTechnicalDesignIn(
     base: TechnicalPlanningBase;
     content: TechnicalDesignContent;
     citations: z.infer<typeof sourceCitationInput>[];
-    renders: string[];
+    renders: (string | null)[];
     turnID?: string;
   },
 ) {
@@ -122,7 +122,7 @@ export async function saveTechnicalDesignIn(
     );
   }
   if (input.renders.length !== content.diagrams.length)
-    throw new CommandError("conflict", "Every architecture diagram needs a validated render.");
+    throw new CommandError("conflict", "Every architecture diagram needs a rendering outcome.");
   await sql`INSERT INTO factory.technical_design_revision(
     id,ticket_id,requirement_revision_id,previous_revision_id,ordinal,source_commit,canonical_content,content_digest,
     citations,diagram_renders,renderer_version,created_by,author_kind,turn_id,planning_turn_id)

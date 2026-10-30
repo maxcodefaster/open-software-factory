@@ -47,8 +47,11 @@ request. The Ticket is one document with compact chapter navigation for Product,
 optional Architecture and Validation. Technical Designs, inspected source references and PlantUML
 diagrams remain development-only. A single-chapter Ticket has no navigation rail and an absent
 technical design has no empty placeholder. Responsibility and following share one People menu.
+An unavailable optional diagram keeps the technical design and safe diagram source visible,
+with an explicit status instead of a broken image. It does not repeat inference.
 Implement approves the exact product and technical revisions;
-reading and ordinary saving never start Planning. See
+edits to an unconfirmed proposal stay private until confirmation.
+Reading and ordinary saving never start Planning. See
 [Ticket technical planning](../../docs/adr/0024-ticket-technical-planning.md).
 
 Project Inputs automatically clarify external JSON requests and prepare requirements through the
