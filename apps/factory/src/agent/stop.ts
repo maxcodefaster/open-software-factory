@@ -1,19 +1,31 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { RuntimeHub } from "../runtime/hub";
+import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import {
   cancelQueuedOpenCodeInput,
-  confirmSettledOpenCodeInput,
   confirmEmptyOpenCodeSession,
+  confirmSettledOpenCodeInput,
   createOpenCodeClient,
   interruptOpenCodeSession,
 } from "./opencode-client";
 import { createStopTransport } from "./stop-transport";
-import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 
 type Database = ReturnType<typeof createDatabase>;
 type StopTarget = { stopID: string | null; turnID: string | null };
+export type RetainedStopTarget = {
+  changeID: string;
+  stopID: string;
+  attemptID: string;
+  sessionID: string;
+  promptID: string;
+  mode: "interrupt" | "observe";
+};
 
-export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
+export function createChangeAgentStop(
+  database: Database,
+  hub: RuntimeHub,
+  settleRetained?: (target: RetainedStopTarget) => Promise<boolean>,
+) {
   const usage = createRecordedOpenCodeUsage(database);
   async function settleTarget(changeID: string, target: StopTarget) {
     if (!target.turnID) return;
@@ -84,7 +96,7 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
     async confirm(
       changeID: string,
       expectedStopID?: string,
-      mode: "interrupt" | "observe" = "interrupt",
+      mode: RetainedStopTarget["mode"] = "interrupt",
     ) {
       const rows = await database.client<
         Array<
@@ -129,12 +141,35 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
         current.bootstrap === true &&
         !current.sessionConfirmed &&
         current.sessionID === current.intendedSessionID;
+      const retainedSettled =
+        !unsubmittedBootstrap &&
+        current.stopID &&
+        current.sessionID &&
+        current.promptID &&
+        current.intentAttemptID === current.attemptID &&
+        !hub.connected(current.attemptID) &&
+        ["failed", "cleanup-failed", "stopped"].includes(current.runtimeState) &&
+        Boolean(
+          await settleRetained?.({
+            changeID,
+            stopID: current.stopID,
+            attemptID: current.attemptID,
+            sessionID: current.sessionID,
+            promptID: current.promptID,
+            mode,
+          }),
+        );
       // OpenCode's queued state survives compute suspension. Destruction of a
       // runtime is not evidence that an assigned input has been removed.
-      if (current.runtimeState === "stopped" && current.intentAttemptID && !unsubmittedBootstrap)
+      if (
+        current.runtimeState === "stopped" &&
+        current.intentAttemptID &&
+        !unsubmittedBootstrap &&
+        !retainedSettled
+      )
         return false;
       if (current.intentAttemptID && current.intentAttemptID !== current.attemptID) return false;
-      if (current.runtimeState !== "stopped") {
+      if (current.runtimeState !== "stopped" && !retainedSettled) {
         if (mode === "observe" && !current.dispatched) return false;
         if (
           !current.stopID ||
@@ -185,12 +220,22 @@ export function createChangeAgentStop(database: Database, hub: RuntimeHub) {
           await usage.settle(current.turnID, "interrupted");
         }
       }
+      if (retainedSettled && current.turnID) {
+        // Native work is settled, not its unobserved consumption. Preserve the
+        // existing journal and mark any missing usage unknown, never zero.
+        await usage.settle(current.turnID, "interrupted");
+      }
       return database.client.begin(async (sql) => {
         // Serialize proof publication with runtime replacement and admission.
         // No external I/O or Turn lock is held while Change is locked.
         const changes = await sql<Array<{ id: string }>>`SELECT id FROM factory.change
           WHERE id = ${changeID} AND runtime_attempt_id = ${current.attemptID} FOR UPDATE`;
         if (!changes[0]) return false;
+        if (retainedSettled) {
+          const [stopped] = await sql`SELECT id FROM factory.runtime_attempt
+            WHERE id=${current.attemptID} AND state='stopped'`;
+          if (!stopped) return false;
+        }
         const confirmed = await sql<Array<{ id: string }>>`
         UPDATE factory.change_agent_session SET stop_pending = false, stop_dispatched = false,
           last_error = NULL,

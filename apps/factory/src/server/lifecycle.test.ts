@@ -18,6 +18,7 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     reclaimStorage: idle,
     drainComputeWaits: idle,
     dispatchReadyPending: idle,
+    recoverRetainedStops: idle,
     shutdown: idle,
     renew: idle,
   };

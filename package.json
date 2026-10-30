@@ -30,7 +30,7 @@
     "connector:check:linux": "bun scripts/testing/connector-linux.ts",
     "db:migrate": "bun packages/db/src/migrate.ts",
     "factory:dev": "vite --config apps/factory/vite.config.ts",
-    "factory:build": "vite build --config apps/factory/vite.config.ts && bun scripts/factory/compress-assets.ts",
+    "factory:build": "vite build --config apps/factory/vite.config.ts && bun scripts/factory/compress-assets.ts && bun scripts/factory/build-retained-stop.ts",
     "factory:image": "bun scripts/factory/image.ts",
     "factory:connect": "bun scripts/kubernetes/connect.ts",
     "factory:up": "bun scripts/factory/index.ts up",

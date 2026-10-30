@@ -39,7 +39,7 @@ import { createActivityWake, createOpenCodeEvents } from "./opencode-events";
 import { observeOpenCodeUsage } from "./opencode-usage";
 import { createReviewAdmission } from "./review-admission";
 import { waitForBuildSandbox } from "./runtime-readiness";
-import { createChangeAgentStop } from "./stop";
+import { createChangeAgentStop, type RetainedStopTarget } from "./stop";
 import { readTurnObservation } from "./turn-observation";
 import { classifyAgentTurn } from "./turn-outcome";
 import {
@@ -118,6 +118,7 @@ export function createAgentController(
   runtime: RuntimeController,
   browser?: ReturnType<typeof createBuildBrowserController>,
   writers?: Pick<ReturnType<typeof createChangeWriterController>, "prepareAgent">,
+  settleRetainedStop?: (target: RetainedStopTarget, signal: AbortSignal) => Promise<boolean>,
 ) {
   const monitors = new Set<string>();
   const observationController = new AbortController();
@@ -185,7 +186,13 @@ export function createAgentController(
     (sql, context) => modelSettings.resolve("build", sql, context),
     (sql) => modelConnections.reference("build", sql),
   );
-  const stop = createChangeAgentStop(database, hub);
+  const stop = createChangeAgentStop(
+    database,
+    hub,
+    settleRetainedStop
+      ? (target) => settleRetainedStop(target, observationController.signal)
+      : undefined,
+  );
   const admitReview = createReviewAdmission(database);
   const commitTransport = createAgentCommitTransport(database, hub);
   const background = new Set<Promise<void>>();
@@ -1364,6 +1371,15 @@ export function createAgentController(
         JOIN factory.change_agent_turn_intent intent ON intent.turn_id=turn.id
         WHERE intent.runtime_attempt_id=${attemptID} AND turn.state='pending'`;
       for (const turn of pending) run(execute(turn.id));
+    },
+
+    async recoverRetainedStops() {
+      if (closed || !settleRetainedStop) return;
+      const stopped = await database.client<{ changeID: string }[]>`
+        SELECT session.change_id AS "changeID" FROM factory.change_agent_session session
+        JOIN factory.runtime_attempt attempt ON attempt.id=session.runtime_attempt_id
+        WHERE session.stop_pending AND attempt.state IN ('failed','cleanup-failed','stopped')`;
+      for (const session of stopped) run(reconcileStop(session.changeID));
     },
 
     async dispatchReadyPending() {
