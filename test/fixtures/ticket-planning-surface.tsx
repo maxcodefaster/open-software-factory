@@ -71,7 +71,7 @@ function Surface() {
         commitSha: "a".repeat(40),
       },
     ],
-    diagramRenders: [__PLANNING_DIAGRAM__],
+    diagramRenders: [query.has("unrendered") ? null : __PLANNING_DIAGRAM__],
     rendererVersion: "fixture/pinned-renderer",
     authorKind: "ai",
     createdAt: "2026-10-26T10:00:00Z",
@@ -141,6 +141,15 @@ function Surface() {
               },
               revisions: [product()],
               documentRevisions: [],
+              proposal: query.has("proposal")
+                ? {
+                    id: "10000000-0000-4000-8000-000000000014",
+                    base: { version: 1, documentId: null, revisionId: productID },
+                    ticket: { title: "Export invoices as CSV", description: "" },
+                    requirement: planningProduct,
+                    fullPlanning: true,
+                  }
+                : null,
               origin: null,
               followUps: [],
               technicalDesigns: contributor || empty ? [] : [design()],
@@ -225,13 +234,20 @@ function Surface() {
                 id: "10000000-0000-4000-8000-000000000006",
                 ordinal: 2,
                 content,
+                diagramRenders: query.has("unrendered")
+                  ? [__PLANNING_DIAGRAM__]
+                  : design().diagramRenders,
                 authorKind: "human",
               });
               setAction("Technical design saved");
               return true;
             }}
             onWriteRequirements={noop}
-            onSaveDocument={async () => undefined}
+            onSaveDocument={async () => {
+              if (query.has("proposal"))
+                setCommands((value) => ({ ...value, saves: value.saves + 1 }));
+              return undefined;
+            }}
             onConfirmRequirements={async () => undefined}
             clarificationAction={{ label: "Ask AI to clarify", status: false }}
             onFollowUp={noop}

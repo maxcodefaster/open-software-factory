@@ -3,15 +3,16 @@ import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import {
   type ReviewFeedback,
   visualReviewSchema,
 } from "../../packages/conversation-domain/src/visual-review";
+import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
+import { planningDesign } from "../fixtures/technical-planning";
 import { fixtureValue } from "../fixtures/value";
 
 const directory = ".factory/test-results/ticket-planning";
@@ -108,6 +109,9 @@ for (const width of [1440, 390]) {
   }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`${origin}/ticket-planning.html?empty&unresolved`);
+    await expect(page.getByLabel("Ticket progress", { exact: true })).toContainText(
+      "Technical planning is unfinished",
+    );
     await expect(page.getByRole("button", { name: "Implement", exact: true })).toBeDisabled();
     await expect(page.getByRole("navigation", { name: "Ticket chapters" })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Ask AI to clarify", exact: true })).toHaveCount(
@@ -130,6 +134,70 @@ for (const width of [1440, 390]) {
     await page.screenshot({ path: `${directory}/continue-technical-${width}.png`, fullPage: true });
   });
 }
+
+for (const device of [
+  { name: "desktop", width: 1440, hasTouch: false },
+  { name: "narrow", width: 390, hasTouch: false },
+  { name: "touch", width: 390, hasTouch: true },
+]) {
+  test.describe(`private proposal at ${device.name}`, () => {
+    test.use({ viewport: { width: device.width, height: 960 }, hasTouch: device.hasTouch });
+    test("proposal edits explain that confirmation, not autosave, shares them", async ({
+      page,
+    }) => {
+      await page.goto(`${origin}/ticket-planning.html?empty&proposal`);
+      await expect(page.getByText("Ready to implement", { exact: true })).toHaveCount(0);
+      await expect(page.getByLabel("Ticket progress", { exact: true })).toHaveText(
+        "Review this proposal. Your edits stay private until you confirm.",
+      );
+      await page
+        .getByRole("textbox", { name: "Acceptance criterion 1", exact: true })
+        .fill("Keep this correction private until the product proposal is confirmed.");
+      await expect(
+        page.getByText("Proposal edits are private until you confirm.", { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText("Changes will save automatically", { exact: true })).toHaveCount(
+        0,
+      );
+      const confirm = page.getByRole("button", { name: "Confirm product spec", exact: true });
+      if (await confirm.isVisible()) await expect(confirm).toBeEnabled();
+      else {
+        await page.getByRole("button", { name: "Ticket actions", exact: true }).click();
+        await expect(
+          page.getByRole("menuitem", { name: "Confirm product spec", exact: true }),
+        ).toBeEnabled();
+        await page.keyboard.press("Escape");
+      }
+      await expect(page.getByLabel("Fixture commands")).toHaveText(
+        JSON.stringify({ work: 0, saves: 0, approvals: 0 }),
+      );
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+      ).toBeLessThanOrEqual(1);
+      await page.screenshot({
+        path: `${directory}/proposal-edits-private-${device.name}.png`,
+        fullPage: true,
+      });
+    });
+  });
+}
+
+test("saving a retained diagram through the existing editor needs no new planning request", async ({
+  page,
+}) => {
+  await page.goto(`${origin}/ticket-planning.html?unrendered`);
+  const nav = page.getByRole("navigation", { name: "Ticket chapters" });
+  await nav.getByRole("button", { name: "Technical design", exact: true }).click();
+  await page.getByRole("button", { name: "Edit design", exact: true }).click();
+  await page.getByRole("button", { name: "Save design", exact: true }).click();
+  await expect(page.getByLabel("Fixture action")).toHaveText("Technical design saved");
+  await nav.getByRole("button", { name: "Architecture", exact: true }).click();
+  await expect(page.getByRole("img", { name: /The new export command/ })).toBeVisible();
+  await expect(page.getByText("Diagram not rendered.", { exact: false })).toHaveCount(0);
+  await expect(page.getByLabel("Fixture commands")).toHaveText(
+    JSON.stringify({ work: 0, saves: 1, approvals: 0 }),
+  );
+});
 
 test("a prerequisite queues one implementation order and cancellation starts no work", async ({
   page,
@@ -204,6 +272,60 @@ for (const width of [1440, 768, 390]) {
       await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
     ).toBeLessThanOrEqual(1);
     expect(errors).toEqual([]);
+  });
+}
+
+for (const device of [
+  { name: "desktop", width: 1440, hasTouch: false },
+  { name: "narrow", width: 390, hasTouch: false },
+  { name: "touch", width: 390, hasTouch: true },
+]) {
+  test.describe(`unrendered optional diagram on ${device.name}`, () => {
+    test.use({ viewport: { width: device.width, height: 960 }, hasTouch: device.hasTouch });
+    test("keeps the complete design and source without offering a broken image", async ({
+      page,
+    }) => {
+      await page.goto(`${origin}/ticket-planning.html?unrendered`);
+      await expect(
+        page.getByRole("region", { name: "Technical design", exact: true }),
+      ).toContainText(planningDesign.context);
+      const nav = page.getByRole("navigation", { name: "Ticket chapters" });
+      if (device.width <= 760)
+        await nav.getByLabel("Ticket chapter").selectOption("ticket-architecture");
+      else await nav.getByRole("button", { name: "Architecture", exact: true }).click();
+      const architecture = page.getByRole("region", { name: "Architecture", exact: true });
+      await expect(architecture.getByRole("status")).toHaveText(
+        "Diagram not rendered. The technical design and diagram source are retained.",
+      );
+      await expect(architecture.getByRole("img")).toHaveCount(0);
+      await expect(
+        architecture.getByRole("link", { name: "Open diagram", exact: true }),
+      ).toHaveCount(0);
+      await expect(architecture.locator(".ticket-diagram-source code")).toBeVisible();
+      await expect(architecture.locator(".ticket-diagram-source code")).toContainText("@startuml");
+      const source = architecture.getByText("PlantUML source", { exact: true });
+      if (device.hasTouch) {
+        await source.tap();
+        await expect(architecture.locator(".ticket-diagram-source code")).toBeHidden();
+        await source.tap();
+      } else {
+        await source.focus();
+        await page.keyboard.press("Enter");
+        await expect(architecture.locator(".ticket-diagram-source code")).toBeHidden();
+        await page.keyboard.press("Enter");
+      }
+      await expect(architecture.locator(".ticket-diagram-source code")).toBeVisible();
+      await expect(page.getByLabel("Fixture commands")).toHaveText(
+        JSON.stringify({ work: 0, saves: 0, approvals: 0 }),
+      );
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth - innerWidth),
+      ).toBeLessThanOrEqual(1);
+      await page.screenshot({
+        path: `${directory}/unrendered-diagram-${device.name}.png`,
+        fullPage: true,
+      });
+    });
   });
 }
 

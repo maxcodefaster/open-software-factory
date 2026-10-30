@@ -514,7 +514,7 @@ export const ticketDetailSchema = z.object({
         sourceCommit: z.string(),
         content: technicalDesignContentInput,
         citations: z.array(sourceCitationInput),
-        diagramRenders: z.array(z.string()),
+        diagramRenders: z.array(z.string().nullable()),
         rendererVersion: z.string(),
         authorKind: z.enum(["human", "ai"]),
         createdAt: z.string(),

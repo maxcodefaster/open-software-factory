@@ -17,6 +17,7 @@ export type TicketProgressInput = {
   cleanupError?: string | undefined;
   canDevelop?: boolean | undefined;
   planning?: boolean | undefined;
+  technicalPlanningOutstanding?: boolean | undefined;
 };
 
 // A read projection of known state, never an inferred result or a work command.
@@ -63,6 +64,8 @@ export function ticketProgress(input: TicketProgressInput): string {
       : "The approved requirements are being implemented. Checks and independent review follow submission. No action needed.";
   if (!input.changeState) {
     if (input.planning) return "Planning is in progress. Review the proposal when it is ready.";
+    if (input.technicalPlanningOutstanding)
+      return "Technical planning is unfinished. Continue technical planning before implementation.";
     return input.ticketState === "ready"
       ? "Requirements are saved. Confirm the scope with Implement when ready."
       : input.ticketState === "done"

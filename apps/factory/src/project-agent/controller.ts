@@ -945,7 +945,10 @@ export function createProjectAgentController(
         publicationStep = "architecture diagram rendering";
         const technical =
           output.kind === "technical-design" && technicalPlanning
-            ? { base: technicalPlanning, renders: await renderArchitectureDiagrams(output.design) }
+            ? {
+                base: technicalPlanning,
+                renders: await renderArchitectureDiagrams(output.design, { allowUnrendered: true }),
+              }
             : undefined;
         publicationStep = "citation reference validation";
         const supported = new Set(output.citations.map((citation) => citation.reference));

@@ -33,5 +33,13 @@ external SVG content and displays the result as an image, never raw inline SVG. 
 identity remain retained with each revision. Diagrams explain a proposed design; they are not a
 claim that static analysis extracted a complete architecture graph.
 
+An optional diagram's syntax, worker availability or rendering deadline must not discard an
+otherwise valid Technical Design. Retain its exact safe source and an explicit unavailable render
+in the same guarded revision transaction. Show that outcome with the source, without a broken
+image or an Open diagram link. This is not a successful diagram render and never retries inference.
+Unsafe source, active/external SVG, missing source evidence and changed authority still reject
+publication. Human design saves keep their existing validation; correcting or removing a diagram
+creates another immutable revision. Reading the unavailable result starts neither rendering nor work.
+
 The Ticket remains one reading surface with chapter navigation, not separate Product/Tech tabs.
 The existing visual system and document editing conventions remain authoritative.
