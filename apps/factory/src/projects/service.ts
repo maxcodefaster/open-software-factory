@@ -4,18 +4,16 @@ import {
   type RegisterProjectInput,
 } from "../../../../packages/project-domain/src/project";
 import { createAccessController, requireActiveAccountIn } from "../access/controller";
-import { factoryForgeSource } from "../knowledge/forge-source";
 import { projectSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
+import { factoryForgeSource } from "../knowledge/forge-source";
 
 type Database = ReturnType<typeof createDatabase>;
 
 export type ProjectServiceDependencies = {
   database: Database;
   localRepositoryOrigin: string;
-  ensureStaging(projectID: string, userID: string): Promise<unknown>;
-  generateKnowledge(projectID: string, userID: string): Promise<unknown>;
-  ensureKnowledgeHook(projectID: string): Promise<void>;
+  onRegistered(projectID: string, userID: string, recovering: boolean): Promise<void>;
   forgeOwner: string;
 };
 
@@ -43,6 +41,17 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
       createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
     });
   return {
+    async recover() {
+      const projects = await dependencies.database.client<{ id: string; userID: string }[]>`
+        SELECT project.id,project.created_by AS "userID" FROM factory.project project
+        JOIN factory.project_setup_readiness configuration
+          ON configuration.project_id=project.id AND configuration.task='configuration'
+        WHERE configuration.state='pending' AND NOT EXISTS(
+          SELECT 1 FROM factory.project_repository_intent intent WHERE intent.project_id=project.id
+        )`;
+      for (const project of projects)
+        await dependencies.onRegistered(project.id, project.userID, true);
+    },
     async list(userID: string) {
       await dependencies.database.client.begin((sql) => requireActiveAccountIn(sql, userID));
       const rows = await dependencies.database.client<ProjectRow[]>`
@@ -91,19 +100,15 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
       `;
           await sql`INSERT INTO factory.project_membership(project_id,user_id,role,manage_project,updated_by)
           VALUES(${id},${userID},'developer',true,${userID})`;
+          await sql`INSERT INTO factory.project_setup_readiness(project_id,task,command_id)
+            VALUES(${id},'configuration',${crypto.randomUUID()})`;
           return created;
         });
         const project = rows[0];
         if (!project) throw new Error("Project insert returned no row");
         void dependencies
-          .ensureKnowledgeHook(project.id)
-          .catch(() => console.error("Wiki source hook setup failed"));
-        void dependencies.ensureStaging(project.id, userID).catch((cause) => {
-          console.error("Staging start failed", cause);
-        });
-        void dependencies.generateKnowledge(project.id, userID).catch((cause) => {
-          console.error("Initial Knowledge generation failed", cause);
-        });
+          .onRegistered(project.id, userID, false)
+          .catch(() => console.error("Registered Project preparation needs attention"));
         return dto(project);
       } catch (cause) {
         if (isUniqueViolation(cause)) {

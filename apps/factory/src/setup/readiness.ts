@@ -263,8 +263,12 @@ export function createSetupReadiness(input: {
   }
   async function recover() {
     const projects = await sql<{ id: string; userID: string; starter: boolean }[]>`SELECT
-      intent.project_id AS id,intent.user_id AS "userID",intent.kind='starter' AS starter
-      FROM factory.project_repository_intent intent WHERE intent.state='committed'`;
+      project.id,COALESCE(intent.user_id,project.created_by) AS "userID",COALESCE(intent.kind='starter',false) AS starter
+      FROM factory.project project
+      LEFT JOIN factory.project_repository_intent intent ON intent.project_id=project.id
+      WHERE intent.state='committed' OR (intent.project_id IS NULL AND EXISTS(
+        SELECT 1 FROM factory.project_setup_readiness readiness WHERE readiness.project_id=project.id
+      ))`;
     for (const project of projects)
       void start(project.id, project.userID, project.starter, true).catch(() => {});
   }

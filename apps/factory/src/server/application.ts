@@ -499,11 +499,9 @@ export async function createFactoryApplication() {
   const projectService = createProjectService({
     database,
     localRepositoryOrigin: new URL(process.env["FACTORY_FORGEJO_API_URL"] ?? "").origin,
-    ensureStaging: (projectID, userID) => runtimeController.ensureStaging(projectID, userID),
-    generateKnowledge: (projectID, userID) => knowledgeController.generate(projectID, userID),
-    ensureKnowledgeHook: async (projectID) => {
-      await wikiSourceUpdates.ensure(projectID);
-      await projectPreparation.ensure(projectID);
+    onRegistered: async (projectID, userID, recovering) => {
+      await setupReadiness.start(projectID, userID, false, recovering);
+      await setupInspection.start(projectID, userID, projectID);
     },
     forgeOwner: forgeOwner,
   });
@@ -630,6 +628,9 @@ export async function createFactoryApplication() {
   await setupReadiness
     .recover()
     .catch(() => console.error("Project preparation recovery is unavailable"));
+  await projectService
+    .recover()
+    .catch(() => console.error("Registered Project recovery is unavailable"));
 
   const buildDirectory = factoryBuildDirectory();
   const planningCacheURL =

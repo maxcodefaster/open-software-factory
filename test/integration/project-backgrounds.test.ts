@@ -26,9 +26,7 @@ test("new Projects spread persistent backgrounds across the catalogue, including
       database,
       localRepositoryOrigin: "https://forge.test",
       forgeOwner: "factory",
-      ensureStaging: async () => {},
-      generateKnowledge: async () => {},
-      ensureKnowledgeHook: async () => {},
+      onRegistered: async () => {},
     });
     const origin = "https://factory.test";
     const endpoint = await compiledFactoryEndpoint({

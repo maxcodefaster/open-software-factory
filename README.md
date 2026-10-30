@@ -380,6 +380,10 @@ If a repository-creation response is lost, Factory observes that same setup auto
 updates the open setup panel. Status recovery never repeats repository creation or import.
 Known setup failures still require an explicit retry.
 
+Registering an existing local Forgejo repository follows the same configuration inspection
+and readiness flow as an import. Registration retains pending configuration before background
+work starts; it does not start Project code or prepare images before confirmation.
+
 Requirements can be written directly. New Ticket → Write requirements creates shared, editable
 intent without calling a model or opening an Interview. Enter the specification and acceptance
 criteria; Implement approves that exact saved revision and commissions Coding in one action.

@@ -24,7 +24,13 @@ afterAll(async () => {
   restore?.();
 });
 
-test.each(["personal", "staging", "ticket"] as const)(
+test.each([
+  "personal",
+  "staging",
+  "staging-unstarted",
+  "staging-missing-contract",
+  "ticket",
+] as const)(
   "new %s runtime retains all declared App channels before compute is available",
   async (kind) => {
     const isolated = await ownedTestDatabase(server.identity, crypto.randomUUID());
@@ -82,6 +88,18 @@ test.each(["personal", "staging", "ticket"] as const)(
         "-m",
         "Owned declared Apps",
       );
+      if (kind === "staging-missing-contract") {
+        git("rm", ".factory/system.json");
+        git(
+          "-c",
+          "user.name=Factory",
+          "-c",
+          "user.email=factory@example.invalid",
+          "commit",
+          "-m",
+          "Owned source before configuration",
+        );
+      }
       const revision = git("rev-parse", "HEAD");
       const owned = await fixture(undefined, revision, database);
       await database.client`UPDATE factory.project SET repository_url=${`file://${source}`}
@@ -114,13 +132,26 @@ test.each(["personal", "staging", "ticket"] as const)(
         },
         async () => "",
       );
+      if (kind === "staging-missing-contract") {
+        await expect(controller.ensureStaging(owned.projectID, owned.userID)).rejects.toThrow(
+          ".factory/system.json",
+        );
+        expect(
+          await database.client`SELECT project_id FROM factory.staging_preview WHERE project_id=${owned.projectID}`,
+        ).toHaveLength(0);
+        return;
+      }
+      if (kind === "staging-unstarted")
+        await database.client`INSERT INTO factory.staging_preview(project_id,revision)
+          VALUES(${owned.projectID},${"0".repeat(40)})`;
       const attempt =
         kind === "personal"
           ? await controller.start(owned.projectID, owned.userID)
-          : kind === "staging"
+          : kind.startsWith("staging")
             ? await controller.ensureStaging(owned.projectID, owned.userID)
             : await controller.startPersisted(owned.changeID, owned.userID);
       expect(attempt?.state).toBe("create-intended");
+      expect(attempt?.revision).toBe(revision);
       const [retained] = await database.client<{ apps: string[]; waiting: boolean }[]>`
         SELECT declared_apps AS apps,
           EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id) AS waiting

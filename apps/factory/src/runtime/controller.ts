@@ -20,6 +20,7 @@ import { factoryboxAssignmentSecret } from "../../../../packages/runtime-kuberne
 import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
 import {
   parseSystemContract,
+  type SystemContract,
   SystemContractError,
 } from "../../../../packages/system-contract/src/system-contract";
 import {
@@ -1649,14 +1650,20 @@ export function createRuntimeController(
           SELECT revision, runtime_attempt_id AS "attemptID"
           FROM factory.staging_preview WHERE project_id = ${projectID}
         `;
-        if (!previews[0]) {
+        let configured: SystemContract | undefined;
+        if (!previews[0]?.attemptID) {
           const revision = await resolveRepositoryRevision(
             project.repositoryURL,
             project.defaultBranch,
           );
+          // A branch observation is not a promoted Preview. Validate its Apps
+          // before retaining an initial pointer; no Runtime Attempt exists yet.
+          configured = await resolveSystemContract(project.repositoryURL, revision);
           previews = await lock<Array<{ revision: string; attemptID: string | null }>>`
             INSERT INTO factory.staging_preview(project_id, revision)
             VALUES (${projectID}, ${revision})
+            ON CONFLICT(project_id) DO UPDATE SET revision=EXCLUDED.revision,updated_at=now()
+              WHERE factory.staging_preview.runtime_attempt_id IS NULL
             RETURNING revision, runtime_attempt_id AS "attemptID"
           `;
         }
@@ -1678,7 +1685,8 @@ export function createRuntimeController(
             return current;
           }
         }
-        const systemContract = await resolveSystemContract(project.repositoryURL, preview.revision);
+        const systemContract =
+          configured ?? (await resolveSystemContract(project.repositoryURL, preview.revision));
         const generations = await lock<Array<{ generation: string }>>`
           SELECT COALESCE(MAX(generation), 0) + 1 AS generation
           FROM factory.runtime_attempt
