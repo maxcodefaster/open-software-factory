@@ -68,5 +68,23 @@ for (const width of [1440, 900, 390]) {
       await expect(dialog).toBeHidden();
       await expect(opener).toBeFocused();
     });
+    test("an observed Stop and editing grant do not revive the old compute demand", async ({
+      page,
+    }) => {
+      const activate = (control: Locator) => (width === 390 ? control.tap() : control.click());
+      await page.goto(`${origin}/ide-writer.html?compute`);
+      const status = page.getByRole("status", { name: "Compute state" });
+      const starts = page.getByRole("status", { name: "Start commands" });
+      await expect(status).toHaveText("ready");
+      await activate(page.getByRole("button", { name: "Observe external Stop", exact: true }));
+      await expect(status).toHaveText("stopped");
+      await activate(page.getByRole("button", { name: "Observe editing grant", exact: true }));
+      await expect(status).toHaveText("stopped");
+      await expect(starts).toHaveText("0");
+      await page.screenshot({ path: resolve(evidence, `stopped-without-restart-${width}.png`) });
+      await activate(page.getByRole("button", { name: "Continue editing", exact: true }));
+      await expect(status).toHaveText("ready");
+      await expect(starts).toHaveText("1");
+    });
   });
 }

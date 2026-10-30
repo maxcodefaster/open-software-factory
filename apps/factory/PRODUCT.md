@@ -169,7 +169,10 @@ survive iframe reloads. Closing all terminals leaves an empty session list until
 chosen; it does not start another session on reload.
 
 Opening a Workspace for editing automatically starts or resumes its compute, without commissioning
-Coding. Eligible Development compute pauses after five minutes without genuine use. Running work
+Coding. The editor backend may warm while hidden, but selects a Workspace only when opened.
+Opening in observation mode does not retain a deferred Start: a later editing grant or
+Coding Stop cannot wake compute without renewed editing use or deliberately reopening the Workspace.
+Eligible Development compute pauses after five minutes without genuine use. Running work
 and open terminal sessions remain protected. Close terminal sessions to permit automatic Pause.
 An unattended Run view does not keep compute awake.
 The IDE's Git tab shows personal-Workspace status and diffs, commits saved changes and offers

@@ -241,10 +241,18 @@ export function DeveloperIDEWorkspace(props: {
     },
   );
   createEffect(
-    () => [props.workspaceID, props.allowed, availableSource(), ready()] as const,
-    ([workspaceID, allowed, sourceWorkspaceID, editorReady]) => {
-      if (!allowed || !editorReady || !workspaceID || sourceWorkspaceID !== workspaceID) return;
-      const origin = editorOrigin();
+    () =>
+      [
+        props.workspaceID,
+        props.allowed,
+        availableSource(),
+        ready(),
+        props.active,
+        editorOrigin(),
+      ] as const,
+    ([workspaceID, allowed, sourceWorkspaceID, editorReady, active, origin]) => {
+      if (!active || !allowed || !editorReady || !workspaceID || sourceWorkspaceID !== workspaceID)
+        return;
       if (origin)
         frame?.contentWindow?.postMessage(
           { type: "factory:select-workspace", workspaceID },
@@ -261,8 +269,9 @@ export function DeveloperIDEWorkspace(props: {
         props.active,
         selected(),
         ready(),
+        editorOrigin(),
       ] as const,
-    ([target, workspaceID, allowed, active, selectedID, editorReady]) => {
+    ([target, workspaceID, allowed, active, selectedID, editorReady, origin]) => {
       if (
         !target ||
         !allowed ||
@@ -273,7 +282,6 @@ export function DeveloperIDEWorkspace(props: {
         sentNavigation === target.id
       )
         return;
-      const origin = editorOrigin();
       if (!origin || !frame?.contentWindow) return;
       sentNavigation = target.id;
       frame.contentWindow.postMessage({ ...target, type: "factory:open-activity" }, origin);
