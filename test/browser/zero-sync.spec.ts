@@ -1,15 +1,15 @@
 import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
 import { mkdir, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { expect, type WebSocketRoute } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
-import { createDatabase } from "../../packages/db/src/client";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { browserFunction } from "../fixtures/server-functions";
-import { openProjectMenu } from "../fixtures/project-menu";
+import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { ownedBrowserEnvironment } from "../fixtures/owned-browser-run";
+import { openProjectMenu } from "../fixtures/project-menu";
+import { browserFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("Zero drives shared reads without idle polling, preserves drafts through recovery, and fences revoked readers", async ({
@@ -282,13 +282,54 @@ test("Zero drives shared reads without idle polling, preserves drafts through re
     await page.getByRole("button", { name: "New Ticket", exact: true }).click();
     await page.getByLabel("Ticket title", { exact: true }).fill("Retain my uncreated draft");
     expect(socket).toBeDefined();
+    const sync = page.getByRole("status", { name: "Shared work sync" });
+    const originalDocument = await page.evaluate(() => performance.timeOrigin);
+    for (const [width, failure] of [
+      [1440, { reason: "internal", message: "Fetch from API server threw error: fetch failed" }],
+      [
+        390,
+        {
+          reason: "http",
+          status: 503,
+          message: "Fetch from API server returned non-OK status 503",
+        },
+      ],
+    ] as const) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 960 });
+      fixtureValue(socket, "socket").send(
+        JSON.stringify([
+          "error",
+          { kind: "TransformFailed", origin: "zeroCache", queryIDs: [], ...failure },
+        ]),
+      );
+      await expect(sync).toContainText("Reconnecting to shared updates");
+      await expect(page.getByLabel("Ticket title", { exact: true })).toHaveValue(
+        "Retain my uncreated draft",
+      );
+      await page.screenshot({
+        path: `${evidence}/sync-api-reconnecting-${width}.png`,
+        fullPage: true,
+      });
+      const noticeBox = await sync.boundingBox();
+      const titleBox = await page.getByLabel("Ticket title", { exact: true }).boundingBox();
+      expect(noticeBox).not.toBeNull();
+      expect(titleBox).not.toBeNull();
+      expect(
+        fixtureValue(noticeBox, "noticeBox").y + fixtureValue(noticeBox, "noticeBox").height,
+      ).toBeLessThanOrEqual(fixtureValue(titleBox, "titleBox").y);
+      await expect(sync).toHaveCount(0, { timeout: 15_000 });
+      expect(await page.evaluate(() => performance.timeOrigin)).toBe(originalDocument);
+      await expect(page.getByLabel("Ticket title", { exact: true })).toHaveValue(
+        "Retain my uncreated draft",
+      );
+    }
+    await page.setViewportSize({ width: 1440, height: 960 });
     fixtureValue(socket, "socket").send(
       JSON.stringify([
         "error",
         { kind: "Internal", origin: "zeroCache", message: "Owned sync failure" },
       ]),
     );
-    const sync = page.getByRole("status", { name: "Shared work sync" });
     await expect(sync).toContainText("Shared updates stopped");
     await expect(page.getByLabel("Ticket title", { exact: true })).toHaveValue(
       "Retain my uncreated draft",

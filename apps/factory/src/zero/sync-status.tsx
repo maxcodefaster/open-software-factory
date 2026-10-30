@@ -22,6 +22,7 @@ export function PlanningSyncStatus(props: {
     const state = connection.state()?.name;
     if (state === "needs-auth")
       return "Your session expired. Your drafts are retained. Sign in again to sync shared work.";
+    if (connection.automaticRecovery()) return "Reconnecting to shared updates…";
     if (state === "error" || state === "closed")
       return "Shared updates stopped. Showing the last known state.";
     if (state === "disconnected")
@@ -62,7 +63,12 @@ export function PlanningSyncStatus(props: {
   }
   return (
     <Show when={message()}>
-      <div class="sync-notice" role="status" aria-label="Shared work sync">
+      <div
+        class="sync-notice"
+        role="status"
+        aria-label="Shared work sync"
+        data-automatic-recovery={connection.automaticRecovery() || undefined}
+      >
         <span>{message()}</span>
         <Show when={canRetry() || connection.state()?.name === "needs-auth"}>
           <button

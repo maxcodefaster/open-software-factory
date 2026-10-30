@@ -2000,6 +2000,11 @@ dt {
   box-shadow: var(--shadow-float);
 }
 
+.sync-notice[data-automatic-recovery] {
+  --notice-text-min-width: 0px;
+  flex-wrap: nowrap;
+}
+
 .agent-panel {
   position: absolute;
   z-index: var(--layer-panel);
