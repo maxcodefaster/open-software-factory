@@ -157,7 +157,7 @@ export async function generateProjectResponse(input: {
         readCode: createTool({
           id: "read-code",
           description:
-            "Read bounded numbered lines of a discovered file at the returned exact commit. Never use it to read secrets or infer uninspected files.",
+            "Read numbered lines of a discovered file at the returned exact commit. A truncated result is a page, not unavailable source: follow nextStartLine as startLine with the same path and commitSha to inspect the remaining relevant lines. Never use it to read secrets or infer uninspected files.",
           inputSchema: codeReadInput,
           outputSchema: codeReadResult,
           execute: async (value) => {
@@ -306,6 +306,10 @@ is frozen in the selected Ticket context. Never rewrite its behavior or expand i
 Research the relevant existing code at source commit ${input.technicalPlanning.sourceCommit}.
 Read before claiming how an existing module, interface or flow works. Use findCode then readCode,
 and cite inspected files. All code references must use that one commit.
+Truncated reads and path listings are paginated evidence, not a reason to stop Planning.
+Follow the returned nextStartLine or narrow the discovered path query to inspect relevant
+configuration before claiming that source is unavailable. Use the Project's Dev Container path
+and its referenced configuration when the task concerns declared Apps or development startup.
 Return a technical-design with context, proposedChanges, decisions, assumptions, risks, validation
 and diagrams. Context describes the inspected current system; proposedChanges describes the
 intended changes, module boundaries and data flow. Record real alternatives and why one fits.

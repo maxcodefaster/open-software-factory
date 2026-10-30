@@ -18,15 +18,16 @@ import {
   codeReadResult,
   findReadableCodePaths,
   readableCodePath,
+  readCodePage,
 } from "./code-read";
 import { createDocumentSearchCache } from "./document-search-cache";
+import { editKnowledgeIn } from "./edit";
 import { factoryForgeSource } from "./forge-source";
 import { generateWiki, type WikiGenerationInput } from "./generation-agent";
 import { wikiGenerationFailureMessage } from "./generation-failure";
 import { publishWikiPackage, WikiPublicationConflict } from "./publication";
 import { createRepositoryKnowledgeCache } from "./repository-cache";
 import { searchSnippet } from "./search-snippet";
-import { editKnowledgeIn } from "./edit";
 
 type Database = ReturnType<typeof createDatabase>;
 type KnowledgeEdit = typeof knowledgeEditInput._output;
@@ -492,15 +493,9 @@ export function createKnowledgeController(
         },
       );
       await createAccessController(database).requireDevelopment(userID, projectID);
-      const lines = content.split("\n");
-      const selected = lines
-        .slice(input.startLine - 1, input.startLine - 1 + input.lineCount)
-        .map((line, index) => `${input.startLine + index}: ${line}`)
-        .join("\n");
       return codeReadResult.parse({
         ...input,
-        body: selected.slice(0, 16000),
-        truncated: selected.length > 16000 || input.startLine - 1 + input.lineCount < lines.length,
+        ...readCodePage(content, input),
         url: `${current.project.repositoryURL.replace(/\.git$/, "")}/src/commit/${input.commitSha}/${input.path.split("/").map(encodeURIComponent).join("/")}`,
       });
     },
