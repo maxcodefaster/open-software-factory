@@ -162,6 +162,11 @@ export async function rememberFactoryboxIdentity(
     !worker.attempted ||
     identity.storeID !== worker.admissionID.replaceAll("-", "") ||
     identity.executableSHA256 !== profile.executableSHA256 ||
+    (profile.minimumBoundedBytes === undefined
+      ? identity.boundedBytes !== undefined
+      : identity.boundedBytes === undefined ||
+        identity.boundedBytes < profile.minimumBoundedBytes ||
+        identity.boundedBytes > profile.boundedBytes) ||
     (worker.identity && !isDeepStrictEqual(worker.identity, identity))
   )
     throw new Error("Native worker identity differs from its Factory create intent");
@@ -183,7 +188,11 @@ export async function rememberFactoryboxIdentity(
       WHERE id=${workerID}`;
 }
 
-export function createFactoryboxWorker(database: Database, kubernetes: KubernetesClient) {
+export function createFactoryboxWorker(
+  database: Database,
+  kubernetes: KubernetesClient,
+  nextProfile?: () => FactoryboxRuntimeProfile,
+) {
   async function recoverBootstrap(input: { actorID: string; requestID: string }) {
     z.uuid().parse(input.requestID);
     const sql = database.coordination();
@@ -210,6 +219,9 @@ export function createFactoryboxWorker(database: Database, kubernetes: Kubernete
             );
           if (pod.phase !== "Failed" && pod.phase !== "Succeeded") return current;
           const profile = factoryboxRuntimeProfile.parse(current.profile);
+          const selected = factoryboxRuntimeProfile.parse(nextProfile?.() ?? profile);
+          if (selected.nodeName !== current.nodeName)
+            throw new Error("Bootstrap recovery cannot move canonical Source to another node");
           if (!current.runtimeHostImage)
             throw new Error("Original worker bootstrap image is missing");
           requireRuntimePodArtifacts(pod, current.runtimeHostImage, profile.image);
@@ -233,7 +245,7 @@ export function createFactoryboxWorker(database: Database, kubernetes: Kubernete
             await transaction`INSERT INTO factory.factorybox_worker_admission(
               id,worker_id,previous_id,profile,runtime_host_image,created_by)
               VALUES(${input.requestID},${current.id},${current.admissionID},
-                ${JSON.stringify({ ...profile, storageAdmission: 1 })}::text::jsonb,
+                ${JSON.stringify({ ...selected, storageAdmission: 1 })}::text::jsonb,
                 ${current.runtimeHostImage},${input.actorID})`;
           });
           return factoryboxAllocation(sql);

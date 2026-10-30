@@ -24,5 +24,12 @@ installs use the same path; retained installations upgrade through guarded boots
 
 New admissions check actual private-volume backing capacity once before native startup. Insufficient
 space fails explicitly instead of leaving an initializing Pod waiting for nonexistent cleanup.
-This check is not disk reclamation or dynamic sizing; those remain separate duties.
-Factorybox's pinned allocation and native safety checks remain authoritative.
+This check is not disk reclamation. For a new automatic profile it checks the declared minimum;
+the pinned native worker selects the actual fixed capacity within the requested range under its
+own store lease. Factory records that selected size as part of the immutable native identity.
+Later host availability cannot reinterpret or resize it. Older exact-size profiles remain unchanged.
+
+A fresh bootstrap successor may use the currently configured, independently qualified worker
+profile on the same canonical Source node. The original profile and bootstrap outcome remain
+retained on their original admission. This does not move Source, resume old RAM or qualify a new
+image without native evidence.

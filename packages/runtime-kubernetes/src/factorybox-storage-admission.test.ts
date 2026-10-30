@@ -3,6 +3,7 @@ import { factoryboxLocation } from "./factorybox-location";
 import {
   configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeInput,
+  factoryboxRuntimeRequest,
   renderFactoryboxRuntime,
 } from "./factorybox-runtime";
 
@@ -69,4 +70,36 @@ test("retained worker declarations do not gain another init container during an 
   ]);
   expect(retainedProfile.boundedBytes).toBe(32 * 1024 ** 3);
   expect(before.pod.spec.containers[0]?.args).toContain(String(retainedProfile.boundedBytes));
+});
+
+test("automatic admission checks its minimum while the pinned native worker selects within the full range", () => {
+  const profile = {
+    ...retainedProfile,
+    storageAdmission: 1 as const,
+    minimumBoundedBytes: 8 * 1024 ** 3,
+  };
+  const rendered = renderFactoryboxRuntime({ ...input, profile });
+  const guard = rendered.pod.spec.initContainers.find(
+    (container) => container.name === "storage-admission",
+  );
+  expect(guard?.env).toEqual(
+    expect.arrayContaining([
+      { name: "FACTORY_BOUNDED_BYTES", value: String(profile.minimumBoundedBytes) },
+    ]),
+  );
+  expect(rendered.pod.spec.containers[0]?.args).toEqual(
+    expect.arrayContaining([
+      "--bounded-bytes",
+      String(profile.boundedBytes),
+      "--bounded-min-bytes",
+      String(profile.minimumBoundedBytes),
+    ]),
+  );
+  expect(factoryboxRuntimeRequest({ ...input, profile }).minimumBoundedBytes).toBe(8 * 1024 ** 3);
+  expect(() =>
+    renderFactoryboxRuntime({
+      ...input,
+      profile: { ...profile, minimumBoundedBytes: 33 * 1024 ** 3 },
+    }),
+  ).toThrow();
 });

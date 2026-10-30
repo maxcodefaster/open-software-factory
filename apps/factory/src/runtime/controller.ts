@@ -20,6 +20,7 @@ import {
   factoryboxAdmissionID,
   factoryboxAssignmentSecret,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
+import { configuredFactoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
 import {
   parseSystemContract,
@@ -145,7 +146,7 @@ export function createRuntimeController(
   let cleanupTail: Promise<void> = Promise.resolve();
   const controlURL = runtimeFactoryURL("/internal/runtime-connect").replace(/^http/, "ws");
   const computeWait = createComputeWait(database, reserve);
-  const worker = createFactoryboxWorker(database, kubernetes);
+  const worker = createFactoryboxWorker(database, kubernetes, configuredFactoryboxRuntimeProfile);
   async function executionIdentity(
     ownerID: string,
     generation: number,

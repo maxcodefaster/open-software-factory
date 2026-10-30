@@ -20,10 +20,12 @@ factorybox:
   # Scheduling reserve, not a fixed CPU allocation. Kubernetes shares spare CPU
   # up to the qualified 3-core ceiling. Retained profiles are not resized.
   cpuRequestMilli: 100
-  # Choose before the first execution. Existing worker profiles are immutable.
-  storeGiB: 8
+  # A fresh worker selects within these bounds from actual backing capacity.
+  # The admitted size and existing worker profiles remain immutable.
+  storeGiB: 32
+  minimumStoreGiB: 8
   # Includes the bounded image, 16 GiB admission floor and metadata headroom.
-  claimGiB: 32
+  claimGiB: 64
 executionReserveTarget: 2
 
 # Empty uses the cluster's default dynamically provisioned RWO StorageClass.

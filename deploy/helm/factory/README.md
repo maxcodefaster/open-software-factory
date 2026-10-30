@@ -64,8 +64,13 @@ validation exceeded the former ten-minute default before bootstrap settled; a
 timeout does not authorize resetting retained state or deleting an in-flight claim.
 
 Size private execution storage before the first execution pins the worker profile.
-`factorybox.storeGiB` defaults to 8 and accepts whole sizes from 8 through 32 GiB.
-`factorybox.claimGiB` defaults to 32 and must cover the bounded image plus 17 GiB
+`factorybox.storeGiB` defaults to a 32 GiB maximum and accepts whole sizes from 8 through 32 GiB.
+`factorybox.minimumStoreGiB` defaults to 8 and must not exceed that maximum.
+The pinned worker must support the `bounded-min-bytes` contract. On its actual backing
+filesystem it chooses the largest whole-GiB size in the range while preserving its 12 GiB
+host floor. Factory retains the actual selected size in its native identity, not as a mutable
+installation setting. Existing admitted profiles and stores are never resized by an upgrade.
+`factorybox.claimGiB` defaults to 64 and must cover the maximum bounded image plus 17 GiB
 for the host admission floor and metadata. For example, a 24 GiB bounded image needs
 at least a 41 GiB claim; a 48 GiB claim leaves additional room. The worker's
 3 CPU / 3 GiB limits do not change. Canonical Project source remains on its separate
