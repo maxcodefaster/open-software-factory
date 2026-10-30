@@ -15,10 +15,16 @@ import {
   configuredFactoryboxRuntimeProfile,
   type FactoryboxRuntimeProfile,
   factoryboxRuntimeProfile,
+  factoryboxRuntimeRequest,
+  factoryboxSandboxID,
+  renderFactoryboxRuntime,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
   type FactoryboxWorkerIdentity,
+  factoryboxWorkerDeclaration,
   factoryboxWorkerIdentity,
+  factoryboxWorkerRequest,
+  observeOriginalFactoryboxDeclaration,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import { requireActiveAccountIn } from "../access/controller";
 
@@ -59,6 +65,7 @@ type Worker = {
   runtimeHostImage: string | null;
   identity: FactoryboxWorkerIdentity | null;
   attempted: boolean;
+  declaration: unknown | null;
 };
 const resource = z
   .object({
@@ -78,7 +85,7 @@ async function read(sql: SQL) {
     worker.node_name AS "nodeName",worker.namespace_uid AS "namespaceUID",
     worker.source_claim_uid AS "sourceClaimUID",admission.claim_uid AS "claimUID",
     admission.pod_uid AS "podUID",admission.profile,admission.runtime_host_image AS "runtimeHostImage",
-    admission.identity,admission.create_attempted AS attempted
+    admission.identity,admission.create_attempted AS attempted,admission.declaration
     FROM factory.factorybox_worker worker JOIN factory.factorybox_worker_admission admission
       ON admission.worker_id=worker.id AND admission.retired_at IS NULL WHERE worker.singleton`;
   if (!worker) throw new Error("Factory worker intent is missing");
@@ -258,6 +265,56 @@ export function createFactoryboxWorker(
     }
   }
   return {
+    async retainDeclaration() {
+      // Do not allocate a worker or start compute while recovering a receipt.
+      const missing = await database.client`SELECT id FROM factory.factorybox_worker_admission
+        WHERE retired_at IS NULL AND declaration IS NULL AND identity IS NOT NULL LIMIT 1`;
+      if (!missing.length) return;
+      const sql = database.coordination();
+      try {
+        await withFactoryboxWorkerLock(sql, async () => {
+          await sql`SELECT pg_advisory_lock(hashtext('factorybox-worker-create'))`;
+          try {
+            const worker = await read(sql);
+            if (worker.declaration || !worker.identity || !worker.runtimeHostImage) return;
+            const location = factoryboxLocation(worker.id, worker.admissionID);
+            const pod = await kubernetes.getPod(location.namespace, location.podName);
+            if (pod?.phase !== "Running" || !pod.ready) return;
+            requireRuntimePodArtifacts(
+              pod,
+              worker.runtimeHostImage,
+              factoryboxRuntimeProfile.parse(worker.profile).image,
+            );
+            // This renders only the worker projection. No Sandbox or Runtime
+            // Attempt is admitted, created, resumed or replayed here.
+            const input = {
+              ...location,
+              attemptID: worker.admissionID,
+              sandboxID: factoryboxSandboxID(worker.admissionID),
+              runtimeOwnerID: worker.id,
+              runtimeHostImage: worker.runtimeHostImage,
+              profile: factoryboxRuntimeProfile.parse(worker.profile),
+              labels: {},
+              sharedSource: false,
+            };
+            const declaration = await observeOriginalFactoryboxDeclaration(
+              factoryboxRuntimeRequest(input),
+              factoryboxWorkerIdentity.parse(worker.identity),
+              renderFactoryboxRuntime(input),
+            );
+            const retained = await sql`UPDATE factory.factorybox_worker_admission
+              SET declaration=${JSON.stringify(declaration)}::text::jsonb
+              WHERE id=${worker.admissionID} AND declaration IS NULL AND retired_at IS NULL`;
+            if (retained.count !== 1)
+              throw new Error("Original worker declaration changed during recovery");
+          } finally {
+            await sql`SELECT pg_advisory_unlock(hashtext('factorybox-worker-create'))`;
+          }
+        });
+      } finally {
+        await sql.end({ timeout: 1 });
+      }
+    },
     async location(sql: SQL = database.client, recovery?: { actorID: string; requestID: string }) {
       const current = recovery ? await recoverBootstrap(recovery) : await factoryboxAllocation(sql);
       return factoryboxLocation(current.id, current.admissionID);
@@ -340,6 +397,52 @@ export function createFactoryboxWorker(
           throw new Error("Original Factory worker disappeared or its UID changed");
         if (!pod && worker.attempted)
           throw new Error("Factory worker creation is unconfirmed; refusing another create");
+        const storeClaimDeclaration = declared.find(
+          (item) =>
+            item.kind === "PersistentVolumeClaim" &&
+            item.metadata.name === `store-${worker.admissionID.replaceAll("-", "")}`,
+        );
+        if (!storeClaimDeclaration) throw new Error("Factory worker store declaration is missing");
+        let declaration = worker.declaration
+          ? factoryboxWorkerDeclaration.parse(worker.declaration)
+          : factoryboxWorkerDeclaration.parse({
+              namespace,
+              claim: storeClaimDeclaration,
+              pod: declaredPod,
+            });
+        if (!worker.declaration && pod) {
+          if (!worker.identity)
+            throw new Error(
+              "Original worker bootstrap is unconfirmed; retain its admission before upgrading",
+            );
+          const nativeProfile = { ...profile };
+          delete nativeProfile.storageAdmission;
+          declaration = factoryboxWorkerDeclaration.parse(
+            await observeOriginalFactoryboxDeclaration(
+              factoryboxWorkerRequest.parse({
+                ...nativeProfile,
+                version: 1,
+                namespace: location.namespace,
+                podName: location.podName,
+                storeID: worker.admissionID.replaceAll("-", ""),
+                trustDomainID: worker.id.replaceAll("-", ""),
+              }),
+              factoryboxWorkerIdentity.parse(worker.identity),
+              declaration,
+            ),
+          );
+        }
+        const frozen = await sql`UPDATE factory.factorybox_worker_admission
+          SET declaration=coalesce(declaration,${JSON.stringify(declaration)}::text::jsonb)
+          WHERE id=${worker.admissionID} AND retired_at IS NULL
+            AND (declaration IS NULL OR declaration=${JSON.stringify(declaration)}::text::jsonb)`;
+        if (frozen.count !== 1) throw new Error("Factory worker bootstrap declaration changed");
+        // Never send an upgraded renderer's bootstrap or resource defaults to
+        // the original worker. Private per-Sandbox resources remain separate.
+        Reflect.set(declaredPod, "metadata", declaration.pod.metadata);
+        Reflect.set(declaredPod, "spec", declaration.pod.spec);
+        Reflect.set(storeClaimDeclaration, "metadata", declaration.claim.metadata);
+        Reflect.set(storeClaimDeclaration, "spec", declaration.claim.spec);
         if (!pod) {
           await sql`UPDATE factory.factorybox_worker_admission SET create_attempted=true
             WHERE id=${worker.admissionID} AND retired_at IS NULL`;
@@ -407,6 +510,7 @@ export function createFactoryboxWorker(
           namespaceUID: observedNamespace.uid,
           podUID: original.uid,
           workerRuntimeHostImage: bootstrapImage,
+          workerDeclaration: declaration,
         };
       } finally {
         try {

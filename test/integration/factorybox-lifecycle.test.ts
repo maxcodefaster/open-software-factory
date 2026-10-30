@@ -83,10 +83,14 @@ test.each([
       await database.client`UPDATE factory.runtime_attempt SET state='starting',kubernetes_namespace_uid='namespace-uid',kubernetes_uid='pod-uid' WHERE id=${owned.attemptID}`;
       await database.client`UPDATE factory.factorybox_worker SET profile=${JSON.stringify(profile)}::text::jsonb,
         runtime_host_image=${input.runtimeHostImage},node_name=${profile.nodeName},
-        namespace_uid='namespace-uid',pod_uid='pod-uid',claim_uid='claim-uid',create_attempted=true
+        namespace_uid='namespace-uid',pod_uid='pod-uid',claim_uid='claim-uid'
         WHERE id=${attempt.workerID}`;
       const request = factoryboxRuntimeRequest(input);
       const declared = factoryboxRuntimeDeclaration(input);
+      await database.client`UPDATE factory.factorybox_worker_admission
+        SET declaration=${JSON.stringify(declared)}::text::jsonb WHERE id=${attempt.workerID}`;
+      await database.client`UPDATE factory.factorybox_worker SET create_attempted=true
+        WHERE id=${attempt.workerID}`;
       const epoch = "e".repeat(32);
       const root = `/var/lib/sysbox/fixed-store/data/store/epochs/${epoch}/controller`;
       const namespace = { metadata: { ...declared.namespace.metadata, uid: "namespace-uid" } };

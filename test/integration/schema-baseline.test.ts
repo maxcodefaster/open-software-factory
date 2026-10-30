@@ -226,7 +226,7 @@ test.each(["historical versions", "partial schema"] as const)(
       if (state === "historical versions")
         expect([
           ...(await database.client`SELECT version FROM factory.schema_migration ORDER BY version`),
-        ]).toEqual([{ version: 0 }, { version: 2 }]);
+        ]).toEqual([{ version: 0 }, { version: 2 }, { version: 3 }]);
       else {
         const [schema] = await database.client<{ relation: string | null }[]>`
           SELECT to_regclass('factory.schema_migration')::text AS relation`;

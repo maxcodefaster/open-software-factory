@@ -9,9 +9,11 @@ import {
   factoryboxSharedLabels,
 } from "./factorybox-location";
 import {
+  type FactoryboxWorkerDeclaration,
   type FactoryboxWorkerIdentity,
   factoryboxCPUQuantity,
   factoryboxCPURequestMilli,
+  factoryboxWorkerDeclaration,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -106,6 +108,7 @@ export interface FactoryboxRuntimeInput {
   readonly runtimeHostImage: string;
   // The original Pod's bootstrap export is not the selected Sandbox image.
   readonly workerRuntimeHostImage?: string;
+  readonly workerDeclaration?: FactoryboxWorkerDeclaration;
   readonly profile: FactoryboxRuntimeProfile;
   readonly sharedSource: boolean;
   readonly storageNode?: string;
@@ -398,7 +401,9 @@ export function factoryboxPreparationAssignment(input: FactoryboxRuntimeInput, v
 }
 
 export function factoryboxRuntimeDeclaration(input: FactoryboxRuntimeInput) {
-  return renderFactoryboxRuntime(input);
+  return input.workerDeclaration
+    ? factoryboxWorkerDeclaration.parse(input.workerDeclaration)
+    : renderFactoryboxRuntime(input);
 }
 
 export async function prepareFactoryboxRuntime(

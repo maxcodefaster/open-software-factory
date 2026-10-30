@@ -32,6 +32,7 @@ import {
   executeFactoryboxOperation,
   type FactoryboxWorkerIdentity,
   factoryboxOperation,
+  factoryboxWorkerDeclaration,
   factoryboxWorkerIdentity,
   inspectFactoryboxWorker,
   runFactoryboxKubernetes,
@@ -162,6 +163,9 @@ export function factoryboxReserveInput(
     runtimeHostImage: slot.runtimeHostImage,
     ...(slot.workerRuntimeHostImage && slot.workerRuntimeHostImage !== slot.runtimeHostImage
       ? { workerRuntimeHostImage: slot.workerRuntimeHostImage }
+      : {}),
+    ...(slot.workerDeclaration
+      ? { workerDeclaration: factoryboxWorkerDeclaration.parse(slot.workerDeclaration) }
       : {}),
     profile: factoryboxRuntimeProfile.parse(slot.factoryboxProfile),
     sharedSource: false,

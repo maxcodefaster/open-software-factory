@@ -6,6 +6,7 @@ import {
   factoryboxOperation,
   factoryboxWorkerRequest,
   inspectFactoryboxWorker,
+  observeOriginalFactoryboxDeclaration,
   renderFactoryboxWorker,
 } from "./factorybox-worker";
 
@@ -101,6 +102,52 @@ function fixture(input: FactoryboxWorkerRequest = request) {
     },
   };
 }
+
+test("retained declaration observation pins immutable original commands while checking the native identity", async () => {
+  const f = fixture();
+  const base = renderFactoryboxWorker(request);
+  const original = {
+    namespace: base[0],
+    claim: base[1],
+    pod: {
+      ...base[2],
+      spec: {
+        ...base[2].spec,
+        initContainers: [
+          {
+            name: "runtime-image",
+            image: `registry.invalid/runtime@sha256:${"a".repeat(64)}`,
+            command: ["sh", "-ec", "original exporter"],
+          },
+        ],
+      },
+    },
+  };
+  Reflect.set(f.pod.spec, "initContainers", structuredClone(original.pod.spec.initContainers));
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run, original);
+  const next = structuredClone(original);
+  Reflect.set(next.pod.spec.initContainers[0]?.command ?? [], 2, "upgraded exporter");
+  await expect(inspectFactoryboxWorker(request, identity, f.run, next)).rejects.toThrow(
+    "exact admission",
+  );
+  const captured = await observeOriginalFactoryboxDeclaration(request, identity, next, f.run);
+  expect(captured).toEqual(original);
+  expect(await inspectFactoryboxWorker(request, identity, f.run, captured)).toEqual(identity);
+  Reflect.set(f.pod.spec.containers[0].resources.limits, "memory", "4Gi");
+  await expect(
+    observeOriginalFactoryboxDeclaration(request, identity, next, f.run),
+  ).rejects.toThrow("exact admission");
+  Reflect.set(f.pod.spec.containers[0].resources.limits, "memory", "3Gi");
+  Reflect.set(f.pod.spec.containers[0], "image", `registry.invalid/other@sha256:${"f".repeat(64)}`);
+  await expect(
+    observeOriginalFactoryboxDeclaration(request, identity, next, f.run),
+  ).rejects.toThrow("exact admission");
+  Reflect.set(f.pod.spec.containers[0], "image", request.image);
+  f.pod.metadata.uid = "replacement";
+  await expect(
+    observeOriginalFactoryboxDeclaration(request, identity, next, f.run),
+  ).rejects.toThrow("Original worker UID");
+});
 
 test("worker admission preserves the complete private store and finite worker ceilings", () => {
   const resources = renderFactoryboxWorker(request);
