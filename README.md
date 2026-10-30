@@ -878,6 +878,10 @@ Wiki review has a separate Planning-model calibration. With the explicit Luna co
 `FACTORY_WIKI_QUALITY_LIVE=1` and run `bun run test:live wiki-quality.live`. It accepts an accurate
 description of a source limitation and clearly marked improvement advice, while rejecting invented
 cleanup and global-connection guarantees. It does not replace the full application journey.
+With that same connection, set `FACTORY_WIKI_PLAN_COVERAGE_LIVE=1` and run
+`bun run test:live wiki-plan-coverage.live`. The plan check accepts research intent before
+investigation, rejects an empty plan that leaves essential guidance missing and accepts a
+genuinely complete Wiki without changes. Page publication still requires its separate factual checks.
 
 Exact-commit code research has its own paid proof. With the explicit Luna Planning connection,
 set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.
