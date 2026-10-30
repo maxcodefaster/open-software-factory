@@ -349,11 +349,21 @@ test("native setup inspection reserves its last admitted step for questions inst
 });
 
 test.each([
-  { name: "known source", path: "tools/forms-dev.mjs", allowed: true },
-  { name: "excluded environment file", path: ".env.local", allowed: false },
+  { name: "known source", path: "tools/forms-dev.mjs", allowed: true, paged: false },
+  { name: "truncated startup source", path: "tools/forms-dev.mjs", allowed: true, paged: true },
+  {
+    name: "UTF-8 startup continuation",
+    path: "tools/forms-dev.mjs",
+    allowed: true,
+    paged: true,
+    prefix: `${"x".repeat(11999)}界`,
+    offset: 11999,
+  },
+  { name: "excluded environment file", path: ".env.local", allowed: false, paged: false },
 ])("the bounded setup index does not replace source authorization: $name", async (entry) => {
   const loaded: string[] = [];
   let requests = 0;
+  let observedTail = false;
   const proposal = {
     purpose: "An application with a referenced setup script",
     services: [],
@@ -367,16 +377,23 @@ test.each([
     async fetch(request) {
       const body = (await request.json()) as { stream?: boolean; messages: unknown[] };
       requests++;
+      observedTail ||= JSON.stringify(body.messages).includes("actual-exported-startup-tail");
       if (requests === 1) expect(JSON.stringify(body.messages)).not.toContain(entry.path);
-      const reading = requests === 1;
+      const reading = requests === 1 || (entry.paged && requests === 2);
       const message = reading
         ? {
             role: "assistant",
             tool_calls: [
               {
-                id: "referenced-source",
+                id: `referenced-source-${requests}`,
                 type: "function",
-                function: { name: "read", arguments: JSON.stringify({ path: entry.path }) },
+                function: {
+                  name: "read",
+                  arguments: JSON.stringify({
+                    path: entry.path,
+                    ...(requests === 2 ? { offset: entry.offset ?? 12000 } : {}),
+                  }),
+                },
               },
             ],
           }
@@ -431,13 +448,16 @@ test.each([
       existingConfiguration: [],
       read: async (path) => {
         loaded.push(path);
-        return "Actual existing setup script";
+        return entry.paged
+          ? `${entry.prefix ?? "x".repeat(12000)}actual-exported-startup-tail`
+          : "Actual existing setup script";
       },
     });
     if (entry.allowed) {
       expect(await output).toEqual(proposal);
       expect(loaded).toEqual([entry.path]);
-      expect(requests).toBe(2);
+      expect(requests).toBe(entry.paged ? 3 : 2);
+      expect(observedTail).toBe(entry.paged);
     } else {
       await expect(output).rejects.toThrow();
       expect(loaded).toEqual([]);
