@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { createDeliveryController } from "./controller";
 import { verificationReceipt } from "../../../../test/fixtures/verification";
+import { createDeliveryController } from "./controller";
 
 function fixture(delivered = false, repair = false, superseded = false, protectedBranch = false) {
   const baseSHA = "a".repeat(40);
@@ -50,6 +50,10 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
         ];
       }
       if (query.includes("UPDATE factory.verification SET runner_id = NULL")) supersededRunner = "";
+      if (query.includes("SELECT state,stop_intended_at IS NOT NULL AS stopping")) {
+        expect(values).toEqual(["old-verification-runtime"]);
+        return [{ state: supersededStopped ? "stopped" : "ready", stopping: false }];
+      }
       if (query.includes("AS active")) return [{ active: state === "active" }];
       if (
         query.includes("UPDATE factory.verification SET state") &&

@@ -6,7 +6,8 @@ import {
 } from "../fixtures/runtime-configuration";
 
 test("owned runtime configuration selects the exact fresh worker profile", () => {
-  expect(configuredFactoryboxRuntimeProfile(ownedRuntimeConfiguration)).toEqual(
-    ownedFactoryboxProfile,
-  );
+  expect(configuredFactoryboxRuntimeProfile(ownedRuntimeConfiguration)).toEqual({
+    ...ownedFactoryboxProfile,
+    storageAdmission: 1,
+  });
 });

@@ -83,7 +83,9 @@ describe("runtime Kubernetes resources", () => {
     expect(bootstrap).toContain("exec factory-runtime-connector parent");
     expect(bootstrap).toContain("--token-file /run/factory-parent-token");
     expect(bootstrap).not.toContain("/tmp/factory-parent-token");
-    expect(bootstrap).toContain("dockerd --host=unix:///var/run/docker.sock");
+    expect(bootstrap).toContain(
+      "dockerd --storage-driver=overlay2 --host=unix:///var/run/docker.sock",
+    );
     expect(bootstrap).not.toContain("dockerd-entrypoint.sh");
     const assignment = String(
       resources.find((resource) => resource.kind === "Secret")?.stringData?.["assignment.json"],
