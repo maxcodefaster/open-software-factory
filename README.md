@@ -30,6 +30,12 @@ without discarding the other open tabs and local drafts.
 
 ## Install into existing Kubernetes
 
+Select `registryCASecret` before admitting the installation's first Factorybox worker and keep
+that CA bundle unchanged for the retained worker. This configures its private Sandbox registry
+trust; it does not configure Kubernetes node image pulls. Node image-pull trust is an operator
+prerequisite. Publishing new digest-pinned runtime tools does not itself require changing this
+setting, and Factory refuses to overwrite a retained worker's shared trust declaration.
+
 The development Helm chart lives in [deploy/helm/factory](deploy/helm/factory/README.md).
 Install it directly from this repository; a public chart repository and release publication are
 not required during development. Kubernetes is provided by the operator. Factory does not

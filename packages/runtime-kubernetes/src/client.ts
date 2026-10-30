@@ -201,6 +201,11 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
         const actual = sharedResource.parse(JSON.parse(current.stdout));
         const containers = actual.spec?.["containers"];
         const ephemeral = actual.spec?.["ephemeralContainers"];
+        const changedData =
+          resource.stringData &&
+          Object.entries(resource.stringData).some(
+            ([name, data]) => Buffer.from(actual.data?.[name] ?? "", "base64").toString() !== data,
+          );
         if (
           !actual.metadata.uid ||
           actual.kind !== resource.kind ||
@@ -210,11 +215,7 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
           (resource.spec && !declaredFields(actual.spec, resource.spec)) ||
           (expectedNamespace?.sharedUIDs?.[key] &&
             actual.metadata.uid !== expectedNamespace.sharedUIDs[key]) ||
-          (resource.stringData &&
-            Object.entries(resource.stringData).some(
-              ([name, data]) =>
-                Buffer.from(actual.data?.[name] ?? "", "base64").toString() !== data,
-            )) ||
+          changedData ||
           (resource.kind === "Pod" &&
             ((Array.isArray(ephemeral) && ephemeral.length > 0) ||
               (Array.isArray(containers) &&
@@ -226,7 +227,11 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
                 ))))
         )
           throw new Error(
-            "Shared Factory resource differs from its immutable owner or declaration",
+            `Shared Factory resource ${key} differs from its immutable owner or declaration.${
+              resource.kind === "Secret" && resource.metadata.name === "registry-ca" && changedData
+                ? " Registry CA configuration must match the existing worker. Node image-pull trust is configured separately; the worker and its retained source were not changed."
+                : ""
+            }`,
           );
         sharedUIDs[key] = actual.metadata.uid;
       }
