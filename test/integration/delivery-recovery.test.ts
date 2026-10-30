@@ -264,6 +264,104 @@ test("failed exact Verification requests one bounded repair on the same Change",
   }
 }, 60_000);
 
+test.each(["failure", "success"] as const)(
+  "exact %s Verification waits for compute cleanup and runner revocation before its handoff",
+  async (status) => {
+    const f = await deliveryFixture();
+    const verificationID = crypto.randomUUID();
+    const attemptID = crypto.randomUUID();
+    const repairs: string[] = [];
+    const reviews: string[] = [];
+    const stops: string[] = [];
+    let runnerRevoked = false;
+    try {
+      f.setStatus(status);
+      await f.database.client`INSERT INTO factory.verification(
+        id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,
+        runner_id,runner_uuid,runner_token)
+        VALUES(${verificationID},${f.owned.changeID},${f.sha},1,'owned-cleanup-handoff','running',1,
+          ${f.owned.userID},27,${crypto.randomUUID()},'owned-unused')`;
+      await f.database.client`INSERT INTO factory.runtime_attempt(
+        id,project_id,verification_id,isolated_kind,generation,revision,state,
+        parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${attemptID},${f.owned.projectID},${verificationID},'verification',2,${f.sha},'ready',
+          ${"a".repeat(64)},${"b".repeat(64)},now(),${f.owned.userID})`;
+      await f.database.client`UPDATE factory.verification SET runtime_attempt_id=${attemptID}
+        WHERE id=${verificationID}`;
+      const controller = createDeliveryController(
+        f.database,
+        {
+          startVerification: async () => {
+            throw new Error("Completed checks must not commission more compute");
+          },
+          startStagingReplacement: async () => null,
+          stop: async (id) => {
+            stops.push(id);
+            await f.database.client`UPDATE factory.runtime_attempt
+              SET stop_intended_at=COALESCE(stop_intended_at,now()),state='stop-intended'
+              WHERE id=${id}`;
+            return null;
+          },
+        },
+        {
+          prompt: async (_changeID, _text, _userID, commandID) => {
+            repairs.push(commandID);
+          },
+          review: async (_changeID, reviewID) => {
+            reviews.push(reviewID);
+          },
+        },
+        async () => {},
+        {
+          client: {
+            ...f.forge,
+            deleteRunner: async () => {
+              if (!runnerRevoked) throw new Error("Owned runner revocation is unconfirmed");
+            },
+            observeVerification: async () => ({
+              status: "success",
+              complete: false,
+              jobs: [],
+              changes: null,
+            }),
+          } as unknown as ReturnType<typeof createForgejoClient>,
+          owner: "owned",
+        },
+      );
+      try {
+        for (const state of ["ready", "stop-intended", "stopping", "cleanup-failed"] as const) {
+          await f.database.client`UPDATE factory.runtime_attempt SET state=${state}
+            WHERE id=${attemptID}`;
+          await controller.reconcile(f.owned.changeID);
+          expect(repairs).toEqual([]);
+          expect(reviews).toEqual([]);
+          expect(
+            await f.database.client`SELECT id FROM factory.verification
+              WHERE id=${verificationID} AND state=${status === "success" ? "succeeded" : "failed"}
+                AND repair_prompted_at IS NULL AND runner_id=27`,
+          ).toHaveLength(1);
+        }
+        await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now()
+          WHERE id=${attemptID}`;
+        await controller.reconcile(f.owned.changeID);
+        expect(repairs).toEqual([]);
+        expect(reviews).toEqual([]);
+        runnerRevoked = true;
+        await controller.reconcile(f.owned.changeID);
+        if (status === "failure") await controller.reconcile(f.owned.changeID);
+        expect(repairs).toEqual(status === "failure" ? [verificationID] : []);
+        expect(reviews).toHaveLength(status === "success" ? 1 : 0);
+        expect(stops).toEqual([attemptID]);
+      } finally {
+        await controller.close();
+      }
+    } finally {
+      await f.close();
+    }
+  },
+  60_000,
+);
+
 test.each(["head", "base"] as const)(
   "exact human delivery rejects moving %s",
   async (moved) => {

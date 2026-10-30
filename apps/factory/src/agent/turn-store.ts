@@ -135,6 +135,11 @@ async function currentAuthorityIn(
         AND COALESCE((SELECT integration_base_sha FROM factory.change_commit_operation
           WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),change.base_sha)=review.base_sha
         AND verification.state='succeeded'
+        AND verification.runner_id IS NULL
+        AND (verification.runtime_attempt_id IS NULL OR EXISTS(
+          SELECT 1 FROM factory.runtime_attempt execution
+          WHERE execution.id=verification.runtime_attempt_id AND execution.state='stopped'
+        ))
         AND review.state IN ('pending','running')
         AND review.commit_sha=(SELECT commit_sha FROM factory.change_commit_operation
           WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)`;
