@@ -24,6 +24,9 @@ test.each([
   ["arm64", false, false, "foreign-owner"],
   ["arm64", false, false, "foreign-input"],
   ["arm64", false, false, "no-stop"],
+  ["arm64", false, false, "failure"],
+  ["amd64", false, false, "failure"],
+  ["arm64", false, false, "failure-without-cleanup"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
   async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
@@ -392,7 +395,14 @@ test.each([
           (record.phase === "running" &&
           !(
             deleteRefused &&
-            ["stopped", "foreign-owner", "foreign-input", "no-stop"].includes(deleteContinuation)
+            [
+              "stopped",
+              "foreign-owner",
+              "foreign-input",
+              "no-stop",
+              "failure",
+              "failure-without-cleanup",
+            ].includes(deleteContinuation)
           )
             ? "running"
             : "stopped");
@@ -615,11 +625,19 @@ test.each([
       await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
       if (deleteContinuation === "no-stop")
         await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=NULL WHERE id=${owned.attemptID}`;
+      if (deleteContinuation === "failure")
+        await database.client`UPDATE factory.runtime_attempt
+          SET state='cleanup-failed',stop_intended_at=NULL,failure='start Dev Container: no space left on device'
+          WHERE id=${owned.attemptID}`;
+      if (deleteContinuation === "failure-without-cleanup")
+        await database.client`UPDATE factory.runtime_attempt
+          SET state='ready',stop_intended_at=NULL,failure='an error is not cleanup authority'
+          WHERE id=${owned.attemptID}`;
       if (deleteContinuation !== "none") {
         await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
         expect(record.phase).toBe("running");
         expect(mutations.filter((action) => action === "delete")).toHaveLength(1);
-        if (deleteContinuation !== "stopped") {
+        if (!["stopped", "failure"].includes(deleteContinuation)) {
           await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow();
           expect(mutations.filter((action) => action === "delete")).toHaveLength(1);
           return;
@@ -641,7 +659,7 @@ test.each([
         (reserveDeleted
           ? ["pause", "retire-resume", "retire-checkpoint", "retire-sandbox", "retire-sandbox"]
           : [
-              ...(deleteContinuation === "stopped" ? ["delete"] : []),
+              ...(["stopped", "failure"].includes(deleteContinuation) ? ["delete"] : []),
               "delete",
               "retire-resume",
               "retire-sandbox",
@@ -667,6 +685,15 @@ test.each([
         Array<{ inputs_released_at: Date | null }>
       >`SELECT inputs_released_at FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
       expect(released?.inputs_released_at).not.toBeNull();
+      if (deleteContinuation === "failure") {
+        const [failed] = await database.client<
+          Array<{ failure: string; stop_intended_at: Date | null }>
+        >`SELECT failure,stop_intended_at FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        expect(failed).toEqual({
+          failure: "start Dev Container: no space left on device",
+          stop_intended_at: null,
+        });
+      }
       expect(
         await database.client`SELECT id FROM factory.development_workspace WHERE id=${attempt.workspaceID}`,
       ).toHaveLength(1);
