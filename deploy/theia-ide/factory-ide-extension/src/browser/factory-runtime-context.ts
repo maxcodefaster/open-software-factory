@@ -126,6 +126,9 @@ export class FactoryRuntimeContext {
   setWritable(workspaceID: string, allowed: boolean) {
     if (workspaceID !== this.#value?.workspaceID) return;
     this.#writable = allowed;
+    // A read-only opening is not a deferred request to start compute when
+    // someone else's work later stops or releases writing authority.
+    if (!allowed) this.#demanded = false;
     this.#prepareDemand();
   }
   async use() {
@@ -153,7 +156,7 @@ export class FactoryRuntimeContext {
   }
   #prepareDemand() {
     const current = this.#value;
-    if (!this.#demanded || !this.#writable || !current || this.#preparationFailure) return;
+    if (!this.#demanded || !current) return;
     if (
       current.state === "ready" ||
       current.state === "failed" ||
@@ -162,6 +165,7 @@ export class FactoryRuntimeContext {
       this.#demanded = false;
       return;
     }
+    if (!this.#writable || this.#preparationFailure) return;
     if (!["stopped", "paused"].includes(current.state)) return;
     this.#demanded = false;
     void this.prepare();

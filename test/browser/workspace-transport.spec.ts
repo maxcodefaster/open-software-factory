@@ -1,11 +1,12 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { developerIDEOrigin } from "../../apps/factory/src/developer-ide-origin";
 import type { WorkspaceSourceState } from "../../packages/workspace-domain/src/source";
+import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
@@ -34,6 +35,66 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await server?.close();
   await rm(cache, { recursive: true, force: true });
+});
+
+test("the warm hidden editor selects no Workspace until it is deliberately opened", async ({
+  page,
+}) => {
+  const workspaceID = "10000000-0000-4000-8000-000000000003";
+  const source = {
+    workspaceID,
+    label: "Owned source",
+    serviceID: "owned-source",
+    epoch: 1,
+    state: "ready" as const,
+    failure: null,
+  };
+  const editor = { serviceID: "owned-editor", epoch: 1, state: "ready" as const, failure: null };
+  await mockFactoryFunctions(page, {
+    workspaces: {
+      ensurePersonalSource: async () => source,
+      getSource: async () => source,
+      ensureEditor: async () => editor,
+      getEditor: async () => editor,
+    },
+  });
+  const editorURL = `${developerIDEOrigin(origin, "10000000-0000-4000-8000-000000000001", 1)}/owned-editor/`;
+  await page.route("**/api/developer-ide/access?*", (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><script>location.replace(${JSON.stringify(editorURL)})</script>`,
+    }),
+  );
+  await page.route(editorURL, (route) =>
+    route.fulfill({
+      contentType: "text/html",
+      body: `<!doctype html><html><body><output aria-label="Workspace selections">0</output><script>
+        const factoryOrigin=${JSON.stringify(origin)};
+        let selections=0;
+        window.addEventListener("message",event=>{
+          if(event.source!==parent||event.origin!==factoryOrigin||
+             event.data?.type!=="factory:select-workspace")return;
+          document.querySelector("output").value=String(++selections);
+          parent.postMessage({type:"factory:workspace-selected",workspaceID:event.data.workspaceID},factoryOrigin);
+        });
+        parent.postMessage({type:"factory:ide-ready"},factoryOrigin);
+      </script></body></html>`,
+    }),
+  );
+  await page.goto(`${origin}/workspace-transport.html?hidden`);
+  const frame = page.frameLocator('iframe[title="Factory IDE"]');
+  const selections = frame.locator("output");
+  await page.waitForLoadState("networkidle");
+  expect(await selections.textContent()).toBe("0");
+  await expect(page.getByRole("button", { name: "Show editor", exact: true })).toBeVisible();
+  await page.screenshot({ path: `${directory}/hidden-editor-no-selection.png` });
+  await page.getByRole("button", { name: "Show editor", exact: true }).click();
+  await expect(selections).toHaveText("1");
+  await expect(page.locator("iframe")).toHaveAttribute("data-workspace-id", workspaceID);
+  await page.getByRole("button", { name: "Hide editor", exact: true }).click();
+  await expect(selections).toHaveText("1");
+  await page.getByRole("button", { name: "Show editor", exact: true }).click();
+  await expect(selections).toHaveText("2");
 });
 
 async function fixture(page: Page, unconfirmedEditor = false) {

@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import {
-  factoryTerminalPath,
-  factoryTerminalClosePath,
-  factoryProcessActionPath,
   FactoryRuntimeContext,
+  factoryProcessActionPath,
+  factoryTerminalClosePath,
+  factoryTerminalPath,
 } from "../../deploy/theia-ide/factory-ide-extension/src/browser/factory-runtime-context";
 import { fixtureValue } from "../fixtures/value";
 
@@ -153,6 +153,63 @@ test("deliberately opening an editable Workspace starts once after writing autho
   await Bun.sleep(0);
   context.setWritable(runtime.workspaceID, true);
   await context.observe();
+  expect(context.value?.state).toBe("ready");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(1);
+});
+
+test("an observation-only IDE cannot reuse its old opening demand after Coding Stop", async () => {
+  let state = "ready";
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (_input, init) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") state = "ready";
+      return Response.json({ ...runtime, state, failure: null });
+    },
+  );
+  // The IDE was opened while the Agent held writing authority. It is still
+  // observing the same Workspace when a later explicit Stop completes.
+  context.select(runtime.workspaceID, true);
+  context.setWritable(runtime.workspaceID, false);
+  await Bun.sleep(0);
+  expect(context.value?.state).toBe("ready");
+  state = "stopped";
+  await context.observe();
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  await context.observe();
+  expect(context.value?.state).toBe("stopped");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(0);
+  // Genuine subsequent use is a new demand, not a replay of the old one.
+  await context.use();
+  await Bun.sleep(0);
+  expect(context.value?.state).toBe("ready");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(1);
+});
+
+test("read-only selection of stopped Source does not wait indefinitely to start on authority changes", async () => {
+  let state = "stopped";
+  const calls: string[] = [];
+  const context = new FactoryRuntimeContext(
+    () => base,
+    async (_input, init) => {
+      calls.push(init?.method ?? "GET");
+      if (init?.method === "POST") state = "ready";
+      return Response.json({ ...runtime, state, failure: null });
+    },
+  );
+  context.select(runtime.workspaceID, true);
+  context.setWritable(runtime.workspaceID, false);
+  await Bun.sleep(0);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
+  expect(context.value?.state).toBe("stopped");
+  expect(calls.filter((method) => method === "POST")).toHaveLength(0);
+  // Explicitly opening it again for editing may still prepare compute.
+  context.select(runtime.workspaceID, true);
+  context.setWritable(runtime.workspaceID, true);
+  await Bun.sleep(0);
   expect(context.value?.state).toBe("ready");
   expect(calls.filter((method) => method === "POST")).toHaveLength(1);
 });
