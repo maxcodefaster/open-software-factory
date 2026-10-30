@@ -162,6 +162,38 @@ test("a new consumer image admits a new Sandbox without replacing the worker or 
   }
 }, 30_000);
 
+test.each(["Failed", "Succeeded"])(
+  "a %s original worker refuses new execution before private writes and retains all worker identities",
+  async (phase) => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const kube = infrastructure();
+    const worker = createFactoryboxWorker(database, kube.kubernetes);
+    try {
+      const location = await worker.location();
+      await worker.provision(resources(location), profile, runtimeImage);
+      const retained = await factoryboxAllocation(database.client);
+      const pod = kube.objects.get("pod/worker");
+      if (!pod) throw new Error("Missing original owned worker");
+      Reflect.set(pod, "status", { phase });
+      const before = kube.writes.length;
+
+      await expect(worker.provision(resources(location), profile, runtimeImage)).rejects.toThrow(
+        "Original Factorybox worker terminated",
+      );
+      expect(kube.writes).toHaveLength(before);
+      expect(await factoryboxAllocation(database.client)).toEqual(retained);
+      expect(kube.objects.get("pod/worker")).toBe(pod);
+      expect(kube.writes.filter((write) => write.kind === "Pod")).toHaveLength(1);
+      expect(kube.writes.filter((write) => write.kind === "PersistentVolumeClaim")).toHaveLength(2);
+    } finally {
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  },
+  30_000,
+);
+
 test("Factory allocation is lazy, concurrent, isolated per installation and starts no compute", async () => {
   const hosts = await Promise.all([factoryProcess(), factoryProcess()]);
   const databases = hosts.map((host) => host.connect());

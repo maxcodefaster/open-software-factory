@@ -12,8 +12,8 @@ import {
   factoryboxSharedLabels,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
 import {
-  type FactoryboxRuntimeProfile,
   configuredFactoryboxRuntimeProfile,
+  type FactoryboxRuntimeProfile,
   factoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
@@ -23,6 +23,9 @@ import {
 
 type Database = ReturnType<typeof createDatabase>;
 type SQL = Database["client"] | TransactionSql;
+
+export const terminatedFactoryboxWorkerFailure =
+  "Original Factorybox worker terminated; execution cannot start. Source and worker identity are retained. Explicit operator recovery is required before retrying.";
 
 // All Sandboxes share one native controller lock. Keep its commands ordered
 // across reserve, execution and retirement controllers, including other Factory
@@ -281,6 +284,8 @@ export function createFactoryboxWorker(database: Database, kubernetes: Kubernete
           await sql`UPDATE factory.factorybox_worker SET pod_uid=coalesce(pod_uid,${original.uid})
           WHERE id=${worker.id} AND (pod_uid IS NULL OR pod_uid=${original.uid})`;
         if (podPinned.count !== 1) throw new Error("Original Factory worker UID changed");
+        if (original.phase === "Failed" || original.phase === "Succeeded")
+          throw new Error(terminatedFactoryboxWorkerFailure);
         const privateResources = declared.filter(
           (value) =>
             value.kind !== "Namespace" &&

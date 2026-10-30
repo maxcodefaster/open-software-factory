@@ -55,7 +55,11 @@ import { recoveredConnectionObserver } from "./recovered-connections";
 import type { ExecutionReserve } from "./reserve-controller";
 import { freezeStagingConfiguration } from "./staging-configuration";
 import type { RuntimeAttemptView } from "./types";
-import { createFactoryboxWorker, factoryboxAllocation } from "./worker";
+import {
+  createFactoryboxWorker,
+  factoryboxAllocation,
+  terminatedFactoryboxWorkerFailure,
+} from "./worker";
 
 type Database = ReturnType<typeof createDatabase>;
 type ExecutionIdentity = ReturnType<typeof runtimeIdentity> & {
@@ -597,14 +601,13 @@ export function createRuntimeController(
         await Bun.sleep(1_000);
         continue;
       }
-      if (
-        !pod ||
-        !current.uid ||
-        current.uid !== pod.uid ||
-        ["Failed", "Succeeded"].includes(pod.phase)
-      ) {
+      if (!pod || !current.uid || current.uid !== pod.uid) {
         await database.client`UPDATE factory.runtime_attempt SET failure='Original Factorybox worker is unavailable; its execution identity was retained',updated_at=now()
               WHERE id=${attemptID} AND state='starting'`;
+        return;
+      }
+      if (pod.phase === "Failed" || pod.phase === "Succeeded") {
+        await beginCleanup(attemptID, terminatedFactoryboxWorkerFailure, current.observedAt);
         return;
       }
       if (pod.ready) {
