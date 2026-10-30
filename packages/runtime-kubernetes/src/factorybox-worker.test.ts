@@ -4,6 +4,7 @@ import {
   executeFactoryboxOperation,
   type FactoryboxWorkerRequest,
   factoryboxOperation,
+  factoryboxOperationFailure,
   factoryboxWorkerRequest,
   inspectFactoryboxWorker,
   observeOriginalFactoryboxDeclaration,
@@ -26,6 +27,25 @@ const request: FactoryboxWorkerRequest = {
 };
 const epoch = "e".repeat(32);
 const root = `/var/lib/sysbox/fixed-store/data/store/epochs/${epoch}/controller`;
+
+test("unconfirmed native work retains a compact actual cause without implying a safe mutation retry", () => {
+  const reason = "available filesystem space is below the native write reserve";
+  const error = factoryboxOperationFailure(
+    "start",
+    `\u001b[31m${reason}\u001b[0m\ncommand terminated with exit code 1\n`,
+  );
+  expect(error.message).toStartWith("Factorybox start outcome is unconfirmed");
+  expect(error.message).toContain(reason);
+  expect(error.message).not.toContain("\u001b");
+  expect(error.message).not.toContain("command terminated");
+  expect(factoryboxOperationFailure("resume", "").message).toBe(
+    "Factorybox resume outcome is unconfirmed",
+  );
+  expect(
+    factoryboxOperationFailure("pause", "diagnostic ".repeat(1000)).message.length,
+  ).toBeLessThan(2100);
+});
+
 function fixture(input: FactoryboxWorkerRequest = request) {
   const resources = renderFactoryboxWorker(input);
   const namespace = {
@@ -78,6 +98,11 @@ function fixture(input: FactoryboxWorkerRequest = request) {
     },
   };
   const calls: Array<readonly string[]> = [];
+  const capacity: Record<string, unknown> = {
+    version: 1,
+    root,
+    new_write_admitted: true,
+  };
   let operation = { exitCode: 0, stdout: JSON.stringify({ root }), stderr: "" };
   const run: typeof runCommand = async (args) => {
     calls.push(args);
@@ -86,7 +111,9 @@ function fixture(input: FactoryboxWorkerRequest = request) {
         ? ({ namespace, pvc: claim, pod, node } as Record<string, unknown>)[args[1] ?? ""]
         : args.at(-1) === "worker-status"
           ? status
-          : null;
+          : args.at(-1) === "capacity"
+            ? capacity
+            : null;
     return value ? { exitCode: 0, stdout: JSON.stringify(value), stderr: "" } : operation;
   };
   return {
@@ -95,6 +122,7 @@ function fixture(input: FactoryboxWorkerRequest = request) {
     pod,
     node,
     status,
+    capacity,
     calls,
     run,
     result(value: typeof operation) {
@@ -102,6 +130,87 @@ function fixture(input: FactoryboxWorkerRequest = request) {
     },
   };
 }
+
+test.each(["start", "fork"] as const)(
+  "native disk refusal leaves %s undispatched and its mutation-attempt fence untouched",
+  async (action) => {
+    const f = fixture();
+    const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+    f.capacity["new_write_admitted"] = false;
+    f.result({
+      exitCode: 0,
+      stdout: JSON.stringify({ record: { version: 1, id: "owned", phase: "running" } }),
+      stderr: "",
+    });
+    let attempted = false;
+    await expect(
+      executeFactoryboxOperation(
+        request,
+        identity,
+        action === "start"
+          ? {
+              action: "start",
+              sandboxID: "owned",
+              bundle: "/var/lib/sysbox/fixed-store/data/store/input/owned/bundle",
+            }
+          : {
+              action: "fork",
+              sandboxID: "owned",
+              sourceSandboxID: "source",
+              snapshotID: "b".repeat(32),
+              sourceOwner: "f".repeat(32),
+              checkpointSHA256: "a".repeat(64),
+            },
+        f.run,
+        undefined,
+        async () => {
+          attempted = true;
+        },
+      ),
+    ).rejects.toThrow(`capacity refused ${action === "start" ? "Start" : "Fork"} before dispatch`);
+    expect(attempted).toBe(false);
+    expect(f.calls.some((args) => args.includes(action))).toBe(false);
+  },
+);
+
+test.each(["missing decision", "foreign controller", "unavailable"] as const)(
+  "unverified %s capacity cannot dispatch a new Start",
+  async (scenario) => {
+    const f = fixture();
+    const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+    if (scenario === "missing decision") delete f.capacity["new_write_admitted"];
+    if (scenario === "foreign controller") f.capacity["root"] = "/another/controller";
+    const run: typeof f.run = async (...args) => {
+      if (scenario === "unavailable" && args[0].at(-1) === "capacity")
+        return { exitCode: 1, stdout: "", stderr: "Controlled unavailable capacity" };
+      return f.run(...args);
+    };
+    f.result({
+      exitCode: 0,
+      stdout: JSON.stringify({ record: { version: 1, id: "owned", phase: "running" } }),
+      stderr: "",
+    });
+    let attempted = false;
+    await expect(
+      executeFactoryboxOperation(
+        request,
+        identity,
+        {
+          action: "start",
+          sandboxID: "owned",
+          bundle: "/var/lib/sysbox/fixed-store/data/store/input/owned/bundle",
+        },
+        run,
+        undefined,
+        async () => {
+          attempted = true;
+        },
+      ),
+    ).rejects.toThrow("before dispatch");
+    expect(attempted).toBe(false);
+    expect(f.calls.some((args) => args.includes("start"))).toBe(false);
+  },
+);
 
 test("retained declaration observation pins immutable original commands while checking the native identity", async () => {
   const f = fixture();

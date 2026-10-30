@@ -28,6 +28,7 @@ import {
   type FactoryboxOperation,
   type FactoryboxWorkerIdentity,
   factoryboxOperation,
+  factoryboxOperationFailure,
   factoryboxWorkerDeclaration,
   factoryboxWorkerIdentity,
   inspectFactoryboxWorker,
@@ -191,7 +192,7 @@ export function createFactoryboxExecution(
         : await executeFactoryboxOperation(request, identity, op, run, declaration, () =>
             attempted(connection, record),
           );
-    if (!observation.confirmed) throw new Error(`Factorybox ${op.action} outcome is unconfirmed`);
+    if (!observation.confirmed) throw factoryboxOperationFailure(op.action, observation.stderr);
     const nativeResult = z.object({
       runtime: z.object({ status: z.string() }).optional(),
       record: z.object({

@@ -1,4 +1,4 @@
-import { isDeepStrictEqual } from "node:util";
+import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 import { z } from "zod";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
@@ -136,6 +136,17 @@ export const factoryboxOperation = z.discriminatedUnion("action", [
   }),
 ]);
 export type FactoryboxOperation = z.infer<typeof factoryboxOperation>;
+
+export function factoryboxOperationFailure(action: FactoryboxOperation["action"], stderr: string) {
+  const detail = stripVTControlCharacters(stderr)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^command terminated with exit code \d+$/.test(line))
+    .slice(0, 4)
+    .join(" ")
+    .slice(0, 2000);
+  return new Error(`Factorybox ${action} outcome is unconfirmed${detail ? `: ${detail}` : ""}`);
+}
 
 export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
   const input = factoryboxWorkerRequest.parse(request);
@@ -592,6 +603,45 @@ export async function executeFactoryboxOperation(
       // this error, and revalidate the original worker before each new read.
       await Bun.sleep(Math.max(0, Math.min(100, deadline - performance.now())));
       await inspectFactoryboxWorker(input, admitted, run, declaration);
+    }
+  }
+  if (op.action === "start" || op.action === "fork") {
+    // A native refusal can happen before the Sandbox record is published.
+    // Observe capacity before marking Start attempted, so a known disk refusal
+    // does not become an abandoned, unconfirmed mutation that cannot be stopped.
+    const capacity = await invoke([...command, "capacity"], true);
+    if (capacity.exitCode !== 0)
+      throw new Error("Factorybox capacity could not be verified before dispatch");
+    let value: unknown;
+    try {
+      value = JSON.parse(capacity.stdout);
+    } catch {
+      throw new Error("Factorybox capacity decision is invalid before dispatch");
+    }
+    const counters = z.object({
+      filesystem_available_bytes: z.number().int().nonnegative(),
+      min_free_bytes: z.number().int().nonnegative(),
+      write_reserve_bytes: z.number().int().nonnegative(),
+    });
+    const parsed = z
+      .object({
+        version: z.literal(1),
+        root: z.literal(admitted.controllerRoot),
+        new_write_admitted: z.boolean(),
+        host: counters.optional(),
+      })
+      .safeParse(value);
+    if (!parsed.success)
+      throw new Error("Factorybox capacity decision is unverified before dispatch");
+    if (!parsed.data.new_write_admitted) {
+      const host = parsed.data.host;
+      throw new Error(
+        `Factorybox capacity refused ${op.action === "start" ? "Start" : "Fork"} before dispatch${
+          host
+            ? `: host available=${host.filesystem_available_bytes} bytes, free floor=${host.min_free_bytes}, write reserve=${host.write_reserve_bytes}`
+            : ""
+        }`,
+      );
     }
   }
   if (op.action === "fork") {
