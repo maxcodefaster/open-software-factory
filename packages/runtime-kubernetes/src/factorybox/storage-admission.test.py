@@ -47,12 +47,12 @@ class StorageAdmission(unittest.TestCase):
         self.assertFalse((self.root / "fixed-store").exists())
 
     def test_exact_capacity_boundary(self):
-        for available in (20 * GIB - 1, 20 * GIB, 20 * GIB + 1):
+        for available in (24 * GIB - 1, 24 * GIB, 24 * GIB + 1):
             with self.subTest(available=available), patch(
                 "os.fstatvfs", return_value=SimpleNamespace(
                     f_bavail=available, f_blocks=available, f_frsize=1, f_bsize=1)):
                 self.messages.clear()
-                if available < 20 * GIB:
+                if available < 24 * GIB:
                     with self.assertRaisesRegex(RuntimeError, "insufficient.*storage"):
                         self.admit()
                 else:

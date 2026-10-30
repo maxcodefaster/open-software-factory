@@ -9,6 +9,7 @@ import stat
 # The pinned Factorybox storefs contract checks this floor again when allocating.
 # A PVC's declared capacity is not proof of available backing filesystem space.
 HOST_FREE_FLOOR = 12 * 1024 ** 3
+HOST_WRITE_RESERVE = 4 * 1024 ** 3
 
 
 def required_capacity(bounded_bytes):
@@ -16,7 +17,7 @@ def required_capacity(bounded_bytes):
             bounded_bytes < 8 * 1024 ** 3 or bounded_bytes > 32 * 1024 ** 3 or
             bounded_bytes % (1024 ** 3)):
         raise ValueError('Storage admission requires the exact bounded worker capacity')
-    return bounded_bytes + HOST_FREE_FLOOR
+    return bounded_bytes + HOST_FREE_FLOOR + HOST_WRITE_RESERVE
 
 
 def inspect_capacity(root, descriptor, pod_uid, store_id, required_bytes):
@@ -55,6 +56,7 @@ def inspect_capacity(root, descriptor, pod_uid, store_id, required_bytes):
         'availableBytes': available,
         'requiredBytes': required_bytes,
         'hostFreeFloorBytes': HOST_FREE_FLOOR,
+        'hostWriteReserveBytes': HOST_WRITE_RESERVE,
     }
 
 
