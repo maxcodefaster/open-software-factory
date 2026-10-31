@@ -2,8 +2,8 @@ import { z } from "zod";
 import { writerViewSchema } from "../api-contracts";
 import { CommandError } from "../command-error";
 import type { createAccessController } from "./controller";
-import type { createChangeWriterController } from "./writer-controller";
 import { editingCommand, writerActivityCommand, writerTakeoverCommand } from "./writer-command";
+import type { createChangeWriterController } from "./writer-controller";
 
 function confirmed(value: unknown) {
   const result = writerViewSchema.safeParse(value);
@@ -30,7 +30,7 @@ export function createWriterService(
     },
     async observe(userID: string, changeID: string) {
       await project(userID, changeID);
-      // view() also reconciles an already settled writer or persisted handoff.
+      // view() also reconciles an already commissioned editing handoff or release.
       // Browser cancellation must not interrupt that existing lifecycle.
       return confirmed(await writers.view(changeID, userID));
     },

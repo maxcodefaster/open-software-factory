@@ -249,7 +249,7 @@ test("an uncertain predecessor cannot be replaced even when its Session reports 
   }
 }, 30_000);
 
-test("settled completion releases editing once and a stale completion cannot stop a newer Agent", async () => {
+test("observing settled work never takes editing; explicit takeover retains its fences and rejects stale completion", async () => {
   const processFixture = await factoryProcess();
   const owned = await fixture(undefined, undefined, processFixture.connect());
   let stopping = 0;
@@ -293,9 +293,24 @@ test("settled completion releases editing once and a stale completion cannot sto
     const initialEpoch = String((await controller.view(owned.changeID, owned.userID)).epoch);
     await complete(first.turn.id);
     failProtection = true;
-    await expect(controller.view(owned.changeID, owned.userID)).rejects.toThrow(
-      "protection response lost",
-    );
+    const observed = await controller.view(owned.changeID, owned.userID);
+    expect(observed).toMatchObject({ state: "agent", canWrite: false });
+    expect(String(observed.epoch)).toBe(initialEpoch);
+    expect(stopping).toBe(0);
+    const decisions = await owned.database
+      .client`SELECT command_id FROM factory.change_editing_decision
+      WHERE change_id=${owned.changeID}`;
+    expect(decisions).toHaveLength(0);
+    await expect(
+      controller.takeOver(
+        owned.changeID,
+        owned.userID,
+        crypto.randomUUID(),
+        undefined,
+        undefined,
+        observed.epoch,
+      ),
+    ).rejects.toThrow("protection response lost");
     const pending = await controller.view(owned.changeID, owned.userID);
     expect(pending.state).toBe("handoff");
     expect(pending.canWrite).toBe(false);
@@ -342,7 +357,21 @@ test("settled completion releases editing once and a stale completion cannot sto
         ])
       ).state,
     ).toBe("agent");
-    expect((await recovered.view(owned.changeID, owned.userID)).canWrite).toBe(true);
+    const latest = await recovered.view(owned.changeID, owned.userID);
+    expect(latest).toMatchObject({ state: "agent", canWrite: false });
+    expect(stopping).toBe(stopsBeforeStale);
+    expect(
+      (
+        await recovered.takeOver(
+          owned.changeID,
+          owned.userID,
+          crypto.randomUUID(),
+          undefined,
+          undefined,
+          latest.epoch,
+        )
+      ).canWrite,
+    ).toBe(true);
     expect(stopping).toBe(stopsBeforeStale + 1);
   } finally {
     await owned.dispose();
