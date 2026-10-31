@@ -250,9 +250,11 @@ func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures
 		"manifest unknown",
 		"invalid reference format",
 		"no space left on device",
+		"no space left on device after a connection reset",
+		"toomanyrequests after connection refused",
 		"unclassified private-registry-secret",
 	} {
-		if retryableBrowserImageDownload(diagnostic) {
+		if retryableImageDownload(diagnostic) {
 			t.Fatal("permanent or unknown image failure was silently retried", diagnostic)
 		}
 	}
@@ -263,7 +265,7 @@ func TestBrowserImageRetryClassificationDoesNotHideConfigurationOrDigestFailures
 		"unexpected status: 503 Service Unavailable",
 		"unexpected EOF",
 	} {
-		if !retryableBrowserImageDownload(diagnostic) {
+		if !retryableImageDownload(diagnostic) {
 			t.Fatal("transient Registry transport failure was made permanent", diagnostic)
 		}
 	}

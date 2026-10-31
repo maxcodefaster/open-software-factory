@@ -140,12 +140,34 @@ func acquireProjectImage(ctx context.Context, reference string) error {
 	if err := ctx.Err(); err != nil {
 		return errors.New("Project image preparation was cancelled")
 	}
-	// Registry output is neither product state nor an actionable user diagnostic.
-	if runtimeDockerCommand(ctx, "pull", reference).Run() != nil {
+	retryDelay := 250 * time.Millisecond
+	for {
+		command := runtimeDockerCommand(ctx, "pull", reference)
+		var diagnostic devcontainerFailureOutput
+		command.Stderr = &diagnostic
+		if command.Run() == nil {
+			break
+		}
 		if ctx.Err() != nil {
 			return errors.New("Project image preparation was cancelled or exceeded 180 seconds")
 		}
-		return errors.New("Project image download failed; check registry connectivity and approved CA trust")
+		if !retryableImageDownload(diagnostic.String()) {
+			return errors.New(projectImageDownloadDiagnostic(diagnostic.String()))
+		}
+		// Acquisition precedes all container/hook work. Observe the same
+		// immutable image after a transport failure, without recreating the
+		// Sandbox, renewing the caller's deadline or repeating Project code.
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return errors.New("Project image preparation was cancelled or exceeded 180 seconds")
+		case <-timer.C:
+		}
+		if !mutable && confirmed() {
+			return nil
+		}
+		retryDelay = min(retryDelay*2, 2*time.Second)
 	}
 	if mutable {
 		_, err := resolveProjectImage(ctx, reference)

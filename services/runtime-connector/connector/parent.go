@@ -1054,7 +1054,7 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 		if ctx.Err() != nil {
 			return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
 		}
-		if !retryableBrowserImageDownload(string(diagnostic.Bytes())) {
+		if !retryableImageDownload(string(diagnostic.Bytes())) {
 			return errors.New("browser tools image download failed; check registry connectivity and approved CA trust")
 		}
 		// An immutable image acquisition can safely recover before any browser
@@ -1072,26 +1072,6 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 		}
 		retryDelay = min(retryDelay*2, 2*time.Second)
 	}
-}
-
-func retryableBrowserImageDownload(diagnostic string) bool {
-	value := strings.ToLower(diagnostic)
-	for _, permanent := range []string{"x509:", "unauthorized", "forbidden", "denied:", "manifest unknown", "invalid reference"} {
-		if strings.Contains(value, permanent) {
-			return false
-		}
-	}
-	for _, transient := range []string{
-		"connection refused", "connection reset", "no route to host", "no such host",
-		"i/o timeout", "tls handshake timeout", "context deadline exceeded", "unexpected eof",
-		"temporary failure in name resolution", "server misbehaving",
-		"500 internal server error", "502 bad gateway", "503 service unavailable", "504 gateway timeout",
-	} {
-		if strings.Contains(value, transient) {
-			return true
-		}
-	}
-	return false
 }
 
 // Compose lookup in the pinned CLI uses project/service, not --id-label. A prior

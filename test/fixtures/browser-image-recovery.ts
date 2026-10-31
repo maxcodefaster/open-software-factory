@@ -5,12 +5,15 @@ import { resolve } from "node:path";
 import { verificationEnvironment } from "../../scripts/testing/test-prerequisites";
 import { fixtureValue } from "./value";
 
-export async function proveBrowserImageRecovery() {
+export const proveBrowserImageRecovery = () => proveImageRecovery("browser");
+export const proveProjectImageRecovery = () => proveImageRecovery("project");
+
+async function proveImageRecovery(kind: "browser" | "project") {
   const root = resolve(import.meta.dir, "../..");
   const id = crypto.randomUUID();
   const scratch = await mkdtemp(resolve(tmpdir(), "factory-owned-image-recovery-"));
   await chmod(scratch, 0o700);
-  const evidence = resolve(root, ".factory/test-results/browser-image-native", id);
+  const evidence = resolve(root, `.factory/test-results/${kind}-image-native`, id);
   await mkdir(evidence, { recursive: true });
   const realDocker = Bun.which("docker") ?? "";
   if (!realDocker) throw new Error("Native Docker is unavailable");
@@ -32,7 +35,7 @@ export async function proveBrowserImageRecovery() {
     ["amd64", "amd64"],
   ]).get(architecture);
   if (!arch) throw new Error("Unsupported native Docker architecture");
-  const label = "factory.owned-browser-image-recovery";
+  const label = `factory.owned-${kind}-image-recovery`;
   const bytes = new TextEncoder();
   const digest = (value: Uint8Array) =>
     `sha256:${createHash("sha256").update(value).digest("hex")}`;
@@ -63,7 +66,7 @@ export async function proveBrowserImageRecovery() {
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const port = fixtureValue(reservation.port, "reservation.port");
   await reservation.stop(true);
-  const repository = `factory-owned-browser-image-${id}/browser-tools`;
+  const repository = `factory-owned-${kind}-image-${id}/${kind}-tools`;
   const reference = `registry.localhost:${port}/${repository}@${manifestDigest}`;
   const cert = resolve(scratch, "registry.pem");
   const key = resolve(scratch, "registry-key.pem");
@@ -139,7 +142,9 @@ exec "$FACTORY_OWNED_NATIVE_DOCKER" "$@"
         "test",
         "./connector",
         "-run",
-        "^TestBrowserImageRecoveryWithNativeDocker$",
+        kind === "browser"
+          ? "^TestBrowserImageRecoveryWithNativeDocker$"
+          : "^TestProjectImageRecoveryWithNativeDocker$",
         "-count=1",
         "-v",
       ],
@@ -151,7 +156,9 @@ exec "$FACTORY_OWNED_NATIVE_DOCKER" "$@"
           FACTORY_OWNED_DOCKER_LOG: log,
           FACTORY_OWNED_FIRST_PULL: marker,
           FACTORY_OWNED_NATIVE_DOCKER: realDocker,
-          FACTORY_BROWSER_IMAGE_RECOVERY_REFERENCE: reference,
+          [kind === "browser"
+            ? "FACTORY_BROWSER_IMAGE_RECOVERY_REFERENCE"
+            : "FACTORY_PROJECT_IMAGE_RECOVERY_REFERENCE"]: reference,
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -204,7 +211,11 @@ exec "$FACTORY_OWNED_NATIVE_DOCKER" "$@"
       throw new Error("Native recovered image differs from its exact owned intent");
     const commands = (await readFile(log, "utf8")).trim().split("\n");
     const pulls = commands.filter((line) => line === `pull ${reference}`).length;
-    if (pulls !== 2 || !requests.includes(`/v2/${repository}/blobs/${configDigest}`))
+    if (
+      pulls !== 2 ||
+      commands.some((line) => line !== `pull ${reference}` && !line.startsWith("image inspect ")) ||
+      !requests.includes(`/v2/${repository}/blobs/${configDigest}`)
+    )
       throw new Error("Native Registry recovery did not exercise a failed and successful pull");
     await writeFile(
       resolve(evidence, "passed.json"),

@@ -886,15 +886,20 @@ Successful runs remove their owned source storage as well as execution resources
 retain source for inspection; the reset guard refuses deletion until that exact retained Workspace
 storage is explicitly cleaned up.
 
-Browser image acquisition retries recognized transient Registry failures within the existing
-three-minute startup window, before any browser or App action exists. Stop cancels that wait.
-Authentication, certificate, digest and unknown failures still fail explicitly. A later authorized
+Project and Browser image acquisition retry recognized transient Registry transport failures within
+their existing three-minute preparation windows. Project recovery precedes Dev Container and hook
+execution; Browser recovery precedes browser and App actions. Stop cancels that wait.
+Storage, memory, authentication, certificate, rate-limit, missing
+manifest, digest and unknown failures still fail explicitly. Project acquisition reports a static
+failure class without retaining or exposing Registry output or credentials. A later authorized
 Build or review may prepare the same frozen image again without restarting the Workspace;
 neither path repeats inference or an App interaction.
-The explicit native recovery proof uses a private TLS Registry and one uniquely labeled image,
-fails its first real Docker pull, restores the Registry and confirms the same exact image:
+Each explicit native recovery proof uses a private TLS Registry and one uniquely labeled image,
+fails its first real Docker pull, restores the Registry and confirms the same exact image.
+Neither proof starts a container or invokes a model:
 
 ```sh
+FACTORY_RUN_PROJECT_IMAGE_RECOVERY_PROOF=1 mise exec -- bun --no-env-file test test/support/project-image-recovery.live.test.ts
 FACTORY_RUN_BROWSER_IMAGE_RECOVERY_PROOF=1 mise exec -- bun --no-env-file test test/support/browser-image-recovery.live.test.ts
 ```
 
