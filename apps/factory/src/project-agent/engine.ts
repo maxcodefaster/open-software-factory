@@ -303,6 +303,10 @@ ${
   input.technicalPlanning
     ? `This task is Technical Planning, not a Product Interview. The confirmed product specification
 is frozen in the selected Ticket context. Never rewrite its behavior or expand its scope.
+For App startup or Preview work, discover and read the repository's .factory/system.json
+alongside its Dev Container configuration and referenced launch helpers. That System Contract
+declares Factory-managed App commands, ports and health paths; a Compose sleep command does
+not mean the App startup contract is missing. Do not request Factory server code as a substitute.
 Research the relevant existing code at source commit ${input.technicalPlanning.sourceCommit}.
 Read before claiming how an existing module, interface or flow works. Use findCode then readCode,
 and cite inspected files. All code references must use that one commit.

@@ -1,9 +1,10 @@
 import { expect, test } from "bun:test";
 import { createAccessController } from "../../apps/factory/src/access/controller";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
+import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
+import { createChangeController } from "../../apps/factory/src/change/controller";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
 import { createTicketService } from "../../apps/factory/src/change/service";
-import { createChangeController } from "../../apps/factory/src/change/controller";
-import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
 import { appendConversationEntry } from "../../apps/factory/src/project-agent/conversation-store";
 import { persistProjectOutput } from "../../apps/factory/src/project-agent/effects";
@@ -13,11 +14,10 @@ import {
   saveTechnicalDesignIn,
   technicalPlanningOutstandingIn,
 } from "../../apps/factory/src/technical-design/store";
-import type { AgentTurnRecord } from "../../apps/factory/src/agent/turn-store";
-import { planningDesign, planningProduct } from "../fixtures/technical-planning";
 import { technicalPlanningBaseInput } from "../../packages/requirement-domain/src/technical-design";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { planningDesign, planningProduct } from "../fixtures/technical-planning";
 import { fixtureValue } from "../fixtures/value";
 
 test("technical revisions are exact, immutable, retry-safe and developer-only", async () => {
@@ -140,8 +140,12 @@ test("full Planning confirmation durably admits exactly one technical task again
     const ticketID = crypto.randomUUID(),
       conversationID = crypto.randomUUID(),
       commandID = crypto.randomUUID();
-    await db.client`INSERT INTO factory.ticket(id,project_id,title,state,created_by)
-      VALUES(${ticketID},${owned.projectID},'Export invoices','ready',${owned.userID})`;
+    const requestDetails =
+      "Observed failure in test/invoices.test.ts:42: expected 200, received 502. " +
+      "Use the existing reference commit 1234567890abcdef1234567890abcdef12345678. " +
+      "Keep the synthetic endpoint and do not call production.";
+    await db.client`INSERT INTO factory.ticket(id,project_id,title,description,state,created_by)
+      VALUES(${ticketID},${owned.projectID},'Export invoices',${requestDetails},'ready',${owned.userID})`;
     await db.client`INSERT INTO factory.ticket_conversation(id,project_id,ticket_id,mode,created_by)
       VALUES(${conversationID},${owned.projectID},${ticketID},'plan',${owned.userID})`;
     const turn: AgentTurnRecord = {
@@ -193,7 +197,7 @@ test("full Planning confirmation durably admits exactly one technical task again
         {
           kind: "requirement",
           message: "Confirm the product scope.",
-          ticket: { title: "Export invoices", description: "" },
+          ticket: { title: "Export invoices", description: "A shorter model-written summary." },
           requirement: planningProduct,
           citations: [],
         },
@@ -203,8 +207,9 @@ test("full Planning confirmation durably admits exactly one technical task again
       );
     });
     const [proposal] = await db.client<
-      { id: string }[]
-    >`SELECT id FROM factory.conversation_entry WHERE conversation_id=${conversationID} AND kind='requirement'`;
+      { id: string; payload: { ticket: { title: string; description: string } } }[]
+    >`SELECT id,payload FROM factory.conversation_entry WHERE conversation_id=${conversationID} AND kind='requirement'`;
+    expect(proposal?.payload.ticket.description).toBe(requestDetails);
     const controller = createProjectAgentController(db, { start: async () => null });
     const documents = createTicketDocumentController(db, (sql, input) =>
       controller.admitTechnicalIn(sql, input),
@@ -216,7 +221,7 @@ test("full Planning confirmation durably admits exactly one technical task again
       requirementRevisionId: null,
       proposalEntryId: fixtureValue(proposal, "proposal").id,
       title: "Export invoices",
-      description: "",
+      description: fixtureValue(proposal, "proposal").payload.ticket.description,
       requirement: planningProduct,
     };
     const confirmed = await documents.save(ticketID, owned.userID, input);
@@ -239,6 +244,7 @@ test("full Planning confirmation durably admits exactly one technical task again
       requirementRevisionId: confirmed.requirementRevisionId,
       documentId: confirmed.id,
     });
+    expect(entry?.payload["ticketContext"]).toMatchObject({ description: requestDetails });
     expect(
       await db.client.begin((sql) =>
         technicalPlanningOutstandingIn(sql, ticketID, confirmed.requirementRevisionId),

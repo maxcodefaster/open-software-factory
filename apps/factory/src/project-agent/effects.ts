@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { ProjectAgentOutput } from "../../../../packages/conversation-domain/src/conversation";
 import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import type { AgentTurnRecord, AgentTurnTransaction } from "../agent/turn-store";
@@ -60,6 +61,24 @@ export async function persistProjectOutput(
     SELECT payload FROM factory.conversation_entry
     WHERE conversation_id=${current.id} AND payload->>'commandId'=${command.commandId}
     ORDER BY ordinal DESC LIMIT 1`;
+  let proposedTicket = output.kind === "requirement" ? output.ticket : null;
+  if (proposedTicket && current.ticketId) {
+    const base = z
+      .object({ id: z.uuid(), version: z.number().int().positive() })
+      .safeParse(input?.payload["ticketContext"]);
+    if (base.success && base.data.id === current.ticketId) {
+      const [request] = await transaction<{ description: string }[]>`
+        SELECT description FROM factory.ticket
+        WHERE id=${current.ticketId} AND project_id=${command.projectId}
+          AND version=${base.data.version}`;
+      // The summary and criteria are advisory. Keep authored Request details,
+      // including diagnostics/attachments the model may omit, for confirmation
+      // and the technical continuation. Read the full exact base, not its
+      // potentially truncated model snapshot. Human edits remain authoritative.
+      if (request?.description.trim())
+        proposedTicket = { ...proposedTicket, description: request.description };
+    }
+  }
   if (output.kind === "epic") {
     if (current.mode !== "plan") throw new Error("Epic proposals require planning authority");
     await appendConversationEntry(transaction, current.id, {
@@ -123,7 +142,7 @@ export async function persistProjectOutput(
         : output.kind === "requirement"
           ? {
               ticketId: current.ticketId,
-              ticket: output.ticket,
+              ticket: proposedTicket ?? output.ticket,
               requirement: output.requirement,
               base: input?.payload["ticketContext"] ?? null,
               ...(fullPlanningSource

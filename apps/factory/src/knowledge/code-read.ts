@@ -49,11 +49,13 @@ export function readCodePage(
 export function readableCodePath(path: string) {
   return (
     !path.startsWith("/") &&
-    !path
-      .split("/")
-      .some((part) =>
-        ["..", "node_modules", ".git", "dist", "build", "vendor", ".factory"].includes(part),
-      ) &&
+    !path.split("/").some(
+      (part) =>
+        ["..", "node_modules", ".git", "dist", "build", "vendor"].includes(part) ||
+        // This source-controlled App declaration is not Factory runtime data.
+        // Keep every other .factory path private, including nested lookalikes.
+        (part === ".factory" && path !== ".factory/system.json"),
+    ) &&
     !/(^|\/)(\.env($|\.)|.*(?:secret|credential|private[-_]?key).*|.*\.(?:pem|key|p12|pfx))$/i.test(
       path,
     ) &&
