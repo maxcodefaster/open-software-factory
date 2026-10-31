@@ -25,6 +25,23 @@ def remaining_preparation_seconds():
     return remaining
 
 
+def sandbox_pid_limit(cpu_max, available_cpus):
+    fields = cpu_max.split()
+    if (len(fields) != 2 or any(not re.fullmatch(r'[1-9][0-9]*', value) for value in fields) or
+            type(available_cpus) is not int or available_cpus < 1):
+        raise ValueError('Sandbox preparation requires a finite worker CPU ceiling and affinity')
+    quota, period = map(int, fields)
+    cpus = min(available_cpus, (quota + period - 1) // period)
+    # pids.max counts threads as well as processes. Preserve the qualified
+    # 3-CPU consumer ceiling, but scale threaded toolchains with larger workers.
+    return max(384, cpus * 128)
+
+
+def worker_pid_limit():
+    return sandbox_pid_limit(Path('/sys/fs/cgroup/cpu.max').read_text(),
+                             len(os.sched_getaffinity(0)))
+
+
 def digest(path):
     value = hashlib.sha256()
     with path.open('rb') as stream:
@@ -326,6 +343,9 @@ def prepare(request):
         if json.loads((root/'intent.json').read_text()) != plan:
             raise ValueError('Private input already belongs to another preparation')
         return prepared_input(request, status)
+    # Only fresh inputs select resources. Retained OCI configurations and RAM
+    # restores keep their original, hashed task ceiling.
+    pids_limit = worker_pid_limit()
     # Native base admission can be busy while another Sandbox resumes or
     # retires a checkpoint. Do not publish a partial private input before the
     # shared immutable base is available. Existing partial inputs stay guarded.
@@ -383,7 +403,7 @@ def prepare(request):
     # Kernels without MPTCP already use TCP and have no corresponding sysctl.
     if Path('/proc/sys/net/mptcp/enabled').exists():
         spec['linux'].setdefault('sysctl', {})['net.mptcp.enabled'] = '0'
-    spec['linux']['resources'] = {'pids': {'limit': 384}, 'devices': [{'allow': True, 'access': 'rwm'}]}
+    spec['linux']['resources'] = {'pids': {'limit': pids_limit}, 'devices': [{'allow': True, 'access': 'rwm'}]}
     for mount in spec['mounts']:
         if mount['destination'] == '/sys/fs/cgroup':
             mount['options'] = ['nosuid', 'noexec', 'nodev', 'rw']
