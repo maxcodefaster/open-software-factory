@@ -5,6 +5,7 @@ export type TicketCheckDetails = {
   deliveryPolicyId?: string | undefined;
   openReviewThreads?: number | undefined;
   checksStopId?: string | undefined;
+  checksRetryAttemptId?: string | undefined;
   verificationState?: string | undefined;
   verificationSummary?: string | undefined;
   verificationPreparationFailure?: string | undefined;
@@ -59,7 +60,9 @@ export function TicketChecks(props: {
               ? "Independent review needs attention"
               : "Preparing independent review";
       case "failed":
-        return "Checks need attention";
+        return props.details?.verificationFailureKind === "execution-failed"
+          ? "Check environment failed"
+          : "Checks need attention";
       case "running":
         return "Checks running";
       case "runner-starting":
@@ -100,15 +103,17 @@ export function TicketChecks(props: {
           <Show
             when={props.building && !props.details?.reviewCurrent}
             fallback={
-              <p>
-                {unsubmitted()
-                  ? "Earlier checks do not verify the retained corrections. Finish and submit them before review."
-                  : props.details?.checksStopId
-                    ? "The submitted version is retained. Resume checks to continue verification and independent review without repeating implementation."
-                    : props.details?.promotionState
-                      ? "The exact verified version was merged. Main Preview status is reported separately."
-                      : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
-              </p>
+              <Show when={!props.details?.checksRetryAttemptId}>
+                <p>
+                  {unsubmitted()
+                    ? "Earlier checks do not verify the retained corrections. Finish and submit them before review."
+                    : props.details?.checksStopId
+                      ? "The submitted version is retained. Resume checks to continue verification and independent review without repeating implementation."
+                      : props.details?.promotionState
+                        ? "The exact verified version was merged. Main Preview status is reported separately."
+                        : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
+                </p>
+              </Show>
             }
           >
             <p>

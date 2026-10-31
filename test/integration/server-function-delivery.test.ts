@@ -27,6 +27,7 @@ test("native Delivery preserves exact review/Stop identities, current authority 
     project = crypto.randomUUID(),
     review = crypto.randomUUID(),
     verification = crypto.randomUUID(),
+    runtime = crypto.randomUUID(),
     promotion = crypto.randomUUID(),
     stop = crypto.randomUUID(),
     date = new Date("2026-10-25T00:00:00Z");
@@ -85,6 +86,10 @@ test("native Delivery preserves exact review/Stop identities, current authority 
         effects.push(["resume-checks", ...args]);
         return value();
       },
+      async retryBootstrap(...args) {
+        effects.push(["retry-bootstrap", ...args]);
+        return value();
+      },
     },
   });
   const endpoint = await compiledFactoryEndpoint({
@@ -98,12 +103,18 @@ test("native Delivery preserves exact review/Stop identities, current authority 
     decodeResponse(await endpoint(await factoryFunctionRequest(origin, name, args)));
   const retry = { commandId: crypto.randomUUID(), reviewId: review },
     retryPromotion = { commandId: crypto.randomUUID(), promotionId: promotion },
-    resume = { commandId: crypto.randomUUID(), verificationId: verification, stopId: stop };
+    resume = { commandId: crypto.randomUUID(), verificationId: verification, stopId: stop },
+    retryBootstrap = {
+      commandId: crypto.randomUUID(),
+      verificationId: verification,
+      runtimeAttemptId: runtime,
+    };
   for (const [name, args] of [
     ["approveDelivery", [change]],
     ["retryCandidateReview", [change, retry]],
     ["retryStagingPromotion", [change, retryPromotion]],
     ["resumeVerification", [change, resume]],
+    ["resumeVerification", [change, retryBootstrap]],
   ] as Array<[string, unknown[]]>)
     expect(await call(name, args)).toMatchObject({ ok: false, status: 503 });
   expect(effects).toEqual([]);
@@ -114,6 +125,8 @@ test("native Delivery preserves exact review/Stop identities, current authority 
     ["retryCandidateReview", [change, { ...retry, createdBy: actor }]],
     ["retryStagingPromotion", [change, { ...retryPromotion, force: true }]],
     ["resumeVerification", [change, { ...resume, stopId: "unconfirmed" }]],
+    ["resumeVerification", [change, { ...retryBootstrap, runtimeAttemptId: "stale" }]],
+    ["resumeVerification", [change, { ...retryBootstrap, stopId: stop }]],
   ] as Array<[string, unknown[]]>)
     expect(await call(name, args)).toMatchObject({ ok: false, status: 400 });
   expect(effects).toEqual([]);
@@ -126,6 +139,10 @@ test("native Delivery preserves exact review/Stop identities, current authority 
     ok: false,
     status: 403,
   });
+  expect(await call("resumeVerification", [change, retryBootstrap])).toMatchObject({
+    ok: false,
+    status: 403,
+  });
   // A Contributor may explicitly retry an incomplete independent review. Only
   // its exact controller admission decides eligibility, never a transport role.
   expect(await call("retryCandidateReview", [change, retry])).toMatchObject({ ok: true });
@@ -135,11 +152,13 @@ test("native Delivery preserves exact review/Stop identities, current authority 
     value: { approvedAt: date.toISOString() },
   });
   expect(await call("resumeVerification", [change, resume])).toMatchObject({ ok: true });
+  expect(await call("resumeVerification", [change, retryBootstrap])).toMatchObject({ ok: true });
   expect(await call("retryStagingPromotion", [change, retryPromotion])).toMatchObject({ ok: true });
   expect(effects).toEqual([
     ["retry-review", change, actor, retry.commandId, review],
     ["get", change],
     ["resume-checks", change, actor, resume.commandId, verification, stop],
+    ["retry-bootstrap", change, actor, retryBootstrap.commandId, verification, runtime],
     ["retry-promotion", change, actor, retryPromotion.commandId, promotion],
   ]);
   const cancellation = new AbortController();

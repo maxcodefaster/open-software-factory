@@ -430,10 +430,16 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
       dependencies.selectedChange()?.id === changeID ? dependencies.delivery() : undefined;
     const verificationId = target?.verificationId;
     const stopId = target?.checksStopId;
-    if (!verificationId || !stopId) return;
-    const scope = `checks-resume:${changeID}`;
+    const runtimeAttemptId = target?.checksRetryAttemptId;
+    if (!verificationId || (!stopId && !runtimeAttemptId)) return;
+    const input = stopId
+      ? { verificationId, stopId }
+      : runtimeAttemptId
+        ? { verificationId, runtimeAttemptId }
+        : undefined;
+    if (!input) return;
+    const scope = `${stopId ? "checks-resume" : "checks-bootstrap-retry"}:${changeID}`;
     await dependencies.mutate(async () => {
-      const input = { verificationId, stopId };
       const commandId = dependencies.agentCommandIds.forInput(scope, JSON.stringify(input));
       const value = await serverCall(
         resumeVerification({ data: [changeID, { commandId, ...input }] }),

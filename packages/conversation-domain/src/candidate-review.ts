@@ -4,11 +4,18 @@ export const candidateReviewRetryInput = z.strictObject({
   commandId: z.uuid(),
   reviewId: z.uuid(),
 });
-export const verificationResumeInput = z.strictObject({
-  commandId: z.uuid(),
-  verificationId: z.uuid(),
-  stopId: z.uuid(),
-});
+export const verificationResumeInput = z.union([
+  z.strictObject({
+    commandId: z.uuid(),
+    verificationId: z.uuid(),
+    stopId: z.uuid(),
+  }),
+  z.strictObject({
+    commandId: z.uuid(),
+    verificationId: z.uuid(),
+    runtimeAttemptId: z.uuid(),
+  }),
+]);
 export const reviewPath = z
   .string()
   .min(1)

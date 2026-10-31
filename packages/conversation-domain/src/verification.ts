@@ -91,6 +91,9 @@ export const verificationDiagnosisInput = z.strictObject({
     "pending",
   ]),
   summary: z.string().min(1).max(1_000),
+  // A queued job whose recorded runtime ended before execution needs a
+  // deliberate retry of that exact, cleaned-up attempt, not code correction.
+  runtimeAttemptId: z.uuid().optional(),
   jobs: z
     .array(
       z.strictObject({

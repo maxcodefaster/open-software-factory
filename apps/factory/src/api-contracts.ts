@@ -394,6 +394,7 @@ export const deliveryViewSchema = z.object({
   openReviewThreads: z.number().int().nonnegative().optional(),
   verificationId: optionalString,
   checksStopId: optionalString,
+  checksRetryAttemptId: optionalString,
   reviewId: optionalString,
   reviewState: optionalString,
   reviewCurrent: z.boolean().optional(),

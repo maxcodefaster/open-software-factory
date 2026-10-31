@@ -51,6 +51,15 @@ test.each([
     "runner or job setup",
   ],
   [
+    {
+      ...submitted,
+      verificationState: "failed",
+      verificationFailureKind: "execution-failed",
+      checksRetryable: true,
+    },
+    "Fix its setup, then Retry checks",
+  ],
+  [
     { ...submitted, verificationState: "failed", verificationFailureKind: "cancelled" },
     "no application defect",
   ],
