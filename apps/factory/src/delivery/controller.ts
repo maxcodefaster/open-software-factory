@@ -25,6 +25,7 @@ import type { RuntimeAttemptView } from "../runtime/types";
 import { createDeliveryCoordination, deliveryDelegationIn } from "./coordination";
 import type { createChangeIntegration } from "./integration";
 import { createDeliveryPromotion } from "./promotion";
+import { retryPromotion } from "./promotion-retry";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -764,7 +765,7 @@ export function createDeliveryController(
             )
             SELECT ${crypto.randomUUID()}, ${change.id}, ${change.projectID}, ${operation.commitSHA},
               runtime_attempt_id FROM factory.staging_preview WHERE project_id = ${change.projectID}
-            ON CONFLICT(change_id) DO NOTHING
+            ON CONFLICT(change_id,ordinal) DO NOTHING
           `;
           await transaction`
             UPDATE factory.change SET state = 'delivering', failure = NULL, version = version + 1
@@ -964,7 +965,7 @@ export function createDeliveryController(
       SELECT DISTINCT change.id,change.project_id AS "projectID",change.created_at
       FROM factory.change change
       JOIN factory.change_commit_operation commit ON commit.change_id = change.id
-      LEFT JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
+      LEFT JOIN factory.current_promotion promotion ON promotion.change_id = change.id
       WHERE commit.state = 'succeeded'
         AND (change.state <> 'cancelled' OR EXISTS(
           SELECT 1 FROM factory.verification verification
@@ -1226,6 +1227,18 @@ export function createDeliveryController(
       const repository = repositoryFromURL(change.repositoryURL);
       await cancelVerifications(changeID, repository);
     },
+    async retryPromotion(changeID: string, userID: string, commandID: string, promotionID: string) {
+      const admitted = await retryPromotion(
+        database,
+        changeID,
+        userID,
+        commandID,
+        promotionID,
+        async (url) => (await forge.getDefaultBranch(repositoryFromURL(url))).headSha,
+      );
+      if (admitted) await reconcile(changeID);
+      return this.get(changeID);
+    },
     async resumeChecks(
       changeID: string,
       userID: string,
@@ -1449,10 +1462,11 @@ export function createDeliveryController(
           autofix.id AS "monitoringIncidentId",autofix.state AS "monitoringState",
           autofix.reason AS "monitoringReason",
           merge.state AS "mergeState", merge.observed_default_sha AS "mergedCommitSha",
-          promotion.state AS "promotionState",
+          promotion.id AS "promotionId",promotion.state AS "promotionState",
           promotion.last_error AS "cleanupError",
           promotion.replacement_runtime_attempt_id AS "replacementRuntimeAttemptId",
-          replacement.state AS "replacementRuntimeState"
+          replacement.state AS "replacementRuntimeState",
+          left(replacement.failure,2000) AS "promotionFailure"
         FROM factory.change change
         LEFT JOIN factory.monitoring_incident autofix ON autofix.ticket_id=change.ticket_id
         LEFT JOIN factory.change_agent_session session ON session.change_id=change.id
@@ -1486,7 +1500,7 @@ export function createDeliveryController(
             AND (merge.delivery_approval_id IS NULL OR id=merge.delivery_approval_id)
           ORDER BY approved_at DESC,id DESC LIMIT 1
         ) approval ON true
-        LEFT JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
+        LEFT JOIN factory.current_promotion promotion ON promotion.change_id = change.id
         LEFT JOIN factory.runtime_attempt replacement
           ON replacement.id = promotion.replacement_runtime_attempt_id
         WHERE change.id = ${changeID}

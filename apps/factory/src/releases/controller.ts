@@ -117,7 +117,7 @@ export function createReleaseController(options: {
       SELECT staging.revision AS sha FROM factory.staging_preview staging
       JOIN factory.runtime_attempt runtime ON runtime.id=staging.runtime_attempt_id AND runtime.state='ready'
       WHERE staging.project_id=${projectID} AND EXISTS(
-        SELECT 1 FROM factory.promotion_operation promotion WHERE promotion.project_id=${projectID}
+        SELECT 1 FROM factory.current_promotion promotion WHERE promotion.project_id=${projectID}
         AND promotion.commit_sha=staging.revision AND promotion.state='succeeded')`;
     return row?.sha ?? null;
   }

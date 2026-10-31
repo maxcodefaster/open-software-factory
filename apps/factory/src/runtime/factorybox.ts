@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
+import type postgres from "postgres";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
@@ -38,6 +39,7 @@ import {
   inspectFactoryboxWorker,
   runFactoryboxKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
+import { rejectedFactoryboxPause } from "./factorybox-pause";
 import type { RuntimeHub } from "./hub";
 import {
   factoryboxAllocation,
@@ -152,7 +154,11 @@ export function createFactoryboxExecution(
     if (changed.count !== 1)
       throw new Error("Factorybox operation was already attempted; observe its original outcome");
   }
-  async function completed(connection: SQL, operation: Operation, observation: unknown) {
+  async function completed(
+    connection: SQL | postgres.TransactionSql,
+    operation: Operation,
+    observation: unknown,
+  ) {
     await connection`UPDATE factory.factorybox_lifecycle_operation SET completed_at=now(),observation=${JSON.stringify(observation)}::text::jsonb
       WHERE id=${operation.id} AND completed_at IS NULL`;
   }
@@ -184,7 +190,7 @@ export function createFactoryboxExecution(
     // may continue Delete only after the exact original native runtime is
     // confirmed stopped, never by assuming a failed command had no effect.
     if (observeOnly && !record.attempted) await attempted(connection, record);
-    const observation =
+    let observation =
       record.attempted || observeOnly
         ? await executeFactoryboxOperation(
             request,
@@ -196,7 +202,38 @@ export function createFactoryboxExecution(
         : await executeFactoryboxOperation(request, identity, op, run, declaration, () =>
             attempted(connection, record),
           );
+    if (!observation.confirmed && op.action === "pause") {
+      const current = await executeFactoryboxOperation(
+        request,
+        identity,
+        { action: "state", sandboxID: saved.request.sandboxID },
+        run,
+        declaration,
+      );
+      if (current.confirmed) observation = current;
+    }
     if (!observation.confirmed) throw factoryboxOperationFailure(op.action, observation.stderr);
+    const raw = JSON.parse(observation.stdout);
+    if (op.action === "pause") {
+      const [started] = await connection<{ observation: unknown }[]>`
+        SELECT observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${attemptID} AND action='start' AND completed_at IS NOT NULL`;
+      const rejection = rejectedFactoryboxPause(
+        raw,
+        saved.request.sandboxID,
+        op.snapshotID,
+        started?.observation,
+      );
+      if (rejection) {
+        await connection.begin(async (sql) => {
+          await completed(sql, record, rejection);
+          await sql`UPDATE factory.runtime_attempt SET state='starting',
+            failure='child connector reconnecting',updated_at=now()
+            WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+        });
+        return rejection;
+      }
+    }
     const nativeResult = z.object({
       runtime: z.object({ status: z.string() }).optional(),
       record: z.object({
@@ -218,7 +255,7 @@ export function createFactoryboxExecution(
         pause_history: z.array(z.unknown()).optional(),
       }),
     });
-    let result = nativeResult.parse(JSON.parse(observation.stdout));
+    let result = nativeResult.parse(raw);
     if (
       op.action === "delete" &&
       record.attempted &&
@@ -292,7 +329,13 @@ export function createFactoryboxExecution(
       await intent(connection, attemptID, "retire-checkpoint", checkpoint.snapshot_id, checkpoint);
     for (const checkpoint of factoryboxObsoleteResumeImages(saved.request.sandboxID, result.record))
       await intent(connection, attemptID, "retire-resume", checkpoint.snapshot_id, checkpoint);
-    await completed(connection, record, compact);
+    if (op.action === "pause")
+      await connection.begin(async (sql) => {
+        await completed(sql, record, compact);
+        await sql`UPDATE factory.runtime_attempt SET state='paused',failure=NULL,updated_at=now()
+          WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+      });
+    else await completed(connection, record, compact);
     return compact;
   }
   async function reclaimAttempt(connection: SQL, attemptID: string, saved: Retained) {
@@ -859,11 +902,27 @@ export function createFactoryboxExecution(
           WHERE id=${attemptID} AND state IN ('ready','pausing') AND stop_intended_at IS NULL`;
         if (changed.count !== 1) throw new Error("Runtime Stop superseded Pause");
         hub.revoke(attemptID);
-        await perform(connection, attemptID, saved, {
+        const outcome = await perform(connection, attemptID, saved, {
           action: "pause",
           sandboxID: saved.request.sandboxID,
           snapshotID: snapshot,
         });
+        if ("rejected" in outcome && outcome.rejected === true) {
+          await connection.begin(async (sql) => {
+            const [current] = await sql<
+              {
+                generation: string;
+                parent: string;
+                child: string;
+              }[]
+            >`SELECT generation,parent_connector_token_hash AS parent,child_connector_token_hash AS child
+              FROM factory.runtime_attempt WHERE id=${attemptID} AND state='starting'
+                AND stop_intended_at IS NULL FOR UPDATE`;
+            if (current)
+              hub.allow(attemptID, Number(current.generation), current.parent, current.child);
+          });
+          return;
+        }
         await connection`UPDATE factory.runtime_attempt SET state='paused',failure=NULL,updated_at=now()
           WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
       });
@@ -885,7 +944,9 @@ export function createFactoryboxExecution(
           const [pause] = await connection<
             Array<{ snapshot: string }>
           >`SELECT snapshot_id AS snapshot FROM factory.factorybox_lifecycle_operation
-          WHERE runtime_attempt_id=${attemptID} AND action='pause' AND completed_at IS NOT NULL ORDER BY intended_at DESC LIMIT 1`;
+          WHERE runtime_attempt_id=${attemptID} AND action='pause' AND completed_at IS NOT NULL
+            AND observation->>'phase'='paused' AND observation ? 'checkpointSHA256'
+          ORDER BY intended_at DESC LIMIT 1`;
           if (!pause) throw new Error("Runtime Attempt has no committed Pause");
           await intent(connection, attemptID, "resume", pause.snapshot);
           await connection`UPDATE factory.runtime_attempt SET state='resuming',failure=NULL,updated_at=now()

@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+export const promotionRetryInput = z.strictObject({
+  commandId: z.uuid(),
+  promotionId: z.uuid(),
+});
+
 export const deliveryDelegationInput = z.strictObject({
   commandId: z.uuid(),
   expectedPolicyId: z.uuid().nullable(),

@@ -99,6 +99,7 @@ type DeliveryView = import("./ticket-checks").TicketCheckDetails & {
   approvedAt?: string | undefined;
   mergeState?: string | undefined;
   promotionState?: string | undefined;
+  promotionId?: string | undefined;
   cleanupError?: string | undefined;
   replacementRuntimeState?: string | undefined;
 };
@@ -169,6 +170,7 @@ export type TicketWorkspaceProps = {
   active?: boolean | undefined;
   onApproveDelivery(changeID: string): void;
   onRetryReview?(changeID: string): void;
+  onRetryPromotion?(changeID: string): void;
   onResumeChecks?(changeID: string): void;
   canDevelop: boolean;
   userID?: string;
@@ -1132,6 +1134,22 @@ function TicketDocument(props: TicketWorkspaceProps) {
       });
     if (
       !ticket.trashedAt &&
+      props.canDevelop &&
+      props.change?.state === "delivering" &&
+      props.delivery?.mergeState === "succeeded" &&
+      props.delivery.promotionState === "failed" &&
+      props.delivery.promotionId &&
+      props.onRetryPromotion
+    )
+      actions.push({
+        id: "retry-promotion",
+        label: "Retry Main Preview",
+        primary: true,
+        disabled: props.pending,
+        run: () => props.change && props.onRetryPromotion?.(props.change.id),
+      });
+    if (
+      !ticket.trashedAt &&
       !ticket.convertedToEpicId &&
       ["inbox", "backlog"].includes(ticket.state) &&
       !props.change &&
@@ -1452,6 +1470,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                                 threads: openReviewThreads() ?? props.delivery?.openReviewThreads,
                                 approved: Boolean(props.delivery?.approvedAt),
                                 cleanupError: props.delivery?.cleanupError,
+                                promotionState: props.delivery?.promotionState,
                                 canDevelop: props.canDevelop,
                                 planning: props.planningBusy,
                                 technicalPlanningOutstanding:

@@ -711,7 +711,7 @@ export function createChangeController(
             AND (merge.delivery_approval_id IS NULL OR id=merge.delivery_approval_id)
           ORDER BY approved_at DESC,id DESC LIMIT 1
         ) approval ON true
-        LEFT JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
+        LEFT JOIN factory.current_promotion promotion ON promotion.change_id = change.id
         WHERE change.id = ${changeID}
       `;
       return rows[0] ?? null;
@@ -757,7 +757,7 @@ export function createChangeController(
             AND (merge.delivery_approval_id IS NULL OR id=merge.delivery_approval_id)
           ORDER BY approved_at DESC,id DESC LIMIT 1
         ) approval ON true
-        LEFT JOIN factory.promotion_operation promotion ON promotion.change_id = change.id
+        LEFT JOIN factory.current_promotion promotion ON promotion.change_id = change.id
         WHERE (${projectID ?? null}::uuid IS NULL OR change.project_id = ${projectID ?? null})
           AND (EXISTS(SELECT 1 FROM factory.administrator WHERE user_id = ${userID})
             OR EXISTS(SELECT 1 FROM factory.project_membership

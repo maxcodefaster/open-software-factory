@@ -430,7 +430,9 @@ export const deliveryViewSchema = z.object({
   approvedAt: optionalString,
   mergeState: optionalString,
   mergedCommitSha: optionalString,
+  promotionId: optionalString,
   promotionState: optionalString,
+  promotionFailure: optionalString,
   replacementRuntimeAttemptId: optionalString,
   replacementRuntimeState: optionalString,
 });

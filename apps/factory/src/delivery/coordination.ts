@@ -28,7 +28,7 @@ export function createDeliveryCoordination(database: ReturnType<typeof createDat
           FROM factory.project_delivery_queue WHERE project_id=${projectID} FOR UPDATE`;
         const [promotion] = await sql<{ changeID: string }[]>`SELECT merge.change_id AS "changeID"
           FROM factory.merge_operation merge JOIN factory.change change ON change.id=merge.change_id
-          LEFT JOIN factory.promotion_operation promotion ON promotion.change_id=change.id
+          LEFT JOIN factory.current_promotion promotion ON promotion.change_id=change.id
           WHERE change.project_id=${projectID} AND merge.state<>'failed'
             AND (merge.state<>'succeeded' OR promotion.state IS NULL OR promotion.state<>'succeeded')
           ORDER BY merge.id LIMIT 1`;
@@ -57,7 +57,7 @@ export function createDeliveryCoordination(database: ReturnType<typeof createDat
     async release(changeID: string) {
       await database.client`UPDATE factory.project_delivery_queue SET change_id=NULL,updated_at=now()
         WHERE change_id=${changeID} AND NOT EXISTS(
-          SELECT 1 FROM factory.merge_operation merge LEFT JOIN factory.promotion_operation promotion ON promotion.change_id=merge.change_id
+          SELECT 1 FROM factory.merge_operation merge LEFT JOIN factory.current_promotion promotion ON promotion.change_id=merge.change_id
           WHERE merge.change_id=${changeID} AND merge.state<>'failed'
             AND (merge.state<>'succeeded' OR promotion.state IS NULL OR promotion.state<>'succeeded'))`;
     },

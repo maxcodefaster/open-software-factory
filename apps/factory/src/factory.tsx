@@ -1107,6 +1107,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     implementTicket,
     approveDelivery,
     retryReview,
+    retryPromotion,
     resumeChecks,
   } = createTicketCommands({
     detail,
@@ -1813,6 +1814,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
     retryMainPreview,
     approveDelivery,
     retryReview,
+    retryPromotion,
     resumeChecks,
     canDevelopProject,
     browserRepository,

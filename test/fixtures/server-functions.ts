@@ -80,6 +80,7 @@ const serviceFunctions = {
     getDelivery: "get",
     approveDelivery: "approve",
     retryCandidateReview: "retryReview",
+    retryStagingPromotion: "retryPromotion",
     resumeVerification: "resumeChecks",
   },
   projects: {
@@ -320,20 +321,31 @@ export async function compiledFactoryEndpoint(
 
 // UI fixtures use the actual compiled functions and wire encoder, injecting
 // only service doubles. Unspecified functions go to the real owned server.
-export async function mockFactoryFunctions(
-  page: Page,
-  services: ServiceDoubles,
-  dropResponse?: (name: string) => boolean,
-) {
-  const entryURL = pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href;
-  const entry: typeof import("../../apps/factory/src/start-server") = await import(entryURL);
-  const manifest = compiledManifest(entry);
-  const names = Object.entries(serviceFunctions).flatMap(([service, functions]) =>
+export function controlledFunctionNames(services: ServiceDoubles) {
+  for (const [service, double] of Object.entries(services)) {
+    const functions = serviceFunctions[service as keyof typeof serviceFunctions];
+    const mapped = new Set<string>(Object.values(functions ?? {}));
+    const missing = Object.keys(double ?? {}).find((method) => !mapped.has(method));
+    if (missing)
+      throw new Error(`Controlled fixture has no native function mapping: ${service}.${missing}`);
+  }
+  return Object.entries(serviceFunctions).flatMap(([service, functions]) =>
     Object.entries(functions).flatMap(([name, method]) => {
       const double = services[service as keyof FactoryServices];
       return double && method in double ? [name] : [];
     }),
   );
+}
+
+export async function mockFactoryFunctions(
+  page: Page,
+  services: ServiceDoubles,
+  dropResponse?: (name: string) => boolean,
+) {
+  const names = controlledFunctionNames(services);
+  const entryURL = pathToFileURL(resolve(factoryBuildDirectory(), "server/entry.js")).href;
+  const entry: typeof import("../../apps/factory/src/start-server") = await import(entryURL);
+  const manifest = compiledManifest(entry);
   let network: ReturnType<typeof Bun.serve> | undefined;
   let networkOrigin: string | undefined;
   let networkOpening: Promise<ReturnType<typeof Bun.serve>> | undefined;

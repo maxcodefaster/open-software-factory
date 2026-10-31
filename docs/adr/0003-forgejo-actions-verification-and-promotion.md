@@ -25,6 +25,14 @@ Factory permits merge only when the current pull-request commit passed and a Del
 
 After Forgejo confirms the merge, Factory persists Promotion intent for the exact merged commit and creates replacement Staging compute. The existing healthy Staging Preview continues serving traffic until the replacement is ready. Only then does Factory switch the Preview and clean up owned compute and runners. The delivered Change branch stays protected with no writers, rather than dropping its protection to delete the ref; [the branch-retirement decision](0011-delivered-branch-retention.md) records that constraint. A failed Verification, merge, or Promotion leaves enough state for deterministic retry and does not replace healthy Staging.
 
+A developer may explicitly retry a failed Main Preview from its merged Ticket after the
+failed replacement's cleanup is confirmed. The retry appends a numbered Promotion bound to
+the failed predecessor, exact merged commit and retained human command. It never resets that
+predecessor, reissues merge or creates another approval. A repeated command observes the same
+new Promotion; a changed command target, moved default branch, changed current Preview or
+unconfirmed cleanup refuses. Current reads and the Project Delivery fence use the latest
+Promotion, while prior failures and Runtime Attempts remain unchanged. Reading does not retry.
+
 Factory owns desired state for Development Workspaces and Project Staging. This delivery path
 ends at the healthy Staging Preview, with Forgejo Actions providing exact-commit Verification.
 

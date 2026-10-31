@@ -14,6 +14,7 @@ import {
   approveDelivery as requestDeliveryApproval,
   resumeVerification,
   retryCandidateReview,
+  retryStagingPromotion,
 } from "../server-functions/delivery";
 import { serverCall } from "../server-functions/result";
 import {
@@ -403,6 +404,27 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
     });
   }
 
+  async function retryPromotion(changeID: string) {
+    const promotionId =
+      dependencies.selectedChange()?.id === changeID
+        ? dependencies.delivery()?.promotionId
+        : undefined;
+    if (!promotionId) return;
+    const scope = dependencies.agentCommandScope("retry-promotion", changeID);
+    await dependencies.mutate(async () => {
+      const commandId = dependencies.agentCommandIds.forInput(
+        scope,
+        JSON.stringify({ changeID, promotionId }),
+      );
+      const value = await serverCall(
+        retryStagingPromotion({ data: [changeID, { commandId, promotionId }] }),
+      );
+      dependencies.acknowledgeCommand(scope, commandId);
+      if (dependencies.selectedChange()?.id === changeID) dependencies.setDelivery(value);
+      await dependencies.refreshLifecycleState();
+    });
+  }
+
   async function resumeChecks(changeID: string) {
     const target =
       dependencies.selectedChange()?.id === changeID ? dependencies.delivery() : undefined;
@@ -433,6 +455,7 @@ export function createTicketCommands(dependencies: TicketCommandsDependencies) {
     implementTicket,
     approveDelivery,
     retryReview,
+    retryPromotion,
     resumeChecks,
   };
 }

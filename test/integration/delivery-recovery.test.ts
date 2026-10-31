@@ -500,3 +500,170 @@ test("promotion retains the healthy Staging while starting, then retries only ow
     await f.close();
   }
 }, 60_000);
+
+test("failed Promotion retry preserves its original attempt and admits one new exact-commit Start", async () => {
+  const f = await deliveryFixture();
+  try {
+    const previous = crypto.randomUUID();
+    const failed = crypto.randomUUID();
+    const promotion = crypto.randomUUID();
+    const command = crypto.randomUUID();
+    const replacement = crypto.randomUUID();
+    const verification = crypto.randomUUID();
+    const approval = crypto.randomUUID();
+    await f.database.client`INSERT INTO factory.verification(
+      id,change_id,commit_sha,pull_request_number,runner_name,state,action_run_id,created_by,completed_at)
+      VALUES(${verification},${f.owned.changeID},${f.sha},1,'retry-exact','succeeded',1,${f.owned.userID},now())`;
+    await f.database.client`INSERT INTO factory.delivery_approval(
+      id,change_id,verification_id,commit_sha,approved_by)
+      VALUES(${approval},${f.owned.changeID},${verification},${f.sha},${f.owned.userID})`;
+    await f.database.client`INSERT INTO factory.merge_operation(
+      id,change_id,delivery_approval_id,pull_request_number,base_sha,commit_sha,idempotency_key,
+      state,observed_default_sha,completed_at)
+      VALUES(${crypto.randomUUID()},${f.owned.changeID},${approval},1,${"a".repeat(40)},
+        ${f.sha},${crypto.randomUUID()},'succeeded',${f.sha},now())`;
+    for (const [id, revision, state, generation] of [
+      [previous, "a".repeat(40), "ready", 2],
+      [failed, f.sha, "failed", 3],
+    ] as const)
+      await f.database.client`INSERT INTO factory.runtime_attempt(
+        id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,
+        child_connector_token_hash,create_intended_at,created_by,failure)
+        VALUES(${id},${f.owned.projectID},'staging',${generation},${revision},
+          ${state}::factory.runtime_attempt_state,${"a".repeat(64)},${"b".repeat(64)},now(),
+          ${f.owned.userID},${id === failed ? "missing Main-Preview configuration" : null})`;
+    await f.database
+      .client`INSERT INTO factory.staging_preview(project_id,revision,runtime_attempt_id)
+      VALUES(${f.owned.projectID},${"a".repeat(40)},${previous})`;
+    await f.database.client`INSERT INTO factory.promotion_operation(
+      id,change_id,project_id,commit_sha,state,previous_runtime_attempt_id,
+      replacement_runtime_attempt_id,last_error,completed_at)
+      VALUES(${promotion},${f.owned.changeID},${f.owned.projectID},${f.sha},'failed',
+        ${previous},${failed},'Replacement Staging failed before readiness',now())`;
+    await f.database
+      .client`UPDATE factory.change SET state='delivering' WHERE id=${f.owned.changeID}`;
+    const [original] = await f.database
+      .client`SELECT * FROM factory.promotion_operation WHERE id=${promotion}`;
+    if (!original) throw new Error("Missing original failed Promotion fixture");
+    const starts: string[] = [];
+    const stops: string[] = [];
+    const controller = createDeliveryController(
+      f.database,
+      {
+        startVerification: async () => {
+          throw new Error("Retry must not repeat Verification");
+        },
+        startStagingReplacement: async (id) => {
+          const [intent] = await f.database.client`SELECT commit_sha,previous_runtime_attempt_id
+            FROM factory.promotion_operation WHERE id=${id}`;
+          expect(intent).toMatchObject({
+            commit_sha: f.sha,
+            previous_runtime_attempt_id: previous,
+          });
+          starts.push(id);
+          await f.database.client`INSERT INTO factory.runtime_attempt(
+            id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,
+            child_connector_token_hash,create_intended_at,created_by)
+            VALUES(${replacement},${f.owned.projectID},'staging',4,${f.sha},'starting',
+              ${"c".repeat(64)},${"d".repeat(64)},now(),${f.owned.userID})`;
+          await f.database.client`UPDATE factory.promotion_operation SET state='starting',
+            replacement_runtime_attempt_id=${replacement} WHERE id=${id} AND state='pending'`;
+          return null;
+        },
+        stop: async (id) => {
+          stops.push(id);
+          return null;
+        },
+      },
+      {
+        prompt: async () => {
+          throw new Error("Retry must not repeat Coding or Review");
+        },
+      },
+      async () => {},
+      { client: f.forge, owner: "owned" },
+    );
+    expect(typeof controller.retryPromotion).toBe("function");
+    for (const state of ["starting", "ready", "pausing", "stopping", "cleanup-failed"]) {
+      await f.database.client`UPDATE factory.runtime_attempt
+        SET state=${state}::factory.runtime_attempt_state WHERE id=${failed}`;
+      await expect(
+        controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
+      ).rejects.toThrow("cleanup are confirmed");
+    }
+    // A terminal product state alone cannot erase an outstanding native input.
+    await f.database.client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${failed}`;
+    await f.database.client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request)
+      VALUES(${failed},'{}'::jsonb)`;
+    await f.database.client`UPDATE factory.runtime_attempt SET state='failed' WHERE id=${failed}`;
+    await expect(
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
+    ).rejects.toThrow("cleanup are confirmed");
+    await f.database.client`UPDATE factory.factorybox_runtime SET inputs_released_at=now()
+      WHERE runtime_attempt_id=${failed}`;
+    await f.database.client`UPDATE factory.staging_preview SET runtime_attempt_id=${failed}
+      WHERE project_id=${f.owned.projectID}`;
+    await expect(
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
+    ).rejects.toThrow("Main Preview changed");
+    await f.database.client`UPDATE factory.staging_preview SET runtime_attempt_id=${previous}
+      WHERE project_id=${f.owned.projectID}`;
+    f.setBase("e".repeat(40));
+    await expect(
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
+    ).rejects.toThrow("default branch");
+    expect(starts).toEqual([]);
+    f.setBase(f.sha);
+    await Promise.all([
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion),
+    ]);
+    await controller.reconcile(f.owned.changeID);
+    expect(starts).toEqual([command]);
+    expect((await controller.get(f.owned.changeID))?.["promotionId"]).toBe(command);
+    expect((await controller.get(f.owned.changeID))?.["promotionState"]).toBe("starting");
+    expect(
+      (await f.database.client`SELECT * FROM factory.promotion_operation WHERE id=${promotion}`)[0],
+    ).toEqual(original);
+    expect(
+      (
+        await f.database.client`SELECT runtime_attempt_id FROM factory.staging_preview
+      WHERE project_id=${f.owned.projectID}`
+      )[0]?.["runtime_attempt_id"],
+    ).toBe(previous);
+    expect(stops).toEqual([]);
+    await controller.retryPromotion(f.owned.changeID, f.owned.userID, command, promotion);
+    expect(starts).toEqual([command]);
+    await expect(
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, crypto.randomUUID(), promotion),
+    ).rejects.toThrow("Promotion changed");
+    await expect(
+      controller.retryPromotion(f.owned.changeID, f.owned.userID, command, command),
+    ).rejects.toThrow("retry changed target");
+    const resetOriginal = async () => {
+      await f.database
+        .client`UPDATE factory.promotion_operation SET state='pending',completed_at=NULL
+        WHERE id=${promotion}`;
+    };
+    await expect(resetOriginal()).rejects.toThrow("terminal outcome are immutable");
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacement}`;
+    await controller.reconcile(f.owned.changeID);
+    expect((await controller.get(f.owned.changeID))?.["promotionState"]).toBe("succeeded");
+    expect(
+      (
+        await f.database.client`SELECT runtime_attempt_id FROM factory.staging_preview
+      WHERE project_id=${f.owned.projectID}`
+      )[0]?.["runtime_attempt_id"],
+    ).toBe(replacement);
+    expect(stops).not.toContain(failed);
+    expect(
+      (await f.database.client`SELECT * FROM factory.promotion_operation WHERE id=${promotion}`)[0],
+    ).toEqual(original);
+    expect(
+      await f.database.client`SELECT state,failure FROM factory.runtime_attempt WHERE id=${failed}`,
+    ).toMatchObject([{ state: "failed", failure: "missing Main-Preview configuration" }]);
+  } finally {
+    await f.close();
+  }
+}, 60_000);

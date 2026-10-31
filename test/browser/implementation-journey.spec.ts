@@ -3075,6 +3075,130 @@ for (const reviewState of ["incomplete", "stopped"] as const)
     );
   });
 
+async function failedPromotionRetryJourney(page: Parameters<typeof signIn>[0], touch = false) {
+  const changeID = crypto.randomUUID();
+  const promotionID = crypto.randomUUID();
+  const replacementID = crypto.randomUUID();
+  const retryID = crypto.randomUUID();
+  const gate = Promise.withResolvers<void>();
+  const commands: Array<{ commandId: string; promotionId: string }> = [];
+  let retried = false;
+  const value = () =>
+    deliveryViewSchema.parse({
+      verificationState: "succeeded",
+      reviewState: "passed",
+      reviewCurrent: true,
+      approvedAt: new Date(0).toISOString(),
+      mergeState: "succeeded",
+      mergedCommitSha: "d".repeat(40),
+      promotionId: retried ? retryID : promotionID,
+      promotionState: retried ? "starting" : "failed",
+      promotionFailure: retried ? undefined : "Main Preview is missing CONTENTFUL_ACCESS_TOKEN.",
+      replacementRuntimeAttemptId: replacementID,
+      replacementRuntimeState: retried ? "starting" : "failed",
+      cleanupError: retried ? undefined : "Replacement Staging failed before readiness",
+    });
+  await mockFactoryFunctions(page, {
+    runtime: {
+      changes: async () =>
+        changesResponseSchema.parse({
+          changes: [
+            {
+              id: changeID,
+              projectId: projectID,
+              ticketId: ticketID,
+              branchName: "factory/owned-promotion",
+              baseSha: "a".repeat(40),
+              state: "delivering",
+              runtimeState: "ready",
+              branchState: "succeeded",
+              implementationState: "committed",
+              buildTurnState: "completed",
+              buildTurnPurpose: "review",
+              mergeState: "succeeded",
+              promotionState: value().promotionState,
+            },
+          ],
+        }),
+    },
+    delivery: {
+      get: async () => value(),
+      retryPromotion: async (_actor, id, input) => {
+        expect(id).toBe(changeID);
+        expect(input.promotionId).toBe(promotionID);
+        commands.push(input);
+        await gate.promise;
+        retried = true;
+        return value();
+      },
+    },
+  });
+  await mockAgentView(
+    page,
+    changeID,
+    async () => ({
+      state: "committed",
+      sessionAvailable: true,
+      runtimeConnected: true,
+      messagesAvailable: true,
+      messages: [],
+      stopPending: false,
+      stopId: null,
+    }),
+    { activity: true },
+  );
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "Ticket board" })
+    .getByRole("button")
+    .filter({ hasText: title })
+    .click();
+  const progress = page.getByRole("status", { name: "Ticket progress" });
+  const retry = page.getByRole("button", { name: "Retry Main Preview", exact: true });
+  await expect(progress).toContainText("merged, but Main Preview failed");
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
+  await page.locator(".ticket-checks > summary").click();
+  await expect(page.getByRole("note")).toContainText("missing CONTENTFUL_ACCESS_TOKEN");
+  expect(await page.getByText("Delivery is complete.", { exact: false }).count()).toBe(0);
+  expect(
+    await page.getByText("Delivery still needs your approval.", { exact: false }).count(),
+  ).toBe(0);
+  await wakeFactoryReads(page);
+  expect(commands).toEqual([]);
+  const evidence = ".factory/test-results/promotion-retry";
+  await mkdir(evidence, { recursive: true });
+  for (const width of touch ? [390] : [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      width,
+    );
+    await page.screenshot({ path: `${evidence}/failed-${touch ? "touch" : width}.png` });
+  }
+  if (touch) await retry.tap();
+  else await retry.click();
+  await expect(retry).toBeDisabled();
+  await expect.poll(() => commands.length).toBe(1);
+  expect(commands[0]?.promotionId).toBe(promotionID);
+  gate.resolve();
+  await expect(retry).toHaveCount(0);
+  await expect(progress).toContainText("Delivery is in progress");
+  expect(commands).toHaveLength(1);
+  await page.screenshot({ path: `${evidence}/starting-${touch ? "touch" : "narrow"}.png` });
+}
+
+test("failed Promotion exposes one explicit Main Preview retry without another merge", async ({
+  page,
+}) => {
+  await failedPromotionRetryJourney(page);
+});
+test.describe("synthetic touch Promotion recovery", () => {
+  test.use({ hasTouch: true, isMobile: true });
+  test("failed Promotion retries the same target from a touch action", async ({ page }) => {
+    await failedPromotionRetryJourney(page, true);
+  });
+});
+
 test("Review corrections send to the retained Build without IDE; checks and controls remain compact", async ({
   page,
 }) => {

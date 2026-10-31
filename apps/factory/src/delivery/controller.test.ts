@@ -104,7 +104,7 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
         return [{ count: 0 }];
       if (query.includes("UPDATE factory.verification SET repair_prompted_at = now()"))
         repairAcknowledged = true;
-      if (query.includes("FROM factory.promotion_operation promotion"))
+      if (query.includes("FROM factory.current_promotion promotion"))
         return state === "delivered"
           ? [
               {

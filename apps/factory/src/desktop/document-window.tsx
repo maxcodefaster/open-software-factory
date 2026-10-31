@@ -223,6 +223,7 @@ export interface DocumentWindowModel {
   retryMainPreview: (tab: WorkspaceTab) => Promise<void>;
   approveDelivery: (changeID: string) => Promise<void>;
   retryReview: (changeID: string) => Promise<void>;
+  retryPromotion: (changeID: string) => Promise<void>;
   resumeChecks: (changeID: string) => Promise<void>;
   canDevelopProject: () => boolean;
   browserRepository: () => string | undefined;
@@ -495,6 +496,7 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
                     active={model.workspaceVisible() && model.workspaceView() === "ticket"}
                     onApproveDelivery={(changeID) => void model.approveDelivery(changeID)}
                     onRetryReview={(changeID) => void model.retryReview(changeID)}
+                    onRetryPromotion={(changeID) => void model.retryPromotion(changeID)}
                     onResumeChecks={(changeID) => void model.resumeChecks(changeID)}
                     canDevelop={model.canDevelopProject()}
                     userID={model.bootstrap.session.user.id}
