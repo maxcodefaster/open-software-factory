@@ -23,8 +23,15 @@ export function createRepositoryKnowledgeCache() {
       }
       return value;
     },
-    content(repository: string, blob: string, load: () => Promise<string>) {
-      const key = `${repository}:${blob}`;
+    content(
+      repository: string,
+      blob: string,
+      load: () => Promise<string>,
+      maximumFileBytes = 250_000,
+    ) {
+      // A paginated source read cannot make a stricter document read inherit
+      // its larger admission limit, including concurrent reads of the same blob.
+      const key = `${repository}:${blob}:${maximumFileBytes}`;
       const cached = contents.get(key);
       if (cached) return cached.value;
       const entry = { value: Promise.resolve(""), bytes: 0 };
@@ -36,7 +43,7 @@ export function createRepositoryKnowledgeCache() {
       entry.value = load()
         .then((text) => {
           const bytes = new TextEncoder().encode(text).byteLength;
-          if (bytes > 250_000)
+          if (bytes > maximumFileBytes)
             throw new Error("Repository document exceeds the readable size limit");
           if (contents.get(key) === entry) {
             entry.bytes = bytes;

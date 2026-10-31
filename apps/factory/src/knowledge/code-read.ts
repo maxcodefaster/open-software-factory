@@ -1,5 +1,9 @@
 import { z } from "zod";
 
+// Whole blobs remain bounded in the repository adapter; model reads are still
+// paginated to 16,000 characters, including large lockfiles and source modules.
+export const maximumReadableCodeBytes = 16 * 1024 * 1024;
+
 export const codeReference = z
   .object({
     commitSha: z.string().regex(/^[0-9a-f]{40}$|^[0-9a-f]{64}$/),
@@ -59,9 +63,10 @@ export function readableCodePath(path: string) {
     !/(^|\/)(\.env($|\.)|.*(?:secret|credential|private[-_]?key).*|.*\.(?:pem|key|p12|pfx))$/i.test(
       path,
     ) &&
-    /\.(?:mdx?|tsx?|jsx?|mjs|cjs|json|ya?ml|toml|go|py|rs|java|kt|cs|sh|sql|html|css|svelte|vue|rb|php|exs?|tf)$/i.test(
+    (/\.(?:mdx?|tsx?|jsx?|mjs|cjs|json|ya?ml|toml|go|py|rs|java|kt|cs|sh|sql|html|css|svelte|vue|rb|php|exs?|tf)$/i.test(
       path,
-    )
+    ) ||
+      /(?:^|\/)(?:Dockerfile|Containerfile)(?:\.[^/]+)?$/i.test(path))
   );
 }
 
@@ -81,7 +86,9 @@ export function findReadableCodePaths(
     }))
     .filter(
       (file) =>
-        readableCodePath(file.path) && file.size <= 250000 && (!terms.length || file.score > 0),
+        readableCodePath(file.path) &&
+        file.size <= maximumReadableCodeBytes &&
+        (!terms.length || file.score > 0),
     )
     .sort((a, b) => b.score - a.score || a.index - b.index);
   return {

@@ -17,6 +17,7 @@ import {
   codeReadInput,
   codeReadResult,
   findReadableCodePaths,
+  maximumReadableCodeBytes,
   readableCodePath,
   readCodePage,
 } from "./code-read";
@@ -476,7 +477,7 @@ export function createKnowledgeController(
       const input = codeReadInput.parse(value);
       const current = await inventory(projectID, input.commitSha);
       const entry = current.files.find((file) => file.path === input.path);
-      if (!entry || entry.size > 250000 || !readableCodePath(input.path))
+      if (!entry || entry.size > maximumReadableCodeBytes || !readableCodePath(input.path))
         throw new CommandError("not-found", "Code source is unavailable");
       const content = await repositoryCache.content(
         current.project.repositoryURL,
@@ -491,6 +492,7 @@ export function createKnowledgeController(
             throw new Error("Code blob does not match its readable inventory");
           return file.content;
         },
+        Math.max(250_000, entry.size),
       );
       await createAccessController(database).requireDevelopment(userID, projectID);
       return codeReadResult.parse({
