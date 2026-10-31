@@ -190,6 +190,46 @@ test("only the explicit technical task admits a Technical Design output", () => 
   expect(parseProjectAgentOutput(technical, "plan", true).kind).toBe("technical-design");
 });
 
+test("Technical Planning retains a substantive explanation under the ordinary answer limit", () => {
+  const message = "A grounded explanation of the selected design and its limits. ".repeat(45);
+  expect(message.length).toBeGreaterThan(2_000);
+  const value = {
+    output: {
+      kind: "technical-design",
+      message,
+      design: planningDesign,
+      citations: [],
+    },
+  };
+  expect(parseProjectAgentOutput(value, "plan", true).message).toBe(message.trim());
+  expect(
+    projectAgentProviderOutputFor("plan", false, false, true).safeParse({
+      output: { ...value.output, message: "x".repeat(12_001) },
+    }).success,
+  ).toBe(false);
+  expect(() =>
+    parseProjectAgentOutput(
+      {
+        output: {
+          ...value.output,
+          citations: [
+            {
+              source: "code",
+              id: "https://docs.example.com",
+              label: "Not a Project source",
+              commitSha: "a".repeat(40),
+              path: "tools/start.mjs",
+              reference: 1,
+            },
+          ],
+        },
+      },
+      "plan",
+      true,
+    ),
+  ).toThrow();
+});
+
 test("validation diagnostics retain only schema paths and codes, never provider data", () => {
   const failure = z.object({ design: z.string() }).safeParse({ design: 1 });
   const error = new ProjectAgentOutputError(

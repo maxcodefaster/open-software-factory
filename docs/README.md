@@ -205,8 +205,9 @@ inference, with at most 8 KiB of reference text. Other Skills and larger referen
 Manual-only guidance still requires invocation. Task-specific structured context preserves earlier
 decisions and option meanings within 96 KiB without duplicating the current input. Oversized core
 context fails before inference; optional assistant background may be omitted. Research/Interview
-instructions and output contracts stay separate. Project requests have a 60-second deadline,
-six provider steps, 256 KiB of serialized per-step input and at most 6,000 output tokens per step.
+instructions and output contracts stay separate. Project research continues until the model
+finishes or its admitted caller cancels or loses authority, without a fixed research-step count.
+Each step retains 256 KiB of serialized input and at most 6,000 output tokens.
 These byte limits are conservative resource bounds, not tokenizer-specific context guarantees.
 Wiki uses a shared budget of 32 provider requests, including tool rounds and deliberate repairs,
 with at most 1 MiB of per-step input and 8,000 output tokens. Setup/probes use the same no-retry
@@ -222,7 +223,10 @@ have a bounded client lifetime without retrying the model request.
 Questions and proposals stay hidden until validated. Partial text is not persisted; final validation
 publishes the answer and its citations once. Disconnecting a browser does not stop or replay work.
 The Project Agent adapter uses source-specific provider citations: only Code requires a commit/path;
-an unused footnote is nullable. Factory validates the returned domain result, including Epic rules.
+an unused footnote is nullable. Code reads return a complete citation with the owning Project UUID
+and exact inspected commit/path. External MCP documentation uses its observed public link, not an
+invented Project citation. Technical explanations use the ordinary answer-size bound; the structured
+design remains separate. Factory validates the returned domain result, including Epic rules.
 A known structured-output rejection is failed, not an unknown provider outcome.
 
 One OpenCode server runs as the development user in the Ticket Workspace. Factory reaches its

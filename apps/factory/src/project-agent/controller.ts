@@ -854,6 +854,7 @@ export function createProjectAgentController(
             ))
               ? {
                   code: {
+                    projectID: command.projectId,
                     authorize: () =>
                       createAccessController(database).requireDevelopment(
                         command.createdBy,

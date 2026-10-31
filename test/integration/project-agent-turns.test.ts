@@ -1229,7 +1229,7 @@ test("a known local structured-output rejection is failed, not an unknown provid
     );
     const current = await owned.controller().get(owned.projectID, undefined, owned.userID);
     expect(current?.turn?.summary).toBe(
-      "The Project Agent returned an invalid response. Your input is saved. Validation: STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
+      "The Project Agent returned an invalid response. Your input is saved. Validation: output.message: too_small",
     );
     await owned
       .controller()

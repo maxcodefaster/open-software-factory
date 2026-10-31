@@ -2,18 +2,18 @@ import { z } from "zod";
 import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import type { SkillRevision } from "../../../../packages/conversation-domain/src/skills";
 import type { createDatabase } from "../../../../packages/db/src/client";
-import type { createKnowledgeController } from "../knowledge/controller";
-import type { createMCPConnections } from "../mcp/connections";
-import { mcpSourceAlias } from "../mcp/sources";
-import { generateProjectResponse } from "./adapter";
-import { readResearch, searchResearch } from "./research";
-import type { ResolvedModelConnection } from "../models/native";
-import type { MastraUsageSink } from "../usage/mastra";
-import { monitoringDiagnosis } from "../monitoring/diagnosis";
-import { monitoringDigest } from "../monitoring/payload";
 import { projectDevelopmentAuthorityIn } from "../access/controller";
 import { CommandError } from "../command-error";
+import type { createKnowledgeController } from "../knowledge/controller";
+import type { createMCPConnections } from "../mcp/connections";
 import { createMCPLibrary } from "../mcp/controller";
+import { mcpSourceAlias } from "../mcp/sources";
+import type { ResolvedModelConnection } from "../models/native";
+import { monitoringDiagnosis } from "../monitoring/diagnosis";
+import { monitoringDigest } from "../monitoring/payload";
+import type { MastraUsageSink } from "../usage/mastra";
+import { generateProjectResponse } from "./adapter";
+import { readResearch, searchResearch } from "./research";
 
 export const inputClarification = monitoringDiagnosis.extend({
   outcome: z.enum(["ticket", "fix", "insufficient-context", "not-application-defect"]),
@@ -145,6 +145,7 @@ export async function clarifyProjectInput(input: {
       ...(input.skillAssignment.codeAccess
         ? {
             code: {
+              projectID: input.projectId,
               authorize: async () => {
                 await input.authorize();
                 await input.database.client.begin((sql) =>
