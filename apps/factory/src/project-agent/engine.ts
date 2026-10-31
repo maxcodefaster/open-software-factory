@@ -514,7 +514,11 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
           return undefined;
         };
       })(),
-      modelSettings: { maxRetries: 0, maxOutputTokens: 6000 },
+      // Reasoning and visible JSON share provider output allowances. A small
+      // cross-model ceiling can consume the whole allowance before a valid
+      // result exists. Keep native provider/model defaults, not a second cap.
+      // Authored input/media and the final domain schemas remain bounded.
+      modelSettings: { maxRetries: 0 },
       structuredOutput: { schema: outputSchema, jsonPromptInjection: "auto" as const },
     };
     const response = await (async () => {
