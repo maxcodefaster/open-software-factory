@@ -15,20 +15,34 @@ import {
   factoryFunctionRequest,
 } from "../fixtures/server-functions";
 
-async function setup() {
+async function setup(integrations = 0) {
   const host = await factoryProcess();
   const database = host.connect();
   try {
     const f = await candidateReviewFixture(undefined, database);
+    let commit = f.commit;
+    for (let index = 0; index < integrations; index++) {
+      const next = String(index + 3).repeat(40);
+      await database.client`INSERT INTO factory.change_commit_operation(
+        id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,
+        integration_base_sha,merge_parent_sha,commit_sha,observed_remote_sha,
+        commit_message,idempotency_key,state,created_by,completed_at,source)
+        SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,${index + 2},branch_name,
+          ${commit},${String(index + 5).repeat(40)},${String(index + 5).repeat(40)},
+          ${next},${next},'Integrate current main',${crypto.randomUUID()},'succeeded',
+          created_by,now(),'integration'
+        FROM factory.change_commit_operation WHERE id=${f.initial.id}`;
+      commit = next;
+    }
     const attemptID = crypto.randomUUID();
     await database.client`DELETE FROM factory.candidate_review WHERE id=${f.reviewID}`;
-    await database.client`UPDATE factory.verification SET state='runner-starting',
+    await database.client`UPDATE factory.verification SET state='runner-starting',commit_sha=${commit},
       summary=NULL,completed_at=NULL,runner_id=16,runner_uuid=${crypto.randomUUID()},
       runner_token='owned-bootstrap-token' WHERE id=${f.verificationID}`;
     await database.client`INSERT INTO factory.runtime_attempt(
       id,project_id,verification_id,isolated_kind,generation,revision,state,
       parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by,failure)
-      VALUES(${attemptID},${f.projectID},${f.verificationID},'verification',2,${f.commit},
+      VALUES(${attemptID},${f.projectID},${f.verificationID},'verification',2,${commit},
         'failed',${"a".repeat(64)},${"b".repeat(64)},now(),${f.userID},
         'Dev Container postCreateCommand failed: owned browser download failed')`;
     await database.client`UPDATE factory.verification SET runtime_attempt_id=${attemptID}
@@ -54,7 +68,7 @@ async function setup() {
       ...createForgejoClient({ apiURL: "http://127.0.0.1:9/api/v1/", token: "owned-unused" }),
       getPullRequest: async () => ({
         number: 1,
-        headSha: f.commit,
+        headSha: commit,
         merged: false,
         state: "open",
         url: "https://forge.invalid/owned/review/pulls/1",
@@ -71,7 +85,7 @@ async function setup() {
             id: 1,
             workflowID: "factory-verification.yml",
             event: "pull_request",
-            commitSha: f.commit,
+            commitSha: commit,
             status: actionState,
             url: "https://forge.invalid/owned/review/actions/runs/1",
           },
@@ -96,7 +110,7 @@ async function setup() {
           await database.client`INSERT INTO factory.runtime_attempt(
             id,project_id,verification_id,isolated_kind,generation,revision,state,
             parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-            VALUES(${nextID},${f.projectID},${f.verificationID},'verification',3,${f.commit},
+            VALUES(${nextID},${f.projectID},${f.verificationID},'verification',3,${commit},
               'starting',${"c".repeat(64)},${"d".repeat(64)},now(),${f.userID})`;
           await database.client`UPDATE factory.verification SET runtime_attempt_id=${nextID}
             WHERE id=${f.verificationID}`;
@@ -134,6 +148,7 @@ async function setup() {
     });
     return {
       ...f,
+      commit,
       host,
       controller,
       bootstrapAttemptID: attemptID,
@@ -214,48 +229,114 @@ test("a failed bootstrap is retained and cleaned up without silently starting an
   }
 });
 
-test("an explicit native retry retains the failed outcome and repeated commands do not dispatch again", async () => {
-  const f = await setup();
+test.each([0, 1, 2])(
+  "an explicit native retry after %i integrations retains the failed outcome and never redispatches repeated commands",
+  async (integrations) => {
+    const f = await setup(integrations);
+    try {
+      await f.controller.reconcile(f.changeID);
+      const failed = await f.row();
+      expect(await f.controller.get(f.changeID)).toMatchObject({
+        checksRetryAttemptId: f.bootstrapAttemptID,
+      });
+      const commandID = crypto.randomUUID();
+      const call = () => f.nativeRetry(commandID);
+      const responses = await Promise.all([call(), call()]);
+      expect(responses).toMatchObject([{ ok: true }, { ok: true }]);
+      const retried = await f.row();
+      expect(retried).toMatchObject({ state: "runner-starting", runner: "17", diagnosis: null });
+      expect(retried.runtime).not.toBe(f.bootstrapAttemptID);
+      expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
+      const [receipt] = await f.database.client<{ result: unknown }[]>`
+      SELECT result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
+      expect(receipt?.result).toMatchObject({
+        verificationID: f.verificationID,
+        runtimeAttemptID: f.bootstrapAttemptID,
+        state: "failed",
+        diagnosis: failed.diagnosis,
+      });
+      const observations = f.observations();
+      expect(await call()).toMatchObject({ ok: true });
+      expect(f.observations()).toBe(observations);
+      expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
+      expect(await f.nativeRetry(commandID, crypto.randomUUID())).toMatchObject({
+        ok: false,
+        status: 409,
+      });
+      const [original] = await f.database.client<{ state: string; failure: string }[]>`
+      SELECT state,failure FROM factory.runtime_attempt WHERE id=${f.bootstrapAttemptID}`;
+      expect(original).toMatchObject({
+        state: "stopped",
+        failure: "Dev Container postCreateCommand failed: owned browser download failed",
+      });
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test("confirmed Stop can resume an integrated submitted candidate without replaying Coding", async () => {
+  const f = await setup(2);
   try {
     await f.controller.reconcile(f.changeID);
-    const failed = await f.row();
+    const stopID = crypto.randomUUID();
+    await f.database.client`UPDATE factory.change_agent_session SET state='stopped',
+      stop_id=${stopID},stop_pending=false WHERE change_id=${f.changeID}`;
+    expect(await f.controller.get(f.changeID)).toMatchObject({ checksStopId: stopID });
+    const commandID = crypto.randomUUID();
+    await f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID);
+    await f.controller.resumeChecks(f.changeID, f.userID, commandID, f.verificationID, stopID);
     expect(await f.controller.get(f.changeID)).toMatchObject({
       checksRetryAttemptId: f.bootstrapAttemptID,
     });
-    const commandID = crypto.randomUUID();
-    const call = () => f.nativeRetry(commandID);
-    const responses = await Promise.all([call(), call()]);
-    expect(responses).toMatchObject([{ ok: true }, { ok: true }]);
-    const retried = await f.row();
-    expect(retried).toMatchObject({ state: "runner-starting", runner: "17", diagnosis: null });
-    expect(retried.runtime).not.toBe(f.bootstrapAttemptID);
-    expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
-    const [receipt] = await f.database.client<{ result: unknown }[]>`
-      SELECT result FROM factory.execution_policy_command WHERE command_id=${commandID}`;
-    expect(receipt?.result).toMatchObject({
-      verificationID: f.verificationID,
-      runtimeAttemptID: f.bootstrapAttemptID,
-      state: "failed",
-      diagnosis: failed.diagnosis,
-    });
-    const observations = f.observations();
-    expect(await call()).toMatchObject({ ok: true });
-    expect(f.observations()).toBe(observations);
-    expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
-    expect(await f.nativeRetry(commandID, crypto.randomUUID())).toMatchObject({
-      ok: false,
-      status: 409,
-    });
-    const [original] = await f.database.client<{ state: string; failure: string }[]>`
-      SELECT state,failure FROM factory.runtime_attempt WHERE id=${f.bootstrapAttemptID}`;
-    expect(original).toMatchObject({
-      state: "stopped",
-      failure: "Dev Container postCreateCommand failed: owned browser download failed",
-    });
+    expect(f.counts()).toEqual({ registrations: 0, starts: 0, prompts: 0 });
+    const [session] = await f.database.client<{ state: string; turn: string }[]>`
+      SELECT state,active_turn_id AS turn FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
+    expect(session).toEqual({ state: "committed", turn: f.initial.id });
   } finally {
     await f.close();
   }
 });
+
+test.each(["stale-verification", "later-submission"] as const)(
+  "integrated bootstrap recovery still refuses %s",
+  async (condition) => {
+    const f = await setup(2);
+    try {
+      await f.controller.reconcile(f.changeID);
+      if (condition === "stale-verification")
+        await f.database.client`UPDATE factory.verification SET commit_sha=(
+          SELECT commit_sha FROM factory.change_commit_operation WHERE id=${f.initial.id})
+          WHERE id=${f.verificationID}`;
+      else {
+        const later = "9".repeat(40);
+        await f.database.client`INSERT INTO factory.change_commit_operation(
+          id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,commit_sha,
+          observed_remote_sha,commit_message,idempotency_key,state,created_by,completed_at)
+          SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,4,branch_name,${f.commit},
+            ${later},${later},'Later submission',${crypto.randomUUID()},'succeeded',created_by,now()
+          FROM factory.change_commit_operation WHERE id=${f.initial.id}`;
+        await f.database.client`UPDATE factory.verification SET commit_sha=${later}
+          WHERE id=${f.verificationID}`;
+      }
+      const before = await f.row();
+      expect((await f.controller.get(f.changeID))?.["checksRetryAttemptId"]).toBeNull();
+      await expect(
+        f.controller.retryBootstrap(
+          f.changeID,
+          f.userID,
+          crypto.randomUUID(),
+          f.verificationID,
+          f.bootstrapAttemptID,
+        ),
+      ).rejects.toMatchObject({ code: "conflict" });
+      expect(await f.row()).toEqual(before);
+      expect(f.counts()).toEqual({ registrations: 0, starts: 0, prompts: 0 });
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test.each([
   "cleanup",

@@ -1313,7 +1313,9 @@ export function createDeliveryController(
           { state: string; stopping: boolean; stopID: string | null; submitted: boolean }[]
         >`
           SELECT session.state,session.stop_pending AS stopping,session.stop_id AS "stopID",
-            (commit.id=session.active_turn_id AND turn.state='completed') AS submitted
+            (session.active_turn_id=(SELECT id FROM factory.change_commit_operation
+              WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
+              ORDER BY sequence DESC LIMIT 1) AND turn.state='completed') AS submitted
           FROM factory.verification verification
           JOIN factory.change change ON change.id=verification.change_id
           JOIN factory.change_agent_session session ON session.change_id=change.id
@@ -1467,7 +1469,8 @@ export function createDeliveryController(
           CASE WHEN session.state='stopped' AND NOT session.stop_pending
             AND writer.state IN ('agent','unassigned') AND change.cancel_requested_at IS NULL
             AND session.active_turn_id=(SELECT id FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
+              WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
+              ORDER BY sequence DESC LIMIT 1)
             AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=session.active_turn_id AND state='completed')
             AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
               AND state IN ('pending','dispatching','running','uncertain'))
@@ -1486,7 +1489,8 @@ export function createDeliveryController(
             AND verification.diagnosis->>'runtimeAttemptId'=verification_runtime.id::text
             AND verification.diagnosis->'jobs'='[]'::jsonb
             AND session.active_turn_id=(SELECT id FROM factory.change_commit_operation
-              WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
+              WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
+              ORDER BY sequence DESC LIMIT 1)
             AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=session.active_turn_id AND state='completed')
             AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
               AND state IN ('pending','dispatching','running','uncertain'))

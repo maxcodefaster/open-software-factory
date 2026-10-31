@@ -49,7 +49,12 @@ export async function retryVerificationBootstrap(
       JOIN LATERAL (
         SELECT id,commit_sha FROM factory.change_commit_operation
         WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1
-      ) commit ON commit.id=session.active_turn_id AND commit.commit_sha=verification.commit_sha
+      ) commit ON commit.commit_sha=verification.commit_sha
+      JOIN LATERAL (
+        SELECT id FROM factory.change_commit_operation
+        WHERE change_id=change.id AND state='succeeded' AND source<>'integration'
+        ORDER BY sequence DESC LIMIT 1
+      ) submitted ON submitted.id=session.active_turn_id
       JOIN factory.agent_turn turn ON turn.id=session.active_turn_id AND turn.state='completed'
       JOIN factory.runtime_attempt attempt ON attempt.id=verification.runtime_attempt_id
         AND attempt.verification_id=verification.id AND attempt.state='stopped'
