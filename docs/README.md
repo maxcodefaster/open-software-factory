@@ -212,10 +212,13 @@ own the output allowance rather than a fixed cross-model Factory ceiling; reason
 structured output share that allowance. Input/media bounds, final result schemas, authority and
 cancellation still apply, and a genuinely truncated response is rejected without replay.
 These byte limits are conservative resource bounds, not tokenizer-specific context guarantees.
-Wiki uses a shared budget of 32 provider requests, including tool rounds and deliberate repairs,
-with at most 1 MiB of per-step input and 8,000 output tokens. Page-quality repairs use that shared
-budget rather than a separate two-round cutoff. Exhaustion never publishes a broken or unchecked
-draft. Setup/probes use the same no-retry
+Wiki uses at most 1 MiB of per-step input and 8,000 output tokens. Ordinary Project updates have no
+fixed request-step count or separate two-round page-repair cutoff. Explicit callers can admit a
+shared request budget covering tool rounds and deliberate repairs; exhaustion never publishes a
+broken or unchecked draft. Known native provider errors distinguish credentials, model access,
+request rejection, rate limits and provider server failures without exposing provider prose or
+credentials or automatically repeating a request. Source and storage failures retain their own
+diagnostics. Setup/probes use the same no-retry
 policy and their existing task deadlines. Setup, runtime, source, IDE, Forge access, Change Writer
 and execution-reserve coordination use
 short-lived PostgreSQL sessions so infrastructure waits do not occupy the application pool.

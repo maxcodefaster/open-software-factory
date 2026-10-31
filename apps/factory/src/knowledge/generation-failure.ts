@@ -1,3 +1,4 @@
+import { modelProbeFailure } from "../models/probe";
 import { isStructuredOutputFailure } from "../project-agent/structured-output";
 
 export class WikiHumanEditConflict extends Error {
@@ -64,6 +65,23 @@ export function wikiGenerationFailureMessage(cause: unknown, fallback: string) {
   for (let depth = 0; depth < 8 && current && typeof current === "object"; depth++) {
     if ("name" in current && current.name === "ModelExecutionBoundError")
       return "The Wiki update reached its configured model execution bounds. No additional provider request was started. Saved pages are retained.";
+    // A Forge or storage HTTP refusal is not a model failure. Only the native
+    // provider error may select these static, content-free diagnostics.
+    if ("name" in current && current.name === "AI_APICallError") {
+      const status = "statusCode" in current ? current.statusCode : undefined;
+      if (typeof status === "number" && status >= 500 && status <= 599)
+        return "The Wiki provider could not complete its request because of a server error. Factory did not automatically repeat the request. Saved pages are retained.";
+      switch (modelProbeFailure(current)) {
+        case "invalid-credentials":
+          return "The Wiki provider rejected its configured credentials. Check the model connection. Saved pages are retained.";
+        case "model-denied":
+          return "The Wiki model is not available on the configured connection or access was refused. Saved pages are retained.";
+        case "rate-limited":
+          return "The Wiki provider rate limit was reached. Saved pages are retained. Retry the update when capacity is available.";
+        case "unsupported":
+          return "The Wiki provider rejected the request for the configured model. Check the model connection and selected model. Saved pages are retained.";
+      }
+    }
     current = "cause" in current ? current.cause : undefined;
   }
   return fallback;
