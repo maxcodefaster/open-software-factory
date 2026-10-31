@@ -1,15 +1,14 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import {
   type AgentTurnTransaction,
   createAgentTurnStore,
 } from "../../apps/factory/src/agent/turn-store";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
-
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import { claimAgentWriterIn } from "../../apps/factory/src/access/change-writer";
 
 test("Build waits for OpenCode after IDE readiness without repeating a prompt", async () => {
   const owned = await fixture();
@@ -313,6 +312,82 @@ test("running Build observation waits for native activity rather than polling hi
     expect(owned.requests()).toBe(1);
     expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
   } finally {
+    await owned.dispose();
+  }
+}, 20_000);
+
+test("terminal Build closes its owned background shell before submission without another prompt", async () => {
+  const owned = await fixture();
+  const controller = owned.controller();
+  const commandID = crypto.randomUUID();
+  const request = owned.hub.request.bind(owned.hub);
+  const removing = Promise.withResolvers<void>();
+  const removed = Promise.withResolvers<void>();
+  let running = true;
+  let shell = true;
+  let reads = 0;
+  let removals = 0;
+  owned.hub.request = async (attempt, channel, input, path) => {
+    const url = new URL(input.url);
+    if (url.pathname === "/api/session/active") {
+      reads++;
+      return Response.json({ data: running ? { [owned.sessionID]: { type: "running" } } : {} });
+    }
+    if (url.pathname === "/api/shell")
+      return Response.json({
+        data: shell
+          ? [
+              {
+                id: "sh_owned_completion",
+                status: "running",
+                metadata: { sessionID: owned.sessionID },
+              },
+            ]
+          : [],
+      });
+    if (url.pathname === "/api/shell/sh_owned_completion" && input.method === "DELETE") {
+      removals++;
+      removing.resolve();
+      await removed.promise;
+      shell = false;
+      return new Response(null, { status: 204 });
+    }
+    return request(attempt, channel, input, path);
+  };
+  try {
+    owned.acceptResponse();
+    await controller.prompt(
+      owned.changeID,
+      "Finish with an owned background server",
+      owned.userID,
+      commandID,
+    );
+    await owned.requested;
+    owned.release();
+    owned.finish();
+    await until(async () => reads > 0, 300);
+    await Bun.sleep(200);
+    expect(removals).toBe(0);
+    expect((await owned.turn(commandID))?.state).toBe("running");
+    running = false;
+    owned.publishActivity();
+    await until(async () => {
+      expect((await owned.turn(commandID))?.summary).toBeNull();
+      return removals === 1;
+    }, 300);
+    await removing.promise;
+    expect((await owned.turn(commandID))?.state).toBe("running");
+    expect(owned.commitCalls).toHaveLength(0);
+    removed.resolve();
+    await until(async () => (await controller.get(owned.changeID)).state === "committed", 300);
+    expect(owned.requests()).toBe(1);
+    expect(removals).toBe(1);
+    expect(shell).toBe(false);
+    expect(owned.commitCalls).toEqual(["git-prepare-commit", "git-push"]);
+  } finally {
+    removed.resolve();
+    running = false;
+    shell = false;
     await owned.dispose();
   }
 }, 20_000);

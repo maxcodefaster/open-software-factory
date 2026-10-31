@@ -239,6 +239,10 @@ native API through the Runtime Connector and `@opencode/client`; browsers do not
 OpenCode receives generation-bound inference access and no reusable forge credential. Factory
 controls commit creation and the exact authorized branch push. Stop fences ownership, interrupts
 owned descendants and removes owned background shells before confirming settlement.
+When the exact native input has a final outcome and all its Sessions are idle, ordinary monitoring
+also drains any remaining owned background shells through that ordered native interrupt. It
+reobserves the same input before settlement or commit. Active inference and unattributed shells
+never authorize that cleanup, and a final answer cannot release editing while its shell still runs.
 If the exact execution has already exited, native Stop recovery can settle retained input in a
 one-shot Pod without restarting the Dev Container. It mounts only the retained native store,
 not Project files or Git configuration at the original location, and has no model or Factory

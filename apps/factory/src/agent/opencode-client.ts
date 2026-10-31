@@ -270,13 +270,12 @@ export async function observeOpenCodeWork(
     (shell) => shell.metadata.sessionID && sessionIDs.has(shell.metadata.sessionID),
   );
   const unknownShell = shells.some((shell) => !shell.metadata.sessionID);
+  const sessionsRunning = [...sessionIDs].some((id) => Object.hasOwn(active, id));
   return {
     sessionIDs: [...sessionIDs],
     shells: ownedShells,
-    running:
-      unknownShell ||
-      ownedShells.length > 0 ||
-      [...sessionIDs].some((id) => Object.hasOwn(active, id)),
+    running: unknownShell || ownedShells.length > 0 || sessionsRunning,
+    sessionsRunning,
     unknownShell,
   };
 }

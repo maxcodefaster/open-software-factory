@@ -29,6 +29,7 @@ import {
   confirmSettledOpenCodeInput,
   createOpenCodeClient,
   ensureOpenCodeMessageBoundary,
+  interruptOpenCodeSession,
   isOpenCodeObservationTransportError,
   observeOpenCodeWork,
   promptRecordedOpenCodeInput,
@@ -1112,13 +1113,27 @@ export function createAgentController(
                 : {}),
             })),
             session.activeInboxID,
-            work.running,
+            work.sessionsRunning || work.unknownShell,
             {
               prompt: intent.text,
               criteria: intent.criteria,
               ...(intent.submissionPolicy === "native" ? { policy: "native" as const } : {}),
             },
           );
+          if (
+            (outcome.state === "failed" || outcome.state === "succeeded") &&
+            work.shells.length > 0
+          ) {
+            // A native final answer can leave an owned background server alive.
+            // Drain that exact Session tree before settling, without another
+            // prompt. Never clean up live inference or unattributed shells.
+            if (!(await renewExecution(turnID, ownerToken))) continue;
+            if ((await interruptOpenCodeSession(client, session.sessionID)) === "unconfirmed")
+              throw new Error("OpenCode finished but its background shell cleanup is unconfirmed");
+            // Re-observe both execution and exact input after the ordered
+            // cleanup. Writer release and commit still require settled work.
+            continue;
+          }
           // History can observe a terminal outcome after the earlier log watermark.
           // Drain again before settlement so the last paid step cannot be missed.
           if (outcome.state === "failed" || outcome.state === "succeeded")
