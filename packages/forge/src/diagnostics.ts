@@ -1,10 +1,13 @@
 import { z } from "zod";
 import {
-  verificationReceiptInput,
   type VerificationDiagnosis,
   type VerificationReceipt,
+  verificationReceiptInput,
 } from "../../conversation-domain/src/verification";
+import { readVerificationDiagnostic, sanitizeVerificationOutput } from "./diagnostic-output";
 import type { ForgeRepository } from "./forge";
+
+export { sanitizeVerificationOutput } from "./diagnostic-output";
 
 const runInput = z.object({
   id: z.number().int().positive(),
@@ -30,10 +33,6 @@ const jobInput = z.object({
     .optional(),
 });
 const terminal = new Set(["success", "failure", "cancelled", "skipped"]);
-// biome-ignore lint/suspicious/noControlCharactersInRegex: Native logs must not retain ANSI terminal escape sequences.
-const ansiEscapes = /\u001b\[[0-?]*[ -/]*[@-~]/g;
-// biome-ignore lint/suspicious/noControlCharactersInRegex: Strip untrusted terminal control bytes, retaining tabs and newlines.
-const terminalControls = /[\u0000-\u0008\u000b-\u001f\u007f]/g;
 const excerpt = (text: string, bytes: number) =>
   Buffer.from(text).subarray(0, bytes).toString("utf8");
 
@@ -54,22 +53,6 @@ async function boundedBody(response: Response, limit: number) {
   } finally {
     await reader.cancel().catch(() => {});
   }
-}
-
-export function sanitizeVerificationOutput(text: string, credential: string) {
-  return (credential ? text.replaceAll(credential, "<REDACTED>") : text)
-    .replace(ansiEscapes, "")
-    .replace(
-      /-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/g,
-      "<REDACTED PRIVATE KEY>",
-    )
-    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1<REDACTED>@")
-    .replace(/\b(Bearer|Basic)\s+[a-z0-9+/_.=-]+/gi, "$1 <REDACTED>")
-    .replace(
-      /((?:["']?[\w.-]*(?:token|password|secret|api[_-]?key|credential)[\w.-]*["']?)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-      "$1<REDACTED>",
-    )
-    .replace(terminalControls, "");
 }
 
 export function createForgejoDiagnostics(
@@ -260,18 +243,21 @@ export function createForgejoDiagnostics(
             });
             continue;
           }
-          const page = await output(repo, item.id, item.attempt, failure.number);
-          if (!page.output.trim()) throw new Error("Failed step output is unavailable");
+          const diagnostic = await readVerificationDiagnostic(
+            await send(
+              `${path(repo)}/jobs/${item.id}/logs?attempt=${item.attempt}&step=${failure.number}`,
+              { headers: { accept: "text/plain", range: "bytes=0-" } },
+            ),
+            credential,
+          );
+          if (!diagnostic.trim()) throw new Error("Failed step output is unavailable");
           jobs.push({
             id: item.id,
             attempt: item.attempt,
             name: excerpt(sanitizeVerificationOutput(item.name, credential), 200),
             step: failure.number,
             stepName: excerpt(sanitizeVerificationOutput(failure.name, credential), 200),
-            output:
-              Buffer.byteLength(page.output) > 2000
-                ? `[End of failed step output]\n${Buffer.from(page.output).subarray(-1800).toString("utf8")}`
-                : page.output,
+            output: diagnostic,
           });
         }
         return {
