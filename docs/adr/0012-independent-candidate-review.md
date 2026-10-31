@@ -13,6 +13,13 @@ must identify the clean candidate. Factory's explicit report tool records compac
 coverage, while ordinary native finish settles execution. Missing reporting or missing proof
 does not pass. This is not a JSON completion form imposed on implementation.
 
+The fixed facade's source and reporting authority belongs to the admitted turn,
+not to its ephemeral browser. A failed or unconfirmed browser cleanup must not
+discard source findings or prevent an honest incomplete report. These calls still
+check the exact Runtime Attempt, generation, owner, lease, active Session, Stop and
+Project authority. App calls separately require the original live or explicitly
+reopenable browser; reporting access cannot revive it or replay a UI mutation.
+
 The resumable implementation Session remains separate. Only reproducible blocking defects within
 approved scope enter automatic correction. A changed commit requires new CI and review. An
 explicit retry can create another fresh attempt for an incomplete review without rewriting the

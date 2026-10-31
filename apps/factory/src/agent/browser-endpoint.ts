@@ -1,19 +1,19 @@
 import { z } from "zod";
+import { attachmentToolCallInput } from "../../../../packages/conversation-domain/src/attachments";
 import {
+  type BuildBrowserResult,
   buildBrowserCallInput,
   buildBrowserToolCatalogue,
-  type BuildBrowserResult,
 } from "../../../../packages/conversation-domain/src/browser-tools";
+import { candidateReviewCallInput } from "../../../../packages/conversation-domain/src/candidate-review";
+import { verificationToolCallInput } from "../../../../packages/conversation-domain/src/verification";
+import { feedbackToolCallInput } from "../../../../packages/conversation-domain/src/visual-review";
+import type { createAttachmentTools } from "../attachments/tools";
 import { CommandError } from "../command-error";
 import { json } from "../http";
+import type { createVisualReviewController } from "../review/controller";
 import type { createBuildBrowserController } from "./browser-controller";
 import type { createCandidateReviewController } from "./candidate-review";
-import { candidateReviewCallInput } from "../../../../packages/conversation-domain/src/candidate-review";
-import { feedbackToolCallInput } from "../../../../packages/conversation-domain/src/visual-review";
-import type { createVisualReviewController } from "../review/controller";
-import { attachmentToolCallInput } from "../../../../packages/conversation-domain/src/attachments";
-import type { createAttachmentTools } from "../attachments/tools";
-import { verificationToolCallInput } from "../../../../packages/conversation-domain/src/verification";
 import type { createVerificationTools } from "./verification-tools";
 
 const rpcInput = z.strictObject({
@@ -116,14 +116,19 @@ export function createBuildBrowserEndpoint(
   return async (request: Request, target: string | { attemptID: string; turnID: string }) => {
     if (request.headers.has("origin"))
       return json({ error: "Browser-origin MCP requests are not permitted" }, 403);
-    const authorized =
+    const authorize = (purpose: "browser" | "facade") =>
       typeof target === "string"
-        ? await controller.authorize(target, request.headers.get("authorization"))
-        : await controller.authorizeRuntime(
+        ? controller.authorize(target, request.headers.get("authorization"), purpose)
+        : controller.authorizeRuntime(
             target.attemptID,
             target.turnID,
             request.headers.get("authorization"),
+            purpose,
           );
+    // Source, Verification and report tools belong to the admitted turn, not
+    // to the lifetime of its ephemeral browser. All original execution,
+    // generation, owner, lease, Stop and Project checks remain mandatory.
+    const authorized = await authorize("facade");
     if (!authorized) return json({ error: "No active Build browser authority" }, 403);
     if (request.method !== "POST")
       return new Response(null, { status: 405, headers: { allow: "POST" } });
@@ -237,9 +242,13 @@ export function createBuildBrowserEndpoint(
             return reply(result);
           }
           if (!call) return fail(-32602, "Unsupported browser tool or arguments");
+          // A closed/uncertain browser never gains App authority just because
+          // this still-running turn may retain its source findings or report.
+          const browserAuthority = await authorize("browser");
+          if (!browserAuthority) return json({ error: "No active Build browser authority" }, 403);
           const result = await controller.call(
-            authorized.session,
-            authorized.ownerToken,
+            browserAuthority.session,
+            browserAuthority.ownerToken,
             call,
             rpc.id,
             request.signal,

@@ -90,6 +90,12 @@ Start `dockerd` directly inside Sysbox. The generic DinD entrypoint makes system
 which creates unsupported nested proc mount propagation when restoring a Dev Container. Sysbox
 already prepares those system mounts; the consumer must preserve their private propagation.
 
+Keep the bootstrap's private `umask 077`. The isolated browser consumers run as UID
+1000, so their read-only public App assignment and short lease need explicit file
+and shared child-directory modes after creation. Creation-mode arguments alone
+are masked by the bootstrap. The parent session directory, credentials and other
+private runtime files retain their private modes.
+
 New canonical Source claims and their Source Pods use the admitted worker node so RWO storage can
 be shared with execution. An existing retained Source keeps its observed node and claim identity;
 a conflicting worker profile is refused before creation rather than moving the checkout.

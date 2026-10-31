@@ -152,34 +152,44 @@ test("runtime browser capability cannot use another turn, generation, Project or
   const secret = "owned-browser-fixture-secret";
   const token = `Bearer ${runtimeBuildBrowserToken(secret, scope.owned.attemptID, 1)}`;
   try {
-    expect(
-      await scope.browser.authorizeRuntime(scope.owned.attemptID, scope.turn.id, token),
-    ).not.toBeNull();
-    expect(
-      await scope.browser.authorizeRuntime(scope.owned.attemptID, crypto.randomUUID(), token),
-    ).toBeNull();
-    expect(
-      await scope.browser.authorizeRuntime(crypto.randomUUID(), scope.turn.id, token),
-    ).toBeNull();
-    expect(
-      await scope.browser.authorizeRuntime(
-        scope.owned.attemptID,
-        scope.turn.id,
-        `Bearer ${runtimeBuildBrowserToken(secret, scope.owned.attemptID, 2)}`,
-      ),
-    ).toBeNull();
-    expect(
-      await scope.browser.authorizeRuntime(
-        scope.owned.attemptID,
-        scope.turn.id,
-        `Bearer ${runtimeModelToken(secret, scope.owned.attemptID, 1)}`,
-      ),
-    ).toBeNull();
+    for (const purpose of ["browser", "facade"] as const) {
+      expect(
+        await scope.browser.authorizeRuntime(scope.owned.attemptID, scope.turn.id, token, purpose),
+      ).not.toBeNull();
+      expect(
+        await scope.browser.authorizeRuntime(
+          scope.owned.attemptID,
+          crypto.randomUUID(),
+          token,
+          purpose,
+        ),
+      ).toBeNull();
+      expect(
+        await scope.browser.authorizeRuntime(crypto.randomUUID(), scope.turn.id, token, purpose),
+      ).toBeNull();
+      expect(
+        await scope.browser.authorizeRuntime(
+          scope.owned.attemptID,
+          scope.turn.id,
+          `Bearer ${runtimeBuildBrowserToken(secret, scope.owned.attemptID, 2)}`,
+          purpose,
+        ),
+      ).toBeNull();
+      expect(
+        await scope.browser.authorizeRuntime(
+          scope.owned.attemptID,
+          scope.turn.id,
+          `Bearer ${runtimeModelToken(secret, scope.owned.attemptID, 1)}`,
+          purpose,
+        ),
+      ).toBeNull();
+    }
     await scope.owned.database
       .client`DELETE FROM factory.project_membership WHERE project_id = ${scope.owned.projectID} AND user_id = ${scope.owned.userID}`;
-    expect(
-      await scope.browser.authorizeRuntime(scope.owned.attemptID, scope.turn.id, token),
-    ).toBeNull();
+    for (const purpose of ["browser", "facade"] as const)
+      expect(
+        await scope.browser.authorizeRuntime(scope.owned.attemptID, scope.turn.id, token, purpose),
+      ).toBeNull();
     expect(scope.frames).toHaveLength(0);
   } finally {
     await scope.dispose();
@@ -850,6 +860,12 @@ test.each(["Stop", "completion"] as const)(
       "owned-browser-lifecycle-secret",
     );
     const frames: string[] = [];
+    const nativeRequests: string[] = [];
+    const originalRequest = owned.hub.request.bind(owned.hub);
+    owned.hub.request = async (...args) => {
+      nativeRequests.push(`${args[2].method} ${new URL(args[2].url).pathname}`);
+      return originalRequest(...args);
+    };
     const originalOperation = owned.hub.parentOperation.bind(owned.hub);
     owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
       if (payload.action !== "browser-close")
@@ -874,6 +890,12 @@ test.each(["Stop", "completion"] as const)(
       const commandID = crypto.randomUUID();
       await controller.prompt(owned.changeID, "Use only the declared App", owned.userID, commandID);
       await owned.requested;
+      const promptIndex = nativeRequests.findIndex((request) => request.endsWith("/prompt"));
+      for (const server of ["factory_browser", "factory_sources"]) {
+        const registration = nativeRequests.indexOf(`PUT /api/experimental/mcp/${server}`);
+        expect(registration).toBeGreaterThanOrEqual(0);
+        expect(registration).toBeLessThan(promptIndex);
+      }
       const turn = await owned.turn(commandID);
       if (!turn) throw new Error("Owned lifecycle turn required");
       const [prepared] = await owned.database.client<

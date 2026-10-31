@@ -151,7 +151,7 @@ export function createBuildBrowserController(
     sql: AgentTurnTransaction,
     session: BrowserSession,
     ownerToken: string,
-    allowClosed = false,
+    purpose: "active" | "reopen" | "facade" = "active",
   ) {
     const started = performance.now();
     const [current] = await sql<Array<{ remainingMS: number; projectID: string; userID: string }>>`
@@ -164,8 +164,8 @@ export function createBuildBrowserController(
       JOIN factory.change change ON change.id = browser.change_id
       JOIN factory.runtime_attempt attempt ON attempt.id = browser.runtime_attempt_id
       WHERE browser.id = ${session.id}
-        AND (browser.state IN ('intended', 'active') OR
-          (${allowClosed} AND browser.state = 'closed' AND browser.reopen_allowed))
+        AND (${purpose === "facade"} OR browser.state IN ('intended', 'active') OR
+          (${purpose === "reopen"} AND browser.state = 'closed' AND browser.reopen_allowed))
         AND turn.id = ${session.turnID} AND turn.owner_token = ${ownerToken}
         AND turn.owner_expires_at > clock_timestamp() AND turn.state IN ('dispatching', 'running')
         AND intent.runtime_attempt_id = browser.runtime_attempt_id AND intent.change_id = browser.change_id
@@ -319,7 +319,11 @@ export function createBuildBrowserController(
     }
   }
 
-  async function authorizeSession(id: string, authorization: string | null, allowClosed = false) {
+  async function authorizeSession(
+    id: string,
+    authorization: string | null,
+    purpose: "active" | "reopen" | "facade" = "active",
+  ) {
     const expected = `Bearer ${capability(id)}`;
     if (
       !authorization ||
@@ -331,8 +335,9 @@ export function createBuildBrowserController(
     if (
       !session ||
       !(
+        purpose === "facade" ||
         ["intended", "active"].includes(session.state) ||
-        (allowClosed && session.state === "closed")
+        (purpose === "reopen" && session.state === "closed")
       )
     )
       return null;
@@ -343,7 +348,7 @@ export function createBuildBrowserController(
     if (!owner || ownerIdentity(owner.token) !== session.ownerID) return null;
     try {
       const allowed = await turns.validateExecution(session.turnID, owner.token, async (sql) => {
-        await currentIn(sql, session, owner.token, allowClosed);
+        await currentIn(sql, session, owner.token, purpose);
       });
       return allowed ? { session, ownerToken: owner.token } : null;
     } catch {
@@ -355,7 +360,7 @@ export function createBuildBrowserController(
     const ordinal = previous.ordinal + 1;
     const id = browserIdentity(previous.turnID, previous.ownerID, ordinal);
     const allowed = await turns.validateExecution(previous.turnID, ownerToken, async (sql) => {
-      await currentIn(sql, previous, ownerToken, true);
+      await currentIn(sql, previous, ownerToken, "reopen");
       await sql`INSERT INTO factory.build_browser_session(
         id,ordinal,turn_id,change_id,runtime_attempt_id,generation,agent_session_id,owner_id)
         SELECT ${id},${ordinal},turn_id,change_id,runtime_attempt_id,generation,agent_session_id,owner_id
@@ -436,11 +441,20 @@ export function createBuildBrowserController(
       };
     },
 
-    async authorize(id: string, authorization: string | null) {
-      return authorizeSession(id, authorization);
+    async authorize(
+      id: string,
+      authorization: string | null,
+      purpose: "browser" | "facade" = "browser",
+    ) {
+      return authorizeSession(id, authorization, purpose === "facade" ? "facade" : "active");
     },
 
-    async authorizeRuntime(attemptID: string, turnID: string, authorization: string | null) {
+    async authorizeRuntime(
+      attemptID: string,
+      turnID: string,
+      authorization: string | null,
+      purpose: "browser" | "facade" = "browser",
+    ) {
       const [current] = await database.client<Array<{ generation: number; ownerToken: string }>>`
         SELECT attempt.generation::float8 AS generation, turn.owner_token AS "ownerToken"
         FROM factory.runtime_attempt attempt JOIN factory.agent_turn turn ON turn.id = ${turnID}
@@ -461,7 +475,11 @@ export function createBuildBrowserController(
           AND owner_id = ${ownerIdentity(current.ownerToken)}
         ORDER BY ordinal DESC LIMIT 1`;
       return session
-        ? authorizeSession(session.id, `Bearer ${capability(session.id)}`, true)
+        ? authorizeSession(
+            session.id,
+            `Bearer ${capability(session.id)}`,
+            purpose === "facade" ? "facade" : "reopen",
+          )
         : null;
     },
 

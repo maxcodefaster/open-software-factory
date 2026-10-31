@@ -1,12 +1,15 @@
 import { expect, test } from "bun:test";
 import { createBuildBrowserController } from "../../apps/factory/src/agent/browser-controller";
+import { createBuildBrowserEndpoint } from "../../apps/factory/src/agent/browser-endpoint";
 import { createCandidateReviewController } from "../../apps/factory/src/agent/candidate-review";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import { RuntimeParentOperationError } from "../../apps/factory/src/runtime/hub";
 import { candidateReviewPermissions } from "../../packages/conversation-domain/src/candidate-review";
 import type { createForgejoClient } from "../../packages/forge/src/forge";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { runtimeBuildBrowserToken } from "../../packages/runtime-domain/src/identity";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { observe } from "../fixtures/pinned-opencode";
@@ -102,6 +105,125 @@ const passed = {
   findings: [],
   ui: "not-applicable" as const,
 };
+
+test.each([true, false])(
+  "an ended browser retains current review source/report authority without App authority, cleanup confirmed=%s",
+  async (cleanupConfirmed) => {
+    const f = await candidateReviewFixture();
+    const source = sourceFixture(true);
+    const review = createCandidateReviewController(f.database, source.forge);
+    const secret = "owned-review-browser-failure";
+    const browser = createBuildBrowserController(f.database, f.hub, secret);
+    let closeUnavailable = !cleanupConfirmed;
+    let browserCalls = 0;
+    try {
+      const turn = await f.activeReview();
+      f.hub.parentOperation = async (_attempt, payload, beforeSend) => {
+        await beforeSend?.(() => {});
+        if (payload.action === "browser-call") {
+          browserCalls++;
+          throw new RuntimeParentOperationError(
+            "browser-call",
+            "browser App proxy did not become ready within five seconds",
+          );
+        }
+        if (closeUnavailable) throw new Error("Owned cleanup response unavailable");
+        return {};
+      };
+      const grant = await browser.prepare(turn.id, turn.ownerToken);
+      const admitted = await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`);
+      if (!admitted) throw new Error("Missing owned review grant");
+      await review.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_scenario",
+          arguments: {
+            id: "app-unavailable",
+            title: "Actual candidate App",
+            category: "normal",
+            observationKind: "app",
+            criterion: 1,
+            expected: "Inspect the candidate App",
+          },
+        },
+        "case-before-browser",
+      );
+      await expect(
+        browser.call(
+          admitted.session,
+          turn.ownerToken,
+          { name: "browser_open", arguments: { app: "app" } },
+          "failed-open",
+        ),
+      ).rejects.toThrow("Browser inspection was not confirmed");
+      expect(await browser.authorize(grant.sessionID, `Bearer ${grant.bearer}`)).toBeNull();
+      const endpoint = createBuildBrowserEndpoint(browser, review);
+      async function call(name: string, args: unknown, id: string) {
+        return endpoint(
+          new Request("https://factory.invalid/internal/build-browser/owned", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${runtimeBuildBrowserToken(secret, f.attemptID, 1)}`,
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id,
+              method: "tools/call",
+              params: { name, arguments: args },
+            }),
+          }),
+          { attemptID: f.attemptID, turnID: turn.id },
+        );
+      }
+      const sourceRead = await call("review_read", { path: source.path }, "source-after-browser");
+      expect(sourceRead.status).toBe(200);
+      expect((await sourceRead.json()).result.isError).not.toBe(true);
+      const scenario = await call(
+        "review_scenario_result",
+        { id: "app-unavailable", status: "unverified", observed: "The App proxy did not start." },
+        "unverified-case",
+      );
+      expect(scenario.status).toBe(200);
+      expect((await scenario.json()).result.isError).not.toBe(true);
+      const unsafe = await call("review_report", { ...passed, ui: "checked" }, "cannot-pass");
+      expect(unsafe.status).toBe(200);
+      expect((await unsafe.json()).result.isError).toBe(true);
+      expect((await f.review())?.result).toBeNull();
+      const incomplete = await call(
+        "review_report",
+        {
+          ...passed,
+          verdict: "incomplete",
+          summary: "Source was inspected; the candidate App could not be inspected.",
+          criteria: [{ criterion: 1, status: "unverified", evidence: "App proxy startup failed." }],
+          ui: "unverified",
+        },
+        "retain-incomplete",
+      );
+      expect(incomplete.status).toBe(200);
+      expect((await incomplete.json()).result.isError).not.toBe(true);
+      expect((await f.review())?.result).toMatchObject({ verdict: "incomplete", ui: "unverified" });
+      expect((await call("browser_snapshot", {}, "no-app-authority")).status).toBe(403);
+      expect(browserCalls).toBe(1);
+      await f.turns.settle(
+        turn.id,
+        turn.ownerToken,
+        "completed",
+        "Owned incomplete review retained",
+      );
+      expect((await call("review_read", { path: source.path }, "settled-turn")).status).toBe(403);
+    } finally {
+      closeUnavailable = false;
+      const [current] = await f.database.client<{ turn_id: string | null }[]>`
+        SELECT turn_id FROM factory.candidate_review WHERE id=${f.reviewID}`;
+      if (current?.turn_id) await browser.closeTurn(current.turn_id);
+      await f.dispose();
+    }
+  },
+);
+
 async function observedCases(
   controller: ReturnType<typeof createCandidateReviewController>,
   turn: { id: string; ownerToken: string },
