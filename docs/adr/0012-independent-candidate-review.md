@@ -13,6 +13,12 @@ must identify the clean candidate. Factory's explicit report tool records compac
 coverage, while ordinary native finish settles execution. Missing reporting or missing proof
 does not pass. This is not a JSON completion form imposed on implementation.
 
+Source tools can also inspect full 40-character commits within the same authorized
+repository, so a Ticket's named prior changes can be compared independently.
+Mutable refs, abbreviated hashes, revision expressions and other repositories are
+not admitted. Historical reads retain their exact source commit and cannot alone
+satisfy a current-candidate case; diffs always end at the admitted candidate.
+
 The fixed facade's source and reporting authority belongs to the admitted turn,
 not to its ephemeral browser. A failed or unconfirmed browser cleanup must not
 discard source findings or prevent an honest incomplete report. These calls still

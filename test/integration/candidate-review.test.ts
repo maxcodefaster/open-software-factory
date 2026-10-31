@@ -1046,48 +1046,120 @@ test("source checks cannot replace normal and adverse App coverage for user-faci
   }
 });
 
-test("a source case needs its own candidate read or diff, not merely a base read", async () => {
+test.each(["base", "c".repeat(40)])(
+  "a source case needs its own candidate read or diff, not merely a historical read: %s",
+  async (revision) => {
+    const f = await candidateReviewFixture();
+    const source = sourceFixture();
+    const controller = createCandidateReviewController(f.database, source.forge);
+    try {
+      const turn = await f.activeReview();
+      await controller.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_scenario",
+          arguments: {
+            id: "source-case",
+            title: "Current source check",
+            category: "normal",
+            observationKind: "source",
+            criterion: 1,
+            expected: "The candidate uses correct addition",
+          },
+        },
+        "source-start",
+      );
+      await controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_read", arguments: { path: source.path, revision } },
+        "base-read",
+      );
+      const result = {
+        name: "review_scenario_result",
+        arguments: { id: "source-case", status: "passed", observed: "Inspected addition" },
+      };
+      await expect(controller.call(turn.id, turn.ownerToken, result, "too-early")).rejects.toThrow(
+        "immutable candidate source",
+      );
+      await controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_diff", arguments: { path: source.path } },
+        "candidate-diff",
+      );
+      await controller.call(turn.id, turn.ownerToken, result, "source-observed");
+    } finally {
+      await f.dispose();
+    }
+  },
+);
+
+test("full commit source comparisons stay in the exact authorized repository and retain provenance", async () => {
   const f = await candidateReviewFixture();
-  const source = sourceFixture();
-  const controller = createCandidateReviewController(f.database, source.forge);
+  const path = "src/sum.ts";
+  const historical = "c".repeat(40);
+  const repositoryReads: unknown[] = [];
+  const controller = createCandidateReviewController(f.database, {
+    listFiles: async (repository: unknown, ref: string) => {
+      repositoryReads.push(repository);
+      return [{ path, sha: ref, size: 100 }];
+    },
+    getFile: async (repository: unknown, _path: string, ref: string) => {
+      repositoryReads.push(repository);
+      return ref === historical
+        ? "export const sum = (a, b) => a - b;\n"
+        : "export const sum = (a, b) => a + b;\n";
+    },
+  } as unknown as ReturnType<typeof createForgejoClient>);
   try {
     const turn = await f.activeReview();
-    await controller.call(
+    const read = await controller.call(
       turn.id,
       turn.ownerToken,
-      {
-        name: "review_scenario",
-        arguments: {
-          id: "source-case",
-          title: "Current source check",
-          category: "normal",
-          observationKind: "source",
-          criterion: 1,
-          expected: "The candidate uses correct addition",
-        },
-      },
-      "source-start",
+      { name: "review_read", arguments: { path, revision: historical } },
+      "historical-read",
     );
-    await controller.call(
+    expect(JSON.parse((read.content[0] as { text: string }).text)).toMatchObject({
+      commit: historical,
+      revision: historical,
+    });
+    const diff = await controller.call(
       turn.id,
       turn.ownerToken,
-      { name: "review_read", arguments: { path: source.path, revision: "base" } },
-      "base-read",
+      { name: "review_diff", arguments: { path, comparison: historical } },
+      "historical-diff",
     );
-    const result = {
-      name: "review_scenario_result",
-      arguments: { id: "source-case", status: "passed", observed: "Inspected addition" },
-    };
-    await expect(controller.call(turn.id, turn.ownerToken, result, "too-early")).rejects.toThrow(
-      "immutable candidate source",
+    const patch = JSON.parse((diff.content[0] as { text: string }).text).text;
+    expect(patch).toContain(historical);
+    expect(patch).toContain(f.commit);
+    expect(patch).toContain("-export const sum = (a, b) => a - b;");
+    expect(patch).toContain("+export const sum = (a, b) => a + b;");
+    expect(repositoryReads.length).toBeGreaterThan(3);
+    expect(
+      repositoryReads.every(
+        (repository) => JSON.stringify(repository) === JSON.stringify(repositoryReads[0]),
+      ),
+    ).toBe(true);
+    const [review] = await f.database.client<{ evidence: Array<Record<string, unknown>> }[]>`
+      SELECT evidence FROM factory.candidate_review WHERE id=${f.reviewID}`;
+    expect(review?.evidence).toContainEqual(
+      expect.objectContaining({
+        revision: historical,
+        sourceCommit: historical,
+        commit: f.commit,
+      }),
     );
-    await controller.call(
-      turn.id,
-      turn.ownerToken,
-      { name: "review_diff", arguments: { path: source.path } },
-      "candidate-diff",
-    );
-    await controller.call(turn.id, turn.ownerToken, result, "source-observed");
+    await f.turns.settle(turn.id, turn.ownerToken, "completed", "Owned read scope settled");
+    await expect(
+      controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_read", arguments: { path, revision: historical } },
+        "stale-read",
+      ),
+    ).rejects.toMatchObject({ code: "conflict" });
   } finally {
     await f.dispose();
   }
