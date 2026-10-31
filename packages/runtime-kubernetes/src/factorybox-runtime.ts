@@ -9,6 +9,7 @@ import {
   factoryboxSharedLabels,
 } from "./factorybox-location";
 import {
+  executeFactoryboxOperation,
   type FactoryboxWorkerDeclaration,
   type FactoryboxWorkerIdentity,
   factoryboxCPUQuantity,
@@ -17,6 +18,7 @@ import {
   factoryboxWorkerResources,
   inspectFactoryboxWorker,
   renderFactoryboxWorker,
+  requireFactoryboxWriteCapacity,
   runFactoryboxKubernetes,
 } from "./factorybox-worker";
 import { workspaceSourceKey } from "./source-manifest";
@@ -488,12 +490,21 @@ export async function prepareFactoryboxRuntime(
   const deadline = performance.now() + timeoutMS;
   const assignmentID = input.reserve ? input.labels["factory.dev/execution-slot"] : input.attemptID;
   if (!assignmentID) throw new Error("Sandbox assignment identity is missing");
-  await inspectFactoryboxWorker(
-    factoryboxRuntimeRequest(input),
-    identity,
-    run,
-    factoryboxRuntimeDeclaration(input),
-  );
+  async function admitPreparation() {
+    const capacity = await executeFactoryboxOperation(
+      factoryboxRuntimeRequest(input),
+      identity,
+      { action: "capacity" },
+      run,
+      factoryboxRuntimeDeclaration(input),
+    );
+    if (!capacity.confirmed)
+      throw new Error("Factorybox capacity could not be verified before preparation");
+    requireFactoryboxWriteCapacity(identity, "preparation", JSON.parse(capacity.stdout));
+  }
+  // Export and extraction can consume host storage before native Start. A
+  // known refusal must not cross the irreversible preparation-attempt fence.
+  await admitPreparation();
   await ensureFactoryboxConsumer(input, identity, run, deadline);
   const secret = await run([
     "get",
@@ -506,6 +517,7 @@ export async function prepareFactoryboxRuntime(
   ]);
   if (secret.exitCode !== 0) throw new Error("Sandbox assignment observation is unavailable");
   const assignment = factoryboxPreparationAssignment(input, JSON.parse(secret.stdout));
+  await admitPreparation();
   await beforeDispatch?.();
   const result = await run(
     [

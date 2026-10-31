@@ -176,6 +176,38 @@ export function factoryboxOperationFailure(action: FactoryboxOperation["action"]
   return new Error(`Factorybox ${action} outcome is unconfirmed${detail ? `: ${detail}` : ""}`);
 }
 
+export function requireFactoryboxWriteCapacity(
+  identity: FactoryboxWorkerIdentity,
+  action: "Start" | "Fork" | "preparation",
+  value: unknown,
+) {
+  const counters = z.object({
+    filesystem_available_bytes: z.number().int().nonnegative().safe(),
+    min_free_bytes: z.number().int().nonnegative().safe(),
+    write_reserve_bytes: z.number().int().nonnegative().safe(),
+  });
+  const parsed = z
+    .object({
+      version: z.literal(1),
+      root: z.literal(identity.controllerRoot),
+      new_write_admitted: z.boolean(),
+      host: counters.optional(),
+    })
+    .safeParse(value);
+  if (!parsed.success)
+    throw new Error("Factorybox capacity decision is unverified before dispatch");
+  if (!parsed.data.new_write_admitted) {
+    const host = parsed.data.host;
+    throw new Error(
+      `Factorybox capacity refused ${action} before dispatch${
+        host
+          ? `: host available=${host.filesystem_available_bytes} bytes, free floor=${host.min_free_bytes}, write reserve=${host.write_reserve_bytes}`
+          : ""
+      }`,
+    );
+  }
+}
+
 export function renderFactoryboxWorker(request: FactoryboxWorkerRequest) {
   const input = factoryboxWorkerRequest.parse(request);
   const memory = input.resources ? factoryboxMemoryQuantity(input.resources.memoryMiB) : "3Gi";
@@ -650,31 +682,7 @@ export async function executeFactoryboxOperation(
     } catch {
       throw new Error("Factorybox capacity decision is invalid before dispatch");
     }
-    const counters = z.object({
-      filesystem_available_bytes: z.number().int().nonnegative(),
-      min_free_bytes: z.number().int().nonnegative(),
-      write_reserve_bytes: z.number().int().nonnegative(),
-    });
-    const parsed = z
-      .object({
-        version: z.literal(1),
-        root: z.literal(admitted.controllerRoot),
-        new_write_admitted: z.boolean(),
-        host: counters.optional(),
-      })
-      .safeParse(value);
-    if (!parsed.success)
-      throw new Error("Factorybox capacity decision is unverified before dispatch");
-    if (!parsed.data.new_write_admitted) {
-      const host = parsed.data.host;
-      throw new Error(
-        `Factorybox capacity refused ${op.action === "start" ? "Start" : "Fork"} before dispatch${
-          host
-            ? `: host available=${host.filesystem_available_bytes} bytes, free floor=${host.min_free_bytes}, write reserve=${host.write_reserve_bytes}`
-            : ""
-        }`,
-      );
-    }
+    requireFactoryboxWriteCapacity(admitted, op.action === "start" ? "Start" : "Fork", value);
   }
   if (op.action === "fork") {
     const source = await invoke([...command, "state", op.sourceSandboxID], true);
