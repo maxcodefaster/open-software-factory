@@ -1,6 +1,7 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient, ForgeRepository } from "../../../../packages/forge/src/forge";
 import type { RuntimeAttemptView } from "../runtime/types";
+
 type PromotionChange = {
   id: string;
   projectID: string;
@@ -28,13 +29,15 @@ export function createDeliveryPromotion(
         replacementAttemptID: string | null;
         replacementState: string | null;
         lastError: string | null;
+        retryActorID: string | null;
       }>
     >`
       SELECT promotion.id, promotion.commit_sha AS "commitSHA", promotion.state, promotion.last_error AS "lastError",
         promotion.previous_runtime_attempt_id AS "previousAttemptID",
         promotion.replacement_runtime_attempt_id AS "replacementAttemptID",
-        attempt.state AS "replacementState"
-      FROM factory.promotion_operation promotion
+        attempt.state AS "replacementState", command.actor_id AS "retryActorID"
+      FROM factory.current_promotion promotion
+      LEFT JOIN factory.execution_policy_command command ON command.command_id=promotion.retry_command_id
       LEFT JOIN factory.runtime_attempt attempt
         ON attempt.id = promotion.replacement_runtime_attempt_id
       WHERE promotion.change_id = ${change.id}
@@ -46,7 +49,7 @@ export function createDeliveryPromotion(
       return;
     }
     if (!promotion.replacementAttemptID) {
-      await runtime.startStagingReplacement(promotion.id, change.userID);
+      await runtime.startStagingReplacement(promotion.id, promotion.retryActorID ?? change.userID);
       return;
     }
     if (["failed", "stopped", "cleanup-failed"].includes(promotion.replacementState ?? "")) {

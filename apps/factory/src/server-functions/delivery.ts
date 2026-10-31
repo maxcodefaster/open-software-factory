@@ -1,6 +1,9 @@
 import { createServerFn } from "@tanstack/solid-start";
 import { z } from "zod";
-import { deliveryDelegationInput } from "../../../../packages/change-domain/src/delivery";
+import {
+  deliveryDelegationInput,
+  promotionRetryInput,
+} from "../../../../packages/change-domain/src/delivery";
 import {
   candidateReviewRetryInput,
   verificationResumeInput,
@@ -57,6 +60,19 @@ export const retryCandidateReview = createServerFn({ method: "POST" })
         context = factoryFunctionContext();
       await context.beforeWrite(false);
       return context.delivery.retryReview(context.actorID, id, value);
+    });
+  });
+export const retryStagingPromotion = createServerFn({ method: "POST" })
+  .validator((args: [changeID: string, input: z.input<typeof promotionRetryInput>]) => args)
+  .handler(async ({ data: [changeID, input] }) => {
+    return factoryFunction(async () => {
+      const context = factoryFunctionContext();
+      await context.beforeWrite(false);
+      return context.delivery.retryPromotion(
+        context.actorID,
+        z.uuid().parse(changeID),
+        promotionRetryInput.parse(input),
+      );
     });
   });
 export const resumeVerification = createServerFn({ method: "POST" })

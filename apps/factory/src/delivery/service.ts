@@ -2,6 +2,7 @@ import type { z } from "zod";
 import {
   type deliveryDelegationInput,
   deliverySettingsView,
+  type promotionRetryInput,
 } from "../../../../packages/change-domain/src/delivery";
 import type {
   candidateReviewRetryInput,
@@ -16,7 +17,7 @@ export function createDeliveryService(options: {
   access: Pick<ReturnType<typeof createAccessController>, "requireChange" | "requireDevelopment">;
   controller: Pick<
     ReturnType<typeof createDeliveryController>,
-    "get" | "approve" | "retryReview" | "resumeChecks" | "settings" | "configure"
+    "get" | "approve" | "retryReview" | "retryPromotion" | "resumeChecks" | "settings" | "configure"
   >;
 }) {
   const dto = (value: Record<string, unknown> | null) => {
@@ -59,6 +60,22 @@ export function createDeliveryService(options: {
       await options.access.requireChange(userID, changeID);
       return dto(
         await options.controller.retryReview(changeID, userID, input.commandId, input.reviewId),
+      );
+    },
+    async retryPromotion(
+      userID: string,
+      changeID: string,
+      input: z.output<typeof promotionRetryInput>,
+    ) {
+      const projectID = await options.access.requireChange(userID, changeID);
+      await options.access.requireDevelopment(userID, projectID);
+      return dto(
+        await options.controller.retryPromotion(
+          changeID,
+          userID,
+          input.commandId,
+          input.promotionId,
+        ),
       );
     },
     async resumeChecks(

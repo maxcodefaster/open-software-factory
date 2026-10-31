@@ -112,6 +112,13 @@ only for that exact worker epoch. Unknown operation outcomes retain ownership an
 they cannot authorize a new Pod, Sandbox or model request. Explicit Stop still removes execution.
 Reserve slots continue to use the existing PostgreSQL controller and locks.
 
+A failed Pause command can have a confirmed native rollback. Factory observes the original
+Start owner/input and exact rejected snapshot, requiring the same live source PID and native
+rejection receipt before recording that outcome. It atomically returns execution to connection
+recovery and reauthorizes only the original Connector credentials, fenced by Stop. No capture,
+Resume or Agent work is replayed. A rejection is not a committed checkpoint; absent, changed
+or ambiguous evidence keeps the existing unresolved-transition protection.
+
 Capacity waiting before native dispatch does not exhaust the commissioned intent. After a bounded
 startup observation ends, the existing reconciliation sweep can observe that same preparation
 again only while Start is unattempted and no dispatched preparation is incomplete. Keep the

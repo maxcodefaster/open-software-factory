@@ -188,6 +188,11 @@ one explicit Retry in that error view, preserving the previous attempt until the
 the recorded successor. Reading, reconnecting, historical previews and unconfirmed cleanup cannot
 commission another Start. Ticket compute remains controlled from its existing work context.
 
+A merged Ticket whose replacement Main Preview failed offers one developer-only Retry Main
+Preview action. It retains the failed attempt and original merge, starting a separately recorded
+replacement only after owned cleanup is confirmed. An unconfirmed command keeps its identity;
+reading or refreshing never repeats it.
+
 Each Project has one shared background from six curated public-domain paintings. Creation picks
 an artwork automatically, preferring less-used choices, and retains it on later visits. Project
 managers can change it in the desktop Settings menu; other members see the same saved choice.

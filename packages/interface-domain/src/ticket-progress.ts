@@ -16,6 +16,7 @@ export type TicketProgressInput = {
   threads?: number | undefined;
   approved?: boolean | undefined;
   cleanupError?: string | undefined;
+  promotionState?: string | undefined;
   canDevelop?: boolean | undefined;
   planning?: boolean | undefined;
   technicalPlanningOutstanding?: boolean | undefined;
@@ -49,7 +50,9 @@ export function ticketProgress(input: TicketProgressInput): string {
   )
     return "Implementation could not finish. Inspect the saved failure and retained work before retrying.";
   if (input.changeState === "delivering")
-    return "Delivery is in progress. Factory keeps the existing Staging Preview until the replacement is ready.";
+    return input.promotionState === "failed"
+      ? "The verified version is merged, but Main Preview failed. Correct its setup and retry Main Preview. The previous Preview is retained."
+      : "Delivery is in progress. Factory keeps the existing Staging Preview until the replacement is ready.";
   if (["pending", "dispatching", "running"].includes(input.correctionState ?? "")) {
     const failure =
       input.verificationState === "failed" &&

@@ -16,6 +16,7 @@ export type TicketCheckDetails = {
   reviewSummary?: string | undefined;
   reviewFindings?: CandidateReviewResult["findings"] | undefined;
   promotionState?: string | undefined;
+  promotionFailure?: string | undefined;
   cleanupError?: string | undefined;
 };
 
@@ -104,7 +105,9 @@ export function TicketChecks(props: {
                   ? "Earlier checks do not verify the retained corrections. Finish and submit them before review."
                   : props.details?.checksStopId
                     ? "The submitted version is retained. Resume checks to continue verification and independent review without repeating implementation."
-                    : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
+                    : props.details?.promotionState
+                      ? "The exact verified version was merged. Main Preview status is reported separately."
+                      : "Checks and independent review assess the exact submitted version. Delivery still needs your approval."}
               </p>
             }
           >
@@ -165,10 +168,17 @@ export function TicketChecks(props: {
             )}
           </For>
           <Show when={props.details?.promotionState}>
-            <p>Delivery · {props.details?.promotionState}</p>
+            <p>Main Preview · {props.details?.promotionState}</p>
+          </Show>
+          <Show when={props.details?.promotionFailure}>
+            {(failure) => <p role="note">{failure()}</p>}
           </Show>
           <Show when={props.details?.cleanupError}>
-            <p>Delivery is complete. Resource cleanup needs attention.</p>
+            <p>
+              {props.details?.promotionState === "succeeded"
+                ? "Delivery is complete. Resource cleanup needs attention."
+                : "Main Preview did not become ready. The previous Preview is retained."}
+            </p>
           </Show>
         </div>
       </details>

@@ -31,6 +31,12 @@ test.each([
   ["arm64", false, false, "failure"],
   ["amd64", false, false, "failure"],
   ["arm64", false, false, "failure-without-cleanup"],
+  ["arm64", false, false, "pause-rejected"],
+  ["amd64", false, false, "pause-rejected"],
+  ["arm64", false, false, "pause-rejected-owner"],
+  ["arm64", false, false, "pause-rejected-input"],
+  ["arm64", false, false, "pause-rejected-pid"],
+  ["arm64", false, false, "pause-unconfirmed"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
   async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
@@ -164,8 +170,11 @@ test.each([
       };
       type NativePause = {
         snapshot_id: string;
-        checkpoint_sha256: string;
-        completed_at: string;
+        checkpoint_sha256?: string;
+        completed_at?: string;
+        rejected_at?: string;
+        source_pid?: number;
+        error?: string;
         resume?: { completed_at: string };
       };
       const record: {
@@ -346,6 +355,26 @@ test.each([
           return { exitCode: 1, stderr: "response lost after completed native Start", stdout: "" };
         }
         if (action === "pause") {
+          if (deleteContinuation.startsWith("pause-")) {
+            const snapshot = args[args.indexOf("--snapshot-id") + 1];
+            if (!snapshot) throw new Error("Missing rejected Pause snapshot");
+            record.phase = "running";
+            record.pause_history = [
+              {
+                snapshot_id: snapshot,
+                ...(deleteContinuation !== "pause-unconfirmed"
+                  ? {
+                      rejected_at: "2026-10-25T10:01:00Z",
+                      error: "checkpoint admission rejected; original source recovered",
+                      source_pid: deleteContinuation === "pause-rejected-pid" ? 999 : 123,
+                    }
+                  : {}),
+              },
+            ];
+            if (deleteContinuation === "pause-rejected-owner") observationIdentity = "owner";
+            if (deleteContinuation === "pause-rejected-input") observationIdentity = "input";
+            return { exitCode: 1, stderr: "checkpoint admission refused", stdout: "" };
+          }
           record.phase = "paused";
           if (record.pause) {
             record.pause_history ??= [];
@@ -620,6 +649,50 @@ test.each([
       nativeStatusOverride = undefined;
       expect(mutations).toEqual(["start"]);
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
+      if (deleteContinuation.startsWith("pause-")) {
+        const valid = deleteContinuation === "pause-rejected";
+        const paused = execution.pause(owned.attemptID);
+        if (valid) await paused;
+        else await expect(paused).rejects.toThrow();
+        const [current] = await database.client<{ state: string; failure: string | null }[]>`
+          SELECT state,failure FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        expect(current).toEqual(
+          valid
+            ? { state: "starting", failure: "child connector reconnecting" }
+            : { state: "pausing", failure: null },
+        );
+        const [operation] = await database.client<{ completed: boolean; observation: unknown }[]>`
+          SELECT completed_at IS NOT NULL AS completed,observation
+          FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='pause'`;
+        expect(operation?.completed).toBe(valid);
+        if (valid) {
+          expect(operation?.observation).toMatchObject({
+            phase: "running",
+            rejected: true,
+            sourcePID: 123,
+          });
+          expect(
+            hub.authorize(
+              new Request("http://factory.test/internal/runtime-connect", {
+                headers: {
+                  authorization: "Bearer only-original-parent",
+                  "x-factory-connector-role": "parent",
+                  "x-factory-runtime-attempt": owned.attemptID,
+                  "x-factory-runtime-generation": String(attempt.generation),
+                },
+              }),
+              () => attempt.parent,
+            ),
+          ).not.toBeNull();
+        }
+        expect(mutations).toEqual(["start", "pause"]);
+        expect(
+          await database.client`SELECT id FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='resume'`,
+        ).toHaveLength(0);
+        return;
+      }
       await execution.pause(owned.attemptID);
       expect(await execution.hasExited(owned.attemptID)).toBe(false);
       const [paused] = await database.client<

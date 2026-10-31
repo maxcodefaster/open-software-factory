@@ -88,6 +88,10 @@ test.each([
   [{ ...submitted, implementationState: "waiting", building: true }, "needs an answer"],
   [{ ...submitted, changeState: "delivering" }, "existing Staging Preview"],
   [
+    { ...submitted, changeState: "delivering", promotionState: "failed" },
+    "merged, but Main Preview failed",
+  ],
+  [
     { ...submitted, changeState: "delivered", cleanupError: "owned resource retained" },
     "cleanup needs attention",
   ],
