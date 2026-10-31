@@ -319,6 +319,20 @@ def checkpoint_io_policy(linux, machine):
     }
 
 
+def checkpoint_annotations(base_id):
+    # Factory owns both the Project mount and this pinned OpenCode config.
+    # Bun watches the latter inside the nested Dev Container's OverlayFS.
+    # CRIU must resolve its inode there without scanning the whole guest.
+    return {
+        'io.factorybox.base': base_id,
+        'io.factorybox.outbound-ipv4': 'true',
+        'io.factorybox.checkpoint.irmap-scan-paths': json.dumps([
+            '/home/coder/project',
+            '/opt/factory/opencode/server/config',
+        ]),
+    }
+
+
 def prepare(request):
     validate_identity(request, with_assignment=True)
     cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
@@ -408,8 +422,7 @@ def prepare(request):
         if mount['destination'] == '/sys/fs/cgroup':
             mount['options'] = ['nosuid', 'noexec', 'nodev', 'rw']
     annotations = spec.setdefault('annotations', {})
-    annotations.update({'io.factorybox.base': base['id'], 'io.factorybox.outbound-ipv4': 'true',
-                        'io.factorybox.checkpoint.irmap-scan-paths': json.dumps(['/home/coder/project'])})
+    annotations.update(checkpoint_annotations(base['id']))
     if request['sharedSource']:
         spec['mounts'].append({'type': 'bind', 'source': source['path'], 'destination': '/home/coder/project',
                                'options': ['rbind', 'rw', 'rprivate', 'nosuid', 'nodev']})

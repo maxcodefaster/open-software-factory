@@ -77,6 +77,12 @@ overwriting its restrictions. This is not a claim that Factorybox supports check
 The filter applies to fresh preparation. Retained OCI inputs and snapshots stay immutable;
 upgrading Factory does not patch an existing execution during Resume.
 
+Fresh preparations also declare the Project mount and Factory's pinned OpenCode configuration
+directory as CRIU inode-to-path fallback search roots. Bun watches that configuration inside
+the nested Dev Container's OverlayFS, whose file handles cannot always be reopened directly.
+The consumer owns those paths; Factorybox remains independent of OpenCode and does not scan
+the entire guest filesystem. Existing hashed OCI inputs retain their original declaration.
+
 Fresh Sandbox preparation selects its finite process/thread ceiling from the original
 worker's CPU cgroup quota and effective CPU affinity, not the node's hardware CPU count.
 The consumer allows 128 tasks per effective vCPU with a 384-task floor, preserving the

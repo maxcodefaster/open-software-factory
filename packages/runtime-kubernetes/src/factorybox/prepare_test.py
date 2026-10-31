@@ -100,6 +100,15 @@ class PreparationTests(unittest.TestCase):
                                   "action": "SCMP_ACT_ERRNO", "errnoRet": 1}],
                 })
 
+    def test_checkpoint_searches_project_and_the_pinned_opencode_config_watch(self):
+        annotations = self.module["checkpoint_annotations"]("factory-runtime")
+        self.assertEqual(annotations["io.factorybox.base"], "factory-runtime")
+        self.assertEqual(annotations["io.factorybox.outbound-ipv4"], "true")
+        self.assertEqual(json.loads(annotations["io.factorybox.checkpoint.irmap-scan-paths"]), [
+            "/home/coder/project",
+            "/opt/factory/opencode/server/config",
+        ])
+
     def test_checkpoint_profile_never_replaces_unreviewed_seccomp_or_accepts_another_architecture(self):
         existing = {"defaultAction": "SCMP_ACT_ERRNO", "syscalls": []}
         linux = {"seccomp": existing}
