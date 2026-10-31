@@ -6,6 +6,7 @@ const directory = resolve(import.meta.dir, "factorybox");
 for (const files of [
   ["initialize_store_test.py"],
   ["inspect_store_test.py"],
+  ["retire_export_test.py"],
   ["consumer_test.py", "consumer.py"],
   ["prepare_test.py", "prepare.py"],
 ])

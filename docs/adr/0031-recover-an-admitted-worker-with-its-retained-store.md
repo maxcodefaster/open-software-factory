@@ -21,6 +21,8 @@ Its read-only store inspector refuses missing, changed or still-leased backing. 
 initializes, repairs, reformats or resizes that store. Bootstrap and later consumer exports
 use admission-scoped directories and exporter names; old import/export receipts stay unchanged.
 Native storage admission does not allocate another fixed image on this path.
+Completed predecessor transport archives have a separate, exact retirement contract in
+[ADR 0032](0032-retire-export-archives-of-terminated-workers.md); native state is not a cache.
 
 Source remains on its original claim and node. Opening a Project does not commission recovery.
 Already admitted worker replacement is separate from the unused bootstrap recovery in

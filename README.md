@@ -93,6 +93,10 @@ and prior execution has settled. The successor reuses the original private store
 it has a new Pod and native epoch, without replaying Agent work. See
 [admitted worker recovery](docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md)
 and [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
+Before preparing a successor's Sandbox, Factory retires completed image-export transports
+owned by positively terminated predecessor admissions. It keeps their receipts and checks
+exact archive identity; active, partial and changed payloads are not deletion authority.
+This does not prune native bases, snapshots, Source or the bounded store.
 Fresh admissions check actual backing-filesystem availability before native allocation. The chart
 defaults to an 8 GiB minimum, 32 GiB maximum and 64 GiB claim. The pinned worker selects a fixed
 size in that range on the actual volume while preserving its native host floor and operating
