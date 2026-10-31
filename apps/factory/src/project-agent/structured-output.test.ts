@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { ErrorCategory, ErrorDomain, MastraError } from "@mastra/core/error";
 import { z } from "zod";
 import { planningDesign } from "../../../../test/fixtures/technical-planning";
 import {
@@ -191,11 +192,17 @@ test("only the explicit technical task admits a Technical Design output", () => 
 
 test("validation diagnostics retain only schema paths and codes, never provider data", () => {
   const failure = z.object({ design: z.string() }).safeParse({ design: 1 });
-  const error = new ProjectAgentOutputError({
-    id: "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
-    cause: failure.error,
-    request: { authorization: "private-provider-token", body: "private model input" },
-  });
+  const error = new ProjectAgentOutputError(
+    {
+      id: "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
+      cause: failure.error,
+      details: {
+        value: JSON.stringify({ output: { kind: "answer", message: 42, citations: [] } }),
+      },
+      request: { authorization: "private-provider-token", body: "private model input" },
+    },
+    projectAgentProviderOutputFor("plan"),
+  );
   expect(error.diagnostic).toBe("design: invalid_type");
   expect(error.retainedMessage).toContain("design: invalid_type");
   expect(error.retainedMessage).not.toContain("private");
@@ -214,3 +221,52 @@ test("retained validation diagnostics fit compact turn outcomes", () => {
   expect(error.diagnostic.length).toBeLessThanOrEqual(1024);
   expect(error.retainedMessage.length).toBeLessThan(2000);
 });
+
+test("native SDK validation without a Zod cause retains only locally revalidated paths", () => {
+  const native = new MastraError({
+    id: "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
+    domain: ErrorDomain.AGENT,
+    category: ErrorCategory.SYSTEM,
+    text: "SDK validation failed with private-provider-content",
+    details: {
+      value: JSON.stringify({
+        output: {
+          kind: "answer",
+          message: { privateRequest: "private-provider-content" },
+          citations: [],
+        },
+      }),
+    },
+  });
+  expect(native.cause).toBeUndefined();
+  const error = new ProjectAgentOutputError(native, projectAgentProviderOutputFor("plan"));
+  expect(error.diagnostic).toBe("output.message: invalid_type");
+  expect(error.retainedMessage).not.toContain("private-provider-content");
+  expect(JSON.stringify(error)).not.toContain("private-provider-content");
+  expect(error.stack).not.toContain("private-provider-content");
+});
+
+test.each([
+  "not JSON, private-provider-content",
+  "private-provider-content".repeat(20_000),
+  JSON.stringify({
+    output: { kind: "answer", message: "private-provider-content", citations: [] },
+  }),
+])(
+  "unusable or locally valid SDK diagnostics never repair or expose a rejected response",
+  (value) => {
+    const error = new ProjectAgentOutputError(
+      new MastraError({
+        id: "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED",
+        domain: ErrorDomain.AGENT,
+        category: ErrorCategory.SYSTEM,
+        text: "SDK rejection",
+        details: { value },
+      }),
+      projectAgentProviderOutputFor("plan"),
+    );
+    expect(error.diagnostic).toBe("STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED");
+    expect(error.retainedMessage).not.toContain("private-provider-content");
+    expect(JSON.stringify(error)).not.toContain("private-provider-content");
+  },
+);

@@ -102,23 +102,42 @@ export function parseProjectAgentOutput(
 
 export class ProjectAgentOutputError extends Error {
   readonly diagnostic: string;
-  constructor(cause?: unknown) {
+  constructor(cause?: unknown, schema?: z.ZodType) {
     super("The Project Agent returned an invalid response. Your input is saved.");
     this.name = "ProjectAgentOutputError";
     let current = cause;
     let diagnostic = "Structured output validation failed.";
+    let validationError: z.ZodError | undefined;
+    let nativeValue: string | undefined;
     for (let depth = 0; depth < 6 && current && typeof current === "object"; depth++) {
       if (current instanceof z.ZodError) {
-        diagnostic = current.issues
-          .map((issue) => `${issue.path.join(".")}: ${issue.code}`)
-          .join("; ");
+        validationError = current;
         break;
       }
       const value = current as Record<string, unknown>;
       if (typeof value["id"] === "string" && /^[A-Z_]+$/.test(value["id"]))
         diagnostic = value["id"];
+      if (schema && value["id"] === "STRUCTURED_OUTPUT_SCHEMA_VALIDATION_FAILED") {
+        const details = z.object({ value: z.string() }).safeParse(value["details"]);
+        // This is a diagnostic read bound, not a new output/admission limit.
+        // Never retain the generated SDK value, even when local validation passes.
+        if (details.success && Buffer.byteLength(details.data.value) <= 256 * 1024)
+          nativeValue ??= details.data.value;
+      }
       current = value["cause"];
     }
+    if (!validationError && schema && nativeValue) {
+      try {
+        const result = schema.safeParse(JSON.parse(nativeValue));
+        if (!result.success) validationError = result.error;
+      } catch {
+        // Malformed diagnostic data cannot repair or publish a rejected response.
+      }
+    }
+    if (validationError)
+      diagnostic = validationError.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.code}`)
+        .join("; ");
     // Paths/codes only. Never retain provider request bodies, generated text,
     // credentials or raw SDK error details in a public-facing error.
     this.diagnostic = diagnostic.length > 1024 ? `${diagnostic.slice(0, 1021)}...` : diagnostic;

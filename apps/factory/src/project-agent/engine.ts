@@ -545,7 +545,7 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
     failed = false;
     return result;
   } catch (cause) {
-    if (isStructuredOutputFailure(cause)) throw new ProjectAgentOutputError(cause);
+    if (isStructuredOutputFailure(cause)) throw new ProjectAgentOutputError(cause, outputSchema);
     throw cause;
   } finally {
     await usage.finish(failed);
