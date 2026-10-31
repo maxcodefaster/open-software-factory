@@ -377,11 +377,14 @@
   grid-column: 1 / -1;
 }
 .wiki-empty-navigation {
-  position: absolute;
-  top: var(--space-4);
-  left: var(--space-4);
+  display: none;
 }
 @media (max-width: 760px) {
+  .wiki-empty-navigation {
+    display: flex;
+    flex-shrink: 0;
+    padding: var(--space-3) var(--space-4);
+  }
   .knowledge-workspace {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
