@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { createForgejoClient } from "./forge";
 import { sanitizeVerificationOutput } from "./diagnostics";
+import { createForgejoClient } from "./forge";
 
 const repository = { owner: "owned", name: "app" };
 const commit = "a".repeat(40);
@@ -19,6 +19,7 @@ function fixture(
     nextPage?: boolean;
     changedAttempt?: boolean;
     lateAttempt?: boolean;
+    log?: string;
   } = {},
 ) {
   const calls: string[] = [];
@@ -73,6 +74,16 @@ function fixture(
         expect(url.searchParams.get("attempt")).toBe("2");
         expect(url.searchParams.get("step")).toBe("1");
         expect(new Headers(init?.headers).get("range")).toMatch(/^bytes=/);
+        if (options.log !== undefined) {
+          const bytes = Buffer.from(options.log);
+          const range = new Headers(init?.headers).get("range") ?? "";
+          const suffix = range.match(/^bytes=-(\d+)$/);
+          const start = suffix ? Math.max(0, bytes.length - Number(suffix[1])) : 0;
+          return new Response(bytes.subarray(start), {
+            status: 206,
+            headers: { "content-range": `bytes ${start}-${bytes.length - 1}/${bytes.length}` },
+          });
+        }
         return options.logMissing
           ? new Response(null, { status: 404 })
           : new Response(`Run bun run test\nExpected 200, received 500\nAPI_KEY=${secret}\n`, {
@@ -131,6 +142,28 @@ test("a failed real step has exact job/attempt, useful output and redacted crede
   expect(result.kind).toBe("check-failed");
   expect(result.jobs[0]).toMatchObject({ id: 8, attempt: 2, step: 1, stepName: "bun run test" });
   expect(result.jobs[0]?.output).toContain("Expected 200, received 500");
+  expect(JSON.stringify(result)).not.toContain(secret);
+});
+test("a failure before later successful checks survives the compact diagnosis", async () => {
+  const { client } = fixture({
+    log:
+      "2026-10-31T02:25:23Z Run repository checks\n" +
+      "2026-10-31T02:25:24Z RequestError: expected 401 in a passing negative test\n" +
+      "2026-10-31T02:25:24Z ✔ rejects unauthorized requests\n".repeat(100) +
+      "2026-10-31T02:27:01Z AssertionError: required immutable CMS snapshot missing\n" +
+      `2026-10-31T02:27:01Z API_KEY=${secret}\n` +
+      "2026-10-31T02:27:01Z expected true, received false\n" +
+      "2026-10-31T02:27:01Z pnpm test exit code: 1\n" +
+      "2026-10-31T02:34:14Z ✔ unrelated successful check\n".repeat(2000) +
+      "2026-10-31T02:34:14Z verify coder exit code: 0\n" +
+      "2026-10-31T02:34:14Z runner: RUN exit status 1\n",
+  });
+  const result = await client.diagnoseVerification(repository, 7, commit);
+  expect(result.kind).toBe("check-failed");
+  expect(result.jobs[0]?.output).toContain("required immutable CMS snapshot missing");
+  expect(result.jobs[0]?.output).toContain("expected true, received false");
+  expect(result.jobs[0]?.output).toContain("byte");
+  expect(result.jobs[0]?.output?.length).toBeLessThanOrEqual(2400);
   expect(JSON.stringify(result)).not.toContain(secret);
 });
 test.each(["cancelled", "skipped"])("%s is not a code defect and reads no logs", async (status) => {
