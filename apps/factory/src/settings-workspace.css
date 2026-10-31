@@ -171,7 +171,8 @@
     margin-bottom: 0;
   }
   .settings-content-heading,
-  .settings-content-heading[data-library="true"] {
+  .settings-content-heading[data-library="true"],
+  .settings-content-heading[data-inputs="true"] {
     display: flex;
     align-items: center;
     min-height: var(--space-12);
@@ -197,7 +198,9 @@
         .skill-library:not([data-monitoring="true"])
         > .skill-library-heading:not([hidden])
     )
-    > .settings-content-heading {
+    > .settings-content-heading,
+  .settings-content:has(> .settings-configuration-host:not([hidden]) .input-overview-heading)
+    > .settings-content-heading[data-inputs="true"] {
     display: none;
   }
   .settings-content

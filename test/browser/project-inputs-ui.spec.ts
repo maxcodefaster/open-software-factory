@@ -1,14 +1,14 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { observeBrowserErrors } from "../fixtures/browser-errors";
-import { invalidateFixtureRead } from "../fixtures/read-invalidation";
 import { mcpLibraryView } from "../../packages/conversation-domain/src/mcp-library";
 import { monitoringSave, monitoringView } from "../../packages/conversation-domain/src/monitoring";
+import { observeBrowserErrors } from "../fixtures/browser-errors";
+import { test } from "../fixtures/browser-test";
+import { invalidateFixtureRead } from "../fixtures/read-invalidation";
 import { factoryFunctionMatches, mockFactoryFunctions } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -163,7 +163,10 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     await page.goto(`${origin}/project-inputs.html`);
     await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
     await expect(inputs.getByText("Give external requests a place to land")).toBeVisible();
-    await expect(navigation.locator("h3")).toHaveText([
+    await expect(navigation.locator("h3")).toHaveText(["Project · Invoice workspace"]);
+    await expect(
+      navigation.getByRole("combobox", { name: "Settings scope" }).locator("option"),
+    ).toHaveText([
       "Project · Invoice workspace",
       "Libraries",
       "Personal",
@@ -215,6 +218,9 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     expect(commands[0]).toEqual(commands[1]);
     expect(view.hooks).toHaveLength(1);
     const secret = inputs.getByRole("region", { name: "New webhook URL" });
+    await expect(
+      page.getByRole("button", { name: "Choose settings page", exact: true }),
+    ).toBeVisible();
     await expect(secret.getByLabel("Webhook URL")).toHaveAttribute("type", "password");
     await expect(secret.getByRole("heading")).toBeFocused();
     await secret.getByRole("button", { name: "Reveal URL", exact: true }).click();
@@ -278,7 +284,7 @@ test("Inputs settings work on desktop and phone without a mode selector", async 
     expect(modelCommands).toBe(0);
     view.canManage = view.canDelegate = view.canDisable = false;
     await page.goto(`${origin}/project-inputs.html?role=viewer`);
-    await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
+    await chooseSettingsPage(page, "Inputs");
     await expect(navigation.getByText("Factory administration", { exact: true })).toHaveCount(0);
     await expect(inputs.getByRole("button", { name: "Add input", exact: true })).toHaveCount(0);
     await expect(inputs.getByLabel("Actions for Product feedback")).toHaveCount(0);
@@ -437,6 +443,14 @@ test("Inputs keep menus, long requests, errors and delegation usable at every si
         const inputs = page.getByRole("region", { name: "Project inputs", exact: true });
         await expect(inputs.getByRole("alert")).toHaveText(/temporarily unavailable/);
         await page.screenshot({ path: `${evidence}/error-${device.name}.png` });
+        if (device.width <= 760)
+          await expect(
+            page.getByRole("button", { name: "Choose settings page", exact: true }),
+          ).toBeVisible();
+        await chooseSettingsPage(page, "MCP connections");
+        await expect(page.getByRole("searchbox", { name: "Search MCP connections" })).toBeVisible();
+        await chooseSettingsPage(page, "Inputs");
+        await expect(inputs.getByRole("alert")).toHaveText(/temporarily unavailable/);
         failRead = false;
         await inputs.getByRole("button", { name: "Retry loading inputs" }).click();
         await expect(inputs.getByRole("alert")).toBeHidden();

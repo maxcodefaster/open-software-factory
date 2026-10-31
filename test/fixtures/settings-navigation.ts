@@ -12,10 +12,17 @@ export async function chooseSettingsScope(page: Page, scope: SettingsScope) {
   if (!(await navigation.isVisible()))
     await workspace.getByRole("button", { name: "Choose settings page", exact: true }).click();
   const picker = navigation.getByRole("combobox", { name: "Settings scope", exact: true });
+  await expect(picker).toBeVisible();
+  if ((await picker.inputValue()) === scope) return;
   // selectOption dispatches change without focusing the native select. A real
   // person keeps focus here while the old scope's buttons are replaced.
   await picker.focus();
   expect(await picker.selectOption(scope)).toEqual([scope]);
+  // The chosen scope can lazy-load its first page and replace the temporary
+  // header. Reopen the current page's control, not a now-hidden loading header.
+  await expect(
+    workspace.getByRole("status").filter({ hasText: /^Opening settings…$/ }),
+  ).toHaveCount(0);
   if (
     await workspace.getByRole("button", { name: "Choose settings page", exact: true }).isVisible()
   )
@@ -42,7 +49,9 @@ export async function chooseSettingsPage(page: Page, label: string, group?: stri
                 ? "personal"
                 : ["Company sign-in", "Repository mirrors"].includes(label)
                   ? "system"
-                  : undefined;
+                  : ["Inputs", "Environments", "Releases"].includes(label)
+                    ? "project"
+                    : undefined;
   if (scope) await chooseSettingsScope(page, scope);
   const workspace = page
     .getByRole("region", { name: "Settings", exact: true })
