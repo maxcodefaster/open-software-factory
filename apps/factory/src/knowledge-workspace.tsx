@@ -71,6 +71,7 @@ export function KnowledgeWorkspace(props: {
   onRestore(pageID: string, revisionID: string, expectedVersion: number): Promise<KnowledgeSave>;
 }) {
   const draftStore = untrack(() => props.drafts);
+  const hasPublishedPages = () => props.pages.some((page) => page.state === "active");
   const [editing, setEditing] = createSignal(false);
   const [searchOpen, setSearchOpen] = createSignal(false);
   const [sources, setSources] = createSignal<Array<{ path: string; commitSha: string }>>();
@@ -434,6 +435,9 @@ export function KnowledgeWorkspace(props: {
         </Show>
 
         <main class="knowledge-content">
+          <Show when={!props.selectedPage && !props.openDocument}>
+            <div class="wiki-empty-navigation">{navigationTitle()}</div>
+          </Show>
           <Show when={["pending", "running", "failed"].includes(props.generation?.state ?? "")}>
             <div class="knowledge-generation">
               <Show when={["pending", "running"].includes(props.generation?.state ?? "")}>
@@ -445,7 +449,13 @@ export function KnowledgeWorkspace(props: {
               <Show when={props.generation?.failure}>
                 {(failure) => (
                   <div class="knowledge-update-error">
-                    <p role="alert">Update failed. Your saved pages are still available.</p>
+                    <p role="alert">
+                      {props.loading
+                        ? "Wiki update failed."
+                        : hasPublishedPages()
+                          ? "Update failed. Your saved pages are still available."
+                          : "Wiki creation failed."}
+                    </p>
                     <details>
                       <summary>Update details</summary>
                       <pre>{failure()}</pre>
@@ -471,19 +481,21 @@ export function KnowledgeWorkspace(props: {
             when={props.selectedPage || props.openDocument}
             fallback={
               <div class="empty-workspace">
-                <div class="wiki-empty-navigation">{navigationTitle()}</div>
                 <Icon name="knowledge" />
                 <Show when={!props.loading} fallback={<p role="status">Loading Wiki…</p>}>
-                  <Show
-                    when={!props.pages.some((page) => page.state === "active")}
-                    fallback={<p>Choose a Wiki page to read.</p>}
-                  >
+                  <Show when={!hasPublishedPages()} fallback={<p>Choose a Wiki page to read.</p>}>
                     <p>
                       {["pending", "running"].includes(props.generation?.state ?? "")
                         ? "Project Knowledge is being generated."
-                        : "Generate Project Knowledge from the current commit."}
+                        : props.generation?.state === "failed"
+                          ? "No Wiki pages have been published yet."
+                          : "Generate Project Knowledge from the current commit."}
                     </p>
-                    <Show when={!["pending", "running"].includes(props.generation?.state ?? "")}>
+                    <Show
+                      when={
+                        !["pending", "running", "failed"].includes(props.generation?.state ?? "")
+                      }
+                    >
                       <button
                         type="button"
                         class="workspace-action"

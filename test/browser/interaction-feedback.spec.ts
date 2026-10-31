@@ -193,6 +193,61 @@ test("Wiki loading never offers generation before an authoritative empty outline
   await expect(create).toBeVisible();
 });
 
+for (const { label, width, touch } of [
+  { label: "desktop", width: 1440, touch: false },
+  { label: "narrow", width: 390, touch: false },
+  { label: "touch", width: 390, touch: true },
+]) {
+  test.describe(`Wiki recovery ${label}`, () => {
+    test.use({ viewport: { width, height: 900 }, hasTouch: touch });
+    test("an empty failed Wiki has one honest recovery action", async ({ page }) => {
+      await open(page, "wiki&failed=1&empty=1");
+      await expect(page.getByLabel("Wiki generation requests")).toHaveText("0");
+      await capture(page, `wiki-failed-empty-${label}`);
+      await expect(
+        page.getByRole("button", { name: /^(Retry update|Create Project Wiki)$/ }),
+      ).toHaveCount(1);
+      await expect(page.getByRole("alert")).toHaveText("Wiki creation failed.");
+      await expect(page.getByText("Your saved pages are still available.")).toHaveCount(0);
+      await expect(
+        page.getByText("No Wiki pages have been published yet.", { exact: true }),
+      ).toBeVisible();
+      if (width <= 760) {
+        const navigation = page.getByRole("button", { name: "Browse Wiki pages", exact: true });
+        const button = fixtureValue(await navigation.boundingBox(), "Wiki navigation geometry");
+        const notice = fixtureValue(
+          await page.locator(".knowledge-generation").boundingBox(),
+          "Wiki failure notice geometry",
+        );
+        expect(button.y + button.height).toBeLessThanOrEqual(notice.y);
+        if (touch) await navigation.tap();
+        else await navigation.press("ArrowDown");
+        await expect(navigation).toHaveAttribute("aria-expanded", "true");
+        await expect(page.getByRole("complementary", { name: "Wiki navigation" })).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(navigation).toHaveAttribute("aria-expanded", "false");
+        await expect(navigation).toBeFocused();
+      }
+      const retry = page.getByRole("button", { name: "Retry update", exact: true });
+      if (touch) await retry.tap();
+      else {
+        await retry.focus();
+        await retry.press("Enter");
+      }
+      await expect(page.getByLabel("Wiki generation requests")).toHaveText("1");
+      await expect(page.locator(".knowledge-generation").getByRole("status")).toHaveText(
+        "Updating Wiki…",
+      );
+      await expect(page.getByRole("alert")).toHaveCount(0);
+      await expect(
+        page.getByRole("button", { name: /^(Retry update|Create Project Wiki)$/ }),
+      ).toHaveCount(0);
+      await capture(page, `wiki-recovery-pending-${label}`);
+      await expect(page.getByLabel("Wiki generation requests")).toHaveText("1");
+    });
+  });
+}
+
 for (const width of [1440, 390, 320]) {
   test(`the workspace Copy link action stays quiet and icon-only at ${width}px`, async ({
     page,

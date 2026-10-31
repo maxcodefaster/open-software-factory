@@ -2,6 +2,7 @@ import { render } from "@solidjs/web";
 import { createSignal, Show } from "solid-js";
 import { APIRequestError } from "../../apps/factory/src/api-client";
 import {
+  type KnowledgeGeneration,
   type KnowledgePage,
   knowledgeSaveSchema,
   ticketDocumentSaveSchema,
@@ -35,8 +36,23 @@ const noAction = () => {};
 
 function Wiki() {
   const drafts = new Map();
+  const query = new URLSearchParams(location.search);
+  const failed = query.has("failed");
   const [loadStage, setLoadStage] = createSignal(
-    new URLSearchParams(location.search).has("loading") ? "outline" : "ready",
+    query.has("empty") ? "empty" : query.has("loading") ? "outline" : "ready",
+  );
+  const [generationRequests, setGenerationRequests] = createSignal(0);
+  const [generation, setGeneration] = createSignal<KnowledgeGeneration | undefined>(
+    failed
+      ? {
+          id: "10000000-0000-4000-8000-000000000003",
+          sourceCommitSha: "a".repeat(40),
+          state: "failed",
+          pageCount: 0,
+          conflictCount: 0,
+          failure: "The Wiki plan did not cover essential reader guidance.",
+        }
+      : undefined,
   );
   const [selected, setSelected] = createSignal(0);
   const [pages, setPages] = createSignal<KnowledgePage[]>(
@@ -57,6 +73,9 @@ function Wiki() {
   );
   return (
     <>
+      <Show when={failed}>
+        <output aria-label="Wiki generation requests">{generationRequests()}</output>
+      </Show>
       <Show when={new URLSearchParams(location.search).has("loading")}>
         <nav aria-label="Owned Wiki loading fixture">
           <button type="button" onClick={() => setLoadStage("page")}>
@@ -81,7 +100,8 @@ function Wiki() {
         revisions={[]}
         searchResults={[]}
         searchQuery=""
-        pending={false}
+        generation={generation()}
+        pending={generation()?.state === "pending"}
         projectID={projectID}
         userID={userID}
         repositoryURL="https://example.invalid/owned-feedback.git"
@@ -89,7 +109,17 @@ function Wiki() {
         drafts={drafts}
         onSelectPage={(id) => setSelected(pages().findIndex((page) => page.id === id))}
         onOpenDocument={noAction}
-        onGenerate={noAction}
+        onGenerate={() => {
+          setGenerationRequests((previous) => previous + 1);
+          setGeneration({
+            id: "10000000-0000-4000-8000-000000000004",
+            sourceCommitSha: "a".repeat(40),
+            state: "pending",
+            pageCount: 0,
+            conflictCount: 0,
+            failure: null,
+          });
+        }}
         onSearch={noAction}
         onSavePage={async (id, expectedVersion, title, body) => {
           // Synthetic component callback, not a Factory command transport.
