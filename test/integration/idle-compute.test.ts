@@ -22,6 +22,9 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
           expect(intent).toEqual({ state: "pausing", stopped: false });
           stops++;
         },
+        async stop() {
+          throw new Error("Unsubmitted compute must retain Pause");
+        },
       },
       1,
     );
@@ -67,6 +70,9 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
         async pause(id) {
           expect(id).toBe(tail);
         },
+        async stop() {
+          throw new Error("Personal compute must retain Pause");
+        },
       },
       1,
     );
@@ -102,6 +108,9 @@ test("idle Pause waits for Build admission and retains pending, working and unce
       },
       {
         async pause() {
+          throw new Error("Active work must not stop");
+        },
+        async stop() {
           throw new Error("Active work must not stop");
         },
       },
@@ -171,6 +180,9 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
       },
       {
         async pause() {
+          throw new Error("Uncommitted intent cannot stop compute");
+        },
+        async stop() {
           throw new Error("Uncommitted intent cannot stop compute");
         },
       },

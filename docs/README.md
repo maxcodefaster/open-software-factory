@@ -320,8 +320,11 @@ Kubernetes -> digest-pinned Factorybox worker Pod with its own bounded store
 ```
 
 Factory prepares the exact consumer image before native Start. After five minutes without genuine
-use, eligible Development execution pauses. Continuing to use the editor resumes the same Attempt
-and Connector credentials. Active Agent work, open terminal sessions and uncertain operations remain protected;
+use, eligible Personal or unsubmitted Development execution pauses. Continuing to use the editor
+resumes the same Attempt and Connector credentials. Submitted, settled Ticket execution instead
+records normal Stop and releases its private backing, retaining Source and native Sessions.
+The [submitted-compute decision](adr/0033-release-idle-submitted-ticket-compute.md) defines that boundary.
+Active Agent work, open terminal sessions and uncertain operations remain protected;
 background polling and Run views do not keep compute awake. The Source service and independent
 editor retain the canonical checkout while execution is paused. Explicit Stop deletes execution
 and its private store. Lost native command output is observed without replaying a mutation.

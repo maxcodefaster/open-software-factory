@@ -105,7 +105,9 @@ Prepare only used Workspaces. Start optional browser tools and processes when ne
 editor or PTY readiness wait for unrelated services. Preserve genuine Dev Container hook dependencies.
 Allow bounded CPU bursts, retain active work, and shut down idle compute. Process views consume
 bounded events instead of repeatedly fetching and rebuilding unchanged state. Same-worker RAM
-Pause/Resume follows ADR 0022. Live migration, generic runtime providers and a second control plane
+Pause/Resume follows ADR 0022. [ADR 0033](0033-release-idle-submitted-ticket-compute.md)
+releases submitted, settled Ticket execution through idle Stop instead of another RAM checkpoint.
+Live migration, generic runtime providers and a second control plane
 are not part of this design.
 
 ## Staging and retained work

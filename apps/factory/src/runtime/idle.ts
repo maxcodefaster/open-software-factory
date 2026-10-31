@@ -14,7 +14,10 @@ export function executionIdleMS(environment: Readonly<Record<string, string | un
 export function createIdleCompute(
   database: Database,
   hub: Pick<RuntimeHub, "claimIdle" | "releaseIdle">,
-  runtimes: { pause(attemptID: string): Promise<unknown> },
+  runtimes: {
+    pause(attemptID: string): Promise<unknown>;
+    stop(attemptID: string): Promise<unknown>;
+  },
   idleMS = executionIdleMS(process.env),
 ) {
   let running: Promise<void> | null = null;
@@ -34,7 +37,7 @@ export function createIdleCompute(
     for (const attempt of candidates) {
       if (closed) return;
       let claimed = false;
-      let recorded = false;
+      let recorded: false | "pause" | "stop" = false;
       try {
         recorded = await database.client.begin(async (sql) => {
           await sql`SELECT pg_advisory_xact_lock(hashtext(${`runtime:${attempt.projectID}`}))`;
@@ -46,20 +49,39 @@ export function createIdleCompute(
           const [current] = await sql<Array<{ state: string }>>`
             SELECT state FROM factory.runtime_attempt WHERE id=${attempt.id} FOR UPDATE`;
           if (current?.state !== "ready") return false;
-          const [work] = await sql<Array<{ active: boolean }>>`
+          const [work] = await sql<Array<{ active: boolean; submitted: boolean }>>`
             SELECT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${attempt.changeID}
               AND state IN ('pending','dispatching','running','uncertain'))
               OR EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${attempt.changeID}
                 AND (state IN ('starting','working') OR stop_pending))
               OR EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=${attempt.changeID}
-                AND state NOT IN ('succeeded','failed')) AS active`;
+                AND state NOT IN ('succeeded','failed')) AS active,
+              EXISTS(SELECT 1 FROM factory.change_agent_session session
+                JOIN factory.change change ON change.id=session.change_id
+                JOIN factory.change_writer writer ON writer.change_id=change.id
+                JOIN factory.agent_turn turn ON turn.id=session.active_turn_id AND turn.change_id=change.id
+                WHERE change.id=${attempt.changeID} AND change.runtime_attempt_id=${attempt.id}
+                  AND session.runtime_attempt_id=${attempt.id} AND session.state='committed'
+                  AND NOT session.stop_pending AND turn.state='completed'
+                  AND writer.state IN ('agent','unassigned')
+                  AND change.state IN ('active','delivering','delivered')
+                  AND EXISTS(SELECT 1 FROM factory.change_commit_operation
+                    WHERE change_id=change.id AND state='succeeded')) AS submitted`;
           if (work?.active || !hub.claimIdle(attempt.id, idleMS)) return false;
           claimed = true;
-          await sql`UPDATE factory.runtime_attempt SET state='pausing',updated_at=now()
+          // Submitted Ticket execution has no unfinished Agent work to
+          // checkpoint. Source and native Sessions live outside its private
+          // backing; preserve those while releasing idle execution normally.
+          const mode = work?.submitted ? "stop" : "pause";
+          await sql`UPDATE factory.runtime_attempt SET
+            state=${mode === "stop" ? "stop-intended" : "pausing"}::factory.runtime_attempt_state,
+            stop_intended_at=CASE WHEN ${mode === "stop"} THEN now() ELSE stop_intended_at END,
+            updated_at=now()
             WHERE id=${attempt.id} AND state='ready'`;
-          return true;
+          return mode;
         });
-        if (recorded) await runtimes.pause(attempt.id);
+        if (recorded === "stop") await runtimes.stop(attempt.id);
+        else if (recorded === "pause") await runtimes.pause(attempt.id);
       } finally {
         if (claimed && !recorded) hub.releaseIdle(attempt.id);
       }

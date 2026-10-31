@@ -176,7 +176,11 @@ Opening in observation mode does not retain a deferred Start: a later editing gr
 Coding Stop cannot wake compute without renewed editing use or deliberately reopening the Workspace.
 An observation-only IDE stays observation-only after Coding settles. Status refreshes do not take
 human editing authority or block submitted Verification; taking over editing remains an explicit action.
-Eligible Development compute pauses after five minutes without genuine use. Running work
+Eligible Personal or unsubmitted Development compute pauses after five minutes without genuine use.
+Submitted, settled Ticket compute instead stops after the same idle period, retaining its Source,
+native Sessions and submitted result while releasing private execution storage. This never repeats
+implementation; a later commissioned operation prepares fresh compute.
+Running work
 and open terminal sessions remain protected. Close terminal sessions to permit automatic Pause.
 An unattended Run view does not keep compute awake.
 The IDE's Git tab shows personal-Workspace status and diffs, commits saved changes and offers
