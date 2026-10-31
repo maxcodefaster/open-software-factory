@@ -29,7 +29,7 @@ test("a failed Preview navigation reports attachment failure instead of displayi
     headers: { "sec-fetch-mode": "navigate" },
   });
   const response = await createRuntimeProtocol(services)(request);
-  expect(response.status).toBe(500);
+  expect(response.status).toBe(503);
   expect(response.headers.get("content-type")).toContain("text/html");
   expect(response.headers.get("content-security-policy")).toContain("script-src 'sha256-");
   const body = await response.text();
