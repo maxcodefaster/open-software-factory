@@ -191,6 +191,7 @@ function AttachedRuntimeFrame(props: {
     | undefined;
 }) {
   const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
+  const [documentFailed, setDocumentFailed] = createSignal(false);
   let frame: HTMLIFrameElement | undefined;
   const activePreviewID = () =>
     props.title === "Preview" && props.active !== false ? props.attemptID : undefined;
@@ -205,6 +206,7 @@ function AttachedRuntimeFrame(props: {
   createEffect(
     () => props.url,
     () => {
+      setDocumentFailed(false);
       setPhase("loading");
     },
   );
@@ -234,11 +236,19 @@ function AttachedRuntimeFrame(props: {
           event.source !== frame?.contentWindow ||
           !event.data ||
           typeof event.data !== "object" ||
-          event.data.type !== "factory-preview-document-ready"
+          !["factory-preview-document-ready", "factory-preview-document-failed"].includes(
+            event.data.type,
+          )
         )
           return;
+        if (event.data.type === "factory-preview-document-failed") {
+          setDocumentFailed(true);
+          setPhase("failed");
+          return;
+        }
         // The document is attached even if a nonessential image is still loading.
         // This is not App health, runtime readiness or review evidence.
+        setDocumentFailed(false);
         setPhase("loaded");
         usePreview(activePreviewID());
       };
@@ -249,6 +259,7 @@ function AttachedRuntimeFrame(props: {
 
   function reload() {
     if (!frame) return;
+    setDocumentFailed(false);
     setPhase("loading");
     frame.src = props.url;
   }
@@ -276,8 +287,9 @@ function AttachedRuntimeFrame(props: {
           const accessRejected =
             document?.contentType === "application/json" &&
             new URL(document.URL).pathname === "/api/runtime-access";
-          setPhase(accessRejected ? "failed" : "loaded");
-          if (!accessRejected) usePreview(activePreviewID());
+          const rejected = accessRejected || documentFailed();
+          setPhase(rejected ? "failed" : "loaded");
+          if (!rejected) usePreview(activePreviewID());
         }}
         onError={() => setPhase("failed")}
       />

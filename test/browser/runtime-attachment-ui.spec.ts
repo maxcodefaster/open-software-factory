@@ -4,6 +4,7 @@ import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { previewBridge } from "../../apps/factory/src/review/preview-bridge";
+import { previewAttachmentFailure } from "../../apps/factory/src/runtime/preview-attachment-failure";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { test } from "../fixtures/browser-test";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
@@ -32,8 +33,19 @@ test.beforeAll(async () => {
         configureServer(server) {
           server.middlewares.use(async (request, response, next) => {
             const path = request.url?.split("?")[0];
-            if (path === "/document") {
+            if (path === "/document" || path === "/failed-document") {
               documents++;
+              if (path === "/failed-document" && documents === 1) {
+                const failure = previewAttachmentFailure(
+                  new Request(`${origin}/runtime/${attemptID}/preview/app/`, {
+                    headers: { "sec-fetch-mode": "navigate" },
+                  }),
+                  origin,
+                  Response.json({ error: "Factory command failed" }, { status: 500 }),
+                );
+                response.writeHead(failure.status, Object.fromEntries(failure.headers));
+                return response.end(await failure.text());
+              }
               response.writeHead(200, { "content-type": "text/html", "cache-control": "no-store" });
               return response.end(
                 '<!doctype html><html><body><p>Usable Preview document</p><img src="/slow-image" alt="Pending illustration"><script src="/bridge.js"></script></body></html>',
@@ -124,6 +136,60 @@ test("Preview accepts its parsed document, not a spoofed sender, while an image 
   await expect(connection).toHaveCount(0);
   expect(documents).toBe(1);
   await page.screenshot({ path: `${evidence}/preview-parsed-before-image.png` });
+});
+
+test("a failed cross-origin Preview stays behind its recovery view and reloads only on request", async ({
+  page,
+  browser,
+}) => {
+  await page.clock.install();
+  for (const width of [1440, 390]) {
+    documents = 0;
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`${origin}/runtime-attachment.html?connection-error=1`);
+    const connection = page.getByRole("status", { name: "Preview connection" });
+    await expect(connection).toContainText("Could not open Preview. Reload this view to retry.");
+    await expect(page.locator('iframe[title="Factory Preview"]')).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+    await expect(page.locator('iframe[title="Factory Preview"]')).toBeHidden();
+    await page.clock.fastForward(31_000);
+    await expect(connection).toBeVisible();
+    expect(documents).toBe(1);
+    await page.screenshot({ path: `${evidence}/preview-connection-error-${width}.png` });
+    bridgeGate.resolve();
+    imageGate.resolve();
+    await connection.getByRole("button", { name: "Reload view", exact: true }).click();
+    await expect(connection).toHaveCount(0);
+    await expect(
+      page.frameLocator('iframe[title="Factory Preview"]').getByText("Usable Preview document"),
+    ).toBeVisible();
+    expect(documents).toBe(2);
+  }
+  const touch = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+    reducedMotion: "reduce",
+  });
+  try {
+    documents = 0;
+    const phone = await touch.newPage();
+    await phone.goto(`${origin}/runtime-attachment.html?connection-error=1`);
+    const connection = phone.getByRole("status", { name: "Preview connection" });
+    const reload = connection.getByRole("button", { name: "Reload view", exact: true });
+    await expect(reload).toBeVisible();
+    expect(
+      await reload.evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
+    await phone.screenshot({ path: `${evidence}/preview-connection-error-touch.png` });
+    await reload.tap();
+    await expect(connection).toHaveCount(0);
+    expect(documents).toBe(2);
+  } finally {
+    await touch.close();
+  }
 });
 
 test("a failed Main Preview exposes its actual cause instead of an empty failure label", async ({
