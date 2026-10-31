@@ -349,13 +349,9 @@ export function createDeliveryController(
       return;
     }
     const previousDiagnosis = verificationDiagnosisInput.safeParse(verification.diagnosis);
-    if (
+    const heldFailure =
       verification.state === "failed" &&
-      (!previousDiagnosis.success || previousDiagnosis.data.kind !== "check-failed")
-    ) {
-      await stopVerification(repository, verification);
-      return;
-    }
+      (!previousDiagnosis.success || previousDiagnosis.data.kind !== "check-failed");
     const activeVerificationID = verification.id;
     async function stillActive() {
       const [current] = await database.client<Array<{ active: boolean }>>`
@@ -478,6 +474,13 @@ export function createDeliveryController(
           WHERE id = ${verification.id} AND repair_prompted_at IS NULL
         `;
       }
+      return;
+    }
+    // Keep observing the exact Forgejo run: a later native success may be
+    // authoritative even after infrastructure failure. Observation alone must
+    // never register another runner or replace its failed environment.
+    if (heldFailure) {
+      await stopVerification(repository, verification);
       return;
     }
     if (
