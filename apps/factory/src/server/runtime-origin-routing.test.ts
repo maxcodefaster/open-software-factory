@@ -8,6 +8,36 @@ const id = "01994a7d-0000-7000-8000-000000000001";
 const hex = id.replaceAll("-", "");
 const origin = "https://factory.example";
 
+test("a failed Preview navigation reports attachment failure instead of displaying Factory JSON", async () => {
+  const services = {
+    factoryOrigin: origin,
+    runtimeReady: async () => true,
+    demandRuntime: async () => true,
+    runtimeAccess: {
+      user: async () => "actor",
+      authorize: async () => "owned-access",
+      redeem: async () => undefined,
+    },
+    runtimeHub: {
+      hasAppChannel: () => true,
+      request: async () => {
+        throw new Error("channel request failed");
+      },
+    },
+  } as unknown as Parameters<typeof createRuntimeProtocol>[0];
+  const request = new Request(`${origin}/runtime/${id}/preview/app/`, {
+    headers: { "sec-fetch-mode": "navigate" },
+  });
+  const response = await createRuntimeProtocol(services)(request);
+  expect(response.status).toBe(500);
+  expect(response.headers.get("content-type")).toContain("text/html");
+  expect(response.headers.get("content-security-policy")).toContain("script-src 'sha256-");
+  const body = await response.text();
+  expect(body).toContain("factory-preview-document-failed");
+  expect(body).not.toContain("Factory command failed");
+  expect(body).not.toContain("channel request failed");
+});
+
 test("isolated App origins serve root pages, assets, APIs and sockets without entering Factory", async () => {
   let factoryCalls = 0;
   const services = {

@@ -5,6 +5,7 @@ import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { RuntimeWorkspace, RuntimeWorkspaceTabs } from "../../apps/factory/src/runtime-workspace";
 import "../../apps/factory/src/tokens.css";
 import "../../apps/factory/src/style.css";
+import "../../apps/factory/src/runtime-workspace.css";
 import "@fontsource-variable/inter";
 import "@fontsource/sansita/400-italic.css";
 import type { RuntimeAttempt } from "../../apps/factory/src/api-contracts";
@@ -47,7 +48,7 @@ function Surface() {
             <RuntimeWorkspace
               title="Preview"
               attemptID={attemptID}
-              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/document`}
+              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("connection-error") ? "failed-document" : "document"}`}
               loadingLabel="Opening Preview…"
             />
           }

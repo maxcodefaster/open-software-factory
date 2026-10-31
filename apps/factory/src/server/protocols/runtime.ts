@@ -9,6 +9,7 @@ import {
   scopeRuntimeEmbedding,
 } from "../../runtime/embedding";
 import { scopeTheiaConnectionCookie } from "../../runtime/hub";
+import { previewAttachmentFailure } from "../../runtime/preview-attachment-failure";
 import { runtimeAppOriginRoute } from "../../runtime-origins";
 import type { FactoryApplication } from "../application";
 
@@ -206,7 +207,7 @@ export function createRuntimeProtocol(services: RuntimeServices) {
       }
       return new Response("Not found", { status: 404 });
     } catch (cause) {
-      return protocolFailure(request, cause);
+      return previewAttachmentFailure(request, factoryOrigin, protocolFailure(request, cause));
     }
   };
 }
