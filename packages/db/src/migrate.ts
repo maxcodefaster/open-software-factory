@@ -37,7 +37,7 @@ try {
   `;
   if (
     versions[0]?.version !== 1 ||
-    versions.length > 3 ||
+    versions.length > 4 ||
     versions.some((value, index) => value.version !== index + 1)
   )
     throw new Error(
@@ -51,6 +51,13 @@ try {
     await client.unsafe(
       await readFile(
         resolve(import.meta.dir, "../migrations/0003_worker_declarations.sql"),
+        "utf8",
+      ),
+    );
+  if (versions.length <= 3)
+    await client.unsafe(
+      await readFile(
+        resolve(import.meta.dir, "../migrations/0004_worker_store_recovery.sql"),
         "utf8",
       ),
     );

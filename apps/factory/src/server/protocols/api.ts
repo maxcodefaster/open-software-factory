@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { json, sameFactoryOrigin } from "../../http";
 import { installationInMaintenance } from "../../installation/maintenance";
 import { factoryRequestURL } from "../../request-origin";
@@ -23,6 +24,7 @@ type ApiServices = Pick<
   | "runtimeAccess"
   | "runtimeHub"
   | "runtimeReady"
+  | "runtimeController"
   | "sourceProtocol"
   | "wikiSourceUpdates"
 >;
@@ -42,6 +44,7 @@ export function createApiProtocol(services: ApiServices) {
     runtimeAccess,
     runtimeHub,
     runtimeReady,
+    runtimeController,
     sourceProtocol,
     wikiSourceUpdates,
   } = services;
@@ -95,6 +98,15 @@ export function createApiProtocol(services: ApiServices) {
         const session = await requireSession(request);
         if (!session) return json({ error: "Authentication required" }, 401);
         await accessController.authorizeAPI(request, session.user.id);
+        if (url.pathname === "/api/admin/worker/recover" && request.method === "POST") {
+          const input = z.strictObject({ requestID: z.uuid() }).parse(await request.json());
+          return json(
+            await runtimeController.recoverWorker({
+              actorID: session.user.id,
+              requestID: input.requestID,
+            }),
+          );
+        }
         const forgeIdentityResponse = await forgeIdentityRoutes(request, session.user.id);
         if (forgeIdentityResponse) return forgeIdentityResponse;
         const reviewMediaResponse = await reviewMediaRoutes(request, session.user.id);

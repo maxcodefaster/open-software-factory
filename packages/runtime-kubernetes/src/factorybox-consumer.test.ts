@@ -43,6 +43,38 @@ const identity: FactoryboxWorkerIdentity = {
   controllerRoot: "/controller",
 };
 
+test("recovered workers export the same image independently without retargeting old exporter history", () => {
+  const admissionID = crypto.randomUUID();
+  const recovered = {
+    ...input,
+    ...factoryboxLocation(workerID, admissionID),
+    profile: {
+      ...input.profile,
+      retainedStore: {
+        storeID: identity.storeID,
+        initializedByPodUID: identity.podUID,
+        boundedBytes: input.profile.boundedBytes,
+      },
+    },
+  };
+  const nextIdentity = { ...identity, podUID: "successor", epoch: "f".repeat(32) };
+  const original = factoryboxConsumerIntent(input, identity);
+  const next = factoryboxConsumerIntent(recovered, nextIdentity);
+  expect(next.exporterName).not.toBe(original.exporterName);
+  const key = new Bun.CryptoHasher("sha256").update(input.runtimeHostImage).digest("hex");
+  const declared = renderFactoryboxConsumer(
+    recovered,
+    nextIdentity,
+    `consumer-seeds/${admissionID.replaceAll("-", "")}/${key}`,
+  );
+  expect(declared.spec.volumes[0]?.persistentVolumeClaim.claimName).toBe(
+    `store-${identity.storeID}`,
+  );
+  expect(() =>
+    renderFactoryboxConsumer(recovered, nextIdentity, `consumer-seeds/${key}`),
+  ).toThrow();
+});
+
 function fixture() {
   const intent = factoryboxConsumerIntent(input, identity);
   const key = new Bun.CryptoHasher("sha256").update(input.runtimeHostImage).digest("hex");

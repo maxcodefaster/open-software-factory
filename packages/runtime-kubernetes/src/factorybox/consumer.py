@@ -65,14 +65,22 @@ def export(request):
     if status['store_id'] != plan['storeID'] or status['epoch'] != plan['epoch']:
         raise ValueError('Consumer export worker epoch changed')
     key = hashlib.sha256(plan['image'].encode()).hexdigest()
-    if plan['exporterName'] != 'consumer-'+key[:48]:
+    namespace = os.environ.get('FACTORY_SEED_NAMESPACE', '')
+    if namespace and not re.fullmatch('[a-f0-9]{32}', namespace):
+        raise ValueError('Consumer export namespace is invalid')
+    name_key = hashlib.sha256((namespace+':'+plan['image']).encode()).hexdigest() if namespace else key
+    if plan['exporterName'] != 'consumer-'+name_key[:48]:
         raise ValueError('Consumer exporter name differs from its immutable image')
     ROOT.mkdir(mode=0o700, exist_ok=True)
     directory(ROOT)
-    descriptor = os.open(ROOT/'.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    home = ROOT/namespace if namespace else ROOT
+    home.mkdir(mode=0o700, exist_ok=True)
+    directory(home)
+    sub_path = 'consumer-seeds/'+(namespace+'/' if namespace else '')+key
+    descriptor = os.open(home/'.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        root = ROOT/key
+        root = home/key
         fresh = not root.exists() and not root.is_symlink()
         if fresh:
             if request['action'] != 'begin' or request.get('existingUID') is not None:
@@ -88,7 +96,7 @@ def export(request):
             if saved['intent'] != plan or not saved['exporterUID']:
                 raise ValueError('Consumer completion belongs to another export')
             return {'create': False, 'complete': True, 'exporterUID': saved['exporterUID'],
-                    'subPath': 'consumer-seeds/'+key}
+                    'subPath': sub_path}
         attempted = root/'attempted.json'
         if request['action'] == 'begin':
             create = fresh
@@ -96,7 +104,7 @@ def export(request):
                 publish(attempted, plan)
             elif read(attempted) != plan:
                 raise ValueError('Consumer create attempt remains unconfirmed')
-            return {'create': create, 'complete': False, 'subPath': 'consumer-seeds/'+key}
+            return {'create': create, 'complete': False, 'subPath': sub_path}
         uid = request['exporterUID']
         if not isinstance(uid, str) or not uid or len(uid) > 128:
             raise ValueError('Consumer export needs its original Pod UID')
@@ -123,7 +131,7 @@ def export(request):
         elif request['action'] != 'observe':
             raise ValueError('Unknown consumer export command')
         return {'create': False, 'complete': complete.exists(), 'exporterUID': uid,
-                'subPath': 'consumer-seeds/'+key}
+                'subPath': sub_path}
 
 
 if __name__ == '__main__':

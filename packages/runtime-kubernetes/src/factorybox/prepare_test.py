@@ -39,6 +39,16 @@ class PreparationTests(unittest.TestCase):
         return patch.dict(os.environ, {"FACTORY_POD_UID": self.request["podUID"],
                                        "FACTORY_STORE_ID": self.request["storeID"]})
 
+    def test_recovered_worker_bootstrap_and_consumers_use_only_its_admission_inputs(self):
+        namespace = 'f'*32
+        seed = self.module['consumer_seed']
+        with patch.dict(os.environ, {'FACTORY_SEED_NAMESPACE': namespace}):
+            self.assertEqual(seed(self.request), Path('/var/lib/sysbox/seeds')/namespace/'bootstrap')
+            upgraded = {**self.request, 'runtimeHostImage': 'registry.invalid/next@sha256:'+'1'*64}
+            key = hashlib.sha256(upgraded['runtimeHostImage'].encode()).hexdigest()
+            self.assertEqual(seed(upgraded), Path('/var/lib/sysbox/consumer-seeds')/namespace/key)
+        self.assertEqual(seed(self.request), Path('/var/lib/sysbox/seed'))
+
     def test_preparation_consumes_one_lifecycle_and_does_not_restart_expired_work(self):
         remaining = self.module["remaining_preparation_seconds"]
         deadline = self.module["PREPARATION_DEADLINE"]

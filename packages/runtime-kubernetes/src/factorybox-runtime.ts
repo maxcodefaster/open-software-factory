@@ -40,6 +40,17 @@ export const factoryboxRuntimeProfile = z
     executableSHA256: z.string().regex(/^[a-f0-9]{64}$/),
     cpuRequestMilli: factoryboxCPURequestMilli.optional(),
     resources: factoryboxWorkerResources.optional(),
+    retainedStore: z
+      .strictObject({
+        storeID: z.string().regex(/^[a-f0-9]{32}$/),
+        initializedByPodUID: z.string().min(1).max(128),
+        boundedBytes: z
+          .number()
+          .int()
+          .min(8 * 1024 ** 3)
+          .max(32 * 1024 ** 3),
+      })
+      .optional(),
     resourceAdmission: z
       .strictObject({
         memoryHeadroomMiB: z.number().int().nonnegative().safe(),
@@ -146,6 +157,10 @@ export const factoryboxInitializeStoreProgram = readFileSync(
   new URL("./factorybox/initialize-store.py", import.meta.url),
   "utf8",
 );
+export const factoryboxInspectStoreProgram = readFileSync(
+  new URL("./factorybox/inspect-store.py", import.meta.url),
+  "utf8",
+);
 export const factoryboxStorageAdmissionProgram = readFileSync(
   new URL("./factorybox/storage-admission.py", import.meta.url),
   "utf8",
@@ -170,6 +185,7 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   // It is not a new option on the pinned standalone worker CLI.
   delete nativeProfile.storageAdmission;
   delete nativeProfile.resourceAdmission;
+  delete nativeProfile.retainedStore;
   factoryboxRuntimeImage.parse(input.runtimeHostImage);
   if (input.workerRuntimeHostImage) factoryboxRuntimeImage.parse(input.workerRuntimeHostImage);
   const identifier = (value: string) =>
@@ -191,7 +207,7 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
     ...nativeProfile,
     namespace: input.namespace,
     podName: input.podName,
-    storeID: identifier(admissionID),
+    storeID: profile.retainedStore?.storeID ?? identifier(admissionID),
     trustDomainID: identifier(input.workerID),
   };
 }
@@ -209,6 +225,22 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
     { name: "FACTORY_POD_UID", valueFrom: { fieldRef: { fieldPath: "metadata.uid" } } },
     { name: "FACTORY_STORE_ID", value: request.storeID },
     { name: "FACTORY_RUNTIME_IMAGE", value: bootstrapImage },
+    ...(input.profile.retainedStore
+      ? [
+          {
+            name: "FACTORY_SEED_NAMESPACE",
+            value: factoryboxAdmissionID(input.workerID, input.podName).replaceAll("-", ""),
+          },
+          {
+            name: "FACTORY_STORE_INITIALIZER_POD_UID",
+            value: input.profile.retainedStore.initializedByPodUID,
+          },
+          {
+            name: "FACTORY_RETAINED_STORE_BYTES",
+            value: String(input.profile.retainedStore.boundedBytes),
+          },
+        ]
+      : []),
   ];
   return {
     namespace: {
@@ -236,7 +268,13 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
             name: "store-initialize",
             image: request.image,
             imagePullPolicy: "IfNotPresent",
-            command: ["python3", "-c", factoryboxInitializeStoreProgram],
+            command: [
+              "python3",
+              "-c",
+              input.profile.retainedStore
+                ? factoryboxInspectStoreProgram
+                : factoryboxInitializeStoreProgram,
+            ],
             securityContext: {
               runAsUser: 0,
               runAsGroup: 0,
@@ -251,7 +289,13 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
               limits: { cpu: "250m", memory: "64Mi" },
             },
             env: environment,
-            volumeMounts: [{ name: "store", mountPath: "/factory-store" }],
+            volumeMounts: [
+              {
+                name: "store",
+                mountPath: "/factory-store",
+                ...(input.profile.retainedStore ? { readOnly: true } : {}),
+              },
+            ],
           },
           {
             name: "runtime-image",
@@ -275,9 +319,17 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
               limits: { cpu: "1", memory: "256Mi" },
             },
             env: environment,
-            volumeMounts: [{ name: "store", mountPath: "/factory-seed", subPath: "seed" }],
+            volumeMounts: [
+              {
+                name: "store",
+                mountPath: "/factory-seed",
+                subPath: input.profile.retainedStore
+                  ? `seeds/${factoryboxAdmissionID(input.workerID, input.podName).replaceAll("-", "")}/bootstrap`
+                  : "seed",
+              },
+            ],
           },
-          ...(input.profile.storageAdmission === 1
+          ...(input.profile.storageAdmission === 1 && !input.profile.retainedStore
             ? [
                 {
                   name: "storage-admission",

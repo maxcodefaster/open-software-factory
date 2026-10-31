@@ -139,6 +139,28 @@ The Pod has `restartPolicy: Never`. There is no Deployment, automatic replacemen
 after node loss. Keep a failed worker's complete PVC and original identity for explicit recovery.
 The health port serves only `GET /readyz` with an empty 204/503 response; it is not an admin API.
 
+## Recover an admitted product worker
+
+Settle or explicitly Stop existing execution before stopping the original worker. Keep its Pod
+with `restartPolicy: Never` so Factory can observe its exact UID and terminal phase.
+Do not delete its Namespace, Source claim or store, mutate the admitted Pod, edit database rows
+or repeat an uncertain Sandbox Start.
+
+An authenticated System Manager can POST `{"requestID":"<new UUID>"}` to
+`/api/admin/worker/recover` with the normal Factory session and same-origin command header.
+The configured worker image and executable select the independently qualified successor.
+Reuse that request UUID to observe the same completed recovery after a lost response.
+The command refuses running, missing or replaced original Pods, unresolved execution and
+foreign stores. Refusal leaves the admission unchanged.
+
+Recovery retains the new declaration without starting a Sandbox. The next explicitly commissioned
+execution creates the successor Pod on the original node, reusing the exact store and Source claim.
+A read-only inspector verifies the original initialization receipt, bounded image inode and
+capacity and requires its old lease to be released. Old imports, exports and runtime histories
+remain retained; new exports have separate admission-scoped inputs. A failed successor bootstrap
+using that store needs another explicit operator recovery, never a new-store bootstrap retry.
+See [ADR 0031](../../docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md).
+
 ## Lifecycle commands
 
 Prepare the complete OCI bundle inside the bounded store, for example

@@ -165,10 +165,14 @@ def image_source_mounts(source):
 
 
 def consumer_seed(request):
+    namespace = os.environ.get('FACTORY_SEED_NAMESPACE', '')
+    if namespace and not re.fullmatch('[a-f0-9]{32}', namespace):
+        raise ValueError('Consumer seed namespace is invalid')
     if request['runtimeHostImage'] == os.environ.get('FACTORY_RUNTIME_IMAGE', request['runtimeHostImage']):
-        return Path('/var/lib/sysbox/seed')
+        return Path('/var/lib/sysbox/seeds')/namespace/'bootstrap' if namespace else Path('/var/lib/sysbox/seed')
     key = hashlib.sha256(request['runtimeHostImage'].encode()).hexdigest()
-    return Path('/var/lib/sysbox/consumer-seeds')/key
+    root = Path('/var/lib/sysbox/consumer-seeds')
+    return (root/namespace if namespace else root)/key
 
 
 def consumer_base_id(request):
@@ -233,12 +237,13 @@ def image_base(request, status, seed, rootfs_sha256, cli):
     # the bounded native store. The verified native copy remains bounded.
     base_id = consumer_base_id(request)
     upgraded = base_id != 'factory-runtime'
-    images = seed if upgraded else Path(status['store'])/'consumer-images'
+    scoped = bool(os.environ.get('FACTORY_SEED_NAMESPACE'))
+    images = seed if upgraded or scoped else Path(status['store'])/'consumer-images'
     images.mkdir(mode=0o700, exist_ok=True)
     descriptor = os.open(images/'.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, 'r+') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        root = images/'import' if upgraded else images/rootfs_sha256
+        root = images/'import' if upgraded or scoped else images/rootfs_sha256
         intent = {'version': 1, 'storeID': request['storeID'], 'epoch': request['epoch'],
                   'podUID': request['podUID'], 'runtimeHostImage': request['runtimeHostImage'],
                   'rootfsSHA256': rootfs_sha256}

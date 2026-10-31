@@ -7,6 +7,7 @@ import {
   rememberFactoryboxSource,
   retainedFactoryboxProfile,
 } from "../../apps/factory/src/runtime/worker";
+import { recoverFactoryboxWorker } from "../../apps/factory/src/runtime/worker-recovery";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import {
   factoryboxAssignmentSecret,
@@ -18,7 +19,7 @@ import {
   factoryboxSandboxID,
   renderFactoryboxRuntime,
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
-import { factoryProcess } from "../fixtures/factory-process";
+import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedFactoryboxProfile as profile } from "../fixtures/runtime-configuration";
 
 const manifest = z
@@ -165,10 +166,12 @@ function infrastructure() {
   const fault = {
     losePodCreate: false,
     unavailableRead: false,
+    beforeRead: async (_args: readonly string[]) => {},
     beforePodCreate: async (_pod: z.infer<typeof manifest>) => {},
   };
   const kubernetes = createKubernetesClient(async (args, body) => {
     if (args[0] === "get") {
+      await fault.beforeRead(args);
       if (fault.unavailableRead)
         return { stdout: "", stderr: "Owned fixture API unavailable", exitCode: 1 };
       const item = objects.get(key(args[1] ?? "", args[2] ?? ""));
@@ -324,6 +327,216 @@ async function failedBootstrap() {
     throw cause;
   }
 }
+
+async function admittedWorker() {
+  const f = await failedBootstrap();
+  const { original } = f;
+  if (!original.podUID || !original.claimUID || !original.namespaceUID)
+    throw new Error("Missing admitted fixture identities");
+  await f.database.client`INSERT INTO factory.administrator(user_id) VALUES(${f.actorID})`;
+  const identity = {
+    version: 1 as const,
+    podUID: original.podUID,
+    claimUID: original.claimUID,
+    namespaceUID: original.namespaceUID,
+    storeID: original.admissionID.replaceAll("-", ""),
+    epoch: "e".repeat(32),
+    bootID: "original-boot",
+    nodeBootID: "original-node-boot",
+    executableSHA256: profile.executableSHA256,
+    controllerRoot: "/factorybox",
+  };
+  await rememberFactoryboxIdentity(f.database.client, original.id, identity);
+  return { ...f, identity };
+}
+
+test("explicit operator recovery keeps one store and Source while admitting a distinct worker lifetime", async () => {
+  const f = await admittedWorker();
+  try {
+    const oldAttempt = await f.attempt("failed");
+    const before = [
+      ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${oldAttempt}`),
+    ];
+    const request = { actorID: f.actorID, requestID: crypto.randomUUID() };
+    const selected = { ...profile, resources: { cpuMilli: 8000, memoryMiB: 12288 } };
+    const writes = f.kube.writes.length;
+    const recovery = await recoverFactoryboxWorker(
+      f.database,
+      f.kube.kubernetes,
+      selected,
+      runtimeImage,
+      request,
+    );
+    expect(f.kube.writes).toHaveLength(writes);
+    expect(
+      await recoverFactoryboxWorker(f.database, f.kube.kubernetes, selected, runtimeImage, request),
+    ).toEqual(recovery);
+    const current = await factoryboxAllocation(f.database.client);
+    expect(current.claimUID).toBe(f.original.claimUID);
+    expect(current.sourceClaimUID).toBe(f.original.sourceClaimUID);
+    expect(current.namespaceUID).toBe(f.original.namespaceUID);
+    expect(current.podUID).toBeNull();
+    expect(current.identity).toBeNull();
+    const retained = await retainedFactoryboxProfile(f.database.client);
+    expect(retained.retainedStore).toEqual({
+      storeID: f.identity.storeID,
+      initializedByPodUID: f.identity.podUID,
+      boundedBytes: profile.boundedBytes,
+    });
+    const location = await f.worker.location();
+    await f.worker.provision(resources(location, runtimeImage, retained), retained, runtimeImage);
+    const next = await factoryboxAllocation(f.database.client);
+    expect(next.podUID).not.toBe(f.original.podUID);
+    expect(next.claimUID).toBe(f.original.claimUID);
+    expect(
+      [...f.kube.objects.values()].filter((item) => item.kind === "PersistentVolumeClaim"),
+    ).toHaveLength(2);
+    expect([
+      ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${oldAttempt}`),
+    ]).toEqual(before);
+    await rememberFactoryboxIdentity(f.database.client, next.id, {
+      ...f.identity,
+      podUID: next.podUID ?? "",
+      epoch: "f".repeat(32),
+    });
+    const [old] = await f.database.client`SELECT identity,retirement_observation
+      FROM factory.factorybox_worker_admission WHERE id=${f.original.admissionID}`;
+    expect(old?.["identity"]).toEqual(f.identity);
+    expect(old?.["retirement_observation"]).toMatchObject({
+      kind: "operator-recovery",
+      requestID: request.requestID,
+    });
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);
+
+test.each([
+  "running",
+  "missing",
+  "replacement",
+  "active execution",
+  "not manager",
+  "unavailable",
+] as const)(
+  "operator recovery refuses %s before changing admissions or source",
+  async (scenario) => {
+    const f = await admittedWorker();
+    try {
+      if (scenario === "running") Reflect.set(f.pod, "status", { phase: "Running" });
+      if (scenario === "missing") f.kube.objects.delete("pod/worker");
+      if (scenario === "replacement") f.pod.metadata.uid = crypto.randomUUID();
+      if (scenario === "active execution") await f.attempt("create-intended");
+      if (scenario === "not manager")
+        await f.database.client`DELETE FROM factory.administrator WHERE user_id=${f.actorID}`;
+      if (scenario === "unavailable") f.kube.fault.unavailableRead = true;
+      const before = [
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ];
+      await expect(
+        recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, {
+          actorID: f.actorID,
+          requestID: crypto.randomUUID(),
+        }),
+      ).rejects.toThrow();
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ]).toEqual(before);
+    } finally {
+      await f.dispose();
+    }
+  },
+  30_000,
+);
+
+test.each(["storeID", "initializedByPodUID", "boundedBytes"] as const)(
+  "database recovery guard rejects a changed retained %s and rolls retirement back",
+  async (field) => {
+    const f = await admittedWorker();
+    try {
+      const before = [
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ];
+      await expect(
+        recoverFactoryboxWorker(
+          f.database,
+          f.kube.kubernetes,
+          profile,
+          runtimeImage,
+          { actorID: f.actorID, requestID: crypto.randomUUID() },
+          async (input) => ({
+            ...input,
+            retainedStore: {
+              storeID: f.identity.storeID,
+              initializedByPodUID: f.identity.podUID,
+              boundedBytes: profile.boundedBytes,
+              [field]: field === "boundedBytes" ? 9 * 1024 ** 3 : "f".repeat(32),
+            },
+          }),
+        ),
+      ).rejects.toThrow("exact store");
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.factorybox_worker_admission`),
+      ]).toEqual(before);
+    } finally {
+      await f.dispose();
+    }
+  },
+  30_000,
+);
+
+test("recovery row lock fences a concurrent fresh commission on the retired admission", async () => {
+  const f = await admittedWorker();
+  const writer = f.database.coordination();
+  const observed = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let held = false;
+  f.kube.fault.beforeRead = async (args) => {
+    if (!held && args[1] === "pod") {
+      held = true;
+      observed.resolve();
+      await release.promise;
+    }
+  };
+  let recovering: ReturnType<typeof recoverFactoryboxWorker> | undefined;
+  try {
+    recovering = recoverFactoryboxWorker(f.database, f.kube.kubernetes, profile, runtimeImage, {
+      actorID: f.actorID,
+      requestID: crypto.randomUUID(),
+    });
+    await observed.promise;
+    const [session] = await writer<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`;
+    if (!session) throw new Error("Missing concurrent writer");
+    const id = crypto.randomUUID();
+    const inserting = writer`INSERT INTO factory.runtime_attempt(
+      id,project_id,isolated_kind,generation,revision,state,factorybox_worker_id,factorybox_admission_id,
+      parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${id},${f.projectID},'staging',1,${"a".repeat(40)},'create-intended',
+        ${f.original.id},${f.original.admissionID},${"b".repeat(64)},${"c".repeat(64)},now(),${f.actorID})`.then(
+      () => null,
+      (cause: unknown) => cause,
+    );
+    await eventually(
+      async () => [
+        ...(await f.database.client`
+      SELECT wait_event_type,wait_event FROM pg_stat_activity WHERE pid=${session.pid}`),
+      ],
+      (rows) => rows[0]?.["wait_event_type"] === "Lock" && rows[0]?.["wait_event"] !== "advisory",
+      "Fresh commission never waited on the admission row",
+    );
+    release.resolve();
+    await recovering;
+    expect(String(await inserting)).toContain("active worker admission");
+    expect(
+      await f.database.client`SELECT id FROM factory.runtime_attempt WHERE id=${id}`,
+    ).toHaveLength(0);
+  } finally {
+    release.resolve();
+    await recovering?.catch(() => {});
+    await writer.end({ timeout: 2 });
+    await f.dispose();
+  }
+}, 30_000);
 
 test.each([
   "active execution",

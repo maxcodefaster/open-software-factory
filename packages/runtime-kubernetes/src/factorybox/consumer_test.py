@@ -52,6 +52,22 @@ class ConsumerTests(unittest.TestCase):
         self.assertTrue(self.complete()['complete'])
         self.assertTrue(self.command('begin', existingUID=None)['complete'])
 
+    def test_successor_exports_have_new_names_and_inputs_without_overwriting_original(self):
+        self.command('begin', existingUID=None)
+        original = (self.root/self.key/'intent.json').read_bytes()
+        namespace = 'f'*32
+        self.status['epoch'] = 'd'*32
+        self.intent = {**self.intent, 'epoch': self.status['epoch'],
+                       'podUID': 'successor-worker',
+                       'exporterName': 'consumer-'+hashlib.sha256((namespace+':'+self.intent['image']).encode()).hexdigest()[:48]}
+        with patch.dict(os.environ, {'FACTORY_SEED_NAMESPACE': namespace,
+                                    'FACTORY_POD_UID': self.intent['podUID']}):
+            result = self.command('begin', existingUID=None)
+            self.assertTrue(result['create'])
+            self.assertEqual(result['subPath'], 'consumer-seeds/'+namespace+'/'+self.key)
+        self.assertEqual((self.root/self.key/'intent.json').read_bytes(), original)
+        self.assertEqual(json.loads((self.root/namespace/self.key/'intent.json').read_text()), self.intent)
+
     def test_preexisting_exporter_is_not_adopted_without_intent(self):
         with self.assertRaisesRegex(ValueError, 'persisted original intent'):
             self.command('begin', existingUID='foreign')
