@@ -148,6 +148,11 @@ DNS or browser resolver flags are needed in Chromium-based browsers for the isol
 `*.runtime.localhost` IDE and App addresses. This is local development access, not a public Ingress
 or an installer for Kubernetes.
 
+Each declared App has its own isolated origin. Root-relative pages, framework APIs, assets and
+WebSockets stay with that App instead of entering Factory's document or command handlers.
+Preview grants bind the exact Runtime Attempt and App channel. Their host-only cookies cover that
+App's origin; Factory credentials are not forwarded, and App cookies cannot escape to another App.
+
 ## Conversations and shared editing
 
 The Assistant's conversation selector retains personal Project and shared Ticket conversations.

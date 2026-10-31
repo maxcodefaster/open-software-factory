@@ -159,6 +159,7 @@ export function createApiProtocol(services: ApiServices) {
         const token = await runtimeAccess.issue({
           attemptID,
           channel,
+          ...(channel === "app" ? { appChannel: previewChannel ?? "app" } : {}),
           userID: session.user.id,
           sessionID: session.session.id,
           expires: Date.now() + 8 * 60 * 60 * 1_000,
@@ -168,7 +169,9 @@ export function createApiProtocol(services: ApiServices) {
           path,
           process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000",
         );
-        destination.host = new URL(appRuntimeOrigin(factoryOrigin, attemptID, channel)).host;
+        destination.host = new URL(
+          appRuntimeOrigin(factoryOrigin, attemptID, previewChannel ?? channel),
+        ).host;
         destination.searchParams.set("factory-grant", token);
         return Response.redirect(destination, 302);
       }

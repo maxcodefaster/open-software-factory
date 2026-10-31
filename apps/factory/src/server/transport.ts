@@ -12,6 +12,7 @@ import {
   type RuntimeSocketData,
   theiaConnectionToken,
 } from "../runtime/hub";
+import { runtimeAppRequest } from "../runtime-app-request";
 import type { DeveloperEditorSocketData } from "../workspace/developer-ide-edge";
 import type { FactoryApplication } from "./application";
 import { createFactoryProtocols, type FactoryProtocolServices } from "./protocols";
@@ -50,6 +51,8 @@ export function startFactoryTransport(application: FactoryTransportServices) {
     port: Number(FACTORY_PORT ?? 3000),
     idleTimeout: 180,
     async fetch(request, server) {
+      const connectionRequest = request;
+      request = runtimeAppRequest(request, factoryOrigin);
       const url = factoryRequestURL(request, factoryOrigin);
       if (/^\/internal\/build-browser\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/.test(url.pathname))
         // Cold image preparation has its own 180-second bound, followed by the
@@ -64,7 +67,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
             ? await developerIDEEdge.executionSocketData(request)
             : await developerIDEEdge.socketData(request);
           if (data instanceof Response) return data;
-          if (!server.upgrade(request, { data }))
+          if (!server.upgrade(connectionRequest, { data }))
             return json({ error: "Editor connection failed" }, 500);
           return undefined;
         } catch (cause) {
@@ -76,7 +79,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
         const data = runtimeHub.authorize(request, hashConnectorToken);
         if (!data) return new Response("Unauthorized", { status: 401 });
         if (
-          !server.upgrade(request, {
+          !server.upgrade(connectionRequest, {
             data,
             headers: { "sec-websocket-protocol": RuntimeHub.protocol() },
           })
@@ -101,7 +104,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
           return new Response("Runtime is not ready", { status: 409 });
         }
         if (
-          !server.upgrade(request, {
+          !server.upgrade(connectionRequest, {
             data: {
               kind: "browser",
               attemptID,
@@ -121,7 +124,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
       if (appPreviewSocket && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const [, attemptID, appChannel, suffix] = appPreviewSocket;
         const accessToken = attemptID
-          ? await runtimeAccess.authorize(request, attemptID, "app")
+          ? await runtimeAccess.authorize(request, attemptID, "app", appChannel)
           : undefined;
         if (!attemptID || !appChannel || !accessToken) {
           return new Response("Runtime access required", { status: 401 });
@@ -134,7 +137,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
         }
         const socketContext = appRuntimeSocketContext(request, `${suffix || "/"}${url.search}`);
         if (
-          !server.upgrade(request, {
+          !server.upgrade(connectionRequest, {
             ...(socketContext.protocol
               ? { headers: { "sec-websocket-protocol": socketContext.protocol } }
               : {}),
@@ -167,7 +170,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
         const socketContext: { headers?: Record<string, string>; protocol?: string } =
           channel === "app" ? appRuntimeSocketContext(request, path) : {};
         if (
-          !server.upgrade(request, {
+          !server.upgrade(connectionRequest, {
             ...(socketContext.protocol
               ? { headers: { "sec-websocket-protocol": socketContext.protocol } }
               : {}),

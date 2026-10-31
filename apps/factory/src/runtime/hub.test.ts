@@ -11,6 +11,23 @@ import {
   theiaConnectionToken,
 } from "./hub";
 
+test("isolated App cookies cover that App's origin without planting Factory credentials", () => {
+  const headers = new Headers();
+  headers.append(
+    "set-cookie",
+    "app_session=owned; Domain=foreign.example; Path=/private; HttpOnly",
+  );
+  headers.append("set-cookie", "factory_runtime_access=forged; Path=/");
+  const scoped = scopeAppCookies(
+    new Response(null, { headers }),
+    "/runtime/01994a7d-0000-7000-8000-000000000001/preview/app-forms",
+    true,
+  );
+  expect(scoped.headers.getSetCookie()).toEqual([
+    "app_session=owned; HttpOnly; Path=/; SameSite=None; Secure; Partitioned",
+  ]);
+});
+
 function connectorSocket(role: "parent" | "child") {
   return {
     data: { kind: "connector", role, attemptID: "attempt", generation: 1 },

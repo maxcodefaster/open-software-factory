@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ServerWebSocket } from "bun";
-import { RuntimeProcessEvents } from "./process-events";
 import { factoryRequestURL } from "../request-origin";
+import { RuntimeProcessEvents } from "./process-events";
 
 const protocol = "factory-runtime-connector-v1";
 
@@ -81,6 +81,7 @@ type PendingHTTP = {
   head: boolean;
   keepsAwake: boolean;
   appPath?: string;
+  originScopedCookies?: boolean;
   resolve(response: Response): void;
   reject(error: Error): void;
   timer: Timer;
@@ -457,7 +458,11 @@ export class RuntimeHub {
               ...(message.headers ? { headers: message.headers } : {}),
             },
           );
-          pending.resolve(pending.appPath ? scopeAppCookies(response, pending.appPath) : response);
+          pending.resolve(
+            pending.appPath
+              ? scopeAppCookies(response, pending.appPath, pending.originScopedCookies)
+              : response,
+          );
           pending.responded = true;
         } catch {
           this.#failHTTP(message.streamId, pending, "Invalid runtime response");
@@ -554,6 +559,7 @@ export class RuntimeHub {
     path: string,
     beforeSend?: (send: () => void) => Promise<void>,
     accessToken?: string,
+    originScopedCookies = false,
   ) {
     if (this.#idleClaims.has(attemptID))
       return new Response("Runtime is stopping", { status: 503 });
@@ -603,6 +609,7 @@ export class RuntimeHub {
                 0,
                 new URL(request.url).pathname.length - new URL(path, request.url).pathname.length,
               ),
+              originScopedCookies,
             }
           : {}),
         resolve,
@@ -1082,7 +1089,7 @@ export function theiaConnectionToken(headers: Headers) {
 // An untrusted App cannot set Factory/IDE credentials or cookies for other
 // runtime paths. Preserve values/expiry, but bind browser state to its runtime
 // path and top-level site so sessions also work in Factory's cross-site iframe.
-export function scopeAppCookies(response: Response, path: string) {
+export function scopeAppCookies(response: Response, path: string, originScoped = false) {
   if (!/^\/runtime\/[a-f0-9-]{36}\/(app|preview\/app(?:-[a-z][a-z0-9-]{0,26})?)$/.test(path))
     throw new Error("App cookie path is not scoped");
   const headers = new Headers(response.headers);
@@ -1106,7 +1113,14 @@ export function scopeAppCookies(response: Response, path: string) {
     );
     headers.append(
       "set-cookie",
-      [pair, ...safe, `Path=${path}`, "SameSite=None", "Secure", "Partitioned"].join("; "),
+      [
+        pair,
+        ...safe,
+        `Path=${originScoped ? "/" : path}`,
+        "SameSite=None",
+        "Secure",
+        "Partitioned",
+      ].join("; "),
     );
   }
   return new Response(response.body, {

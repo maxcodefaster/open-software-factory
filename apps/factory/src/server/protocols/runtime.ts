@@ -9,6 +9,7 @@ import {
   scopeRuntimeEmbedding,
 } from "../../runtime/embedding";
 import { scopeTheiaConnectionCookie } from "../../runtime/hub";
+import { runtimeAppOriginRoute } from "../../runtime-origins";
 import type { FactoryApplication } from "../application";
 
 import { protocolFailure } from "./failure";
@@ -38,6 +39,7 @@ export function createRuntimeProtocol(services: RuntimeServices) {
   return async (request: Request): Promise<Response> => {
     try {
       const url = factoryRequestURL(request, factoryOrigin);
+      const originApp = runtimeAppOriginRoute(factoryOrigin, url);
       const channelRequest = url.pathname.match(/^\/runtime\/([0-9a-f-]+)\/(app|ide)(\/.*)?$/);
       if (channelRequest) {
         const [, attemptID, channel, suffix] = channelRequest;
@@ -47,7 +49,9 @@ export function createRuntimeProtocol(services: RuntimeServices) {
           url,
           attemptID,
           channel,
-          `/runtime/${attemptID}/${channel}/`,
+          channel === "app" && originApp?.attemptID === attemptID && originApp.channel === "app"
+            ? "/"
+            : `/runtime/${attemptID}/${channel}/`,
         );
         if (redeemed) return redeemed;
         const accessToken = await runtimeAccess.authorize(request, attemptID, channel);
@@ -135,6 +139,7 @@ export function createRuntimeProtocol(services: RuntimeServices) {
             send();
           },
           accessToken,
+          channel === "app" && originApp?.attemptID === attemptID && originApp.channel === "app",
         );
         return channel === "ide"
           ? scopeTheiaConnectionCookie(response, `/runtime/${attemptID}/ide/`)
@@ -154,10 +159,13 @@ export function createRuntimeProtocol(services: RuntimeServices) {
           url,
           attemptID,
           "app",
-          `/runtime/${attemptID}/preview/${appChannel}/`,
+          originApp?.attemptID === attemptID && originApp.channel === appChannel
+            ? "/"
+            : `/runtime/${attemptID}/preview/${appChannel}/`,
+          appChannel,
         );
         if (redeemed) return redeemed;
-        const accessToken = await runtimeAccess.authorize(request, attemptID, "app");
+        const accessToken = await runtimeAccess.authorize(request, attemptID, "app", appChannel);
         if (!accessToken) {
           return json({ error: "Runtime access required" }, 401);
         }
@@ -188,6 +196,7 @@ export function createRuntimeProtocol(services: RuntimeServices) {
             send();
           },
           accessToken,
+          originApp?.attemptID === attemptID && originApp.channel === appChannel,
         );
         return scopeRuntimeEmbedding(
           response,

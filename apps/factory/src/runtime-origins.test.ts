@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { appRuntimeOrigin, isolatedRuntimeOrigin } from "./runtime-origins";
 import { developerIDEOrigin } from "./developer-ide-origin";
+import { appRuntimeOrigin, isolatedRuntimeOrigin, runtimeAppOriginRoute } from "./runtime-origins";
 
 const id = "01994a7d-0000-7000-8000-000000000001";
 
@@ -37,4 +37,24 @@ test("local acceptance retains loopback DNS and isolates each listener and runti
 test("runtime origin labels cannot add an unrelated host, extra labels or credentials", () => {
   for (const label of ["other.example", "user@host", "-invalid", "a".repeat(64)])
     expect(() => isolatedRuntimeOrigin("https://factory.example", label)).toThrow();
+});
+
+test("each declared App has its own complete listener-bound origin within DNS limits", () => {
+  const factory = "https://factory.example:8443";
+  for (const channel of ["app", "app-forms-api", "app-forms-admin", `app-${"a".repeat(27)}`]) {
+    const url = new URL(appRuntimeOrigin(factory, id, channel));
+    expect(url.hostname.split(".")[0]?.length).toBeLessThanOrEqual(63);
+    expect(runtimeAppOriginRoute(factory, url)).toEqual({ attemptID: id, channel });
+    const otherPort = new URL(url);
+    otherPort.port = "9443";
+    expect(runtimeAppOriginRoute(factory, otherPort)).toBeUndefined();
+    const foreign = new URL(url);
+    foreign.hostname += ".foreign.example";
+    expect(runtimeAppOriginRoute(factory, foreign)).toBeUndefined();
+  }
+  expect(appRuntimeOrigin(factory, id, "app-forms-api")).not.toBe(
+    appRuntimeOrigin(factory, id, "app-forms-admin"),
+  );
+  expect(() => appRuntimeOrigin(factory, id, "app-other.example")).toThrow();
+  expect(() => appRuntimeOrigin(factory, "not-an-attempt", "app")).toThrow();
 });

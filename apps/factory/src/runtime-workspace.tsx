@@ -77,6 +77,7 @@ export function RuntimeWorkspaceTabs(props: {
             <RuntimeWorkspace
               title={tab().view === "ide" ? "IDE" : "Preview"}
               attemptID={tab().attemptID}
+              appChannel={tab().appChannel}
               url={url()}
               reconnecting={reconnecting()}
               loadingLabel={status()}
@@ -101,6 +102,7 @@ export function RuntimeWorkspaceTabs(props: {
 export function RuntimeWorkspace(props: {
   title: "IDE" | "Preview";
   attemptID?: string | undefined;
+  appChannel?: string | undefined;
   url?: string | undefined;
   loadingLabel: string;
   failure?: string | null | undefined;
@@ -159,6 +161,7 @@ export function RuntimeWorkspace(props: {
           <AttachedRuntimeFrame
             title={props.title}
             attemptID={props.attemptID}
+            appChannel={props.appChannel}
             url={url()}
             reconnecting={Boolean(props.reconnecting)}
             review={props.review}
@@ -173,6 +176,7 @@ export function RuntimeWorkspace(props: {
 function AttachedRuntimeFrame(props: {
   title: "IDE" | "Preview";
   attemptID: string | undefined;
+  appChannel?: string | undefined;
   url: string;
   reconnecting?: boolean;
   active?: boolean | undefined;
@@ -194,7 +198,7 @@ function AttachedRuntimeFrame(props: {
     if (!attemptID) return;
     frame?.contentWindow?.postMessage(
       { type: "factory-runtime-use" },
-      appRuntimeOrigin(location.origin, attemptID, "app"),
+      appRuntimeOrigin(location.origin, attemptID, props.appChannel ?? "app"),
     );
   }
   createEffect(activePreviewID, usePreview);
@@ -212,10 +216,18 @@ function AttachedRuntimeFrame(props: {
     return () => clearTimeout(timer);
   });
   createEffect(
-    () => ({ preview: props.title === "Preview", attemptID: props.attemptID }),
+    () => ({
+      preview: props.title === "Preview",
+      attemptID: props.attemptID,
+      appChannel: props.appChannel,
+    }),
     (current) => {
       if (!current.preview || !current.attemptID) return;
-      const origin = appRuntimeOrigin(location.origin, current.attemptID, "app");
+      const origin = appRuntimeOrigin(
+        location.origin,
+        current.attemptID,
+        current.appChannel ?? "app",
+      );
       const ready = (event: MessageEvent) => {
         if (
           event.origin !== origin ||
@@ -286,7 +298,11 @@ function AttachedRuntimeFrame(props: {
             active={props.active !== false}
             onOpenTicket={context().review.onOpenTicket}
             frame={() => frame}
-            runtimeOrigin={appRuntimeOrigin(location.origin, context().attemptID, "app")}
+            runtimeOrigin={appRuntimeOrigin(
+              location.origin,
+              context().attemptID,
+              props.appChannel ?? "app",
+            )}
           />
         )}
       </Show>
