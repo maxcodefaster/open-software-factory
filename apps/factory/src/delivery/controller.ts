@@ -1428,6 +1428,9 @@ export function createDeliveryController(
           CASE WHEN failed_verification.id IS NOT NULL THEN
             COALESCE(left(failed_verification.failure,1000),'Verification compute failed before checks completed.')
             ELSE verification.summary END AS "verificationSummary",
+          CASE WHEN verification.state IN ('pending','runner-starting')
+            AND verification_runtime.state IN ('create-intended','starting')
+            THEN left(nullif(verification_runtime.failure,''),1000) END AS "verificationPreparationFailure",
           CASE WHEN failed_verification.id IS NOT NULL THEN 'execution-failed'
             WHEN verification.state='failed' THEN verification.diagnosis->>'kind' END AS "verificationFailureKind",
           CASE WHEN latest_turn.input->>'kind'='change-repair' THEN latest_turn.state::text END AS "correctionState",
@@ -1465,6 +1468,7 @@ export function createDeliveryController(
               WHERE change_id = change.id AND state = 'succeeded' ORDER BY sequence DESC LIMIT 1)
           ORDER BY created_at DESC LIMIT 1
         ) verification ON true
+        LEFT JOIN factory.runtime_attempt verification_runtime ON verification_runtime.id=verification.runtime_attempt_id
         LEFT JOIN factory.runtime_attempt failed_verification ON failed_verification.id=verification.runtime_attempt_id
           AND verification.state IN ('pending','runner-starting','running')
           AND (failed_verification.state IN ('failed','cleanup-failed')

@@ -16,6 +16,33 @@ test("unfinished technical planning is not described as an active model operatio
   expect(text).not.toContain("in progress");
 });
 
+test.each(["pending", "runner-starting"])(
+  "submitted %s Verification does not claim that checks are already running",
+  (verificationState) => {
+    const text = ticketProgress({ ...submitted, verificationState });
+    expect(text).toContain("preparing fresh checks");
+    expect(text).not.toContain("running fresh checks");
+    expect(text).not.toContain("No action needed");
+  },
+);
+
+test("a retained preparation issue stays distinct from application failure and active checks", () => {
+  const input = {
+    ...submitted,
+    verificationState: "runner-starting",
+    verificationPreparationFailure: "Factorybox capacity refused preparation before dispatch",
+  };
+  expect(ticketProgress(input)).toContain("Check preparation needs attention");
+  expect(ticketProgress(input)).not.toContain("running fresh checks");
+  expect(ticketProgress(input)).not.toContain("verification check failed");
+  expect(ticketProgress({ ...input, verificationState: "running" })).toContain(
+    "running fresh checks",
+  );
+  expect(
+    ticketProgress({ ...input, verificationState: "succeeded", reviewState: "passed" }),
+  ).not.toContain("preparation");
+});
+
 test.each([
   [{ ...submitted, verificationState: "running" }, "running fresh checks"],
   [{ ...submitted, verificationState: "succeeded", reviewState: "running" }, "Independent review"],

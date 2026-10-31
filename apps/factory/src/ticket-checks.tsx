@@ -7,6 +7,7 @@ export type TicketCheckDetails = {
   checksStopId?: string | undefined;
   verificationState?: string | undefined;
   verificationSummary?: string | undefined;
+  verificationPreparationFailure?: string | undefined;
   verificationFailureKind?: string | undefined;
   correctionState?: string | undefined;
   actionRunUrl?: string | undefined;
@@ -62,7 +63,9 @@ export function TicketChecks(props: {
         return "Checks running";
       case "runner-starting":
       case "pending":
-        return "Preparing checks";
+        return props.details?.verificationPreparationFailure
+          ? "Check preparation needs attention"
+          : "Preparing checks";
       case "cancelled":
         return "Checks stopped";
       default:
@@ -124,6 +127,15 @@ export function TicketChecks(props: {
             }
           >
             <p>{props.details?.verificationSummary}</p>
+          </Show>
+          <Show
+            when={
+              !unsubmitted() &&
+              ["pending", "runner-starting"].includes(props.details?.verificationState ?? "") &&
+              props.details?.verificationPreparationFailure
+            }
+          >
+            <p>Last preparation issue: {props.details?.verificationPreparationFailure}</p>
           </Show>
           <Show when={props.details?.reviewSummary}>
             <p>{props.details?.reviewSummary}</p>

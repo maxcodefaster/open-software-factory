@@ -9,6 +9,7 @@ export type TicketProgressInput = {
   verificationState?: string | undefined;
   verificationFailureKind?: string | undefined;
   verificationSummary?: string | undefined;
+  verificationPreparationFailure?: string | undefined;
   correctionState?: string | undefined;
   reviewState?: string | undefined;
   checksPaused?: boolean | undefined;
@@ -110,7 +111,11 @@ export function ticketProgress(input: TicketProgressInput): string {
       return "Independent review found problems. Delivery stays blocked while the findings are checked and corrected.";
     return "Implementation passed its checks. Independent review is next or in progress. No action needed.";
   }
-  if (["pending", "runner-starting", "running"].includes(input.verificationState ?? ""))
+  if (["pending", "runner-starting"].includes(input.verificationState ?? ""))
+    return input.verificationPreparationFailure
+      ? "Check preparation needs attention. Open checks for the recorded setup issue. The submitted version is retained."
+      : "Implementation is submitted. Factory is preparing fresh checks for that exact version.";
+  if (input.verificationState === "running")
     return "Implementation is submitted. Factory is running fresh checks on that exact version. No action needed.";
   if (input.verificationState === "cancelled")
     return "Checks were stopped. The submitted version remains unverified; inspect the run before continuing.";

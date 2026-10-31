@@ -416,6 +416,7 @@ export const deliveryViewSchema = z.object({
   verificationCommitSha: optionalString,
   verificationState: optionalString,
   verificationSummary: optionalString,
+  verificationPreparationFailure: optionalString,
   verificationFailureKind: optionalEnum([
     "check-failed",
     "execution-failed",

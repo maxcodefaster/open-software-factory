@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import {
   type AgentView,
   agentViewSchema,
@@ -21,6 +20,7 @@ import {
 } from "../../packages/conversation-domain/src/visual-review";
 import { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
@@ -33,10 +33,10 @@ import {
   mockFactoryFunctions,
   wakeFactoryReads,
 } from "../fixtures/server-functions";
+import { fixtureValue } from "../fixtures/value";
 import { streamedAgentView } from "../support/agent-activity-route";
 import { serveChatAssets } from "../support/chat-assets";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
-import { fixtureValue } from "../fixtures/value";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(30_000);
@@ -858,6 +858,8 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
   const requests: unknown[] = [];
   const implementationRequests: string[] = [];
   let resumed = false;
+  let verificationState = "runner-starting";
+  let preparationIssue: string | undefined;
   const implementationCommands = await Promise.all(
     ["startCoding", "sendCodingPrompt"].map(factoryFunctionMatcher),
   );
@@ -905,7 +907,8 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
   const delivery = () => ({
     verificationId: verificationID,
     verificationCommitSha: "b".repeat(40),
-    verificationState: "runner-starting",
+    verificationState,
+    verificationPreparationFailure: preparationIssue,
     ...(!resumed ? { checksStopId: stopID } : {}),
   });
   await mockFactoryFunctions(page, {
@@ -966,6 +969,34 @@ test("a submitted stopped candidate resumes checks explicitly, with stable retri
   expect(requests).toHaveLength(2);
   expect(requests[1]).toEqual(requests[0]);
   expect(requests[0]).toMatchObject({ verificationId: verificationID, stopId: stopID });
+  expect(implementationRequests).toEqual([]);
+  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+    "preparing fresh checks",
+  );
+  await expect(page.getByRole("status", { name: "Ticket progress" })).not.toContainText(
+    "running fresh checks",
+  );
+  preparationIssue = "Factorybox capacity refused preparation before dispatch";
+  await wakeFactoryReads(page);
+  await expect(summary).toHaveText("Check preparation needs attention");
+  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+    "Open checks for the recorded setup issue",
+  );
+  await expect(page.locator(".ticket-check-details")).toContainText(preparationIssue);
+  await page.screenshot({ path: `${captures}/preparation-issue-narrow.png` });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(page.locator(".ticket-check-details")).toContainText(preparationIssue);
+  await page.screenshot({ path: `${captures}/preparation-issue-wide.png` });
+  // Actual check execution supersedes an old setup diagnostic, even before a
+  // later snapshot drops that old string. Reads do not commission more work.
+  verificationState = "running";
+  await wakeFactoryReads(page);
+  await expect(summary).toHaveText("Checks running");
+  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+    "running fresh checks",
+  );
+  await expect(page.locator(".ticket-check-details")).not.toContainText(preparationIssue);
+  expect(requests).toHaveLength(2);
   expect(implementationRequests).toEqual([]);
 });
 

@@ -126,6 +126,7 @@ export function createRuntimeController(
     token: FACTORY_FORGEJO_TOKEN,
   });
   const cleanupRetries = new Set<string>();
+  const startupObservations = new Set<string>();
   const reconnectObservations = new Map<string, ReturnType<typeof setTimeout>>();
   function clearReconnectObservation(attemptID: string) {
     const timer = reconnectObservations.get(attemptID);
@@ -593,6 +594,20 @@ export function createRuntimeController(
   async function observeStartup(
     attemptID: string,
     _runtimeOwnerID: string,
+    namespace: string,
+    podName: string,
+    resources: readonly unknown[],
+  ) {
+    if (startupObservations.has(attemptID)) return;
+    startupObservations.add(attemptID);
+    try {
+      await observeStartupWindow(attemptID, namespace, podName, resources);
+    } finally {
+      startupObservations.delete(attemptID);
+    }
+  }
+  async function observeStartupWindow(
+    attemptID: string,
     namespace: string,
     podName: string,
     resources: readonly unknown[],
@@ -1133,6 +1148,40 @@ export function createRuntimeController(
               await database.client`SELECT id FROM factory.runtime_attempt WHERE id=${attempt.id} AND state='stop-intended'`;
             if (stopped) await this.stop(attempt.id);
           }
+        }
+        // An observation window can end while capacity refuses all dispatch.
+        // Continue that persisted, unattempted intent when capacity returns.
+        // A used Start or an incomplete dispatched preparation must never gain
+        // another native execution window merely because observation expired.
+        const pending = await database.client<
+          Array<{ id: string; namespace: string; podName: string }>
+        >`
+          SELECT attempt.id,attempt.kubernetes_namespace AS namespace,
+            attempt.kubernetes_pod_name AS "podName"
+          FROM factory.runtime_attempt attempt
+          JOIN factory.factorybox_runtime saved ON saved.runtime_attempt_id=attempt.id
+          WHERE attempt.state='starting' AND attempt.stop_intended_at IS NULL
+            AND attempt.kubernetes_uid IS NOT NULL AND saved.inputs_released_at IS NULL
+            AND NOT (attempt.id=ANY(${[...startupObservations]}::uuid[]))
+            AND NOT EXISTS(SELECT 1 FROM factory.runtime_compute_wait WHERE attempt_id=attempt.id)
+            AND EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation
+              WHERE runtime_attempt_id=attempt.id AND action IN ('prepare','start') AND attempted_at IS NULL)
+            AND NOT EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation
+              WHERE runtime_attempt_id=attempt.id AND action='start' AND attempted_at IS NOT NULL)
+            AND NOT EXISTS(SELECT 1 FROM factory.factorybox_lifecycle_operation
+              WHERE runtime_attempt_id=attempt.id AND action='prepare'
+                AND attempted_at IS NOT NULL AND completed_at IS NULL)
+          ORDER BY attempt.updated_at,attempt.id LIMIT 16`;
+        for (const attempt of pending) {
+          const resources = await factorybox.startupResources(attempt.id);
+          if (!resources) continue;
+          void observeStartup(
+            attempt.id,
+            attempt.id,
+            attempt.namespace,
+            attempt.podName,
+            resources,
+          ).catch(() => console.error("Retained unattempted startup observation failed"));
         }
       } finally {
         drainingCompute = false;
