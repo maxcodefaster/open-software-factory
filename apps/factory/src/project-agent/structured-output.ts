@@ -11,7 +11,9 @@ const fields = sourceCitationInput.shape;
 const projectCitation = z
   .object({
     source: z.enum(["knowledge", "ticket", "epic", "attachment"]),
-    id: fields.id,
+    id: fields.id.describe(
+      "Copy the exact UUID from the admitted Project source or returned code citation. Never use a path, URL or commit.",
+    ),
     label: fields.label,
     reference: fields.reference.unwrap().nullable().default(null),
   })

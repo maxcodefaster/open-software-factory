@@ -20,7 +20,11 @@ for (const streaming of [false, true]) {
         { name: "findCode", arguments: { query: path } },
         { name: "readCode", arguments: { path, commitSha: commit, startLine: 1, lineCount: 80 } },
       ]);
-      const requests: { tools?: unknown[]; tool_choice?: unknown }[] = [];
+      const requests: {
+        tools?: unknown[];
+        tool_choice?: unknown;
+        messages?: { role: string; content?: unknown }[];
+      }[] = [];
       const inspected: string[] = [];
       const cancellation = new AbortController();
       let lookups = 0;
@@ -59,6 +63,7 @@ for (const streaming of [false, true]) {
             stream?: boolean;
             tools?: unknown[];
             tool_choice?: unknown;
+            messages?: { role: string; content?: unknown }[];
           };
           const step = requests.push(body) - 1;
           const tool = calls[step];
@@ -140,6 +145,7 @@ for (const streaming of [false, true]) {
               throw new Error("No non-code source was requested");
             },
             code: {
+              projectID,
               paths: async (query) => {
                 lookups++;
                 return { commitSha: commit, paths: [query], truncated: false };
@@ -175,6 +181,19 @@ for (const streaming of [false, true]) {
         // force an early answer by removing its research tools at a fixed step.
         expect((final?.tools ?? []).length).toBeGreaterThan(0);
         expect(final?.tool_choice ?? "auto").toBe("auto");
+        const codeResults = (final?.messages ?? [])
+          .filter((message) => message.role === "tool" && typeof message.content === "string")
+          .map((message) => JSON.parse(message.content as string))
+          .filter((result) => typeof result.path === "string");
+        expect(codeResults).toHaveLength(paths.length);
+        for (const result of codeResults)
+          expect(result.citation).toEqual({
+            source: "code",
+            id: projectID,
+            label: result.path,
+            commitSha: commit,
+            path: result.path,
+          });
       } finally {
         await provider.stop(true);
       }

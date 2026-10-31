@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { requirementContentInput } from "../../requirement-domain/src/content";
-import { epicProposalInput } from "./epic-proposal";
 import { technicalDesignContentInput } from "../../requirement-domain/src/technical-design";
+import { epicProposalInput } from "./epic-proposal";
 
 export const planningIntentInput = z.enum([
   "requirements-interview",
@@ -167,7 +167,9 @@ export const projectAgentOutput = z.discriminatedUnion("kind", [
     .strict(),
   z.strictObject({
     kind: z.literal("technical-design"),
-    message: z.string().trim().min(1).max(2_000),
+    message: projectAgentAnswerOutput.shape.message.describe(
+      "A concise human explanation. Put the complete technical design in design, without repeating it here.",
+    ),
     design: technicalDesignContentInput,
     citations: z.array(sourceCitationInput).max(12).default([]),
   }),
