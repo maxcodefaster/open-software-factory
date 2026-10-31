@@ -71,6 +71,10 @@ test("unconfirmed native work retains a compact actual cause without implying a 
   expect(error.message).toContain(reason);
   expect(error.message).not.toContain("\u001b");
   expect(error.message).not.toContain("command terminated");
+  const pause = factoryboxOperationFailure("pause", "native\0 checkpoint\u0007 failed\n");
+  expect(pause.message).toContain("native checkpoint failed");
+  expect(pause.message).not.toContain("\0");
+  expect(pause.message).not.toContain("\u0007");
   expect(factoryboxOperationFailure("resume", "").message).toBe(
     "Factorybox resume outcome is unconfirmed",
   );
