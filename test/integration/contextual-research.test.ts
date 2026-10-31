@@ -1,15 +1,15 @@
-import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
 import { createKnowledgeController } from "../../apps/factory/src/knowledge/controller";
 import { createEpicConfirmation } from "../../apps/factory/src/project-agent/epic-confirmation";
 import { readResearch, searchResearch } from "../../apps/factory/src/project-agent/research";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import type { EpicProposal } from "../../packages/conversation-domain/src/epic-proposal";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
+import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 test("Ticket detail hides unconfirmed code-derived proposals from Contributors after downgrade", async () => {
@@ -194,7 +194,46 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
   try {
     const owned = await fixture(undefined, undefined, db);
     const sha = "b".repeat(40),
-      blob = "c".repeat(40);
+      blob = "c".repeat(40),
+      contractBlob = "d".repeat(40);
+    const contract = JSON.stringify(
+      {
+        version: 1,
+        primaryApp: "website",
+        apps: [
+          {
+            id: "website",
+            label: "Website",
+            command: ["pnpm", "dev"],
+            port: 4321,
+            healthPath: "/health",
+          },
+          {
+            id: "forms-api",
+            label: "Forms API",
+            command: ["pnpm", "forms:api"],
+            port: 3001,
+            healthPath: "/ready",
+          },
+          {
+            id: "forms-admin",
+            label: "Forms editor",
+            command: ["pnpm", "forms:admin"],
+            port: 3002,
+            healthPath: "/",
+          },
+          {
+            id: "forms-web",
+            label: "Forms Web",
+            command: ["pnpm", "forms:web"],
+            port: 4323,
+            healthPath: "/health",
+          },
+        ],
+      },
+      null,
+      2,
+    );
     let inventories = 0,
       reads = 0;
     const api = "https://forge.test/api/v1";
@@ -216,10 +255,14 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
           { path: "src/index.ts", sha: blob, size: 45 },
           { path: ".env.local", sha: blob, size: 45 },
           { path: "secrets.json", sha: blob, size: 45 },
+          { path: ".factory/system.json", sha: contractBlob, size: contract.length },
+          { path: ".factory/assignment.json", sha: blob, size: 45 },
+          { path: "nested/.factory/system.json", sha: blob, size: 45 },
         ];
       },
-      getFileInfo: async () => {
+      getFileInfo: async (_repository, path) => {
         reads++;
+        if (path === ".factory/system.json") return { sha: contractBlob, content: contract };
         return { sha: blob, content: "export const answer = 42;\nconsole.log(answer);" };
       },
     });
@@ -239,7 +282,26 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
     expect(first.truncated).toBe(true);
     expect(reads).toBe(1);
     expect(inventories).toBe(1);
-    for (const path of [".env.local", "secrets.json", "../src/index.ts"])
+    expect(
+      await controller.codePaths(owned.projectID, "system.json", owned.userID, sha),
+    ).toMatchObject({
+      commitSha: sha,
+      paths: [".factory/system.json"],
+    });
+    const contractInput = { ...value, path: ".factory/system.json", lineCount: 160 };
+    const declared = await controller.code(owned.projectID, contractInput, owned.userID);
+    for (const app of ["Website", "Forms API", "Forms editor", "Forms Web"])
+      expect(declared.body).toContain(app);
+    expect(declared.commitSha).toBe(sha);
+    expect(declared.url).toContain(`/${sha}/.factory/system.json`);
+    expect(reads).toBe(2);
+    for (const path of [
+      ".env.local",
+      "secrets.json",
+      "../src/index.ts",
+      ".factory/assignment.json",
+      "nested/.factory/system.json",
+    ])
       await expect(
         controller.code(owned.projectID, { ...value, path }, owned.userID),
       ).rejects.toThrow("unavailable");
@@ -247,6 +309,12 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
     await expect(controller.code(owned.projectID, value, owned.userID)).rejects.toThrow(
       "Developer access required",
     );
+    await expect(controller.code(owned.projectID, contractInput, owned.userID)).rejects.toThrow(
+      "Developer access required",
+    );
+    await expect(
+      controller.codePaths(owned.projectID, "system.json", owned.userID, sha),
+    ).rejects.toThrow("Developer access required");
   } finally {
     await db.client.end();
     await process.dispose();

@@ -1,5 +1,27 @@
 import { expect, test } from "bun:test";
-import { findReadableCodePaths, readCodePage } from "./code-read";
+import { findReadableCodePaths, readableCodePath, readCodePage } from "./code-read";
+
+test("Planning can discover the root System Contract without exposing Factory private files", () => {
+  const paths = [
+    ".factory/system.json",
+    ".factory/assignment.json",
+    ".factory/cache/system.json",
+    ".factory/system.json/private.json",
+    ".factory/credentials.json",
+    "nested/.factory/system.json",
+    ".factory/../system.json",
+    "/.factory/system.json",
+    ".env",
+  ];
+  expect(readableCodePath(".factory/system.json")).toBe(true);
+  for (const path of paths.slice(1)) expect(readableCodePath(path)).toBe(false);
+  expect(
+    findReadableCodePaths(
+      paths.map((path) => ({ path, size: 100 })),
+      "system.json",
+    ),
+  ).toEqual({ paths: [".factory/system.json"], truncated: false });
+});
 
 test("a truncated configuration gives Planning the exact next unread line", () => {
   const content = Array.from({ length: 205 }, (_, index) =>
