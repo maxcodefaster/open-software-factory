@@ -167,6 +167,10 @@ export type FactoryboxOperation = z.infer<typeof factoryboxOperation>;
 
 export function factoryboxOperationFailure(action: FactoryboxOperation["action"], stderr: string) {
   const detail = stripVTControlCharacters(stderr)
+    // PostgreSQL text rejects NUL. Keep the native cause persistable so an
+    // uncertain Pause cannot lose its diagnostic and strand queued work.
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: Keep tabs/newlines, strip native control bytes.
+    .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, "")
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line && !/^command terminated with exit code \d+$/.test(line))
