@@ -1920,6 +1920,7 @@ export function createRuntimeController(
           Array<{
             changeID: string;
             baseSHA: string;
+            executionRevision: string;
             changeState: string;
             runtimeAttemptID: string | null;
             repositoryURL: string;
@@ -1931,6 +1932,9 @@ export function createRuntimeController(
           }>
         >`
           SELECT change.id AS "changeID", change.base_sha AS "baseSHA",
+            COALESCE((SELECT commit_sha FROM factory.change_commit_operation
+              WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
+              change.base_sha) AS "executionRevision",
             change.state AS "changeState", change.runtime_attempt_id AS "runtimeAttemptID",
             change.ticket_id AS "ticketID", change.branch_name AS "branchName",
             project.repository_url AS "repositoryURL",
@@ -1996,7 +2000,10 @@ export function createRuntimeController(
         }
         const workspace = workspaces[0];
         if (!workspace) throw new Error("Ticket Workspace was not created");
-        const systemContract = await resolveSystemContract(row.repositoryURL, workspace.revision);
+        // Source retains its original seed identity. New execution must use the
+        // submitted commit's configuration, not that seed's old App commands.
+        const revision = row.executionRevision;
+        const systemContract = await resolveSystemContract(row.repositoryURL, revision);
         const generations = await lock<Array<{ generation: string }>>`
           SELECT COALESCE(MAX(generation), 0) + 1 AS generation
           FROM factory.runtime_attempt WHERE workspace_id = ${workspace.id}
@@ -2010,13 +2017,19 @@ export function createRuntimeController(
         const child = tokens.child;
         await lock`BEGIN`;
         try {
-          const current = await lock<Array<{ state: string }>>`
-            SELECT state, runtime_attempt_id AS "runtimeAttemptID" FROM factory.change
+          const current = await lock<Array<{ state: string; executionRevision: string }>>`
+            SELECT state, runtime_attempt_id AS "runtimeAttemptID",
+              COALESCE((SELECT commit_sha FROM factory.change_commit_operation
+                WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1),
+                base_sha) AS "executionRevision"
+            FROM factory.change
             WHERE id = ${changeID} FOR UPDATE
           `;
           if (!["starting", "active", "failed"].includes(current[0]?.state ?? "")) {
             throw new Error("Change does not accept a Ticket Sandbox");
           }
+          if (current[0]?.executionRevision !== revision)
+            throw new Error("Ticket commit changed before compute admission");
           const [writer] = await lock<
             { state: string }[]
           >`SELECT state FROM factory.change_writer WHERE change_id=${changeID}`;
@@ -2029,7 +2042,7 @@ export function createRuntimeController(
               parent_connector_token_hash, child_connector_token_hash,
               create_intended_at, created_by, declared_apps, factorybox_admission_id
             ) VALUES (
-              ${identity.attemptID}, ${projectID}, ${changeID}, ${workspace.id}, ${generation}, ${workspace.revision},
+              ${identity.attemptID}, ${projectID}, ${changeID}, ${workspace.id}, ${generation}, ${revision},
               'create-intended',
               ${hashConnectorToken(parent)}, ${hashConnectorToken(child)}, now(), ${userID},
               ${JSON.stringify(systemContract.apps.map((app) => (app.id === systemContract.primaryApp ? "app" : `app-${app.id}`)))}::text::jsonb,
@@ -2067,7 +2080,7 @@ export function createRuntimeController(
             repositoryIdentity: projectID,
             preserveWorkspace: true,
             storageNode: canonicalSource.storageNode,
-            revision: workspace.revision,
+            revision,
             devcontainerPath: row.devcontainerPath,
             connectorToken: parent,
             childConnectorToken: child,

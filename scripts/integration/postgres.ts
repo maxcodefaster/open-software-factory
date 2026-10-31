@@ -450,7 +450,8 @@ try {
           )
         `;
       },
-      (cause) => cause.code === "23503",
+      (cause) =>
+        cause.code === "23514" && cause.message.includes("Ticket execution revision must match"),
       "PostgreSQL allowed a Change Runtime Attempt at a different revision",
     );
     await transaction`

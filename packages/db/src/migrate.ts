@@ -37,7 +37,7 @@ try {
   `;
   if (
     versions[0]?.version !== 1 ||
-    versions.length > 5 ||
+    versions.length > 6 ||
     versions.some((value, index) => value.version !== index + 1)
   )
     throw new Error(
@@ -64,6 +64,13 @@ try {
   if (versions.length <= 4)
     await client.unsafe(
       await readFile(resolve(import.meta.dir, "../migrations/0005_promotion_retries.sql"), "utf8"),
+    );
+  if (versions.length <= 5)
+    await client.unsafe(
+      await readFile(
+        resolve(import.meta.dir, "../migrations/0006_ticket_execution_revision.sql"),
+        "utf8",
+      ),
     );
 } catch (cause) {
   // A failed transactional step must roll back before releasing the session

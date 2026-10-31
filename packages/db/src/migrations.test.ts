@@ -11,5 +11,6 @@ test("Factory ships its Greenfield baseline and concrete retained-operation upgr
     "0003_worker_declarations.sql",
     "0004_worker_store_recovery.sql",
     "0005_promotion_retries.sql",
+    "0006_ticket_execution_revision.sql",
   ]);
 });

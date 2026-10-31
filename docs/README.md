@@ -329,6 +329,13 @@ background polling and Run views do not keep compute awake. The Source service a
 editor retain the canonical checkout while execution is paused. Explicit Stop deletes execution
 and its private store. Lost native command output is observed without replaying a mutation.
 
+New Ticket execution pins its configuration and declared Apps to the latest successfully submitted
+Change commit, or to the original base before the first submission. The canonical Source keeps its
+original seed identity and current checkout. A later commit never retargets an already admitted
+Runtime Attempt, including one still waiting for capacity; recovery uses that Attempt's recorded
+revision. This also keeps a fresh Review execution from launching the base commit's old App commands.
+See [Ticket execution revision](adr/0034-pin-ticket-execution-to-submitted-source.md).
+
 Docker, Compose and the Dev Containers CLI run unchanged. Project code has no node
 Docker socket. The privileged outer Factorybox worker is trusted infrastructure; Sysbox shares the
 host kernel and does not establish VM-grade isolation. Factory has one concrete runtime topology
