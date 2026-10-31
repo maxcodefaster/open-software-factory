@@ -9,6 +9,7 @@ import {
   factoryFunctionMatches,
   factoryFunctionRequest,
 } from "../fixtures/server-functions";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { fixtureValue } from "../fixtures/value";
 
 test("production Server Functions use real sessions, durable exact saves and no HTTP usage routes", async () => {
@@ -39,13 +40,7 @@ test("production Server Functions use real sessions, durable exact saves and no 
     expect(assets.some((path) => path.includes("/document-engine-"))).toBe(false);
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
-    const settings = page.getByRole("region", { name: "Settings", exact: true });
-    await settings
-      .getByRole("navigation", { name: "Settings navigation" })
-      .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-      .getByRole("button", { name: "Monitoring", exact: true })
-      .click();
+    await chooseSettingsPage(page, "Monitoring", "Factory administration");
     const usage = page.getByRole("region", { name: "Usage & limits", exact: true });
     await browserExpect(usage.getByLabel("Monthly Coding allowance")).toHaveValue("");
     await usage.getByLabel("Monthly Coding allowance").fill("7");

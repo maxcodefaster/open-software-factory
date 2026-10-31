@@ -138,6 +138,14 @@ test("Settings scope chooser exposes one compact group instead of every scope at
   await expect(scope).toBeVisible();
   await expect(navigation.getByRole("button")).toHaveCount(6);
   await page.screenshot({ path: `${evidence}/compact-settings-390.png` });
+  await scope.focus();
+  await scope.selectOption("system");
+  await expect(navigation).toBeHidden();
+  await page.getByRole("button", { name: "Choose settings page", exact: true }).click();
+  await expect(scope).toHaveValue("system");
+  await navigation.getByRole("button", { name: "Company sign-in", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Company sign-in", exact: true })).toBeVisible();
+  await page.screenshot({ path: `${evidence}/compact-settings-scope-change-390.png` });
 });
 
 test("visual sweep keeps Project membership separate from Factory account actions", async ({
@@ -809,6 +817,42 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
   await expect(chooser).toBeFocused();
   expect(starts).toBe(0);
 });
+
+for (const viewport of auditViewports) {
+  test(`Agent minimize moves focus out before hiding the panel at ${viewport.width}px`, async ({
+    page,
+  }) => {
+    await resize(page, viewport);
+    const toggle = page.getByRole("button", { name: "Toggle Agent panel", exact: true });
+    await toggle.focus();
+    await toggle.click();
+    const panel = page.locator(".agent-panel");
+    await expect(panel).toBeVisible();
+    const minimize = page.getByRole("button", { name: "Minimize Agent panel", exact: true });
+    await minimize.focus();
+    await page.evaluate(() => {
+      const panel = document.querySelector(".agent-panel");
+      if (!panel) throw new Error("Agent panel is missing");
+      const failures: string[] = [];
+      Object.assign(window, { agentHiddenFocusFailures: failures });
+      const observer = new MutationObserver(() => {
+        if (panel.getAttribute("aria-hidden") !== "true") return;
+        if (panel.contains(document.activeElement))
+          failures.push(document.activeElement?.getAttribute("aria-label") ?? "unnamed control");
+        observer.disconnect();
+      });
+      observer.observe(panel, { attributes: true, attributeFilter: ["aria-hidden"] });
+    });
+    await minimize.click();
+    await expect(toggle).toBeFocused({ timeout: 1500 });
+    expect(
+      await page.evaluate(
+        () => (window as Window & { agentHiddenFocusFailures?: string[] }).agentHiddenFocusFailures,
+      ),
+    ).toEqual([]);
+    await page.screenshot({ path: `${evidence}/agent-minimize-focus-${viewport.width}.png` });
+  });
+}
 
 test("rapid minimize retains drafts and prefers solid, reduced-motion presentation when requested", async ({
   page,

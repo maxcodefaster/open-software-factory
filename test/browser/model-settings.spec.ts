@@ -1,11 +1,12 @@
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
-import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
-import type { ModelConnectionView } from "../../packages/conversation-domain/src/model-connection";
 import { CommandError } from "../../apps/factory/src/command-error";
-import { mockFactoryFunctions, browserFunction } from "../fixtures/server-functions";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
+import type { ModelConnectionView } from "../../packages/conversation-domain/src/model-connection";
+import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
+import { test } from "../fixtures/browser-test";
+import { browserFunction, mockFactoryFunctions } from "../fixtures/server-functions";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { signIn } from "../support/factory-fixture";
 
 test.beforeEach(async ({ page }) => {
@@ -34,12 +35,7 @@ async function openFactoryModels(page: Page) {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });
-  await settings
-    .getByRole("navigation", { name: "Settings navigation" })
-    .locator("section")
-    .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-    .getByRole("button", { name: "Models", exact: true })
-    .click();
+  await chooseSettingsPage(page, "Models", "Factory administration");
   return settings;
 }
 

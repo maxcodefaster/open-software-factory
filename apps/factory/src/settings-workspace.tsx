@@ -221,7 +221,10 @@ export function SettingsWorkspace(props: {
               onChange={(event) => {
                 const group = groups().find((item) => item.id === event.currentTarget.value);
                 const first = group?.categories[0];
-                if (group && first) setSelection({ scope: group.scope, category: first });
+                if (group && first) {
+                  setSelection({ scope: group.scope, category: first });
+                  navigation.close(true);
+                }
               }}
             >
               <For each={groups()}>
@@ -410,7 +413,9 @@ export function SettingsWorkspace(props: {
                     onToggle={(event) => setSetupOpen(event.currentTarget.open)}
                   >
                     <summary>Setup & recovery</summary>
-                    <Show when={setupOpen()}>
+                    <Show
+                      when={setupOpen() && category() === "environment" && props.active !== false}
+                    >
                       <ProjectSetupSettings
                         projectID={project().id}
                         userID={props.userID}

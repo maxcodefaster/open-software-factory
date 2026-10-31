@@ -207,6 +207,11 @@ test.each(["historical versions", "partial schema"] as const)(
     const database = factory.connect(1);
     const userID = crypto.randomUUID();
     try {
+      const originalVersions = [
+        ...(await database.client<{ version: number }[]>`
+          SELECT version FROM factory.schema_migration ORDER BY version`),
+      ];
+      expect(originalVersions[0]?.version).toBe(1);
       await database.client`INSERT INTO auth."user"(id,name,email)
         VALUES(${userID},'Retained owner',${`${userID}@baseline.test`})`;
       if (state === "historical versions")
@@ -226,7 +231,9 @@ test.each(["historical versions", "partial schema"] as const)(
       if (state === "historical versions")
         expect([
           ...(await database.client`SELECT version FROM factory.schema_migration ORDER BY version`),
-        ]).toEqual([{ version: 0 }, { version: 2 }, { version: 3 }, { version: 4 }]);
+        ]).toEqual(
+          originalVersions.map((row) => ({ version: row.version === 1 ? 0 : row.version })),
+        );
       else {
         const [schema] = await database.client<{ relation: string | null }[]>`
           SELECT to_regclass('factory.schema_migration')::text AS relation`;

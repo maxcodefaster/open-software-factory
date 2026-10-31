@@ -4,16 +4,41 @@ import { expect } from "@playwright/test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { environmentSettingsView } from "../../packages/project-domain/src/environment";
 import { setupInspectionView, setupReadiness } from "../../packages/project-domain/src/setup";
 import { test } from "../fixtures/browser-test";
 import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { chooseSettingsPage, openSetupRecovery } from "../fixtures/settings-navigation";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 
 const evidence = ".factory/test-results/project-setup-settings";
+test.use({ actionTimeout: 5000 });
 const cache = resolve(".factory/test-results/vite", `setup-settings-${crypto.randomUUID()}`);
 let frontend: ViteDevServer;
 let origin: string;
+test.beforeEach(async ({ page }) => {
+  await mockFactoryFunctions(page, {
+    environments: {
+      get: async (projectID, _actor, environment) => {
+        expect(projectID).toBe("10000000-0000-4000-8000-000000000001");
+        const role = new URL(page.url()).searchParams.get("role");
+        return environmentSettingsView.parse({
+          environment,
+          variables: [],
+          registries: [],
+          version: 0,
+          canManage: role !== "viewer" && role !== "developer",
+          storeConfigured: true,
+          pending: false,
+          pendingCommandID: null,
+        });
+      },
+      save: async () => {
+        throw new Error("Reading setup recovery must not save Environment settings");
+      },
+    },
+  });
+});
 test.beforeAll(async () => {
   frontend = await createServer({
     configFile: false,
@@ -113,9 +138,10 @@ for (const device of [
         await expect(
           page
             .getByRole("navigation", { name: "Settings navigation" })
-            .getByRole("button", { name: "Project setup", exact: true }),
+            .getByRole("button", { name: "Environments", exact: true }),
         ).toBeVisible({ timeout: 2000 });
-      await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+      await expect(page.getByRole("button", { name: "Project setup", exact: true })).toHaveCount(0);
+      await openSetupRecovery(page, "Project · Invoice workspace");
       const panel = page.getByRole("region", { name: "Project configuration", exact: true });
       const answer = panel.getByRole("textbox", {
         name: "Which isolated database should be used?",
@@ -129,14 +155,14 @@ for (const device of [
       await page.clock.fastForward(2500);
       await expect(preparation.getByRole("img", { name: "running", exact: true })).toBeVisible();
       await expect(retry).toBeFocused();
-      await chooseSettingsPage(page, "Environments", "Project · Invoice workspace");
+      await chooseSettingsPage(page, "Models", "Project · Invoice workspace");
       const readsBeforeLeaving = statusReads;
       await page.clock.fastForward(10_000);
       expect(statusReads).toBe(readsBeforeLeaving);
-      await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+      await openSetupRecovery(page, "Project · Invoice workspace");
       await expect(answer).toHaveValue("Separate local PostgreSQL only.");
       await page.reload();
-      await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+      await openSetupRecovery(page, "Project · Invoice workspace");
       await expect(answer).toHaveValue("Separate local PostgreSQL only.");
       await expect(
         page.getByRole("region", { name: "Project preparation", exact: true }),
@@ -195,7 +221,7 @@ for (const device of [
         });
         try {
           await page.goto(`${origin}/project-inputs.html`);
-          await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+          await openSetupRecovery(page, "Project · Invoice workspace");
           const panel = page.getByRole("region", { name: "Project configuration", exact: true });
           await expect(panel).toContainText(failure);
           await expect(panel.getByRole("button", { name: "Confirm configuration" })).toHaveCount(0);
@@ -282,7 +308,7 @@ test("developers without Project management can read preparation but cannot chan
     },
   });
   await page.goto(`${origin}/project-inputs.html?role=developer`);
-  await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+  await openSetupRecovery(page, "Project · Invoice workspace");
   const preparation = page.getByRole("region", { name: "Project preparation", exact: true });
   await expect(preparation).toContainText("Project Wiki");
   await expect(preparation.getByRole("button", { name: "Retry", exact: true })).toHaveCount(0);
@@ -348,7 +374,7 @@ test("configuration corrections retain the exact proposal, answers and unconfirm
     },
   });
   await page.goto(`${origin}/project-inputs.html`);
-  await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+  await openSetupRecovery(page, "Project · Invoice workspace");
   const panel = page.getByRole("region", { name: "Project configuration", exact: true });
   const disclosure = panel.getByText("Request configuration changes", { exact: true });
   await expect(disclosure).toBeVisible({ timeout: 2000 });
@@ -368,7 +394,7 @@ test("configuration corrections retain the exact proposal, answers and unconfirm
   await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${evidence}/correction-unconfirmed-narrow.png` });
   await page.reload();
-  await chooseSettingsPage(page, "Project setup", "Project · Invoice workspace");
+  await openSetupRecovery(page, "Project · Invoice workspace");
   await disclosure.click();
   await expect(correction).toBeDisabled();
   await expect(correction).toHaveValue(feedback);

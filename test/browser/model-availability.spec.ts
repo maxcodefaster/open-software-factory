@@ -1,17 +1,18 @@
-import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { createTicketDocumentController } from "../../apps/factory/src/change/document";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 import {
   browserBootstrap,
   mockBootstrap,
   mockFactoryFunctions,
 } from "../fixtures/server-functions";
-import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test("saving a first managed Coding model enables Implement without reloading the workspace", async ({
   page,
@@ -123,12 +124,7 @@ test("saving a first managed Coding model enables Implement without reloading th
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
     const settings = page.getByRole("region", { name: "Settings", exact: true });
-    await settings
-      .getByRole("navigation", { name: "Settings navigation" })
-      .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-      .getByRole("button", { name: "Models", exact: true })
-      .click();
+    await chooseSettingsPage(page, "Models", "Factory administration");
     const coding = settings.getByRole("region", { name: "Coding", exact: true });
     await coding.locator(".model-role-connection summary").click();
     await coding.getByLabel("Connection", { exact: true }).selectOption(connectionID);
