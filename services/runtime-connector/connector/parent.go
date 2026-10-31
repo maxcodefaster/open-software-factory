@@ -393,9 +393,16 @@ func gitOutput(ctx context.Context, workspace string, arguments ...string) (stri
 	return gitOutputWithEnv(ctx, workspace, nil, arguments...)
 }
 
+func workspaceGitCommand(ctx context.Context, workspace string, arguments ...string) *exec.Cmd {
+	// Parent Git owns writes, but the canonical Source and non-root Dev Container
+	// must still read its resulting refs and objects. Keep the Parent's private
+	// bootstrap umask; scope this mode to Git's own metadata only.
+	base := []string{"-c", "safe.directory=" + workspace, "-c", "core.sharedRepository=0644", "-C", workspace}
+	return exec.CommandContext(ctx, "git", append(base, arguments...)...)
+}
+
 func gitOutputWithEnv(ctx context.Context, workspace string, environment []string, arguments ...string) (string, error) {
-	base := []string{"-c", "safe.directory=" + workspace, "-C", workspace}
-	command := exec.CommandContext(ctx, "git", append(base, arguments...)...)
+	command := workspaceGitCommand(ctx, workspace, arguments...)
 	if environment != nil {
 		command.Env = environment
 	}
@@ -480,8 +487,8 @@ func prepareCommit(ctx context.Context, workspace string, message Message) (stri
 	if _, err := gitOutput(ctx, workspace, "add", "-A"); err != nil {
 		return "", err
 	}
-	command := exec.CommandContext(
-		ctx, "git", "-c", "safe.directory="+workspace, "-C", workspace,
+	command := workspaceGitCommand(
+		ctx, workspace,
 		"-c", "user.name="+message.AuthorName, "-c", "user.email="+message.AuthorEmail,
 		"commit", "--cleanup=verbatim", "-m", commitMessage,
 	)
@@ -930,31 +937,28 @@ func checkoutProject(ctx context.Context, assignment Assignment) error {
 		if identityErr != nil || strings.TrimSpace(string(repositoryIdentity)) != assignment.RepositoryIdentity {
 			return errors.New("workspace folder exists but its repository identity does not match the assignment")
 		}
-		if originErr := exec.CommandContext(
-			ctx,
-			"git", "-c", "safe.directory="+assignment.WorkspaceFolder, "-C", assignment.WorkspaceFolder,
+		if originErr := workspaceGitCommand(
+			ctx, assignment.WorkspaceFolder,
 			"remote", "set-url", "origin", assignment.RepositoryURL,
 		).Run(); originErr != nil {
 			return errors.New("Workspace Git origin could not be refreshed")
 		}
 		if assignment.PreserveWorkspace {
-			return nil
+			return ensureSharedGitReadable(assignment.WorkspaceFolder)
 		}
-		head, headErr := exec.CommandContext(
-			ctx, "git", "-c", "safe.directory="+assignment.WorkspaceFolder,
-			"-C", assignment.WorkspaceFolder, "rev-parse", "HEAD",
+		head, headErr := workspaceGitCommand(
+			ctx, assignment.WorkspaceFolder, "rev-parse", "HEAD",
 		).Output()
 		if headErr != nil || strings.TrimSpace(string(head)) != assignment.Revision {
 			return errors.New("workspace folder does not contain the assigned revision")
 		}
-		status, statusErr := exec.CommandContext(
-			ctx, "git", "-c", "safe.directory="+assignment.WorkspaceFolder,
-			"-C", assignment.WorkspaceFolder, "status", "--porcelain",
+		status, statusErr := workspaceGitCommand(
+			ctx, assignment.WorkspaceFolder, "status", "--porcelain",
 		).Output()
 		if statusErr != nil || len(bytes.TrimSpace(status)) != 0 {
 			return errors.New("workspace folder is not a clean checkout")
 		}
-		return nil
+		return ensureSharedGitReadable(assignment.WorkspaceFolder)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect workspace folder: %w", err)
 	}
