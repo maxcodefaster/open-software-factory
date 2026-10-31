@@ -195,7 +195,11 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
     const owned = await fixture(undefined, undefined, db);
     const sha = "b".repeat(40),
       blob = "c".repeat(40),
-      contractBlob = "d".repeat(40);
+      contractBlob = "d".repeat(40),
+      lockBlob = "e".repeat(40),
+      dockerBlob = "f".repeat(40);
+    const lockfile = `lockfileVersion: '9.0'\nastro: 7.0.6\n${"package: dependency\n".repeat(24000)}`;
+    const dockerfile = "FROM node:24\nWORKDIR /workspace/project\nRUN corepack enable\n";
     const contract = JSON.stringify(
       {
         version: 1,
@@ -258,11 +262,15 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
           { path: ".factory/system.json", sha: contractBlob, size: contract.length },
           { path: ".factory/assignment.json", sha: blob, size: 45 },
           { path: "nested/.factory/system.json", sha: blob, size: 45 },
+          { path: "pnpm-lock.yaml", sha: lockBlob, size: Buffer.byteLength(lockfile) },
+          { path: ".devcontainer/Dockerfile", sha: dockerBlob, size: dockerfile.length },
         ];
       },
       getFileInfo: async (_repository, path) => {
         reads++;
         if (path === ".factory/system.json") return { sha: contractBlob, content: contract };
+        if (path === "pnpm-lock.yaml") return { sha: lockBlob, content: lockfile };
+        if (path === ".devcontainer/Dockerfile") return { sha: dockerBlob, content: dockerfile };
         return { sha: blob, content: "export const answer = 42;\nconsole.log(answer);" };
       },
     });
@@ -295,6 +303,36 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
     expect(declared.commitSha).toBe(sha);
     expect(declared.url).toContain(`/${sha}/.factory/system.json`);
     expect(reads).toBe(2);
+    expect(
+      await controller.codePaths(owned.projectID, "pnpm-lock.yaml Dockerfile", owned.userID, sha),
+    ).toMatchObject({
+      commitSha: sha,
+      paths: ["pnpm-lock.yaml", ".devcontainer/Dockerfile"],
+      truncated: false,
+    });
+    const locked = await controller.code(
+      owned.projectID,
+      { ...value, path: "pnpm-lock.yaml", lineCount: 2 },
+      owned.userID,
+    );
+    expect(locked.body).toBe("1: lockfileVersion: '9.0'\n2: astro: 7.0.6");
+    expect(locked).toMatchObject({ truncated: true, nextStartLine: 3 });
+    const lockPage = await controller.code(
+      owned.projectID,
+      { ...value, path: "pnpm-lock.yaml", startLine: 3 },
+      owned.userID,
+    );
+    expect(lockPage.body).toBe("3: package: dependency");
+    expect(
+      (
+        await controller.code(
+          owned.projectID,
+          { ...value, path: ".devcontainer/Dockerfile" },
+          owned.userID,
+        )
+      ).body,
+    ).toBe("1: FROM node:24");
+    expect(reads).toBe(4);
     for (const path of [
       ".env.local",
       "secrets.json",
@@ -314,6 +352,12 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
     );
     await expect(
       controller.codePaths(owned.projectID, "system.json", owned.userID, sha),
+    ).rejects.toThrow("Developer access required");
+    await expect(
+      controller.codePaths(owned.projectID, "pnpm-lock.yaml Dockerfile", owned.userID, sha),
+    ).rejects.toThrow("Developer access required");
+    await expect(
+      controller.code(owned.projectID, { ...value, path: "pnpm-lock.yaml" }, owned.userID),
     ).rejects.toThrow("Developer access required");
   } finally {
     await db.client.end();

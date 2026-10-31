@@ -51,3 +51,25 @@ test("bounds retained content and rejects oversized documents", async () => {
   await cache.content("a", "first", load);
   expect(reads).toBe(2);
 });
+
+test("large paginated code reads never weaken document limits through the shared cache", async () => {
+  const cache = createRepositoryKnowledgeCache();
+  const body = "package: dependency\n".repeat(24000);
+  let reads = 0;
+  const load = async () => {
+    reads++;
+    return body;
+  };
+  await Promise.all([
+    expect(cache.content("a", "lock", load)).rejects.toThrow("size limit"),
+    expect(cache.content("a", "lock", load, Buffer.byteLength(body))).resolves.toBe(body),
+  ]);
+  expect(reads).toBe(2);
+  expect(await cache.content("a", "lock", load, Buffer.byteLength(body))).toBe(body);
+  expect(reads).toBe(2);
+  await expect(cache.content("a", "lock", load)).rejects.toThrow("size limit");
+  expect(reads).toBe(3);
+  await expect(cache.content("a", "lock", load, Buffer.byteLength(body) - 1)).rejects.toThrow(
+    "size limit",
+  );
+});

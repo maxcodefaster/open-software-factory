@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { findReadableCodePaths, readableCodePath, readCodePage } from "./code-read";
+import {
+  findReadableCodePaths,
+  maximumReadableCodeBytes,
+  readableCodePath,
+  readCodePage,
+} from "./code-read";
 
 test("Planning can discover the root System Contract without exposing Factory private files", () => {
   const paths = [
@@ -21,6 +26,27 @@ test("Planning can discover the root System Contract without exposing Factory pr
       "system.json",
     ),
   ).toEqual({ paths: [".factory/system.json"], truncated: false });
+});
+
+test("Planning discovers large lockfiles and extensionless container recipes", () => {
+  const files = [
+    { path: "pnpm-lock.yaml", size: 415080 },
+    { path: ".devcontainer/Dockerfile", size: 1415 },
+  ];
+  expect(findReadableCodePaths(files, "pnpm-lock.yaml .devcontainer/Dockerfile")).toEqual({
+    paths: files.map((file) => file.path),
+    truncated: false,
+  });
+  for (const path of ["Dockerfile", "deploy/Dockerfile.worker", ".devcontainer/Containerfile"])
+    expect(readableCodePath(path)).toBe(true);
+  for (const path of [
+    ".factory/Dockerfile",
+    "nested/.factory/Dockerfile",
+    "node_modules/Dockerfile",
+    "secrets/Dockerfile.private-key",
+    "../Dockerfile",
+  ])
+    expect(readableCodePath(path)).toBe(false);
 });
 
 test("a truncated configuration gives Planning the exact next unread line", () => {
@@ -98,7 +124,7 @@ test("path discovery stays bounded and does not expose oversized or protected fi
     findReadableCodePaths(
       [
         { path: "src/credentials.ts", size: 100 },
-        { path: "src/large.ts", size: 250001 },
+        { path: "src/large.ts", size: maximumReadableCodeBytes + 1 },
         { path: "node_modules/private.ts", size: 100 },
       ],
       "src private",
