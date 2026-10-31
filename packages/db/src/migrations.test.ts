@@ -9,5 +9,6 @@ test("Factory ships its Greenfield baseline and the concrete retained worker adm
     "0001_baseline.sql",
     "0002_worker_admissions.sql",
     "0003_worker_declarations.sql",
+    "0004_worker_store_recovery.sql",
   ]);
 });

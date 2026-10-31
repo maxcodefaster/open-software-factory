@@ -64,6 +64,7 @@ import {
   factoryboxAllocation,
   terminatedFactoryboxWorkerFailure,
 } from "./worker";
+import { recoverFactoryboxWorker } from "./worker-recovery";
 
 type Database = ReturnType<typeof createDatabase>;
 type ExecutionIdentity = ReturnType<typeof runtimeIdentity> & {
@@ -1057,6 +1058,15 @@ export function createRuntimeController(
   }
 
   return {
+    async recoverWorker(input: { actorID: string; requestID: string }) {
+      return recoverFactoryboxWorker(
+        database,
+        kubernetes,
+        configuredFactoryboxRuntimeProfile(),
+        pinnedRuntimeHostImage,
+        input,
+      );
+    },
     async reclaimStorage() {
       await worker.retainDeclaration();
       await factorybox.reclaimStorage();

@@ -285,6 +285,9 @@ and refactoring are not part of the preset.
 The [Factorybox admission command](../deploy/factorybox/README.md) inspects the same pinned worker
 contract used by Workspace Start and the existing execution reserve. The consumer preparation and
 lifecycle boundary is recorded in [ADR 0022](adr/0022-factorybox-workspace-execution.md).
+An explicit System Manager recovery may admit a successor after the original exact-UID Pod
+terminates and prior execution settles. It keeps the original store and Source claim, with new
+worker/epoch and export identities. See [admitted worker recovery](adr/0031-recover-an-admitted-worker-with-its-retained-store.md).
 
 Each immutable worker profile includes its explicit `arm64` or `amd64` architecture, exact image
 and executable, node and kernel. Fresh automatic admissions also retain the aggregate CPU and

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { runCommand } from "./command";
-import { factoryboxSharedLabels } from "./factorybox-location";
+import { factoryboxAdmissionID, factoryboxSharedLabels } from "./factorybox-location";
 import type { FactoryboxRuntimeInput } from "./factorybox-runtime";
 import { type FactoryboxWorkerIdentity, factoryboxCPUQuantity } from "./factorybox-worker";
 
@@ -17,13 +17,16 @@ export function factoryboxConsumerIntent(
   identity: FactoryboxWorkerIdentity,
 ) {
   const key = createHash("sha256").update(input.runtimeHostImage).digest("hex");
+  const namespace = input.profile.retainedStore
+    ? factoryboxAdmissionID(input.workerID, input.podName).replaceAll("-", "")
+    : "";
   return {
     version: 1 as const,
     storeID: identity.storeID,
     epoch: identity.epoch,
     podUID: identity.podUID,
     image: input.runtimeHostImage,
-    exporterName: `consumer-${key.slice(0, 48)}`,
+    exporterName: `consumer-${(namespace ? createHash("sha256").update(`${namespace}:${input.runtimeHostImage}`).digest("hex") : key).slice(0, 48)}`,
   };
 }
 
@@ -34,7 +37,10 @@ export function renderFactoryboxConsumer(
 ) {
   const intent = factoryboxConsumerIntent(input, identity);
   const key = createHash("sha256").update(intent.image).digest("hex");
-  if (subPath !== `consumer-seeds/${key}`)
+  const namespace = input.profile.retainedStore
+    ? `${factoryboxAdmissionID(input.workerID, input.podName).replaceAll("-", "")}/`
+    : "";
+  if (subPath !== `consumer-seeds/${namespace}${key}`)
     throw new Error("Consumer export path differs from its immutable image");
   return {
     apiVersion: "v1",

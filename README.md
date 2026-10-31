@@ -88,7 +88,11 @@ initial setup only after the exact original terminal Pod is observed, no native 
 was recorded and all previous execution is settled. The new admission has its own Pod and private
 store; canonical Source, old Pods, stores and Runtime Attempts retain their original identities.
 Opening a Project or reconnecting does not replace a worker. Recovery of an already admitted
-worker remains an operator decision. See [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
+worker requires an explicit System Manager command after its exact original Pod has terminated
+and prior execution has settled. The successor reuses the original private store and Source claim;
+it has a new Pod and native epoch, without replaying Agent work. See
+[admitted worker recovery](docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md)
+and [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
 Fresh admissions check actual backing-filesystem availability before native allocation. The chart
 defaults to an 8 GiB minimum, 32 GiB maximum and 64 GiB claim. The pinned worker selects a fixed
 size in that range on the actual volume while preserving its native host floor and operating

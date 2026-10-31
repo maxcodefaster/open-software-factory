@@ -35,6 +35,41 @@ const input: FactoryboxRuntimeInput = {
   },
 };
 
+test("operator recovery reuses the exact store but gives its successor independent bootstrap inputs", () => {
+  const successorID = "17164fe7-7c86-451e-ae6e-0b0fe6b8bf5e";
+  const recovered = {
+    ...input,
+    ...factoryboxLocation(input.workerID, successorID),
+    profile: {
+      ...input.profile,
+      retainedStore: {
+        storeID: input.workerID.replaceAll("-", ""),
+        initializedByPodUID: "original-pod-uid",
+        boundedBytes: input.profile.boundedBytes,
+      },
+    },
+  };
+  const request = factoryboxRuntimeRequest(recovered);
+  expect(request.storeID).toBe(input.workerID.replaceAll("-", ""));
+  expect(request).not.toHaveProperty("retainedStore");
+  const rendered = renderFactoryboxRuntime(recovered);
+  expect(rendered.claim.metadata.name).toBe(`store-${request.storeID}`);
+  const initialize = fixtureValue(rendered.pod.spec.initContainers[0], "store inspection");
+  expect(initialize.volumeMounts[0]).toMatchObject({ readOnly: true });
+  expect(initialize.command[2]).toContain("Retained");
+  const exporter = fixtureValue(rendered.pod.spec.initContainers[1], "bootstrap export");
+  expect(exporter.volumeMounts[0]).toMatchObject({
+    subPath: `seeds/${successorID.replaceAll("-", "")}/bootstrap`,
+  });
+  expect(rendered.pod.spec.containers[0]?.env).toContainEqual({
+    name: "FACTORY_SEED_NAMESPACE",
+    value: successorID.replaceAll("-", ""),
+  });
+  expect(renderFactoryboxRuntime(input).pod.spec.initContainers[1]?.volumeMounts[0]).toMatchObject({
+    subPath: "seed",
+  });
+});
+
 test("observing a retained worker uses its admitted bootstrap, not today's exporter command", () => {
   const original = structuredClone(renderFactoryboxRuntime(input));
   const exporter = fixtureValue(

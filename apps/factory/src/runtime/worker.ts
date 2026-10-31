@@ -192,7 +192,11 @@ export async function rememberFactoryboxIdentity(
   if (
     worker.id !== workerID ||
     !worker.attempted ||
-    identity.storeID !== worker.admissionID.replaceAll("-", "") ||
+    identity.storeID !==
+      (profile.retainedStore?.storeID ?? worker.admissionID.replaceAll("-", "")) ||
+    (profile.retainedStore &&
+      identity.boundedBytes !== undefined &&
+      identity.boundedBytes !== profile.retainedStore.boundedBytes) ||
     identity.executableSHA256 !== profile.executableSHA256 ||
     (profile.minimumBoundedBytes === undefined
       ? identity.boundedBytes !== undefined
@@ -251,6 +255,8 @@ export function createFactoryboxWorker(
             );
           if (pod.phase !== "Failed" && pod.phase !== "Succeeded") return current;
           const profile = factoryboxRuntimeProfile.parse(current.profile);
+          if (profile.retainedStore)
+            throw new Error("A retained-store worker requires explicit operator recovery");
           const selected = factoryboxRuntimeProfile.parse(
             await admitFactoryboxWorkerResources(nextProfile?.() ?? profile),
           );
@@ -261,6 +267,8 @@ export function createFactoryboxWorker(
           requireRuntimePodArtifacts(pod, current.runtimeHostImage, profile.image);
           await sql.begin(async (transaction) => {
             await requireActiveAccountIn(transaction, input.actorID);
+            await transaction`SELECT id FROM factory.factorybox_worker_admission
+              WHERE id=${current.admissionID} AND retired_at IS NULL FOR UPDATE`;
             const busy = await transaction`SELECT id FROM factory.runtime_attempt
               WHERE factorybox_admission_id=${current.admissionID} AND state NOT IN ('failed','stopped') LIMIT 1`;
             if (busy.length)
@@ -359,6 +367,7 @@ export function createFactoryboxWorker(
         const bootstrapImage = worker.runtimeHostImage;
         if (!bootstrapImage) throw new Error("Factory worker bootstrap image is missing");
         const location = factoryboxLocation(worker.id, worker.admissionID);
+        const storeID = profile.retainedStore?.storeID ?? worker.admissionID.replaceAll("-", "");
         // The shared Pod keeps its exact original init image and environment.
         // Consumer upgrades are exported separately after native admission.
         for (const item of declared) {
@@ -426,8 +435,7 @@ export function createFactoryboxWorker(
           throw new Error("Factory worker creation is unconfirmed; refusing another create");
         const storeClaimDeclaration = declared.find(
           (item) =>
-            item.kind === "PersistentVolumeClaim" &&
-            item.metadata.name === `store-${worker.admissionID.replaceAll("-", "")}`,
+            item.kind === "PersistentVolumeClaim" && item.metadata.name === `store-${storeID}`,
         );
         if (!storeClaimDeclaration) throw new Error("Factory worker store declaration is missing");
         let declaration = worker.declaration
@@ -445,6 +453,7 @@ export function createFactoryboxWorker(
           const nativeProfile = { ...profile };
           delete nativeProfile.storageAdmission;
           delete nativeProfile.resourceAdmission;
+          delete nativeProfile.retainedStore;
           declaration = factoryboxWorkerDeclaration.parse(
             await observeOriginalFactoryboxDeclaration(
               factoryboxWorkerRequest.parse({
@@ -452,7 +461,7 @@ export function createFactoryboxWorker(
                 version: 1,
                 namespace: location.namespace,
                 podName: location.podName,
-                storeID: worker.admissionID.replaceAll("-", ""),
+                storeID,
                 trustDomainID: worker.id.replaceAll("-", ""),
               }),
               factoryboxWorkerIdentity.parse(worker.identity),
@@ -477,7 +486,7 @@ export function createFactoryboxWorker(
           if (worker.admissionID === worker.id)
             await sql`UPDATE factory.factorybox_worker SET create_attempted=true WHERE id=${worker.id}`;
         }
-        const storeKey = `PersistentVolumeClaim/store-${worker.admissionID.replaceAll("-", "")}`;
+        const storeKey = `PersistentVolumeClaim/store-${storeID}`;
         const shared = declared.filter(
           (value) =>
             value === namespace || value.metadata.labels["factory.dev/shared-resource"] === "true",
