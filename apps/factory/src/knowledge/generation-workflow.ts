@@ -483,6 +483,14 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             issues.push(...wikiLinkIssues(page.body, pages));
           }
           if (issues.length) return { round: inputData.round + 1, issues, output };
+          if (providerRequests?.remaining === 0)
+            return {
+              round: inputData.round + 1,
+              issues: [
+                "The draft remains unpublished because its independent page check needs another admitted provider request",
+              ],
+              output,
+            };
           const review = await ask(
             "checker",
             reviewSchema,
@@ -510,7 +518,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       .then(prepare)
       .dountil(
         repair,
-        async ({ inputData }) => inputData.issues.length === 0 || inputData.round >= 2,
+        async ({ inputData }) => inputData.issues.length === 0 || providerRequests?.remaining === 0,
       )
       .commit();
     const result = await (await workflow.createRun()).start({ inputData: {} });

@@ -19,11 +19,13 @@ test.each([
   "empty-topic",
   "verbose-overview",
   "execution-bound",
+  "checker-budget-exhausted",
   "invalid-plan-once",
   "invalid-plan-always",
   "verbose-topic-plan",
   "source-hungry-checker",
   "bare-wiki-reference",
+  "planned-links-need-more-repair",
   "large-repository",
   "many-topics",
   "authority-change",
@@ -176,17 +178,21 @@ test.each([
                 : [
                     {
                       body:
-                        scenario === "bare-wiki-reference" &&
-                        prompt.topic.slug === "guide-1" &&
-                        !prompt.issues?.length
-                          ? "See #wiki/overview for the verified orientation."
-                          : scenario === "verbose-overview" &&
-                              !prompt.issues?.length &&
-                              prompt.topic.slug === "overview"
-                            ? "x".repeat(1201)
-                            : !prompt.issues?.length && prompt.topic.slug === "overview"
-                              ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
-                              : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
+                        scenario === "planned-links-need-more-repair" &&
+                        prompt.topic.slug === "overview" &&
+                        writes <= 3
+                          ? "Useful verified behavior. See [Flow 1](#wiki/guide-1)."
+                          : scenario === "bare-wiki-reference" &&
+                              prompt.topic.slug === "guide-1" &&
+                              !prompt.issues?.length
+                            ? "See #wiki/overview for the verified orientation."
+                            : scenario === "verbose-overview" &&
+                                !prompt.issues?.length &&
+                                prompt.topic.slug === "overview"
+                              ? "x".repeat(1201)
+                              : !prompt.issues?.length && prompt.topic.slug === "overview"
+                                ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
+                                : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
                       ...(scenario === "wrong-parent" && prompt.topic.slug !== "overview"
                         ? { parentSlug: null }
                         : {}),
@@ -276,7 +282,16 @@ test.each([
         },
         ...(scenario === "many-topics"
           ? {}
-          : { providerRequests: { remaining: scenario === "execution-bound" ? 1 : 32 } }),
+          : {
+              providerRequests: {
+                remaining:
+                  scenario === "execution-bound"
+                    ? 1
+                    : scenario === "checker-budget-exhausted"
+                      ? 5
+                      : 32,
+              },
+            }),
         readFiles: async (paths) =>
           paths.map((path) => {
             read.add(path);
@@ -290,6 +305,8 @@ test.each([
             expect(page.body).not.toContain("## Sources");
             if (scenario === "bare-wiki-reference")
               expect(page.body).not.toContain("See #wiki/overview");
+            if (scenario === "planned-links-need-more-repair" && page.slug === "overview")
+              expect(page.body).not.toContain("#wiki/guide-1");
             pages.push({
               id: crypto.randomUUID(),
               slug: page.slug,
@@ -329,6 +346,13 @@ test.each([
         expect(publications).toBe(0);
         return;
       }
+      if (scenario === "checker-budget-exhausted") {
+        await expect(run).rejects.toThrow("Wiki topic failed bounded quality checks");
+        expect(receivedRequests).toBe(5);
+        expect(checks).toBe(0);
+        expect(publications).toBe(0);
+        return;
+      }
       if (scenario === "unread-research-always") {
         await expect(run).rejects.toThrow("Research cites unread source: src/flow-63.ts");
         expect(researches).toBe(2);
@@ -346,6 +370,7 @@ test.each([
           "verbose-topic-plan",
           "source-hungry-checker",
           "bare-wiki-reference",
+          "planned-links-need-more-repair",
           "large-repository",
           "many-topics",
         ].includes(scenario)
@@ -360,7 +385,7 @@ test.each([
         expect(publications).toBe(
           ["publication-conflict", "execution-bound", "empty-topic"].includes(scenario) ? 0 : 1,
         );
-        expect(checks).toBeLessThanOrEqual(4);
+        expect(receivedRequests).toBeLessThanOrEqual(32);
         return;
       }
       const result = await run;
@@ -382,7 +407,13 @@ test.each([
       }
       expect(read.size).toBe(64);
       expect(publications).toBe(4);
-      expect(writes).toBe(scenario === "bare-wiki-reference" ? 6 : 5);
+      expect(writes).toBe(
+        scenario === "planned-links-need-more-repair"
+          ? 7
+          : scenario === "bare-wiki-reference"
+            ? 6
+            : 5,
+      );
       expect(checks).toBe(scenario === "source-hungry-checker" ? 8 : 4);
       expect(researches).toBe(
         ["invalid-research", "repair-needs-rejected-research", "unread-research-once"].includes(

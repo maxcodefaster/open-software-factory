@@ -213,7 +213,9 @@ structured output share that allowance. Input/media bounds, final result schemas
 cancellation still apply, and a genuinely truncated response is rejected without replay.
 These byte limits are conservative resource bounds, not tokenizer-specific context guarantees.
 Wiki uses a shared budget of 32 provider requests, including tool rounds and deliberate repairs,
-with at most 1 MiB of per-step input and 8,000 output tokens. Setup/probes use the same no-retry
+with at most 1 MiB of per-step input and 8,000 output tokens. Page-quality repairs use that shared
+budget rather than a separate two-round cutoff. Exhaustion never publishes a broken or unchecked
+draft. Setup/probes use the same no-retry
 policy and their existing task deadlines. Setup, runtime, source, IDE, Forge access, Change Writer
 and execution-reserve coordination use
 short-lived PostgreSQL sessions so infrastructure waits do not occupy the application pool.
