@@ -288,6 +288,12 @@ storage node. Factory's Theia extension adapts files, search and watch operation
 access. Initialization runs no Project hooks or code and permanently drops ownership privileges
 before serving source. No synchronized checkout, mutable current-directory alias or NFS watch
 assumption is involved.
+Factory Git integration restores the canonical checkout owner's UID/GID on root-created tracked
+files and their directories, including conflict results. Retained-start preparation enforces that
+same ownership without changing source bytes, HEAD, ordinary file modes, untracked private data or
+native Session files. Descriptor-bound Linux operations refuse hard-linked files and never follow
+symlinks or nested mounts. File watches skip unreadable child directories, but an unreadable root
+or an unknown watcher failure still rejects the subscription.
 The independent editor has a pinned TypeScript/JavaScript and Python language preset. Start tools
 explicitly prepares execution if needed; opening source alone never starts a language server.
 The servers run in the actual Dev Container with Project dependencies, not on the editor backend.

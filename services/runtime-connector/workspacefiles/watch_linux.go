@@ -102,8 +102,14 @@ func (watch *sourceWatch) addTree(ctx context.Context, name string) error {
 		if entry.Kind != "directory" || excludedWatchPath(child) {
 			continue
 		}
-		if err := watch.addTree(ctx, child); err != nil && !errors.Is(err, unix.ENOENT) {
-			return err
+		if err := watch.addTree(ctx, child); err != nil {
+			// A user-private tool directory is not readable Source. Keep
+			// observing accessible siblings without changing its permissions.
+			// Failure to watch the checkout root or an unknown failure still
+			// rejects the subscription.
+			if !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EPERM) {
+				return err
+			}
 		}
 	}
 	return nil

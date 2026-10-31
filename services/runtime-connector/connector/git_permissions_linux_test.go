@@ -94,6 +94,174 @@ func TestParentCommitKeepsCanonicalGitReadable(t *testing.T) {
 	}
 }
 
+func TestParentIntegrationKeepsTrackedSourceOwnedByDeveloper(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires the owned root Linux Connector fixture")
+	}
+	if os.Getenv("FACTORY_INTEGRATION_PERMISSIONS_FIXTURE") != "1" {
+		child := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.v")
+		child.Env = append(os.Environ(), "FACTORY_INTEGRATION_PERMISSIONS_FIXTURE=1")
+		if output, err := child.CombinedOutput(); err != nil {
+			t.Fatalf("integration ownership fixture failed: %v\n%s", err, output)
+		}
+		return
+	}
+	syscall.Umask(0022)
+	workspace, message := integrationFixture(t, false)
+	if err := os.Chmod(filepath.Dir(workspace), 0755); err != nil {
+		t.Fatal(err)
+	}
+	commitGit(t, workspace, "checkout", "main")
+	if err := os.Mkdir(filepath.Join(workspace, "new-source"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	commitFile(t, workspace, "new-source/app.txt", "integrated source\n")
+	commitGit(t, workspace, "add", "-A")
+	commitGit(t, workspace, "commit", "-m", "New source directory")
+	message.MergeParentSHA = commitGit(t, workspace, "rev-parse", "HEAD")
+	commitGit(t, workspace, "checkout", message.Branch)
+	commitGit(t, workspace, "config", "factory.repositoryIdentity", "owned-integration")
+	commitGit(t, workspace, "remote", "add", "origin", message.RepositoryURL)
+	if err := filepath.WalkDir(workspace, func(name string, _ os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Lchown(name, 1000, 1000)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	private := filepath.Join(workspace, ".git", "factory-opencode.db")
+	if err := os.WriteFile(private, []byte("private native session"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	syscall.Umask(0077)
+	sha, err := prepareCommit(context.Background(), workspace, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	developer := func(script string, arguments ...string) {
+		t.Helper()
+		child := exec.Command("sh", append([]string{"-ec", script, "owned-source"}, arguments...)...)
+		child.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000}}
+		if output, err := child.CombinedOutput(); err != nil {
+			t.Fatalf("integrated source is unusable by the actual developer: %v\n%s", err, output)
+		}
+	}
+	developer(`test "$(cat "$1")" = "integrated source"; printf "later manual edit\n" > "$1"; printf "new file\n" > "$2"`,
+		filepath.Join(workspace, "new-source", "app.txt"), filepath.Join(workspace, "new-source", "manual.txt"))
+	for _, name := range []string{"new-source", "new-source/app.txt", "other.txt"} {
+		info, err := os.Stat(filepath.Join(workspace, name))
+		if err != nil || info.Sys().(*syscall.Stat_t).Uid != 1000 {
+			t.Fatalf("Factory left tracked source owned by another user: %s: %v, %v", name, info, err)
+		}
+	}
+	// Reproduce a retained private file written by an older Parent. A normal
+	// fresh-start preparation must retain its bytes and the original checkout.
+	name := filepath.Join(workspace, "new-source", "app.txt")
+	replacement := filepath.Join(workspace, "new-source", "owned-root-replacement")
+	if err := os.WriteFile(replacement, []byte("retained manual bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, name); err != nil {
+		t.Fatal(err)
+	}
+	privateDirectory := filepath.Join(workspace, "private-untracked")
+	if err := os.Mkdir(privateDirectory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDirectory, "credential"), []byte("private"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	message.Action = "git-observe-commit"
+	if recovered, err := prepareCommit(context.Background(), workspace, message); err != nil || recovered != sha {
+		t.Fatalf("exact commit observation failed: %s, %v", recovered, err)
+	}
+	if info, err := os.Stat(name); err != nil || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		t.Fatal("commit observation changed later file ownership")
+	}
+	original, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkoutProject(context.Background(), Assignment{
+		WorkspaceFolder: workspace, PreserveWorkspace: true, RepositoryIdentity: "owned-integration",
+		RepositoryURL: message.RepositoryURL, Revision: sha,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	developer(`test "$(cat "$1")" = "retained manual bytes"; printf "readable and writable\n" > "$1"`, name)
+	if current := commitGit(t, workspace, "rev-parse", "HEAD"); current != sha {
+		t.Fatal("ownership preparation changed the exact submitted commit")
+	}
+	if current, err := os.Stat(workspace); err != nil || !os.SameFile(original, current) {
+		t.Fatal("ownership preparation replaced canonical Source")
+	}
+	if info, err := os.Stat(private); err != nil || info.Mode().Perm() != 0600 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		t.Fatal("ownership preparation changed private native Session data")
+	}
+	if info, err := os.Stat(privateDirectory); err != nil || info.Mode().Perm() != 0700 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+		t.Fatal("ownership preparation changed untracked private data")
+	}
+	grant := filepath.Join(filepath.Dir(workspace), "private-runtime-grant")
+	if err := os.WriteFile(grant, []byte("private"), 0666); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(grant); err != nil || info.Mode().Perm() != 0600 {
+		t.Fatal("integration changed the process-wide private umask")
+	}
+}
+
+func TestTrackedSourceOwnershipDoesNotFollowPrivateLinkTargets(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("requires the owned root Linux Connector fixture")
+	}
+	for _, kind := range []string{"symlink", "parent-symlink", "hardlink"} {
+		t.Run(kind, func(t *testing.T) {
+			workspace, _ := commitRepository(t)
+			private := filepath.Join(t.TempDir(), "private")
+			if err := os.WriteFile(private, []byte("private source fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(workspace, "app.txt")
+			if kind == "parent-symlink" {
+				if err := os.Mkdir(filepath.Join(workspace, "nested"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				target = filepath.Join(workspace, "nested", "private")
+				commitFile(t, workspace, "nested/private", "tracked\n")
+				commitGit(t, workspace, "add", "-A")
+				if err := os.RemoveAll(filepath.Dir(target)); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Dir(private), filepath.Dir(target)); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Remove(target); err != nil {
+					t.Fatal(err)
+				}
+				link := os.Symlink
+				if kind == "hardlink" {
+					link = os.Link
+				}
+				if err := link(private, target); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Chown(workspace, 1000, 1000); err != nil {
+				t.Fatal(err)
+			}
+			err := ensureTrackedWorkspaceOwnership(context.Background(), workspace)
+			if (kind == "hardlink") != (err != nil) {
+				t.Fatalf("unexpected protected tracked-source result: %v", err)
+			}
+			if info, err := os.Stat(private); err != nil || info.Mode().Perm() != 0600 || info.Sys().(*syscall.Stat_t).Uid != 0 {
+				t.Fatal("tracked Source ownership widened a private link target")
+			}
+		})
+	}
+}
+
 func TestCanonicalGitPreparationRestoresReadabilityWithoutReset(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("requires the owned root Linux Connector fixture")

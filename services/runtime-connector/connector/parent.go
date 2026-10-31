@@ -459,9 +459,15 @@ func prepareCommit(ctx context.Context, workspace string, message Message) (stri
 		if _, err := gitOutputWithEnv(ctx, workspace, environment, "fetch", "--no-tags", message.RepositoryURL, message.MergeParentSHA); err != nil {
 			return "", errors.New("integration source could not be fetched")
 		}
-		if _, err := gitOutput(ctx, workspace, "-c", "core.hooksPath=/dev/null",
+		_, mergeError := gitOutput(ctx, workspace, "-c", "core.hooksPath=/dev/null",
 			"-c", "user.name="+message.AuthorName, "-c", "user.email="+message.AuthorEmail,
-			"merge", "--no-ff", "--no-commit", message.MergeParentSHA); err != nil {
+			"merge", "--no-ff", "--no-commit", message.MergeParentSHA)
+		// Conflicts also materialize files that the retained implementer must
+		// be able to read and resolve in its normal development identity.
+		if err := ensureTrackedWorkspaceOwnership(ctx, workspace); err != nil {
+			return "", err
+		}
+		if mergeError != nil {
 			unmerged, observationErr := gitOutput(ctx, workspace, "ls-files", "--unmerged")
 			if observationErr == nil && unmerged != "" {
 				return "", errors.New("integration has conflicts")
@@ -944,7 +950,10 @@ func checkoutProject(ctx context.Context, assignment Assignment) error {
 			return errors.New("Workspace Git origin could not be refreshed")
 		}
 		if assignment.PreserveWorkspace {
-			return ensureSharedGitReadable(assignment.WorkspaceFolder)
+			if err := ensureSharedGitReadable(assignment.WorkspaceFolder); err != nil {
+				return err
+			}
+			return ensureTrackedWorkspaceOwnership(ctx, assignment.WorkspaceFolder)
 		}
 		head, headErr := workspaceGitCommand(
 			ctx, assignment.WorkspaceFolder, "rev-parse", "HEAD",
