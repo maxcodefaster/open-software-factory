@@ -122,9 +122,15 @@ test("first opening from a Ticket link preserves the already loaded hidden edito
       }),
     },
   });
-  await signIn(page);
-  await expect(page.getByRole("button", { name: "Open project menu", exact: true })).toBeVisible();
+  // Start at the link before signing in. Warming the editor on a separate
+  // Dashboard document and then hard-navigating cannot retain its iframe.
   await page.goto(`/projects/${projectID}/tickets/${ticketID}`);
+  await page.getByLabel("Email").fill(process.env["FACTORY_ADMIN_EMAIL"] ?? "admin@factory.local");
+  await page
+    .getByLabel("Password")
+    .fill(process.env["FACTORY_ADMIN_PASSWORD"] ?? "factory-local-password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp(`/projects/${projectID}/tickets/${ticketID}$`));
   await expect(page.getByRole("status", { name: "Ticket progress" })).toBeVisible();
   const frame = page.locator('iframe[title="Factory IDE"]');
   const draft = page.frameLocator('iframe[title="Factory IDE"]').getByLabel("Unsaved editor draft");
@@ -2284,6 +2290,7 @@ test("returns to the embedded input after dismissing the narrow Agent on the iso
   }
   await page.keyboard.type("focus-return-input");
   await expect(input).toHaveValue("focus-return-input");
+  await page.screenshot({ path: `${evidenceDirectory}/ide-embedded-focus-return.png` });
   const frameBody = page.frameLocator('iframe[title="Factory IDE"]').locator("body");
   for (const unavailable of ["hidden", "disabled", "removed"]) {
     await input.click();
