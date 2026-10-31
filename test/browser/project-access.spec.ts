@@ -1,9 +1,9 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserBootstrap,
@@ -11,6 +11,7 @@ import {
   mockFactoryFunctions,
   requestFunction,
 } from "../fixtures/server-functions";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { signIn } from "../support/factory-fixture";
 
 test("managers create accounts and Project access; developers see only their Project and lose revoked access", async ({
@@ -73,12 +74,7 @@ test("managers create accounts and Project access; developers see only their Pro
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
     const dialog = page.getByRole("region", { name: "Settings", exact: true });
-    const navigation = dialog.getByRole("navigation", { name: "Settings navigation" });
-    await navigation
-      .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-      .getByRole("button", { name: "People & access", exact: true })
-      .click();
+    await chooseSettingsPage(page, "People & access", "Factory administration");
     await expect(dialog.getByRole("region", { name: "Managed accounts" })).toBeVisible();
     await dialog.getByText("Add account", { exact: true }).click();
     await dialog.getByLabel("Name", { exact: true }).fill("Access QA developer");
@@ -88,11 +84,7 @@ test("managers create accounts and Project access; developers see only their Pro
     await expect(dialog.getByRole("status")).toHaveText(
       "Account created. Add access in the project's People & access settings.",
     );
-    await navigation
-      .locator("section")
-      .filter({ has: page.getByRole("heading", { name: `Project · ${name}`, exact: true }) })
-      .getByRole("button", { name: "People & access", exact: true })
-      .click();
+    await chooseSettingsPage(page, "People & access", `Project · ${name}`);
     await expect(
       dialog
         .getByRole("region", { name: "People & access", exact: true })

@@ -1,14 +1,15 @@
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { CommandError } from "../../apps/factory/src/command-error";
 import type { FactoryFunctionContext } from "../../apps/factory/src/server-functions/context";
 import { defaultExecutionPolicy } from "../../packages/conversation-domain/src/execution-policy";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { mockFactoryFunctions, mockUsageFunctions } from "../fixtures/server-functions";
-import { deleteFactoryProject, signIn } from "../support/factory-fixture";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { fixtureValue } from "../fixtures/value";
+import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ trace: "off" });
 
@@ -200,13 +201,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
   });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
-  const settings = page.getByRole("region", { name: "Settings", exact: true });
-  await settings
-    .getByRole("navigation", { name: "Settings navigation" })
-    .locator("section")
-    .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-    .getByRole("button", { name: "Monitoring", exact: true })
-    .click();
+  await chooseSettingsPage(page, "Monitoring", "Factory administration");
   const usage = page.getByRole("region", { name: "Usage & limits" });
   await expect(usage.getByLabel("Monthly Coding allowance")).toHaveValue("", { timeout: 5000 });
   navigations.length = 0;
@@ -261,16 +256,7 @@ test("Usage settings retain exact saves and show truthful totals, prices and mea
     .click();
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
-  const chooseSettings = settings.getByRole("button", {
-    name: "Choose settings page",
-    exact: true,
-  });
-  if (await chooseSettings.isVisible()) await chooseSettings.click();
-  const projectNavigation = settings
-    .getByRole("navigation", { name: "Settings navigation" })
-    .locator("section")
-    .filter({ has: page.getByRole("heading", { name: /^Project · / }) });
-  await projectNavigation.getByRole("button", { name: "Monitoring", exact: true }).click();
+  await chooseSettingsPage(page, "Monitoring", "Project · Usage transport proof");
   await expect(usage.getByLabel("Monthly Coding allowance")).toBeDisabled();
   await expect(usage.getByText("Effective: 5 USD")).toBeVisible();
   await expect(usage.getByRole("button", { name: "Save limits" })).toHaveCount(0);

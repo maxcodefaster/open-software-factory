@@ -9,7 +9,7 @@ import {
   browserFunction,
   callFactoryFunction,
 } from "../fixtures/server-functions";
-import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { chooseSettingsPage, chooseSettingsScope } from "../fixtures/settings-navigation";
 
 test("security Settings is a keyboard-accessible tab, reauthenticates in place, and fits narrow screens", async () => {
   const owned = await factoryProcess();
@@ -35,6 +35,7 @@ test("security Settings is a keyboard-accessible tab, reauthenticates in place, 
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page.getByRole("button", { name: "Open settings", exact: true }).click();
     const navigation = page.getByRole("navigation", { name: "Settings navigation" });
+    await chooseSettingsScope(page, "personal");
     await navigation.getByRole("button", { name: "Login & security" }).focus();
     await page.keyboard.press("Enter");
     const settings = page.getByRole("region", { name: "Login & security" });

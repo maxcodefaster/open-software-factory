@@ -539,10 +539,19 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   };
   const dismissAgent = () => {
     const opener = agentOverlayOpener ?? agentToggleElement;
+    if (opener?.isConnected) opener.focus({ preventScroll: true });
+    // A disconnected, hidden or non-focusable opener must not leave focus in
+    // the panel when its closing render applies aria-hidden and inert.
+    const parked = agentPanelElement?.contains(document.activeElement);
+    if (parked) agentToggleElement?.focus({ preventScroll: true });
     setAgentOpen(false);
-    requestAnimationFrame(() => {
-      if (!agentOpen() && opener?.isConnected) opener.focus({ preventScroll: true });
-    });
+    // Narrow document openers are inert until that render closes the overlay.
+    // Restore the original place only if no intervening interaction moved focus.
+    if (parked && opener !== agentToggleElement)
+      requestAnimationFrame(() => {
+        if (!agentOpen() && opener?.isConnected && document.activeElement === agentToggleElement)
+          opener.focus({ preventScroll: true });
+      });
   };
   const projectMenuOpener = (): HTMLButtonElement | undefined => {
     const button = projectControlElement?.querySelector<HTMLButtonElement>(".project-selector");

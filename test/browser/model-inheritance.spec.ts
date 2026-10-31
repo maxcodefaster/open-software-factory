@@ -1,15 +1,19 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { inheritedModelSettingsView } from "../../packages/conversation-domain/src/model-inheritance";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserBootstrap,
+  browserFunction,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
 import { signIn } from "../support/factory-fixture";
-import { browserBootstrap, browserFunction } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
 
 test("Project managers set model defaults and locks; developers select and Reset their own models", async ({
   page,
@@ -55,20 +59,11 @@ test("Project managers set model defaults and locks; developers select and Reset
     await current.getByRole("button", { name: "Settings", exact: true }).click();
     await current.getByRole("button", { name: "Open settings", exact: true }).click();
     const dialog = current.getByRole("region", { name: "Settings", exact: true });
-    await dialog
-      .getByRole("navigation", { name: "Settings navigation" })
-      .locator("section")
-      .filter({
-        has: current.getByRole("heading", {
-          name: group === "Personal" ? group : `Project · ${group}`,
-          exact: true,
-        }),
-      })
-      .getByRole("button", {
-        name: group === "Personal" ? "Model overrides" : "Models",
-        exact: true,
-      })
-      .click();
+    await chooseSettingsPage(
+      current,
+      group === "Personal" ? "Model overrides" : "Models",
+      group === "Personal" ? group : `Project · ${group}`,
+    );
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("combobox", { name: /^Build/ })).toHaveCount(1);
     return dialog;
@@ -110,6 +105,11 @@ test("Project managers set model defaults and locks; developers select and Reset
       managerDialog
         .getByRole("navigation", { name: "Settings navigation" })
         .getByRole("heading", { name: "Factory administration", exact: true }),
+    ).toHaveCount(0);
+    await expect(
+      managerDialog
+        .getByRole("combobox", { name: "Settings scope", exact: true })
+        .getByRole("option", { name: "Factory administration", exact: true }),
     ).toHaveCount(0);
     await managerDialog
       .getByRole("combobox", { name: /^Investigate & Plan/ })

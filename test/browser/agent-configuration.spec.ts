@@ -1,21 +1,22 @@
-import { requestFunction } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
 import { mkdir } from "node:fs/promises";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { CommandError } from "../../apps/factory/src/command-error";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createSkillController } from "../../apps/factory/src/skills/controller";
 import { requirementsInterviewSkill } from "../../apps/factory/src/skills/reviewed";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
-import { signIn } from "../support/factory-fixture";
 import {
   browserBootstrap,
   browserFunction,
   mockFactoryFunctions,
+  requestFunction,
 } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
+import { chooseSettingsPage } from "../fixtures/settings-navigation";
+import { signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 960 }, contextOptions: { reducedMotion: "reduce" } });
 test.setTimeout(90_000);
@@ -210,10 +211,7 @@ test("admitted configuration is readable, private to Project members, and distin
     await expect(
       developer.getByRole("dialog", { name: "Agent settings", exact: true }),
     ).toHaveCount(0);
-    await settings
-      .getByRole("navigation", { name: "Settings navigation" })
-      .getByRole("button", { name: "Skills", exact: true })
-      .click();
+    await chooseSettingsPage(developer, "Skills");
     await developer.screenshot({
       path: ".factory/test-results/agent-configuration/developer-settings.png",
     });
