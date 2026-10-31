@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
 import { createTwoFilesPatch } from "diff";
+import type {
+  BuildBrowserCall,
+  BuildBrowserResult,
+} from "../../../../packages/conversation-domain/src/browser-tools";
 import {
   candidateReviewCallInput,
   candidateReviewResultInput,
@@ -7,14 +11,10 @@ import {
   checkedReviewResult,
   reviewNeedsBrowser,
 } from "../../../../packages/conversation-domain/src/candidate-review";
-import type {
-  BuildBrowserCall,
-  BuildBrowserResult,
-} from "../../../../packages/conversation-domain/src/browser-tools";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { CommandError } from "../command-error";
-import { createAgentTurnStore, type AgentTurnTransaction } from "./turn-store";
+import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
 type ReviewScope = {
@@ -445,15 +445,14 @@ export function createCandidateReviewController(
         });
       }
       const inventory = await inventories(scope);
-      async function revisionFiles(revision: "candidate" | "base" | "previous") {
-        if (revision !== "previous")
+      async function revisionFiles(revision: string) {
+        if (revision === "candidate" || revision === "base")
           return {
             files: inventory[revision],
             sha: revision === "base" ? scope.baseSHA : scope.commitSHA,
           };
-        if (!scope.previousSHA)
-          throw new CommandError("conflict", "This review has no previous candidate");
-        const sha = scope.previousSHA;
+        const sha = revision === "previous" ? scope.previousSHA : revision;
+        if (!sha) throw new CommandError("conflict", "This review has no previous candidate");
         return {
           sha,
           files: await cached(`inventory:${scope.repositoryURL}:${sha}`, () =>
@@ -680,7 +679,8 @@ export function createCandidateReviewController(
         output = { revision, commit: selected.sha, matches, skipped, nextOffset, nextLine };
         observation = {
           kind: matches.length ? "source" : "search",
-          revision,
+          revision: selected.sha === scope.commitSHA ? "candidate" : revision,
+          sourceCommit: selected.sha,
           search: query,
           pathPrefix,
           offset,
@@ -702,7 +702,14 @@ export function createCandidateReviewController(
             .map((line, index) => `${startLine + index}: ${line}`)
             .join("\n"),
         };
-        observation = { kind: "source", path, revision, startLine, lines };
+        observation = {
+          kind: "source",
+          path,
+          revision: selected.sha === scope.commitSHA ? "candidate" : revision,
+          sourceCommit: selected.sha,
+          startLine,
+          lines,
+        };
       } else {
         const { path, comparison } = call.arguments;
         const beforeRevision = await revisionFiles(comparison);

@@ -6,8 +6,8 @@ import {
   candidateReviewResultInput,
   candidateReviewToolCatalogue,
   checkedReviewResult,
-  findingCheckResultInput,
   findingCheckInstructions,
+  findingCheckResultInput,
   reviewNeedsBrowser,
 } from "./candidate-review";
 
@@ -174,4 +174,40 @@ test("frontend source needs a real browser review, not only code inspection", ()
 test("MCP input schemas keep defaulted source-read arguments optional", () => {
   const read = candidateReviewToolCatalogue.find((tool) => tool.name === "review_read");
   expect(read?.inputSchema.required).toEqual(["path"]);
+});
+
+test("review source references admit full immutable commits only within the assigned repository", () => {
+  const commit = "9b2bfe41945557d6e0a260d91090579d7504e3f5";
+  for (const [name, field] of [
+    ["review_read", "revision"],
+    ["review_search", "revision"],
+    ["review_diff", "comparison"],
+    ["review_files", "comparison"],
+  ] as const) {
+    const argumentsFor = (revision: string) => ({
+      ...(name === "review_read" || name === "review_diff" ? { path: "src/sum.ts" } : {}),
+      ...(name === "review_search" ? { query: "sum" } : {}),
+      [field]: revision,
+    });
+    expect(
+      candidateReviewCallInput.safeParse({ name, arguments: argumentsFor(commit) }).success,
+    ).toBe(true);
+    for (const ref of [
+      "main",
+      "HEAD",
+      commit.slice(0, 7),
+      `${commit}~1`,
+      `${commit}:src`,
+      `../${commit}`,
+    ])
+      expect(
+        candidateReviewCallInput.safeParse({ name, arguments: argumentsFor(ref) }).success,
+      ).toBe(false);
+    expect(
+      candidateReviewCallInput.safeParse({
+        name,
+        arguments: { ...argumentsFor(commit), repository: "another/private-repository" },
+      }).success,
+    ).toBe(false);
+  }
 });
