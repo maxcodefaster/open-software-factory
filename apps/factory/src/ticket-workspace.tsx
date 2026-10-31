@@ -1444,6 +1444,8 @@ function TicketDocument(props: TicketWorkspaceProps) {
                                 verificationState: props.delivery?.verificationState,
                                 verificationFailureKind: props.delivery?.verificationFailureKind,
                                 verificationSummary: props.delivery?.verificationSummary,
+                                verificationPreparationFailure:
+                                  props.delivery?.verificationPreparationFailure,
                                 correctionState: props.delivery?.correctionState,
                                 reviewState: props.delivery?.reviewState,
                                 checksPaused: Boolean(props.delivery?.checksStopId),

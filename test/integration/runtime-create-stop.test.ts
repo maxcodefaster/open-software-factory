@@ -20,7 +20,10 @@ import {
   type KubernetesClient,
   KubernetesObservationUnavailableError,
 } from "../../packages/runtime-kubernetes/src/client";
-import { factoryboxRuntimeDeclaration } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import {
+  factoryboxRuntimeDeclaration,
+  factoryboxRuntimeRequest,
+} from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { fixture } from "../fixtures/change-agent-turns";
 import { executionPoolFixture } from "../fixtures/execution-pool";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -90,7 +93,14 @@ async function sourceOnly(sql: Parameters<typeof factoryboxAllocation>[0], names
   });
 }
 
-test.each(["cold worker", "specific refusal"] as const)(
+test.each([
+  "cold worker",
+  "specific refusal",
+  "capacity returns before dispatch",
+  "capacity returns before Start",
+  "unconfirmed preparation",
+  "unconfirmed Start",
+] as const)(
   "startup separates worker admission from Sandbox lifecycle and preserves %s evidence",
   async (scenario) => {
     const host = await factoryProcess();
@@ -100,6 +110,8 @@ test.each(["cold worker", "specific refusal"] as const)(
     let clockValue = performance.now();
     const clock = spyOn(performance, "now").mockImplementation(() => clockValue);
     let reads = 0,
+      sourceReads = 0,
+      starts = 0,
       remaining: number | undefined;
     try {
       const [attempt] = await database.client<
@@ -107,7 +119,7 @@ test.each(["cold worker", "specific refusal"] as const)(
       >`SELECT kubernetes_namespace AS namespace,kubernetes_pod_name AS "podName",
         factorybox_worker_id AS "workerID" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
       if (!attempt) throw new Error("Missing owned startup identity");
-      const declaration = factoryboxRuntimeDeclaration({
+      const input = {
         ...attempt,
         attemptID: owned.attemptID,
         sandboxID: `runtime-${owned.attemptID.replaceAll("-", "")}`,
@@ -116,10 +128,28 @@ test.each(["cold worker", "specific refusal"] as const)(
         runtimeHostImage: configuration.FACTORY_RUNTIME_HOST_IMAGE,
         profile: ownedFactoryboxProfile,
         sharedSource: true,
-      });
+      };
+      const declaration = factoryboxRuntimeDeclaration(input);
+      const resumedPreparation = [
+        "capacity returns before dispatch",
+        "capacity returns before Start",
+        "unconfirmed preparation",
+        "unconfirmed Start",
+      ].includes(scenario);
       await database.client`UPDATE factory.runtime_attempt SET state='starting',
         kubernetes_uid='owned-startup-pod',kubernetes_namespace_uid='owned-startup-namespace'
         WHERE id=${owned.attemptID}`;
+      if (resumedPreparation) {
+        await database.client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request)
+          VALUES(${owned.attemptID},${JSON.stringify(factoryboxRuntimeRequest(input))}::jsonb)`;
+        await database.client`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,attempted_at,completed_at)
+          VALUES(${owned.attemptID},'prepare',
+            ${scenario === "capacity returns before dispatch" ? null : new Date().toISOString()},
+            ${["unconfirmed Start", "capacity returns before Start"].includes(scenario) ? new Date().toISOString() : null})`;
+        if (["unconfirmed Start", "capacity returns before Start"].includes(scenario))
+          await database.client`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,attempted_at)
+            VALUES(${owned.attemptID},'start',${scenario === "unconfirmed Start" ? new Date().toISOString() : null})`;
+      }
       const controller = createRuntimeController(
         database,
         hub,
@@ -150,9 +180,16 @@ test.each(["cold worker", "specific refusal"] as const)(
         {
           ...createFactoryboxExecution(database, hub),
           async startupResources() {
+            sourceReads++;
             return [declaration.pod];
           },
           async ensureStarted(_id, _resources, deadline) {
+            starts++;
+            if (starts > 1 && scenario.startsWith("capacity returns")) {
+              await database.client`UPDATE factory.runtime_attempt SET state='ready',failure=NULL
+                WHERE id=${owned.attemptID}`;
+              return;
+            }
             if (deadline === undefined) throw new Error("Missing Sandbox lifecycle deadline");
             remaining = deadline - clockValue;
             clockValue = deadline + 1;
@@ -173,6 +210,24 @@ test.each(["cold worker", "specific refusal"] as const)(
         "Native operating storage capacity is unavailable",
       );
       expect((await controller.get(owned.attemptID))?.state).toBe("starting");
+      if (resumedPreparation) {
+        await controller.drainComputeWaits();
+        if (scenario.startsWith("capacity returns")) {
+          await eventually(
+            () => controller.get(owned.attemptID),
+            (value) => value?.state === "ready",
+            "The same unattempted Sandbox did not continue when capacity returned",
+          );
+          expect(starts).toBe(2);
+          expect(sourceReads).toBe(2);
+          await controller.drainComputeWaits();
+          expect(starts).toBe(2);
+          await Bun.sleep(1_100);
+        } else {
+          expect(sourceReads).toBe(1);
+          expect(starts).toBe(1);
+        }
+      }
     } finally {
       clock.mockRestore();
       await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;

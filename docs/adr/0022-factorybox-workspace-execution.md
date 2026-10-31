@@ -100,6 +100,13 @@ only for that exact worker epoch. Unknown operation outcomes retain ownership an
 they cannot authorize a new Pod, Sandbox or model request. Explicit Stop still removes execution.
 Reserve slots continue to use the existing PostgreSQL controller and locks.
 
+Capacity waiting before native dispatch does not exhaust the commissioned intent. After a bounded
+startup observation ends, the existing reconciliation sweep can observe that same preparation
+again only while Start is unattempted and no dispatched preparation is incomplete. Keep the
+original Runtime Attempt, worker, inputs and credentials. A dispatched Start or unconfirmed
+preparation never gains another native execution window from observation expiry. Ticket progress
+distinguishes preparation, its last recorded issue and actual running checks.
+
 Sandbox identities are independent of worker identities. Preparation protocol 3
 retains a private input directory and OCI configuration for each immutable
 Sandbox ID; a reserve assignment keeps its original slot Sandbox ID. Sandboxes

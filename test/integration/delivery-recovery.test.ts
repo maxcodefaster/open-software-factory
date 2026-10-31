@@ -176,8 +176,24 @@ test("failed Verification compute is visible while human editing fences reconcil
       verificationState: "runner-starting",
       verificationSummary: null,
       verificationFailureKind: null,
+      verificationPreparationFailure: null,
     });
     expect((await changes.get(f.owned.changeID))?.verificationState).toBe("runner-starting");
+    const preparationIssue = "Factorybox capacity refused preparation before dispatch";
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET failure=${preparationIssue} WHERE id=${replacementID}`;
+    expect(await delivery.get(f.owned.changeID)).toMatchObject({
+      verificationState: "runner-starting",
+      verificationFailureKind: null,
+      verificationPreparationFailure: preparationIssue,
+    });
+    // Historical diagnostics must not override actual readiness or check outcomes.
+    await f.database
+      .client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${replacementID}`;
+    expect(await delivery.get(f.owned.changeID)).toMatchObject({
+      verificationState: "runner-starting",
+      verificationPreparationFailure: null,
+    });
     // A native check result remains authoritative even if cleanup later fails.
     await f.database
       .client`UPDATE factory.verification SET state='succeeded',summary='Exact checks passed',completed_at=now() WHERE id=${verificationID}`;
