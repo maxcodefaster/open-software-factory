@@ -529,6 +529,11 @@ Its frozen instructions identify the successful exact-commit Verification as Fac
 evidence. The reviewer still checks source, test relevance and actual App behavior independently.
 It cannot edit, run shell commands or delegate to a writing agent. A native finish without an
 accepted report remains incomplete. Passing checks alone no longer enables Delivery.
+Human review comments can attach supplementary evidence for the current candidate. A fresh review
+freezes those file references alongside the implementation's admitted references. Older-candidate
+comments and files added after admission remain outside that review; repeating its command does
+not refresh the snapshot. Attachments are untrusted reference data, not a passing verdict or extra
+execution authority. The reviewer must inspect their provenance and relevance independently.
 The normal path uses one reviewer. Only proposed blockers commission one fresh, focused
 counter-investigation of the complete finding batch, using the same admitted model and permissions.
 That checker confirms concrete defects, dismisses false alarms or leaves material uncertainty

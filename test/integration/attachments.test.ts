@@ -6,21 +6,24 @@ import {
   type AttachmentObjects,
   attachmentDigest,
 } from "../../apps/factory/src/attachments/objects";
+import { createAttachmentRoutes } from "../../apps/factory/src/attachments/routes";
 import {
   attachmentContextIn,
   createAttachmentStore,
 } from "../../apps/factory/src/attachments/store";
 import { createAttachmentTools } from "../../apps/factory/src/attachments/tools";
 import { createVisualReviewController } from "../../apps/factory/src/review/controller";
+import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
+import { type ServerResult, serverCall } from "../../apps/factory/src/server-functions/result";
 import { attachmentMarkdown } from "../../packages/conversation-domain/src/attachments";
 import { ownedBrowserJPEG } from "../fixtures/browser-image";
 import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
-import { createAttachmentRoutes } from "../../apps/factory/src/attachments/routes";
-import type { FactoryServices } from "../../apps/factory/src/server-functions/context";
-import { serverCall, type ServerResult } from "../../apps/factory/src/server-functions/result";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
-import { compiledFactoryEndpoint, factoryFunctionRequest } from "../fixtures/server-functions";
+import {
+  compiledFactoryEndpoint,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 import { fixtureValue } from "../fixtures/value";
 
 function memoryObjects() {
@@ -262,6 +265,82 @@ test("private uploads, publication, exact Build snapshots and retained history u
     await owned.dispose();
   }
 });
+
+test("independent Review freezes human evidence comments for its exact candidate without inheriting later or stale references", async () => {
+  const f = await candidateReviewFixture();
+  const memory = memoryObjects();
+  const store = createAttachmentStore(f.database, memory.objects, async (data) => ({
+    text: new TextDecoder().decode(data),
+    previews: [],
+  }));
+  const tools = createAttachmentTools(f.database, store);
+  const review = createVisualReviewController(f.database);
+  async function file(name: string) {
+    const bytes = new TextEncoder().encode(`Owned fixture evidence: ${name}`);
+    const input = {
+      id: crypto.randomUUID(),
+      projectId: f.projectID,
+      name,
+      mediaType: "text/plain" as const,
+      bytes: bytes.length,
+      sha256: attachmentDigest(bytes),
+    };
+    await store.begin(f.userID, input);
+    await store.upload(f.userID, input.id, bytes);
+    return input;
+  }
+  try {
+    const current = await file("current-native-proof.txt");
+    const stale = await file("previous-candidate-proof.txt");
+    const staleFeedback = crypto.randomUUID();
+    await f.database
+      .client`INSERT INTO factory.review_feedback(id,change_id,author_id,kind,commit_sha)
+      VALUES(${staleFeedback},${f.changeID},${f.userID},'comment',${"a".repeat(40)})`;
+    await f.database
+      .client`INSERT INTO factory.review_feedback_message(id,feedback_id,author_id,body)
+      VALUES(${crypto.randomUUID()},${staleFeedback},${f.userID},${attachmentMarkdown(stale)})`;
+    await review.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "comment",
+      body: `Independent native evidence for ${f.commit}. Inspect its provenance, not an implementer verdict.\n${attachmentMarkdown(current)}`,
+    });
+    const active = await f.activeReview();
+    const admission = createChangeAdmission(f.database, buildModelID);
+    const intent = await admission.intent(active.id);
+    expect(intent.text).toContain("Independent native evidence");
+    expect(intent.text).toContain(current.id);
+    expect(intent.text).not.toContain(stale.id);
+    const read = await tools.call(active.id, active.ownerToken, {
+      name: "attachment_read",
+      arguments: { id: current.id },
+    });
+    expect(JSON.stringify(read)).toContain("Owned fixture evidence: current-native-proof.txt");
+    const later = await file("later-uncommissioned-proof.txt");
+    await review.create(f.changeID, f.userID, {
+      commandId: crypto.randomUUID(),
+      kind: "comment",
+      body: attachmentMarkdown(later),
+    });
+    const repeated = await createReviewAdmission(f.database)(f.changeID, f.reviewID, f.userID);
+    expect(repeated.turn.id).toBe(active.id);
+    expect((await admission.intent(active.id)).text).not.toContain(later.id);
+    for (const reference of [stale, later])
+      await expect(
+        tools.call(active.id, active.ownerToken, {
+          name: "attachment_read",
+          arguments: { id: reference.id },
+        }),
+      ).rejects.toMatchObject({ status: 404 });
+    await f.turns.settle(
+      active.id,
+      active.ownerToken,
+      "completed",
+      "Owned exact-candidate evidence isolation checked",
+    );
+  } finally {
+    await f.dispose();
+  }
+}, 30000);
 
 test("feedback files and their human meaning reach only the selected correction and its independent review", async () => {
   const f = await candidateReviewFixture();
