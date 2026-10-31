@@ -441,8 +441,16 @@ export function createFactoryboxExecution(
         "import pathlib,sys;sys.stdout.write(pathlib.Path(sys.argv[1]).read_text())",
         path,
       ]);
-      if (result.exitCode !== 0)
-        throw new Error("Factorybox preparation remains unconfirmed; its inputs were retained");
+      if (result.exitCode !== 0) {
+        const [attempt] = await connection<Array<{ failure: string | null }>>`
+          SELECT failure FROM factory.runtime_attempt WHERE id=${attemptID}`;
+        // A missing receipt is not a new cause. Keep the original diagnostic
+        // rather than hiding it on every read-only reconciliation.
+        throw new Error(
+          attempt?.failure ??
+            "Factorybox preparation remains unconfirmed; its inputs were retained",
+        );
+      }
       const observed = z
         .object({
           version: z.literal(3),

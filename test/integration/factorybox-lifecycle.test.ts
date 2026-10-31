@@ -16,6 +16,9 @@ import { eventually, factoryProcess } from "../fixtures/factory-process";
 test.each([
   ["arm64", false, false, "none"],
   ["arm64", false, false, "capacity-refusal"],
+  ["arm64", false, false, "preparation-capacity"],
+  ["amd64", false, false, "preparation-capacity"],
+  ["arm64", false, false, "preparation-capacity-late"],
   ["amd64", false, false, "none"],
   ["arm64", true, false, "none"],
   ["amd64", true, false, "none"],
@@ -184,6 +187,8 @@ test.each([
       };
       const mutations: string[] = [];
       let preparations = 0;
+      let preparationCapacityRefused = deleteContinuation.startsWith("preparation-capacity");
+      let capacityChecks = 0;
       let releases = 0;
       let cancellations = 0;
       let deleteRefused = false;
@@ -245,17 +250,28 @@ test.each([
           return { exitCode: 0, stderr: "", stdout: JSON.stringify(status) };
         }
         if (args.at(-1) === "capacity") {
+          capacityChecks++;
+          const preparationRefused =
+            preparationCapacityRefused &&
+            (deleteContinuation !== "preparation-capacity-late" || capacityChecks > 1);
           const [start] = await database.client<Array<{ attempted: boolean }>>`
             SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
             WHERE runtime_attempt_id=${owned.attemptID} AND action='start'`;
-          expect(start?.attempted).toBe(false);
+          expect(start?.attempted ?? false).toBe(false);
           return {
             exitCode: 0,
             stderr: "",
             stdout: JSON.stringify({
               version: 1,
               root,
-              new_write_admitted: deleteContinuation !== "capacity-refusal",
+              new_write_admitted:
+                !preparationRefused &&
+                !(deleteContinuation === "capacity-refusal" && preparations > 0),
+              host: {
+                filesystem_available_bytes: preparationRefused ? 14 * 1024 ** 3 : 32 * 1024 ** 3,
+                min_free_bytes: 12 * 1024 ** 3,
+                write_reserve_bytes: 4 * 1024 ** 3,
+              },
             }),
           };
         }
@@ -469,6 +485,26 @@ test.each([
       };
       const hub = new RuntimeHub(async () => {});
       const execution = createFactoryboxExecution(database, hub, run);
+      if (preparationCapacityRefused) {
+        await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
+          "capacity refused preparation before dispatch",
+        );
+        const [prepared] = await database.client<Array<{ attempted: boolean }>>`
+          SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='prepare'`;
+        expect(prepared?.attempted).toBe(false);
+        expect(preparations).toBe(0);
+        expect(mutations).toEqual([]);
+        // An operator returning real capacity permits the same still-unattempted
+        // intent to continue, including through a new Factory process.
+        preparationCapacityRefused = false;
+        const recovered = createFactoryboxExecution(database, hub, run);
+        await expect(recovered.ensureStarted(owned.attemptID)).rejects.toThrow("unconfirmed");
+        await recovered.ensureStarted(owned.attemptID);
+        expect(preparations).toBe(1);
+        expect(mutations).toEqual(["start"]);
+        return;
+      }
       if (deleteContinuation === "capacity-refusal") {
         await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
           "capacity refused Start before dispatch",
@@ -507,6 +543,11 @@ test.each([
         await expect(execution.ensureStarted(owned.attemptID)).rejects.toThrow(
           "preparation remains unconfirmed",
         );
+        const firstFailure =
+          "Factorybox preparation is unconfirmed: native storage write reserve refused import";
+        await database.client`UPDATE factory.runtime_attempt SET failure=${firstFailure}
+          WHERE id=${owned.attemptID}`;
+        await expect(execution.ensureStarted(owned.attemptID)).rejects.toThrow(firstFailure);
         expect(preparations).toBe(1);
         await execution.deleteSandbox(owned.attemptID);
         await execution.deleteSandbox(owned.attemptID);
