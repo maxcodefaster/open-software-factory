@@ -207,7 +207,10 @@ decisions and option meanings within 96 KiB without duplicating the current inpu
 context fails before inference; optional assistant background may be omitted. Research/Interview
 instructions and output contracts stay separate. Project research continues until the model
 finishes or its admitted caller cancels or loses authority, without a fixed research-step count.
-Each step retains 256 KiB of serialized input and at most 6,000 output tokens.
+Each step retains at most 256 KiB of serialized input. The pinned provider SDK and selected model
+own the output allowance rather than a fixed cross-model Factory ceiling; reasoning and visible
+structured output share that allowance. Input/media bounds, final result schemas, authority and
+cancellation still apply, and a genuinely truncated response is rejected without replay.
 These byte limits are conservative resource bounds, not tokenizer-specific context guarantees.
 Wiki uses a shared budget of 32 provider requests, including tool rounds and deliberate repairs,
 with at most 1 MiB of per-step input and 8,000 output tokens. Setup/probes use the same no-retry
