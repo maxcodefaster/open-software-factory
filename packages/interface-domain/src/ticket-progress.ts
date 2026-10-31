@@ -13,6 +13,7 @@ export type TicketProgressInput = {
   correctionState?: string | undefined;
   reviewState?: string | undefined;
   checksPaused?: boolean | undefined;
+  checksRetryable?: boolean | undefined;
   threads?: number | undefined;
   approved?: boolean | undefined;
   cleanupError?: string | undefined;
@@ -90,7 +91,9 @@ export function ticketProgress(input: TicketProgressInput): string {
   if (input.verificationState === "failed") {
     switch (input.verificationFailureKind) {
       case "execution-failed":
-        return "Verification could not execute its checks. Inspect the runner or job setup; application correctness remains unverified.";
+        return input.checksRetryable
+          ? "The check environment failed before execution. Fix its setup, then Retry checks. The submitted version is retained."
+          : "Verification could not execute its checks. Inspect the runner or job setup; application correctness remains unverified.";
       case "cancelled":
       case "skipped":
         return "Verification did not complete its checks. Inspect the Forgejo run; no application defect was established and no code correction was started.";

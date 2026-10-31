@@ -849,155 +849,189 @@ test("a queued first Build shows preparation after reconnect, not active impleme
   expect(errors).toEqual([]);
 });
 
-test("a submitted stopped candidate resumes checks explicitly, with stable retries and no implementation request", async ({
-  page,
-}) => {
-  const changeID = crypto.randomUUID();
-  const verificationID = crypto.randomUUID();
-  const stopID = crypto.randomUUID();
-  const requests: unknown[] = [];
-  const implementationRequests: string[] = [];
-  let resumed = false;
-  let verificationState = "runner-starting";
-  let preparationIssue: string | undefined;
-  const implementationCommands = await Promise.all(
-    ["startCoding", "sendCodingPrompt"].map(factoryFunctionMatcher),
-  );
-  page.on("request", (request) => {
-    if (
-      request.method() === "POST" &&
-      implementationCommands.some((matches) => matches(new URL(request.url())))
-    )
-      implementationRequests.push(request.url());
-  });
-  await mockFactoryFunctions(page, {
-    runtime: {
-      changes: async () =>
-        changesResponseSchema.parse({
-          changes: [
-            {
-              id: changeID,
-              projectId: projectID,
-              ticketId: ticketID,
-              branchName: "factory/owned-stopped",
-              baseSha: "a".repeat(40),
-              state: "active",
-              branchState: "succeeded",
-              implementationState: resumed ? "committed" : "stopped",
-              buildTurnState: "completed",
-            },
-          ],
-        }),
-    },
-  });
-  await mockAgentView(
-    page,
-    changeID,
-    async () => ({
-      state: resumed ? "committed" : "stopped",
-      sessionAvailable: true,
-      runtimeConnected: false,
-      messagesAvailable: true,
-      messages: [],
-      stopPending: false,
-      stopId: null,
-    }),
-    { activity: true },
-  );
-  const delivery = () => ({
-    verificationId: verificationID,
-    verificationCommitSha: "b".repeat(40),
-    verificationState,
-    verificationPreparationFailure: preparationIssue,
-    ...(!resumed ? { checksStopId: stopID } : {}),
-  });
-  await mockFactoryFunctions(page, {
-    delivery: {
-      async get(_actor, id) {
-        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
-        return deliveryViewSchema.parse(delivery());
-      },
-    },
-  });
-  await mockFactoryFunctions(
-    page,
-    {
-      delivery: {
-        async resumeChecks(_actor, id, input) {
-          expect(id).toBe(changeID);
-          requests.push(input);
-          if (requests.length > 1) resumed = true;
-          return deliveryViewSchema.parse(delivery());
+test.describe("check recovery", () => {
+  test.use({ contextOptions: { reducedMotion: "reduce", hasTouch: true } });
+  for (const recoveryMode of ["stop", "bootstrap"] as const) {
+    test(`a submitted ${recoveryMode} candidate recovers checks explicitly, with stable retries and no implementation request`, async ({
+      page,
+    }) => {
+      const changeID = crypto.randomUUID();
+      const verificationID = crypto.randomUUID();
+      const stopID = crypto.randomUUID();
+      const runtimeAttemptID = crypto.randomUUID();
+      const bootstrap = recoveryMode === "bootstrap";
+      const requests: unknown[] = [];
+      const implementationRequests: string[] = [];
+      let resumed = false;
+      let verificationState = bootstrap ? "failed" : "runner-starting";
+      let preparationIssue: string | undefined;
+      const implementationCommands = await Promise.all(
+        ["startCoding", "sendCodingPrompt"].map(factoryFunctionMatcher),
+      );
+      page.on("request", (request) => {
+        if (
+          request.method() === "POST" &&
+          implementationCommands.some((matches) => matches(new URL(request.url())))
+        )
+          implementationRequests.push(request.url());
+      });
+      await mockFactoryFunctions(page, {
+        runtime: {
+          changes: async () =>
+            changesResponseSchema.parse({
+              changes: [
+                {
+                  id: changeID,
+                  projectId: projectID,
+                  ticketId: ticketID,
+                  branchName: "factory/owned-stopped",
+                  baseSha: "a".repeat(40),
+                  state: "active",
+                  branchState: "succeeded",
+                  implementationState: resumed || bootstrap ? "committed" : "stopped",
+                  buildTurnState: "completed",
+                },
+              ],
+            }),
         },
-      },
-    },
-    (name) => name === "resumeVerification" && requests.length === 1,
-  );
-  await selectProject(page);
-  await page
-    .getByRole("region", { name: "implementation", exact: true })
-    .getByRole("button")
-    .click();
-  const resume = page.getByRole("button", { name: "Resume checks", exact: true });
-  await expect(resume).toBeEnabled();
-  const summary = page.locator(".ticket-checks > summary");
-  await expect(summary).toContainText("Checks paused");
-  await expect(summary.locator(".busy")).toHaveCount(0);
-  await summary.click();
-  await expect(
-    page
-      .locator(".ticket-checks")
-      .getByText("The submitted version is retained.", { exact: false }),
-  ).toBeVisible();
-  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
-    "The submitted version is retained.",
-  );
-  await expect(page.getByText("Corrections not submitted", { exact: true })).toHaveCount(0);
-  const captures = ".factory/test-results/checks-resume";
-  await mkdir(captures, { recursive: true });
-  await page.screenshot({ path: `${captures}/paused-wide.png` });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(resume).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
-  await page.screenshot({ path: `${captures}/paused-narrow.png` });
-  expect(requests).toEqual([]);
-  await resume.click();
-  await expect(page.getByRole("alert")).toBeVisible();
-  await resume.click();
-  await expect(summary).toHaveText("Preparing checks");
-  await expect(resume).toHaveCount(0);
-  expect(requests).toHaveLength(2);
-  expect(requests[1]).toEqual(requests[0]);
-  expect(requests[0]).toMatchObject({ verificationId: verificationID, stopId: stopID });
-  expect(implementationRequests).toEqual([]);
-  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
-    "preparing fresh checks",
-  );
-  await expect(page.getByRole("status", { name: "Ticket progress" })).not.toContainText(
-    "running fresh checks",
-  );
-  preparationIssue = "Factorybox capacity refused preparation before dispatch";
-  await wakeFactoryReads(page);
-  await expect(summary).toHaveText("Check preparation needs attention");
-  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
-    "Open checks for the recorded setup issue",
-  );
-  await expect(page.locator(".ticket-check-details")).toContainText(preparationIssue);
-  await page.screenshot({ path: `${captures}/preparation-issue-narrow.png` });
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(page.locator(".ticket-check-details")).toContainText(preparationIssue);
-  await page.screenshot({ path: `${captures}/preparation-issue-wide.png` });
-  // Actual check execution supersedes an old setup diagnostic, even before a
-  // later snapshot drops that old string. Reads do not commission more work.
-  verificationState = "running";
-  await wakeFactoryReads(page);
-  await expect(summary).toHaveText("Checks running");
-  await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
-    "running fresh checks",
-  );
-  await expect(page.locator(".ticket-check-details")).not.toContainText(preparationIssue);
-  expect(requests).toHaveLength(2);
-  expect(implementationRequests).toEqual([]);
+      });
+      await mockAgentView(
+        page,
+        changeID,
+        async () => ({
+          state: resumed || bootstrap ? "committed" : "stopped",
+          sessionAvailable: true,
+          runtimeConnected: false,
+          messagesAvailable: true,
+          messages: [],
+          stopPending: false,
+          stopId: null,
+        }),
+        { activity: true },
+      );
+      const delivery = () => ({
+        verificationId: verificationID,
+        verificationCommitSha: "b".repeat(40),
+        verificationState,
+        verificationPreparationFailure: preparationIssue,
+        ...(!resumed
+          ? bootstrap
+            ? {
+                checksRetryAttemptId: runtimeAttemptID,
+                verificationFailureKind: "execution-failed",
+                verificationSummary: "Dev Container setup failed before queued checks ran.",
+              }
+            : { checksStopId: stopID }
+          : {}),
+      });
+      await mockFactoryFunctions(page, {
+        delivery: {
+          async get(_actor, id) {
+            if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+            return deliveryViewSchema.parse(delivery());
+          },
+        },
+      });
+      await mockFactoryFunctions(
+        page,
+        {
+          delivery: {
+            async resumeChecks(_actor, id, input) {
+              expect(id).toBe(changeID);
+              requests.push(input);
+              if (requests.length > 1) {
+                resumed = true;
+                verificationState = "runner-starting";
+              }
+              return deliveryViewSchema.parse(delivery());
+            },
+          },
+        },
+        (name) => name === "resumeVerification" && requests.length === 1,
+      );
+      await selectProject(page);
+      await page
+        .getByRole("region", { name: "implementation", exact: true })
+        .getByRole("button")
+        .click();
+      const resume = page.getByRole("button", {
+        name: bootstrap ? "Retry checks" : "Resume checks",
+        exact: true,
+      });
+      await expect(resume).toBeEnabled();
+      const summary = page.locator(".ticket-checks > summary");
+      await expect(summary).toContainText(bootstrap ? "Check environment failed" : "Checks paused");
+      await expect(summary.locator(".busy")).toHaveCount(0);
+      await summary.click();
+      await expect(
+        page
+          .locator(".ticket-checks")
+          .getByText(
+            bootstrap
+              ? "Dev Container setup failed before queued checks ran."
+              : "The submitted version is retained.",
+            { exact: false },
+          ),
+      ).toBeVisible();
+      await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+        bootstrap ? "Fix its setup, then Retry checks" : "The submitted version is retained.",
+      );
+      await expect(page.getByText("Corrections not submitted", { exact: true })).toHaveCount(0);
+      const captures = `.factory/test-results/checks-recovery/${recoveryMode}`;
+      await mkdir(captures, { recursive: true });
+      await page.screenshot({ path: `${captures}/paused-wide.png` });
+      await page.setViewportSize({ width: 390, height: 844 });
+      await expect(resume).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        390,
+      );
+      await page.screenshot({ path: `${captures}/paused-narrow.png` });
+      expect(requests).toEqual([]);
+      await resume.focus();
+      await expect(resume).toBeFocused();
+      await resume.press("Enter");
+      await expect(page.getByRole("alert")).toBeVisible();
+      await resume.tap();
+      await expect(summary).toHaveText("Preparing checks");
+      await expect(resume).toHaveCount(0);
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(requests[0]).toMatchObject(
+        bootstrap
+          ? { verificationId: verificationID, runtimeAttemptId: runtimeAttemptID }
+          : { verificationId: verificationID, stopId: stopID },
+      );
+      expect(implementationRequests).toEqual([]);
+      await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+        "preparing fresh checks",
+      );
+      await expect(page.getByRole("status", { name: "Ticket progress" })).not.toContainText(
+        "running fresh checks",
+      );
+      preparationIssue = "Factorybox capacity refused preparation before dispatch";
+      await wakeFactoryReads(page);
+      await expect(summary).toHaveText("Check preparation needs attention");
+      await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+        "Open checks for the recorded setup issue",
+      );
+      await expect(page.locator(".ticket-check-details")).toContainText(preparationIssue);
+      await page.screenshot({ path: `${captures}/preparation-issue-narrow.png` });
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await expect(page.locator(".ticket-check-details")).toContainText(preparationIssue);
+      await page.screenshot({ path: `${captures}/preparation-issue-wide.png` });
+      // Actual check execution supersedes an old setup diagnostic, even before a
+      // later snapshot drops that old string. Reads do not commission more work.
+      verificationState = "running";
+      await wakeFactoryReads(page);
+      await expect(summary).toHaveText("Checks running");
+      await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+        "running fresh checks",
+      );
+      await expect(page.locator(".ticket-check-details")).not.toContainText(preparationIssue);
+      expect(requests).toHaveLength(2);
+      expect(implementationRequests).toEqual([]);
+    });
+  }
 });
 
 test("Implement is one explicit recoverable action and does not open IDE or Assistant", async ({

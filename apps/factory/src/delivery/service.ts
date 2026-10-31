@@ -17,7 +17,14 @@ export function createDeliveryService(options: {
   access: Pick<ReturnType<typeof createAccessController>, "requireChange" | "requireDevelopment">;
   controller: Pick<
     ReturnType<typeof createDeliveryController>,
-    "get" | "approve" | "retryReview" | "retryPromotion" | "resumeChecks" | "settings" | "configure"
+    | "get"
+    | "approve"
+    | "retryReview"
+    | "retryPromotion"
+    | "resumeChecks"
+    | "retryBootstrap"
+    | "settings"
+    | "configure"
   >;
 }) {
   const dto = (value: Record<string, unknown> | null) => {
@@ -83,7 +90,18 @@ export function createDeliveryService(options: {
       changeID: string,
       input: z.output<typeof verificationResumeInput>,
     ) {
-      await options.access.requireChange(userID, changeID);
+      const projectID = await options.access.requireChange(userID, changeID);
+      await options.access.requireDevelopment(userID, projectID);
+      if ("runtimeAttemptId" in input)
+        return dto(
+          await options.controller.retryBootstrap(
+            changeID,
+            userID,
+            input.commandId,
+            input.verificationId,
+            input.runtimeAttemptId,
+          ),
+        );
       return dto(
         await options.controller.resumeChecks(
           changeID,

@@ -26,6 +26,7 @@ import { createDeliveryCoordination, deliveryDelegationIn } from "./coordination
 import type { createChangeIntegration } from "./integration";
 import { createDeliveryPromotion } from "./promotion";
 import { retryPromotion } from "./promotion-retry";
+import { retryVerificationBootstrap } from "./verification-retry";
 
 type Database = ReturnType<typeof createDatabase>;
 type RuntimeController = {
@@ -282,6 +283,7 @@ export function createDeliveryController(
       runtimeAttemptID: string | null;
       runtimeState: string | null;
       runtimeUpdatedAt: string | null;
+      runtimeFailure: string | null;
       runnerID: string | null;
       runnerUUID: string | null;
       runnerToken: string | null;
@@ -293,6 +295,7 @@ export function createDeliveryController(
         verification.action_run_id AS "actionRunID",
         verification.runtime_attempt_id AS "runtimeAttemptID",
         attempt.state AS "runtimeState", attempt.updated_at AS "runtimeUpdatedAt",
+        attempt.failure AS "runtimeFailure",
         verification.runner_id AS "runnerID",
         verification.runner_uuid AS "runnerUUID", verification.runner_token AS "runnerToken",
         verification.repair_prompted_at AS "repairPromptedAt", verification.diagnosis
@@ -330,6 +333,7 @@ export function createDeliveryController(
           verification.action_run_id AS "actionRunID",
           verification.runtime_attempt_id AS "runtimeAttemptID",
           attempt.state AS "runtimeState", attempt.updated_at AS "runtimeUpdatedAt",
+          attempt.failure AS "runtimeFailure",
           verification.runner_id AS "runnerID",
           verification.runner_uuid AS "runnerUUID", verification.runner_token AS "runnerToken",
           verification.repair_prompted_at AS "repairPromptedAt", verification.diagnosis
@@ -341,6 +345,14 @@ export function createDeliveryController(
     const verification = rows[0];
     if (!verification || verification.state === "cancelled") return;
     if (verification.state === "succeeded") {
+      await stopVerification(repository, verification);
+      return;
+    }
+    const previousDiagnosis = verificationDiagnosisInput.safeParse(verification.diagnosis);
+    if (
+      verification.state === "failed" &&
+      (!previousDiagnosis.success || previousDiagnosis.data.kind !== "check-failed")
+    ) {
       await stopVerification(repository, verification);
       return;
     }
@@ -477,16 +489,35 @@ export function createDeliveryController(
       await stopVerification(repository, verification);
       return;
     }
-    const replaceRunner = Boolean(
-      verification.runtimeAttemptID &&
-        ["failed", "stopped", "cleanup-failed"].includes(verification.runtimeState ?? ""),
-    );
     if (
-      replaceRunner ||
-      !verification.runnerID ||
-      !verification.runnerUUID ||
-      !verification.runnerToken
+      verification.runtimeAttemptID &&
+      ["failed", "stopped", "cleanup-failed"].includes(verification.runtimeState ?? "")
     ) {
+      const diagnosis = verificationDiagnosisInput.parse({
+        kind: "execution-failed",
+        summary: bounded(
+          `Verification environment is unavailable. ${
+            verification.runtimeFailure ??
+            "The recorded runtime ended before the queued checks were accepted."
+          }`,
+          1_000,
+        ),
+        // Only a still-queued workflow proves that checks have not executed.
+        // An interrupted running job keeps an unknown execution outcome.
+        ...(actionRun.status === "waiting"
+          ? { runtimeAttemptId: verification.runtimeAttemptID }
+          : {}),
+        jobs: [],
+      });
+      await database.client`UPDATE factory.verification SET state='failed',
+        diagnosis=${JSON.stringify(diagnosis)}::jsonb,summary=${diagnosis.summary},
+        completed_at=now(),updated_at=now()
+        WHERE id=${verification.id} AND runtime_attempt_id=${verification.runtimeAttemptID}
+          AND state IN ('pending','runner-starting','running')`;
+      await stopVerification(repository, verification);
+      return;
+    }
+    if (!verification.runnerID || !verification.runnerUUID || !verification.runnerToken) {
       if (verification.runnerID) {
         await forge.deleteRunner(repository, Number(verification.runnerID));
       }
@@ -500,7 +531,6 @@ export function createDeliveryController(
       );
       const saved = await database.client`
         UPDATE factory.verification SET
-          runtime_attempt_id = CASE WHEN ${replaceRunner} THEN NULL ELSE runtime_attempt_id END,
           runner_id = ${registration.id}, runner_uuid = ${registration.uuid},
           runner_token = ${registration.token}, updated_at = now()
         WHERE id = ${verification.id} AND runner_id IS NOT DISTINCT FROM ${verification.runnerID}::bigint
@@ -520,20 +550,12 @@ export function createDeliveryController(
           WHERE id = ${verification.id} AND state = 'cancelled' AND runner_id = ${registration.id}`;
         return;
       }
-      if (replaceRunner) {
-        verification.runtimeAttemptID = null;
-        verification.runtimeState = null;
-        verification.runtimeUpdatedAt = null;
-      }
       verification.runnerID = String(registration.id);
       verification.runnerUUID = registration.uuid;
       verification.runnerToken = registration.token;
     }
     if (!(await stillActive())) return;
-    if (
-      !verification.runtimeAttemptID ||
-      ["failed", "stopped", "cleanup-failed"].includes(verification.runtimeState ?? "")
-    ) {
+    if (!verification.runtimeAttemptID) {
       await runtime.startVerification(verification.id, change.userID);
     }
     await database.client`
@@ -1239,6 +1261,24 @@ export function createDeliveryController(
       if (admitted) await reconcile(changeID);
       return this.get(changeID);
     },
+    async retryBootstrap(
+      changeID: string,
+      userID: string,
+      commandID: string,
+      verificationID: string,
+      runtimeAttemptID: string,
+    ) {
+      const admitted = await retryVerificationBootstrap(
+        database,
+        changeID,
+        userID,
+        commandID,
+        verificationID,
+        runtimeAttemptID,
+      );
+      if (admitted) await reconcile(changeID);
+      return this.get(changeID);
+    },
     async resumeChecks(
       changeID: string,
       userID: string,
@@ -1433,6 +1473,28 @@ export function createDeliveryController(
             AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id AND trashed_at IS NULL)
             AND verification.state<>'cancelled' AND change.state='active'
             THEN session.stop_id END AS "checksStopId",
+          CASE WHEN verification.state='failed' AND change.state='active'
+            AND change.cancel_requested_at IS NULL AND session.state='committed' AND NOT session.stop_pending
+            AND writer.state IN ('agent','unassigned')
+            AND verification.runner_id IS NULL AND verification.action_run_id IS NOT NULL
+            AND verification.completed_at IS NOT NULL AND verification.repair_prompted_at IS NULL
+            AND verification_runtime.state='stopped' AND verification_runtime.verification_id=verification.id
+            AND verification.diagnosis->>'kind'='execution-failed'
+            AND verification.diagnosis->>'runtimeAttemptId'=verification_runtime.id::text
+            AND verification.diagnosis->'jobs'='[]'::jsonb
+            AND session.active_turn_id=(SELECT id FROM factory.change_commit_operation
+              WHERE change_id=change.id AND state='succeeded' ORDER BY sequence DESC LIMIT 1)
+            AND EXISTS(SELECT 1 FROM factory.agent_turn WHERE id=session.active_turn_id AND state='completed')
+            AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=change.id
+              AND state IN ('pending','dispatching','running','uncertain'))
+            AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation WHERE change_id=change.id
+              AND state NOT IN ('succeeded','failed'))
+            AND NOT EXISTS(SELECT 1 FROM factory.factorybox_runtime native
+              WHERE native.runtime_attempt_id=verification_runtime.id AND native.inputs_released_at IS NULL)
+            AND NOT EXISTS(SELECT 1 FROM factory.review_feedback WHERE change_id=change.id
+              AND kind='thread' AND state<>'resolved')
+            AND EXISTS(SELECT 1 FROM factory.ticket WHERE id=change.ticket_id AND trashed_at IS NULL)
+            THEN verification_runtime.id END AS "checksRetryAttemptId",
           review.id AS "reviewId",
           pr.pull_request_url AS "pullRequestUrl", pr.state AS "pullRequestState",
           verification.commit_sha AS "verificationCommitSha",

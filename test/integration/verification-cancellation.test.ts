@@ -33,22 +33,19 @@ afterAll(() => {
 
 test.each([
   ...[
-    { boundary: "workflow", replace: false, failedRevocation: false },
-    { boundary: "action run", replace: false, failedRevocation: false },
-    { boundary: "runner registration", replace: false, failedRevocation: false },
-    { boundary: "runner registration", replace: true, failedRevocation: false },
-    { boundary: "runner registration", replace: false, failedRevocation: true },
-    { boundary: "runner registration", replace: true, failedRevocation: true },
+    { boundary: "workflow", failedRevocation: false },
+    { boundary: "action run", failedRevocation: false },
+    { boundary: "runner registration", failedRevocation: false },
+    { boundary: "runner registration", failedRevocation: true },
   ].map((item) => ({ ...item, trash: false })),
   ...["workflow", "action run", "runner registration"].map((boundary) => ({
     boundary,
-    replace: false,
     failedRevocation: false,
     trash: true,
   })),
 ])(
-  "cancellation during $boundary, replacement=$replace, failed revocation=$failedRevocation, trash=$trash",
-  async ({ boundary, replace, failedRevocation, trash }) => {
+  "cancellation during $boundary, failed revocation=$failedRevocation, trash=$trash",
+  async ({ boundary, failedRevocation, trash }) => {
     const process = await factoryProcess();
     const database = process.connect();
     const entered = Promise.withResolvers<void>();
@@ -102,20 +99,6 @@ test.each([
         FROM factory.change WHERE id = ${owned.changeID}`;
       await database.client`UPDATE factory.project SET repository_url = 'http://forge.invalid/owned/build.git'
         WHERE id = ${owned.projectID}`;
-      if (replace) {
-        const verificationID = crypto.randomUUID();
-        const attemptID = crypto.randomUUID();
-        await database.client`INSERT INTO factory.verification(id, change_id, commit_sha, pull_request_number,
-          runner_name, runner_id, runner_uuid, runner_token, created_by)
-          VALUES (${verificationID}, ${owned.changeID}, ${commitSHA}, 1, 'owned-replacement', 16,
-            ${crypto.randomUUID()}, 'owned-token', ${owned.userID})`;
-        await database.client`INSERT INTO factory.runtime_attempt(id, project_id, verification_id, isolated_kind,
-          generation, revision, state,
-          parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-          VALUES (${attemptID}, ${owned.projectID}, ${verificationID}, 'verification', 2, ${commitSHA},
-            'stopped', ${"a".repeat(64)}, ${"b".repeat(64)}, now(), ${owned.userID})`;
-        await database.client`UPDATE factory.verification SET runtime_attempt_id = ${attemptID} WHERE id = ${verificationID}`;
-      }
       let rejectedRevocations = 0;
       const forge = {
         ...createForgejoClient({ apiURL: "http://127.0.0.1:9/api/v1/", token: "owned-unused" }),
@@ -227,7 +210,6 @@ test.each([
       expect(verifications.every((verification) => verification.runnerID === null)).toBe(true);
       expect(registrations).toBe(boundary === "runner registration" ? 1 : 0);
       if (registrations) expect(removed).toContain(17);
-      if (replace) expect(removed).toContain(16);
       const [unrelated] = await database.client<
         { state: string }[]
       >`SELECT state FROM factory.runtime_attempt WHERE id = ${owned.attemptID}`;

@@ -923,6 +923,14 @@ This is a bounded calibration, not the final application journey.
 exact-candidate Delivery, targeted correction, explicit retry, Stop and allowance behavior without
 live models. `bun run test:native opencode-review-permissions` proves the pinned native tool boundary.
 
+A failed Verification environment does not commission another Sandbox or code correction.
+After Factory confirms that the workflow was still queued and the failed Sandbox and runner
+are cleaned up, the Ticket offers **Retry checks**. This explicit command retains the failed
+outcome and Runtime identity before preparing another environment for the same Forgejo run.
+It does not rerun executed checks, repeat implementation or approve Delivery. Unconfirmed cleanup,
+active or uncertain work and a changed candidate remain ineligible. Repeating the same command
+observes its result without dispatching another runner.
+
 Wiki review has a separate Planning-model calibration. With the explicit Luna connection, set
 `FACTORY_WIKI_QUALITY_LIVE=1` and run `bun run test:live wiki-quality.live`. It accepts an accurate
 description of a source limitation and clearly marked improvement advice, while rejecting invented

@@ -1196,12 +1196,12 @@ function TicketDocument(props: TicketWorkspaceProps) {
     if (
       !ticket.trashedAt &&
       props.canDevelop &&
-      props.delivery?.checksStopId &&
+      (props.delivery?.checksStopId || props.delivery?.checksRetryAttemptId) &&
       props.onResumeChecks
     )
       actions.push({
         id: "resume-checks",
-        label: "Resume checks",
+        label: props.delivery?.checksStopId ? "Resume checks" : "Retry checks",
         primary: true,
         disabled: props.pending,
         run: () => props.change && props.onResumeChecks?.(props.change.id),
@@ -1467,6 +1467,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                                 correctionState: props.delivery?.correctionState,
                                 reviewState: props.delivery?.reviewState,
                                 checksPaused: Boolean(props.delivery?.checksStopId),
+                                checksRetryable: Boolean(props.delivery?.checksRetryAttemptId),
                                 threads: openReviewThreads() ?? props.delivery?.openReviewThreads,
                                 approved: Boolean(props.delivery?.approvedAt),
                                 cleanupError: props.delivery?.cleanupError,

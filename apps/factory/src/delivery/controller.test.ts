@@ -92,7 +92,7 @@ function fixture(delivered = false, repair = false, superseded = false, protecte
         return [
           {
             id: verificationID,
-            state: "failed",
+            state: recordedDiagnosis ? "failed" : "running",
             actionRunID: "1",
             repairPromptedAt: repairAcknowledged ? "now" : null,
             diagnosis: recordedDiagnosis,
