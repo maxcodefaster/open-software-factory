@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
 import type { ServerWebSocket } from "bun";
+import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
+import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentCommitTransport } from "../../apps/factory/src/agent/commit-transport";
 import { createChangeAgentStop } from "../../apps/factory/src/agent/stop";
 import { RuntimeHub, type RuntimeSocketData } from "../../apps/factory/src/runtime/hub";
-import { fixture } from "../fixtures/change-agent-turns";
+import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 
 test.each(["same Workspace", "Stop"])(
@@ -194,6 +196,84 @@ test.each([
       expect(operation).toEqual({ state: "failed", sha: null });
       expect(actions).not.toContain("git-push");
       expect(owned.requests()).toBe(1);
+      if (!recovering) {
+        const admission = createChangeAdmission(owned.database, buildModelID);
+        const [context] = await owned.database.client<{ id: string | null }[]>`
+          SELECT active_coding_context_id AS id FROM factory.ticket_conversation
+          WHERE ticket_id=${owned.ticketID}`;
+        const nextInput = {
+          kind: "change-prompt" as const,
+          text: "Continue the retained implementation after the empty turn",
+          ...(context?.id ? { contextId: context.id } : {}),
+        };
+        await owned.database.client`UPDATE factory.change_commit_operation
+          SET state='commit-intended',completed_at=NULL WHERE id=${accepted.turn?.id ?? ""}`;
+        await expect(
+          admission.admit(owned.changeID, owned.userID, {
+            ...nextInput,
+            commandId: crypto.randomUUID(),
+          }),
+        ).rejects.toThrow();
+        await owned.database.client`UPDATE factory.change_commit_operation
+          SET state='failed',completed_at=now() WHERE id=${accepted.turn?.id ?? ""}`;
+        await owned.database.client`UPDATE factory.change_agent_session
+          SET state='stopped',stop_pending=true,stop_id=${crypto.randomUUID()}
+          WHERE change_id=${owned.changeID}`;
+        await expect(
+          admission.admit(owned.changeID, owned.userID, {
+            ...nextInput,
+            commandId: crypto.randomUUID(),
+          }),
+        ).rejects.toThrow();
+        await owned.database.client`UPDATE factory.change_agent_session
+          SET state='waiting',stop_pending=false,stop_id=NULL WHERE change_id=${owned.changeID}`;
+        const next = await admission.admit(owned.changeID, owned.userID, {
+          ...nextInput,
+          commandId: crypto.randomUUID(),
+        });
+        expect(next.turn.id).not.toBe(accepted.turn?.id);
+        expect(next.turn.state).toBe("pending");
+        const [writer] = await owned.database.client<
+          { turn: string; required: boolean; attempt: string }[]
+        >`SELECT turn_id AS turn,fence_required AS required,fence_attempt_id AS attempt
+          FROM factory.change_writer WHERE change_id=${owned.changeID}`;
+        expect(writer).toEqual({
+          turn: next.turn.id,
+          required: true,
+          attempt: owned.attemptID,
+        });
+        const events: string[] = [];
+        let stopped = false;
+        const writers = createChangeWriterController({
+          database: owned.database,
+          agentUsername: "owned-control",
+          stopDeadlineMs: 1,
+          runtime: {
+            stop: async (id) => {
+              expect(id).toBe(owned.attemptID);
+              events.push("compute-stop");
+            },
+            get: async () => ({ state: stopped ? "stopped" : "stopping" }),
+          },
+          stopAgent: async () => {},
+          fenceSource: async () => {
+            events.push("source-fenced");
+          },
+          protect: async (_changeID, granted) => {
+            events.push(granted.length ? "agent-granted" : "branch-fenced");
+          },
+        });
+        expect(await writers.prepareAgent(owned.changeID, next.turn.id)).toBe(false);
+        expect(events).toEqual(["source-fenced", "branch-fenced", "compute-stop"]);
+        expect(owned.requests()).toBe(1);
+        stopped = true;
+        await owned.database.client`UPDATE factory.runtime_attempt SET state='stopped'
+          WHERE id=${owned.attemptID}`;
+        expect(await writers.prepareAgent(owned.changeID, next.turn.id)).toBe(true);
+        expect(events.at(-1)).toBe("agent-granted");
+        expect((await writers.view(owned.changeID, owned.userID)).state).toBe("agent");
+        expect(owned.requests()).toBe(1);
+      }
     } finally {
       owned.hub.revoke(owned.attemptID);
       await Promise.all([controller.shutdown(), recovery.shutdown()]);

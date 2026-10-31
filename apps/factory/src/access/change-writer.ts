@@ -72,20 +72,31 @@ export async function claimAgentWriterIn(
         ((session.state='failed' AND previous.state='failed' AND NOT EXISTS(
           SELECT 1 FROM factory.coding_pause pause WHERE pause.turn_id=previous.id AND pause.resumed_by_turn_id IS NULL))
           OR (session.change_id IS NOT NULL AND intent.runtime_attempt_id IS NULL
-            AND previous.state IN ('failed','stopped'))) AS "requiresFence"
+            AND previous.state IN ('failed','stopped'))
+          OR (session.state='waiting' AND previous.state='completed')) AS "requiresFence"
         FROM factory.agent_turn previous
         LEFT JOIN factory.change_agent_session session ON session.change_id=previous.change_id
         LEFT JOIN factory.change_agent_turn_intent intent ON intent.turn_id=previous.id
         WHERE previous.id=${writer.turnID} AND previous.change_id=${changeID}
           AND ((NOT session.stop_pending AND (session.state IN ('committed','stopped')
           OR (session.state='failed' AND session.active_turn_id=${writer.turnID}
-            AND previous.state='failed')))
+            AND previous.state='failed')
+          OR (session.state='waiting' AND session.active_turn_id=previous.id
+            AND previous.state='completed' AND session.runtime_attempt_id=intent.runtime_attempt_id
+            AND session.opencode_session_id=intent.session_id
+            AND EXISTS(SELECT 1 FROM factory.change_commit_operation operation
+              WHERE operation.id=previous.id AND operation.change_id=${changeID}
+                AND operation.source='agent' AND operation.runtime_attempt_id=intent.runtime_attempt_id
+                AND operation.state='failed' AND operation.commit_sha IS NULL AND operation.completed_at IS NOT NULL)
+            AND NOT EXISTS(SELECT 1 FROM factory.change_commit_operation operation
+              WHERE operation.change_id=${changeID} AND operation.state NOT IN ('succeeded','failed')))))
           OR (previous.state IN ('failed','stopped')
             AND intent.turn_id IS NOT NULL AND intent.runtime_attempt_id IS NULL
             AND (session.change_id IS NULL OR NOT session.stop_pending)))
           AND NOT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${changeID} AND id<>${turnID} AND state IN ('pending','dispatching','running','uncertain'))`;
-    // Known failures can still own startup hooks or background processes. Admit
-    // an explicit retry only with a full runtime fence before its writer grant.
+    // Known failures and completed empty turns can still own hooks or background
+    // processes. A completed no-change commit permits another explicit prompt,
+    // but its previous runtime must be fully fenced before the next writer grant.
     // Uncertain work and unconfirmed Stop remain ineligible.
     const [previous] =
       await sql`SELECT id FROM factory.agent_turn WHERE id=${writer.turnID} AND state IN ('completed','stopped','failed')`;
