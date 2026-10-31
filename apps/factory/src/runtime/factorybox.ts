@@ -3,6 +3,10 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
+  retiredFactoryboxExportOwner,
+  retireFactoryboxExports,
+} from "../../../../packages/runtime-kubernetes/src/factorybox-export-retention";
+import {
   type FactoryboxBackingRequest,
   type FactoryboxCheckpointRequest,
   factoryboxBackingRequest,
@@ -742,6 +746,25 @@ export function createFactoryboxExecution(
             await rememberFactoryboxIdentity(connection, request.workerID, identity);
             await connection`UPDATE factory.factorybox_runtime SET identity=${JSON.stringify(identity)}::text::jsonb WHERE runtime_attempt_id=${attemptID} AND identity IS NULL`;
             saved.identity = identity;
+          }
+          if (request.profile.retainedStore) {
+            const previous = await connection`SELECT
+              replace(id::text,'-','') AS "admissionID",pod_uid AS "podUID",
+              identity->>'epoch' AS epoch,runtime_host_image AS image,
+              CASE WHEN profile ? 'retainedStore' THEN replace(id::text,'-','') ELSE NULL END AS "seedNamespace",
+              json_build_object('podUID',retirement_observation->>'podUID',
+                'phase',retirement_observation->>'phase') AS terminal
+              FROM factory.factorybox_worker_admission
+              WHERE worker_id=${request.workerID} AND retired_at IS NOT NULL
+                AND retirement_observation->>'kind'='operator-recovery'
+                AND coalesce(profile->'retainedStore'->>'storeID',identity->>'storeID')=${identity.storeID}
+              ORDER BY created_at,id`;
+            await retireFactoryboxExports(
+              request,
+              identity,
+              z.array(retiredFactoryboxExportOwner).parse([...previous]),
+              run,
+            );
           }
           let prepared: { bundle: string };
           if (attempt.slotForkRequest) {
