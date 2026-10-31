@@ -26,6 +26,11 @@ class PreparationTests(unittest.TestCase):
         environment = patch.dict(os.environ, {"FACTORY_RUNTIME_IMAGE": self.request["runtimeHostImage"]})
         environment.start()
         self.addCleanup(environment.stop)
+        # Portable ownership cases use the original qualified 3-CPU budget.
+        # PIDBudgetTests below exercise the actual Linux cgroup reader.
+        budget = patch.dict(self.module["prepare"].__globals__, {"worker_pid_limit": lambda: 384})
+        budget.start()
+        self.addCleanup(budget.stop)
 
     def assigned(self, **changes):
         request = {**self.request, **changes}
@@ -248,6 +253,28 @@ class PreparationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "same immutable base"):
                 self.module["prepare"](request)
             self.assertFalse(root.exists())
+            mutation.assert_not_called()
+
+    def test_invalid_worker_budget_fails_before_native_base_or_private_input_mutation(self):
+        request = self.assigned()
+        seed = self.root / "seed"
+        seed.mkdir()
+        (seed / "rootfs.tar").write_bytes(b"exact frozen image")
+        rootfs = hashlib.sha256((seed / "rootfs.tar").read_bytes()).hexdigest()
+        (seed / "rootfs.sha256").write_text(rootfs + "  rootfs.tar\n")
+        (seed / "intent").write_text(
+            "\n".join(request[key] for key in ["podUID", "storeID", "runtimeHostImage"]) + "\n")
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"]}
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run") as mutation, self.environment(), \
+                patch.dict(self.module["prepare"].__globals__, {
+                    "Path": lambda path: seed if str(path) == "/var/lib/sysbox/seed" else Path(path),
+                    "worker_pid_limit": unittest.mock.Mock(side_effect=ValueError("Invalid worker CPU ceiling")),
+                    "image_base": unittest.mock.Mock(side_effect=AssertionError("Must not import a base")),
+                }):
+            with self.assertRaisesRegex(ValueError, "worker CPU ceiling"):
+                self.module["prepare"](request)
+            self.assertFalse((self.root / "input").exists())
             mutation.assert_not_called()
 
     def test_one_image_source_is_reused_across_distinct_sandbox_preparations(self):
@@ -574,7 +601,42 @@ class PreparationTests(unittest.TestCase):
                 mutation.assert_not_called()
 
 
+class PIDBudgetTests(unittest.TestCase):
+    def setUp(self):
+        self.module = runpy.run_path(sys.argv[1], run_name="factory_pid_budget_probe")
+
+    def test_pid_ceiling_scales_with_the_finite_worker_cpu_quota_and_affinity(self):
+        for quota, affinity, expected in [
+                ("300000 100000", 8, 384),
+                ("800000 100000", 8, 1024),
+                ("1600000 100000", 16, 2048),
+                ("800000 100000", 2, 384),
+                ("10000 100000", 8, 384),
+                ("250001 100000", 8, 384)]:
+            with self.subTest(quota=quota, affinity=affinity):
+                self.assertEqual(self.module["sandbox_pid_limit"](quota, affinity), expected)
+
+    def test_unknown_unbounded_or_invalid_cpu_budgets_are_not_silently_admitted(self):
+        for quota, affinity in [
+                ("max 100000", 8), ("0 100000", 8), ("-1 100000", 8),
+                ("800000 0", 8), ("800000 100000 extra", 8), ("", 8),
+                ("800000 100000", 0), ("800000 100000", True)]:
+            with self.subTest(quota=quota, affinity=affinity):
+                with self.assertRaisesRegex(ValueError, "finite worker CPU"):
+                    self.module["sandbox_pid_limit"](quota, affinity)
+
+    def test_live_reader_uses_the_worker_cgroup_not_a_node_cpu_count(self):
+        with patch.object(Path, "read_text", return_value="800000 100000\n") as quota, \
+                patch.object(os, "sched_getaffinity", create=True, return_value=set(range(8))) as affinity:
+            self.assertEqual(self.module["worker_pid_limit"](), 1024)
+            quota.assert_called_once()
+            affinity.assert_called_once_with(0)
+
+
 if __name__ == "__main__":
-    suite = unittest.defaultTestLoader.loadTestsFromTestCase(PreparationTests)
+    suite = unittest.TestSuite([
+        unittest.defaultTestLoader.loadTestsFromTestCase(PreparationTests),
+        unittest.defaultTestLoader.loadTestsFromTestCase(PIDBudgetTests),
+    ])
     outcome = unittest.TextTestRunner(verbosity=2).run(suite)
     raise SystemExit(not outcome.wasSuccessful())

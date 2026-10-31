@@ -77,6 +77,15 @@ overwriting its restrictions. This is not a claim that Factorybox supports check
 The filter applies to fresh preparation. Retained OCI inputs and snapshots stay immutable;
 upgrading Factory does not patch an existing execution during Resume.
 
+Fresh Sandbox preparation selects its finite process/thread ceiling from the original
+worker's CPU cgroup quota and effective CPU affinity, not the node's hardware CPU count.
+The consumer allows 128 tasks per effective vCPU with a 384-task floor, preserving the
+standalone 3-CPU qualification profile while allowing threaded toolchains on larger
+admitted workers. Missing or unbounded CPU admission fails before image import or private
+input creation. The selected ceiling is frozen in the hashed OCI configuration; existing
+preparations, Pause/Resume and Forks retain their original limits. This is not a complete
+per-Sandbox CPU/RAM allocator or a guarantee against exhaustion of the worker's aggregate PID budget.
+
 Start `dockerd` directly inside Sysbox. The generic DinD entrypoint makes system mounts shared,
 which creates unsupported nested proc mount propagation when restoring a Dev Container. Sysbox
 already prepares those system mounts; the consumer must preserve their private propagation.
