@@ -539,10 +539,12 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
   };
   const dismissAgent = () => {
     const opener = agentOverlayOpener ?? agentToggleElement;
-    if (opener?.isConnected) opener.focus({ preventScroll: true });
+    const openerBlocked = Boolean(opener?.closest("[inert]"));
+    if (opener?.isConnected && !openerBlocked && opener.getClientRects().length)
+      opener.focus({ preventScroll: true });
     // A disconnected, hidden or non-focusable opener must not leave focus in
     // the panel when its closing render applies aria-hidden and inert.
-    const parked = agentPanelElement?.contains(document.activeElement);
+    const parked = openerBlocked || agentPanelElement?.contains(document.activeElement);
     if (parked) agentToggleElement?.focus({ preventScroll: true });
     setAgentOpen(false);
     // Narrow document openers are inert until that render closes the overlay.
