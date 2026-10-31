@@ -109,6 +109,7 @@ export async function fixture(
   const cancelledInputs = new Set<string>();
   let installedSkills: string[] = [];
   const nativeInstructions = new Map<string, unknown>();
+  const nativeMCPServers = new Set<string>();
   const hub = new RuntimeHub(async () => {});
   const activityStreams = new Set<ReadableStreamDefaultController<Uint8Array>>();
   const publishActivity = () => {
@@ -132,12 +133,22 @@ export async function fixture(
       } else if (request.method === "DELETE") nativeInstructions.delete(key);
       return new Response(null, { status: 204 });
     }
-    if (path === "/api/experimental/mcp/factory_browser" && request.method === "PUT")
+    if (
+      ["/api/experimental/mcp/factory_browser", "/api/experimental/mcp/factory_sources"].includes(
+        path,
+      ) &&
+      request.method === "PUT"
+    ) {
+      nativeMCPServers.add(path.slice(path.lastIndexOf("/") + 1));
       return new Response(null, { status: 204 });
+    }
     // OpenCode's native discovery protocol, not Factory's retired UI API.
     if (path === "/api/mcp")
       return Response.json({
-        data: [{ name: "factory_browser", status: { status: "connected" } }],
+        data: [...nativeMCPServers].map((name) => ({
+          name,
+          status: { status: "connected" },
+        })),
       });
     if (path === "/api/event")
       return new Response(

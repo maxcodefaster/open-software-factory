@@ -173,20 +173,8 @@ func writeBrowserAuthority(directory string, request browserRuntimeRequest) erro
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(directory, "config", "authority.json")
-	file, err := os.CreateTemp(filepath.Dir(path), ".authority-")
-	if err != nil {
+	if err := writeBrowserConfig(directory, "authority.json", content); err != nil {
 		return errors.New("browser execution lease could not be written")
-	}
-	defer os.Remove(file.Name())
-	_, written := file.Write(content)
-	protected := file.Chmod(0444)
-	closed := file.Close()
-	if errors.Join(written, protected, closed) != nil {
-		return errors.New("browser execution lease could not be written")
-	}
-	if err := os.Rename(file.Name(), path); err != nil {
-		return errors.New("browser execution lease could not be replaced")
 	}
 	return nil
 }
@@ -325,7 +313,7 @@ func (manager *browserRuntimeManager) start(runtime *browserRuntime) error {
 		return err
 	}
 	config, _ := json.Marshal(channels)
-	if err := os.WriteFile(filepath.Join(runtime.directory, "config", "apps.json"), config, 0444); err != nil {
+	if err := writeBrowserConfig(runtime.directory, "apps.json", config); err != nil {
 		return errors.New("browser App assignment could not be written")
 	}
 	if err := runtime.renewAuthority(runtime.scope, false); err != nil {
