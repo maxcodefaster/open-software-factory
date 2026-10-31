@@ -182,11 +182,17 @@ test.each([
       await f.database.client`INSERT INTO factory.runtime_attempt(
           id,project_id,change_id,workspace_id,generation,revision,state,
           parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          SELECT ${expectedAttemptID},project_id,change_id,workspace_id,generation+1,revision,'ready',
+          SELECT ${expectedAttemptID},project_id,change_id,workspace_id,generation+1,${f.commit},'ready',
             parent_connector_token_hash,child_connector_token_hash,now(),created_by
           FROM factory.runtime_attempt WHERE id=${f.attemptID}`;
       await f.database
         .client`UPDATE factory.change SET runtime_attempt_id=${expectedAttemptID} WHERE id=${f.changeID}`;
+      const [association] = await f.database.client<
+        { revision: string; sessionRuntime: string }[]
+      >`SELECT attempt.revision,session.runtime_attempt_id AS "sessionRuntime"
+        FROM factory.runtime_attempt attempt JOIN factory.change_agent_session session
+          ON session.change_id=attempt.change_id WHERE attempt.id=${expectedAttemptID}`;
+      expect(association).toEqual({ revision: f.commit, sessionRuntime: f.attemptID });
     }
     if (condition === "unfinished-commit")
       await f.database.client`INSERT INTO factory.change_commit_operation(
