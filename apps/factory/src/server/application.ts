@@ -23,6 +23,7 @@ import { createCandidateReviewController } from "../agent/candidate-review";
 import { createAgentController } from "../agent/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
 import { createRetainedStopSettlement } from "../agent/retained-stop";
+import { createReviewExecutionReader } from "../agent/review-execution";
 import { createAgentService } from "../agent/service";
 import { createVerificationTools } from "../agent/verification-tools";
 import { createAttachmentRoutes } from "../attachments/routes";
@@ -246,7 +247,11 @@ export async function createFactoryApplication() {
   );
   const buildBrowserEndpoint = createBuildBrowserEndpoint(
     buildBrowserController,
-    createCandidateReviewController(database),
+    createCandidateReviewController(
+      database,
+      undefined,
+      createReviewExecutionReader(database, runtimeHub, environmentSecrets),
+    ),
     visualReview,
     createAttachmentTools(database, attachmentStore),
     createVerificationTools(database),

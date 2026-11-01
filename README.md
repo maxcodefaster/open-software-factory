@@ -935,6 +935,16 @@ isolated App proxy. It exposes bounded cookie attributes without values and sani
 metadata, with explicit pagination and history-loss indicators. The read sends no App request.
 Cookie acceptance still requires actual browser behavior; this is not a historical write audit.
 
+The review-only `review_execution` tool reads Factory commit receipts for the exact candidate
+and paginated implementation tool inputs from its recorded Workspace Sessions. Factory checks
+historical environment identities before reading native actions, masks their protected values
+and common credential syntax before pagination, and withholds prompts, reasoning, native outputs
+and patch bodies. Missing identities or secret-store receipts fail closed. Action timestamps
+exclude later implementation; unclassified or redacted material stays unknown. Only a response
+digest and provenance enter compact Review Evidence. Runtime-owned history is not a tamper-proof
+or exhaustive external-write audit, and neither action history nor commit receipts replace
+source or App coverage. A receipt's `source=agent` identifies the trigger, not forge authority.
+
 The smaller `opencode-sol.live` proof runs the exact published OpenCode process in an owned
 fixture, implements and tests a small goal through Azure `gpt-6.1-sol` at medium reasoning,
 and checks the result independently without a final JSON form. Set `FACTORY_OPENCODE_SOL_LIVE=1`

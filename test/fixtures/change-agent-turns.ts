@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createChangeWriterController } from "../../apps/factory/src/access/writer-controller";
 import { createAgentController } from "../../apps/factory/src/agent/controller";
 import type { AgentTurnTransaction } from "../../apps/factory/src/agent/turn-store";
+import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import type { createDatabase } from "../../packages/db/src/client";
 import { canonicalRequirementContent } from "../../packages/requirement-domain/src/requirement";
@@ -26,6 +27,10 @@ export async function fixture(
     sql: AgentTurnTransaction,
     context: { userID: string; projectID: string; ticketID: string },
   ) => Promise<{ incidentID: string; policyID: string }>,
+  environmentSetup?: (
+    sql: AgentTurnTransaction,
+    context: { userID: string; projectID: string },
+  ) => Promise<void>,
 ) {
   const host = externalDatabase ? undefined : await factoryProcess();
   const database = externalDatabase ?? fixtureValue(host, "host").connect();
@@ -61,6 +66,7 @@ export async function fixture(
       await sql`INSERT INTO factory.requirement_revision(id, ticket_id, ordinal, canonical_content, content_digest, created_by)
       VALUES (${revisionID}, ${ticketID}, 1, ${canonical}, ${createHash("sha256").update(canonical).digest("hex")}, ${userID})`;
       const basis = await approvalSetup?.(sql, { userID, projectID, ticketID });
+      await environmentSetup?.(sql, { userID, projectID });
       await sql`INSERT INTO factory.requirement_approval(id, ticket_id, requirement_revision_id, approved_by,
         monitoring_incident_id,monitoring_policy_id)
       VALUES (${approvalID}, ${ticketID}, ${revisionID}, ${userID},${basis?.incidentID ?? null},${basis?.policyID ?? null})`;
@@ -71,7 +77,9 @@ export async function fixture(
       VALUES (${workspaceID}, ${projectID}, 'ticket', ${ticketID}, ${changeID}, ${`factory/change-${suffix}`},
         ${baseSHA}, ${userID})`;
       await sql`INSERT INTO factory.runtime_attempt(id, project_id, change_id, workspace_id, generation, revision, state, parent_connector_token_hash, child_connector_token_hash, create_intended_at, created_by)
-        VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'ready', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
+        VALUES (${attemptID}, ${projectID}, ${changeID}, ${workspaceID}, 1, ${baseSHA}, 'create-intended', ${connectorHash ?? "b".repeat(64)}, ${connectorHash ?? "c".repeat(64)}, now(), ${userID})`;
+      await freezeRuntimeEnvironment(sql, attemptID);
+      await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${attemptID}`;
       await sql`UPDATE factory.change SET runtime_attempt_id = ${attemptID} WHERE id = ${changeID}`;
       await sql`INSERT INTO factory.change_agent_session(change_id, runtime_attempt_id, opencode_session_id, state, native_session_confirmed_at, created_by)
       VALUES (${changeID}, ${attemptID}, ${`ses_owned_${suffix}`}, 'committed', now(), ${userID})`;
@@ -480,7 +488,11 @@ export async function fixture(
           // Project. The guard above rejects every actually created runtime.
           await sql`DELETE FROM factory.runtime_artifact_intent WHERE runtime_attempt_id IN
             (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
+          await sql`DELETE FROM factory.runtime_environment_intent WHERE runtime_attempt_id IN
+            (SELECT id FROM factory.runtime_attempt WHERE project_id=${projectID})`;
           await sql`DELETE FROM factory.runtime_attempt WHERE project_id = ${projectID}`;
+          await sql`DELETE FROM factory.project_environment WHERE project_id=${projectID}`;
+          await sql`DELETE FROM factory.environment_write WHERE project_id=${projectID}`;
           await sql`DELETE FROM factory.development_workspace WHERE id = ${workspaceID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.change WHERE id = ${changeID} AND project_id = ${projectID}`;
           await sql`DELETE FROM factory.requirement_approval WHERE id = ${approvalID} AND approved_by = ${userID}`;

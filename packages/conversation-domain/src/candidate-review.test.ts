@@ -36,6 +36,33 @@ const result = {
   findings: [],
   ui: "not-applicable",
 };
+test("execution evidence accepts bounded paging but cannot select arbitrary native identities", () => {
+  const call = (arguments_: unknown) => ({
+    name: "review_execution",
+    arguments: arguments_,
+  });
+  expect(candidateReviewCallInput.parse(call({}))).toMatchObject({
+    arguments: { section: "receipts", session: 0, offset: 0, inputOffset: 0 },
+  });
+  expect(
+    candidateReviewCallInput.safeParse(
+      call({ section: "actions", session: 1, cursor: "opaque", action: 2, inputOffset: 8_000 }),
+    ).success,
+  ).toBe(true);
+  for (const args of [
+    { sessionID: "foreign-session" },
+    { runtimeID: crypto.randomUUID() },
+    { section: "actions", session: -1 },
+    { section: "actions", cursor: "" },
+    { section: "actions", offset: 1.5 },
+    { section: "actions", inputOffset: 8_000 },
+    { section: "actions", action: 1, offset: 12 },
+    { section: "receipts", cursor: "native-cursor" },
+    { section: "receipts", action: 1 },
+    { section: "receipts", session: 1 },
+  ])
+    expect(candidateReviewCallInput.safeParse(call(args)).success).toBe(false);
+});
 const proposal = candidateReviewResultInput.parse({
   ...result,
   verdict: "changes-requested",

@@ -106,6 +106,53 @@ const passed = {
   ui: "not-applicable" as const,
 };
 
+test("review execution receipts bind the candidate and never grant source or App coverage", async () => {
+  const f = await candidateReviewFixture();
+  const source = sourceFixture();
+  const controller = createCandidateReviewController(f.database, source.forge);
+  try {
+    const turn = await f.activeReview();
+    const result = await controller.call(
+      turn.id,
+      turn.ownerToken,
+      { name: "review_execution", arguments: { section: "receipts" } },
+      "execution-receipts",
+    );
+    const text = result.content.find((item) => item.type === "text");
+    if (text?.type !== "text") throw new Error("Missing execution receipts");
+    const receipt = JSON.parse(text.text.split("\nReview evidence ID:")[0] ?? "");
+    expect(receipt.candidate).toBe(f.commit);
+    expect(receipt.commits).toContainEqual(
+      expect.objectContaining({
+        id: f.initial.id,
+        commit: f.commit,
+        observedRemote: f.commit,
+        state: "succeeded",
+      }),
+    );
+    expect(receipt.limits).toContain("not an exhaustive");
+    await expect(
+      controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_report", arguments: passed },
+        "receipts-are-not-source-coverage",
+      ),
+    ).rejects.toThrow();
+    await f.controller().stop(f.changeID);
+    await expect(
+      controller.call(
+        turn.id,
+        turn.ownerToken,
+        { name: "review_execution", arguments: { section: "receipts" } },
+        "execution-after-stop",
+      ),
+    ).rejects.toMatchObject({ code: "conflict" });
+  } finally {
+    await f.dispose();
+  }
+});
+
 test.each([true, false])(
   "an ended browser retains current review source/report authority without App authority, cleanup confirmed=%s",
   async (cleanupConfirmed) => {

@@ -1,14 +1,15 @@
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createReviewAdmission } from "../../apps/factory/src/agent/review-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
-import { buildModelID, fixture } from "./change-agent-turns";
 import type { createDatabase } from "../../packages/db/src/client";
+import { buildModelID, fixture } from "./change-agent-turns";
 import { seedMonitoringDelegation } from "./monitoring";
 
 export async function candidateReviewFixture(
   canonical?: string,
   database?: ReturnType<typeof createDatabase>,
   autofix = false,
+  environmentSetup?: Parameters<typeof fixture>[5],
 ) {
   let monitoring: Awaited<ReturnType<typeof seedMonitoringDelegation>> | undefined;
   const owned = await fixture(
@@ -22,6 +23,7 @@ export async function candidateReviewFixture(
           return monitoring;
         }
       : undefined,
+    environmentSetup,
   );
   await owned.database
     .client`UPDATE factory.project SET repository_url='https://forge.invalid/owned/review.git' WHERE id=${owned.projectID}`;

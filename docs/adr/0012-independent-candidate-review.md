@@ -36,6 +36,20 @@ Response attributes do not prove browser cookie acceptance or provide an exhaust
 implementation/write audit; missing observations remain unknown. Metadata reads cannot replace
 a case's own actual App inspection and supply no video chapter position.
 
+Execution claims use the fixed review-only `review_execution` tool. Factory supplies the exact
+candidate's commit-operation receipts, separately from runtime-owned implementation action inputs.
+Only recorded implementation roots and their checked native descendants in the same canonical
+Workspace are readable through the current Review Runtime. The caller cannot select a foreign
+Session or Runtime. Historical environment identities, committed fingerprints and masked manifests
+must agree with OpenBao before native inputs are read. All historical protected values and common
+credential syntax are masked before bounded byte pagination. Prompts, reasoning, tool outputs and
+patch bodies are withheld. Action times exclude work after the candidate receipt, with unknown
+times disclosed rather than assumed complete. Evidence retains only response digests and candidate
+provenance, not raw action logs. These observations cannot establish an exhaustive or tamper-proof
+external-write audit. Missing, redacted, unclassified or unread material stays unknown; execution
+evidence never substitutes for a scenario's source or App observation. Reading it grants no
+execution authority and does not replay implementation or wake released compute.
+
 The resumable implementation Session remains separate. Only reproducible blocking defects within
 approved scope enter automatic correction. A changed commit requires new CI and review. An
 explicit retry can create another fresh attempt for an incomplete review without rewriting the

@@ -14,6 +14,7 @@ import {
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient } from "../../../../packages/forge/src/forge";
 import { CommandError } from "../command-error";
+import { createReviewExecutionReader } from "./review-execution";
 import { type AgentTurnTransaction, createAgentTurnStore } from "./turn-store";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -30,6 +31,7 @@ type ReviewScope = {
   proposal: unknown;
   previousSHA: string | null;
   focusNeedsApp: boolean;
+  attemptID: string;
   evidence: Array<Record<string, unknown>>;
 };
 type Inventory = Array<{ path: string; sha: string; size: number }>;
@@ -51,6 +53,7 @@ function hasCaseObservation(evidence: ReviewScope["evidence"], id: string, kind:
 export function createCandidateReviewController(
   database: Database,
   forgeOverride?: ReturnType<typeof createForgejoClient>,
+  execution = createReviewExecutionReader(database),
 ) {
   const turns = createAgentTurnStore(database);
   const allowedOwner = forgeOverride ? undefined : process.env["FACTORY_FORGEJO_OWNER"];
@@ -106,6 +109,7 @@ export function createCandidateReviewController(
       SELECT review.id,review.change_id AS "changeID",review.commit_sha AS "commitSHA",
         review.base_sha AS "baseSHA",project.repository_url AS "repositoryURL",review.result,review.evidence,
         review.coverage_version AS "coverageVersion",review.finding_source_id AS "findingSourceID",
+        attempt.id AS "attemptID",
         source.result AS proposal,focus.commit_sha AS "previousSHA",
         (COALESCE(focus.result->>'ui'='unverified',false) OR EXISTS(
           SELECT 1 FROM factory.review_scenario scenario
@@ -271,6 +275,18 @@ export function createCandidateReviewController(
       const scope = await authorized(turnID, ownerToken, async (_sql, scope) => scope);
       if (scope.result && !["review_report", "review_finding_report"].includes(call.name))
         throw new CommandError("conflict", "Review report is already recorded");
+      if (call.name === "review_execution") {
+        const result = await execution(scope, call.arguments);
+        const id = `execution:${typeof requestID}:${requestID}`;
+        await record(turnID, ownerToken, {
+          id,
+          kind: "execution",
+          commit: scope.commitSHA,
+          section: call.arguments.section,
+          responseSHA256: createHash("sha256").update(JSON.stringify(result)).digest("hex"),
+        });
+        return textResult(`${JSON.stringify(result)}\nReview evidence ID: ${id}`);
+      }
       if (
         (scope.findingSourceID &&
           ["review_report", "review_scenario", "review_scenario_result"].includes(call.name)) ||
@@ -299,6 +315,8 @@ export function createCandidateReviewController(
                   !observation ||
                   !(
                     observation["kind"] === "browser" ||
+                    (observation["kind"] === "execution" &&
+                      observation["commit"] === current.commitSHA) ||
                     (observation["kind"] === "source" &&
                       (observation["revision"] === "candidate" || observation["diff"] === true))
                   ),
