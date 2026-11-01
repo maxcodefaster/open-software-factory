@@ -150,6 +150,9 @@ or an installer for Kubernetes.
 
 Each declared App has its own isolated origin. Root-relative pages, framework APIs, assets and
 WebSockets stay with that App instead of entering Factory's document or command handlers.
+The Connector preserves the browser-visible App Host for HTTP and WebSocket requests while
+dialing only the admitted internal target. Factory reconstructs proxy authority after discarding
+client-supplied forwarding headers; same-origin authentication does not need a relaxed origin check.
 Preview grants bind the exact Runtime Attempt and App channel. Their host-only cookies cover that
 App's origin; Factory credentials are not forwarded, and App cookies cannot escape to another App.
 

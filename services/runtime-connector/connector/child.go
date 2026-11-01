@@ -438,6 +438,14 @@ func (runtime *childRuntime) handleHTTPRequest(ctx context.Context, message Mess
 	}
 	copyRequestHeaders(request.Header, message.Headers)
 	if channel.Kind == "app" {
+		host, err := appProxyHost(channel, message.Headers)
+		if err != nil {
+			runtime.sendError(message.StreamID, err.Error())
+			return false
+		}
+		if host != "" {
+			request.Host = host
+		}
 		// Factory has authenticated this App request and removed all Factory
 		// credentials. App cookies remain scoped to their runtime path/origin.
 		if cookie := message.Headers["cookie"]; cookie != "" {
@@ -550,6 +558,14 @@ func (runtime *childRuntime) openWebSocket(ctx context.Context, message Message)
 		}
 	}
 	if channel.Kind == "app" {
+		host, err := appProxyHost(channel, message.Headers)
+		if err != nil {
+			runtime.sendError(message.StreamID, err.Error())
+			return
+		}
+		if host != "" {
+			headers.Set("Host", host)
+		}
 		if cookie := message.Headers["cookie"]; cookie != "" {
 			headers.Set("Cookie", cookie)
 		}

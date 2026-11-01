@@ -462,7 +462,9 @@ func TestChildForwardsHTTPAndWebSocket(t *testing.T) {
 			<-request.Context().Done()
 			canceled <- struct{}{}
 		case "/socket":
-			if request.Header.Get("Cookie") != "starter.session_token=owned-app" || request.Header.Get("X-Forwarded-Prefix") != "/runtime/owned/app" || request.Header.Get("Authorization") != "" {
+			if request.Host != "owned-app.runtime.localhost:58310" ||
+				request.Header.Get("Origin") != "http://owned-app.runtime.localhost:58310" ||
+				request.Header.Get("Cookie") != "starter.session_token=owned-app" || request.Header.Get("X-Forwarded-Prefix") != "/runtime/owned/app" || request.Header.Get("Authorization") != "" {
 				http.Error(response, "App context missing", http.StatusForbidden)
 				return
 			}
@@ -680,7 +682,12 @@ websocketExchange:
 		Channel:  "app",
 		Path:     "/socket",
 		Protocol: "vite-hmr",
-		Headers:  map[string]string{"cookie": "starter.session_token=owned-app", "x-forwarded-prefix": "/runtime/owned/app", "authorization": "Bearer must-not-forward", "sec-websocket-extensions": "permessage-deflate; client_max_window_bits"},
+		Headers: map[string]string{
+			"cookie": "starter.session_token=owned-app", "x-forwarded-prefix": "/runtime/owned/app",
+			"x-forwarded-host": "owned-app.runtime.localhost:58310", "x-forwarded-proto": "http",
+			"origin": "http://owned-app.runtime.localhost:58310", "authorization": "Bearer must-not-forward",
+			"sec-websocket-extensions": "permessage-deflate; client_max_window_bits",
+		},
 	}); err != nil {
 		return err
 	}
