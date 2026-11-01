@@ -43,7 +43,10 @@ Workspace are readable through the current Review Runtime. The caller cannot sel
 Session or Runtime. Historical environment identities, committed fingerprints and masked manifests
 must agree with OpenBao before native inputs are read. All historical protected values and common
 credential syntax are masked before bounded byte pagination. Prompts, reasoning, tool outputs and
-patch bodies are withheld. Action times exclude work after the candidate receipt, with unknown
+browser-typed values are withheld. Patch indexes contain paths; an explicit selected-action read can
+inspect the redacted recorded patch, including a temporary helper absent from Git. This is recorded
+input, not proof that its later execution used identical file bytes. Action times exclude work after
+the candidate receipt, with unknown
 times disclosed rather than assumed complete. Evidence retains only response digests and candidate
 provenance, not raw action logs. These observations cannot establish an exhaustive or tamper-proof
 external-write audit. Missing, redacted, unclassified or unread material stays unknown; execution

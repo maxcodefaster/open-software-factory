@@ -939,7 +939,10 @@ The review-only `review_execution` tool reads Factory commit receipts for the ex
 and paginated implementation tool inputs from its recorded Workspace Sessions. Factory checks
 historical environment identities before reading native actions, masks their protected values
 and common credential syntax before pagination, and withholds prompts, reasoning, native outputs
-and patch bodies. Missing identities or secret-store receipts fail closed. Action timestamps
+and browser-typed values. Patch indexes show paths; selecting one action reads its redacted recorded
+patch with bounded pagination, including temporary helpers absent from Git. Recorded input alone
+does not prove which bytes a later execution used. Missing identities or secret-store receipts fail
+closed. Action timestamps
 exclude later implementation; unclassified or redacted material stays unknown. Only a response
 digest and provenance enter compact Review Evidence. Runtime-owned history is not a tamper-proof
 or exhaustive external-write audit, and neither action history nor commit receipts replace

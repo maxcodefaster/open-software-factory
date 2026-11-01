@@ -14,7 +14,7 @@ type Database = ReturnType<typeof createDatabase>;
 type Scope = { id: string; changeID: string; commitSHA: string; attemptID: string };
 export type ExecutionRead = z.output<typeof reviewExecutionArgumentsInput>;
 const sensitiveName =
-  /password|secret|token|authorization|cookie|credential|(?:^|_)key(?:$|_)|private.?key|api.?key|subscription.?key|access.?key/i;
+  /password|passwd|secret|token|authorization|cookie|credential|(?:^|_)pass(?:$|_)|(?:^|_)key(?:$|_)|private.?key|api.?key|subscription.?key|access.?key/i;
 const limits =
   "Factory receipts and retained, runtime-owned native history, not an exhaustive external-network, tamper-proof or out-of-band write audit. Native outputs, reasoning and prompts are withheld. Redacted, missing or truncated inputs remain unknown. Receipts do not replace immutable-source or actual App checks.";
 
@@ -44,9 +44,12 @@ export function sanitizeExecutionInput(value: unknown, secrets: readonly string[
         mask,
       )
       .replace(/\b(?:Bearer|Basic)\s+[^\s"'\\]+/gi, mask)
-      .replace(/(https?:\/\/)[^\s/@:]+:[^\s/@]+@/gi, (_, prefix: string) => `${prefix}${mask()}@`)
       .replace(
-        /([A-Za-z0-9_-]*(?:password|secret|token|credential|api[_-]?key|subscription[_-]?key|authorization|cookie)[A-Za-z0-9_-]*\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s;,&]+)/gi,
+        /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/gi,
+        (_, prefix: string) => `${prefix}${mask()}@`,
+      )
+      .replace(
+        /(["']?[A-Za-z0-9_-]*(?:password|passwd|secret|token|credential|api[_-]?key|subscription[_-]?key|authorization|cookie)[A-Za-z0-9_-]*["']?\s*[:=]\s*)(?:"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|[^\s;,&]+)/gi,
         (_, prefix: string) => `${prefix}${mask()}`,
       );
     return result;
@@ -91,6 +94,7 @@ export function projectExecutionActions(
   page: unknown,
   secrets: readonly string[],
   through = Number.POSITIVE_INFINITY,
+  expandedAction?: number,
 ) {
   if (!page || typeof page !== "object" || !("data" in page) || !Array.isArray(page.data))
     throw new Error("Native action history is unavailable");
@@ -144,11 +148,12 @@ export function projectExecutionActions(
       }
       const input = part.state.input ?? null;
       const typedInput = /(?:^|_)browser_(?:fill|type)$/.test(part.name);
-      // Patches are independently available at the immutable candidate. Avoid
-      // repeating source bodies or leaking newly written values into the audit.
+      // Keep the index compact. A selected recorded patch can also identify an
+      // executed temporary helper absent from Git; redact its complete input
+      // before byte pagination, just like recorded shell/write inputs.
       const projected = typedInput
         ? { typedValueWithheld: true }
-        : part.name === "patch"
+        : part.name === "patch" && actions.length !== expandedAction
           ? {
               paths:
                 typeof input?.patchText === "string"
@@ -157,6 +162,7 @@ export function projectExecutionActions(
                     ].map((match) => match[1])
                   : [],
               bodyWithheld: true,
+              bodyAvailable: true,
             }
           : input;
       const safe = sanitizeExecutionInput(projected, secrets);
@@ -294,7 +300,7 @@ export function createReviewExecutionReader(
     );
     const through = Date.parse(candidate.completedAt);
     if (!Number.isFinite(through)) throw new Error("Candidate execution time is unavailable");
-    const projected = projectExecutionActions(page, hidden, through);
+    const projected = projectExecutionActions(page, hidden, through, input.action);
     if (input.action !== undefined && !projected.actions[input.action])
       throw new Error("Choose an action from this native page");
     if (input.offset > projected.actions.length)

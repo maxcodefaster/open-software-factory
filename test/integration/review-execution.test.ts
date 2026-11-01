@@ -69,6 +69,7 @@ test("execution history uses only recorded implementation ancestry, bounded page
   const root = intent.sessionID;
   const child = "owned-child";
   let command = "echo 0";
+  let patchText: string | undefined;
   const reads: Array<{ attempt: string; path: string; query: Record<string, string> }> = [];
   const native: Pick<RuntimeHub, "request"> = {
     async request(attempt, channel, request) {
@@ -94,17 +95,20 @@ test("execution history uses only recorded implementation ancestry, bounded page
               content: Array.from({ length: 14 }, (_, index) => ({
                 id: `action-${index}`,
                 type: "tool",
-                name: "shell",
+                name: index === 0 && patchText ? "patch" : "shell",
                 state: {
                   status: "completed",
-                  input: {
-                    command:
-                      index === 13
-                        ? `pnpm test ${"x".repeat(12_000)}`
-                        : index === 0
-                          ? command
-                          : `echo ${index}`,
-                  },
+                  input:
+                    index === 0 && patchText
+                      ? { patchText }
+                      : {
+                          command:
+                            index === 13
+                              ? `pnpm test ${"x".repeat(12_000)}`
+                              : index === 0
+                                ? command
+                                : `echo ${index}`,
+                        },
                   content: [{ type: "text", text: "private-output" }],
                 },
                 time: { created: 1, completed: 2 },
@@ -154,6 +158,39 @@ test("execution history uses only recorded implementation ancestry, bounded page
     const descendant = await read(scope, actions({ session: 1 }));
     expect(descendant).toMatchObject({ sessionID: child, actions: [], nextCursor: null });
     expect(reads.every((request) => request.attempt === f.attemptID)).toBe(true);
+
+    patchText =
+      "*** Add File: /tmp/opencode/reader.mjs\n" +
+      '+const marker = "a b c";\n' +
+      '+const auth = {"password":"private-helper-password"};\n' +
+      `+await sql\`SELECT id FROM qa_viewers WHERE id = \${ownedID}\`;\n` +
+      `+// ${"x".repeat(9_000)}\n`;
+    const patchIndex = await read(scope, actions());
+    if (!("actions" in patchIndex)) throw new Error("Missing helper action index");
+    expect(patchIndex.actions[0]?.input).not.toContain("SELECT id FROM qa_viewers");
+    const selectedPatch = await read(scope, actions({ action: 0 }));
+    if (!("actions" in selectedPatch)) throw new Error("Missing selected helper patch");
+    expect(selectedPatch.actions[0]?.input).toContain("SELECT id FROM qa_viewers");
+    expect(patchIndex.actions[0]?.input).toContain('"bodyAvailable":true');
+    expect(selectedPatch.actions[0]?.redacted).toBe(true);
+    expect(JSON.stringify(selectedPatch)).not.toContain("a b c");
+    expect(JSON.stringify(selectedPatch)).not.toContain("private-helper-password");
+    expect(selectedPatch.actions[0]).toMatchObject({
+      inputTruncated: true,
+      nextInputOffset: 8_000,
+    });
+    const remainingPatch = await read(scope, actions({ action: 0, inputOffset: 8_000 }));
+    if (!("actions" in remainingPatch)) throw new Error("Missing helper continuation");
+    expect(remainingPatch.actions[0]).toMatchObject({
+      inputStartsAt: 8_000,
+      inputTruncated: false,
+      nextInputOffset: null,
+    });
+    expect(
+      JSON.parse(`${selectedPatch.actions[0]?.input}${remainingPatch.actions[0]?.input}`).patchText,
+    ).toContain("SELECT id FROM qa_viewers");
+    expect(reads.at(-1)?.path).toBe(`/api/session/${root}/message`);
+    patchText = undefined;
 
     command = "printf '%s' 'a b c' 'registry value with spaces'";
     const beforeSecrets = reads.length;
