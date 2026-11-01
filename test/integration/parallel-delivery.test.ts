@@ -95,6 +95,96 @@ async function retainedPR(f: Fixture) {
       'Owned candidate','','owned-'||id,'succeeded',1,'https://forge.invalid/owned/review/pulls/1',now()
     FROM factory.change WHERE id=${f.changeID}`;
 }
+
+test.each(["open", "implemented"] as const)(
+  "human feedback %s blocks integration and merge, not submitted checks or independent review",
+  async (feedbackState) => {
+    const f = await candidateReviewFixture();
+    const feedbackID = crypto.randomUUID();
+    let integrations = 0;
+    let reviews = 0;
+    try {
+      await retainedPR(f);
+      await f.database.client`UPDATE factory.change_agent_session SET state='committed'
+        WHERE change_id=${f.changeID}`;
+      await f.database.client`DELETE FROM factory.candidate_review WHERE id=${f.reviewID}`;
+      await f.database.client`DELETE FROM factory.verification WHERE id=${f.verificationID}`;
+      await f.database.client`INSERT INTO factory.review_feedback
+        (id,change_id,author_id,kind,state,commit_sha)
+        VALUES(${feedbackID},${f.changeID},${f.userID},'thread',${feedbackState},${f.commit})`;
+      const forge = {
+        getPullRequest: async () => ({ number: 1, headSha: f.commit, merged: false }),
+        getDefaultBranch: async () => ({ headSha: main }),
+        getFile: async () => "Owned protected workflow",
+        listActionRuns: async () => [],
+      } as unknown as ReturnType<typeof createForgejoClient>;
+      const controller = createDeliveryController(
+        f.database,
+        {
+          startVerification: async () => {
+            throw new Error("Owned checks wait for the forge run observation");
+          },
+          startStagingReplacement: async () => {
+            throw new Error("Open human feedback cannot promote");
+          },
+          stop: async () => null,
+        },
+        {
+          prompt: async () => {
+            throw new Error("Checking submitted work cannot commission implementation");
+          },
+          review: async (changeID, reviewID, userID) => {
+            const admitted = await createReviewAdmission(f.database)(changeID, reviewID, userID);
+            if (!admitted.replayed) reviews++;
+          },
+        },
+        async () => {},
+        { client: forge, owner: "owned" },
+        {
+          reconcile: async () => {
+            integrations++;
+            throw new Error("Open human feedback cannot integrate source");
+          },
+        },
+      );
+      await controller.reconcile(f.changeID);
+      const [verification] = await f.database.client<
+        { id: string; state: string; commit: string }[]
+      >`
+        SELECT id,state,commit_sha AS commit FROM factory.verification WHERE change_id=${f.changeID}`;
+      expect(verification).toMatchObject({ state: "pending", commit: f.commit });
+      await f.database.client`UPDATE factory.verification SET state='succeeded',completed_at=now(),
+        action_run_id=1 WHERE id=${fixtureValue(verification, "verification").id}`;
+      await controller.reconcile(f.changeID);
+      expect(reviews).toBe(1);
+      expect(integrations).toBe(0);
+      expect((await controller.get(f.changeID))?.["openReviewThreads"]).toBe(1);
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.merge_operation WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+      expect(
+        await f.database
+          .client`SELECT id FROM factory.delivery_approval WHERE change_id=${f.changeID}`,
+      ).toHaveLength(0);
+      const [thread] = await f.database.client<{ state: string }[]>`
+        SELECT state FROM factory.review_feedback WHERE id=${feedbackID}`;
+      expect(thread?.state).toBe(feedbackState);
+      const independent = await additionalTicket(f, true);
+      try {
+        const queue = createDeliveryCoordination(f.database);
+        expect(await queue.claim(f.projectID, independent.changeID)).toBe(true);
+        await queue.release(independent.changeID);
+      } finally {
+        await independent.dispose();
+      }
+    } finally {
+      await f.dispose();
+    }
+  },
+  60_000,
+);
+
 async function additionalTicket(f: Fixture, change = false) {
   const ticketID = crypto.randomUUID(),
     revisionID = crypto.randomUUID(),

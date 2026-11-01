@@ -576,6 +576,9 @@ any action.
 Human feedback can be an ordinary comment or a resolvable Thread. Open Threads block Delivery,
 including Threads marked "Implemented, please recheck" by the agent. The author or an existing
 authorized developer resolves them. Saving, replying and resolving start no inference.
+Submitted corrections still receive exact-candidate Verification and independent review while
+Threads remain open. Source integration, merge and Promotion wait for resolution; the Ticket
+does not hold the Project Delivery slot while a person rechecks the result.
 Request revision commissions all open Threads that still need work in the retained coding
 conversation. There are no per-comment checkboxes or separate Ticket correction composer.
 Ordinary comments stay in the discussion. Already dispatched Threads are not silently sent again;

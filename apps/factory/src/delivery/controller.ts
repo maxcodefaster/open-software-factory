@@ -894,11 +894,24 @@ export function createDeliveryController(
               LEFT JOIN factory.agent_turn reviewer ON reviewer.id=review.turn_id
               WHERE review.change_id=${changeID} AND verification.commit_sha=${change.commitSHA}
                 AND review.ordinal=(SELECT MAX(ordinal) FROM factory.candidate_review WHERE verification_id=verification.id)
-                AND (review.state='incomplete' OR reviewer.state IN ('failed','stopped','uncertain')))
-            OR EXISTS(
-              SELECT 1 FROM factory.review_feedback WHERE change_id=${changeID} AND kind='thread' AND state<>'resolved'))`;
+                AND (review.state='incomplete' OR reviewer.state IN ('failed','stopped','uncertain'))))`;
         if (blocked && change.state !== "delivering") {
           await coordination.release(changeID);
+          return;
+        }
+        const [feedback] = await database.client<{ open: boolean }[]>`
+          SELECT EXISTS(SELECT 1 FROM factory.review_feedback
+            WHERE change_id=${changeID} AND kind='thread' AND state<>'resolved') AS open`;
+        if (feedback?.open && change.state !== "delivering") {
+          // A human needs exact-candidate checks and QA to recheck a correction.
+          // Do not integrate or hold the Project Delivery slot while they decide.
+          await coordination.release(changeID);
+          const pull = await ensurePullRequest(change);
+          if (pull) {
+            await ensureVerification(change, pull.repository, pull.pullRequest);
+            if (pull.pullRequest.headSha === change.commitSHA && !pull.pullRequest.merged)
+              await ensureReview(change);
+          }
           return;
         }
         if (!(await coordination.claim(change.projectID, change.id))) return;
