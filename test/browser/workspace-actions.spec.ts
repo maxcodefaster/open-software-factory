@@ -332,11 +332,7 @@ test("Settings connection and Input headers use the same actions without changin
     await openProjectMenu(page);
     await page.getByRole("button").filter({ hasText: slug }).click();
     const navigation = await openSettings(page);
-    await navigation
-      .locator("section")
-      .filter({ has: page.getByRole("heading", { name: "Factory administration", exact: true }) })
-      .getByRole("button", { name: "Models", exact: true })
-      .click();
+    await chooseSettingsPage(page, "Models", "Factory administration");
     for (const width of widths) {
       await page.setViewportSize({ width, height: 960 });
       const bar = await actionBar(page, "Model connection actions", "Add connection");

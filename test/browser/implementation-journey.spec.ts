@@ -33,6 +33,7 @@ import {
   mockFactoryFunctions,
   wakeFactoryReads,
 } from "../fixtures/server-functions";
+import { chooseSettingsScope } from "../fixtures/settings-navigation";
 import { fixtureValue } from "../fixtures/value";
 import { streamedAgentView } from "../support/agent-activity-route";
 import { serveChatAssets } from "../support/chat-assets";
@@ -3471,7 +3472,7 @@ test("Review corrections send to the retained Build without IDE; checks and cont
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
 });
 
-test("Settings is a retained Project-bound workspace tab with no modal", async ({ page }) => {
+test("Settings menu keeps focus when a delayed Ticket arrives", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   const captures = ".factory/test-results/implementation-journey";
@@ -3479,15 +3480,17 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
   const requested = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
   let delayed = true;
+  const savedDetail = await serverCall(browserFunction(page, "getTicketDetail", [ticketID]));
+  expect(savedDetail.ticket.id).toBe(ticketID);
   await mockFactoryFunctions(page, {
     tickets: {
       async detail(_actor, id) {
-        const value = await serverCall(browserFunction(page, "getTicketDetail", [id]));
-        if (id === ticketID && delayed) {
+        if (id !== ticketID) return serverCall(browserFunction(page, "getTicketDetail", [id]));
+        if (delayed) {
           requested.resolve();
           await release.promise;
         }
-        return value;
+        return savedDetail;
       },
     },
   });
@@ -3517,20 +3520,38 @@ test("Settings is a retained Project-bound workspace tab with no modal", async (
     delayed = false;
     release.resolve();
   }
-  await openSettings.click();
+  expect(errors).toEqual([]);
+});
+
+test("Settings is a retained Project-bound workspace tab with no modal", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const captures = ".factory/test-results/implementation-journey";
+  await mkdir(captures, { recursive: true });
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "requirements", exact: true })
+    .locator(".ticket-card-body")
+    .click();
+  await expect(
+    page.getByRole("textbox", { name: "Specification summary", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page.getByRole("button", { name: "Open settings", exact: true }).click();
   const settings = page.getByRole("region", { name: "Settings", exact: true });
   await expect(page.getByRole("tab", { name: "Settings", exact: true })).toBeVisible();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await expect(settings.getByRole("heading", { name: "Personal", exact: true })).toBeVisible();
-  await expect(
-    settings.getByRole("heading", { name: "Project · Implementation UX", exact: true }),
-  ).toBeVisible();
-  await expect(
-    settings.getByRole("heading", { name: "Factory administration", exact: true }),
-  ).toBeVisible();
-  const skills = settings
-    .getByRole("navigation", { name: "Settings navigation" })
-    .getByRole("button", { name: "Skills", exact: true });
+  const navigation = settings.getByRole("navigation", { name: "Settings navigation" });
+  const scope = navigation.getByRole("combobox", { name: "Settings scope", exact: true });
+  await expect(scope.locator("option")).toHaveText([
+    "Project · Implementation UX",
+    "Libraries",
+    "Personal",
+    "Factory administration",
+  ]);
+  await expect(scope).toHaveValue("project");
+  await chooseSettingsScope(page, "libraries");
+  const skills = navigation.getByRole("button", { name: "Skills", exact: true });
   await skills.click();
   await page.getByRole("tab", { name: title, exact: true }).click();
   await page.getByRole("tab", { name: "Settings", exact: true }).click();
