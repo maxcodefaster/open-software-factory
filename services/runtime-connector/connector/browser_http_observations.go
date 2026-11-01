@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -251,10 +253,22 @@ func (proxy *browserAppProxy) serveObservations(w http.ResponseWriter, request *
 }
 
 func readBrowserHTTPObservations(ctx context.Context, directory, app string, after uint64) (json.RawMessage, error) {
+	socketDirectory, err := os.Open(filepath.Join(directory, "socket"))
+	if err != nil {
+		return nil, errors.New("browser HTTP observation directory unavailable")
+	}
+	defer socketDirectory.Close()
+	address := filepath.Join(directory, "socket", "observations.sock")
+	if runtime.GOOS == "linux" {
+		// Native Docker volume paths exceed sockaddr_un's pathname bound.
+		// Pin the original directory through its open FD, not a shortened
+		// Session identity, global working-directory change or mutable alias.
+		address = "/proc/self/fd/" + strconv.Itoa(int(socketDirectory.Fd())) + "/observations.sock"
+	}
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(directory, "socket", "observations.sock"))
+			return (&net.Dialer{}).DialContext(ctx, "unix", address)
 		},
 	}
 	defer transport.CloseIdleConnections()
