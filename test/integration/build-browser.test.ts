@@ -734,11 +734,21 @@ test("a confirmed element interaction failure requires a fresh snapshot, not a n
     await scope.browser.call(
       active.session,
       scope.ownerToken,
+      { name: "browser_http_observations", arguments: {} },
+      "read-response-attributes",
+    );
+    await expect(
+      scope.browser.call(active.session, scope.ownerToken, fill, "still-blocked-repeat"),
+    ).rejects.toThrow("fresh browser_snapshot");
+    await scope.browser.call(
+      active.session,
+      scope.ownerToken,
       { name: "browser_snapshot", arguments: {} },
       "observe",
     );
     await scope.browser.call(active.session, scope.ownerToken, fill, "new-action");
     expect(scope.frames.map(({ action }) => action)).toEqual([
+      "browser-call",
       "browser-call",
       "browser-call",
       "browser-call",

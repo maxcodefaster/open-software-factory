@@ -930,6 +930,11 @@ image or a Go installation. Set `FACTORY_BROWSER_PROOF_DOCKER_VERSION` to the ex
 Compose label. Both paths retain the App, source, lease, isolation, recording and cleanup checks.
 This component proof does not update worker pins or replace the full Factory Delivery journey.
 
+The browser's `browser_http_observations` tool reads only responses already observed by its
+isolated App proxy. It exposes bounded cookie attributes without values and sanitized CORS
+metadata, with explicit pagination and history-loss indicators. The read sends no App request.
+Cookie acceptance still requires actual browser behavior; this is not a historical write audit.
+
 The smaller `opencode-sol.live` proof runs the exact published OpenCode process in an owned
 fixture, implements and tests a small goal through Azure `gpt-6.1-sol` at medium reasoning,
 and checks the result independently without a final JSON form. Set `FACTORY_OPENCODE_SOL_LIVE=1`

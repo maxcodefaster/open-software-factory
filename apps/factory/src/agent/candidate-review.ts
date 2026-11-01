@@ -34,12 +34,16 @@ type ReviewScope = {
 };
 type Inventory = Array<{ path: string; sha: string; size: number }>;
 
+function actualAppObservation(item: Record<string, unknown>) {
+  return item["kind"] === "browser" && item["call"] !== "browser_http_observations";
+}
+
 function hasCaseObservation(evidence: ReviewScope["evidence"], id: string, kind: "app" | "source") {
   return evidence.some(
     (item) =>
       item["scenarioId"] === id &&
       (kind === "app"
-        ? item["kind"] === "browser"
+        ? actualAppObservation(item)
         : item["kind"] === "source" && (item["revision"] === "candidate" || item["diff"] === true)),
   );
 }
@@ -331,7 +335,7 @@ export function createCandidateReviewController(
                       (observation) =>
                         observation["id"] === id &&
                         (kind === "app"
-                          ? observation["kind"] === "browser"
+                          ? actualAppObservation(observation)
                           : observation["kind"] === "source" || observation["kind"] === "browser"),
                     ),
                   ),
@@ -416,7 +420,7 @@ export function createCandidateReviewController(
               if (
                 kind !== "app" ||
                 item["scenarioId"] !== args.id ||
-                item["kind"] !== "browser" ||
+                !actualAppObservation(item) ||
                 !context ||
                 typeof context !== "object"
               )

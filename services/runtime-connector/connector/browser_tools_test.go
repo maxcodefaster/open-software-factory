@@ -14,6 +14,7 @@ func TestBrowserToolAllowlistAndFixedBounds(t *testing.T) {
 		{"browser_snapshot", `{}`, "take_snapshot"},
 		{"browser_console", `{}`, "list_console_messages"},
 		{"browser_screenshot", `{}`, "take_screenshot"},
+		{"browser_http_observations", `{"after":12}`, "factory_http_observations"},
 		{"browser_click", `{"uid":"1_12"}`, "click"},
 		{"browser_fill", `{"uid":"1_12","value":"New title"}`, "fill"},
 		{"browser_wait", `{"text":"Saved"}`, "wait_for"},
@@ -37,6 +38,9 @@ func TestBrowserToolAllowlistAndFixedBounds(t *testing.T) {
 			if test.name == "browser_press_key" && call.Arguments["key"] != "Tab" {
 				t.Fatal("keyboard intent changed during dispatch")
 			}
+			if test.name == "browser_http_observations" && call.After != 12 {
+				t.Fatal("HTTP observation read changed its cursor")
+			}
 		})
 	}
 }
@@ -59,6 +63,12 @@ func TestBrowserToolsRejectURLsFilesScriptsUnknownArgumentsAndPages(t *testing.T
 		{"browser_snapshot", `{"filePath":"/tmp/leak"}`},
 		{"browser_screenshot", `{"fullPage":true}`},
 		{"browser_console", `{"pageSize":10000}`},
+		{"browser_http_observations", `{"url":"http://metadata/"}`},
+		{"browser_http_observations", `{"app":"other"}`},
+		{"browser_http_observations", `{"after":null}`},
+		{"browser_http_observations", `{"after":-1}`},
+		{"browser_http_observations", `{"after":1.5}`},
+		{"browser_http_observations", `{"after":9007199254740992}`},
 		{"browser_click", `{"uid":"1_2","pageId":999}`},
 		{"browser_fill", `{"uid":"../file","value":"new"}`},
 		{"browser_resize", `{"width":319,"height":720}`},
@@ -84,6 +94,7 @@ func TestBrowserToolsRejectURLsFilesScriptsUnknownArgumentsAndPages(t *testing.T
 	for _, call := range []browserToolCall{
 		{Name: "browser_resize", Arguments: json.RawMessage(`{"width":390,"height":720}`)},
 		{Name: "browser_press_key", Arguments: json.RawMessage(`{"key":"Enter"}`)},
+		{Name: "browser_http_observations", Arguments: json.RawMessage(`{}`)},
 	} {
 		if _, err := resolveBrowserTool(channels, 0, call); err == nil {
 			t.Fatal("viewport or keyboard control without an opened App was allowed")

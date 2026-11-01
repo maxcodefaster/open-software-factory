@@ -531,9 +531,13 @@ export function createBuildBrowserController(
         session.ordinal > 1 && session.state === "intended" && call.name === "browser_open";
       if (
         needsObservation.has(session.id) &&
-        !["browser_snapshot", "browser_console", "browser_screenshot", "browser_wait"].includes(
-          call.name,
-        )
+        ![
+          "browser_snapshot",
+          "browser_console",
+          "browser_screenshot",
+          "browser_wait",
+          "browser_http_observations",
+        ].includes(call.name)
       )
         throw new CommandError(
           "conflict",

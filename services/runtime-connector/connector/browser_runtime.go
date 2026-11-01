@@ -597,9 +597,27 @@ func (manager *browserRuntimeManager) call(ctx context.Context, scope browserRun
 			return "", err
 		}
 	}
-	recordingPosition := manager.recordingPosition(bounded, runtime)
-	raw, err := runtime.rpc(bounded, "tools/call", map[string]any{"name": dispatch.Name, "arguments": dispatch.Arguments})
+	var recordingPosition *int64
+	if scope.Call.Name != "browser_http_observations" {
+		recordingPosition = manager.recordingPosition(bounded, runtime)
+	}
+	var raw json.RawMessage
+	var err error
+	if dispatch.Name == "factory_http_observations" {
+		raw, err = readBrowserHTTPObservations(bounded, runtime.directory, runtime.app, dispatch.After)
+	} else {
+		raw, err = runtime.rpc(bounded, "tools/call", map[string]any{"name": dispatch.Name, "arguments": dispatch.Arguments})
+	}
 	if err != nil {
+		if dispatch.Name == "factory_http_observations" {
+			// A failed read is not a lost App mutation and must not tear down
+			// the existing browser or replay navigation.
+			failure, encodeErr := json.Marshal(map[string]any{
+				"isError": true,
+				"content": []map[string]string{{"type": "text", "text": "Browser HTTP observations unavailable. No App request ran; missing metadata remains unknown."}},
+			})
+			return string(failure), encodeErr
+		}
 		runtime.cancel()
 		go manager.closeSession(scope)
 		return "", err

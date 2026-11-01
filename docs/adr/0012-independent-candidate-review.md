@@ -26,6 +26,16 @@ check the exact Runtime Attempt, generation, owner, lease, active Session, Stop 
 Project authority. App calls separately require the original live or explicitly
 reopenable browser; reporting access cannot revive it or replay a UI mutation.
 
+The fixed browser facade can read bounded, ephemeral metadata from HTTP responses already
+observed by its exact App proxy. A separate Unix control socket prevents browser proxy requests
+from reaching that read handler. Observations contain method, path without queries, status,
+cookie attributes without values and sanitized CORS metadata. They remain subject to the same
+turn, runtime, browser Session and lease checks. Pagination exposes history eviction and omitted
+cookie headers. This neither sends requests nor enables network tools or JavaScript evaluation.
+Response attributes do not prove browser cookie acceptance or provide an exhaustive historical
+implementation/write audit; missing observations remain unknown. Metadata reads cannot replace
+a case's own actual App inspection and supply no video chapter position.
+
 The resumable implementation Session remains separate. Only reproducible blocking defects within
 approved scope enter automatic correction. A changed commit requires new CI and review. An
 explicit retry can create another fresh attempt for an incomplete review without rewriting the

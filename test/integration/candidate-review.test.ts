@@ -959,6 +959,41 @@ test("an App case cannot be closed as passing before its own App observation", a
         "premature-result",
       ),
     ).rejects.toThrow("actual App observation");
+    await controller.observeBrowser(
+      turn.id,
+      turn.ownerToken,
+      { name: "browser_http_observations", arguments: {} },
+      "response-metadata-only",
+      {
+        structuredContent: {
+          sessionId: crypto.randomUUID(),
+          turnId: turn.id,
+          changeId: f.changeID,
+          runtimeAttemptId: f.attemptID,
+          generation: 1,
+          app: "app",
+          headCommit: f.commit,
+          workingTreeModified: false,
+          observedAt: new Date().toISOString(),
+        },
+        content: [{ type: "text", text: '{"observations":[]}' }],
+      },
+    );
+    await expect(
+      controller.call(
+        turn.id,
+        turn.ownerToken,
+        {
+          name: "review_scenario_result",
+          arguments: {
+            id: "app-case",
+            status: "passed",
+            observed: "Only prior HTTP metadata was read",
+          },
+        },
+        "metadata-cannot-replace-app-case",
+      ),
+    ).rejects.toThrow("actual App observation");
     const [row] = await f.database.client<{ active: boolean; status: string | null }[]>`
       SELECT ended_at IS NULL AS active,status FROM factory.review_scenario
       WHERE review_id=${f.reviewID} AND id='app-case'`;

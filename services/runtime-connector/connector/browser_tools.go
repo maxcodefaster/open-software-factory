@@ -30,6 +30,7 @@ type browserToolDispatch struct {
 	Name      string
 	Arguments map[string]any
 	App       string
+	After     uint64
 }
 
 // This is Factory's tool allowlist, not an upstream MCP registry. Agents choose
@@ -89,6 +90,20 @@ func resolveBrowserTool(channels []Channel, pageID int, call browserToolCall) (b
 	}
 	upstream := browserToolDispatch{Arguments: map[string]any{"pageId": pageID}}
 	switch call.Name {
+	case "browser_http_observations":
+		var arguments struct {
+			After json.RawMessage `json:"after"`
+		}
+		if decode(&arguments) != nil {
+			return browserToolDispatch{}, denied
+		}
+		if len(arguments.After) > 0 {
+			if bytes.Equal(bytes.TrimSpace(arguments.After), []byte("null")) ||
+				json.Unmarshal(arguments.After, &upstream.After) != nil || upstream.After > maxBrowserObservationCursor {
+				return browserToolDispatch{}, denied
+			}
+		}
+		upstream.Name = "factory_http_observations"
 	case "browser_snapshot", "browser_console", "browser_screenshot":
 		if decode(&struct{}{}) != nil {
 			return browserToolDispatch{}, denied

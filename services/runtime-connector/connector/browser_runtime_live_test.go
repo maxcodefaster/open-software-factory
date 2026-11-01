@@ -36,6 +36,7 @@ func TestBrowserRuntimeAppFixture(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "text/html")
+		w.Header().Add("Set-Cookie", "fixture-session=private-fixture-cookie; Path=/; HttpOnly; SameSite=Lax")
 		// Form editors can retain substantial client state after the first
 		// input. Keep this bounded state in the browser while recording, so a
 		// tiny static page cannot hide renderer/encoder memory starvation.
@@ -183,6 +184,31 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	if !strings.Contains(snapshot.Content[0].Text, "Cold navigation requests 1") {
 		t.Fatal("navigation was repeated instead of observing the existing declared page", snapshot.Content[0].Text)
 	}
+	httpResult := call("browser_http_observations", `{}`)
+	if httpResult.StructuredContent == nil || httpResult.StructuredContent.SessionID != scope.SessionID ||
+		httpResult.StructuredContent.TurnID != scope.TurnID || httpResult.StructuredContent.App != "web" ||
+		httpResult.StructuredContent.WorkingTreeModified || len(httpResult.Content) != 1 {
+		t.Fatal("HTTP observation did not retain the exact browser/checkout authority", httpResult)
+	}
+	var observedHTTP browserHTTPObservationPage
+	if json.Unmarshal([]byte(httpResult.Content[0].Text), &observedHTTP) != nil {
+		t.Fatal("real proxy HTTP metadata unavailable", httpResult.Content[0].Text)
+	}
+	cookieObserved := false
+	for _, response := range observedHTTP.Observations {
+		for _, cookie := range response.Cookies {
+			if response.App == "web" && response.Path == "/cold" && response.Status == 200 &&
+				cookie.Name == "fixture-session" && cookie.HTTPOnly && cookie.SameSite == "lax" {
+				cookieObserved = true
+			}
+		}
+	}
+	if !cookieObserved || strings.Contains(httpResult.Content[0].Text, "private-fixture-cookie") {
+		t.Fatal("actual isolated browser response lost its cookie attributes or leaked its value")
+	}
+	if err := os.WriteFile(filepath.Join(root, "http-observations.json"), []byte(httpResult.Content[0].Text), 0600); err != nil {
+		t.Fatal("safe native HTTP evidence could not be retained", err)
+	}
 	shot := call("browser_screenshot", `{}`)
 	if shot.StructuredContent == nil || shot.StructuredContent.TurnID != scope.TurnID || shot.StructuredContent.SessionID != scope.SessionID ||
 		shot.StructuredContent.App != "web" || !browserCommitPattern.MatchString(shot.StructuredContent.HeadCommit) || shot.StructuredContent.WorkingTreeModified {
@@ -212,6 +238,10 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("actual pinned recording start", err, diagnostic, string(raw))
 	}
 	captureStarted := time.Now()
+	recordedHTTP := call("browser_http_observations", `{}`)
+	if recordedHTTP.StructuredContent == nil || recordedHTTP.StructuredContent.RecordingTimeMS != nil {
+		t.Fatal("reading historical HTTP metadata invented a recording frame")
+	}
 	call("browser_fill", fmt.Sprintf(`{"uid":%q,"value":"Owned recorded input"}`, input[1]))
 	filled := call("browser_snapshot", `{}`)
 	if !strings.Contains(filled.Content[0].Text, `value="Owned recorded input"`) {
@@ -419,6 +449,10 @@ quietRecording:
 	}
 	if _, err := manager.call(connection, scope); err == nil {
 		t.Fatal("expired browser session was resurrected")
+	}
+	scope.Call = browserToolCall{Name: "browser_http_observations", Arguments: json.RawMessage(`{}`)}
+	if _, err := manager.call(connection, scope); err == nil {
+		t.Fatal("expired browser retained access to HTTP observations")
 	}
 	// A fresh session tests disconnect during live browser work independently of
 	// the expiry case. Late goroutines must not create after closeAll has finished.

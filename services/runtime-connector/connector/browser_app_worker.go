@@ -27,6 +27,22 @@ func RunBrowserAppProxy(ctx context.Context) error {
 		return err
 	}
 	defer proxy.close()
+	observations, err := net.Listen("unix", browserObservationSocket)
+	if err != nil {
+		return errors.New("browser observation socket unavailable")
+	}
+	defer observations.Close()
+	defer os.Remove(browserObservationSocket)
+	if err := os.Chmod(browserObservationSocket, 0600); err != nil {
+		return errors.New("browser observation socket protection failed")
+	}
+	observer := &http.Server{
+		Handler: http.HandlerFunc(proxy.serveObservations), ReadHeaderTimeout: 3 * time.Second,
+		IdleTimeout: 15 * time.Second, MaxHeaderBytes: 4096,
+	}
+	defer observer.Close()
+	observerClosed := make(chan error, 1)
+	go func() { observerClosed <- observer.Serve(observations) }()
 	listener, err := net.Listen("unix", browserSocketPath)
 	if err != nil {
 		return errors.New("browser App socket unavailable")
@@ -49,5 +65,7 @@ func RunBrowserAppProxy(ctx context.Context) error {
 		return nil
 	case <-closed:
 		return errors.New("browser App proxy exited unexpectedly")
+	case <-observerClosed:
+		return errors.New("browser observation reader exited unexpectedly")
 	}
 }

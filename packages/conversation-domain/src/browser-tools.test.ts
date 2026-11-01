@@ -16,6 +16,28 @@ test("native browser guidance uses tools and inline images without the CLI detou
   expect(instructions).not.toContain("270000");
   expect(instructions).toContain("Never repeat an unconfirmed UI mutation");
 });
+
+test("browser HTTP observations expose only a bounded read cursor, not a request tool", () => {
+  for (const args of [{}, { after: 12 }])
+    expect(
+      buildBrowserCallInput.safeParse({ name: "browser_http_observations", arguments: args })
+        .success,
+    ).toBe(true);
+  for (const args of [
+    { after: -1 },
+    { after: 1.5 },
+    { after: Number.MAX_SAFE_INTEGER + 1 },
+    { url: "http://other/" },
+    { app: "other" },
+    { headers: { authorization: "secret" } },
+    { method: "POST" },
+  ])
+    expect(
+      buildBrowserCallInput.safeParse({ name: "browser_http_observations", arguments: args })
+        .success,
+    ).toBe(false);
+  expect(buildBrowserInstructions("owned-turn")).toContain("browser_http_observations");
+});
 test("Build browser exposes bounded mobile viewport and keyboard controls", () => {
   for (const call of [
     { name: "browser_resize", arguments: { width: 390, height: 720 } },

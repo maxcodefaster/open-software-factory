@@ -22,6 +22,7 @@ var (
 )
 
 type browserAppRoute struct {
+	app    string
 	origin string
 	target url.URL
 	dial   url.URL
@@ -31,9 +32,10 @@ type browserAppRoute struct {
 // connection is a Unix socket to this proxy, outside the browser container.
 // Never dial a hostname or destination supplied by a page or an agent.
 type browserAppProxy struct {
-	authority context.Context
-	routes    map[string]browserAppRoute
-	transport *browserHTTPTransport
+	authority    context.Context
+	routes       map[string]browserAppRoute
+	transport    *browserHTTPTransport
+	observations browserHTTPHistory
 }
 
 func newBrowserAppProxy(authority context.Context, channels []Channel, primaryIP string) (*browserAppProxy, error) {
@@ -79,7 +81,7 @@ func newBrowserAppProxyDestination(authority context.Context, channels []Channel
 			return nil, errors.New("invalid declared App port")
 		}
 		origin := "http://" + channel.Name + ".factory.invalid"
-		route := browserAppRoute{origin: origin, target: *target, dial: *target}
+		route := browserAppRoute{app: channel.Name, origin: origin, target: *target, dial: *target}
 		route.dial.Host = net.JoinHostPort(ip.String(), target.Port())
 		for _, key := range []string{origin, browserOrigin(target)} {
 			if _, exists := proxy.routes[key]; exists {
@@ -171,12 +173,15 @@ func (proxy *browserAppProxy) ServeHTTP(w http.ResponseWriter, request *http.Req
 			if proxy.authority.Err() != nil {
 				return errBrowserAuthorityEnded
 			}
+			appAllowOrigin := response.Header.Get("Access-Control-Allow-Origin")
+			appOriginHeaders := len(response.Header.Values("Access-Control-Allow-Origin"))
 			if originalOrigin := request.Header.Get("Origin"); originalOrigin != "" &&
 				response.Header.Get("Access-Control-Allow-Origin") == response.Request.Header.Get("Origin") {
 				response.Header.Set("Access-Control-Allow-Origin", originalOrigin)
 			}
 			location := response.Header.Get("Location")
 			if location == "" || response.StatusCode < 300 || response.StatusCode >= 400 {
+				proxy.observeHTTP(route, request, response, appAllowOrigin, appOriginHeaders)
 				return nil
 			}
 			redirect, err := url.Parse(location)
@@ -192,6 +197,7 @@ func (proxy *browserAppProxy) ServeHTTP(w http.ResponseWriter, request *http.Req
 			canonical, _ := url.Parse(redirectRoute.origin)
 			redirect.Host = canonical.Host
 			response.Header.Set("Location", redirect.String())
+			proxy.observeHTTP(route, request, response, appAllowOrigin, appOriginHeaders)
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
