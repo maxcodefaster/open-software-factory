@@ -15,7 +15,6 @@ test("runtime environment freezes version, authenticates parent generation, isol
     const token = "owned-runtime-environment-token";
     const owned = await fixture(undefined, undefined, database, token);
     await database.client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
-    await database.client`UPDATE factory.runtime_attempt SET state='create-intended' WHERE id=${owned.attemptID}`;
     const values = new Map<string, StoredEnvironment>();
     const secrets = {
       configured: true,
@@ -51,18 +50,30 @@ test("runtime environment freezes version, authenticates parent generation, isol
         },
       ],
     });
-    expect((await freezeRuntimeEnvironment(database.client, owned.attemptID)).version).toBe(1);
+    // The shared fixture already admitted its original runtime before settings
+    // existed. Saving settings cannot retarget that immutable empty admission.
+    expect(await freezeRuntimeEnvironment(database.client, owned.attemptID)).toMatchObject({
+      environment: "development",
+      version: 0,
+      secretKey: null,
+    });
+    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    const developmentAttempt = crypto.randomUUID();
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      SELECT ${developmentAttempt},project_id,change_id,workspace_id,2,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    await database.client`UPDATE factory.change SET runtime_attempt_id=${developmentAttempt} WHERE id=${owned.changeID}`;
+    expect((await freezeRuntimeEnvironment(database.client, developmentAttempt)).version).toBe(1);
     const endpoint = createRuntimeEnvironmentEndpoint(database, secrets);
-    const request = (authorization = token, generation = 1) =>
-      new Request(`https://factory.test/internal/runtime-environment/${owned.attemptID}`, {
+    const request = (authorization = token, generation = 2) =>
+      new Request(`https://factory.test/internal/runtime-environment/${developmentAttempt}`, {
         headers: {
           authorization: `Bearer ${authorization}`,
           "x-factory-runtime-generation": String(generation),
         },
       });
-    expect((await endpoint(request("wrong"), owned.attemptID)).status).toBe(401);
-    expect((await endpoint(request(token, 2), owned.attemptID)).status).toBe(401);
-    const response = await endpoint(request(), owned.attemptID);
+    expect((await endpoint(request("wrong"), developmentAttempt)).status).toBe(401);
+    expect((await endpoint(request(token, 1), developmentAttempt)).status).toBe(401);
+    const response = await endpoint(request(), developmentAttempt);
     expect(response.headers.get("cache-control")).toBe("no-store");
     expect((await response.json()).bundle.variables.map((v: { name: string }) => v.name)).toEqual([
       "PRIVATE_DEV",
@@ -81,25 +92,25 @@ test("runtime environment freezes version, authenticates parent generation, isol
         },
       ],
     });
-    expect((await freezeRuntimeEnvironment(database.client, owned.attemptID)).version).toBe(1);
+    expect((await freezeRuntimeEnvironment(database.client, developmentAttempt)).version).toBe(1);
     expect(
-      (await (await endpoint(request(), owned.attemptID)).json()).bundle.variables[0].name,
+      (await (await endpoint(request(), developmentAttempt)).json()).bundle.variables[0].name,
     ).toBe("PRIVATE_DEV");
     const verificationID = crypto.randomUUID();
     await database.client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,runner_name,created_by) VALUES(${verificationID},${owned.changeID},${"a".repeat(40)},1,'owned-environment-runner',${owned.userID})`;
-    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${developmentAttempt}`;
     const verificationAttempt = crypto.randomUUID();
     await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,verification_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${verificationAttempt},project_id,NULL,${verificationID},'verification',2,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      SELECT ${verificationAttempt},project_id,NULL,${verificationID},'verification',3,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${developmentAttempt}`;
     await freezeRuntimeEnvironment(database.client, verificationAttempt);
     // New Verification uses the current Development version, with explicit grants only.
-    const verified = await (await endpoint(request(token, 2), verificationAttempt)).json();
+    const verified = await (await endpoint(request(token, 3), verificationAttempt)).json();
     expect(verified.bundle.variables.map((v: { name: string }) => v.name)).toEqual(["TEST_TOKEN"]);
     expect(verified.bundle.registries.map((v: { host: string }) => v.host)).toEqual([
       "test.registry.test",
     ]);
     await expect(
-      database.client`UPDATE factory.runtime_environment_intent SET version=2 WHERE runtime_attempt_id=${owned.attemptID}`.execute(),
+      database.client`UPDATE factory.runtime_environment_intent SET version=2 WHERE runtime_attempt_id=${developmentAttempt}`.execute(),
     ).rejects.toThrow("immutable");
     await controller.save(owned.projectID, owned.userID, "main-preview", {
       commandID: crypto.randomUUID(),
@@ -109,19 +120,20 @@ test("runtime environment freezes version, authenticates parent generation, isol
     });
     const stagingAttempt = crypto.randomUUID();
     await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-      SELECT ${stagingAttempt},project_id,'staging',1,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      SELECT ${stagingAttempt},project_id,'staging',1,revision,'create-intended',parent_connector_token_hash,child_connector_token_hash,now(),created_by FROM factory.runtime_attempt WHERE id=${developmentAttempt}`;
     expect(await freezeRuntimeEnvironment(database.client, stagingAttempt)).toMatchObject({
       environment: "main-preview",
       version: 1,
     });
     expect(
-      (await (await endpoint(request(), stagingAttempt)).json()).bundle.variables.map(
+      (await (await endpoint(request(token, 1), stagingAttempt)).json()).bundle.variables.map(
         (v: { name: string }) => v.name,
       ),
     ).toEqual(["PREVIEW_ONLY"]);
     await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${verificationAttempt}`;
-    expect((await endpoint(request(token, 2), verificationAttempt)).status).toBe(401);
-    expect((await endpoint(request(), owned.attemptID)).status).toBe(401);
+    expect((await endpoint(request(token, 3), verificationAttempt)).status).toBe(401);
+    expect((await endpoint(request(), developmentAttempt)).status).toBe(401);
+    expect((await endpoint(request(token, 1), owned.attemptID)).status).toBe(401);
     expect(
       JSON.stringify(await database.client`SELECT * FROM factory.runtime_environment_intent`),
     ).not.toContain("owned-PRIVATE_DEV");
