@@ -54,6 +54,143 @@ test.each([401, 403, 404, 503])(
   },
 );
 
+function closedSourceEvents(readyState = 2) {
+  const original = globalThis.EventSource;
+  const events: OwnedEvents[] = [];
+  class OwnedEvents {
+    static readonly CLOSED = 2;
+    onerror?: () => void;
+    onmessage?: (event: { data: string }) => void;
+    closed = false;
+    readonly readyState = readyState;
+    constructor(readonly url: URL) {
+      events.push(this);
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  Object.defineProperty(globalThis, "EventSource", { configurable: true, value: OwnedEvents });
+  return {
+    events,
+    restore() {
+      Object.defineProperty(globalThis, "EventSource", { configurable: true, value: original });
+    },
+  };
+}
+
+test.each([200, 503])(
+  "a browser-closed Source stream reconnects the same Workspace after root status %s",
+  async (status) => {
+    const owned = closedSourceEvents();
+    const changed: SourceChange[] = [];
+    const states: Array<boolean | undefined> = [];
+    const requests: string[] = [];
+    let close: (() => void) | undefined;
+    try {
+      const client = new FactorySourceClient(
+        new URL("http://owned.invalid/editor/"),
+        async (url) => {
+          requests.push(new URL(String(url)).pathname);
+          return Response.json({ kind: "directory" }, { status });
+        },
+      );
+      close = client.watch(
+        "workspace-a",
+        (event) => changed.push(event),
+        (state) => states.push(state),
+      );
+      expect(owned.events).toHaveLength(1);
+      owned.events[0]?.onerror?.();
+      owned.events[0]?.onerror?.();
+      await Bun.sleep(1_100);
+      expect(owned.events).toHaveLength(2);
+      expect(owned.events[0]?.closed).toBe(true);
+      expect(owned.events[1]?.url.pathname).toBe(
+        "/editor/__factory/workspaces/workspace-a/source/events",
+      );
+      expect(requests.every((path) => path.endsWith("/workspace-a/source/stat"))).toBe(true);
+      owned.events[0]?.onmessage?.({ data: JSON.stringify({ kind: "updated", path: "old.ts" }) });
+      owned.events[1]?.onmessage?.({ data: JSON.stringify({ kind: "resync", path: "" }) });
+      expect(changed).toEqual([{ kind: "resync", path: "" }]);
+      expect(states).not.toContain(false);
+    } finally {
+      close?.();
+      owned.restore();
+    }
+  },
+);
+
+test("native reconnect remains owned by the browser and disposal cancels a closed-stream retry", async () => {
+  const owned = closedSourceEvents(0);
+  let close: (() => void) | undefined;
+  try {
+    const client = new FactorySourceClient(new URL("http://owned.invalid/editor/"), async () =>
+      Response.json({ kind: "directory" }),
+    );
+    close = client.watch(
+      "workspace-a",
+      () => {},
+      () => {},
+    );
+    owned.events[0]?.onerror?.();
+    await Bun.sleep(1_100);
+    expect(owned.events).toHaveLength(1);
+    close();
+    owned.restore();
+    const closed = closedSourceEvents();
+    try {
+      const stopped = client.watch(
+        "workspace-a",
+        () => {},
+        () => {},
+      );
+      closed.events[0]?.onerror?.();
+      await Bun.sleep(0);
+      stopped();
+      closed.events[0]?.onerror?.();
+      await Bun.sleep(1_100);
+      expect(closed.events).toHaveLength(1);
+    } finally {
+      closed.restore();
+    }
+  } finally {
+    close?.();
+    owned.restore();
+  }
+});
+
+test("disposal fences a late failed Source probe without publishing another status", async () => {
+  const owned = closedSourceEvents();
+  const pending = Promise.withResolvers<Response>();
+  const states: Array<boolean | undefined> = [];
+  let signal: AbortSignal | undefined;
+  const client = new FactorySourceClient(
+    new URL("http://owned.invalid/editor/"),
+    async (_url, init) => {
+      signal = init?.signal ?? undefined;
+      return pending.promise;
+    },
+  );
+  const close = client.watch(
+    "workspace-a",
+    () => {},
+    (state) => states.push(state),
+  );
+  try {
+    owned.events[0]?.onerror?.();
+    close();
+    pending.resolve(Response.json({ error: "Owned revoked access" }, { status: 403 }));
+    await Bun.sleep(0);
+    expect(signal?.aborted).toBe(true);
+    expect(states).toEqual([true]);
+    expect(owned.events).toHaveLength(1);
+  } finally {
+    close();
+    owned.restore();
+  }
+});
+
 function sourceFixture() {
   const documents = new Map<string, string>();
   const writes: Array<{ workspaceID: string; body: Readonly<Record<string, unknown>> }> = [];

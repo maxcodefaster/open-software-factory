@@ -129,27 +129,100 @@ export class FactorySourceClient implements SourceTransport {
     change: (event: SourceChange) => void,
     disconnected: (retrying?: boolean) => void,
   ): () => void {
-    const events = new EventSource(this.url(workspaceID, "events"));
-    events.onmessage = (event) => {
-      try {
-        const value: unknown = JSON.parse(event.data);
-        change(sourceChange(value));
-      } catch {
-        disconnected(false);
-        events.close();
+    const url = this.url(workspaceID, "events");
+    const lifetime = new AbortController();
+    let events: EventSource | undefined;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let delay = 1_000;
+    let probing = false;
+    let received = 0;
+    const closeEvents = () => {
+      const current = events;
+      events = undefined;
+      if (current) {
+        current.onmessage = null;
+        current.onerror = null;
+        current.close();
       }
     };
-    events.onerror = () => {
-      disconnected(true);
-      void this.request(workspaceID, "stat", { path: "" }).catch((error: unknown) => {
-        if (error instanceof SourceResponseError && [401, 403, 404].includes(error.status)) {
-          disconnected(false);
-          events.close();
-        }
-      });
+    const stop = () => {
+      lifetime.abort();
+      clearTimeout(retry);
+      retry = undefined;
+      closeEvents();
     };
+    const connect = () => {
+      if (lifetime.signal.aborted) return;
+      const current = new EventSource(url);
+      events = current;
+      current.onmessage = (event) => {
+        if (lifetime.signal.aborted || events !== current) return;
+        try {
+          const value: unknown = JSON.parse(event.data);
+          const next = sourceChange(value);
+          received++;
+          delay = 1_000;
+          clearTimeout(retry);
+          retry = undefined;
+          change(next);
+        } catch {
+          disconnected(false);
+          stop();
+        }
+      };
+      current.onerror = () => {
+        if (lifetime.signal.aborted || events !== current) return;
+        disconnected(true);
+        if (probing) return;
+        probing = true;
+        const observed = received;
+        void (async () => {
+          try {
+            await this.request(
+              workspaceID,
+              "stat",
+              { path: "" },
+              AbortSignal.any([lifetime.signal, AbortSignal.timeout(5_000)]),
+            );
+          } catch (error: unknown) {
+            if (lifetime.signal.aborted || events !== current || received !== observed) return;
+            if (error instanceof SourceResponseError && [401, 403, 404].includes(error.status)) {
+              disconnected(false);
+              stop();
+              return;
+            }
+          } finally {
+            probing = false;
+          }
+          if (
+            lifetime.signal.aborted ||
+            events !== current ||
+            received !== observed ||
+            retry !== undefined ||
+            current.readyState !== EventSource.CLOSED
+          )
+            return;
+          // A rejected HTTP stream can be permanently CLOSED even though root
+          // access still works. Native reconnect only owns CONNECTING streams.
+          // Retry reads on this same Workspace, never a save or runtime command.
+          retry = setTimeout(() => {
+            retry = undefined;
+            if (
+              lifetime.signal.aborted ||
+              events !== current ||
+              current.readyState !== EventSource.CLOSED
+            )
+              return;
+            closeEvents();
+            connect();
+          }, delay);
+          delay = Math.min(delay * 2, 5_000);
+        })();
+      };
+    };
+    connect();
     // The service emits resync on every connection, including reconnect. No
     // event backlog, heartbeat or source content is stored in product data.
-    return () => events.close();
+    return stop;
   }
 }
