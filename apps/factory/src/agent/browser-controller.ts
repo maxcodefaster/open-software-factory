@@ -230,6 +230,16 @@ export function createBuildBrowserController(
         reason='Recording interrupted. App observations and QA results are retained separately.'
         WHERE browser_session_id=${id} AND state IN ('intended','recording')`.catch(() => {});
       needsObservation.delete(id);
+      const ended = await database.client`UPDATE factory.build_browser_session browser
+        SET state='closed',cleanup_confirmed_at=now(),
+          outcome_summary=CASE WHEN browser.outcome_summary LIKE 'Inspection ended: %'
+            THEN browser.outcome_summary ELSE 'Exact Runtime Attempt teardown confirmed browser cleanup' END
+        FROM factory.runtime_attempt attempt
+        WHERE browser.id=${id} AND browser.state='closing'
+          AND attempt.id=browser.runtime_attempt_id AND attempt.generation=browser.generation
+          AND attempt.state='stopped' AND attempt.stopped_at IS NOT NULL
+        RETURNING browser.id`;
+      if (ended.length) return;
       try {
         await hub.parentOperation(
           session.attemptID,

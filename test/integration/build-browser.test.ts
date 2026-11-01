@@ -233,6 +233,50 @@ test("one browser_open waits for confirmed cold preparation without another mode
   }
 });
 
+test.each(["stopped", "stopping", "cleanup-failed"] as const)(
+  "browser cleanup uses only confirmed exact Runtime Attempt teardown: %s",
+  async (state) => {
+    const scope = await setup();
+    const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
+    let cleanupRequests = 0;
+    try {
+      await scope.browser.call(
+        scope.authorized.session,
+        scope.ownerToken,
+        { name: "browser_open", arguments: { app: "app" } },
+        "first-open",
+      );
+      scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
+        if (payload.action === "browser-close") {
+          cleanupRequests++;
+          throw new Error("Owned browser cleanup acknowledgement unavailable");
+        }
+        return forward(attempt, payload, beforeSend);
+      };
+      await scope.browser.closeTurn(scope.turn.id);
+      expect(cleanupRequests).toBe(1);
+      await scope.owned.database.client`UPDATE factory.runtime_attempt
+        SET state=${state},stopped_at=CASE WHEN ${state}='stopped' THEN now() END
+        WHERE id=${scope.owned.attemptID}`;
+      await scope.browser.reconcileCleanup();
+      const [browser] = await scope.owned.database.client<
+        { state: string; confirmed: boolean }[]
+      >`SELECT state,cleanup_confirmed_at IS NOT NULL AS confirmed
+        FROM factory.build_browser_session WHERE id=${scope.grant.sessionID}`;
+      expect(browser).toEqual(
+        state === "stopped"
+          ? { state: "closed", confirmed: true }
+          : { state: "closing", confirmed: false },
+      );
+      expect(cleanupRequests).toBe(state === "stopped" ? 1 : 2);
+      expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(1);
+    } finally {
+      scope.owned.hub.parentOperation = forward;
+      await scope.dispose();
+    }
+  },
+);
+
 test.each([
   { lostCleanup: false, disconnected: false, timedOut: false },
   { lostCleanup: true, disconnected: false, timedOut: false },
