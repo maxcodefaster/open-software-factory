@@ -19,7 +19,7 @@ import type { TurnUsage } from "../../../../packages/conversation-domain/src/tur
 import type { TechnicalPlanningBase } from "../../../../packages/requirement-domain/src/technical-design";
 import { codeReadInput, codeReadResult } from "../knowledge/code-read";
 import type { MCPSourceTool } from "../mcp/sources";
-import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
+import { nativeAgentPolicy } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel, type ResolvedModelConnection } from "../models/native";
 import { invokedSkills, nativeSkillId } from "../skills/native";
 import { createMastraUsage, type MastraUsageSink } from "../usage/mastra";
@@ -33,6 +33,7 @@ import {
   researchQuery,
   type researchSource,
 } from "./research";
+import { createResearchContextProcessor } from "./research-context";
 import {
   isStructuredOutputFailure,
   ProjectAgentOutputError,
@@ -193,6 +194,12 @@ export async function generateProjectResponse(input: {
     name: "Factory Project Agent",
     model: await nativeModel(input.connection, input.modelId),
     ...nativeAgentPolicy,
+    inputProcessors: [
+      createResearchContextProcessor({
+        signal: input.signal,
+        authorize: input.research.authorize,
+      }),
+    ],
     tools: {
       ...(input.factoryTools
         ? Object.fromEntries(
@@ -508,20 +515,12 @@ ${explicit.length ? `The human explicitly invoked these skills: ${explicit.map(n
       // The admitted caller owns cancellation/deadlines. Authority and native
       // context/media guards still apply to every additional provider step.
       maxSteps: Number.POSITIVE_INFINITY,
-      prepareStep: (() => {
-        const guard = nativeStepGuard({
-          signal: input.signal,
-          maxInputBytes: 256 * 1024,
-          maxMediaBytes: 16 * 1024 * 1024,
-          authorize: input.research.authorize,
-        });
-        return async (step: Parameters<typeof guard>[0]) => {
-          await guard(step);
-          const remaining = input.inputTask?.remainingTools();
-          if (remaining?.length) return { activeTools: remaining, toolChoice: "required" as const };
-          return undefined;
-        };
-      })(),
+      prepareStep: async () => {
+        input.signal.throwIfAborted();
+        const remaining = input.inputTask?.remainingTools();
+        if (remaining?.length) return { activeTools: remaining, toolChoice: "required" as const };
+        return undefined;
+      },
       // Reasoning and visible JSON share provider output allowances. A small
       // cross-model ceiling can consume the whole allowance before a valid
       // result exists. Keep native provider/model defaults, not a second cap.

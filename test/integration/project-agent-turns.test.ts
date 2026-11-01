@@ -1241,6 +1241,59 @@ test("a known local structured-output rejection is failed, not an unknown provid
   }
 });
 
+test.each(["input", "requests"] as const)(
+  "a serialized native %s bound exposes a definite saved failure, never an unknown command",
+  async (bound) => {
+    const owned = await fixture(answer);
+    const commandID = crypto.randomUUID();
+    const adapter = await import("../../apps/factory/src/project-agent/adapter");
+    const generate = spyOn(adapter, "generateProjectResponse").mockRejectedValue({
+      name: "WrappedNativeError",
+      message: "Private provider detail must not reach the caller",
+      cause: {
+        name: "ModelExecutionBoundError",
+        message: `Model ${bound} bound reached. No additional provider request was started.`,
+      },
+    });
+    try {
+      const controller = owned.controller();
+      const failure = await controller
+        .message(owned.projectID, undefined, "Preserve the authored scope", owned.userID, commandID)
+        .catch((cause: unknown) => cause);
+      expect(failure).toMatchObject({
+        name: "CommandError",
+        code: "unavailable",
+        status: 503,
+      });
+      if (!(failure instanceof Error)) throw new Error("Missing public command error");
+      expect(failure.message).toContain(
+        bound === "input" ? "model input limit" : "model request allowance",
+      );
+      expect(failure.message).not.toContain("Private provider detail");
+      expect(failure.message).not.toContain("unconfirmed");
+      expect(await owned.turns()).toMatchObject([{ commandId: commandID, state: "failed" }]);
+      const current = await controller.get(owned.projectID, undefined, owned.userID);
+      expect(current?.turn?.summary).toBe(failure.message);
+      expect((await owned.entries()).filter((entry) => entry.kind === "user-message")).toHaveLength(
+        1,
+      );
+      await controller.message(
+        owned.projectID,
+        undefined,
+        "Preserve the authored scope",
+        owned.userID,
+        commandID,
+      );
+      await controller.recover();
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(owned.requests()).toBe(0);
+    } finally {
+      generate.mockRestore();
+      await owned.dispose();
+    }
+  },
+);
+
 test("interview answers are admitted once and invalid answers leave no turn or input", async () => {
   const owned = await fixture({
     kind: "question",

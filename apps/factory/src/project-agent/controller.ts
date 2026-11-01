@@ -44,7 +44,11 @@ import { connectFactoryMCP } from "../mcp/factory";
 import { mcpSourceTools } from "../mcp/sources";
 import { createModelConnections } from "../models/connections";
 import { createModelSettingsController } from "../models/controller";
-import { knownModelRejection, ModelExecutionBoundError } from "../models/execution-policy";
+import {
+  knownModelRejection,
+  ModelExecutionBoundError,
+  modelExecutionBound,
+} from "../models/execution-policy";
 import type { ResolvedModelConnection } from "../models/native";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { createSkillController } from "../skills/controller";
@@ -899,26 +903,26 @@ export function createProjectAgentController(
         });
       } catch (cause) {
         const lostAuthority = authorityFailure(cause) || authorityFailure(abort.signal.reason);
+        const bound = modelExecutionBound(cause);
         const knownFailure =
           lostAuthority ||
           cause instanceof ProjectAgentOutputError ||
           cause instanceof ProjectContextLimitError ||
           cause instanceof ModelExecutionBoundError ||
           knownModelRejection(cause);
-        await turns.settle(
-          owner.id,
-          token,
-          knownFailure ? "failed" : "uncertain",
-          lostAuthority
-            ? "The Project Agent execution authority changed. Your input is saved; no response was published."
-            : cause instanceof ProjectAgentOutputError
-              ? cause.retainedMessage
-              : cause instanceof ProjectContextLimitError
-                ? cause.message
+        const summary = lostAuthority
+          ? "The Project Agent execution authority changed. Your input is saved; no response was published."
+          : cause instanceof ProjectAgentOutputError
+            ? cause.retainedMessage
+            : cause instanceof ProjectContextLimitError
+              ? cause.message
+              : bound
+                ? `The model ${bound === "input" ? "input limit" : "request allowance"} was reached before the next provider request. Your input is saved. No additional provider request was started.`
                 : knownFailure
                   ? "The provider rejected this request or a configured bound was reached. Your input is saved."
-                  : "The provider outcome could not be established. The same command will not be submitted again.",
-        );
+                  : "The provider outcome could not be established. The same command will not be submitted again.";
+        await turns.settle(owner.id, token, knownFailure ? "failed" : "uncertain", summary);
+        if (!lostAuthority && bound) throw new CommandError("unavailable", summary);
         throw lostAuthority ?? cause;
       } finally {
         await factoryMCP?.close();

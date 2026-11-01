@@ -15,6 +15,13 @@ evidence and returns its structured result, not at a fixed step or distinct-look
 The admitted caller owns cancellation and task deadlines; the adapter adds no fixed one-minute
 deadline across an otherwise progressing research turn. Per-step context/media bounds and
 authority checks still apply. A tool result is not a completed answer.
+When earlier immutable code-read bodies fill the model request, Factory transiently replaces
+only the oldest necessary bodies with explicit omission markers, exact provenance and reread
+arguments. The latest tool batch, authored decisions and native call/result pairs remain intact.
+Complete results stay in the turn-local cache; inspecting them again rechecks authority without
+repeating the repository read. This projection does not alter retained messages, create a verdict,
+compact mutation receipts or widen the existing input/media bounds. An oversized core or current
+batch still fails before another provider request.
 No embedding pipeline, BM25 or second code database.
 Investigate returns cited answers; Plan may also return independent question rounds, a Requirement
 proposal or an editable Epic/member proposal. Known Project/Ticket context is frozen at admission;

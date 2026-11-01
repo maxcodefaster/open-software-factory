@@ -5,7 +5,9 @@ import { z } from "zod";
 import {
   knownModelRejection,
   ModelExecutionBoundError,
+  modelExecutionBound,
   nativeAgentPolicy,
+  nativeInputSize,
   nativeStepGuard,
 } from "./execution-policy";
 import { nativeModel } from "./native";
@@ -85,6 +87,32 @@ test("multimodal input has a separate bounded image allowance without relaxing a
   ).rejects.toBeInstanceOf(ModelExecutionBoundError);
 });
 
+test("the canonical provider image projection retains the same media and text bounds", async () => {
+  const guard = nativeStepGuard({
+    signal: AbortSignal.timeout(2_000),
+    maxInputBytes: 1024,
+    maxMediaBytes: 2048,
+  });
+  const data = Buffer.alloc(1200, 1);
+  const messages = [{ role: "user", content: [{ type: "file", mediaType: "image/png", data }] }];
+  expect(nativeInputSize({ messages, systemMessages: [], maxMediaBytes: 2048 })).toMatchObject({
+    mediaBytes: 1200,
+  });
+  await guard({ messages, systemMessages: [] });
+  expect(messages[0]?.content[0]?.data).toBe(data);
+  await expect(
+    guard({
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "file", mediaType: "image/png", data: Buffer.alloc(3000, 1) }],
+        },
+      ],
+      systemMessages: [],
+    }),
+  ).rejects.toThrow("Model input bound reached");
+});
+
 test("shared native policy removes processor retries and counts every tool-loop provider step", async () => {
   let requests = 0;
   const provider = Bun.serve({
@@ -153,6 +181,21 @@ test("shared native policy removes processor retries and counts every tool-loop 
 });
 
 test("execution bounds and definite rejection distinguish unknown paid outcomes", async () => {
+  expect(modelExecutionBound(new ModelExecutionBoundError("input"))).toBe("input");
+  expect(
+    modelExecutionBound({
+      cause: {
+        name: "ModelExecutionBoundError",
+        message: "Model requests bound reached. No additional provider request was started.",
+      },
+    }),
+  ).toBe("requests");
+  expect(
+    modelExecutionBound({ name: "Error", message: "private provider failure" }),
+  ).toBeUndefined();
+  expect(
+    modelExecutionBound({ name: "ModelExecutionBoundError", message: "Unrecognized detail" }),
+  ).toBeUndefined();
   expect(knownModelRejection({ cause: { statusCode: 429 } })).toBe(true);
   expect(knownModelRejection({ cause: { statusCode: 401 } })).toBe(true);
   expect(knownModelRejection({ statusCode: 503 })).toBe(false);
