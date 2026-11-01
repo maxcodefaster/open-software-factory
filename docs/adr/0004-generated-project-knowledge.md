@@ -40,6 +40,13 @@ does not increase the task or shared request bounds and never permits unsupporte
 
 Inspect manifests, entrypoints, source relationships, real flows and focused tests, then update only affected useful pages. Read current human prose and preserve its business framing and hierarchy. AI may automatically correct or remove generated prose contradicted by current evidence, but absence from code does not disprove human product knowledge. Omission never removes a page; whole-page archival remains human-controlled. Unchanged content creates no revision. Failure retains readable current content.
 
+Pushes trigger relevance checks, not publication quotas. Prefer the existing page identity for
+changed guidance; a new page needs a distinct useful reader task not already covered. Internal
+refactors, formatting and test changes need no prose update unless they change supported guidance
+or contradict a current claim. Keep correct wording rather than polishing every update. The
+whole-plan checker rejects redundant topics without reducing necessary coverage. Commit diaries,
+release-note pages and generated status reports do not belong in the Wiki.
+
 Publication retains human text edits separately from the generated baseline. Notes outside that
 baseline survive a rewritten introduction or ending verbatim. Disjoint inline edits use the existing
 document merge, including removing repeated human edits from the next generated baseline rather

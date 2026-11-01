@@ -59,6 +59,11 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
           .join("\n");
         let output: unknown;
         if (system.includes("Research manifests")) {
+          expect(system).toContain(
+            "A push is a reason to check relevance, not a reason to publish",
+          );
+          expect(system).toContain("Prefer updating an existing page by pageIDs");
+          expect(system).not.toContain("Small app needs 1-3 topics");
           plans++;
           if (plans > 1) {
             const correction = messages.find(
@@ -71,6 +76,7 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
             topics: scenario === "missing-guide" && plans > 1 ? [topic] : [],
           };
         } else if (system.includes("Review the whole proposed Wiki topic plan")) {
+          expect(system).toContain("Reject a new topic whose reader task is already covered");
           coverageChecks++;
           if (scenario === "unavailable-reviewer")
             return Response.json(

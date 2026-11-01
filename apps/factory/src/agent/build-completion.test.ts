@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import {
   assessBuildCompletion,
   buildCompletionInstructions,
-  buildGoalInstructions,
   buildCompletionText,
+  buildGoalInstructions,
 } from "./build-completion";
 
 const prompt = { prompt: buildCompletionInstructions(2), criteria: 2 };
@@ -27,6 +27,8 @@ test("new Builds have a goal and native completion without parsing a final JSON 
   expect(instructions).toContain("read a screenshot");
   expect(instructions).toContain("anything unfinished");
   expect(instructions).toContain("Submission is not acceptance");
+  expect(instructions).toContain("Do not narrate every tool call");
+  expect(instructions).toContain("Do not add generated status reports");
   expect(instructions).not.toContain("factory-build-result");
   expect(
     assessBuildCompletion({ prompt: instructions, criteria: 2 }, "Implemented and tested."),

@@ -106,6 +106,9 @@ test("native Project Agent preserves structured context and sends current input 
     expect(captured).toContain(question.id);
     expect(captured).toContain("PROPOSAL_SCOPE_REQUIRED");
     expect(captured.split("CURRENT_UNIQUE_INPUT")).toHaveLength(2);
+    expect(captured).toContain("Write for the next decision");
+    expect(captured).toContain("Do not repeat the Ticket, question or supplied context");
+    expect(captured).toContain("Keep every independently testable acceptance criterion");
   } finally {
     await model.stop(true);
   }

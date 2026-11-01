@@ -99,6 +99,22 @@ test.skipIf(process.env["FACTORY_WIKI_PLAN_COVERAGE_LIVE"] !== "1")(
         topics: [],
         reject: false,
       },
+      {
+        name: "duplicate-development-guide",
+        pages: [overview, development],
+        topics: [
+          researchTopic,
+          {
+            slug: "running-locally",
+            title: "Run the Forms API locally",
+            purpose: "Explain npm run dev and npm test in a separate local startup guide.",
+            paths: ["package.json"],
+            pageIDs: [],
+            parentSlug: "overview",
+          },
+        ],
+        reject: true,
+      },
     ];
     const results: unknown[] = [];
     const controller = new AbortController();

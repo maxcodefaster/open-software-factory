@@ -25,6 +25,8 @@ test("review receives exact successful CI evidence without claiming shell execut
   expect(policy).toContain("CI alone");
   expect(policy).toContain("exercise the declared App");
   expect(policy).toContain("no shell");
+  expect(policy).toContain("Group duplicate symptoms under their shared cause");
+  expect(policy).toContain("Do not repeat the full specification");
 });
 
 const result = {

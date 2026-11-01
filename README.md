@@ -444,6 +444,11 @@ Ask AI to clarify starts an optional Interview explicitly. Creating or moving Ti
 their documents and reconnecting do not start clarification. An Interview proposal still needs
 human confirmation, and neither path bypasses independent checks, review or Delivery approval.
 
+Project Agents write for the next decision rather than narrating research. Tickets keep the concrete
+problem, intended outcome and independently testable criteria. Reviews keep actionable findings and
+their evidence without repeating the specification. Wiki pushes check relevance, update existing
+pages when guidance changes and allow no change; they do not require new pages or a commit diary.
+
 Developers can choose **Plan product & tech** to clarify product behavior and then research a
 technical design. **Confirm product spec** saves the Product Requirements and durably commissions
 the technical continuation. **Plan technical design** works from complete saved requirements
@@ -956,7 +961,13 @@ cleanup and global-connection guarantees. It does not replace the full applicati
 With that same connection, set `FACTORY_WIKI_PLAN_COVERAGE_LIVE=1` and run
 `bun run test:live wiki-plan-coverage.live`. The plan check accepts research intent before
 investigation, rejects an empty plan that leaves essential guidance missing and accepts a
-genuinely complete Wiki without changes. Page publication still requires its separate factual checks.
+genuinely complete Wiki without changes. It also rejects a redundant guide for an already covered
+reader task. Page publication still requires its separate factual checks.
+Set `FACTORY_WIKI_UPDATE_LOCALITY_LIVE=1` and run `bun run test:live wiki-update-locality.live`
+to exercise the full writing workflow against synthetic changed sources. An internal refactor
+must publish nothing; a changed development command must update its existing guide without
+rewriting the overview, duplicating pages or losing human context. These paid proofs do not
+modify the retained installation.
 
 Exact-commit code research has its own paid proof. With the explicit Luna Planning connection,
 set `FACTORY_CODE_RESEARCH_LIVE=1` and run `bun run test:live contextual-research.live`.

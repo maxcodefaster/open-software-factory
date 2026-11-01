@@ -58,7 +58,16 @@ otherwise misunderstand. Avoid repeating the same status transition under severa
 Inspect implementation and focused tests before claiming behavior. Never invent intent, deployment, guarantees,
 commands or integrations. Omit unknown behavior, do not fill it with generic advice.
 Preserve human business framing and hierarchy. Absence from code does not disprove business knowledge.
+Human operating practices need not be implemented in code. Keep them; do not replace them with
+unsupported-feature disclaimers unless inspected evidence actually contradicts that human context.
 Correct evidence-disproven stale paragraphs. Omit unaffected pages. No material change means pages:[].
+A push is a reason to check relevance, not a reason to publish. Document durable behavior and reader tasks,
+not commits, implementation diaries, release notes, research transcripts or a page per changed file.
+Prefer updating an existing page by pageIDs when it already owns the topic. Add a page only for useful
+guidance that cannot fit coherently in an existing page. Do not restate existing guidance under a new title.
+Keep a correct passage unchanged rather than polishing its wording on every update. Internal refactors,
+formatting and tests alone need no prose update unless they change supported guidance or disprove a claim.
+Keep all necessary instructions, caveats and evidence; concise does not mean incomplete.
 No generated timestamps, hashes or Sources footers. Factory supplies provenance.
 Factory binds page identities and parents from the validated plan and current pages.
 Use source tools when evidence is missing, then return your structured result once it is sufficient.
@@ -78,8 +87,9 @@ export const wikiPlanReviewTask =
   "Check whether existing pages plus the scheduled topics cover useful orientation and essential reader tasks. A topic can investigate an incomplete implementation, distinguish target architecture from current behavior and explain verified limitations. Unknown details are research questions, not grounds for rejecting that topic. Inspect source only to identify genuinely omitted reader tasks or evidence-disproven stale current pages, never to fact-check hypothetical unwritten prose. " +
   "A short overview that defers a source-supported guide leaves a gap only when neither a current page nor a proposed topic covers that task. Do not count a scheduled guide as still missing merely because it will publish later. A previous partial publication does not by itself establish a complete Wiki. " +
   "Accept an empty plan only when current pages already cover the useful supported guidance and no material correction is needed. Do not invent a minimum number of pages, require a page per feature, duplicate existing guidance, or demand unrelated rewrites. A small Project or one substantial guide can already be complete. " +
+  "Reject a new topic whose reader task is already covered by an existing page or another planned topic. If a changed fact belongs to an existing page, require an update to that identity rather than a parallel replacement guide. Do not demand wording changes, commit summaries or extra pages merely because changedPaths is nonempty. " +
   "completedPageIDs are read-only checked publications for this exact commit, not proof that other useful topics exist. Keep valid human framing, hierarchy and exact completed pages. Do not demand links to guides that will publish later. " +
-  "Report only essential tasks left out of both current pages and proposed topics, or a necessary correction to evidence-disproven current prose that the plan omits. Each issue must identify that actual current text or absent task and its inspected supporting source. Do not invent claims from a topic title or demand implementation changes to make a documentation topic valid. Accurately described source defects are not documentation defects. Ignore personal wording preferences. Never request source-code changes. Return issues:[] for a genuinely sufficient research plan.";
+  "Report essential tasks omitted by the plan, necessary corrections to evidence-disproven current prose, and redundant proposed topics or unnecessary rewrites. For duplication, name the proposed topic and existing page that already covers its task. For missing or stale guidance, identify the actual current text or absent task and its inspected supporting source. Do not invent claims from a topic title or demand implementation changes to make a documentation topic valid. Accurately described source defects are not documentation defects. Ignore personal wording preferences. Never request source-code changes. Return issues:[] for a sufficient plan with no redundant work.";
 
 export async function generateWiki(input: WikiGenerationInput): Promise<WikiGenerationOutput> {
   if (!input.publish) throw new Error("Wiki workflow requires checked publication");
@@ -297,7 +307,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             initialSources: input.sources,
           },
           planSources,
-          "Research manifests and core flows, then plan only useful affected topics. New Wiki starts with a concise overview followed by coherent child guides. Small app needs 1-3 topics. Each purpose is at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
+          "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add child guides only when distinct reader tasks need them. There is no target page count. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
           async (plan) => {
             const remaining = remainingPlan(plan);
             validatePlan(remaining);
