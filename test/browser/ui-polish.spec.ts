@@ -656,6 +656,99 @@ test("declared Preview Apps remain selectable before compute and retain their ch
   ).toHaveCount(1);
 });
 
+for (const touch of [false, true])
+  test.describe(`named Development previews ${touch ? "touch" : "desktop"}`, () => {
+    test.use({ hasTouch: touch });
+    test("declared App names identify every retained target without another Start", async ({
+      page,
+    }) => {
+      const attemptID = crypto.randomUUID();
+      const workspaceID = crypto.randomUUID();
+      const scope = "A retained Ticket with a deliberately long Forms routing title";
+      const apps = [
+        { channel: "app", label: `ACME website · ${scope}` },
+        { channel: "app-forms-api", label: `Forms API · ${scope}` },
+        { channel: "app-forms-admin", label: `Forms visual editor · ${scope}` },
+        { channel: "app-forms-web", label: `Forms Web preview · ${scope}` },
+      ];
+      let starts = 0;
+      await mockFactoryFunctions(page, {
+        runtime: {
+          attempts: async () =>
+            attemptsResponseSchema.parse({
+              attempts: [
+                {
+                  id: attemptID,
+                  projectId: projectID,
+                  runtimeKind: "ticket",
+                  workspaceId: workspaceID,
+                  state: "paused",
+                },
+              ],
+            }),
+          previews: async () =>
+            appPreviewsSchema.parse({
+              previews: apps.map((app) => ({
+                ...app,
+                projectID,
+                attemptID,
+                state: "paused",
+              })),
+            }),
+          ensureStaging: async () => {
+            starts++;
+            throw new Error("A retained Development target must not start Staging");
+          },
+        },
+      });
+      const paths: string[] = [];
+      await page.route("**/api/runtime-access?*", async (route) => {
+        const url = new URL(route.request().url());
+        expect(url.searchParams.get("embed")).toBe("1");
+        paths.push(url.searchParams.get("path") ?? "");
+        await route.fulfill({
+          contentType: "text/html",
+          body: "<!doctype html><p>Owned shared Forms editor</p>",
+        });
+      });
+      if (touch) await page.setViewportSize({ width: 390, height: 900 });
+      await wakeFactoryReads(page);
+      const chooser = page.getByRole("button", { name: "Choose Preview instance", exact: true });
+      if (touch) await chooser.tap();
+      else await chooser.click();
+      const menu = page.getByRole("menu", { name: "Preview instances" });
+      await expect(menu.getByRole("menuitem")).toHaveCount(5);
+      await expect(
+        menu.getByRole("menuitem", { name: /^Staging Opens when selected$/ }),
+      ).toBeVisible();
+      await expect(menu.getByRole("menuitem").filter({ hasText: scope })).toHaveCount(4);
+      for (const app of apps)
+        await expect(
+          menu.getByRole("menuitem", { name: new RegExp(`^${app.label}`) }),
+        ).toBeVisible();
+      await page.screenshot({
+        path: `${evidence}/development-app-names-${touch ? "touch" : "desktop"}.png`,
+        animations: "disabled",
+      });
+      await page.setViewportSize({ width: 390, height: 900 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        390,
+      );
+      await page.screenshot({
+        path: `${evidence}/development-app-names-${touch ? "touch" : "narrow"}.png`,
+        animations: "disabled",
+      });
+      const editor = menu.getByRole("menuitem", { name: /^Forms visual editor ·/ });
+      if (touch) await editor.tap();
+      else await editor.click();
+      await expect(
+        page.frameLocator('iframe[title="Factory Preview"]').getByText("Owned shared Forms editor"),
+      ).toBeVisible();
+      expect(paths).toEqual([`/runtime/${attemptID}/preview/app-forms-admin/`]);
+      expect(starts).toBe(0);
+    });
+  });
+
 test("silent Preview attachment offers a bounded reload of the same instance", async ({ page }) => {
   const attemptID = crypto.randomUUID();
   const developmentAttemptID = crypto.randomUUID();

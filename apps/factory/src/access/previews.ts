@@ -23,7 +23,7 @@ export function createProjectAppPreviews(
       forge: createForgejoClient({ apiURL, token }),
     };
   }
-  function stagingApps(repositoryURL: string, revision: string) {
+  function contractApps(repositoryURL: string, revision: string) {
     const key = `${repositoryURL}:${revision}`;
     const retained = contracts.get(key);
     if (retained) return retained;
@@ -74,11 +74,14 @@ export function createProjectAppPreviews(
         title: string | null;
         apps: unknown;
         state: string;
+        revision: string;
+        repositoryURL: string;
       }[]
     >`
       SELECT attempt.id,person.name AS owner,ticket.title,attempt.declared_apps AS apps,
-        attempt.state
+        attempt.state,attempt.revision,project.repository_url AS "repositoryURL"
       FROM factory.runtime_attempt attempt
+      JOIN factory.project project ON project.id=attempt.project_id
       JOIN factory.development_workspace workspace ON workspace.id=attempt.workspace_id
       LEFT JOIN auth."user" person ON person.id=workspace.owner_user_id
       LEFT JOIN factory.change change ON change.id=workspace.change_id
@@ -86,16 +89,44 @@ export function createProjectAppPreviews(
       WHERE attempt.project_id=${projectID} AND attempt.state IN ('create-intended','ready','pausing','paused','resuming','starting')
         AND (workspace.kind='personal' OR change.runtime_attempt_id=attempt.id AND ticket.trashed_at IS NULL)
       ORDER BY attempt.created_at DESC LIMIT 100`;
-    const development = attempts.flatMap((attempt) => {
-      const retained = declaredApps.parse(attempt.apps);
-      return (retained.length ? retained : channels(attempt.id)).map((channel) => ({
-        attemptID: attempt.id,
-        projectID,
-        channel,
-        label: `${attempt.title ?? attempt.owner ?? "Development"} · ${channel === "app" ? "App" : channel.slice(4)}`,
-        state: attempt.state,
-      }));
-    });
+    const development: {
+      attemptID: string;
+      projectID: string;
+      channel: string;
+      label: string;
+      state: string;
+    }[] = [];
+    const nameReads = new Map<string, ReturnType<typeof contractApps>>();
+    for (let offset = 0; offset < attempts.length; offset += 4) {
+      const batch = await Promise.all(
+        attempts.slice(offset, offset + 4).map(async (attempt) => {
+          const retained = declaredApps.parse(attempt.apps);
+          const visible = retained.length ? retained : channels(attempt.id);
+          if (!visible.length) return [];
+          // The exact execution revision owns names, not the current branch or
+          // mutable checkout. Coalesce failures within this read as well, while
+          // allowing a later observation to recover from a temporary Forge outage.
+          const key = `${attempt.repositoryURL}:${attempt.revision}`;
+          let names = nameReads.get(key);
+          if (!names) {
+            names = contractApps(attempt.repositoryURL, attempt.revision).catch(() => []);
+            nameReads.set(key, names);
+          }
+          const labels = await names;
+          return visible.map((channel) => ({
+            attemptID: attempt.id,
+            projectID,
+            channel,
+            label: `${
+              labels.find((app) => app.channel === channel)?.label ??
+              (channel === "app" ? "App" : channel.slice(4))
+            } · ${attempt.title ?? attempt.owner ?? "Development"}`,
+            state: attempt.state,
+          }));
+        }),
+      );
+      development.push(...batch.flat());
+    }
     if (!staging) return development;
     let revision = staging.revision;
     if (!revision) {
@@ -104,7 +135,7 @@ export function createProjectAppPreviews(
       if (!branch) throw new Error("Project Preview source branch is unavailable");
       revision = branch.headSha;
     }
-    const apps = await stagingApps(staging.repositoryURL, revision);
+    const apps = await contractApps(staging.repositoryURL, revision);
     const usable = [
       "create-intended",
       "starting",
