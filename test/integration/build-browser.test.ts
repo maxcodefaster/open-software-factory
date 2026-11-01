@@ -233,13 +233,15 @@ test("one browser_open waits for confirmed cold preparation without another mode
 });
 
 test.each([
-  { lostCleanup: false, disconnected: false },
-  { lostCleanup: true, disconnected: false },
-  { lostCleanup: false, disconnected: true },
-  { lostCleanup: true, disconnected: true },
+  { lostCleanup: false, disconnected: false, timedOut: false },
+  { lostCleanup: true, disconnected: false, timedOut: false },
+  { lostCleanup: false, disconnected: true, timedOut: false },
+  { lostCleanup: true, disconnected: true, timedOut: false },
+  { lostCleanup: false, disconnected: false, timedOut: true },
+  { lostCleanup: true, disconnected: false, timedOut: true },
 ])(
   "a still-authorized Build can explicitly reopen only after confirmed browser cleanup: %j",
-  async ({ lostCleanup, disconnected }) => {
+  async ({ lostCleanup, disconnected, timedOut }) => {
     const scope = await setup();
     const forward = scope.owned.hub.parentOperation.bind(scope.owned.hub);
     try {
@@ -250,8 +252,13 @@ test.each([
         "first-open",
       );
       scope.owned.hub.parentOperation = async (attempt, payload, beforeSend) => {
-        if (disconnected && payload.action === "browser-call") {
+        if ((disconnected || timedOut) && payload.action === "browser-call") {
           await forward(attempt, payload, beforeSend);
+          if (timedOut)
+            throw new RuntimeParentOperationError(
+              "browser-call",
+              "browser tool exceeded its execution authority or deadline",
+            );
           throw new Error("Runtime channel disconnected");
         }
         if (payload.action === "browser-renew")
@@ -263,17 +270,27 @@ test.each([
           throw new Error("Cleanup acknowledgement unavailable");
         return forward(attempt, payload, beforeSend);
       };
-      if (disconnected)
+      if (disconnected || timedOut)
         await expect(
           scope.browser.call(
             scope.authorized.session,
             scope.ownerToken,
-            { name: "browser_click", arguments: { uid: "1_2" } },
-            "lost-click",
+            timedOut
+              ? { name: "browser_screenshot", arguments: {} }
+              : { name: "browser_click", arguments: { uid: "1_2" } },
+            "lost-browser-call",
           ),
         ).rejects.toMatchObject({ code: "conflict" });
       else await scope.browser.renewTurn(scope.turn.id, scope.ownerToken);
       scope.owned.hub.parentOperation = forward;
+      expect(
+        await scope.browser.authorizeRuntime(
+          scope.owned.attemptID,
+          scope.turn.id,
+          `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+          "facade",
+        ),
+      ).not.toBeNull();
       const response = await scope.endpoint(
         new Request("http://factory.test/internal/browser", {
           method: "POST",
@@ -293,7 +310,7 @@ test.each([
       if (lostCleanup) {
         expect(response.status).toBe(403);
         expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(
-          disconnected ? 2 : 1,
+          disconnected || timedOut ? 2 : 1,
         );
         return;
       }

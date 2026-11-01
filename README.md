@@ -602,8 +602,9 @@ An unavailable runtime-status write does not terminate Factory or disconnect hea
 Only the current authorized observation retries; newer observations supersede it, and revocation
 cancels it. A terminating producer's final outcome remains observable after its connection closes.
 These retries never create another Sandbox or resend an inference.
-If the Connector confirms browser expiry or Factory confirms control-connection loss, the same active
-Build can explicitly open a fresh browser after exact cleanup is confirmed. It cannot restore or reuse the old browser,
+If the Connector confirms browser expiry or a tool deadline, or Factory confirms control-connection
+loss, the same active Build can explicitly open a fresh browser after exact cleanup is confirmed.
+It cannot restore or reuse the old browser,
 replay a UI action, bypass Stop, or reset the turn's browser-call limit. A fresh snapshot is required
 before further actions.
 Admitted corrections remain in the conversation even if source preparation fails before OpenCode

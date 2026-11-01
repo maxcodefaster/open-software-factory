@@ -110,6 +110,10 @@ const reopenableFailures = new Set([
   "browser control connection ended",
   "browser session already ended; open a fresh browser session",
   "browser session requires owned cleanup after parent restart; do not replay a UI mutation",
+  // A bounded tool wait does not revoke the admitted Build. Its UI outcome is
+  // unknown, so only confirmed cleanup plus a new browser_open may recover it.
+  // The new browser must still observe a snapshot before another App action.
+  "browser tool exceeded its execution authority or deadline",
 ]);
 
 function reopenableBrowserFailure(cause: unknown) {
