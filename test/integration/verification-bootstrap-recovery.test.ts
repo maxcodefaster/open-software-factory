@@ -56,6 +56,7 @@ async function setup(integrations = 0) {
       FROM factory.change WHERE id=${f.changeID}`;
     let registrations = 0;
     let starts = 0;
+    let continuations = 0;
     let prompts = 0;
     let observations = 0;
     let cleanup = true;
@@ -105,6 +106,10 @@ async function setup(integrations = 0) {
       database,
       {
         startVerification: async () => {
+          continuations++;
+          const [current] = await database.client<{ id: string | null }[]>`
+            SELECT runtime_attempt_id AS id FROM factory.verification WHERE id=${f.verificationID}`;
+          if (current?.id) return null;
           starts++;
           const nextID = crypto.randomUUID();
           await database.client`INSERT INTO factory.runtime_attempt(
@@ -155,6 +160,7 @@ async function setup(integrations = 0) {
       stopped,
       removed,
       counts: () => ({ registrations, starts, prompts }),
+      continuations: () => continuations,
       observations: () => observations,
       setCleanup(value: boolean) {
         cleanup = value;
@@ -293,6 +299,24 @@ test("confirmed Stop can resume an integrated submitted candidate without replay
     const [session] = await f.database.client<{ state: string; turn: string }[]>`
       SELECT state,active_turn_id AS turn FROM factory.change_agent_session WHERE change_id=${f.changeID}`;
     expect(session).toEqual({ state: "committed", turn: f.initial.id });
+  } finally {
+    await f.close();
+  }
+});
+
+test("periodic bootstrap continuation observes the same queued runtime without retrying execution", async () => {
+  const f = await setup();
+  try {
+    await f.controller.reconcile(f.changeID);
+    await f.nativeRetry(crypto.randomUUID());
+    const retained = await f.row();
+    expect(retained.runtime).not.toBe(f.bootstrapAttemptID);
+    expect(f.continuations()).toBe(1);
+    await f.controller.reconcile(f.changeID);
+    await f.controller.reconcile(f.changeID);
+    expect(await f.row()).toEqual(retained);
+    expect(f.continuations()).toBe(3);
+    expect(f.counts()).toEqual({ registrations: 1, starts: 1, prompts: 0 });
   } finally {
     await f.close();
   }

@@ -558,9 +558,10 @@ export function createDeliveryController(
       verification.runnerToken = registration.token;
     }
     if (!(await stillActive())) return;
-    if (!verification.runtimeAttemptID) {
-      await runtime.startVerification(verification.id, change.userID);
-    }
+    // Continue the commissioned bootstrap against its exact retained Attempt.
+    // This also settles its completed Coding predecessor after process restart;
+    // startVerification cannot implicitly replace a stopped/failed Attempt.
+    await runtime.startVerification(verification.id, change.userID);
     await database.client`
       UPDATE factory.verification SET
         state = ${actionRun.status === "running" ? "running" : "runner-starting"}::factory.verification_state,

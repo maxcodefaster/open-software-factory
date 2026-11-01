@@ -338,6 +338,9 @@ Factory prepares the exact consumer image before native Start. After five minute
 use, eligible Personal or unsubmitted Development execution pauses. Continuing to use the editor
 resumes the same Attempt and Connector credentials. Submitted, settled Ticket execution instead
 records normal Stop and releases its private backing, retaining Source and native Sessions.
+Before fresh Verification, Factory releases that candidate's submitted Agent execution without
+waiting for the idle grace, then waits for confirmed cleanup before admitting the check Sandbox.
+Active work, human writing, open terminals and unconfirmed operations remain protected.
 The [submitted-compute decision](adr/0033-release-idle-submitted-ticket-compute.md) defines that boundary.
 Active Agent work, open terminal sessions and uncertain operations remain protected;
 background polling and Run views do not keep compute awake. The Source service and independent

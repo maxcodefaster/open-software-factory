@@ -59,6 +59,7 @@ import { recoveredConnectionObserver } from "./recovered-connections";
 import type { ExecutionReserve } from "./reserve-controller";
 import { freezeStagingConfiguration } from "./staging-configuration";
 import type { RuntimeAttemptView } from "./types";
+import { prepareVerificationHandoff } from "./verification-handoff";
 import {
   createFactoryboxWorker,
   factoryboxAllocation,
@@ -2159,7 +2160,6 @@ export function createRuntimeController(
           projectID: string;
           commitSHA: string;
           attemptID: string | null;
-          attemptState: string | null;
           runnerUUID: string | null;
           runnerToken: string | null;
           repositoryURL: string;
@@ -2168,14 +2168,12 @@ export function createRuntimeController(
       >`
         SELECT change.project_id AS "projectID", verification.commit_sha AS "commitSHA",
           verification.runtime_attempt_id AS "attemptID",
-          attempt.state AS "attemptState",
           verification.runner_uuid AS "runnerUUID", verification.runner_token AS "runnerToken",
           project.repository_url AS "repositoryURL",
           project.devcontainer_path AS "devcontainerPath"
         FROM factory.verification verification
         JOIN factory.change change ON change.id = verification.change_id
         JOIN factory.project project ON project.id = change.project_id
-        LEFT JOIN factory.runtime_attempt attempt ON attempt.id = verification.runtime_attempt_id
         WHERE verification.id = ${verificationID}
       `;
       const verification = rows[0];
@@ -2183,31 +2181,22 @@ export function createRuntimeController(
       if (!verification.runnerUUID || !verification.runnerToken) {
         throw new Error("Verification runner is not registered");
       }
-      if (
-        verification.attemptID &&
-        ["create-intended", "starting", "ready", "stop-intended", "stopping"].includes(
-          verification.attemptState ?? "",
-        )
-      )
-        return this.get(verification.attemptID);
+      const handoff = await prepareVerificationHandoff(database, hub, verificationID);
+      if (handoff.stopAttemptID) await this.stop(handoff.stopAttemptID);
+      // Continuation never replaces an existing execution, including a failed
+      // or stopped one. Only the explicit verified bootstrap retry can clear
+      // that association after its exact cleanup is confirmed.
+      if (verification.attemptID) return this.get(verification.attemptID);
+      if (!handoff.ready) return null;
       const lock = database.coordination();
       try {
         await lock`SELECT pg_advisory_lock(hashtext(${`runtime:isolated:${verification.projectID}`}))`;
-        const current = await lock<
-          Array<{ attemptID: string | null; attemptState: string | null }>
-        >`
-          SELECT verification.runtime_attempt_id AS "attemptID", attempt.state AS "attemptState"
+        const current = await lock<Array<{ attemptID: string | null }>>`
+          SELECT verification.runtime_attempt_id AS "attemptID"
           FROM factory.verification verification
-          LEFT JOIN factory.runtime_attempt attempt ON attempt.id = verification.runtime_attempt_id
           WHERE verification.id = ${verificationID} FOR UPDATE OF verification
         `;
-        if (
-          current[0]?.attemptID &&
-          ["create-intended", "starting", "ready", "stop-intended", "stopping"].includes(
-            current[0].attemptState ?? "",
-          )
-        )
-          return this.get(current[0].attemptID);
+        if (current[0]?.attemptID) return this.get(current[0].attemptID);
         const generations = await lock<Array<{ generation: string }>>`
           SELECT COALESCE(MAX(generation), 0) + 1 AS generation
           FROM factory.runtime_attempt
