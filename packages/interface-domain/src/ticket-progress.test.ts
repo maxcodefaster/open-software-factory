@@ -16,6 +16,22 @@ test("unfinished technical planning is not described as an active model operatio
   expect(text).not.toContain("in progress");
 });
 
+test("failed review preparation keeps the recovery action scoped to the submitted candidate", () => {
+  const text = ticketProgress({
+    ...submitted,
+    changeState: "failed",
+    implementationState: "failed",
+    turnState: "failed",
+    turnPurpose: "review",
+    verificationState: "succeeded",
+    reviewState: "failed",
+  });
+  expect(text).toContain("Review preparation failed");
+  expect(text).toContain("Retry review");
+  expect(text).toContain("without repeating implementation");
+  expect(text).not.toContain("Implementation could not finish");
+});
+
 test.each(["pending", "runner-starting"])(
   "submitted %s Verification does not claim that checks are already running",
   (verificationState) => {

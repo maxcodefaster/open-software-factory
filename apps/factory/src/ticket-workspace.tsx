@@ -1209,8 +1209,8 @@ function TicketDocument(props: TicketWorkspaceProps) {
     if (
       !ticket.trashedAt &&
       (props.change?.state === "active" ||
-        (props.change?.state === "starting" &&
-          ["stopped", "failed"].includes(props.change.runtimeState ?? ""))) &&
+        (["starting", "failed"].includes(props.change?.state ?? "") &&
+          ["stopped", "failed"].includes(props.change?.runtimeState ?? ""))) &&
       !implementationBusy() &&
       !props.codingPause &&
       ["incomplete", "failed", "stopped"].includes(props.delivery?.reviewState ?? "") &&

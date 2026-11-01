@@ -44,6 +44,8 @@ export function ticketProgress(input: TicketProgressInput): string {
     return "Implementation is stopped. Retained code is not lost; resume deliberately when ready.";
   if (input.implementationState === "waiting")
     return "Implementation needs an answer. Open the Coding conversation to continue.";
+  if (input.turnPurpose === "review" && input.changeState === "failed")
+    return "Review preparation failed. The submitted version is retained. Retry review to continue without repeating implementation.";
   if (
     input.changeState === "failed" ||
     (input.turnPurpose !== "review" &&

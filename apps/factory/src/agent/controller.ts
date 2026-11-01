@@ -277,7 +277,7 @@ export function createAgentController(
       )
         throw new CommandError(
           "unavailable",
-          "The implementation Workspace failed to start. Source is retained. Retry implementation from this Ticket.",
+          "The Ticket Workspace failed to start. Source is retained. Retry the interrupted operation from this Ticket.",
         );
       throw new CommandError("conflict", "Change is not active");
     }

@@ -2973,141 +2973,173 @@ test("a failed editor Stop leaves restart unconfirmed without ensuring another e
   await expect(restart).toBeEnabled();
 });
 
-for (const reviewState of ["incomplete", "stopped"] as const)
+async function independentReviewRetryJourney(
+  page: Parameters<typeof signIn>[0],
+  reviewState: "incomplete" | "stopped" | "failed",
+  touch = false,
+) {
+  if (touch) {
+    await page.setViewportSize({ width: 430, height: 900 });
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+  }
+  const changeID = crypto.randomUUID();
+  const reviewID = crypto.randomUUID();
+  const initialCommandID = crypto.randomUUID();
+  let request: { commandId: string; reviewId: string } | undefined;
+  let running = false;
+  const turnID = crypto.randomUUID();
+  const change = () => ({
+    id: changeID,
+    projectId: projectID,
+    ticketId: ticketID,
+    branchName: "factory/owned-review",
+    baseSha: "a".repeat(40),
+    state: !running
+      ? reviewState === "failed"
+        ? "failed"
+        : reviewState === "stopped"
+          ? "starting"
+          : "active"
+      : "active",
+    runtimeState: !running && reviewState !== "incomplete" ? reviewState : "ready",
+    branchState: "succeeded",
+    verificationState: "succeeded",
+    implementationState: running
+      ? "working"
+      : reviewState !== "incomplete"
+        ? reviewState
+        : "committed",
+    buildTurnState: running ? "running" : reviewState !== "incomplete" ? reviewState : "completed",
+    buildTurnPurpose: "review",
+  });
+  const delivery = () => ({
+    verificationState: "succeeded",
+    reviewId: request?.commandId ?? reviewID,
+    reviewState: running ? "running" : reviewState,
+    reviewCurrent: true,
+    reviewSummary: running
+      ? "Checking the same submitted version."
+      : "The declared App was unavailable. This review did not pass.",
+  });
+  const agent = () => ({
+    state: running ? "working" : reviewState !== "incomplete" ? reviewState : "committed",
+    runtimeState: change().runtimeState,
+    sessionAvailable: true,
+    runtimeConnected: running || reviewState === "incomplete",
+    messagesAvailable: running || reviewState === "incomplete",
+    messages: [],
+    stopPending: false,
+    stopId: null,
+    turn: {
+      id: turnID,
+      commandId: request?.commandId ?? initialCommandID,
+      purpose: "review",
+      mode: "build",
+      engine: "opencode",
+      modelId: "owned-coding-model",
+      codingReasoning: "medium",
+      skills: [],
+      state: running ? "running" : reviewState !== "incomplete" ? reviewState : "completed",
+    },
+  });
+  await mockFactoryFunctions(page, {
+    runtime: { changes: async () => changesResponseSchema.parse({ changes: [change()] }) },
+  });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async get(_actor, id) {
+        if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
+        return deliveryViewSchema.parse(delivery());
+      },
+    },
+  });
+  await mockAgentView(page, changeID, async () => agent(), { activity: true });
+  await mockFactoryFunctions(page, {
+    conversations: {
+      get: async () =>
+        conversationViewSchema.nullable().parse({
+          id: crypto.randomUUID(),
+          projectId: projectID,
+          ticketId: ticketID,
+          mode: "build",
+          version: 1,
+          entries: [],
+        }),
+    },
+  });
+  await mockFactoryFunctions(page, {
+    delivery: {
+      async retryReview(_actor, id, input) {
+        expect(id).toBe(changeID);
+        request = input;
+        running = true;
+        return deliveryViewSchema.parse(delivery());
+      },
+    },
+  });
+  await selectProject(page);
+  await page
+    .getByRole("region", { name: "Ticket board" })
+    .getByRole("button")
+    .filter({ hasText: title })
+    .click();
+  const retry = page.getByRole("button", { name: "Retry review", exact: true });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry implementation", exact: true })).toHaveCount(
+    0,
+  );
+  if (reviewState === "failed") {
+    await expect(page.getByRole("status", { name: "Ticket progress" })).toContainText(
+      "Review preparation failed",
+    );
+  }
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
+  await page.locator(".ticket-checks > summary").click();
+  await expect(
+    page.getByText("The declared App was unavailable. This review did not pass."),
+  ).toBeVisible();
+  await mkdir(".factory/test-results/reviewer-interface", { recursive: true });
+  const capture = `${reviewState}${touch ? "-touch" : ""}`;
+  await page.screenshot({
+    path: `.factory/test-results/reviewer-interface/factory-${capture}.png`,
+  });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.screenshot({
+    path: `.factory/test-results/reviewer-interface/factory-${capture}-narrow.png`,
+  });
+  const bounds = await retry.boundingBox();
+  expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 430).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
+  if (!touch) await page.setViewportSize({ width: 1440, height: 900 });
+  if (touch) await retry.tap();
+  else await retry.click();
+  await expect.poll(() => request?.reviewId).toBe(reviewID);
+  expect(request?.commandId).toMatch(/^[a-f0-9-]{36}$/);
+  await expect(retry).toHaveCount(0);
+  await expect(page.locator(".ticket-checks > summary")).toHaveText(
+    "Independent review in progress",
+  );
+  await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
+  await page.screenshot({
+    path: `.factory/test-results/reviewer-interface/factory-reviewing${touch ? "-touch" : ""}.png`,
+  });
+  await page.setViewportSize({ width: 430, height: 900 });
+  await page.screenshot({
+    path: `.factory/test-results/reviewer-interface/factory-reviewing${touch ? "-touch" : ""}-narrow.png`,
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(430);
+}
+
+for (const reviewState of ["incomplete", "stopped", "failed"] as const)
   test(`independent review retries its exact candidate after ${reviewState} without offering Delivery`, async ({
     page,
-  }) => {
-    const changeID = crypto.randomUUID();
-    const reviewID = crypto.randomUUID();
-    const initialCommandID = crypto.randomUUID();
-    let request: { commandId: string; reviewId: string } | undefined;
-    let running = false;
-    const turnID = crypto.randomUUID();
-    const change = () => ({
-      id: changeID,
-      projectId: projectID,
-      ticketId: ticketID,
-      branchName: "factory/owned-review",
-      baseSha: "a".repeat(40),
-      state: reviewState === "stopped" && !running ? "starting" : "active",
-      runtimeState: reviewState === "stopped" && !running ? "stopped" : "ready",
-      branchState: "succeeded",
-      verificationState: "succeeded",
-      implementationState: running
-        ? "working"
-        : reviewState === "stopped"
-          ? "stopped"
-          : "committed",
-      buildTurnState: running ? "running" : reviewState === "stopped" ? "stopped" : "completed",
-      buildTurnPurpose: "review",
-    });
-    const delivery = () => ({
-      verificationState: "succeeded",
-      reviewId: request?.commandId ?? reviewID,
-      reviewState: running ? "running" : reviewState,
-      reviewCurrent: true,
-      reviewSummary: running
-        ? "Checking the same submitted version."
-        : "The declared App was unavailable. This review did not pass.",
-    });
-    const agent = () => ({
-      state: running ? "working" : reviewState === "stopped" ? "stopped" : "committed",
-      runtimeState: change().runtimeState,
-      sessionAvailable: true,
-      runtimeConnected: running || reviewState !== "stopped",
-      messagesAvailable: running || reviewState !== "stopped",
-      messages: [],
-      stopPending: false,
-      stopId: null,
-      turn: {
-        id: turnID,
-        commandId: request?.commandId ?? initialCommandID,
-        purpose: "review",
-        mode: "build",
-        engine: "opencode",
-        modelId: "owned-coding-model",
-        codingReasoning: "medium",
-        skills: [],
-        state: running ? "running" : reviewState === "stopped" ? "stopped" : "completed",
-      },
-    });
-    await mockFactoryFunctions(page, {
-      runtime: { changes: async () => changesResponseSchema.parse({ changes: [change()] }) },
-    });
-    await mockFactoryFunctions(page, {
-      delivery: {
-        async get(_actor, id) {
-          if (id !== changeID) return serverCall(browserFunction(page, "getDelivery", [id]));
-          return deliveryViewSchema.parse(delivery());
-        },
-      },
-    });
-    await mockAgentView(page, changeID, async () => agent(), { activity: true });
-    await mockFactoryFunctions(page, {
-      conversations: {
-        get: async () =>
-          conversationViewSchema.nullable().parse({
-            id: crypto.randomUUID(),
-            projectId: projectID,
-            ticketId: ticketID,
-            mode: "build",
-            version: 1,
-            entries: [],
-          }),
-      },
-    });
-    await mockFactoryFunctions(page, {
-      delivery: {
-        async retryReview(_actor, id, input) {
-          expect(id).toBe(changeID);
-          request = input;
-          running = true;
-          return deliveryViewSchema.parse(delivery());
-        },
-      },
-    });
-    await selectProject(page);
-    await page.getByRole("region", { name: "review", exact: true }).getByRole("button").click();
-    const retry = page.getByRole("button", { name: "Retry review", exact: true });
-    await expect(retry).toBeVisible();
-    await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
-    await page.locator(".ticket-checks > summary").click();
-    await expect(
-      page.getByText("The declared App was unavailable. This review did not pass."),
-    ).toBeVisible();
-    await mkdir(".factory/test-results/reviewer-interface", { recursive: true });
-    await page.screenshot({
-      path: `.factory/test-results/reviewer-interface/factory-${reviewState}.png`,
-    });
-    await page.setViewportSize({ width: 430, height: 900 });
-    await page.screenshot({
-      path: `.factory/test-results/reviewer-interface/factory-${reviewState}-narrow.png`,
-    });
-    const bounds = await retry.boundingBox();
-    expect(bounds && bounds.x >= 0 && bounds.x + bounds.width <= 430).toBe(true);
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
-      430,
-    );
-    await page.setViewportSize({ width: 1440, height: 900 });
-    await retry.click();
-    await expect.poll(() => request?.reviewId).toBe(reviewID);
-    expect(request?.commandId).toMatch(/^[a-f0-9-]{36}$/);
-    await expect(retry).toHaveCount(0);
-    await expect(page.locator(".ticket-checks > summary")).toHaveText(
-      "Independent review in progress",
-    );
-    await expect(page.getByRole("button", { name: "Deliver", exact: true })).toHaveCount(0);
-    await page.screenshot({
-      path: ".factory/test-results/reviewer-interface/factory-reviewing.png",
-    });
-    await page.setViewportSize({ width: 430, height: 900 });
-    await page.screenshot({
-      path: ".factory/test-results/reviewer-interface/factory-reviewing-narrow.png",
-    });
-    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
-      430,
-    );
-  });
+  }) => independentReviewRetryJourney(page, reviewState));
+
+test.describe("touch review recovery", () => {
+  test.use({ hasTouch: true });
+  test("failed review retries its exact candidate without offering Delivery", async ({ page }) =>
+    independentReviewRetryJourney(page, "failed", true));
+});
 
 async function failedPromotionRetryJourney(page: Parameters<typeof signIn>[0], touch = false) {
   const changeID = crypto.randomUUID();

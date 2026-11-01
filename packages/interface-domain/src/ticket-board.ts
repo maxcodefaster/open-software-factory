@@ -19,7 +19,7 @@ export type TicketBoardInput = {
 function hasCurrentImplementation(input: TicketBoardInput) {
   if (
     input.buildTurnPurpose === "review" &&
-    ["active", "starting"].includes(input.changeState ?? "")
+    ["active", "starting", "failed"].includes(input.changeState ?? "")
   )
     return false;
   return (
@@ -62,7 +62,7 @@ export function ticketBoardStatus(input: TicketBoardInput): string {
   if (input.changeState === "cancelling") return "Cancelling";
   if (
     input.buildTurnPurpose === "review" &&
-    ["active", "starting"].includes(input.changeState ?? "")
+    ["active", "starting", "failed"].includes(input.changeState ?? "")
   ) {
     if (["failed", "stopped", "uncertain"].includes(input.buildTurnState ?? ""))
       return "Review needs attention";

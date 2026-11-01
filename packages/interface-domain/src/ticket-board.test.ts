@@ -78,6 +78,19 @@ describe("Ticket board stages", () => {
     ).toBe("implementation");
   });
 
+  test("failed review preparation stays in Review and does not become an implementation failure", () => {
+    const input = {
+      ticketState: "in-progress" as const,
+      changeState: "failed",
+      verificationState: "succeeded",
+      buildTurnPurpose: "review",
+      buildTurnState: "failed",
+      implementationState: "failed",
+    };
+    expect(ticketBoardStage(input)).toBe("review");
+    expect(ticketBoardStatus(input)).toBe("Review needs attention");
+  });
+
   test.each(["pending", "dispatching", "running", "failed", "stopped", "completed"])(
     "independent review %s stays in Review instead of looking like another implementation",
     (state) => {
