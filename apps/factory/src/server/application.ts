@@ -754,6 +754,7 @@ export async function createFactoryApplication() {
     agentController,
     attachmentRoutes,
     attachmentStore,
+    buildBrowserController,
     buildBrowserEndpoint,
     database,
     demandRuntime,

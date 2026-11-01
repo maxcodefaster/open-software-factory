@@ -6,6 +6,7 @@ test("the process owns Delivery and Monitoring observations and drains them befo
   const closed: string[] = [];
   let deliveries = 0;
   let monitoring = 0;
+  let browserCleanups = 0;
   const idle = async () => {};
   const observer = {
     start: idle,
@@ -56,6 +57,12 @@ test("the process owns Delivery and Monitoring observations and drains them befo
         closed.push("delivery");
       },
     },
+    buildBrowserController: {
+      async reconcileCleanup() {
+        browserCleanups++;
+        await finish.promise;
+      },
+    },
     monitoringWorker: {
       async sweep() {
         monitoring++;
@@ -77,6 +84,7 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     await Bun.sleep(10);
     expect(deliveries).toBe(1);
     expect(monitoring).toBe(1);
+    expect(browserCleanups).toBe(1);
     let drained = false;
     const pending = close().then(() => {
       drained = true;
@@ -90,6 +98,7 @@ test("the process owns Delivery and Monitoring observations and drains them befo
     await pending;
     expect(closed.sort()).toEqual(["delivery", "monitoring", "wiki"]);
     expect(deliveries).toBe(1);
+    expect(browserCleanups).toBe(1);
   } finally {
     finish.resolve();
     await close();

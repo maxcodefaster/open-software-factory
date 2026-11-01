@@ -748,6 +748,12 @@ export function createBuildBrowserController(
       await Promise.all(sessions.map(({ id }) => close(id)));
     },
 
+    async reconcileCleanup() {
+      const sessions = await database.client<Array<{ id: string }>>`
+        SELECT id FROM factory.build_browser_session WHERE state = 'closing'`;
+      await Promise.all(sessions.map(({ id }) => close(id)));
+    },
+
     async recover(attemptID?: string) {
       const sessions = await database.client<Array<{ id: string }>>`
         SELECT id FROM factory.build_browser_session WHERE state <> 'closed'

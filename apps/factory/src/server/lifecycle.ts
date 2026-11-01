@@ -5,6 +5,7 @@ type LifecycleServices = Pick<
   FactoryApplication,
   | "agentController"
   | "attachmentStore"
+  | "buildBrowserController"
   | "developerIDEEdge"
   | "deliveryController"
   | "environmentController"
@@ -32,6 +33,7 @@ export function startFactoryLifecycle(application: LifecycleServices) {
   const {
     agentController,
     attachmentStore,
+    buildBrowserController,
     developerIDEEdge,
     deliveryController,
     environmentController,
@@ -95,6 +97,12 @@ export function startFactoryLifecycle(application: LifecycleServices) {
     "Retained Stop settlement is unavailable",
     async () => agentController?.recoverRetainedStops(),
     2_000,
+  );
+  jobs.every(
+    "Browser cleanup observation is unavailable",
+    () => buildBrowserController.reconcileCleanup(),
+    2_000,
+    true,
   );
   jobs.every(
     "Wiki reconciliation failed",

@@ -130,6 +130,7 @@ test("browser create intent is immutable, deterministic and persisted before exa
       1,
     );
     expect(result.content[0]).toEqual({ type: "text", text: "Declared App inspection" });
+    await browser.reconcileCleanup();
     expect(scope.frames).toHaveLength(1);
     const [state] = await owned.database.client<Array<{ state: string; confirmed: boolean }>>`
       SELECT state, create_confirmed_at IS NOT NULL AS confirmed
@@ -291,28 +292,32 @@ test.each([
           "facade",
         ),
       ).not.toBeNull();
-      const response = await scope.endpoint(
-        new Request("http://factory.test/internal/browser", {
-          method: "POST",
-          headers: {
-            authorization: `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
-            "content-type": "application/json",
-          },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: "explicit-reopen",
-            method: "tools/call",
-            params: { name: "browser_open", arguments: { app: "app" } },
+      const openFresh = () =>
+        scope.endpoint(
+          new Request("http://factory.test/internal/browser", {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${runtimeBuildBrowserToken("owned-browser-fixture-secret", scope.owned.attemptID, 1)}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: "explicit-reopen",
+              method: "tools/call",
+              params: { name: "browser_open", arguments: { app: "app" } },
+            }),
           }),
-        }),
-        { attemptID: scope.owned.attemptID, turnID: scope.turn.id },
-      );
+          { attemptID: scope.owned.attemptID, turnID: scope.turn.id },
+        );
+      let response = await openFresh();
       if (lostCleanup) {
         expect(response.status).toBe(403);
-        expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(
-          disconnected || timedOut ? 2 : 1,
-        );
-        return;
+        const calls = scope.frames.filter((frame) => frame.action === "browser-call").length;
+        expect(calls).toBe(disconnected || timedOut ? 2 : 1);
+        await Promise.all([scope.browser.reconcileCleanup(), scope.browser.reconcileCleanup()]);
+        expect(scope.frames.filter((frame) => frame.action === "browser-call")).toHaveLength(calls);
+        expect(scope.frames.filter((frame) => frame.action === "browser-close")).toHaveLength(1);
+        response = await openFresh();
       }
       expect(response.status).toBe(200);
       const result = await response.json();
