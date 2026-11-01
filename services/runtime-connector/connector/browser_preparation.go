@@ -6,6 +6,8 @@ import (
 	"sync"
 )
 
+var errBrowserImageStorageExhausted = errors.New("Browser tools could not prepare the approved image: Sandbox storage is exhausted; release unused compute or retired storage before retrying this work")
+
 // One exact assigned image is prepared in this Workspace's private daemon.
 // It is not editor readiness and does not create a browser execution session.
 type browserImagePreparation struct {
@@ -60,6 +62,11 @@ func (preparation *browserImagePreparation) ready(turnID string) error {
 	select {
 	case <-preparation.done:
 		if preparation.err != nil {
+			// Only the classified local sentinel may cross this boundary.
+			// Arbitrary Registry output remains private even if it resembles it.
+			if errors.Is(preparation.err, errBrowserImageStorageExhausted) {
+				return errBrowserImageStorageExhausted
+			}
 			return errors.New("Browser tools could not prepare the approved image; check Registry availability and approved access before retrying this work")
 		}
 		return nil

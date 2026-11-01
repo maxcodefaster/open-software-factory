@@ -1063,6 +1063,10 @@ func ensureBrowserImage(parent context.Context, reference string) error {
 		if ctx.Err() != nil {
 			return errors.New("browser tools image startup was cancelled or exceeded 180 seconds")
 		}
+		failure := strings.ToLower(string(diagnostic.Bytes()))
+		if strings.Contains(failure, "no space left on device") || strings.Contains(failure, "disk quota exceeded") {
+			return errBrowserImageStorageExhausted
+		}
 		if !retryableImageDownload(string(diagnostic.Bytes())) {
 			return errors.New("browser tools image download failed; check registry connectivity and approved CA trust")
 		}

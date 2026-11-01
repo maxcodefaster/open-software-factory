@@ -92,6 +92,48 @@ func TestBrowserPreparationFailureAndStopRemainBounded(t *testing.T) {
 	}
 }
 
+func TestBrowserImageStorageFailureReachesInspectionWithoutRegistryOutput(t *testing.T) {
+	for _, diagnostic := range []string{
+		"failed to register layer: write /private/layer: no space left on device; private-registry-secret",
+		"disk quota exceeded after a connection reset; private-registry-secret",
+	} {
+		t.Run(diagnostic[:4], func(t *testing.T) {
+			directory := t.TempDir()
+			logPath := filepath.Join(directory, "commands")
+			script := `#!/bin/sh
+printf '%s\n' "$*" >> "$FACTORY_DOCKER_LOG"
+if [ "$1" = pull ]; then printf '%s\n' "$FACTORY_DOWNLOAD_FAILURE" >&2; fi
+exit 1
+`
+			if err := os.WriteFile(filepath.Join(directory, "docker"), []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("FACTORY_DOCKER_LOG", logPath)
+			t.Setenv("FACTORY_DOWNLOAD_FAILURE", diagnostic)
+			reference := "registry.factory/browser-tools@sha256:" + strings.Repeat("a", 64)
+			preparation := prepareBrowserImage(context.Background(), func(ctx context.Context) error {
+				return ensureBrowserImage(ctx, reference)
+			})
+			defer preparation.stop()
+			if err := preparation.ready("storage-failure-turn"); err == nil || !strings.Contains(err.Error(), "preparing") {
+				t.Fatal("cold image was not prepared before browser execution", err)
+			}
+			<-preparation.done
+			const expected = "Browser tools could not prepare the approved image: Sandbox storage is exhausted; release unused compute or retired storage before retrying this work"
+			for range 2 {
+				if err := preparation.ready("storage-failure-turn"); err == nil || err.Error() != expected {
+					t.Fatal("known native storage failure became an unrelated Registry diagnostic", err)
+				}
+			}
+			commands, err := os.ReadFile(logPath)
+			if err != nil || strings.Count(string(commands), "pull "+reference) != 1 {
+				t.Fatalf("permanent storage failure silently restarted acquisition: %s, %v", commands, err)
+			}
+		})
+	}
+}
+
 func TestStoppingUnusedBrowserPreparationCreatesNoWorker(t *testing.T) {
 	preparation := prepareBrowserImage(context.Background(), func(context.Context) error {
 		t.Error("Stop started an unused download")

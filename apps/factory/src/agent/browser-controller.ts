@@ -88,6 +88,7 @@ const safeBrowserFailures = new Set([
   "browser checkout modification state is unavailable",
   "browser screenshot publication was not confirmed",
   "Browser tools preparation was stopped",
+  "Browser tools could not prepare the approved image: Sandbox storage is exhausted; release unused compute or retired storage before retrying this work",
   "Browser tools could not prepare the approved image; check registry connectivity and CA trust, then restart the Workspace",
   "Browser tools could not prepare the approved image; check Registry availability and approved access before retrying this work",
   "Browser observation does not match this execution scope",
