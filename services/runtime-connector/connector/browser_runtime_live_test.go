@@ -153,8 +153,15 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Helper()
 		scope.ExpiresAt = time.Now().Add(25 * time.Second)
 		scope.Call = browserToolCall{Name: name, Arguments: json.RawMessage(arguments)}
+		started := time.Now()
 		output, err := manager.call(connection, scope)
+		t.Logf("%s completed in %s", name, time.Since(started))
 		if err != nil {
+			browser, _ := browserRuntimeNames(scope.SessionID)
+			probe, end := context.WithTimeout(context.Background(), 5*time.Second)
+			defer end()
+			events, _ := manager.docker(probe, "exec", browser, "cat", "/sys/fs/cgroup/memory.events")
+			t.Logf("owned browser memory events: %s", events)
 			t.Fatal(name, err)
 		}
 		var result browserMCPContent
@@ -202,6 +209,15 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 		t.Fatal("actual pinned recording start", err, diagnostic, string(raw))
 	}
 	captureStarted := time.Now()
+	call("browser_fill", fmt.Sprintf(`{"uid":%q,"value":"Owned recorded input"}`, input[1]))
+	filled := call("browser_snapshot", `{}`)
+	if !strings.Contains(filled.Content[0].Text, `value="Owned recorded input"`) {
+		t.Fatal("recorded fill did not retain the input value", filled.Content[0].Text)
+	}
+	input = regexp.MustCompile(`uid=([0-9]+_[0-9]+) textbox "Keyboard target"`).FindStringSubmatch(filled.Content[0].Text)
+	if len(input) != 2 {
+		t.Fatal("filled input identity unavailable", filled.Content[0].Text)
+	}
 	call("browser_click", fmt.Sprintf(`{"uid":%q}`, input[1]))
 	call("browser_press_key", `{"key":"Tab"}`)
 	focused := call("browser_snapshot", `{}`)
@@ -212,6 +228,8 @@ func TestBrowserRuntimeManagerFixture(t *testing.T) {
 	call("browser_wait", `{"text":"Keyboard activated"}`)
 	call("browser_resize", `{"width":390,"height":720}`)
 	call("browser_wait", `{"text":"Viewport 390x720"}`)
+	call("browser_press_key", `{"key":"Tab"}`)
+	call("browser_snapshot", `{}`)
 	mobile := call("browser_screenshot", `{}`)
 	if mobile.StructuredContent == nil || mobile.StructuredContent.RecordingTimeMS == nil {
 		t.Fatal("actual encoder position is unavailable for scenario chapters")
@@ -443,9 +461,12 @@ func TestBrowserRuntimeManagerLive(t *testing.T) {
 	defer cancel()
 	docker := func(args ...string) string {
 		t.Helper()
-		output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+		output, err := exec.CommandContext(ctx, "docker", args...).Output()
 		if err != nil {
-			t.Fatalf("Docker %s failed: %v: %s", args[0], err, output)
+			if exited, ok := err.(*exec.ExitError); ok {
+				t.Fatalf("Docker %s failed: %v: %s", args[0], err, exited.Stderr)
+			}
+			t.Fatalf("Docker %s failed: %v", args[0], err)
 		}
 		return strings.TrimSpace(string(output))
 	}
