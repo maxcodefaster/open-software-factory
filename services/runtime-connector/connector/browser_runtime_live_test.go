@@ -36,8 +36,11 @@ func TestBrowserRuntimeAppFixture(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "text/html")
+		// Form editors can retain substantial client state after the first
+		// input. Keep this bounded state in the browser while recording, so a
+		// tiny static page cannot hide renderer/encoder memory starvation.
 		fmt.Fprint(w, `<!doctype html><title>Exact primary App</title><h1>Only primary loopback</h1><p>Factory browser manager proof</p>
-<label>Keyboard target<input></label><button onclick="document.querySelector('#result').textContent='Keyboard activated'">Apply</button>
+<label>Keyboard target<input oninput="if(!globalThis.factoryOwnedInputState){globalThis.factoryOwnedInputState=new Uint8Array(256*1024*1024);globalThis.factoryOwnedInputState.fill(41)}"></label><button onclick="document.querySelector('#result').textContent='Keyboard activated'">Apply</button>
 <p id="result">Ready</p><p id="viewport"></p><script>
 function size(){document.querySelector('#viewport').textContent='Viewport '+innerWidth+'x'+innerHeight}
 addEventListener('resize',size);size();console.log('primary App inspected')</script>`)

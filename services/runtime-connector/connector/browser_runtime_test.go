@@ -317,6 +317,10 @@ func browserIsolationFixture(t *testing.T, manager *browserRuntimeManager, direc
 	if proxy {
 		network = "container:" + manager.primaryID
 	}
+	memory := int64(1408 << 20)
+	if proxy {
+		memory = 128 << 20
+	}
 	if !strings.Contains(strings.Join(arguments, " "), "--network "+network) {
 		t.Fatal("create command lost network boundary")
 	}
@@ -326,7 +330,7 @@ func browserIsolationFixture(t *testing.T, manager *browserRuntimeManager, direc
 		"HostConfig": map[string]any{"NetworkMode": network, "ReadonlyRootfs": true,
 			"CapDrop": []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges=true"},
 			"Tmpfs":  map[string]string{"/tmp": "rw,nosuid,nodev,size=256m,mode=1777"},
-			"Memory": 768 << 20, "NanoCpus": 1_000_000_000, "PidsLimit": 256},
+			"Memory": memory, "NanoCpus": 1_000_000_000, "PidsLimit": 256},
 		"Mounts": []map[string]any{
 			{"Type": "bind", "Source": filepath.Join(directory, "socket"), "Destination": "/factory/browser", "RW": proxy},
 			{"Type": "bind", "Source": filepath.Join(directory, "config"), "Destination": "/factory/browser/config", "RW": false},
@@ -356,6 +360,8 @@ func TestBrowserRuntimeRecoveredIsolation(t *testing.T) {
 			func(c *inspectedContainer) { c.HostConfig.CapAdd = []string{"SYS_ADMIN"} },
 			func(c *inspectedContainer) { c.HostConfig.SecurityOpt = []string{"seccomp=unconfined"} },
 			func(c *inspectedContainer) { c.HostConfig.Memory = 0 },
+			func(c *inspectedContainer) { c.HostConfig.Memory = 768 << 20 },
+			func(c *inspectedContainer) { c.HostConfig.Memory += 1 << 20 },
 			func(c *inspectedContainer) { c.Mounts[1].RW = true },
 			func(c *inspectedContainer) { c.Mounts[0].Source = "/checkout" },
 		} {

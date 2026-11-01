@@ -202,6 +202,16 @@ func (runtime *browserRuntime) renewAuthority(scope browserRuntimeRequest, renew
 	return writeBrowserAuthority(runtime.directory, scope)
 }
 
+// Keep the pair's original 1536 MiB ceiling, but leave Chromium, MCP and the
+// recorder enough memory for interactive Apps. The streaming Go proxy does not
+// need half of that budget.
+func browserContainerMemory(proxy bool) int64 {
+	if proxy {
+		return 128 << 20
+	}
+	return 1408 << 20
+}
+
 func browserCreateArguments(assignment Assignment, primaryID, directory string, scope browserRuntimeRequest, proxy bool) ([]string, error) {
 	if !browserImagePattern.MatchString(assignment.BrowserToolsImage) || !browserContainerPattern.MatchString(primaryID) ||
 		!filepath.IsAbs(directory) || filepath.Clean(directory) != directory {
@@ -220,7 +230,8 @@ func browserCreateArguments(assignment Assignment, primaryID, directory string, 
 		"--label", "factory.dev/browser-owner=" + scope.OwnerID,
 		"--label", "com.docker.compose.project=" + assignment.ComposeProjectName,
 		"--network", network, "--user", "1000:1000", "--read-only", "--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", "768m", "--cpus", "1",
+		"--security-opt", "no-new-privileges", "--pids-limit", "256",
+		"--memory", strconv.FormatInt(browserContainerMemory(proxy)>>20, 10) + "m", "--cpus", "1",
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=256m,mode=1777",
 		"--mount", "type=bind,src=" + filepath.Join(directory, "socket") + ",dst=/factory/browser" + mount,
 		"--mount", "type=bind,src=" + filepath.Join(directory, "config") + ",dst=/factory/browser/config,readonly",
@@ -266,7 +277,7 @@ func validateBrowserIsolation(container inspectedContainer, assignment Assignmen
 		len(host.CapAdd) != 0 || len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" ||
 		len(host.Devices) != 0 || len(host.VolumesFrom) != 0 || len(host.SecurityOpt) != 1 ||
 		(host.SecurityOpt[0] != "no-new-privileges" && host.SecurityOpt[0] != "no-new-privileges=true") ||
-		host.Memory != 768<<20 || host.NanoCpus != 1_000_000_000 || host.PidsLimit != 256 ||
+		host.Memory != browserContainerMemory(proxy) || host.NanoCpus != 1_000_000_000 || host.PidsLimit != 256 ||
 		len(host.Tmpfs) != 1 || host.Tmpfs["/tmp"] != "rw,nosuid,nodev,size=256m,mode=1777" || len(container.Mounts) != 2 {
 		return denied
 	}
