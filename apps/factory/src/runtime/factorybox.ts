@@ -6,6 +6,7 @@ import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   retiredFactoryboxExportOwner,
   retireFactoryboxExports,
+  retireImportedFactoryboxExports,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-export-retention";
 import {
   type FactoryboxBackingRequest,
@@ -582,6 +583,23 @@ export function createFactoryboxExecution(
     reclaimStorage() {
       if (reclaiming) return reclaiming;
       reclaiming = (async () => {
+        const [current] = await database.client<Array<{ id: string }>>`
+          SELECT saved.runtime_attempt_id AS id FROM factory.factorybox_runtime saved
+          JOIN factory.runtime_attempt attempt ON attempt.id=saved.runtime_attempt_id
+          JOIN factory.factorybox_worker_admission admission ON admission.id=attempt.factorybox_admission_id
+          WHERE admission.retired_at IS NULL AND saved.identity IS NOT NULL
+          ORDER BY saved.runtime_attempt_id LIMIT 1`;
+        if (current) {
+          try {
+            await locked(current.id, async (connection) => {
+              const saved = await retained(connection, current.id);
+              if (saved?.identity)
+                await retireImportedFactoryboxExports(saved.request, saved.identity, run);
+            });
+          } catch {
+            console.error("Factorybox imported export retirement needs observation");
+          }
+        }
         const attempts = await database.client<
           Array<{ id: string }>
         >`SELECT DISTINCT runtime_attempt_id AS id FROM factory.factorybox_lifecycle_operation
@@ -874,7 +892,18 @@ export function createFactoryboxExecution(
             prepared = {
               bundle: `/var/lib/sysbox/fixed-store/data/store/input/${request.sandboxID}/bundle`,
             };
-          } else prepared = await preparation(connection, attemptID, saved);
+          } else {
+            try {
+              prepared = await preparation(connection, attemptID, saved);
+            } catch (cause) {
+              if (!(cause instanceof FactoryboxCapacityRefusedError)) throw cause;
+              const reclaimed = await retireImportedFactoryboxExports(request, identity, run);
+              if (!reclaimed.retired.some((archive) => !archive.alreadyCompleted)) throw cause;
+              // Only an unattempted capacity refusal reaches here. Admission
+              // checks real space again before the same preparation can dispatch.
+              prepared = await preparation(connection, attemptID, saved);
+            }
+          }
           await perform(
             connection,
             attemptID,

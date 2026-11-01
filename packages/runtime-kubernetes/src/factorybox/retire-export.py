@@ -8,6 +8,7 @@ import re
 import stat
 import subprocess
 import sys
+import time
 
 
 def directory(path):
@@ -132,6 +133,124 @@ def retire_one(root, owner, image):
         return {'image': image, 'bytes': saved['file']['bytes'], 'alreadyCompleted': False}
 
 
+def imported_base_identity(base, source, saved, base_id, status):
+    if type(base) is not dict:
+        raise ValueError('Consumer has no native base record')
+    tree = base.get('tree', {})
+    if type(tree) is not dict or type(tree.get('immutable')) is not dict:
+        raise ValueError('Consumer native base has no immutable tree')
+    if (base.get('version') != 1 or base.get('id') != base_id or
+            base.get('source') != str(source) or base.get('boot_id') != status.get('boot_id') or
+            base.get('runtime_sha256') != status['lifecycle'].get('runtime_sha256') or
+            not base.get('prepared_at') or tree.get('source') != str(source) or
+            tree.get('saved') != str(saved) or tree.get('immutable', {}).get('root') != str(saved) or
+            not re.fullmatch('[a-f0-9]{64}', tree.get('sha256', ''))):
+        raise ValueError('Consumer has no exact independent native base')
+    identity = {key: base[key] for key in
+                ['version', 'id', 'source', 'boot_id', 'runtime_sha256', 'prepared_at']}
+    identity['tree'] = {'saved': str(saved), 'sha256': tree['sha256']}
+    return identity
+
+
+def retire_imported_exports(root, request, status, environment=None):
+    deadline = time.monotonic() + 420
+    environment = os.environ if environment is None else environment
+    fields = {'version', 'storeID', 'epoch', 'podUID', 'admissionID'}
+    namespace = environment.get('FACTORY_SEED_NAMESPACE', '')
+    if (type(request) is not dict or set(request) != fields or
+            type(request['version']) is not int or request['version'] != 1 or
+            any(not isinstance(request[key], str) or not re.fullmatch('[a-f0-9]{32}', request[key])
+                for key in ['storeID', 'epoch', 'admissionID']) or
+            not isinstance(request['podUID'], str) or not request['podUID'] or
+            len(request['podUID']) > 128 or
+            status.get('store_id') != request['storeID'] or status.get('epoch') != request['epoch'] or
+            environment.get('FACTORY_STORE_ID') != request['storeID'] or
+            environment.get('FACTORY_POD_UID') != request['podUID'] or
+            (namespace != request['admissionID'] if namespace else
+             request['admissionID'] != request['storeID'])):
+        raise ValueError('Imported export retirement differs from its current worker')
+    directory(root)
+    home = root/'consumer-seeds'
+    result = {'version': 1, 'retired': [], 'refused': [], 'missing': []}
+    if not present(home):
+        return result
+    directory(home)
+    if namespace:
+        home = home/namespace
+        if not present(home):
+            return result
+        directory(home)
+    owner = {key: request[key] for key in ['admissionID', 'podUID', 'epoch', 'storeID']}
+    for seed in home.iterdir():
+        if not re.fullmatch('[a-f0-9]{64}', seed.name):
+            continue
+        try:
+            directory(seed)
+            descriptor = os.open(seed/'.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, 'r+') as lock:
+                regular(seed/'.lock')
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                plan = json.loads(read(seed/'intent.json'))
+                if type(plan) is not dict:
+                    raise ValueError('Consumer export intent is not an object')
+                image = plan.get('image', '')
+                if (set(plan) != {'version', 'storeID', 'epoch', 'podUID', 'image', 'exporterName'} or
+                        plan['version'] != 1 or any(plan[key] != request[key]
+                            for key in ['storeID', 'epoch', 'podUID']) or
+                        not re.fullmatch(r'[a-zA-Z0-9.:/-]+@sha256:[a-f0-9]{64}', image) or
+                        hashlib.sha256(image.encode()).hexdigest() != seed.name):
+                    raise ValueError('Consumer export belongs to another worker or image')
+                name_key = hashlib.sha256((namespace+':'+image).encode()).hexdigest() if namespace else seed.name
+                complete = json.loads(read(seed/'complete.json'))
+                checksum = read(seed/'rootfs.sha256', 256).split()
+                if (type(complete) is not dict or plan['exporterName'] != 'consumer-'+name_key[:48] or
+                        complete.get('intent') != plan or not complete.get('exporterUID') or
+                        read(seed/'exporter-uid') != complete['exporterUID'] or
+                        len(checksum) != 2 or checksum[1] != 'rootfs.tar' or
+                        not re.fullmatch('[a-f0-9]{64}', checksum[0]) or
+                        complete.get('rootfsSHA256') != checksum[0]):
+                    raise ValueError('Consumer has no exact successful export')
+                imported = seed/'import'
+                directory(imported)
+                expected = {'version': 1, 'storeID': request['storeID'], 'epoch': request['epoch'],
+                            'podUID': request['podUID'], 'runtimeHostImage': image,
+                            'rootfsSHA256': checksum[0]}
+                if json.loads(read(imported/'prepared.json')) != expected or present(imported/'source'):
+                    raise ValueError('Consumer import is partial or has a source successor')
+                base_id = 'runtime-'+seed.name[:55]
+                base_root = Path(status['lifecycle']['root'])/'bases'/base_id
+                directory(base_root)
+                source, saved = imported/'source', base_root/'rootfs'
+                identity = imported_base_identity(
+                    json.loads(read(base_root/'base.json')), source, saved, base_id, status)
+                if json.loads(read(imported/'source-retired.json')) != {'version': 1, 'base': identity}:
+                    raise ValueError('Consumer import retirement differs from its native base')
+                authority = {'version': 1, 'import': expected, 'base': identity}
+                authority_path = seed/'import-archive-authority.json'
+                if present(authority_path) and json.loads(read(authority_path)) != authority:
+                    raise ValueError('Imported archive authority changed')
+                if not present(seed/'archive-retired.json'):
+                    # The complete native base must already exist. Replaying its
+                    # exact PrepareBase only verifies that independent copy; the
+                    # original extraction is absent and cannot recreate it.
+                    cli = ['/opt/factorybox/factorybox', '--worker-run-root', '/run/factorybox',
+                           '--worker-store-id', request['storeID'], '--worker-epoch', request['epoch']]
+                    observed = json.loads(subprocess.check_output(
+                        [*cli, 'prepare-base', '--source', str(source), base_id],
+                        timeout=max(0.001, deadline-time.monotonic())))
+                    if imported_base_identity(observed, source, saved, base_id, status) != identity:
+                        raise ValueError('Independent native consumer copy changed')
+                    if not present(authority_path):
+                        publish(authority_path, authority)
+                elif not present(authority_path):
+                    raise ValueError('Imported archive completion lost its native authority')
+                result['retired'].append(retire_one(seed, owner, image))
+        except (ValueError, OSError, json.JSONDecodeError,
+                subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            result['refused'].append(seed.name)
+    return result
+
+
 def retire_exports(root, request, status, environment=None):
     environment = os.environ if environment is None else environment
     if type(request) is not dict or set(request) != {'version', 'storeID', 'epoch', 'podUID', 'admissionID', 'previous'}:
@@ -228,4 +347,7 @@ if __name__ == '__main__':
     if os.geteuid() != 0:
         raise ValueError('Export retirement requires the admitted root worker')
     current = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
-    print(json.dumps(retire_exports(Path('/var/lib/sysbox'), json.load(sys.stdin), current)))
+    operation = retire_imported_exports if sys.argv[1:] == ['imported'] else retire_exports
+    if sys.argv[1:] not in [[], ['imported']]:
+        raise ValueError('Unknown export retirement operation')
+    print(json.dumps(operation(Path('/var/lib/sysbox'), json.load(sys.stdin), current)))

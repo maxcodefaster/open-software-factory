@@ -28,6 +28,58 @@ export const retiredFactoryboxExportOwner = z.strictObject({
 });
 export type RetiredFactoryboxExportOwner = z.infer<typeof retiredFactoryboxExportOwner>;
 
+const exportRetirementOutcome = z.object({
+  version: z.literal(1),
+  retired: z.array(
+    z.object({
+      image: factoryboxRuntimeImage,
+      bytes: z.number().int().nonnegative().safe(),
+      alreadyCompleted: z.boolean(),
+    }),
+  ),
+  refused: z.array(z.string()),
+  missing: z.array(z.string()),
+});
+
+export async function retireImportedFactoryboxExports(
+  input: FactoryboxRuntimeInput,
+  identity: FactoryboxWorkerIdentity,
+  run: typeof runCommand,
+) {
+  await inspectFactoryboxWorker(
+    factoryboxRuntimeRequest(input),
+    identity,
+    run,
+    factoryboxRuntimeDeclaration(input),
+  );
+  const result = await run(
+    [
+      "exec",
+      "-i",
+      input.podName,
+      "-n",
+      input.namespace,
+      "-c",
+      "worker",
+      "--",
+      "python3",
+      "-c",
+      factoryboxExportRetirementProgram,
+      "imported",
+    ],
+    JSON.stringify({
+      version: 1,
+      storeID: identity.storeID,
+      epoch: identity.epoch,
+      podUID: identity.podUID,
+      admissionID: factoryboxAdmissionID(input.workerID, input.podName).replaceAll("-", ""),
+    }),
+  );
+  if (result.exitCode !== 0)
+    throw new Error("Imported export cache needs observation; original receipts remain retained");
+  return exportRetirementOutcome.parse(JSON.parse(result.stdout));
+}
+
 export function factoryboxExportRetirementRequest(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
@@ -88,20 +140,7 @@ export async function retireFactoryboxExports(
     );
     if (result.exitCode !== 0)
       throw new Error("Retired export cache needs observation; original receipts remain retained");
-    const observed = z
-      .object({
-        version: z.literal(1),
-        retired: z.array(
-          z.object({
-            image: factoryboxRuntimeImage,
-            bytes: z.number().int().nonnegative().safe(),
-            alreadyCompleted: z.boolean(),
-          }),
-        ),
-        refused: z.array(z.string()),
-        missing: z.array(z.string()),
-      })
-      .parse(JSON.parse(result.stdout));
+    const observed = exportRetirementOutcome.parse(JSON.parse(result.stdout));
     if (observed.refused.length)
       console.error("Retired export cache preserved unconfirmed payloads", owner.admissionID);
   }

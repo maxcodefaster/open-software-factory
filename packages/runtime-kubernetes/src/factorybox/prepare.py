@@ -200,6 +200,68 @@ def consumer_base_id(request):
     return 'runtime-'+hashlib.sha256(request['runtimeHostImage'].encode()).hexdigest()[:55]
 
 
+def archive_receipt(path):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+            stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or info.st_size > 65536):
+        raise ValueError('Consumer archive receipt identity changed')
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor) as stream:
+        return json.load(stream)
+
+
+def consumer_archive_checksum(request, seed):
+    expected = (seed/'rootfs.sha256').read_text().split()
+    if (len(expected) != 2 or expected[1] != 'rootfs.tar' or
+            not re.fullmatch('[a-f0-9]{64}', expected[0])):
+        raise ValueError('Consumer archive checksum is not committed')
+    completed = seed/'archive-retired.json'
+    if not completed.exists() and not completed.is_symlink():
+        if digest(seed/'rootfs.tar') != expected[0]:
+            raise ValueError('Complete consumer rootfs differs from its committed export')
+        return expected[0]
+    retirement = archive_receipt(seed/'archive-retirement.json')
+    if type(retirement) is not dict:
+        raise ValueError('Consumer archive retirement is not an object')
+    if archive_receipt(completed) != {'version': 1, 'retirement': retirement}:
+        raise ValueError('Consumer archive retirement has no exact completion')
+    info = seed.lstat()
+    namespace = os.environ.get('FACTORY_SEED_NAMESPACE', '')
+    owner = {'admissionID': namespace or request['storeID'],
+             **{key: request[key] for key in ['podUID', 'storeID', 'epoch']}}
+    binding = {'version': 1, 'owner': owner, 'image': request['runtimeHostImage'],
+               'sha256': expected[0], 'directory': {'device': info.st_dev, 'inode': info.st_ino}}
+    if (set(retirement) != {'binding', 'file'} or retirement['binding'] != binding or
+            type(retirement['file']) is not dict or set(retirement['file']) !=
+            {'device', 'inode', 'bytes', 'mtimeNS', 'ctimeNS'} or
+            any(type(value) is not int for value in retirement['file'].values()) or
+            not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()):
+        raise ValueError('Consumer archive retirement belongs to another worker or directory')
+    imported = seed/'import'
+    if imported.is_symlink() or imported.resolve() != imported:
+        raise ValueError('Consumer import directory changed')
+    plan = {'version': 1, **{key: request[key] for key in
+            ['storeID', 'epoch', 'podUID', 'runtimeHostImage']}, 'rootfsSHA256': expected[0]}
+    authority = archive_receipt(seed/'import-archive-authority.json')
+    retired_source = archive_receipt(imported/'source-retired.json')
+    if type(authority) is not dict or type(authority.get('base')) is not dict:
+        raise ValueError('Consumer archive has no native import authority')
+    base = authority.get('base', {})
+    if (set(authority) != {'version', 'import', 'base'} or authority['version'] != 1 or
+            authority['import'] != plan or archive_receipt(imported/'prepared.json') != plan or
+            retired_source != {'version': 1, 'base': base} or
+            base.get('version') != 1 or base.get('id') != consumer_base_id(request) or
+            base.get('source') != str(imported/'source') or not base.get('prepared_at') or
+            not re.fullmatch('[a-f0-9]{64}', base.get('tree', {}).get('sha256', ''))):
+        raise ValueError('Consumer archive has no exact completed native import')
+    if (seed/'rootfs.tar').exists() or (seed/'rootfs.tar').is_symlink() or (
+            imported/'source').exists() or (imported/'source').is_symlink():
+        raise ValueError('Retired consumer payload has an unexpected successor')
+    # Fresh inputs still invoke native PrepareBase below. Missing or changed
+    # native backing cannot be recreated from this retired transport.
+    return expected[0]
+
+
 def retire_image_source(root, base, status, base_id='factory-runtime'):
     source = root/'source'
     saved = str(Path(status['lifecycle']['root'])/'bases'/base_id/'rootfs')
@@ -349,10 +411,8 @@ def prepare(request):
     seed = consumer_seed(request)
     if (seed/'intent').read_text().splitlines() != [request['podUID'], request['storeID'], request['runtimeHostImage']]:
         raise ValueError('Consumer export belongs to another Pod or image')
-    expected = (seed/'rootfs.sha256').read_text().split()
-    if len(expected) != 2 or expected[1] != 'rootfs.tar' or digest(seed/'rootfs.tar') != expected[0]:
-        raise ValueError('Complete consumer rootfs differs from its committed export')
-    plan = preparation_plan(request, expected[0], source)
+    rootfs_sha256 = consumer_archive_checksum(request, seed)
+    plan = preparation_plan(request, rootfs_sha256, source)
     if root.exists():
         if json.loads((root/'intent.json').read_text()) != plan:
             raise ValueError('Private input already belongs to another preparation')
@@ -363,7 +423,7 @@ def prepare(request):
     # Native base admission can be busy while another Sandbox resumes or
     # retires a checkpoint. Do not publish a partial private input before the
     # shared immutable base is available. Existing partial inputs stay guarded.
-    base = image_base(request, status, seed, expected[0], cli)
+    base = image_base(request, status, seed, rootfs_sha256, cli)
     root.parent.mkdir(mode=0o700, exist_ok=True)
     root.mkdir(mode=0o700)
     publish(root/'intent.json', plan)
@@ -433,7 +493,7 @@ def prepare(request):
     if set(mounts) != {str(bundle/name) for name in ['rootfs', 'lower']}:
         raise ValueError('Prepared input mount pair is incomplete')
     publish(root/'mounts.json', mounts)
-    completed = {'version': 3, 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': expected[0],
+    completed = {'version': 3, 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': rootfs_sha256,
                  'storeID': request['storeID'], 'epoch': request['epoch'], 'podUID': request['podUID']}
     publish(root/'prepared.json', completed)
     return completed

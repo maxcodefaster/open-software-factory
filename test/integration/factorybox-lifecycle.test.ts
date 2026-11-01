@@ -21,6 +21,7 @@ test.each([
   ["arm64", false, false, "preparation-capacity"],
   ["amd64", false, false, "preparation-capacity"],
   ["arm64", false, false, "preparation-capacity-late"],
+  ["arm64", false, false, "preparation-capacity-reclaimed"],
   ["amd64", false, false, "none"],
   ["arm64", true, false, "none"],
   ["amd64", true, false, "none"],
@@ -204,6 +205,7 @@ test.each([
       let preparationCapacityRefused = deleteContinuation.startsWith("preparation-capacity");
       let startCapacityRefused = deleteContinuation === "start-capacity-recovery";
       let pauseCapacityRefused = false;
+      let archiveReclaims = 0;
       let capacityChecks = 0;
       let releases = 0;
       let cancellations = 0;
@@ -295,6 +297,23 @@ test.each([
                 min_free_bytes: 12 * 1024 ** 3,
                 write_reserve_bytes: 4 * 1024 ** 3,
               },
+            }),
+          };
+        }
+        if (args.at(-1) === "imported") {
+          archiveReclaims++;
+          const reclaimed = deleteContinuation === "preparation-capacity-reclaimed";
+          if (reclaimed) preparationCapacityRefused = false;
+          return {
+            exitCode: 0,
+            stderr: "",
+            stdout: JSON.stringify({
+              version: 1,
+              retired: reclaimed
+                ? [{ image: input.runtimeHostImage, bytes: 1024, alreadyCompleted: false }]
+                : [],
+              refused: [],
+              missing: [],
             }),
           };
         }
@@ -531,6 +550,16 @@ test.each([
       };
       const hub = new RuntimeHub(async () => {});
       const execution = createFactoryboxExecution(database, hub, run);
+      if (deleteContinuation === "preparation-capacity-reclaimed") {
+        await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
+          "unconfirmed",
+        );
+        await createFactoryboxExecution(database, hub, run).ensureStarted(owned.attemptID);
+        expect(archiveReclaims).toBe(1);
+        expect(preparations).toBe(1);
+        expect(mutations).toEqual(["start"]);
+        return;
+      }
       if (preparationCapacityRefused || startCapacityRefused) {
         const refusedPreparation = preparationCapacityRefused;
         const refusal = await execution

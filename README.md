@@ -97,6 +97,10 @@ Before preparing a successor's Sandbox, Factory retires completed image-export t
 owned by positively terminated predecessor admissions. It keeps their receipts and checks
 exact archive identity; active, partial and changed payloads are not deletion authority.
 This does not prune native bases, snapshots, Source or the bounded store.
+The current worker also retires a completed consumer transport after reverifying its independent
+native import. Later preparations reuse that verified base without the tar file. The storage
+sweep performs this automatically; Source, snapshots and native backing remain retained.
+See [consumer transport retirement](docs/adr/0035-retire-transport-archives-after-native-import.md).
 Fresh admissions check actual backing-filesystem availability before native allocation. The chart
 defaults to an 8 GiB minimum, 32 GiB maximum and 64 GiB claim. The pinned worker selects a fixed
 size in that range on the actual volume while preserving its native host floor and operating

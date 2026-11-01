@@ -405,6 +405,75 @@ class PreparationTests(unittest.TestCase):
                          "immutable": {"root": str(saved)}}}
         return root, source, saved, base, status
 
+    def test_compacted_export_reuse_requires_exact_import_and_retirement_receipts(self):
+        environment = patch.dict(os.environ, {'FACTORY_RUNTIME_IMAGE':
+                                             'registry.invalid/bootstrap@sha256:'+'1'*64})
+        environment.start()
+        self.addCleanup(environment.stop)
+        seed = self.root/'consumer-export'
+        seed.mkdir(mode=0o700)
+        imported = seed/'import'
+        imported.mkdir(mode=0o700)
+        content = b'complete imported image transport'
+        checksum = hashlib.sha256(content).hexdigest()
+        (seed/'rootfs.tar').write_bytes(content)
+        (seed/'rootfs.tar').chmod(0o600)
+        (seed/'rootfs.sha256').write_text(checksum+'  rootfs.tar\n')
+        (seed/'rootfs.sha256').chmod(0o600)
+        (seed/'intent').write_text('\n'.join(self.request[key] for key in
+                                           ['podUID', 'storeID', 'runtimeHostImage'])+'\n')
+        (seed/'intent').chmod(0o600)
+        module = self.module
+        self.assertEqual(module['consumer_archive_checksum'](self.request, seed), checksum)
+        import_plan = {'version': 1, **{key: self.request[key] for key in
+                       ['storeID', 'epoch', 'podUID', 'runtimeHostImage']},
+                       'rootfsSHA256': checksum}
+        base_id = 'runtime-'+hashlib.sha256(
+            self.request['runtimeHostImage'].encode()).hexdigest()[:55]
+        saved = self.root/'native-controller/bases'/base_id/'rootfs'
+        base = {'version': 1, 'id': base_id,
+                'source': str(imported/'source'),
+                'boot_id': 'owned-boot', 'runtime_sha256': 'd'*64,
+                'prepared_at': 'owned-import-time',
+                'tree': {'saved': str(saved), 'sha256': 'e'*64}}
+        authority = {'version': 1, 'import': import_plan, 'base': base}
+        for path, value in [(imported/'prepared.json', import_plan),
+                            (imported/'source-retired.json', {'version': 1, 'base': base})]:
+            path.write_text(json.dumps(value))
+            path.chmod(0o600)
+        retire = runpy.run_path(str(Path(sys.argv[1]).with_name('retire-export.py')),
+                               run_name='owned_archive_retirement')
+        owner = {'admissionID': self.request['storeID'], **{key: self.request[key]
+                 for key in ['storeID', 'epoch', 'podUID']}}
+        retire['retire_one'](seed, owner, self.request['runtimeHostImage'])
+        with self.assertRaises((ValueError, FileNotFoundError)):
+            module['consumer_archive_checksum'](self.request, seed)
+        proof = seed/'import-archive-authority.json'
+        proof.write_text(json.dumps(authority))
+        proof.chmod(0o600)
+        self.assertEqual(module['consumer_archive_checksum'](self.request, seed), checksum)
+        native = {**base, 'tree': {**base['tree'], 'source': base['source'],
+                                  'immutable': {'root': str(saved)}}}
+        status = {'boot_id': base['boot_id'],
+                  'lifecycle': {'root': str(self.root/'native-controller'),
+                                'runtime_sha256': base['runtime_sha256']}}
+        with patch('subprocess.check_output', return_value=json.dumps(native).encode()) as verify, \
+                patch('subprocess.run') as extract:
+            self.assertEqual(module['image_base'](
+                self.request, status, seed, checksum, ['native-cli']), native)
+            self.assertEqual(verify.call_count, 1)
+            extract.assert_not_called()
+        with self.assertRaises(ValueError):
+            module['consumer_archive_checksum']({**self.request, 'epoch': 'f'*32}, seed)
+        (imported/'source').mkdir()
+        with self.assertRaises(ValueError):
+            module['consumer_archive_checksum'](self.request, seed)
+        (imported/'source').rmdir()
+        (seed/'rootfs.tar').write_bytes(b'preserve successor')
+        with self.assertRaises(ValueError):
+            module['consumer_archive_checksum'](self.request, seed)
+        self.assertEqual((seed/'rootfs.tar').read_bytes(), b'preserve successor')
+
     def test_import_retirement_requires_the_exact_independent_native_base(self):
         root, source, saved, base, status = self.image_retirement_fixture()
         for field in ["version", "id", "source", "boot_id", "runtime_sha256", "prepared_at"]:

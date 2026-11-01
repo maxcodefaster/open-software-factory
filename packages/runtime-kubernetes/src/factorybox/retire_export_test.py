@@ -6,6 +6,7 @@ import runpy
 import tempfile
 import unittest
 import shutil
+from unittest.mock import patch
 
 
 class ExportRetirementTests(unittest.TestCase):
@@ -147,6 +148,99 @@ class ExportRetirementTests(unittest.TestCase):
         (self.bootstrap.parent/'archive-retirement.json').chmod(0o600)
         self.retire()
         self.assertTrue(self.bootstrap.exists())
+
+
+class ImportedExportRetirementTests(unittest.TestCase):
+    export = ExportRetirementTests.export
+
+    def setUp(self):
+        ExportRetirementTests.setUp(self)
+        self.active = self.export(self.root/'consumer-seeds'/('c'*32)/self.key,
+                                  pod='current-pod', consumer=True)
+        self.plan = {'version': 1, 'storeID': 'a'*32, 'epoch': 'b'*32,
+                     'podUID': 'current-pod', 'image': self.image,
+                     'exporterName': 'consumer-'+hashlib.sha256(
+                         ('c'*32+':'+self.image).encode()).hexdigest()[:48]}
+        self.write(self.active.parent/'intent.json', self.plan)
+        complete = json.loads((self.active.parent/'complete.json').read_text())
+        complete['intent'] = self.plan
+        self.write(self.active.parent/'complete.json', complete)
+        self.import_plan = {'version': 1, 'storeID': 'a'*32, 'epoch': 'b'*32,
+                            'podUID': 'current-pod', 'runtimeHostImage': self.image,
+                            'rootfsSHA256': hashlib.sha256(self.active.read_bytes()).hexdigest()}
+        imported = self.active.parent/'import'
+        imported.mkdir(mode=0o700)
+        self.write(imported/'prepared.json', self.import_plan)
+        self.status.update({'boot_id': 'owned-boot',
+                            'lifecycle': {'root': str(self.native/'controller'),
+                                          'runtime_sha256': 'e'*64}})
+        self.base_id = 'runtime-'+self.key[:55]
+        base_root = self.native/'controller/bases'/self.base_id
+        base_root.mkdir(mode=0o700, parents=True)
+        (base_root/'rootfs').mkdir(mode=0o700)
+        (base_root/'rootfs/retained-native-base').write_bytes(b'preserve base')
+        self.base = {'version': 1, 'id': self.base_id, 'source': str(imported/'source'),
+                     'boot_id': 'owned-boot', 'runtime_sha256': 'e'*64,
+                     'prepared_at': 'owned-import-time',
+                     'tree': {'source': str(imported/'source'), 'saved': str(base_root/'rootfs'),
+                              'sha256': 'f'*64, 'immutable': {'root': str(base_root/'rootfs')}}}
+        self.write(base_root/'base.json', self.base)
+        identity = {key: self.base[key] for key in
+                    ['version', 'id', 'source', 'boot_id', 'runtime_sha256', 'prepared_at']}
+        identity['tree'] = {'saved': str(base_root/'rootfs'), 'sha256': 'f'*64}
+        self.write(imported/'source-retired.json', {'version': 1, 'base': identity})
+        self.current_request = {key: self.request[key] for key in
+                                ['version', 'storeID', 'epoch', 'podUID', 'admissionID']}
+
+    def write(self, path, value):
+        path.write_text(json.dumps(value))
+        path.chmod(0o600)
+
+    def reclaim(self, native=None):
+        with patch('subprocess.check_output', return_value=json.dumps(
+                self.base if native is None else native).encode()) as observed:
+            result = self.module['retire_imported_exports'](
+                self.root, self.current_request, self.status, self.environment)
+        return result, observed.call_count
+
+    def test_imported_active_worker_archive_retires_only_after_native_reverification(self):
+        result, calls = self.reclaim()
+        self.assertEqual(len(result['retired']), 1)
+        self.assertEqual(calls, 1)
+        self.assertFalse(self.active.exists())
+        self.assertTrue(self.current.exists())
+        self.assertTrue(self.bootstrap.exists())
+        self.assertEqual((self.native/'retained-state').read_bytes(),
+                         b'preserve native snapshots and Source')
+        self.assertEqual((self.native/'controller/bases'/self.base_id/
+                          'rootfs/retained-native-base').read_bytes(), b'preserve base')
+        result, calls = self.reclaim()
+        self.assertEqual(len(result['retired']), 1)
+        self.assertTrue(result['retired'][0]['alreadyCompleted'])
+        self.assertEqual(calls, 0)
+
+    def test_missing_import_or_unconfirmed_native_copy_cannot_retire_archive(self):
+        result, _ = self.reclaim({**self.base, 'prepared_at': ''})
+        self.assertEqual(result['retired'], [])
+        self.assertTrue(self.active.exists())
+        (self.active.parent/'import/source-retired.json').unlink()
+        result, calls = self.reclaim()
+        self.assertEqual(result['retired'], [])
+        self.assertEqual(calls, 0)
+        self.assertTrue(self.active.exists())
+
+    def test_imported_archive_preserves_corruption_source_successors_and_wrong_epoch(self):
+        self.active.write_bytes(b'changed export')
+        result, _ = self.reclaim()
+        self.assertEqual(result['retired'], [])
+        self.assertTrue(self.active.exists())
+        (self.active.parent/'import/source').mkdir()
+        result, calls = self.reclaim()
+        self.assertEqual(result['retired'], [])
+        self.assertEqual(calls, 0)
+        self.current_request['epoch'] = 'f'*32
+        with self.assertRaises(ValueError):
+            self.reclaim()
 
 
 if __name__ == '__main__':
