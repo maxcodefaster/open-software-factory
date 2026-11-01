@@ -1057,10 +1057,20 @@ test("browser facade denies human origins, arbitrary MCP, raw URLs, oversized ch
     const catalogue = (await (await rpc("tools/list")).json()) as {
       result: { tools: Array<{ name: string }> };
     };
-    expect(catalogue.result.tools).toHaveLength(9);
-    expect(catalogue.result.tools.map(({ name }) => name)).toContain("browser_resize");
-    expect(catalogue.result.tools.map(({ name }) => name)).toContain("browser_press_key");
-    expect(catalogue.result.tools.map(({ name }) => name)).not.toContain("evaluate_script");
+    expect(catalogue.result.tools.map(({ name }) => name).sort()).toEqual(
+      [
+        "browser_open",
+        "browser_snapshot",
+        "browser_console",
+        "browser_screenshot",
+        "browser_http_observations",
+        "browser_click",
+        "browser_fill",
+        "browser_wait",
+        "browser_resize",
+        "browser_press_key",
+      ].sort(),
+    );
     const registered = (await (await rpc("resources/list")).json()) as { error: { code: number } };
     expect(registered.error.code).toBe(-32601);
     const arbitrary = (await (
