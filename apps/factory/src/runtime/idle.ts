@@ -49,7 +49,7 @@ export function createIdleCompute(
           const [current] = await sql<Array<{ state: string }>>`
             SELECT state FROM factory.runtime_attempt WHERE id=${attempt.id} FOR UPDATE`;
           if (current?.state !== "ready") return false;
-          const [work] = await sql<Array<{ active: boolean; submitted: boolean }>>`
+          const [work] = await sql<Array<{ active: boolean; releasable: boolean }>>`
             SELECT EXISTS(SELECT 1 FROM factory.agent_turn WHERE change_id=${attempt.changeID}
               AND state IN ('pending','dispatching','running','uncertain'))
               OR EXISTS(SELECT 1 FROM factory.change_agent_session WHERE change_id=${attempt.changeID}
@@ -61,18 +61,25 @@ export function createIdleCompute(
                 JOIN factory.change_writer writer ON writer.change_id=change.id
                 JOIN factory.agent_turn turn ON turn.id=session.active_turn_id AND turn.change_id=change.id
                 WHERE change.id=${attempt.changeID} AND change.runtime_attempt_id=${attempt.id}
-                  AND session.runtime_attempt_id=${attempt.id} AND session.state='committed'
-                  AND NOT session.stop_pending AND turn.state='completed'
+                  AND session.runtime_attempt_id=${attempt.id}
+                  AND NOT session.stop_pending
                   AND writer.state IN ('agent','unassigned')
                   AND change.state IN ('active','delivering','delivered')
-                  AND EXISTS(SELECT 1 FROM factory.change_commit_operation
-                    WHERE change_id=change.id AND state='succeeded')) AS submitted`;
+                  AND ((session.state='committed' AND turn.state='completed'
+                    AND EXISTS(SELECT 1 FROM factory.change_commit_operation
+                      WHERE change_id=change.id AND state='succeeded'))
+                    OR (session.state='failed' AND turn.state='failed'
+                      AND (writer.state='unassigned' OR writer.turn_id=turn.id)
+                      AND EXISTS(SELECT 1 FROM factory.change_agent_turn_intent intent
+                        WHERE intent.turn_id=turn.id AND intent.change_id=change.id
+                          AND intent.runtime_attempt_id=${attempt.id}
+                          AND intent.session_id=session.opencode_session_id)))) AS releasable`;
           if (work?.active || !hub.claimIdle(attempt.id, idleMS)) return false;
           claimed = true;
-          // Submitted Ticket execution has no unfinished Agent work to
-          // checkpoint. Source and native Sessions live outside its private
-          // backing; preserve those while releasing idle execution normally.
-          const mode = work?.submitted ? "stop" : "pause";
+          // Submitted work needs no checkpoint; a definite failure already
+          // requires fresh, fenced execution on explicit retry. Preserve their
+          // Source and native Sessions while releasing the private backing.
+          const mode = work?.releasable ? "stop" : "pause";
           await sql`UPDATE factory.runtime_attempt SET
             state=${mode === "stop" ? "stop-intended" : "pausing"}::factory.runtime_attempt_state,
             stop_intended_at=CASE WHEN ${mode === "stop"} THEN now() ELSE stop_intended_at END,

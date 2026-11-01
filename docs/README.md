@@ -338,6 +338,9 @@ Factory prepares the exact consumer image before native Start. After five minute
 use, eligible Personal or unsubmitted Development execution pauses. Continuing to use the editor
 resumes the same Attempt and Connector credentials. Submitted, settled Ticket execution instead
 records normal Stop and releases its private backing, retaining Source and native Sessions.
+Known failed Agent execution with the same exact Session/intent/runtime binding also stops after
+the idle grace, retaining unsubmitted Source. Its explicit retry already requires fresh execution;
+uncertain work, human writing and unrelated executions remain protected.
 Before fresh Verification, Factory releases that candidate's submitted Agent execution without
 waiting for the idle grace, then waits for confirmed cleanup before admitting the check Sandbox.
 Active work, human writing, open terminals and unconfirmed operations remain protected.

@@ -157,6 +157,73 @@ test("a lost idle Stop response retains intent without repeating dispatch or res
 });
 
 test.each([
+  "settled",
+  "human",
+  "unknown-session",
+  "active-use",
+  "pending",
+  "uncertain",
+  "unfinished",
+] as const)(
+  "known failed Coding releases only exact settled idle execution: %s",
+  async (condition) => {
+    const f = await setup();
+    try {
+      const admitted = await createChangeAdmission(f.database, buildModelID).admit(
+        f.changeID,
+        f.userID,
+        { kind: "change-prompt", commandId: crypto.randomUUID(), text: "Owned failed work" },
+      );
+      const turn = await f.turns.claimPending(admitted.turn.id);
+      if (!turn?.ownerToken) throw new Error("Owned failed turn was not claimed");
+      await f.writers.prepareAgent(f.changeID, turn.id);
+      await f.database.client`UPDATE factory.change_agent_turn_intent
+      SET runtime_attempt_id=${f.attemptID} WHERE turn_id=${turn.id}`;
+      await f.database.client`UPDATE factory.change_agent_session SET active_turn_id=${turn.id},
+      state='working' WHERE change_id=${f.changeID}`;
+      await f.turns.beginDispatch(turn.id, turn.ownerToken);
+      await f.turns.settle(
+        turn.id,
+        turn.ownerToken,
+        condition === "uncertain" ? "uncertain" : "failed",
+        "Owned request outcome",
+      );
+      await f.database.client`UPDATE factory.change_agent_session SET state='failed'
+      WHERE change_id=${f.changeID}`;
+      if (condition === "human")
+        await f.database.client`UPDATE factory.change_writer SET state='human',turn_id=NULL,
+        user_id=${f.userID},fence_required=false,fence_attempt_id=NULL WHERE change_id=${f.changeID}`;
+      if (condition === "unknown-session")
+        await f.database.client`UPDATE factory.change_agent_session SET active_turn_id=NULL
+        WHERE change_id=${f.changeID}`;
+      if (condition === "active-use") f.setActiveUse(true);
+      if (condition === "pending")
+        await createChangeAdmission(f.database, buildModelID).admit(f.changeID, f.userID, {
+          kind: "change-prompt",
+          commandId: crypto.randomUUID(),
+          text: "Owned next commission",
+        });
+      if (condition === "unfinished")
+        await f.database.client`INSERT INTO factory.change_commit_operation(
+        id,change_id,runtime_attempt_id,sequence,branch_name,expected_parent_sha,
+        commit_message,idempotency_key,state,created_by)
+        SELECT ${crypto.randomUUID()},change_id,runtime_attempt_id,2,branch_name,commit_sha,
+          'Owned unfinished submission',${crypto.randomUUID()},'commit-intended',created_by
+        FROM factory.change_commit_operation WHERE id=${f.initial.id}`;
+      const before = await f.retained();
+      await f.idle.sweep();
+      expect(f.paused).toEqual(
+        ["human", "unknown-session"].includes(condition) ? [f.attemptID] : [],
+      );
+      expect(f.stopped).toEqual(condition === "settled" ? [f.attemptID] : []);
+      expect(await f.retained()).toEqual(before);
+    } finally {
+      await f.close();
+    }
+  },
+);
+
+test.each([
   "human-writer",
   "unsubmitted",
   "unknown-source-runtime",

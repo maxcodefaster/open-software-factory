@@ -180,6 +180,9 @@ Eligible Personal or unsubmitted Development compute pauses after five minutes w
 Submitted, settled Ticket compute instead stops after the same idle period, retaining its Source,
 native Sessions and submitted result while releasing private execution storage. This never repeats
 implementation; a later commissioned operation prepares fresh compute.
+Known failed Agent execution also stops after the idle period when the failed Session and its intent
+identify that exact runtime. Its explicit retry already requires fresh, fenced compute; unsubmitted
+Source and native history remain retained. Uncertain work and human writing do not qualify.
 Fresh Verification releases its exact submitted Agent execution before starting a separate check
 environment, rather than holding both private environments through the idle grace. It waits for
 confirmed cleanup and preserves Source, native Sessions, writer authority and the submitted result.

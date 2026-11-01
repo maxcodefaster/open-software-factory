@@ -20,6 +20,17 @@ Agent execution instead would preserve an unnecessary private Docker tree and RA
 bounded store while Verification needs its own fresh environment. This decision does not resize
 an admitted store, retire an earlier worker epoch, remove Source or guarantee unlimited capacity.
 
+## Known failed Agent execution
+
+The same idle release applies to a known failed Agent Turn whose failed Session and admitted intent
+both identify the Ticket's exact current Runtime Attempt and native Session. Explicit retry already
+fences and stops that execution before granting a new writer. Checkpointing it first adds storage and
+capture failure without providing a supported retry path.
+
+Normal Stop retains unsubmitted Source, the failed Turn and native Session; it starts no retry.
+Human writers, another or unknown execution, active or uncertain work and unfinished Git operations
+do not qualify. The same terminal, genuine-use and in-flight-operation guards remain mandatory.
+
 ## Release before fresh Verification
 
 Fresh Verification also releases its exact submitted Agent execution before admitting another
