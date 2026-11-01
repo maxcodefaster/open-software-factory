@@ -113,6 +113,9 @@ Preparation checks that same decision before exporting a consumer image and agai
 extraction or private mounts. A refused check keeps preparation unattempted and can continue when
 capacity returns. If dispatched preparation has no completion receipt, reconciliation preserves its
 original failure diagnostic rather than replacing it with a generic pending message.
+A confirmed native Start with its Parent connected remains preparing while Project setup hooks
+finish. Expiry of the native startup observation window does not report those hooks as failed.
+Connector readiness, actual setup errors and exact-identity transport recovery still own the outcome.
 
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's

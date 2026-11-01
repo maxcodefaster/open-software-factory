@@ -254,9 +254,14 @@ test.each([
   30_000,
 );
 
-test.each([true, false])(
-  "startup waits for child readiness without repeating confirmed native Start, parent connected=%s",
-  async (parentConnected) => {
+test.each([
+  [true, false],
+  [false, false],
+  [true, true],
+  [false, true],
+] as const)(
+  "startup waits for child readiness without repeating confirmed native Start, parent connected=%s, setup exceeds observation=%s",
+  async (parentConnected, setupExceedsObservation) => {
     const host = await factoryProcess();
     const database = host.connect();
     const owned = await fixture(undefined, undefined, database);
@@ -265,7 +270,14 @@ test.each([true, false])(
     let podReads = 0;
     let starts = 0;
     let nativeReads = 0;
-    const hub = new RuntimeHub(async () => {});
+    let observedNow = performance.now();
+    const clock = setupExceedsObservation
+      ? spyOn(performance, "now").mockImplementation(() => observedNow)
+      : undefined;
+    let controller: ReturnType<typeof createRuntimeController> | undefined;
+    const hub = new RuntimeHub(async (id, phase, error) => {
+      await controller?.status(id, phase, error);
+    });
     try {
       const [attempt] = await database.client<
         { namespace: string; podName: string; workerID: string }[]
@@ -310,7 +322,7 @@ test.each([true, false])(
           return false;
         },
       };
-      const controller = createRuntimeController(
+      controller = createRuntimeController(
         database,
         hub,
         "owned-startup-cadence",
@@ -325,6 +337,7 @@ test.each([true, false])(
             if (++podReads === 3) {
               thirdRead.resolve();
               await releaseRead.promise;
+              if (setupExceedsObservation) observedNow += 420_001;
             }
             return {
               uid: "owned-startup-pod",
@@ -347,17 +360,27 @@ test.each([true, false])(
       expect(nativeReads).toBe(parentConnected ? 0 : 2);
       expect((await controller.get(owned.attemptID))?.state).toBe("starting");
       if (!parentConnected) hub.open(parent);
+      if (setupExceedsObservation) {
+        releaseRead.resolve();
+        await Bun.sleep(1_100);
+        const current = await controller.get(owned.attemptID);
+        expect(current?.state).toBe("starting");
+        expect(current?.failure).toBeNull();
+        await controller.drainComputeWaits();
+        expect(starts).toBe(1);
+      }
       const child = socket("child");
       hub.open(child);
       hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
       releaseRead.resolve();
       await eventually(
-        () => controller.get(owned.attemptID),
+        async () => controller?.get(owned.attemptID),
         (current) => current?.state === "ready",
         "Confirmed execution never became ready after the child completed setup",
       );
       expect(starts).toBe(1);
     } finally {
+      clock?.mockRestore();
       await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
       releaseRead.resolve();
       hub.revoke(owned.attemptID);

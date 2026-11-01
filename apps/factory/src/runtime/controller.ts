@@ -675,6 +675,11 @@ export function createRuntimeController(
       }
       await Bun.sleep(1_000);
     }
+    // This bounds native admission observation, not the Project's setup hooks.
+    // A confirmed Sandbox with its original Parent still connected has not
+    // failed. Its Connector owns the eventual ready/error outcome; transport
+    // loss still enters the existing exact-identity reconnect observation.
+    if (startConfirmed && hub.parentConnected(attemptID)) return;
     await database.client`UPDATE factory.runtime_attempt
           SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
           WHERE id=${attemptID} AND state='starting' AND (failure IS NULL OR failure='')`;
