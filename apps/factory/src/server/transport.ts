@@ -2,7 +2,7 @@ import type { ServerWebSocket } from "bun";
 import { hashConnectorToken } from "../../../../packages/runtime-domain/src/identity";
 import { runtimeWriteAuthorityIn } from "../access/change-writer";
 import { CommandError } from "../command-error";
-import { json } from "../http";
+import { json, maximumHTTPRequestBytes } from "../http";
 import { serveFactory } from "../http-listener";
 import { factoryRequestURL } from "../request-origin";
 import { createRuntimeWriterBoundary } from "../runtime/browser-writer";
@@ -49,6 +49,7 @@ export function startFactoryTransport(application: FactoryTransportServices) {
   });
   const servers = serveFactory<FactorySocketData>(factoryHost, {
     port: Number(FACTORY_PORT ?? 3000),
+    maxRequestBodySize: maximumHTTPRequestBytes,
     idleTimeout: 180,
     async fetch(request, server) {
       const connectionRequest = request;

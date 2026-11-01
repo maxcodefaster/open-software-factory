@@ -502,6 +502,10 @@ and admitted model settings. Home-directory and Project OpenCode configuration a
 skills do not override that setup. Do not maintain a second `opencode.json` for Factory.
 Coding uses native HTTP transport and automatic summary compaction with the selected model;
 provider-native compaction is not enabled through the relay.
+The relay streams validated request bytes from a private temporary file, so retained inline
+screenshots do not hit a separate 4 MiB text ceiling or require the full history as a JavaScript
+object. Its HTTP ingress ceiling remains 128 MiB. It checks the exact admitted model, reasoning,
+current execution authority and budget before dispatch, and deletes the temporary input afterward.
 The packaged runtime policy augments OpenCode's native instructions rather than replacing its
 tool guidance. Build reads the checkout's applicable `AGENTS.md` files explicitly. Required
 non-manual Build Skills and human-invoked Skills load before inference; optional Skills remain

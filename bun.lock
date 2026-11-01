@@ -50,6 +50,7 @@
         "pdfjs-dist": "6.4.299",
         "postgres": "3.4.9",
         "solid-js": "2.0.0-rc.18",
+        "stream-json": "3.8.0",
         "turndown": "7.2.4",
         "turndown-plugin-gfm": "1.0.2",
         "yaml": "2.9.1",
@@ -1763,6 +1764,10 @@
     "srvx": ["srvx@0.11.22", "", { "bin": { "srvx": "bin/srvx.mjs" } }, "sha512-LqZxxBDMKuMAZzFzJnDCkFOrs9MZQZr0LvHiO/SuSZVdQaXD7xQ5UWTUxheJrQPve1qk9MG2B/yttUvJxw8egQ=="],
 
     "statuses": ["statuses@2.0.2", "", {}, "sha512-DvEy55V3DB7uknRo+4iOGT5fP1slR8wQohVdknigZPMpMstaKJQWhwiYBACJE3Ul2pTnATihhBYnRhZQHGBiRw=="],
+
+    "stream-chain": ["stream-chain@4.4.1", "", {}, "sha512-4MWXw+Si0RW3HAYQN3MdxpgTJA6Te9StiLtdkZO248DLPsRipqBbuiQSkyYLpCDEuvqGfqb2B5dEGxiEfHYkNQ=="],
+
+    "stream-json": ["stream-json@3.8.0", "", { "dependencies": { "stream-chain": "^4.4.1" } }, "sha512-xD0bPEoPgaaEpEu2HSq1spYAs5LSJrLAlo44SHycE+aI8W0IrU2cklY7fiQKhRTVbuvxNUij06vIiz1NBT+AZA=="],
 
     "stream-shift": ["stream-shift@1.0.3", "", {}, "sha512-76ORR0DO1o1hlKwTbi/DM3EXWGf3ZJYO8cXX5RJwnul2DEg2oyoZyjLNoQM8WsvZiFKCRfC1O0J7iCvie3RZmQ=="],
 

@@ -1,16 +1,20 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
 import { createAgentTurnStore } from "../../apps/factory/src/agent/turn-store";
+import { maximumHTTPRequestBytes } from "../../apps/factory/src/http";
 import { createModelSettingsController } from "../../apps/factory/src/models/controller";
 import { createModelRelay } from "../../apps/factory/src/models/relay";
 import { createProjectAgentController } from "../../apps/factory/src/project-agent/controller";
+import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { modelSettingsView } from "../../packages/conversation-domain/src/model-settings";
 import { runtimeModelToken } from "../../packages/runtime-domain/src/identity";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
-import { callFactoryFunction, factoryFunctionRequest } from "../fixtures/server-functions";
-import { serverCall } from "../../apps/factory/src/server-functions/result";
-import { decodeFactoryResponse as decodeResponse } from "../fixtures/server-functions";
+import {
+  callFactoryFunction,
+  decodeFactoryResponse as decodeResponse,
+  factoryFunctionRequest,
+} from "../fixtures/server-functions";
 
 const planning = "planning-original";
 const build = "build-original";
@@ -379,22 +383,29 @@ test("relay streams the active exact model and rejects revoked/runtime/token aut
       (await relay(request(build, undefined, "not-json"), owned.attemptID, "responses")).status,
     ).toBe(400);
     expect((await relay(request(), owned.attemptID, "models")).status).toBe(404);
-    const oversized = JSON.stringify({ model: build, padding: "x".repeat(4_194_304) });
-    expect(
-      (await relay(request(build, undefined, oversized), owned.attemptID, "responses")).status,
-    ).toBe(413);
+    const oversized = request();
+    oversized.headers.set("content-length", String(maximumHTTPRequestBytes + 1));
+    expect((await relay(oversized, owned.attemptID, "responses")).status).toBe(413);
+    let remaining = maximumHTTPRequestBytes;
+    let cancelled = false;
+    const whitespace = new TextEncoder().encode(" ".repeat(65_536));
     const streamed = new Request("http://factory.invalid/internal/model", {
       method: "POST",
       headers: { authorization: `Bearer ${runtimeModelToken(secret, attemptID, 1)}` },
       body: new ReadableStream({
-        start(controller) {
-          controller.enqueue(new TextEncoder().encode(oversized.slice(0, 2_097_152)));
-          controller.enqueue(new TextEncoder().encode(oversized.slice(2_097_152)));
-          controller.close();
+        pull(controller) {
+          if (remaining > 0) {
+            controller.enqueue(whitespace);
+            remaining -= whitespace.byteLength;
+          } else controller.enqueue(new TextEncoder().encode("{}"));
+        },
+        cancel() {
+          cancelled = true;
         },
       }),
     });
     expect((await relay(streamed, owned.attemptID, "responses")).status).toBe(413);
+    expect(cancelled).toBe(true);
     for (const effort of [undefined, "none", "low", "high"]) {
       expect(
         (
