@@ -49,6 +49,41 @@ test("Planning discovers large lockfiles and extensionless container recipes", (
     expect(readableCodePath(path)).toBe(false);
 });
 
+test("Planning discovers Astro entry and dynamic routes without exposing protected files", () => {
+  const paths = [
+    "apps/web/src/pages/index.astro",
+    "apps/web/src/pages/[...path].astro",
+    "apps/web/src/pages/forms-preview/drafts/[version].astro",
+    "apps/web/src/components/FormsDraftPreview.tsx",
+  ];
+  const hidden = [
+    ".factory/private.astro",
+    "nested/.factory/index.astro",
+    "node_modules/routes/index.astro",
+    "dist/index.astro",
+    "apps/web/src/pages/credentials.astro",
+    "apps/web/src/pages/private-key.astro",
+    "apps/web/src/pages/../index.astro",
+    "/apps/web/src/pages/index.astro",
+  ];
+  const files = [...paths, ...hidden].map((path) => ({ path, size: 100 }));
+  expect(findReadableCodePaths(files, "apps/web/src/pages")).toEqual({
+    paths: paths.slice(0, 3),
+    truncated: false,
+  });
+  for (const path of paths) expect(readableCodePath(path)).toBe(true);
+  for (const path of hidden) expect(readableCodePath(path)).toBe(false);
+  expect(
+    readCodePage("---\nconst form = Astro.params.version;\n---\n<h1>{form}</h1>", {
+      startLine: 1,
+      lineCount: 80,
+    }),
+  ).toMatchObject({
+    body: "1: ---\n2: const form = Astro.params.version;\n3: ---\n4: <h1>{form}</h1>",
+    truncated: false,
+  });
+});
+
 test("a truncated configuration gives Planning the exact next unread line", () => {
   const content = Array.from({ length: 205 }, (_, index) =>
     index === 180 ? "watch: { ignored: ['**/.pnpm-store/**'] }" : `configuration ${index + 1}`,

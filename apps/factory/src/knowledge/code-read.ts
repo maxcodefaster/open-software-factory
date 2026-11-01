@@ -63,7 +63,7 @@ export function readableCodePath(path: string) {
     !/(^|\/)(\.env($|\.)|.*(?:secret|credential|private[-_]?key).*|.*\.(?:pem|key|p12|pfx))$/i.test(
       path,
     ) &&
-    (/\.(?:mdx?|tsx?|jsx?|mjs|cjs|json|ya?ml|toml|go|py|rs|java|kt|cs|sh|sql|html|css|svelte|vue|rb|php|exs?|tf)$/i.test(
+    (/\.(?:mdx?|tsx?|jsx?|mjs|cjs|json|ya?ml|toml|go|py|rs|java|kt|cs|sh|sql|html|css|astro|svelte|vue|rb|php|exs?|tf)$/i.test(
       path,
     ) ||
       /(?:^|\/)(?:Dockerfile|Containerfile)(?:\.[^/]+)?$/i.test(path))

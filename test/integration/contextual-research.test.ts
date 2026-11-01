@@ -197,7 +197,10 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
       blob = "c".repeat(40),
       contractBlob = "d".repeat(40),
       lockBlob = "e".repeat(40),
-      dockerBlob = "f".repeat(40);
+      dockerBlob = "f".repeat(40),
+      astroBlob = "a".repeat(40);
+    const astroPath = "apps/web/src/pages/forms-preview/drafts/[version].astro";
+    const astro = "---\nconst version = Astro.params.version;\n---\n<h1>{version}</h1>";
     const lockfile = `lockfileVersion: '9.0'\nastro: 7.0.6\n${"package: dependency\n".repeat(24000)}`;
     const dockerfile = "FROM node:24\nWORKDIR /workspace/project\nRUN corepack enable\n";
     const contract = JSON.stringify(
@@ -264,6 +267,8 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
           { path: "nested/.factory/system.json", sha: blob, size: 45 },
           { path: "pnpm-lock.yaml", sha: lockBlob, size: Buffer.byteLength(lockfile) },
           { path: ".devcontainer/Dockerfile", sha: dockerBlob, size: dockerfile.length },
+          { path: astroPath, sha: astroBlob, size: astro.length },
+          { path: "nested/.factory/private.astro", sha: astroBlob, size: astro.length },
         ];
       },
       getFileInfo: async (_repository, path) => {
@@ -271,6 +276,7 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
         if (path === ".factory/system.json") return { sha: contractBlob, content: contract };
         if (path === "pnpm-lock.yaml") return { sha: lockBlob, content: lockfile };
         if (path === ".devcontainer/Dockerfile") return { sha: dockerBlob, content: dockerfile };
+        if (path === astroPath) return { sha: astroBlob, content: astro };
         return { sha: blob, content: "export const answer = 42;\nconsole.log(answer);" };
       },
     });
@@ -279,7 +285,7 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
       else Bun.env[key] = value;
     }
     const paths = await controller.codePaths(owned.projectID, "src", owned.userID);
-    expect(paths.paths).toEqual(["src/index.ts"]);
+    expect(paths.paths).toEqual(["src/index.ts", astroPath]);
     const value = { commitSha: sha, path: "src/index.ts", startLine: 1, lineCount: 1 };
     const [first, second] = await Promise.all([
       controller.code(owned.projectID, value, owned.userID),
@@ -333,12 +339,26 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
       ).body,
     ).toBe("1: FROM node:24");
     expect(reads).toBe(4);
+    expect(
+      await controller.codePaths(owned.projectID, "apps/web/src/pages", owned.userID, sha),
+    ).toEqual({ commitSha: sha, paths: [astroPath], truncated: false });
+    const astroInput = { ...value, path: astroPath, lineCount: 80 };
+    const page = await controller.code(owned.projectID, astroInput, owned.userID);
+    expect(page.body).toContain("2: const version = Astro.params.version;");
+    expect(page.commitSha).toBe(sha);
+    expect(page.url).toContain(
+      `/${sha}/apps/web/src/pages/forms-preview/drafts/%5Bversion%5D.astro`,
+    );
+    expect(page.truncated).toBe(false);
+    expect(reads).toBe(5);
+    expect(inventories).toBe(1);
     for (const path of [
       ".env.local",
       "secrets.json",
       "../src/index.ts",
       ".factory/assignment.json",
       "nested/.factory/system.json",
+      "nested/.factory/private.astro",
     ])
       await expect(
         controller.code(owned.projectID, { ...value, path }, owned.userID),
@@ -359,6 +379,9 @@ test("exact-commit code reads share caches, reject secrets and recheck developer
     await expect(
       controller.code(owned.projectID, { ...value, path: "pnpm-lock.yaml" }, owned.userID),
     ).rejects.toThrow("Developer access required");
+    await expect(controller.code(owned.projectID, astroInput, owned.userID)).rejects.toThrow(
+      "Developer access required",
+    );
   } finally {
     await db.client.end();
     await process.dispose();
