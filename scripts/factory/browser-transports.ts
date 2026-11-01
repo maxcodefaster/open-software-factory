@@ -10,6 +10,7 @@ export type BrowserNetworkCall = {
   line: number;
   operation: string;
   arguments: string[];
+  constantArguments?: Array<string | undefined>;
 };
 const operations = new Set([
   "fetch",
@@ -25,6 +26,30 @@ export function browserNetworkCalls(file: string, text: string) {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const aliases = new Map<string, string>();
   const calls: BrowserNetworkCall[] = [];
+  let checker: ts.TypeChecker | undefined;
+  function constantArgument(argument: ts.Expression) {
+    if (!ts.isIdentifier(argument)) return undefined;
+    if (!checker) {
+      // Bind this file only. Resolve the actual lexical declaration, including
+      // callback captures and shadowing, without reading imports or libraries.
+      const options = { noLib: true, noResolve: true };
+      const host = ts.createCompilerHost(options);
+      const path = resolve(file);
+      host.getSourceFile = (name) => (resolve(name) === path ? source : undefined);
+      host.fileExists = (name) => resolve(name) === path;
+      host.readFile = (name) => (resolve(name) === path ? text : undefined);
+      checker = ts.createProgram([path], options, host).getTypeChecker();
+    }
+    const declaration = checker.getSymbolAtLocation(argument)?.valueDeclaration;
+    if (
+      declaration &&
+      ts.isVariableDeclaration(declaration) &&
+      ts.isVariableDeclarationList(declaration.parent) &&
+      declaration.parent.flags & ts.NodeFlags.Const
+    )
+      return declaration.initializer?.getText(source);
+    return undefined;
+  }
   for (const statement of source.statements) {
     if (!ts.isImportDeclaration(statement)) continue;
     const bindings = statement.importClause?.namedBindings;
@@ -42,13 +67,19 @@ export function browserNetworkCalls(file: string, text: string) {
           ? expression.name.text
           : "";
       const operation = aliases.get(name) ?? name;
-      if (operations.has(operation))
+      if (operations.has(operation)) {
+        const constantArguments =
+          operation === "EventSource" ? (node.arguments ?? []).map(constantArgument) : [];
         calls.push({
           file,
           operation,
           line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
           arguments: (node.arguments ?? []).map((argument) => argument.getText(source)),
+          ...(constantArguments.some((argument) => argument !== undefined)
+            ? { constantArguments }
+            : {}),
         });
+      }
     }
     ts.forEachChild(node, visit);
   }
@@ -104,7 +135,8 @@ export function editorProtocolDecision(call: BrowserNetworkCall): string | undef
   if (
     file === "factory-source-client.ts" &&
     call.operation === "EventSource" &&
-    args[0] === 'this.url(workspaceID, "events")'
+    (args[0] === 'this.url(workspaceID, "events")' ||
+      call.constantArguments?.[0] === 'this.url(workspaceID, "events")')
   )
     return "Grant-bound native source/file-watch events in the original Workspace.";
   if (

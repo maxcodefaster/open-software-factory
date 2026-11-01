@@ -84,6 +84,39 @@ test("an allowlisted module cannot introduce another logical API or helper alias
   }
 });
 
+test("the source-watch guard follows an immutable local endpoint through its callback", () => {
+  const file = "deploy/theia-ide/factory-ide-extension/src/browser/factory-source-client.ts";
+  for (const text of [
+    `const eventsURL = this.url(workspaceID, "events"); new EventSource(eventsURL);`,
+    `function watch(workspaceID: string) {
+      const eventsURL = this.url(workspaceID, "events");
+      const connect = () => new EventSource(eventsURL);
+    }`,
+  ]) {
+    const calls = browserNetworkCalls(file, text);
+    expect(calls).toHaveLength(1);
+    for (const call of calls) expect(editorProtocolDecision(call)).toContain("source/file-watch");
+  }
+});
+
+test("the source-watch guard rejects mutable, shadowed and different endpoints", () => {
+  const file = "deploy/theia-ide/factory-ide-extension/src/browser/factory-source-client.ts";
+  for (const text of [
+    `let url = this.url(workspaceID, "events"); new EventSource(url);`,
+    `const url = "/api/projects"; new EventSource(url);`,
+    `const url = this.url(workspaceID, "commands"); new EventSource(url);`,
+    `const url = this.url(workspaceID, "events");
+      function connect(url: string) { new EventSource(url); }`,
+    `const url = this.url(workspaceID, "events");
+      { const url = "/api/projects"; new EventSource(url); }`,
+    `function connect(url: string) { new EventSource(url); }`,
+  ]) {
+    const calls = browserNetworkCalls(file, text);
+    expect(calls).toHaveLength(1);
+    for (const call of calls) expect(editorProtocolDecision(call)).toBeUndefined();
+  }
+});
+
 test("the separately granted embedded IDE has only explicitly classified native protocols", async () => {
   const root = resolve(import.meta.dir, "../..");
   const prefix = "deploy/theia-ide/factory-ide-extension/src/browser";
