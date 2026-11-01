@@ -1558,10 +1558,18 @@ export function createRuntimeController(
             volumeName: string;
           }>
         >`
-          SELECT id, source_revision AS revision, kubernetes_namespace AS namespace,
-            volume_name AS "volumeName"
-          FROM factory.development_workspace
-          WHERE project_id = ${projectID} AND kind = 'personal' AND owner_user_id = ${userID}
+          SELECT workspace.id, COALESCE((
+            SELECT operation.result->>'head' FROM factory.personal_git_operation operation
+            WHERE operation.workspace_id=workspace.id AND operation.user_id=workspace.owner_user_id
+              AND operation.branch=${project.defaultBranch}
+              AND operation.action='pull' AND operation.state='succeeded'
+              AND operation.result->>'head'<>operation.expected_head
+            ORDER BY operation.completed_at DESC,operation.created_at DESC,operation.id DESC LIMIT 1
+          ),workspace.source_revision) AS revision,
+            workspace.kubernetes_namespace AS namespace,workspace.volume_name AS "volumeName"
+          FROM factory.development_workspace workspace
+          WHERE workspace.project_id = ${projectID} AND workspace.kind = 'personal'
+            AND workspace.owner_user_id = ${userID}
         `;
         if (!workspaces[0]) {
           const revision = await resolveRepositoryRevision(
@@ -1627,6 +1635,10 @@ export function createRuntimeController(
         const identity = await executionIdentity(workspace.id, generation, lock, userID);
         if (identity.namespace !== workspace.namespace)
           throw new Error("Workspace belongs to another Factory");
+        // Initialization remains immutable. Only a confirmed advancing Pull
+        // adopts newer published configuration for a fresh personal Attempt.
+        // Local commits, unchanged/failed Pulls and existing Attempts keep
+        // their original authority; Start never pulls or resets Source.
         const revision = workspace.revision;
         const tokens = runtimeConnectorTokens(connectorSecret, identity.attemptID, generation);
         const token = tokens.parent;

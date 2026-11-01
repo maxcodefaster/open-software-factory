@@ -379,6 +379,10 @@ initializer. Pull uses the Project default branch and fast-forward only. Diverge
 commits for an explicit merge; unsaved editor buffers block Commit and Pull. No automatic stash,
 reset or push bypasses Ticket Verification and Delivery. The Workspace's initialization revision
 remains immutable even as its working Git HEAD advances.
+After a confirmed advancing fast-forward Pull, a fresh personal Runtime Attempt uses that
+published revision for its App configuration. Unchanged, failed or uncertain Pulls and local-only
+commits do not advance that selection. Starting or reconnecting never pulls Source, and an
+existing Runtime Attempt keeps its frozen revision and Apps.
 
 Project-owned prebuilds reuse only exact recipe, commit, image/Feature, platform and environment
 inputs. Immutable artifacts can be reused; mutable dependency trees, used Sandboxes and previous

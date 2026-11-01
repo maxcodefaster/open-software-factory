@@ -6,6 +6,7 @@ import { createRuntimeController } from "../../apps/factory/src/runtime/controll
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createDatabase } from "../../packages/db/src/client";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
+import { personalWorkspaceIdentity } from "../../packages/workspace-domain/src/workspace";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually } from "../fixtures/factory-process";
 import { ownedPostgresServer, ownedTestDatabase } from "../fixtures/postgres-server";
@@ -26,6 +27,11 @@ afterAll(async () => {
 
 test.each([
   "personal",
+  "personal-pulled",
+  "personal-pulled-with-later-failure",
+  "personal-pulled-with-later-unchanged-pull",
+  "personal-unconfirmed-pull",
+  "personal-local-commit",
   "staging",
   "staging-unstarted",
   "staging-missing-contract",
@@ -119,6 +125,59 @@ test.each([
           FROM factory.change WHERE id=${owned.changeID}`;
       let executionRevision = revision;
       let expectedApps = ["app", "app-editor", "app-api"];
+      let personalWorkspaceID: string | undefined;
+      let previousPersonalAttemptID: string | undefined;
+      if (kind.startsWith("personal-")) {
+        personalWorkspaceID = personalWorkspaceIdentity(owned.projectID, owned.userID).workspaceID;
+        previousPersonalAttemptID = crypto.randomUUID();
+        await database.client`INSERT INTO factory.development_workspace(
+          id,project_id,kind,owner_user_id,source_branch,source_revision,created_by)
+          VALUES(${personalWorkspaceID},${owned.projectID},'personal',${owned.userID},'main',${revision},${owned.userID})`;
+        await database.client`INSERT INTO factory.runtime_attempt(
+          id,project_id,workspace_id,generation,revision,state,parent_connector_token_hash,
+          child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${previousPersonalAttemptID},${owned.projectID},${personalWorkspaceID},1,${revision},
+            'stopped',${"a".repeat(64)},${"b".repeat(64)},now(),${owned.userID})`;
+        const path = join(source, ".factory/system.json");
+        const contract = JSON.parse(await Bun.file(path).text());
+        contract.apps[0].command = ["node", "current-web.js"];
+        contract.apps[1].id = "visual-editor";
+        await writeFile(path, JSON.stringify(contract));
+        git("add", ".");
+        git(
+          "-c",
+          "user.name=Factory",
+          "-c",
+          "user.email=factory@example.invalid",
+          "commit",
+          "-m",
+          "Published newer personal App configuration",
+        );
+        const pulled = git("rev-parse", "HEAD");
+        const succeeded = kind.startsWith("personal-pulled");
+        await database.client`INSERT INTO factory.personal_git_operation(
+          id,workspace_id,runtime_attempt_id,user_id,action,expected_head,branch,message,state,result,completed_at)
+          VALUES(${crypto.randomUUID()},${personalWorkspaceID},${previousPersonalAttemptID},${owned.userID},
+            ${kind === "personal-local-commit" ? "commit" : "pull"},${revision},'main','',
+            ${succeeded || kind === "personal-local-commit" ? "succeeded" : "uncertain"},
+            ${JSON.stringify({ head: pulled, branch: "main", files: [] })}::text::jsonb,
+            CASE WHEN ${succeeded || kind === "personal-local-commit"} THEN now() ELSE NULL END)`;
+        if (succeeded) {
+          executionRevision = pulled;
+          expectedApps = ["app", "app-visual-editor", "app-api"];
+        }
+        if (
+          kind === "personal-pulled-with-later-failure" ||
+          kind === "personal-pulled-with-later-unchanged-pull"
+        )
+          await database.client`INSERT INTO factory.personal_git_operation(
+            id,workspace_id,runtime_attempt_id,user_id,action,expected_head,branch,message,state,result,completed_at)
+            VALUES(${crypto.randomUUID()},${personalWorkspaceID},${previousPersonalAttemptID},${owned.userID},
+              'pull',${"f".repeat(40)},'main','',
+              ${kind === "personal-pulled-with-later-failure" ? "failed" : "succeeded"},
+              ${JSON.stringify({ head: "f".repeat(40), branch: "main", files: [] })}::text::jsonb,
+              clock_timestamp()+interval '1 second')`;
+      }
       if (kind.startsWith("ticket-submitted")) {
         const path = join(source, ".factory/system.json");
         const contract = JSON.parse(await Bun.file(path).text());
@@ -182,12 +241,11 @@ test.each([
       if (kind === "staging-unstarted")
         await database.client`INSERT INTO factory.staging_preview(project_id,revision)
           VALUES(${owned.projectID},${"0".repeat(40)})`;
-      const attempt =
-        kind === "personal"
-          ? await controller.start(owned.projectID, owned.userID)
-          : kind.startsWith("staging")
-            ? await controller.ensureStaging(owned.projectID, owned.userID)
-            : await controller.startPersisted(owned.changeID, owned.userID);
+      const attempt = kind.startsWith("personal")
+        ? await controller.start(owned.projectID, owned.userID)
+        : kind.startsWith("staging")
+          ? await controller.ensureStaging(owned.projectID, owned.userID)
+          : await controller.startPersisted(owned.changeID, owned.userID);
       expect(attempt?.state).toBe("create-intended");
       expect(attempt?.revision).toBe(executionRevision);
       const [retained] = await database.client<{ apps: string[]; waiting: boolean }[]>`
@@ -196,6 +254,26 @@ test.each([
         FROM factory.runtime_attempt attempt WHERE id=${attempt?.id ?? null}`;
       expect(retained?.apps).toEqual(expectedApps);
       expect(retained?.waiting).toBe(true);
+      if (personalWorkspaceID && previousPersonalAttemptID) {
+        const [workspace] = await database.client<{ revision: string }[]>`
+          SELECT source_revision AS revision FROM factory.development_workspace WHERE id=${personalWorkspaceID}`;
+        expect(workspace?.revision).toBe(revision);
+        const [previous] = await database.client<{ revision: string }[]>`
+          SELECT revision FROM factory.runtime_attempt WHERE id=${previousPersonalAttemptID}`;
+        expect(previous?.revision).toBe(revision);
+        await database.client`INSERT INTO factory.personal_git_operation(
+          id,workspace_id,runtime_attempt_id,user_id,action,expected_head,branch,message,state,result,completed_at)
+          VALUES(${crypto.randomUUID()},${personalWorkspaceID},${previousPersonalAttemptID},${owned.userID},
+            'pull',${executionRevision},'main','','succeeded',
+            ${JSON.stringify({ head: "e".repeat(40), branch: "main", files: [] })}::text::jsonb,
+            clock_timestamp()+interval '2 seconds')`;
+        const same = await controller.start(owned.projectID, owned.userID);
+        expect(same?.id).toBe(attempt?.id);
+        expect(same?.revision).toBe(executionRevision);
+        const [unchanged] = await database.client<{ apps: string[] }[]>`
+          SELECT declared_apps AS apps FROM factory.runtime_attempt WHERE id=${same?.id ?? null}`;
+        expect(unchanged?.apps).toEqual(expectedApps);
+      }
       if (kind.startsWith("ticket")) {
         const [workspace] = await database.client<{ revision: string }[]>`
           SELECT source_revision AS revision FROM factory.development_workspace
