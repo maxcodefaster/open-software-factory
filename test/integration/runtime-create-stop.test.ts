@@ -96,6 +96,7 @@ async function sourceOnly(sql: Parameters<typeof factoryboxAllocation>[0], names
 test.each([
   "cold worker",
   "specific refusal",
+  "repeated refusal",
   "capacity returns before dispatch",
   "capacity returns before Start",
   "unconfirmed preparation",
@@ -192,7 +193,7 @@ test.each([
             }
             if (deadline === undefined) throw new Error("Missing Sandbox lifecycle deadline");
             remaining = deadline - clockValue;
-            clockValue = deadline + 1;
+            if (scenario !== "repeated refusal" || starts >= 3) clockValue = deadline + 1;
             throw new Error("Native operating storage capacity is unavailable");
           },
         },
@@ -204,7 +205,21 @@ test.each([
         (value) => value?.failure === "Native operating storage capacity is unavailable",
         "Specific native failure was not observed",
       );
+      const failureTimestamp = async () => {
+        const [current] = await database.client<Array<{ updatedAt: string }>>`
+          SELECT updated_at::text AS "updatedAt" FROM factory.runtime_attempt
+          WHERE id=${owned.attemptID}`;
+        return current?.updatedAt;
+      };
+      const recordedAt = await failureTimestamp();
+      if (scenario === "repeated refusal")
+        await eventually(
+          async () => starts,
+          (value) => value === 3,
+          "Startup did not reobserve the same refusal",
+        );
       await Bun.sleep(1_100);
+      expect(await failureTimestamp()).toBe(recordedAt);
       if (scenario === "cold worker") expect(remaining).toBeCloseTo(420_000, 6);
       expect((await controller.get(owned.attemptID))?.failure).toBe(
         "Native operating storage capacity is unavailable",

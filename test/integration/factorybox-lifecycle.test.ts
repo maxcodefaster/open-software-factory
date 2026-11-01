@@ -16,6 +16,8 @@ import { eventually, factoryProcess } from "../fixtures/factory-process";
 test.each([
   ["arm64", false, false, "none"],
   ["arm64", false, false, "capacity-refusal"],
+  ["arm64", false, false, "start-capacity-recovery"],
+  ["amd64", false, false, "start-capacity-recovery"],
   ["arm64", false, false, "preparation-capacity"],
   ["amd64", false, false, "preparation-capacity"],
   ["arm64", false, false, "preparation-capacity-late"],
@@ -197,6 +199,7 @@ test.each([
       const mutations: string[] = [];
       let preparations = 0;
       let preparationCapacityRefused = deleteContinuation.startsWith("preparation-capacity");
+      let startCapacityRefused = deleteContinuation === "start-capacity-recovery";
       let capacityChecks = 0;
       let releases = 0;
       let cancellations = 0;
@@ -275,7 +278,10 @@ test.each([
               root,
               new_write_admitted:
                 !preparationRefused &&
-                !(deleteContinuation === "capacity-refusal" && preparations > 0),
+                !(
+                  (deleteContinuation === "capacity-refusal" || startCapacityRefused) &&
+                  preparations > 0
+                ),
               host: {
                 filesystem_available_bytes: preparationRefused ? 14 * 1024 ** 3 : 32 * 1024 ** 3,
                 min_free_bytes: 12 * 1024 ** 3,
@@ -514,22 +520,50 @@ test.each([
       };
       const hub = new RuntimeHub(async () => {});
       const execution = createFactoryboxExecution(database, hub, run);
-      if (preparationCapacityRefused) {
-        await expect(execution.ensureStarted(owned.attemptID, [declared.pod])).rejects.toThrow(
-          "capacity refused preparation before dispatch",
+      if (preparationCapacityRefused || startCapacityRefused) {
+        const refusedPreparation = preparationCapacityRefused;
+        const refusal = await execution
+          .ensureStarted(owned.attemptID, [declared.pod])
+          .catch((cause: unknown) => cause);
+        expect(refusal).toBeInstanceOf(Error);
+        if (!(refusal instanceof Error)) throw new Error("Missing capacity refusal");
+        expect(refusal.message).toContain(
+          `capacity refused ${refusedPreparation ? "preparation" : "Start"} before dispatch`,
         );
+        // The startup observer retains this diagnostic while native admission
+        // refuses dispatch. Reconstruct the service as process recovery does.
+        await database.client`UPDATE factory.runtime_attempt SET failure=${refusal.message}
+          WHERE id=${owned.attemptID}`;
+        const currentFailure = async () => {
+          const [current] = await database.client<Array<{ failure: string | null }>>`
+            SELECT failure FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+          return current?.failure;
+        };
         const [prepared] = await database.client<Array<{ attempted: boolean }>>`
           SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
           WHERE runtime_attempt_id=${owned.attemptID} AND action='prepare'`;
-        expect(prepared?.attempted).toBe(false);
-        expect(preparations).toBe(0);
+        expect(prepared?.attempted).toBe(!refusedPreparation);
+        expect(preparations).toBe(refusedPreparation ? 0 : 1);
         expect(mutations).toEqual([]);
         // An operator returning real capacity permits the same still-unattempted
         // intent to continue, including through a new Factory process.
         preparationCapacityRefused = false;
+        startCapacityRefused = false;
         const recovered = createFactoryboxExecution(database, hub, run);
         await expect(recovered.ensureStarted(owned.attemptID)).rejects.toThrow("unconfirmed");
+        expect(await currentFailure()).toBe(refusal.message);
         await recovered.ensureStarted(owned.attemptID);
+        expect(await currentFailure()).toBeNull();
+        // Start success cannot erase a later, unrelated failure or a Stop.
+        await database.client`UPDATE factory.runtime_attempt SET failure='child connector reconnecting'
+          WHERE id=${owned.attemptID}`;
+        await recovered.ensureStarted(owned.attemptID);
+        expect(await currentFailure()).toBe("child connector reconnecting");
+        await database.client`UPDATE factory.runtime_attempt
+          SET state='stop-intended',stop_intended_at=now(),failure=${refusal.message}
+          WHERE id=${owned.attemptID}`;
+        await recovered.ensureStarted(owned.attemptID);
+        expect(await currentFailure()).toBe(refusal.message);
         expect(preparations).toBe(1);
         expect(mutations).toEqual(["start"]);
         return;

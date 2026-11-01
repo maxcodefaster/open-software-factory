@@ -639,7 +639,8 @@ export function createRuntimeController(
       }
       if (!pod || !current.uid || current.uid !== pod.uid) {
         await database.client`UPDATE factory.runtime_attempt SET failure='Original Factorybox worker is unavailable; its execution identity was retained',updated_at=now()
-              WHERE id=${attemptID} AND state='starting'`;
+              WHERE id=${attemptID} AND state='starting'
+                AND failure IS DISTINCT FROM 'Original Factorybox worker is unavailable; its execution identity was retained'`;
         return;
       }
       if (pod.phase === "Failed" || pod.phase === "Succeeded") {
@@ -666,15 +667,17 @@ export function createRuntimeController(
               current.observedAt,
             );
         } catch (cause) {
-          await database.client`UPDATE factory.runtime_attempt SET failure=${cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed"},updated_at=now()
-                WHERE id=${attemptID} AND state='starting'`;
+          const failure =
+            cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed";
+          await database.client`UPDATE factory.runtime_attempt SET failure=${failure},updated_at=now()
+                WHERE id=${attemptID} AND state='starting' AND failure IS DISTINCT FROM ${failure}`;
         }
       }
       await Bun.sleep(1_000);
     }
     await database.client`UPDATE factory.runtime_attempt
-          SET failure=coalesce(nullif(failure,''),'Factorybox startup deadline expired; original execution was retained'),updated_at=now()
-          WHERE id=${attemptID} AND state='starting'`;
+          SET failure='Factorybox startup deadline expired; original execution was retained',updated_at=now()
+          WHERE id=${attemptID} AND state='starting' AND (failure IS NULL OR failure='')`;
   }
 
   async function launchIsolated(

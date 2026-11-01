@@ -701,6 +701,7 @@ export function createFactoryboxExecution(
           const [attempt] = await connection<
             Array<{
               state: string;
+              failure: string | null;
               namespaceUID: string;
               podUID: string;
               profile: unknown;
@@ -717,7 +718,7 @@ export function createFactoryboxExecution(
               podName: string;
             }>
           >`
-          SELECT attempt.state,attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.kubernetes_uid AS "podUID",
+          SELECT attempt.state,attempt.failure,attempt.kubernetes_namespace_uid AS "namespaceUID",attempt.kubernetes_uid AS "podUID",
             artifact.factorybox_profile AS profile,artifact.runtime_host_image AS "runtimeHostImage",slot.id AS "slotID",slot.factorybox_identity AS "slotIdentity",
             slot.factorybox_fork_request AS "slotForkRequest",slot.factorybox_standby AS "slotStandby",
             attempt.factorybox_worker_id AS "workerID",attempt.workspace_id AS "workspaceID",
@@ -876,6 +877,18 @@ export function createFactoryboxExecution(
             },
             Boolean(attempt.slotID),
           );
+          // A confirmed Start supersedes pre-dispatch capacity waiting, not
+          // other diagnostics or a newer observation. Unconfirmed outcomes
+          // never reach this point and retain their original failure.
+          if (
+            attempt.failure &&
+            /^Factorybox capacity refused (preparation|Start) before dispatch(?:: |$)/.test(
+              attempt.failure,
+            )
+          )
+            await connection`UPDATE factory.runtime_attempt SET failure=NULL,updated_at=now()
+              WHERE id=${attemptID} AND state='starting' AND stop_intended_at IS NULL
+                AND failure=${attempt.failure}`;
         },
         deadline,
       );
