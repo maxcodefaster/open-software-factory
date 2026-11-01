@@ -12,6 +12,7 @@ import {
   completedConversation,
   mockFactoryFunctions,
 } from "../fixtures/server-functions";
+import { chooseSettingsScope } from "../fixtures/settings-navigation";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
@@ -82,6 +83,7 @@ test("Agent opener stays square even with a long Project label on narrow screens
 test("Models and Skills are visible entry points in Settings", async ({ page }) => {
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Open settings", exact: true }).click();
+  await chooseSettingsScope(page, "personal");
   const personal = page
     .getByRole("navigation", { name: "Settings navigation" })
     .locator("section")
@@ -89,6 +91,7 @@ test("Models and Skills are visible entry points in Settings", async ({ page }) 
   await expect(personal.getByRole("button", { name: "Model overrides", exact: true })).toBeVisible({
     timeout: 3_000,
   });
+  await chooseSettingsScope(page, "libraries");
   await expect(
     page
       .getByRole("navigation", { name: "Settings navigation" })
