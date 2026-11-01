@@ -947,6 +947,9 @@ exclude later implementation; unclassified or redacted material stays unknown. O
 digest and provenance enter compact Review Evidence. Runtime-owned history is not a tamper-proof
 or exhaustive external-write audit, and neither action history nor commit receipts replace
 source or App coverage. A receipt's `source=agent` identifies the trigger, not forge authority.
+The inventory section lists every eligible tool position on one native page without copying inputs;
+its cursor and next Session identify the remaining history. Selected action reads inspect the
+material inputs. The inventory itself is not a compliance verdict.
 
 The smaller `opencode-sol.live` proof runs the exact published OpenCode process in an owned
 fixture, implements and tests a small goal through Azure `gpt-6.1-sol` at medium reasoning,

@@ -70,6 +70,7 @@ test("execution history uses only recorded implementation ancestry, bounded page
   const child = "owned-child";
   let command = "echo 0";
   let patchText: string | undefined;
+  let oversizedInventory = false;
   const reads: Array<{ attempt: string; path: string; query: Record<string, string> }> = [];
   const native: Pick<RuntimeHub, "request"> = {
     async request(attempt, channel, request) {
@@ -86,16 +87,23 @@ test("execution history uses only recorded implementation ancestry, bounded page
           cursor: {},
         });
       if (url.pathname === `/api/session/${root}/message`)
+        if (url.searchParams.get("cursor") === "next-native-page")
+          return Response.json({ data: [], cursor: {} });
+      if (url.pathname === `/api/session/${root}/message`)
         return Response.json({
           data: [
             {
               id: "owned-message",
               type: "assistant",
               time: { created: 1, completed: 2 },
-              content: Array.from({ length: 14 }, (_, index) => ({
+              content: Array.from({ length: oversizedInventory ? 2_000 : 14 }, (_, index) => ({
                 id: `action-${index}`,
                 type: "tool",
-                name: index === 0 && patchText ? "patch" : "shell",
+                name: oversizedInventory
+                  ? `owned-inventory-tool-${index}`
+                  : index === 0 && patchText
+                    ? "patch"
+                    : "shell",
                 state: {
                   status: "completed",
                   input:
@@ -146,6 +154,27 @@ test("execution history uses only recorded implementation ancestry, bounded page
     expect("actions" in first && first.actions).toHaveLength(12);
     expect(JSON.stringify(first)).not.toContain("private-output");
     expect(JSON.stringify(first)).not.toContain(turn.sessionID);
+    const inventory = await read(scope, actions({ section: "inventory" }));
+    expect(inventory).toMatchObject({
+      candidate: f.commit,
+      sessionID: root,
+      totalSessions: 2,
+      actionsInPage: 14,
+      tools: [{ name: "shell", actions: Array.from({ length: 14 }, (_, index) => index) }],
+      nextCursor: "next-native-page",
+      nextSession: null,
+    });
+    expect(JSON.stringify(inventory)).not.toContain("echo 0");
+    expect(JSON.stringify(inventory)).not.toContain("private-output");
+    const end = await read(scope, actions({ section: "inventory", cursor: "next-native-page" }));
+    expect(end).toMatchObject({ actionsInPage: 0, tools: [], nextCursor: null, nextSession: 1 });
+    const descendantIndex = await read(scope, actions({ section: "inventory", session: 1 }));
+    expect(descendantIndex).toMatchObject({
+      actionsInPage: 0,
+      tools: [],
+      nextCursor: null,
+      nextSession: null,
+    });
     const next = await read(scope, actions({ offset: 12 }));
     expect("actions" in next && next.actions).toHaveLength(2);
     expect(next).toMatchObject({ nextOffset: null });
@@ -191,6 +220,14 @@ test("execution history uses only recorded implementation ancestry, bounded page
     ).toContain("SELECT id FROM qa_viewers");
     expect(reads.at(-1)?.path).toBe(`/api/session/${root}/message`);
     patchText = undefined;
+    oversizedInventory = true;
+    await expect(read(scope, actions({ section: "inventory" }))).rejects.toThrow(
+      "Execution inventory exceeds the response limit",
+    );
+    const detailedFallback = await read(scope, actions());
+    expect(detailedFallback).toMatchObject({ actionsInPage: 2_000, nextOffset: 12 });
+    expect("actions" in detailedFallback && detailedFallback.actions).toHaveLength(12);
+    oversizedInventory = false;
 
     command = "printf '%s' 'a b c' 'registry value with spaces'";
     const beforeSecrets = reads.length;

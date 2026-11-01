@@ -301,6 +301,36 @@ export function createReviewExecutionReader(
     const through = Date.parse(candidate.completedAt);
     if (!Number.isFinite(through)) throw new Error("Candidate execution time is unavailable");
     const projected = projectExecutionActions(page, hidden, through, input.action);
+    if (input.section === "inventory") {
+      const tools = new Map<string, number[]>();
+      projected.actions.forEach((action, index) => {
+        const indexes = tools.get(action.tool) ?? [];
+        indexes.push(index);
+        tools.set(action.tool, indexes);
+      });
+      const result = {
+        candidate: scope.commitSHA,
+        through: candidate.completedAt,
+        sessionIndex: input.session,
+        sessionID: session,
+        totalSessions: sessions.length,
+        tools: [...tools].map(([name, actions]) => ({ name, actions })),
+        actionsInPage: projected.actions.length,
+        nextCursor: projected.nextCursor,
+        nextSession:
+          projected.nextCursor === null && input.session + 1 < sessions.length
+            ? input.session + 1
+            : null,
+        unclassified: projected.unclassified,
+        laterActions: projected.laterActions,
+        limits,
+      };
+      if (Buffer.byteLength(JSON.stringify(result)) > 24_000)
+        throw new Error(
+          "Execution inventory exceeds the response limit. Inspect actions at this same session and cursor before advancing.",
+        );
+      return result;
+    }
     if (input.action !== undefined && !projected.actions[input.action])
       throw new Error("Choose an action from this native page");
     if (input.offset > projected.actions.length)

@@ -49,6 +49,10 @@ test("execution evidence accepts bounded paging but cannot select arbitrary nati
       call({ section: "actions", session: 1, cursor: "opaque", action: 2, inputOffset: 8_000 }),
     ).success,
   ).toBe(true);
+  expect(
+    candidateReviewCallInput.safeParse(call({ section: "inventory", session: 1, cursor: "opaque" }))
+      .success,
+  ).toBe(true);
   for (const args of [
     { sessionID: "foreign-session" },
     { runtimeID: crypto.randomUUID() },
@@ -60,6 +64,9 @@ test("execution evidence accepts bounded paging but cannot select arbitrary nati
     { section: "receipts", cursor: "native-cursor" },
     { section: "receipts", action: 1 },
     { section: "receipts", session: 1 },
+    { section: "inventory", action: 1 },
+    { section: "inventory", offset: 12 },
+    { section: "inventory", inputOffset: 8_000 },
   ])
     expect(candidateReviewCallInput.safeParse(call(args)).success).toBe(false);
 });
