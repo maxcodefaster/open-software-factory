@@ -1117,7 +1117,18 @@ test("keeps caret-based slash blocks, immutable save and approved scope intact",
       );
     }),
   ).toBe(true);
-  await summary.press("ControlOrMeta+End");
+  // Establish the same word boundary on macOS and Linux before native typing.
+  await summary.evaluate((element) => {
+    const text = element.querySelector("p")?.firstChild;
+    const selection = window.getSelection();
+    if (!text || text.nodeType !== Node.TEXT_NODE || !selection)
+      throw new Error("Missing authored paragraph");
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
   await summary.press("/");
   const menu = page.getByRole("menu", { name: "Specification blocks" });
   await expect(menu).toBeVisible();

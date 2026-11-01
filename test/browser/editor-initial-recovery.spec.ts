@@ -1,9 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
-import { createDeveloperIDEEdge } from "../../apps/factory/src/workspace/developer-ide-edge";
 import { CommandError } from "../../apps/factory/src/command-error";
+import { createDeveloperIDEEdge } from "../../apps/factory/src/workspace/developer-ide-edge";
+import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 
 async function listen(server: Server) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -13,7 +14,9 @@ async function listen(server: Server) {
 }
 
 async function fixture() {
+  const database = createDatabase(1);
   const userID = crypto.randomUUID();
+  const sessionID = crypto.randomUUID();
   const state = {
     editor: "ready" as "ready" | "preparing" | "stop-intended",
     backendReady: false,
@@ -60,9 +63,7 @@ async function fixture() {
   });
   const origin = await listen(frontend);
   edge = createDeveloperIDEEdge(
-    { client: async () => [{ id: "owned-session" }] } as unknown as Parameters<
-      typeof createDeveloperIDEEdge
-    >[0],
+    database,
     {
       get: async () => ({ epoch: 1, state: state.editor }),
       async connection() {
@@ -76,16 +77,33 @@ async function fixture() {
       typeof createDeveloperIDEEdge
     >[4],
   );
-  return {
-    state,
-    url: await edge.issue(userID, "owned-session", false),
-    async dispose() {
+  async function dispose() {
+    try {
       for (const server of [frontend, backend]) {
         server.closeAllConnections();
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
-    },
-  };
+      await database.client.begin(async (sql) => {
+        await sql`DELETE FROM auth.verification WHERE identifier LIKE ${`factory-editor:${userID}:%`}`;
+        await sql`DELETE FROM auth.session WHERE id=${sessionID} AND user_id=${userID}`;
+        await sql`DELETE FROM auth."user" WHERE id=${userID}`;
+      });
+    } finally {
+      await database.client.end({ timeout: 2 });
+    }
+  }
+  try {
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO auth."user"(id,name,email,email_verified)
+        VALUES(${userID},'Owned editor recovery',${`${userID}@owned.invalid`},true)`;
+      await sql`INSERT INTO auth.session(id,token,user_id,expires_at)
+        VALUES(${sessionID},${crypto.randomUUID()},${userID},now()+interval '1 hour')`;
+    });
+    return { state, url: await edge.issue(userID, sessionID, false), dispose };
+  } catch (cause) {
+    await dispose();
+    throw cause;
+  }
 }
 
 test("an unavailable initial editor reconnects without reloading a later dirty editor", async ({

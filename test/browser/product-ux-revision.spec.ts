@@ -1,15 +1,17 @@
-import { completedConversation } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
 import { createHash } from "node:crypto";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
-import { browserBootstrap } from "../fixtures/server-functions";
+import { conversationViewSchema } from "../../apps/factory/src/api-contracts";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { documentBlocks } from "../../apps/factory/src/document-model";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import {
+  browserBootstrap,
+  completedConversation,
+  mockFactoryFunctions,
+} from "../fixtures/server-functions";
 import { deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 test.use({ viewport: { width: 1440, height: 900 }, contextOptions: { reducedMotion: "reduce" } });
@@ -269,11 +271,26 @@ test("slash commands stay beside the caret in a dense document", async ({ page }
     .click();
   const summary = page.getByRole("textbox", { name: "Specification summary", exact: true });
   await summary.click();
-  await summary.press("ControlOrMeta+Home");
-  await summary.press("ArrowRight");
+  // Position this fixture identically on macOS and Linux; type the command natively.
+  await summary.evaluate((element) => {
+    const text = element.querySelector("p")?.firstChild;
+    const selection = window.getSelection();
+    if (!text || text.nodeType !== Node.TEXT_NODE || !selection)
+      throw new Error("Missing dense document paragraph");
+    const range = document.createRange();
+    range.setStart(text, 1);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
   await summary.pressSequentially("/");
   const menu = page.getByRole("menu", { name: "Specification blocks" });
+  await expect(menu).toHaveCount(0);
+  await summary.press("Backspace");
+  await summary.press("ArrowLeft");
+  await summary.pressSequentially("/");
   await expect(menu).toBeVisible();
+  await expect(menu.getByRole("menuitem", { name: "Text", exact: true })).toBeVisible();
   const caret = await summary.evaluate(() => {
     const selection = window.getSelection();
     if (!selection?.rangeCount) throw new Error("Missing slash-command caret");
@@ -288,6 +305,11 @@ test("slash commands stay beside the caret in a dense document", async ({ page }
     Math.min(Math.abs(bounds.y - caret.bottom), Math.abs(bounds.y + bounds.height - caret.top)),
     JSON.stringify({ caret, bounds, placement, frame }),
   ).toBeLessThanOrEqual(12);
+  await mkdir(".factory/test-results/workspace-headings", { recursive: true });
+  await page.screenshot({
+    path: ".factory/test-results/workspace-headings/slash-dense.png",
+    animations: "disabled",
+  });
 });
 
 test("new answers respect a reader's scroll position and pending feedback is immediate", async ({
