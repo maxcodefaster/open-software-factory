@@ -168,7 +168,7 @@ function fixture(input: FactoryboxWorkerRequest = request) {
   };
 }
 
-test.each(["start", "fork"] as const)(
+test.each(["start", "fork", "pause"] as const)(
   "native disk refusal leaves %s undispatched and its mutation-attempt fence untouched",
   async (action) => {
     const f = fixture();
@@ -190,21 +190,25 @@ test.each(["start", "fork"] as const)(
               sandboxID: "owned",
               bundle: "/var/lib/sysbox/fixed-store/data/store/input/owned/bundle",
             }
-          : {
-              action: "fork",
-              sandboxID: "owned",
-              sourceSandboxID: "source",
-              snapshotID: "b".repeat(32),
-              sourceOwner: "f".repeat(32),
-              checkpointSHA256: "a".repeat(64),
-            },
+          : action === "pause"
+            ? { action: "pause", sandboxID: "owned", snapshotID: "b".repeat(32) }
+            : {
+                action: "fork",
+                sandboxID: "owned",
+                sourceSandboxID: "source",
+                snapshotID: "b".repeat(32),
+                sourceOwner: "f".repeat(32),
+                checkpointSHA256: "a".repeat(64),
+              },
         f.run,
         undefined,
         async () => {
           attempted = true;
         },
       ),
-    ).rejects.toThrow(`capacity refused ${action === "start" ? "Start" : "Fork"} before dispatch`);
+    ).rejects.toThrow(
+      `capacity refused ${{ start: "Start", fork: "Fork", pause: "Pause" }[action]} before dispatch`,
+    );
     expect(attempted).toBe(false);
     expect(f.calls.some((args) => args.includes(action))).toBe(false);
   },
@@ -885,7 +889,10 @@ test("every mutation pins its store/epoch inside the executed CLI and never retr
     f.run,
   );
   expect(result.confirmed).toBe(false);
-  const mutation = f.calls.filter((args) => args.includes("--worker-epoch"));
+  const pinned = f.calls.filter((args) => args.includes("--worker-epoch"));
+  expect(pinned).toHaveLength(2);
+  expect(pinned[0]?.at(-1)).toBe("capacity");
+  const mutation = pinned.filter((args) => args.at(-1) !== "capacity");
   expect(mutation).toHaveLength(1);
   expect(mutation[0]).toEqual([
     "exec",

@@ -30,6 +30,7 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import {
   executeFactoryboxOperation,
+  FactoryboxCapacityRefusedError,
   type FactoryboxOperation,
   type FactoryboxWorkerIdentity,
   factoryboxOperation,
@@ -190,6 +191,7 @@ export function createFactoryboxExecution(
     // may continue Delete only after the exact original native runtime is
     // confirmed stopped, never by assuming a failed command had no effect.
     if (observeOnly && !record.attempted) await attempted(connection, record);
+    if (op.action === "pause" && record.attempted) hub.revoke(attemptID);
     let observation =
       record.attempted || observeOnly
         ? await executeFactoryboxOperation(
@@ -199,9 +201,13 @@ export function createFactoryboxExecution(
             run,
             declaration,
           )
-        : await executeFactoryboxOperation(request, identity, op, run, declaration, () =>
-            attempted(connection, record),
-          );
+        : await executeFactoryboxOperation(request, identity, op, run, declaration, async () => {
+            await attempted(connection, record);
+            if (op.action === "pause") hub.revoke(attemptID);
+          });
+    const nativeFailure = observation.confirmed
+      ? undefined
+      : factoryboxOperationFailure(op.action, observation.stderr);
     if (!observation.confirmed && op.action === "pause") {
       const current = await executeFactoryboxOperation(
         request,
@@ -301,7 +307,10 @@ export function createFactoryboxExecution(
           !result.record.pause.checkpoint_sha256 ||
           (op.action === "resume" && !result.record.pause.resume?.completed_at)))
     )
-      throw new Error(`Factorybox ${op.action} is not confirmed by its original native record`);
+      throw (
+        nativeFailure ??
+        new Error(`Factorybox ${op.action} is not confirmed by its original native record`)
+      );
     if (op.action === "resume") {
       const [pause] = await connection<
         Array<{ observation: unknown }>
@@ -909,17 +918,36 @@ export function createFactoryboxExecution(
         >`SELECT snapshot_id AS snapshot FROM factory.factorybox_lifecycle_operation
           WHERE runtime_attempt_id=${attemptID} AND action='pause' AND completed_at IS NULL ORDER BY intended_at LIMIT 1`;
         const snapshot = existing?.snapshot ?? crypto.randomUUID().replaceAll("-", "");
-        await intent(connection, attemptID, "pause", snapshot);
+        const operation = await intent(connection, attemptID, "pause", snapshot);
         const changed =
           await connection`UPDATE factory.runtime_attempt SET state='pausing',failure=NULL,updated_at=now()
           WHERE id=${attemptID} AND state IN ('ready','pausing') AND stop_intended_at IS NULL`;
         if (changed.count !== 1) throw new Error("Runtime Stop superseded Pause");
-        hub.revoke(attemptID);
         const outcome = await perform(connection, attemptID, saved, {
           action: "pause",
           sandboxID: saved.request.sandboxID,
           snapshotID: snapshot,
+        }).catch(async (cause: unknown) => {
+          if (!(cause instanceof FactoryboxCapacityRefusedError)) throw cause;
+          // The verified refusal occurred before the dispatch fence. Keep the
+          // live transports and the same unattempted snapshot intent. Stop or
+          // any attempted command prevents this recovery.
+          const restored = await connection.begin(async (sql) => {
+            const [unattempted] = await sql`UPDATE factory.factorybox_lifecycle_operation
+              SET observation=${JSON.stringify({ version: 1, deferred: true, reason: cause.message })}::text::jsonb
+              WHERE id=${operation.id} AND attempted_at IS NULL AND completed_at IS NULL RETURNING id`;
+            if (!unattempted) return false;
+            const changed = await sql`UPDATE factory.runtime_attempt
+              SET state=${hub.ready(attemptID) ? "ready" : "starting"}::factory.runtime_attempt_state,
+                failure=NULL,updated_at=now()
+              WHERE id=${attemptID} AND state='pausing' AND stop_intended_at IS NULL`;
+            return changed.count === 1;
+          });
+          if (!restored) throw cause;
+          hub.releaseIdle(attemptID);
+          return { deferred: true as const };
         });
+        if ("deferred" in outcome) return;
         if ("rejected" in outcome && outcome.rejected === true) {
           await connection.begin(async (sql) => {
             const [current] = await sql<

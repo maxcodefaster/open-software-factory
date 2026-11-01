@@ -116,6 +116,9 @@ original failure diagnostic rather than replacing it with a generic pending mess
 A confirmed native Start with its Parent connected remains preparing while Project setup hooks
 finish. Expiry of the native startup observation window does not report those hooks as failed.
 Connector readiness, actual setup errors and exact-identity transport recovery still own the outcome.
+Idle Pause checks that same capacity decision before revoking live transports or dispatching capture.
+A known pre-dispatch refusal keeps the Sandbox usable and the same snapshot intent unattempted;
+the existing idle grace permits another admission check. A dispatched or unknown Pause remains fenced.
 
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's

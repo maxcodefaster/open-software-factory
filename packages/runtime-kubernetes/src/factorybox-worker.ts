@@ -180,9 +180,11 @@ export function factoryboxOperationFailure(action: FactoryboxOperation["action"]
   return new Error(`Factorybox ${action} outcome is unconfirmed${detail ? `: ${detail}` : ""}`);
 }
 
+export class FactoryboxCapacityRefusedError extends Error {}
+
 export function requireFactoryboxWriteCapacity(
   identity: FactoryboxWorkerIdentity,
-  action: "Start" | "Fork" | "preparation",
+  action: "Start" | "Fork" | "Pause" | "preparation",
   value: unknown,
 ) {
   const counters = z.object({
@@ -202,7 +204,7 @@ export function requireFactoryboxWriteCapacity(
     throw new Error("Factorybox capacity decision is unverified before dispatch");
   if (!parsed.data.new_write_admitted) {
     const host = parsed.data.host;
-    throw new Error(
+    throw new FactoryboxCapacityRefusedError(
       `Factorybox capacity refused ${action} before dispatch${
         host
           ? `: host available=${host.filesystem_available_bytes} bytes, free floor=${host.min_free_bytes}, write reserve=${host.write_reserve_bytes}`
@@ -673,9 +675,9 @@ export async function executeFactoryboxOperation(
       await inspectFactoryboxWorker(input, admitted, run, declaration);
     }
   }
-  if (op.action === "start" || op.action === "fork") {
+  if (op.action === "start" || op.action === "fork" || op.action === "pause") {
     // A native refusal can happen before the Sandbox record is published.
-    // Observe capacity before marking Start attempted, so a known disk refusal
+    // Observe capacity before marking the operation attempted, so a known disk refusal
     // does not become an abandoned, unconfirmed mutation that cannot be stopped.
     const capacity = await invoke([...command, "capacity"], true);
     if (capacity.exitCode !== 0)
@@ -686,7 +688,11 @@ export async function executeFactoryboxOperation(
     } catch {
       throw new Error("Factorybox capacity decision is invalid before dispatch");
     }
-    requireFactoryboxWriteCapacity(admitted, op.action === "start" ? "Start" : "Fork", value);
+    requireFactoryboxWriteCapacity(
+      admitted,
+      ({ start: "Start", fork: "Fork", pause: "Pause" } as const)[op.action],
+      value,
+    );
   }
   if (op.action === "fork") {
     const source = await invoke([...command, "state", op.sourceSandboxID], true);

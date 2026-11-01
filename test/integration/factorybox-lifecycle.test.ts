@@ -39,6 +39,9 @@ test.each([
   ["arm64", false, false, "pause-rejected-input"],
   ["arm64", false, false, "pause-rejected-pid"],
   ["arm64", false, false, "pause-unconfirmed"],
+  ["arm64", false, false, "pause-capacity"],
+  ["amd64", false, false, "pause-capacity"],
+  ["arm64", false, false, "pause-capacity-stop"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
   async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
@@ -200,6 +203,7 @@ test.each([
       let preparations = 0;
       let preparationCapacityRefused = deleteContinuation.startsWith("preparation-capacity");
       let startCapacityRefused = deleteContinuation === "start-capacity-recovery";
+      let pauseCapacityRefused = false;
       let capacityChecks = 0;
       let releases = 0;
       let cancellations = 0;
@@ -269,7 +273,10 @@ test.each([
           const [start] = await database.client<Array<{ attempted: boolean }>>`
             SELECT attempted_at IS NOT NULL AS attempted FROM factory.factorybox_lifecycle_operation
             WHERE runtime_attempt_id=${owned.attemptID} AND action='start'`;
-          expect(start?.attempted ?? false).toBe(false);
+          expect(start?.attempted ?? false).toBe(mutations.includes("start"));
+          if (pauseCapacityRefused && deleteContinuation === "pause-capacity-stop")
+            await database.client`UPDATE factory.runtime_attempt
+              SET state='stop-intended',stop_intended_at=now() WHERE id=${owned.attemptID}`;
           return {
             exitCode: 0,
             stderr: "",
@@ -278,6 +285,7 @@ test.each([
               root,
               new_write_admitted:
                 !preparationRefused &&
+                !pauseCapacityRefused &&
                 !(
                   (deleteContinuation === "capacity-refusal" || startCapacityRefused) &&
                   preparations > 0
@@ -361,7 +369,10 @@ test.each([
           return { exitCode: 1, stderr: "response lost after completed native Start", stdout: "" };
         }
         if (action === "pause") {
-          if (deleteContinuation.startsWith("pause-")) {
+          if (
+            deleteContinuation.startsWith("pause-") &&
+            !deleteContinuation.startsWith("pause-capacity")
+          ) {
             const snapshot = args[args.indexOf("--snapshot-id") + 1];
             if (!snapshot) throw new Error("Missing rejected Pause snapshot");
             record.phase = "running";
@@ -683,10 +694,58 @@ test.each([
       nativeStatusOverride = undefined;
       expect(mutations).toEqual(["start"]);
       await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${owned.attemptID}`;
+      if (deleteContinuation.startsWith("pause-capacity")) {
+        const socket = (role: "parent" | "child") =>
+          ({
+            data: { kind: "connector", role, attemptID: owned.attemptID, generation: 1 },
+            close() {},
+            send() {
+              return 1;
+            },
+          }) as unknown as import("bun").ServerWebSocket<
+            import("../../apps/factory/src/runtime/hub").RuntimeSocketData
+          >;
+        hub.open(socket("parent"));
+        const child = socket("child");
+        hub.open(child);
+        hub.message(child, JSON.stringify({ type: "hello", role: "child", channels: [] }));
+        expect(hub.ready(owned.attemptID)).toBe(true);
+        pauseCapacityRefused = true;
+        const pausing = execution.pause(owned.attemptID);
+        if (deleteContinuation === "pause-capacity-stop")
+          await expect(pausing).rejects.toThrow("capacity refused Pause before dispatch");
+        else await pausing;
+        expect(mutations).toEqual(["start"]);
+        const [deferred] = await database.client<
+          Array<{ id: string; attempted: boolean; completed: boolean; snapshot: string }>
+        >`SELECT id,attempted_at IS NOT NULL AS attempted,completed_at IS NOT NULL AS completed,
+          snapshot_id AS snapshot FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='pause'`;
+        if (!deferred) throw new Error("Missing deferred Pause intent");
+        expect(deferred).toMatchObject({ attempted: false, completed: false });
+        const [current] = await database.client<Array<{ state: string }>>`
+          SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        if (deleteContinuation === "pause-capacity-stop") {
+          expect(current?.state).toBe("stop-intended");
+          return;
+        }
+        expect(current?.state).toBe("ready");
+        expect(hub.ready(owned.attemptID)).toBe(true);
+        pauseCapacityRefused = false;
+        await createFactoryboxExecution(database, hub, run).pause(owned.attemptID);
+        expect(mutations).toEqual(["start", "pause"]);
+        const [completed] = await database.client<Array<{ id: string; snapshot: string }>>`
+          SELECT id,snapshot_id AS snapshot FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='pause' AND completed_at IS NOT NULL`;
+        expect(completed).toEqual({ id: deferred.id, snapshot: deferred.snapshot });
+        return;
+      }
       if (deleteContinuation.startsWith("pause-")) {
         const valid = deleteContinuation === "pause-rejected";
         const paused = execution.pause(owned.attemptID);
         if (valid) await paused;
+        else if (deleteContinuation === "pause-unconfirmed")
+          await expect(paused).rejects.toThrow("checkpoint admission refused");
         else await expect(paused).rejects.toThrow();
         const [current] = await database.client<{ state: string; failure: string | null }[]>`
           SELECT state,failure FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
