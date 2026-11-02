@@ -832,18 +832,8 @@ test("silent Preview attachment offers a bounded reload of the same instance", a
   }
 });
 
-test("Dock chooser is integrated, keyboard navigable and does not start compute", async ({
-  page,
-}) => {
+async function showDockTicket(page: Page) {
   const changeID = crypto.randomUUID();
-  let starts = 0;
-  const compute = await Promise.all(
-    ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
-  );
-  page.on("request", (request) => {
-    if (request.method() === "POST" && compute.some((matches) => matches(new URL(request.url()))))
-      starts++;
-  });
   await mockFactoryFunctions(page, {
     runtime: {
       changes: async () =>
@@ -865,6 +855,20 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
     },
   });
   await wakeFactoryReads(page);
+}
+
+test("Dock chooser is integrated, keyboard navigable and does not start compute", async ({
+  page,
+}) => {
+  let starts = 0;
+  const compute = await Promise.all(
+    ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(factoryFunctionMatcher),
+  );
+  page.on("request", (request) => {
+    if (request.method() === "POST" && compute.some((matches) => matches(new URL(request.url()))))
+      starts++;
+  });
+  await showDockTicket(page);
   const chooser = page.getByRole("button", { name: "Choose IDE instance", exact: true });
   await expect(chooser).toBeVisible({ timeout: 10_000 });
   const group = page.locator(".dock-app.has-instances");
@@ -884,6 +888,10 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
   await page.keyboard.press("Enter");
   const menu = page.getByRole("menu", { name: "IDE instances", exact: true });
   const items = menu.getByRole("menuitem");
+  await expect(menu.getByRole("menuitem", { name: /My workspace/ })).toContainText(
+    "Starts or resumes compute",
+  );
+  await expect(menu).not.toContainText("Edit without starting compute");
   await expect(items.first()).toBeFocused();
   await page.keyboard.press("ArrowDown");
   await expect(items.nth(1)).toBeFocused();
@@ -909,6 +917,44 @@ test("Dock chooser is integrated, keyboard navigable and does not start compute"
   await expect(menu).toBeHidden();
   await expect(chooser).toBeFocused();
   expect(starts).toBe(0);
+});
+
+test.describe("Dock compute explanation on touch", () => {
+  test.use({ hasTouch: true });
+
+  test("Dock chooser explains editing compute without starting it on narrow touch", async ({
+    page,
+  }) => {
+    await resize(page, { width: 390, height: 844 });
+    let starts = 0;
+    const compute = await Promise.all(
+      ["startPersonalWorkspace", "startTicketWorkspace", "ensureStaging"].map(
+        factoryFunctionMatcher,
+      ),
+    );
+    page.on("request", (request) => {
+      if (request.method() === "POST" && compute.some((matches) => matches(new URL(request.url()))))
+        starts++;
+    });
+    await showDockTicket(page);
+    const chooser = page.getByRole("button", { name: "Choose IDE instance", exact: true });
+    await expect(chooser).toBeVisible({ timeout: 10_000 });
+    await chooser.tap();
+    const menu = page.getByRole("menu", { name: "IDE instances", exact: true });
+    await expect(menu.getByRole("menuitem", { name: /My workspace/ })).toContainText(
+      "Starts or resumes compute",
+    );
+    const bounds = await menu.evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return { left: rect.left, right: rect.right, viewport: window.innerWidth };
+    });
+    expect(bounds.left).toBeGreaterThanOrEqual(0);
+    expect(bounds.right).toBeLessThanOrEqual(bounds.viewport);
+    await page.screenshot({ path: `${evidence}/dock-compute-touch-390.png` });
+    await chooser.tap();
+    await expect(menu).toBeHidden();
+    expect(starts).toBe(0);
+  });
 });
 
 for (const viewport of auditViewports) {

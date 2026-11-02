@@ -1621,7 +1621,7 @@ function FactoryWorkspace(props: FactoryDesktopProps) {
       targets.unshift({
         id: `personal:${project.id}`,
         label: "My workspace",
-        detail: "Edit without starting compute",
+        detail: "Starts or resumes compute",
         projectId: project.id,
       });
     }
