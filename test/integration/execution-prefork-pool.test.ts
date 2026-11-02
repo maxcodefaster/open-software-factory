@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
+import { freezeRuntimeEnvironment } from "../../apps/factory/src/environments/runtime";
 import { freezeRuntimeArtifacts } from "../../apps/factory/src/runtime/artifacts";
 import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
+import { createStagingTemplateProducer } from "../../apps/factory/src/runtime/staging-template";
 import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { executionPoolFixture } from "../fixtures/execution-pool";
 import { factoryProcess } from "../fixtures/factory-process";
@@ -17,6 +19,94 @@ const profile = {
   boundedBytes: 8589934592 as const,
   claimGiB: 32 as const,
 };
+
+test("nonempty Staging environments can prepare a separate credential-free dependency template", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const store = createReserveStore(defaultReservePolicy, images, profile);
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+  try {
+    owned = await executionPoolFixture(database, store, profile, images);
+    const secretKey = `owned-runtime-values-never-captured-${crypto.randomUUID()}`;
+    await database.client`INSERT INTO factory.environment_write(command_id,project_id,environment,
+      base_version,fingerprint,manifest,secret_key,state,created_by,committed_at)
+      VALUES(${crypto.randomUUID()},${owned.projectID},'main-preview',0,${"e".repeat(64)},
+        '{"variables":[{"name":"APP_TOKEN","runtime":true,"build":false,"verification":false}],"registries":[]}'::jsonb,
+        ${secretKey},'committed',${owned.userID},now())`;
+    await database.client`INSERT INTO factory.project_environment(project_id,environment,version,manifest,secret_key)
+      SELECT project_id,environment,1,manifest,secret_key FROM factory.environment_write WHERE secret_key=${secretKey}`;
+    const stagingID = crypto.randomUUID();
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${stagingID},${fixtureValue(owned, "owned").projectID},'staging',2,${fixtureValue(owned, "owned").revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+      await freezeRuntimeEnvironment(sql, stagingID);
+      await freezeRuntimeArtifacts(
+        sql,
+        stagingID,
+        fixtureValue(owned, "owned").artifactConfiguration,
+      );
+      await sql`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
+        SELECT ${stagingID},declaration FROM factory.staging_configuration WHERE runtime_attempt_id=${fixtureValue(owned, "owned").stagingID}`;
+      await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${stagingID}`;
+      await sql`UPDATE factory.staging_preview SET runtime_attempt_id=${stagingID} WHERE project_id=${fixtureValue(owned, "owned").projectID}`;
+    });
+    const offered: unknown[] = [];
+    await createStagingTemplateProducer(
+      database,
+      {
+        ...store,
+        hasTemplate: async () => false,
+        async offerTemplate(_sql, input) {
+          offered.push(input.recipe);
+        },
+      },
+      images,
+    ).refresh();
+    expect(offered).toHaveLength(1);
+    expect(offered[0]).toMatchObject({
+      repositoryIdentity: owned.projectID,
+      revision: owned.revision,
+      composeProjectName: "project_devcontainer",
+      repositoryUrl: `https://unassigned.invalid/${owned.projectID}.git`,
+      controlUrl: "ws://unassigned.invalid/",
+    });
+    const recipe = JSON.stringify(offered[0]);
+    for (const forbidden of [
+      "environmentVersion",
+      "runtimeEnvironment",
+      "APP_TOKEN",
+      secretKey,
+      "do-not-capture",
+    ])
+      expect(recipe).not.toContain(forbidden);
+  } finally {
+    await owned?.cleanup();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+test("a template that never reached standby is not repeatedly cold-built for unchanged inputs", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const store = createReserveStore(defaultReservePolicy, images, profile);
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+  try {
+    owned = await executionPoolFixture(database, store, profile, images);
+    const key = owned.template.templateKey;
+    if (!key) throw new Error("Owned template has no immutable input key");
+    await store.retire(database.client, owned.template.id);
+    await store.retired(database.client, owned.template.id);
+    await database.client`UPDATE factory.execution_slot SET reconcile_after=now()-interval '1 second'
+      WHERE id=${owned.template.id}`;
+    expect(await store.hasTemplate(database.client, key)).toBe(true);
+    expect(await store.hasTemplate(database.client, `${key}-new-input`)).toBe(false);
+  } finally {
+    await owned?.cleanup();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
 
 test("the production pool plans two Project-bound Forks from one healthy immutable template", async () => {
   const host = await factoryProcess();

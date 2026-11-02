@@ -172,9 +172,14 @@ Start the declared credential-free Apps in that clean template, Pause it, then c
 two real native Forks and Pause each unused Fork. This is one shared Project-bound
 pool for eligible fresh Staging and Verification, not a pool per role or a limit of
 two running Sandboxes. Recent Project execution demand selects the warm Project.
-Only empty Staging Runtime Environments are eligible for this preparation; others
-keep ordinary fresh execution. An existing canonical Workspace is never replaced
-by the template checkout.
+A nonempty Staging Runtime Environment does not by itself exclude the Project.
+The separate template still receives no Runtime Environment version, variables,
+registry grants or Factory credentials. If its recipe cannot prepare without those
+grants, ordinary fresh execution remains available. An existing canonical Workspace
+is never replaced by the template checkout.
+A template that never reached confirmed standby is not repeatedly cold-built for the
+same immutable basis after cleanup. A new healthy Staging basis or changed artifact
+inputs permits a new template; uncertain external outcomes retain their original owner.
 
 Ready requires native confirmation of the exact standby snapshot, zero anonymous
 RAM and no resident snapshot pages. Persist source import, Fork, Pause and Resume
@@ -186,7 +191,12 @@ the controller fills their places with new paused Forks.
 Resume the selected Fork before delivering fresh Parent and Child authority. An exact
 revision/configuration with no resolved Runtime variables or registries adopts the
 already-running App processes through private root-peer control. Different input
-rebuilds only that Fork's private execution with its fresh grants. Keep the immutable
+rebuilds only that Fork's private execution with its fresh grants. For the same
+Project, commit and Dev Container path with no new build-variable or registry grants,
+retain the Fork's clean checkout and prepared dependency files; recheck source identity
+and rerun required hooks. Different source or build inputs discard that private checkout
+before normal preparation. Neither path reuses a
+Verification verdict or grants credentials to captured processes. Keep the immutable
 inner container origin separate from the new Runtime Attempt identity.
 
 Retire unused slots when their TTL or promoted basis changes. The template snapshot

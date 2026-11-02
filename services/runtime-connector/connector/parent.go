@@ -124,8 +124,15 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 			if err := cleanupProject(prepared.state()); err != nil {
 				return err
 			}
-			if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
-				return err
+			// This is the Fork's separate clean checkout, never canonical
+			// Workspace source. Fresh grants require fresh processes and
+			// hooks, not deletion of its exact prepared dependency files.
+			// checkoutProject still verifies its Project, commit and clean
+			// tracked source before the ordinary Dev Container startup.
+			if !reusablePreparedDependencies(prepared.assignment, assignment, environment) {
+				if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
+					return err
+				}
 			}
 			prepared = nil
 		} else {

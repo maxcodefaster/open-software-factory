@@ -44,13 +44,30 @@ func validatePreparedProject(assignment Assignment) error {
 	return nil
 }
 
-func samePreparedProject(source, target Assignment) bool {
+func samePreparedSource(source, target Assignment) bool {
 	return source.RepositoryIdentity == target.RepositoryIdentity && source.Revision == target.Revision &&
 		source.DevcontainerPath == target.DevcontainerPath &&
 		source.WorkspaceFolder == target.WorkspaceFolder &&
 		source.RemoteWorkspaceFolder == target.RemoteWorkspaceFolder &&
+		!target.PreserveWorkspace
+}
+
+func samePreparedProject(source, target Assignment) bool {
+	return samePreparedSource(source, target) &&
 		reflect.DeepEqual(source.Channels, target.Channels) && reflect.DeepEqual(source.Processes, target.Processes) &&
-		!target.PreserveWorkspace && target.Prebuild == nil && target.BrowserToolsImage == ""
+		target.Prebuild == nil && target.BrowserToolsImage == ""
+}
+
+func reusablePreparedDependencies(source, target Assignment, environment runtimeEnvironment) bool {
+	if !samePreparedSource(source, target) || len(environment.Bundle.Registries) != 0 {
+		return false
+	}
+	for _, variable := range environment.Bundle.Variables {
+		if variable.Build {
+			return false
+		}
+	}
+	return true
 }
 
 type preparedProject struct {

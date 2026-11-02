@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -27,7 +28,7 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if kind == "" {
 		kind = "build"
 	}
-	if kind != "build" && kind != "image-only" && kind != "build-no-features" {
+	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" {
 		t.Fatal("unknown native Compose proof recipe")
 	}
 	platform := "linux/" + runtime.GOARCH
@@ -167,6 +168,7 @@ exec %q "$@"
 		"seed/dependency/package.json":                    `{"name":"local-dependency","version":"1.0.0","main":"index.js"}`,
 		"seed/dependency/index.js":                        `module.exports="exact offline dependency";`,
 		"seed/package-lock.json":                          `{"name":"seed","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"seed","version":"1.0.0","dependencies":{"local-dependency":"file:./dependency"}},"dependency":{"name":"local-dependency","version":"1.0.0"},"node_modules/local-dependency":{"resolved":"dependency","link":true}}}`,
+		".gitignore":                                      "/dependency/\n/project-hook\n/feature-hook\n/create-hook\n",
 	}
 	if kind == "image-only" {
 		var config map[string]any
@@ -209,13 +211,15 @@ exec %q "$@"
 	}
 	command("git", "-C", root, "init", "--initial-branch=main")
 	command("git", "-C", root, "config", "factory.repositoryIdentity", "owned-compose-project")
+	command("git", "-C", root, "remote", "add", "origin", "https://unassigned.invalid/owned-compose-project.git")
 	command("git", "-C", root, "add", ".")
 	command("git", "-C", root, "-c", "user.name=Owned fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "exact offline Compose recipe")
 	commit := command("git", "-C", root, "rev-parse", "HEAD")
 	assignment := Assignment{
 		Version: 1, RuntimeAttemptID: "owned-compose-producer", Generation: 1,
 		RepositoryIdentity: "owned-compose-project", WorkspaceFolder: root, RemoteWorkspaceFolder: "/workspace/project",
-		Revision: commit, DevcontainerPath: ".devcontainer/devcontainer.json",
+		RepositoryURL: "https://unassigned.invalid/owned-compose-project.git",
+		Revision:      commit, DevcontainerPath: ".devcontainer/devcontainer.json",
 		ComposeProjectName: "owned_compose_project",
 	}
 	if kind == "build-no-features" {
@@ -282,6 +286,13 @@ exec %q "$@"
 	assignment.RegistryCAFile = grants.caFile
 	ctx = context.WithValue(ctx, dockerConfigContextKey{}, grants.dockerConfig)
 	ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
+	if kind == "dependency-seed" {
+		assignment.EnvironmentVersion = nil
+		assignment.RuntimeEnvironment = nil
+		assignment.EnvironmentSecretsFile = ""
+		assignment.DockerConfigDirectory = ""
+		assignment.RegistryCAFile = ""
+	}
 	path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
 	if err != nil {
 		t.Fatal(err)
@@ -333,12 +344,92 @@ exec %q "$@"
 	if json.Unmarshal([]byte(output), &selected) != nil || selected["Image"] != result.Image {
 		t.Fatalf("Compose consumer did not use the exact prebuilt digest: %s", output)
 	}
+	var dependencyRebuildMS int64
+	if kind == "dependency-seed" {
+		source := assignment
+		source.ControlURL = "ws://unassigned.invalid/"
+		target := source
+		target.RuntimeAttemptID = "owned-fresh-granted-consumer"
+		target.EnvironmentVersion = &version
+		var requested atomic.Bool
+		endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/internal/runtime-environment/"+target.RuntimeAttemptID {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			if r.Header.Get("Authorization") != "Bearer owned-fresh-parent" {
+				t.Error("fresh assignment requested Runtime values without its own authority")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			requested.Store(true)
+			json.NewEncoder(w).Encode(runtimeEnvironment{Version: version, Bundle: environmentBundle{
+				Variables: []environmentVariable{{Name: "PREPARED_RUNTIME_VALUE", Value: "fresh-after-image-preparation", Runtime: true}},
+			}})
+		}))
+		defer endpoint.Close()
+		target.ControlURL = strings.Replace(endpoint.URL, "http://", "ws://", 1) + "/internal/runtime-connect"
+		grants.cleanup()
+		previousContainer := container.ContainerID
+		// The production Parent authenticates fresh values, then must stop
+		// the clean processes without throwing away this exact dependency
+		// checkout. This owned endpoint intentionally refuses the later WS.
+		err := runParent(context.Background(), target, "owned-fresh-parent", "owned-fresh-child", &preparedProject{
+			assignment: source, result: container,
+			origin: containerOrigin{source.RuntimeAttemptID, source.Generation, container.ComposeProjectName},
+		})
+		if err == nil || !requested.Load() {
+			t.Fatalf("fresh-grant rebuild did not reach its own control boundary: %v", err)
+		}
+		manual, err := os.ReadFile(filepath.Join(root, "dependency/manual"))
+		if err != nil || string(manual) != "still writable" {
+			t.Fatalf("fresh-grant rebuild discarded the actual prepared dependency tree: %v", err)
+		}
+		if err := checkoutProject(context.Background(), target); err != nil {
+			t.Fatalf("retained prepared dependencies bypassed exact clean-source validation: %v", err)
+		}
+		grants, err = prepareEnvironmentFiles(runtimeEnvironment{Version: version, Bundle: environmentBundle{
+			Variables: []environmentVariable{{Name: "PREPARED_RUNTIME_VALUE", Value: "fresh-after-image-preparation", Runtime: true}},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer grants.cleanup()
+		target.RuntimeEnvironment = map[string]string{"PREPARED_RUNTIME_VALUE": "fresh-after-image-preparation"}
+		target.EnvironmentSecretsFile = grants.secretsFile
+		target.DockerConfigDirectory = grants.dockerConfig
+		target.RegistryCAFile = grants.caFile
+		ctx = context.WithValue(context.Background(), dockerConfigContextKey{}, grants.dockerConfig)
+		ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
+		path, cleanup, err := preparePrebuildConsumer(ctx, target, result.Image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		target.EffectiveConfiguration = path
+		if _, err := validateDevcontainer(ctx, target); err != nil {
+			t.Fatal(err)
+		}
+		started = time.Now()
+		assignment = target
+		container, err = startDevcontainer(ctx, assignment)
+		if err != nil || container.ContainerID == previousContainer {
+			t.Fatalf("fresh grants did not start a separate compliant Dev Container: %v", err)
+		}
+		dependencyRebuildMS = time.Since(started).Milliseconds()
+		observation = command("docker", "exec", container.ContainerID, "node", "-e",
+			`const fs=require("fs");if(fs.readFileSync("/workspace/project/dependency/manual","utf8")!=="still writable"||fs.readFileSync("/workspace/project/project-hook","utf8")!=="required project hook\nrequired project hook\n")process.exit(1);process.stdout.write(require("/workspace/project/dependency/node_modules/local-dependency"));`)
+		if observation != "exact offline dependency" {
+			t.Fatal("fresh compliant startup lost its dependency or skipped its required hook")
+		}
+	}
 	summary := map[string]any{
 		"nativeComponentProof": true, "nativeFactoryboxProof": false, "platform": platform,
 		"primaryKind": kind, "preparedDependency": kind != "image-only",
 		"image": result.Image, "firstBuildMS": first.Milliseconds(), "replayMS": replayed.Milliseconds(),
 		"consumerStartMS": consumer.Milliseconds(), "requiredHooks": true, "writableDependency": true,
 		"producerGraphEvictedBeforeConsumer": true,
+		"freshGrantDependencyRebuildMS":      dependencyRebuildMS,
 		"modelCalls":                         0, "projectCredentials": false,
 	}
 	encoded, _ := json.Marshal(summary)

@@ -10,6 +10,88 @@ import (
 	"testing"
 )
 
+func TestPreparedRebuildKeepsExactPrivateSourceAndInstalledDependencies(t *testing.T) {
+	for _, changedRevision := range []bool{false, true} {
+		t.Run(map[bool]string{false: "same source", true: "changed source"}[changedRevision], func(t *testing.T) {
+			source, revision := prebuildRepository(t)
+			source.Revision = revision
+			source.Generation = 1
+			source.RemoteWorkspaceFolder = "/workspace/project"
+			source.RepositoryURL = "https://unassigned.invalid/owned-project.git"
+			if err := workspaceGitCommand(context.Background(), source.WorkspaceFolder, "remote", "add", "origin", source.RepositoryURL).Run(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source.WorkspaceFolder, ".git", "info", "exclude"), []byte("node_modules/\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			cache := filepath.Join(source.WorkspaceFolder, "node_modules", "owned-prepared-dependency")
+			if err := os.MkdirAll(filepath.Dir(cache), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cache, []byte("prepared once"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			target := source
+			target.RuntimeAttemptID = "fresh-assigned-fork"
+			target.ControlURL = "ws://127.0.0.1:1/internal/runtime-connect"
+			// Different required processes force the same rebuild used when
+			// fresh Runtime grants cannot adopt the credential-free processes.
+			target.Processes = []Process{{Name: "app", Command: []string{"node", "fresh.js"}}}
+			if changedRevision {
+				target.Revision = strings.Repeat("b", 40)
+			}
+			err := runParent(context.Background(), target, "owned-parent", "owned-child", &preparedProject{
+				assignment: source,
+				result:     devcontainerResult{ComposeProjectName: "owned_template"},
+				origin:     containerOrigin{source.RuntimeAttemptID, source.Generation, "owned_template"},
+			})
+			if err == nil {
+				t.Fatal("fixture unexpectedly reached a live Factory")
+			}
+			content, cacheErr := os.ReadFile(cache)
+			if changedRevision {
+				if !os.IsNotExist(cacheErr) {
+					t.Fatal("different source retained another revision's prepared dependencies")
+				}
+			} else if cacheErr != nil || string(content) != "prepared once" {
+				t.Fatalf("rebuilding exact private source discarded prepared dependencies: %v", cacheErr)
+			} else if err := checkoutProject(context.Background(), target); err != nil {
+				t.Fatalf("prepared dependency reuse skipped or failed exact clean-source validation: %v", err)
+			}
+		})
+	}
+}
+
+func TestPreparedDependencyReuseDoesNotReuseDifferentBuildOrRegistryInputs(t *testing.T) {
+	slot, activation := preparedFixture(t)
+	source, target := *slot.Project, activation.Assignment
+	for _, environment := range []runtimeEnvironment{
+		{},
+		{Bundle: environmentBundle{Variables: []environmentVariable{{Name: "APP_TOKEN", Runtime: true}}}},
+	} {
+		if !reusablePreparedDependencies(source, target, environment) {
+			t.Fatal("fresh runtime-only authority discarded exact clean dependencies")
+		}
+	}
+	for _, environment := range []runtimeEnvironment{
+		{Bundle: environmentBundle{Variables: []environmentVariable{{Name: "BUILD_FLAVOR", Build: true}}}},
+		{Bundle: environmentBundle{Registries: []environmentRegistry{{Host: "private.example.test"}}}},
+	} {
+		if reusablePreparedDependencies(source, target, environment) {
+			t.Fatal("different build or registry inputs reused unqualified prepared dependencies")
+		}
+	}
+	target.Revision = strings.Repeat("b", 40)
+	if reusablePreparedDependencies(source, target, runtimeEnvironment{}) {
+		t.Fatal("different source reused another revision's dependency tree")
+	}
+}
+
 func preparedFixture(t *testing.T) (ReserveSlot, ReserveActivation) {
 	t.Helper()
 	slot, activation, _ := reserveFixture(t)

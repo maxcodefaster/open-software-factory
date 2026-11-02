@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { runtimeIdentity } from "../../../../packages/runtime-domain/src/identity";
 import type { ExecutionSlot, ReserveRole } from "../../../../packages/runtime-domain/src/reserve";
 import { runInputStreamCommand } from "../../../../packages/runtime-kubernetes/src/command";
 import { kubernetesCommand } from "../../../../packages/runtime-kubernetes/src/config";
@@ -45,10 +46,7 @@ export function createStagingTemplateProducer(
         JOIN factory.runtime_attempt staging ON staging.id=preview.runtime_attempt_id AND staging.revision=preview.revision
         JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=staging.id
         JOIN factory.staging_configuration configuration ON configuration.runtime_attempt_id=staging.id
-        LEFT JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=staging.id
-        LEFT JOIN factory.environment_write environment_write ON environment_write.secret_key=environment.secret_key AND environment_write.state='committed'
         WHERE staging.state='ready' AND staging.stop_intended_at IS NULL
-          AND (environment.secret_key IS NULL OR environment_write.manifest='{"variables":[],"registries":[]}'::jsonb)
         ORDER BY greatest(preview.updated_at,coalesce((SELECT max(created_at) FROM factory.runtime_attempt demand
           WHERE demand.project_id=project.id),preview.updated_at)) DESC,project.id LIMIT 1`;
       if (!candidate || candidate.runtimeHostImage !== images.staging) return;
@@ -70,7 +68,7 @@ export function createStagingTemplateProducer(
         preserveWorkspace: false,
         revision: candidate.revision,
         devcontainerPath: candidate.devcontainerPath,
-        composeProjectName: `template_${id.replaceAll("-", "")}`,
+        composeProjectName: runtimeIdentity(`template:${id}`, 1).composeProjectName,
         controlUrl: "ws://unassigned.invalid/",
         connectorStateDir: "/home/coder/connector-state",
         channels: declaration.channels,

@@ -53,10 +53,14 @@ export function createReserveStore(
   }
   return {
     async hasTemplate(sql: SQL, key: string) {
+      // Repeating a failed clean recipe cannot grant it missing credentials.
+      // Keep that terminal basis fenced, while a new Staging/artifact basis
+      // gets its own preparation. Healthy retired templates remain refillable.
       return (
         (
           await sql`SELECT id FROM factory.execution_slot WHERE template_id IS NULL AND template_key=${key}
-        AND (state IN ('creating','ready','retiring') OR reconcile_after>now()) LIMIT 1`
+        AND (state IN ('creating','ready','retiring') OR
+          (state='deleted' AND (factorybox_standby IS NULL OR reconcile_after>now()))) LIMIT 1`
         ).length > 0
       );
     },
