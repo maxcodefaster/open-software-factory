@@ -1018,7 +1018,7 @@ export function createFactoryboxExecution(
           if (!pause) throw new Error("Runtime Attempt has no committed Pause");
           await intent(connection, attemptID, "resume", pause.snapshot);
           await connection`UPDATE factory.runtime_attempt SET state='resuming',failure=NULL,updated_at=now()
-          WHERE id=${attemptID} AND state IN ('paused','resuming') AND stop_intended_at IS NULL`;
+          WHERE id=${attemptID} AND state='paused' AND stop_intended_at IS NULL`;
           // Check the original live worker before reauthorizing its credentials.
           await inspectFactoryboxWorker(
             factoryboxRuntimeRequest(saved.request),
@@ -1036,7 +1036,16 @@ export function createFactoryboxExecution(
           WHERE id=${attemptID} AND state='resuming' AND stop_intended_at IS NULL`;
         },
         deadline,
-      );
+      ).catch(async (cause: unknown) => {
+        // IDE, Ticket and restart recovery use this same execution owner.
+        // Keep the first cause while later reads can only say "unconfirmed".
+        // Neither the error nor a missing completion authorizes another Resume.
+        await database.client`UPDATE factory.runtime_attempt SET
+          failure=${cause instanceof Error ? cause.message : "Factorybox Resume is unconfirmed"},
+          updated_at=now()
+          WHERE id=${attemptID} AND state='resuming' AND failure IS NULL AND stop_intended_at IS NULL`;
+        throw cause;
+      });
     },
   };
 }

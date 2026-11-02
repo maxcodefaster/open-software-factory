@@ -903,12 +903,25 @@ test.each([
       await expect(execution.resume(owned.attemptID)).rejects.toThrow("unconfirmed");
       expect(resumeCommands).toBe(2);
       const [lostResume] = await database.client<
-        Array<{ state: string }>
-      >`SELECT state FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        Array<{ state: string; failure: string | null; updatedAt: string }>
+      >`SELECT state,failure,updated_at::text AS "updatedAt" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
       expect(lostResume?.state).toBe("resuming");
+      expect(lostResume?.failure).toContain("reply lost after the second native Resume");
+      record.phase = "resuming";
+      await expect(execution.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+      const [stillUnconfirmed] = await database.client<
+        Array<{ failure: string | null; updatedAt: string }>
+      >`SELECT failure,updated_at::text AS "updatedAt" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      expect(stillUnconfirmed?.failure).toBe(lostResume?.failure);
+      expect(stillUnconfirmed?.updatedAt).toBe(lostResume?.updatedAt);
+      expect(resumeCommands).toBe(2);
+      record.phase = "running";
       const resumeRecovered = createFactoryboxExecution(database, hub, run);
       await resumeRecovered.resume(owned.attemptID);
       expect(resumeCommands).toBe(2);
+      const [resumeSettled] = await database.client<Array<{ failure: string | null }>>`
+        SELECT failure FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+      expect(resumeSettled?.failure).toBeNull();
       await resumeRecovered.reclaimStorage();
       expect(reclaimed.size).toBe(2);
       expect(reclaimed.has(secondSnapshot)).toBe(true);
