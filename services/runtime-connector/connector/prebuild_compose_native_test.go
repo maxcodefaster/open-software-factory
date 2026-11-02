@@ -158,10 +158,10 @@ exec %q "$@"
 	}
 	root := filepath.Join(t.TempDir(), "project")
 	files := map[string]string{
-		".devcontainer/devcontainer.json":                 `{"dockerComposeFile":"compose.json","service":"workspace","workspaceFolder":"/workspace/project","remoteUser":"root","features":{"./feature":{}},"onCreateCommand":["node","-e","require('fs').cpSync('/opt/project-seed','/workspace/project/dependency',{recursive:true})"],"postCreateCommand":["node","-e","require('fs').writeFileSync('/workspace/project/project-hook','required project hook')"]}`,
+		".devcontainer/devcontainer.json":                 `{"dockerComposeFile":"compose.json","service":"workspace","workspaceFolder":"/workspace/project","remoteUser":"root","features":{"./feature":{}},"onCreateCommand":["node","-e","const fs=require('fs');fs.cpSync('/opt/project-seed','/workspace/project/dependency',{recursive:true});fs.appendFileSync('/workspace/project/create-hook','required create hook\\n')"],"postCreateCommand":["node","-e","require('fs').appendFileSync('/workspace/project/project-hook','required project hook\\n')"]}`,
 		".devcontainer/compose.json":                      `{"name":"owned_compose_project","services":{"workspace":{"build":{"context":"..","dockerfile":".devcontainer/Dockerfile"},"volumes":["..:/workspace/project"],"cap_drop":["ALL"],"command":["sleep","infinity"]},"support":{"image":"` + base + `","command":["sleep","infinity"]}}}`,
 		".devcontainer/Dockerfile":                        "FROM " + base + "\nCOPY seed /opt/project-seed\nRUN cd /opt/project-seed && npm ci --offline --ignore-scripts --no-audit --no-fund\n",
-		".devcontainer/feature/devcontainer-feature.json": `{"id":"fixture","version":"1.0.0","name":"Owned feature","postCreateCommand":["node","-e","require('fs').writeFileSync('/workspace/project/feature-hook','required Feature hook')"]}`,
+		".devcontainer/feature/devcontainer-feature.json": `{"id":"fixture","version":"1.0.0","name":"Owned feature","postCreateCommand":["node","-e","require('fs').appendFileSync('/workspace/project/feature-hook','required Feature hook\\n')"]}`,
 		".devcontainer/feature/install.sh":                "#!/bin/sh\nset -eu\nprintf 'prepared toolchain' > /opt/prebuilt-feature\n",
 		"seed/package.json":                               `{"name":"seed","version":"1.0.0","dependencies":{"local-dependency":"file:./dependency"}}`,
 		"seed/dependency/package.json":                    `{"name":"local-dependency","version":"1.0.0","main":"index.js"}`,
@@ -171,7 +171,7 @@ exec %q "$@"
 	if kind == "image-only" {
 		var config map[string]any
 		json.Unmarshal([]byte(files[".devcontainer/devcontainer.json"]), &config)
-		config["onCreateCommand"] = []string{"node", "-e", `require("fs").mkdirSync("/workspace/project/dependency",{recursive:true})`}
+		config["onCreateCommand"] = []string{"node", "-e", `const fs=require("fs");fs.mkdirSync("/workspace/project/dependency",{recursive:true});fs.appendFileSync("/workspace/project/create-hook","required create hook\n")`}
 		encoded, _ := json.Marshal(config)
 		files[".devcontainer/devcontainer.json"] = string(encoded)
 		var compose map[string]any
@@ -193,6 +193,7 @@ exec %q "$@"
 		files[".devcontainer/Dockerfile"] += "USER node\n"
 		var compose map[string]any
 		json.Unmarshal([]byte(files[".devcontainer/compose.json"]), &compose)
+		delete(compose, "name")
 		compose["services"].(map[string]any)["workspace"].(map[string]any)["init"] = true
 		encoded, _ = json.Marshal(compose)
 		files[".devcontainer/compose.json"] = string(encoded)
@@ -216,6 +217,9 @@ exec %q "$@"
 		RepositoryIdentity: "owned-compose-project", WorkspaceFolder: root, RemoteWorkspaceFolder: "/workspace/project",
 		Revision: commit, DevcontainerPath: ".devcontainer/devcontainer.json",
 		ComposeProjectName: "owned_compose_project",
+	}
+	if kind == "build-no-features" {
+		assignment.ComposeProjectName = "project_devcontainer"
 	}
 	request := PrebuildRequest{Commit: commit, Platform: platform, ImageRepository: "127.0.0.1:5000/prebuilds/owned-compose-project"}
 	initialTrims, _ := os.ReadFile("/tmp/owned-cache-trims")
@@ -284,6 +288,7 @@ exec %q "$@"
 	}
 	defer cleanup()
 	assignment.EffectiveConfiguration = path
+	assignment.PrebuildCacheImage = result.Image
 	if _, err := validateDevcontainer(ctx, assignment); err != nil {
 		t.Fatal(err)
 	}
@@ -307,20 +312,21 @@ exec %q "$@"
 	}()
 	consumer := time.Since(started)
 	observation := command("docker", "exec", container.ContainerID, "node", "-e",
-		`const fs=require("fs"); const dependency=fs.existsSync("/opt/project-seed")?require("/workspace/project/dependency/node_modules/local-dependency"):"image-only"; const values={dependency,feature:fs.existsSync("/opt/prebuilt-feature")?fs.readFileSync("/opt/prebuilt-feature","utf8"):"absent",projectHook:fs.readFileSync("/workspace/project/project-hook","utf8"),featureHook:fs.existsSync("/workspace/project/feature-hook")?fs.readFileSync("/workspace/project/feature-hook","utf8"):""}; fs.writeFileSync("/workspace/project/dependency/manual","still writable"); process.stdout.write(JSON.stringify(values));`)
+		`const fs=require("fs"); const dependency=fs.existsSync("/opt/project-seed")?require("/workspace/project/dependency/node_modules/local-dependency"):"image-only"; const values={dependency,feature:fs.existsSync("/opt/prebuilt-feature")?fs.readFileSync("/opt/prebuilt-feature","utf8"):"absent",createHook:fs.readFileSync("/workspace/project/create-hook","utf8"),projectHook:fs.readFileSync("/workspace/project/project-hook","utf8"),featureHook:fs.existsSync("/workspace/project/feature-hook")?fs.readFileSync("/workspace/project/feature-hook","utf8"):""}; fs.writeFileSync("/workspace/project/dependency/manual","still writable"); process.stdout.write(JSON.stringify(values));`)
 	dependency := "exact offline dependency"
 	if kind == "image-only" {
 		dependency = "image-only"
 	}
-	feature, featureHook := "prepared toolchain", "required Feature hook"
+	feature, featureHook := "prepared toolchain", "required Feature hook\n"
 	if kind == "build-no-features" {
 		feature, featureHook = "absent", ""
 	}
 	var values map[string]string
 	if json.Unmarshal([]byte(observation), &values) != nil ||
 		values["dependency"] != dependency || values["feature"] != feature ||
-		values["projectHook"] != "required project hook" || values["featureHook"] != featureHook {
-		t.Fatalf("prepared Compose consumer lost dependencies or required hooks: %s", observation)
+		values["createHook"] != "required create hook\n" ||
+		values["projectHook"] != "required project hook\n" || values["featureHook"] != featureHook {
+		t.Fatalf("prepared Compose consumer lost dependencies or ran required hooks other than exactly once: %s", observation)
 	}
 	var selected map[string]any
 	output := command("docker", "inspect", "--format", "{{json .Config}}", container.ContainerID)

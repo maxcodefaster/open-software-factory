@@ -45,6 +45,36 @@ exit 0
 	}
 }
 
+func TestPreparedImageStartsWithoutRequestingAnotherCacheBuild(t *testing.T) {
+	directory := t.TempDir()
+	log := filepath.Join(directory, "arguments")
+	for name, script := range map[string]string{
+		"docker":       "#!/bin/sh\nexit 0\n",
+		"devcontainer": fmt.Sprintf("#!/bin/sh\nprintf '%%s\\n' \"$@\" > %q\nexit 1\n", log),
+	} {
+		if err := os.WriteFile(filepath.Join(directory, name), []byte(script), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, effective := range []string{"", "/dev/shm/owned-consumer/devcontainer.json"} {
+		_, err := startDevcontainer(context.Background(), Assignment{
+			WorkspaceFolder: directory, DevcontainerPath: ".devcontainer/devcontainer.json",
+			RuntimeAttemptID: "owned-consumer", Generation: 1,
+			PrebuildCacheImage:     "registry.factory/prebuilds/project@sha256:" + strings.Repeat("a", 64),
+			EffectiveConfiguration: effective,
+		})
+		if err == nil {
+			t.Fatal("fixture unexpectedly started a real Dev Container")
+		}
+		arguments, err := os.ReadFile(log)
+		if err != nil || strings.Contains(string(arguments), "--cache-from") ||
+			(strings.Contains(string(arguments), "--override-config") != (effective != "")) {
+			t.Fatalf("prepared consumer or normal fallback requested another cached build: %s: %v", arguments, err)
+		}
+	}
+}
+
 func TestInteractiveRuntimeInjectsNoEditor(t *testing.T) {
 	for _, libc := range []string{"musl", "glibc"} {
 		t.Run(libc, func(t *testing.T) {

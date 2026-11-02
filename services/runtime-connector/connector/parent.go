@@ -1157,9 +1157,10 @@ func startDevcontainer(ctx context.Context, assignment Assignment) (devcontainer
 	if assignment.EnvironmentSecretsFile != "" {
 		arguments = append(arguments, "--secrets-file", assignment.EnvironmentSecretsFile, "--oci-auth-hardening")
 	}
-	if assignment.PrebuildCacheImage != "" {
-		arguments = append(arguments, "--cache-from", assignment.PrebuildCacheImage)
-	}
+	// A compatible prebuild is already selected by EffectiveConfiguration.
+	// --cache-from would ask the CLI to build again; for an image-only Compose
+	// service CLI 0.89.0 even emits an invalid service-level cache_from field.
+	// If consumer preparation was unavailable, preserve normal startup instead.
 	command := exec.CommandContext(ctx, "devcontainer", arguments...)
 	command.Env = devcontainerEnvironment(assignment)
 	var stdout bytes.Buffer

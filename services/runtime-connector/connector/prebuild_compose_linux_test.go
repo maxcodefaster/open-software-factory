@@ -24,6 +24,9 @@ func TestPrebuildComposeConsumerUsesMemoryBackedOverrideWithoutDroppingHooks(t *
 	if err := os.WriteFile(filepath.Join(bin, "devcontainer"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nprintf '{}\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	image := "registry.factory/prebuilds/project-one@sha256:" + strings.Repeat("c", 64)
 	path, cleanup, err := preparePrebuildConsumer(context.Background(), assignment, image)

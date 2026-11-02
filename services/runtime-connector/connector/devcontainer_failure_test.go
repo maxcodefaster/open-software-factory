@@ -11,6 +11,14 @@ import (
 	"unicode/utf8"
 )
 
+func TestDevcontainerFailureKeepsTheActualComposeSchemaRejection(t *testing.T) {
+	cause := "validating /tmp/devcontainercli-root/docker-compose/owned.yml: services.workspace.cache_from false schema"
+	detail := devcontainerFailureDiagnostic("", cause+"\nError: Command failed: docker compose build", Assignment{})
+	if !strings.Contains(detail, "services.workspace.cache_from false schema") {
+		t.Fatalf("Compose's actual schema rejection was replaced by the CLI wrapper: %s", detail)
+	}
+}
+
 func TestDevcontainerBuildCauseOnStdoutIsNotReplacedByTheComposeWrapper(t *testing.T) {
 	for _, format := range []string{"text", "raw JSON"} {
 		t.Run(format, func(t *testing.T) {

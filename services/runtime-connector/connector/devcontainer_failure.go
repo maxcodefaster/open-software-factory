@@ -56,6 +56,7 @@ func devcontainerFailureLines(text string) []string {
 			strings.Contains(lower, "failure") || strings.Contains(lower, "curl: (") ||
 			diagnosticHTTPFailure.MatchString(line) ||
 			strings.Contains(lower, "not found") || strings.Contains(lower, "denied") ||
+			(strings.Contains(lower, "validating ") && strings.Contains(lower, "schema")) ||
 			strings.Contains(lower, "not permitted") || strings.Contains(lower, "privileges requested") ||
 			strings.Contains(lower, "did not complete successfully") {
 			failures = append(failures, line)

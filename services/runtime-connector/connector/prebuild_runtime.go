@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -136,6 +137,14 @@ func preparePrebuildConsumer(ctx context.Context, assignment Assignment, image s
 	delete(config, "build")
 	delete(config, "dockerFile")
 	delete(config, "features")
+	output, err := runtimeDockerCommand(ctx, "image", "inspect", "--format", "{{json .Config.Labels}}", image).Output()
+	var labels map[string]string
+	if err != nil || len(output) > 1<<20 || json.Unmarshal(output, &labels) != nil {
+		return "", func() {}, errors.New("Prepared image metadata is unavailable")
+	}
+	if err := removePrebuiltProjectHooks(config, labels["devcontainer.metadata"]); err != nil {
+		return "", func() {}, err
+	}
 	directory, err := os.MkdirTemp("/dev/shm", "factory-prebuild-consumer-")
 	if err != nil {
 		return "", func() {}, err
@@ -158,6 +167,53 @@ func preparePrebuildConsumer(ctx context.Context, assignment Assignment, image s
 		return "", func() {}, err
 	}
 	return path, cleanup, nil
+}
+
+func removePrebuiltProjectHooks(config map[string]json.RawMessage, metadata string) error {
+	if metadata == "" {
+		return nil
+	}
+	var entries []map[string]json.RawMessage
+	if json.Unmarshal([]byte(metadata), &entries) != nil {
+		var entry map[string]json.RawMessage
+		if json.Unmarshal([]byte(metadata), &entry) != nil || entry == nil {
+			return errors.New("Prepared image lifecycle metadata is invalid")
+		}
+		entries = []map[string]json.RawMessage{entry}
+	} else if entries == nil {
+		return errors.New("Prepared image lifecycle metadata is invalid")
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	// The pinned CLI appends the Project's metadata after inherited image and
+	// Feature entries. Only remove an identical hook from that final Project
+	// entry. Inherited/Feature hooks remain upstream-owned and still run.
+	project := entries[len(entries)-1]
+	if project == nil {
+		return errors.New("Prepared image lifecycle metadata is invalid")
+	}
+	if project["id"] != nil {
+		return nil
+	}
+	var duplicated []string
+	for _, hook := range []string{"onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"} {
+		if config[hook] == nil || project[hook] == nil {
+			continue
+		}
+		var authored, prepared any
+		if json.Unmarshal(config[hook], &authored) != nil || json.Unmarshal(project[hook], &prepared) != nil ||
+			!reflect.DeepEqual(authored, prepared) {
+			// Expanded inputs may no longer be equivalent. Normal compliant
+			// startup is safer than skipping a changed hook or running both.
+			return errors.New("Prepared image lifecycle metadata differs from the Project recipe")
+		}
+		duplicated = append(duplicated, hook)
+	}
+	for _, hook := range duplicated {
+		delete(config, hook)
+	}
+	return nil
 }
 
 func publishRuntimePrebuild(ctx context.Context, assignment Assignment, token string, result PrebuildResult) error {
