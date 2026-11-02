@@ -54,6 +54,7 @@ export async function releaseWorkspace(fixture: Fixture) {
   await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
   const terminal = ide.locator(".factory-terminal-widget");
   const host = terminal.locator(".factory-terminal-host:not([hidden])");
+  await terminal.getByRole("button", { name: "New terminal", exact: true }).click();
   await visible(host).toHaveAttribute("data-connection-state", "connected");
   await host.locator(".xterm").click({ force: true });
   await page.keyboard.type(`export FACTORY_RELEASE_SENTINEL=${fixture.slug}`);

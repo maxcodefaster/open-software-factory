@@ -205,7 +205,6 @@ export class FactoryTerminalWidget extends BaseWidget {
   readonly #panels = document.createElement("div");
   readonly #views = new Map<string, TerminalView>();
   readonly #catalogue = new Map<string, StoredTerminal[]>();
-  readonly #initialized = new Set<string>();
   readonly #status = document.createElement("div");
   readonly #contextSubscription: { dispose(): void };
   readonly #writeSubscription: { dispose(): void };
@@ -260,8 +259,6 @@ export class FactoryTerminalWidget extends BaseWidget {
         try {
           if (runtime) {
             selected = localStorage.getItem(`${terminalStorageKey(runtime)}:active`);
-            if (localStorage.getItem(terminalStorageKey(runtime)) !== null)
-              this.#initialized.add(runtime.attemptID);
           }
         } catch {
           /* Keep the first retained session if storage is unavailable. */
@@ -364,12 +361,6 @@ export class FactoryTerminalWidget extends BaseWidget {
       return;
     }
     if (!this.isVisible) return;
-    if (this.#terminals.length === 0 && !this.#initialized.has(this.#runtime.attemptID)) {
-      this.#terminals = [this.#newTerminal(1)];
-      this.#activeID = this.#terminals[0]?.id;
-      this.#save();
-    }
-    this.#initialized.add(this.#runtime.attemptID);
     this.#add.disabled = this.#terminals.length >= 8;
     if (this.#terminals.length === 0) {
       this.#status.hidden = false;

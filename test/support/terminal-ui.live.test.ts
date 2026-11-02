@@ -15,6 +15,7 @@ test.skipIf(!enabled)(
   async () => {
     const owner = crypto.randomUUID();
     const name = `factory-terminal-ui-${owner}`;
+    const network = `${name}-network`;
     const workspace = crypto.randomUUID();
     const attempt = crypto.randomUUID();
     const artifacts = `.factory/test-results/chat-terminal-polish/terminal-${owner}`;
@@ -47,22 +48,28 @@ test.skipIf(!enabled)(
     >();
     let proxy: ReturnType<typeof Bun.serve<Socket>> | undefined;
     let created = false;
+    let networkCreated = false;
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await writeFile(
       `${artifacts}/intent.json`,
-      JSON.stringify({ owner, name, image, workspace, attempt }),
+      JSON.stringify({ owner, name, network, image, workspace, attempt }),
     );
     try {
+      await docker("network", "create", "--label", `factory.terminal-ui-proof=${owner}`, network);
+      networkCreated = true;
       await docker(
-        "run",
-        "--detach",
+        "create",
         "--name",
         name,
         "--label",
         `factory.terminal-ui-proof=${owner}`,
+        "--cpus=1",
+        "--memory=768m",
+        "--network",
+        network,
         "--tmpfs",
         "/tmp",
         "--tmpfs",
@@ -72,6 +79,7 @@ test.skipIf(!enabled)(
         image,
       );
       created = true;
+      await docker("start", name);
       const origin = `http://${await docker("port", name, "4400/tcp")}`;
       await browserExpect
         .poll(
@@ -235,6 +243,14 @@ test.skipIf(!enabled)(
       await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
       const terminal = ide.locator(".factory-terminal-widget");
       const active = terminal.locator(".factory-terminal-host:not([hidden])");
+      await browserExpect(terminal.getByRole("status")).toContainText("No open terminals.");
+      expect(sessions.size).toBe(0);
+      await page.screenshot({ path: `${artifacts}/terminal-empty.png` });
+      await page.reload();
+      await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
+      await browserExpect(terminal.getByRole("status")).toContainText("No open terminals.");
+      expect(sessions.size).toBe(0);
+      await terminal.getByRole("button", { name: "New terminal", exact: true }).click();
       await browserExpect(active).toHaveAttribute("data-connection-state", "connected");
       await active.locator(".xterm").click();
       await page.keyboard.type("printf 'native-%s\\n' proof");
@@ -323,7 +339,12 @@ test.skipIf(!enabled)(
       expect(errors).toEqual([]);
       await writeFile(
         `${artifacts}/result.json`,
-        JSON.stringify({ result: "passed", image, nativePTYs: sessions.size }),
+        JSON.stringify({
+          result: "passed",
+          image,
+          noAutomaticTerminalBeforeOrAfterReload: true,
+          nativePTYs: sessions.size,
+        }),
       );
     } catch (cause) {
       await page.screenshot({ path: `${artifacts}/failure.png` }).catch(() => {});
@@ -345,6 +366,18 @@ test.skipIf(!enabled)(
           ),
         ).toBe(owner);
         await docker("rm", "--force", name);
+      }
+      if (networkCreated) {
+        expect(
+          await docker(
+            "network",
+            "inspect",
+            "--format",
+            '{{index .Labels "factory.terminal-ui-proof"}}',
+            network,
+          ),
+        ).toBe(owner);
+        await docker("network", "rm", network);
       }
     }
   },

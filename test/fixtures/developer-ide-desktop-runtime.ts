@@ -77,6 +77,9 @@ export async function proveDesktopRuntime(input: {
   const computeStart = performance.now();
   const admittedAt = new Date().toISOString();
   await expect(frame.locator(".monaco-editor:visible")).toBeVisible();
+  const add = terminal.getByRole("button", { name: "New terminal", exact: true });
+  await expect(add).toBeEnabled({ timeout: 240_000 });
+  if ((await host.count()) === 0) await add.click();
   await expect(host).toHaveAttribute("data-connection-state", "connected", { timeout: 240_000 });
   const connectedMS = Math.round(performance.now() - computeStart);
   const list = z

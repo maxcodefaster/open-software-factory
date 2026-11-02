@@ -185,6 +185,7 @@ for (const restore of [false, true])
         const timeOrigin = await ide.locator("body").evaluate(() => performance.timeOrigin);
         await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
         const terminal = ide.locator(".factory-terminal-host:not([hidden])");
+        await ide.getByRole("button", { name: "New terminal", exact: true }).click();
         await expect(terminal).toHaveAttribute("data-connection-state", "connected", {
           timeout: 180_000,
         });

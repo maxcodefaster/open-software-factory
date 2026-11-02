@@ -158,6 +158,7 @@ test("the original Starter Ticket opens real source, PTY and its development Pre
     const editorMS = Math.round(performance.now() - started);
     await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
     const terminal = ide.locator(".factory-terminal-host:not([hidden])");
+    await ide.getByRole("button", { name: "New terminal", exact: true }).click();
     await expect(terminal).toHaveAttribute("data-connection-state", "connected");
     await terminal.locator(".xterm").click({ force: true });
     await page.keyboard.type("printf 'starter-workspace='; pwd");

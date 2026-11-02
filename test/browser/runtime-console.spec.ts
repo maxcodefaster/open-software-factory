@@ -235,6 +235,7 @@ test("retains complete native stdin when closing another terminal", async ({ pag
   await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
   const terminals = ide.locator(".factory-terminal-widget");
   const activeHost = terminals.locator(".factory-terminal-host:not([hidden])");
+  await terminals.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(activeHost).toHaveAttribute("data-connection-state", "connected");
   await activeHost.locator(".xterm").click();
   await page.keyboard.type("export FACTORY_TERMINAL_SENTINEL=session-alive");
@@ -499,6 +500,7 @@ test("controls declared Apps and restores workspace terminal sessions", async ({
   const terminalTab = ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" });
   await terminalTab.click();
   const terminal = ide.locator(".factory-terminal-widget");
+  await terminal.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(terminal.locator(".xterm")).toBeAttached();
   const terminalHost = terminal.locator(".factory-terminal-host:not([hidden])");
   await expect(terminalHost).toHaveAttribute("data-connection-state", "connected");

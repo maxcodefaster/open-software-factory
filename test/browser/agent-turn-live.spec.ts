@@ -223,6 +223,7 @@ test("runs genuine Project and Build turns beside the embedded IDE and Preview",
   await expect(ide.locator(".theia-preload")).toHaveCount(0);
   await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
   const terminal = ide.locator(".factory-terminal-host:not([hidden])");
+  await ide.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(terminal).toHaveAttribute("data-connection-state", "connected");
   await terminal.locator(".xterm").click();
   await page.keyboard.type("cat src/version.txt");

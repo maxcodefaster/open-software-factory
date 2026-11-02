@@ -66,6 +66,8 @@ async function moveSourceCaret(ide: FrameLocator, position: "start" | "end") {
 async function terminalCommand(page: Page, ide: FrameLocator, command: string, expected: string) {
   await ide.locator(".lm-TabBar-tab").filter({ hasText: "Terminal" }).click();
   const terminal = ide.locator(".factory-terminal-host:not([hidden])");
+  if ((await terminal.count()) === 0)
+    await ide.getByRole("button", { name: "New terminal", exact: true }).click();
   await expect(terminal).toHaveAttribute("data-connection-state", "connected");
   await terminal.locator(".xterm").click({ force: true });
   await page.keyboard.type(command);

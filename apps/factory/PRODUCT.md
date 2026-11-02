@@ -167,8 +167,9 @@ approval. Other chats and external MCP-library sources retain their existing aut
 See [Factory MCP](../../docs/adr/0020-factory-actions-through-mcp.md).
 
 IDE terminal tabs support keyboard switching and F2 renaming. Session names and the selected tab
-survive iframe reloads. Closing all terminals leaves an empty session list until New terminal is
-chosen; it does not start another session on reload.
+survive iframe reloads. New terminal explicitly opens the first session; opening the IDE or its
+Terminal panel does not create an unused shell that prevents idle Pause. Closing all terminals
+leaves an empty session list until New terminal is chosen; it does not start another session on reload.
 
 Opening a Workspace for editing automatically starts or resumes its compute, without commissioning
 Coding. The editor backend may warm while hidden, but selects a Workspace only when opened.
