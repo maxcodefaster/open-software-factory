@@ -49,6 +49,7 @@ type prebuildInput struct {
 	CLIIntegrity       string   `json:"cliIntegrity"`
 	ImmutableInputs    []string `json:"immutableInputs"`
 	EnvironmentVersion uint64   `json:"environmentVersion"`
+	ComposeService     string   `json:"composeService,omitempty"`
 }
 
 type prebuildIntent struct {
@@ -71,6 +72,7 @@ type prebuildConfiguration struct {
 	Image             string          `json:"image"`
 	Dockerfile        string          `json:"dockerFile"`
 	DockerComposeFile any             `json:"dockerComposeFile"`
+	Service           string          `json:"service"`
 	Build             struct {
 		Dockerfile string `json:"dockerfile"`
 		Context    string `json:"context"`
@@ -120,8 +122,16 @@ func writePrebuildIntent(directory string, intent prebuildIntent) error {
 }
 
 func ProducePrebuild(parent context.Context, assignment Assignment, request PrebuildRequest) (PrebuildResult, error) {
-	result, err := producePrebuildWith(parent, assignment, request, buildProjectPrebuild, pushProjectPrebuild, readPrebuildConfiguration)
-	if err == nil {
+	published := false
+	push := func(ctx context.Context, operation prebuildOperation, imageID string) (string, error) {
+		image, err := pushProjectPrebuild(ctx, operation, imageID)
+		published = err == nil
+		return image, err
+	}
+	result, err := producePrebuildWith(parent, assignment, request, buildProjectPrebuild, push, readPrebuildConfiguration)
+	// A confirmed replay did not build, pull or publish anything. Keep bounded
+	// cleanup after actual publication, not on this read-only reuse path.
+	if err == nil && published {
 		_ = trimPrivateBuildCache(parent)
 	}
 	return result, err

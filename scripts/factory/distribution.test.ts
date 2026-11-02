@@ -131,3 +131,37 @@ test("release images wait for the same non-live checks on both native architectu
   });
   expect(JSON.stringify(checks)).not.toMatch(/secrets\.|test:(?:live|native|browser:paid)/);
 });
+
+test("native Compose prebuild and required hooks gate runtime publication on both architectures", async () => {
+  const workflow = parse(
+    await readFile(new URL("../../.github/workflows/images.yaml", import.meta.url), "utf8"),
+  );
+  const build = workflow.jobs.roles.steps.find((step: { run?: string }) =>
+    step.run?.includes("docker buildx build"),
+  );
+  expect(build.run).toContain(
+    'bash scripts/runtime/project-compose-prebuild-proof.sh "$image_id" "$NODE_PROOF_IMAGE" "$registry_proof_image"',
+  );
+  expect(build.run.indexOf("project-compose-prebuild-proof.sh")).toBeLessThan(
+    build.run.indexOf('docker push "$image"'),
+  );
+  expect(
+    workflow.jobs.roles.steps.find((step: { uses?: string }) =>
+      step.uses?.startsWith("actions/setup-go@"),
+    ).with,
+  ).toEqual({
+    "go-version": `\${{ steps.proof-tools.outputs.go }}`,
+    "cache-dependency-path": "services/runtime-connector/go.sum",
+  });
+  const proof = await readFile(
+    new URL("../runtime/project-compose-prebuild-proof.sh", import.meta.url),
+    "utf8",
+  );
+  expect(proof).toContain("--network=none --cpus=3 --memory=3g");
+  expect(proof).toContain('"nativeFactoryboxProof":false');
+  const start = proof.indexOf("docker create");
+  const create = proof.slice(start, proof.indexOf("docker cp", start));
+  expect(create).toContain("--network=none");
+  // The fixture has its own Unix socket. It must not bind-mount the host's.
+  expect(create).not.toMatch(/--mount|--volume\b|\s-v\b/);
+});

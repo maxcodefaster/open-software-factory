@@ -32,7 +32,9 @@ import { runtimeCacheObservation } from "../fixtures/runtime-cache-observation";
 import { authenticatedBootstrap, callFactoryFunction } from "../fixtures/server-functions";
 import { slice20StartupTargetFailures } from "./runtime-startup";
 
-const prebuildEnabled = process.env["FACTORY_RUN_PROJECT_PREBUILD_PROOF"] === "1";
+const composePrebuildEnabled = process.env["FACTORY_RUN_PROJECT_COMPOSE_PREBUILD_PROOF"] === "1";
+const prebuildEnabled =
+  process.env["FACTORY_RUN_PROJECT_PREBUILD_PROOF"] === "1" || composePrebuildEnabled;
 const ideEnabled = process.env["FACTORY_RUN_AUTOMATIC_IDE_PROOF"] === "1";
 const idleEnabled = process.env["FACTORY_RUN_IDLE_COMPUTE_PROOF"] === "1" || ideEnabled;
 const performanceEnabled = process.env["FACTORY_CHECK_SLICE20_STARTUP_TARGETS"] === "1";
@@ -70,7 +72,9 @@ test.skipIf(!enabled)(
     const projectID = crypto.randomUUID();
     const artifacts = resolve(".factory/test-results/source-compute", proofID);
     await mkdir(artifacts, { recursive: true });
-    const recipe = prebuildEnabled ? await projectPrebuildRecipe(artifacts) : null;
+    const recipe = prebuildEnabled
+      ? await projectPrebuildRecipe(artifacts, composePrebuildEnabled)
+      : null;
     const localImages = starterImagesSchema.parse(
       JSON.parse(await readFile(".factory/starter-images.json", "utf8")),
     );

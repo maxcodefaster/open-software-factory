@@ -357,7 +357,7 @@ func TestPrebuildTaggedJSONCUsesUpstreamResolvedDocumentAndKeepsCanonicalRecipe(
 	}
 }
 
-func TestPrebuildComposeFallbackNeverCreatesAnArtifact(t *testing.T) {
+func TestPrebuildIncompleteComposeNeverCreatesAnArtifact(t *testing.T) {
 	assignment, commit := prebuildRepository(t)
 	builds := 0
 	read := func(context.Context, string, string) (prebuildConfiguration, error) {
@@ -365,11 +365,11 @@ func TestPrebuildComposeFallbackNeverCreatesAnArtifact(t *testing.T) {
 	}
 	build := func(context.Context, prebuildOperation, string) (string, error) { builds++; return "", nil }
 	push := func(context.Context, prebuildOperation, string) (string, error) {
-		t.Fatal("published unsupported recipe")
+		t.Fatal("published an incomplete Compose recipe")
 		return "", nil
 	}
 	_, err := producePrebuildWith(context.Background(), assignment, PrebuildRequest{Commit: commit, Platform: "linux/arm64", ImageRepository: "registry.factory/prebuilds/project-one"}, build, push, read)
 	if err == nil || builds != 0 {
-		t.Fatal("Compose did not retain normal-start fallback")
+		t.Fatal("incomplete Compose did not retain normal-start fallback")
 	}
 }

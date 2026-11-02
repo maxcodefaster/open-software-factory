@@ -97,13 +97,21 @@ func runtimePrebuildPlatform(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", errors.New("Project native build platform is unavailable")
 	}
-	switch strings.TrimSpace(string(output)) {
-	case "linux/aarch64", "linux/arm64":
-		return "linux/arm64", nil
-	case "linux/x86_64", "linux/amd64":
-		return "linux/amd64", nil
-	default:
+	platform := normalizePrebuildPlatform(strings.TrimSpace(string(output)))
+	if platform == "" {
 		return "", errors.New("Project native build platform is unsupported")
+	}
+	return platform, nil
+}
+
+func normalizePrebuildPlatform(value string) string {
+	switch value {
+	case "linux/aarch64", "linux/arm64":
+		return "linux/arm64"
+	case "linux/x86_64", "linux/amd64":
+		return "linux/amd64"
+	default:
+		return ""
 	}
 }
 
@@ -125,18 +133,24 @@ func preparePrebuildConsumer(ctx context.Context, assignment Assignment, image s
 	if err != nil || json.Unmarshal(source, &config) != nil {
 		return "", func() {}, errors.New("Prepared image recipe is unavailable")
 	}
-	if config["dockerComposeFile"] != nil {
-		return "", func() {}, errors.New("Compose uses normal image preparation")
-	}
 	delete(config, "build")
 	delete(config, "dockerFile")
 	delete(config, "features")
-	config["image"], _ = json.Marshal(image)
 	directory, err := os.MkdirTemp("/dev/shm", "factory-prebuild-consumer-")
 	if err != nil {
 		return "", func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(directory) }
+	if config["dockerComposeFile"] != nil {
+		if err := configureComposePrebuildConsumer(assignment.WorkspaceFolder,
+			filepath.Join(assignment.WorkspaceFolder, assignment.DevcontainerPath), directory, image, config); err != nil {
+			cleanup()
+			return "", func() {}, err
+		}
+		delete(config, "image")
+	} else {
+		config["image"], _ = json.Marshal(image)
+	}
 	path := filepath.Join(directory, "devcontainer.json")
 	encoded, _ := json.Marshal(config)
 	if err := os.WriteFile(path, encoded, 0600); err != nil {

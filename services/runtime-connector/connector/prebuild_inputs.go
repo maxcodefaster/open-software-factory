@@ -181,10 +181,13 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 	if err != nil {
 		return input, "", err
 	}
-	if config.DockerComposeFile != nil {
-		return input, "", errors.New("prebuild producer accepts a standalone image or Dockerfile recipe; Compose consumers use its digest")
-	}
 	var immutable []string
+	if config.DockerComposeFile != nil {
+		config, immutable, err = prepareComposePrebuild(ctx, snapshot, configPath, config)
+		if err != nil {
+			return input, "", err
+		}
+	}
 	var dockerfileRelative string
 	if config.Image != "" {
 		key, err := projectImageKey(config.Image)
@@ -234,17 +237,18 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 		if err != nil || len(source) > 1<<20 {
 			return input, "", errors.New("prebuild Dockerfile is unavailable or too large")
 		}
-		immutable, err = prebuildDockerInputs(string(source))
+		inputs, err := prebuildDockerInputs(string(source))
 		if err != nil {
-			resolved, inputs, resolveErr := resolvePrebuildDockerInputs(ctx, string(source))
+			resolved, resolvedInputs, resolveErr := resolvePrebuildDockerInputs(ctx, string(source))
 			if resolveErr != nil {
 				return input, "", resolveErr
 			}
-			immutable = inputs
+			inputs = resolvedInputs
 			if err := os.WriteFile(path, []byte(resolved), 0600); err != nil {
 				return input, "", err
 			}
 		}
+		immutable = append(immutable, inputs...)
 	}
 	remoteFeatures := false
 	for feature := range config.Features {
@@ -272,6 +276,10 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 	}
 	sort.Strings(immutable)
 	input = prebuildInput{Version: 1, Repository: assignment.RepositoryIdentity, Commit: request.Commit, Tree: tree, Configuration: configuration, Dockerfile: dockerfileRelative, Platform: request.Platform, ImageRepository: named.Name(), CLIVersion: prebuildCLIVersion, CLIIntegrity: prebuildCLIIntegrity, ImmutableInputs: immutable}
+	if config.DockerComposeFile != nil {
+		input.Version = 2
+		input.ComposeService = config.Service
+	}
 	if assignment.EnvironmentVersion != nil {
 		input.EnvironmentVersion = *assignment.EnvironmentVersion
 	}

@@ -1,4 +1,3 @@
-import { type ParseError, parse as parseJSONC } from "jsonc-parser";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { createForgejoClient, type ForgeRepository } from "../../../../packages/forge/src/forge";
 import type { ComputeClass } from "../../../../packages/runtime-domain/src/compute";
@@ -1217,30 +1216,6 @@ export function createRuntimeController(
           FROM factory.project_image_preparation preparation JOIN factory.project project ON project.id=preparation.project_id WHERE preparation.id=${preparationID} AND preparation.state IN ('pending','running')`;
         if (!job) return;
         await requireSetupReady(lock, job.projectID);
-        if (!job.attemptID) {
-          const content = job.repositoryURL.startsWith("file://")
-            ? await readRepositoryFileAtRevision(
-                job.repositoryURL,
-                job.revision,
-                job.devcontainerPath,
-              )
-            : await forge.getFile(
-                repositoryFromURL(job.repositoryURL),
-                job.devcontainerPath,
-                job.revision,
-              );
-          const errors: ParseError[] = [];
-          const recipe = parseJSONC(content, errors, { allowTrailingComma: true });
-          if (
-            !errors.length &&
-            recipe &&
-            typeof recipe === "object" &&
-            "dockerComposeFile" in recipe
-          ) {
-            await lock`UPDATE factory.project_image_preparation SET state='unsupported',failure='Compose uses normal startup instead of a prebuilt image.',updated_at=now() WHERE id=${preparationID} AND state='pending'`;
-            return;
-          }
-        }
         projectLock = `runtime:${job.projectID}`;
         await lock`SELECT pg_advisory_lock(hashtext(${projectLock}))`;
         let attemptID = job.attemptID;

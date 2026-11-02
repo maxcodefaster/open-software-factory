@@ -795,7 +795,10 @@ func validateCompose(
 	}
 	arguments := []string{"compose"}
 	for _, file := range files {
-		arguments = append(arguments, "--file", filepath.Join(filepath.Dir(configPath), file))
+		if !filepath.IsAbs(file) {
+			file = filepath.Join(filepath.Dir(configPath), file)
+		}
+		arguments = append(arguments, "--file", file)
 	}
 	arguments = append(arguments, "--profile", "*", "config", "--format", "json")
 	output, err := runtimeDockerCommand(ctx, arguments...).Output()

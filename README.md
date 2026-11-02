@@ -142,6 +142,10 @@ not admit a Factorybox worker or activate an installation.
 Before pushing each native runtime-host image, an offline Compose proof builds a configured
 Dockerfile outside its context and checks that raw Bake still refuses the same ungranted file.
 It uses no Project source, credentials or host Docker socket and does not qualify Factorybox.
+`mise exec -- bash scripts/runtime/project-compose-prebuild-proof.sh RUNTIME_IMAGE NODE_IMAGE REGISTRY_IMAGE`
+separately checks native Compose image preparation, exact replay and a writable consumer with
+required Project/Feature hooks. Pass immutable native image references. This owned, offline
+component proof has a private Docker daemon and does not establish Factorybox or startup targets.
 
 For local browser access, install with `deploy/helm/factory/values.local.yaml` and your
 cluster-reachable application image. Then run:

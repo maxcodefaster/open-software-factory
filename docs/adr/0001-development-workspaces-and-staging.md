@@ -82,8 +82,12 @@ minutes. A confirmed image is reusable only for its exact commit, recipe, resolv
 inputs, native platform and environment version. Normal image tags and JSONC remain repository-owned;
 resolve and freeze only an isolated build snapshot. The consumer uses a temporary image configuration
 and upstream image metadata so Feature lifecycle hooks still run. Dirty source, changed inputs,
-unsupported recipes or failed preparation use normal compliant startup. Compose runs through the
-existing bounded runtime path; automatic Compose image production is not supported.
+unsupported recipes or failed preparation use normal compliant startup. Compose preparation builds
+the selected primary service with the unchanged CLI on the admitted native platform. Resolve its
+committed Compose files and immutable image/Dockerfile inputs without producer-environment or
+external-file dependencies. The consumer keeps the original service files and lifecycle hooks,
+adding only a primary-image override that removes its redundant build. This caches the toolchain
+image; it is not evidence that dependency hooks ran or that a paused Project Fork is available.
 
 Use OpenBao KV v2 for encrypted Project values. PostgreSQL owns masked manifests, versions and
 deterministic write intent/outcome, never values. Project managers replace protected values; developers

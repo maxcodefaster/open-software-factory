@@ -90,7 +90,17 @@ func buildProjectPrebuild(ctx context.Context, operation prebuildOperation, snap
 			return "", err
 		}
 	}
-	arguments := []string{"build", "--workspace-folder", snapshot, "--config", filepath.Join(snapshot, operation.Input.Configuration), "--image-name", operation.Tag, "--platform", operation.Input.Platform, "--label", prebuildLabel + "=" + operation.Identity, "--oci-auth-hardening"}
+	arguments := []string{"build", "--workspace-folder", snapshot, "--config", filepath.Join(snapshot, operation.Input.Configuration), "--image-name", operation.Tag, "--label", prebuildLabel + "=" + operation.Identity, "--oci-auth-hardening"}
+	if operation.Input.ComposeService == "" {
+		arguments = append(arguments, "--platform", operation.Input.Platform)
+	} else {
+		// CLI 0.89.0 builds Compose natively and rejects --platform. Confirm
+		// the private daemon architecture instead of silently cross-building.
+		output, err := prebuildCommand(ctx, home, "docker", "info", "--format", "{{.OSType}}/{{.Architecture}}").Output()
+		if err != nil || normalizePrebuildPlatform(strings.TrimSpace(string(output))) != operation.Input.Platform {
+			return "", errors.New("Compose prebuild requires its exact native platform")
+		}
+	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(filepath.Join(snapshot, operation.Input.Configuration)), "devcontainer-lock.json")); err == nil {
 		arguments = append(arguments, "--frozen-lockfile")
 	}

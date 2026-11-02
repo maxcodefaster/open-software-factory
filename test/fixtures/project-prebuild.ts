@@ -6,7 +6,7 @@ import { z } from "zod";
 import upstream from "../../upstream.json";
 import { type FactoryboxFixtureTarget, factoryboxFixtureCommand } from "./factorybox-runtime";
 
-export async function projectPrebuildRecipe(artifacts: string) {
+export async function projectPrebuildRecipe(artifacts: string, compose = false) {
   const directory = resolve(artifacts, "recipe-repository");
   const git = async (...args: string[]) =>
     (
@@ -70,6 +70,22 @@ export async function projectPrebuildRecipe(artifacts: string) {
       },
     }),
   };
+  if (compose) {
+    const config = JSON.parse(files[".devcontainer/prebuild/devcontainer.json"] ?? "null");
+    delete config.build;
+    config.dockerComposeFile = "compose.json";
+    config.service = "workspace";
+    files[".devcontainer/prebuild/devcontainer.json"] = JSON.stringify(config);
+    files[".devcontainer/prebuild/compose.json"] = JSON.stringify({
+      services: {
+        workspace: {
+          build: { context: "../..", dockerfile: ".devcontainer/prebuild/Dockerfile" },
+          volumes: ["../..:/workspace/project"],
+        },
+        support: { image: upstream.node.image },
+      },
+    });
+  }
   for (const [name, content] of Object.entries(files)) {
     const path = resolve(directory, name);
     await mkdir(resolve(path, ".."), { recursive: true });
