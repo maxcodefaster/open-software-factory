@@ -198,6 +198,9 @@ An unavailable Preview shows its recorded startup cause. A settled current Main 
 one explicit Retry in that error view, preserving the previous attempt until the command confirms
 the recorded successor. Reading, reconnecting, historical previews and unconfirmed cleanup cannot
 commission another Start. Ticket compute remains controlled from its existing work context.
+On first attachment, a temporary Factory transport refusal reconnects the same Preview document
+while its view is active. Permanent failures and documents already used by a person require an
+explicit reload; App writes and runtime Starts are never repeated by this recovery.
 
 A merged Ticket whose replacement Main Preview failed offers one developer-only Retry Main
 Preview action. It retains the failed attempt and original merge, starting a separately recorded

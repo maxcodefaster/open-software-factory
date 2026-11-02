@@ -48,7 +48,8 @@ function Surface() {
             <RuntimeWorkspace
               title="Preview"
               attemptID={attemptID}
-              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("connection-error") ? "failed-document" : "document"}`}
+              active={!params.has("inactive")}
+              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("starting") ? "starting-document" : params.has("connection-error") ? "failed-document" : "document"}`}
               loadingLabel="Opening Preview…"
             />
           }

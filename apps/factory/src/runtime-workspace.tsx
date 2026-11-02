@@ -192,6 +192,9 @@ function AttachedRuntimeFrame(props: {
 }) {
   const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
   const [documentFailed, setDocumentFailed] = createSignal(false);
+  const [retryable, setRetryable] = createSignal(false);
+  let attached = false;
+  let retryDelay = 1000;
   let frame: HTMLIFrameElement | undefined;
   const activePreviewID = () =>
     props.title === "Preview" && props.active !== false ? props.attemptID : undefined;
@@ -206,6 +209,9 @@ function AttachedRuntimeFrame(props: {
   createEffect(
     () => props.url,
     () => {
+      attached = false;
+      retryDelay = 1000;
+      setRetryable(false);
       setDocumentFailed(false);
       setPhase("loading");
     },
@@ -217,6 +223,31 @@ function AttachedRuntimeFrame(props: {
     const timer = setTimeout(() => setPhase("failed"), 30_000);
     return () => clearTimeout(timer);
   });
+  createEffect(
+    () => ({
+      phase: phase(),
+      retryable: retryable(),
+      active: props.active !== false,
+      reconnecting: props.reconnecting,
+    }),
+    (current) => {
+      if (
+        current.phase !== "failed" ||
+        !current.retryable ||
+        !current.active ||
+        current.reconnecting
+      )
+        return;
+      // Only Factory-confirmed initial document unavailability can retry.
+      // Reconnect the same GET attachment, never Start, App writes or an
+      // already attached document that may contain unsaved human input.
+      const timer = setTimeout(() => {
+        retryDelay = Math.min(retryDelay * 2, 10_000);
+        reload(false);
+      }, retryDelay);
+      return () => clearTimeout(timer);
+    },
+  );
   createEffect(
     () => ({
       preview: props.title === "Preview",
@@ -242,12 +273,15 @@ function AttachedRuntimeFrame(props: {
         )
           return;
         if (event.data.type === "factory-preview-document-failed") {
+          setRetryable(!attached && event.data.retryable === true);
           setDocumentFailed(true);
           setPhase("failed");
           return;
         }
         // The document is attached even if a nonessential image is still loading.
         // This is not App health, runtime readiness or review evidence.
+        attached = true;
+        setRetryable(false);
         setDocumentFailed(false);
         setPhase("loaded");
         usePreview(activePreviewID());
@@ -257,8 +291,13 @@ function AttachedRuntimeFrame(props: {
     },
   );
 
-  function reload() {
+  function reload(resetBackoff = true) {
     if (!frame) return;
+    if (resetBackoff) {
+      attached = false;
+      retryDelay = 1000;
+    }
+    setRetryable(false);
     setDocumentFailed(false);
     setPhase("loading");
     frame.src = props.url;
@@ -288,6 +327,7 @@ function AttachedRuntimeFrame(props: {
             document?.contentType === "application/json" &&
             new URL(document.URL).pathname === "/api/runtime-access";
           const rejected = accessRejected || documentFailed();
+          if (!rejected) attached = true;
           setPhase(rejected ? "failed" : "loaded");
           if (!rejected) usePreview(activePreviewID());
         }}
@@ -336,8 +376,12 @@ function AttachedRuntimeFrame(props: {
               </p>
             }
           >
-            <p>Could not open {props.title}. Reload this view to retry.</p>
-            <button type="button" class="primary-button" onClick={reload}>
+            <p>
+              {retryable()
+                ? "Preview could not be reached. Reconnecting…"
+                : `Could not open ${props.title}. Reload this view to retry.`}
+            </p>
+            <button type="button" class="primary-button" onClick={() => reload()}>
               Reload view
             </button>
           </Show>

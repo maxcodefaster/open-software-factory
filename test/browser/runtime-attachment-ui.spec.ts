@@ -6,6 +6,7 @@ import { createServer, type ViteDevServer } from "vite";
 import { previewBridge } from "../../apps/factory/src/review/preview-bridge";
 import { previewAttachmentFailure } from "../../apps/factory/src/runtime/preview-attachment-failure";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
+import { protocolFailure } from "../../apps/factory/src/server/protocols/failure";
 import { test } from "../fixtures/browser-test";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
@@ -33,8 +34,20 @@ test.beforeAll(async () => {
         configureServer(server) {
           server.middlewares.use(async (request, response, next) => {
             const path = request.url?.split("?")[0];
-            if (path === "/document" || path === "/failed-document") {
+            if (["/document", "/failed-document", "/starting-document"].includes(path ?? "")) {
               documents++;
+              if (path === "/starting-document" && documents <= 2) {
+                const navigation = new Request(`${origin}/runtime/${attemptID}/preview/app/`, {
+                  headers: { "sec-fetch-mode": "navigate" },
+                });
+                const failure = previewAttachmentFailure(
+                  navigation,
+                  origin,
+                  protocolFailure(navigation, new Error("channel request failed")),
+                );
+                response.writeHead(failure.status, Object.fromEntries(failure.headers));
+                return response.end(await failure.text());
+              }
               if (path === "/failed-document" && documents === 1) {
                 const failure = previewAttachmentFailure(
                   new Request(`${origin}/runtime/${attemptID}/preview/app/`, {
@@ -138,7 +151,99 @@ test("Preview accepts its parsed document, not a spoofed sender, while an image 
   await page.screenshot({ path: `${evidence}/preview-parsed-before-image.png` });
 });
 
-test("a failed cross-origin Preview stays behind its recovery view and reloads only on request", async ({
+test("a cold App reconnects its initial Preview document without another Start", async ({
+  page,
+  browser,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  await page.clock.install();
+  for (const width of [1440, 390]) {
+    documents = 0;
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto(`${origin}/runtime-attachment.html?starting=1`);
+    const connection = page.getByRole("status", { name: "Preview connection" });
+    await expect(connection).toContainText("Preview could not be reached. Reconnecting", {
+      timeout: 3000,
+    });
+    expect(documents).toBe(1);
+    await page.screenshot({ path: `${evidence}/preview-cold-connecting-${width}.png` });
+    await page.clock.fastForward(1000);
+    await expect.poll(() => documents).toBe(2);
+    await expect(connection).toContainText("Reconnecting");
+    await page.clock.fastForward(2000);
+    await expect(connection).toHaveCount(0, { timeout: 3000 });
+    await expect(
+      page.frameLocator('iframe[title="Factory Preview"]').getByText("Usable Preview document"),
+    ).toBeVisible();
+    await expect(page.locator("iframe")).toHaveAttribute("data-runtime-attempt-id", attemptID);
+    expect(documents).toBe(3);
+    await page.clock.fastForward(31_000);
+    expect(documents).toBe(3);
+    await page.screenshot({ path: `${evidence}/preview-cold-connected-${width}.png` });
+  }
+  const touch = await browser.newContext({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+    reducedMotion: "reduce",
+  });
+  try {
+    documents = 0;
+    const phone = await touch.newPage();
+    await phone.clock.install();
+    await phone.goto(`${origin}/runtime-attachment.html?starting=1`);
+    const connection = phone.getByRole("status", { name: "Preview connection" });
+    const reload = connection.getByRole("button", { name: "Reload view", exact: true });
+    await expect(connection).toContainText("Reconnecting");
+    expect(
+      await reload.evaluate((element) => element.getBoundingClientRect().height),
+    ).toBeGreaterThanOrEqual(44);
+    await phone.screenshot({ path: `${evidence}/preview-cold-connecting-touch.png` });
+    await reload.tap();
+    await expect.poll(() => documents).toBe(2);
+    await expect(connection).toContainText("Reconnecting");
+    await phone.clock.fastForward(1000);
+    await expect(connection).toHaveCount(0, { timeout: 3000 });
+    expect(documents).toBe(3);
+  } finally {
+    await touch.close();
+  }
+});
+
+test("an inactive Preview does not keep retrying its unavailable attachment", async ({ page }) => {
+  await page.clock.install();
+  await page.goto(`${origin}/runtime-attachment.html?starting=1&inactive=1`);
+  const connection = page.getByRole("status", { name: "Preview connection" });
+  await expect(connection).toContainText("Reconnecting");
+  await page.clock.fastForward(31_000);
+  expect(documents).toBe(1);
+});
+
+test("a previously attached Preview never reloads automatically over human work", async ({
+  page,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  await page.clock.install();
+  await page.goto(`${origin}/runtime-attachment.html`);
+  const connection = page.getByRole("status", { name: "Preview connection" });
+  await expect(connection).toHaveCount(0);
+  await page
+    .frameLocator('iframe[title="Factory Preview"]')
+    .getByText("Usable Preview document")
+    .evaluate((_, factoryOrigin) => {
+      window.parent.postMessage(
+        { type: "factory-preview-document-failed", retryable: true },
+        factoryOrigin,
+      );
+    }, origin);
+  await expect(connection).toContainText("Could not open Preview.");
+  await page.clock.fastForward(31_000);
+  expect(documents).toBe(1);
+});
+
+test("a permanent cross-origin Preview failure reloads only on request", async ({
   page,
   browser,
 }) => {

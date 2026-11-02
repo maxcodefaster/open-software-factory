@@ -21,8 +21,24 @@ test("attachment failure preserves failure status and exposes no private protoco
   );
   const body = await result.text();
   expect(body).toContain("factory-preview-document-failed");
+  expect(body).toContain('"retryable":true');
   expect(body).not.toContain("private runtime diagnostics");
 });
+
+test.each([400, 401, 403, 404, 409, 422, 500])(
+  "Factory attachment status %i does not authorize an automatic reload",
+  async (status) => {
+    const request = new Request(`${origin}${path}`, {
+      headers: { "sec-fetch-mode": "navigate" },
+    });
+    const result = previewAttachmentFailure(
+      request,
+      origin,
+      Response.json({ error: "private runtime diagnostics" }, { status }),
+    );
+    expect(await result.text()).toContain('"retryable":false');
+  },
+);
 
 test("ordinary JSON calls, IDE navigation, App mutations and success keep their original response", () => {
   for (const [pathname, method, navigation, status] of [
