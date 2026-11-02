@@ -205,7 +205,27 @@ func prepareEnvironmentFiles(environment runtimeEnvironment) (environmentFiles, 
 	if err := requireMemoryFilesystem("/dev/shm"); err != nil {
 		return environmentFiles{}, err
 	}
-	return prepareEnvironmentFilesAt(environment, "/dev/shm", "/run/factory-build-secrets")
+	factoryCA, err := os.ReadFile("/factory/registry-ca/ca.crt")
+	if err != nil {
+		return environmentFiles{}, errors.New("Admitted Factory registry trust is unavailable")
+	}
+	files, err := prepareEnvironmentFilesAt(environment, "/dev/shm", "/run/factory-build-secrets")
+	if err != nil {
+		return environmentFiles{}, err
+	}
+	projectCA, err := os.ReadFile(files.caFile)
+	if err == nil {
+		// Docker's private daemon already has the admitted installation CA.
+		// The Node CLI resolves OCI inputs itself too, so Project settings
+		// must supplement that trust rather than replace it with an empty file.
+		bundle := append(append(append([]byte(nil), factoryCA...), '\n'), projectCA...)
+		err = os.WriteFile(files.caFile, bundle, 0600)
+	}
+	if err != nil {
+		files.cleanup()
+		return environmentFiles{}, errors.New("Runtime registry trust preparation failed")
+	}
+	return files, nil
 }
 
 func (files environmentFiles) cleanup() {

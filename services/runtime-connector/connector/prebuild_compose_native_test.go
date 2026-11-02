@@ -3,8 +3,10 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,13 +27,50 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if kind == "" {
 		kind = "build"
 	}
-	if kind != "build" && kind != "image-only" {
+	if kind != "build" && kind != "image-only" && kind != "build-no-features" {
 		t.Fatal("unknown native Compose proof recipe")
 	}
 	platform := "linux/" + runtime.GOARCH
 	if runtime.GOOS != "linux" || platform != os.Getenv("FACTORY_COMPOSE_PROOF_PLATFORM") {
 		t.Fatal("proof is not running on its admitted native architecture")
 	}
+	// Match a fresh installation's private Registry trust. It is not a Project
+	// registry grant, and Node's CLI must retain it even with an empty bundle.
+	trusted := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer trusted.Close()
+	factoryCA := "/factory/registry-ca/ca.crt"
+	if err := os.MkdirAll(filepath.Dir(factoryCA), 0700); err != nil {
+		t.Fatal(err)
+	}
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: trusted.Certificate().Raw})
+	file, err := os.OpenFile(factoryCA, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal("owned component fixture must not replace admitted Registry trust", err)
+	}
+	if _, err := file.Write(certificate); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(factoryCA)
+	registryTrust, err := prepareEnvironmentFiles(runtimeEnvironment{Version: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registryTrust.cleanup()
+	trustProbe := exec.CommandContext(ctx, "node", "-e",
+		fmt.Sprintf(`require("https").get(%q,res=>{res.resume();res.on("end",()=>{if(res.statusCode!==200)process.exitCode=1})}).on("error",err=>{console.error(err.code);process.exitCode=1})`, trusted.URL))
+	trustProbe.Env = devcontainerEnvironment(Assignment{
+		DockerConfigDirectory: registryTrust.dockerConfig, RegistryCAFile: registryTrust.caFile,
+	})
+	if output, err := trustProbe.CombinedOutput(); err != nil {
+		t.Fatalf("the real Node CLI environment dropped the admitted Factory Registry CA: %s: %v", output, err)
+	}
+	registryTrust.cleanup()
 	cli, err := exec.LookPath("devcontainer")
 	if err != nil {
 		t.Fatal(err)
@@ -42,8 +81,12 @@ if [ "$1" = build ]; then
   %q "$@" >/tmp/owned-devcontainer-build.log 2>&1
   exit $?
 fi
+if [ "$1" = up ]; then
+  %q "$@" 2>/tmp/owned-devcontainer-up.log
+  exit $?
+fi
 exec %q "$@"
-`, cli, cli)
+`, cli, cli, cli)
 	if err := os.WriteFile(filepath.Join(wrappers, "devcontainer"), []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +182,21 @@ exec %q "$@"
 		encoded, _ = json.Marshal(compose)
 		files[".devcontainer/compose.json"] = string(encoded)
 	}
+	if kind == "build-no-features" {
+		var config map[string]any
+		json.Unmarshal([]byte(files[".devcontainer/devcontainer.json"]), &config)
+		delete(config, "features")
+		config["remoteUser"] = "node"
+		config["overrideCommand"] = true
+		encoded, _ := json.Marshal(config)
+		files[".devcontainer/devcontainer.json"] = string(encoded)
+		files[".devcontainer/Dockerfile"] += "USER node\n"
+		var compose map[string]any
+		json.Unmarshal([]byte(files[".devcontainer/compose.json"]), &compose)
+		compose["services"].(map[string]any)["workspace"].(map[string]any)["init"] = true
+		encoded, _ = json.Marshal(compose)
+		files[".devcontainer/compose.json"] = string(encoded)
+	}
 	for path, content := range files {
 		path = filepath.Join(root, path)
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -188,7 +246,38 @@ exec %q "$@"
 	if err != nil || string(afterReplay) != string(beforeReplay) {
 		t.Fatal("completed prebuild replay repeated synchronous build-cache pruning")
 	}
+	// A consumer has no producer-local image tags or BuildKit records. This
+	// daemon belongs only to the offline fixture; its running Registry retains
+	// the published immutable artifacts while all unused producer state goes.
+	command("docker", "builder", "prune", "--all", "--force")
+	command("docker", "image", "prune", "--all", "--force")
+	if exec.CommandContext(ctx, "docker", "image", "inspect", result.Image).Run() == nil {
+		t.Fatal("consumer still shares the producer's local image graph")
+	}
+	command("docker", "pull", result.Image)
+	command("docker", "pull", base)
+	if kind == "build-no-features" {
+		command("chown", "-R", "1000:1000", root)
+	}
 	assignment.RuntimeAttemptID = "owned-compose-consumer"
+	version := uint64(1)
+	assignment.EnvironmentVersion = &version
+	assignment.RuntimeEnvironment = map[string]string{"PREPARED_RUNTIME_VALUE": "fresh-after-image-preparation"}
+	grants, err := prepareEnvironmentFiles(runtimeEnvironment{
+		Version: version,
+		Bundle: environmentBundle{Variables: []environmentVariable{{
+			Name: "PREPARED_RUNTIME_VALUE", Value: assignment.RuntimeEnvironment["PREPARED_RUNTIME_VALUE"], Runtime: true,
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer grants.cleanup()
+	assignment.EnvironmentSecretsFile = grants.secretsFile
+	assignment.DockerConfigDirectory = grants.dockerConfig
+	assignment.RegistryCAFile = grants.caFile
+	ctx = context.WithValue(ctx, dockerConfigContextKey{}, grants.dockerConfig)
+	ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
 	path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
 	if err != nil {
 		t.Fatal(err)
@@ -201,6 +290,11 @@ exec %q "$@"
 	started = time.Now()
 	container, err := startDevcontainer(ctx, assignment)
 	if err != nil {
+		diagnostic, _ := os.ReadFile("/tmp/owned-devcontainer-up.log")
+		if len(diagnostic) > 24*1024 {
+			diagnostic = diagnostic[len(diagnostic)-24*1024:]
+		}
+		t.Log(string(diagnostic))
 		t.Fatal(err)
 	}
 	defer func() {
@@ -213,15 +307,19 @@ exec %q "$@"
 	}()
 	consumer := time.Since(started)
 	observation := command("docker", "exec", container.ContainerID, "node", "-e",
-		`const fs=require("fs"); const dependency=fs.existsSync("/opt/project-seed")?require("/workspace/project/dependency/node_modules/local-dependency"):"image-only"; const values={dependency,feature:fs.readFileSync("/opt/prebuilt-feature","utf8"),projectHook:fs.readFileSync("/workspace/project/project-hook","utf8"),featureHook:fs.readFileSync("/workspace/project/feature-hook","utf8")}; fs.writeFileSync("/workspace/project/dependency/manual","still writable"); process.stdout.write(JSON.stringify(values));`)
+		`const fs=require("fs"); const dependency=fs.existsSync("/opt/project-seed")?require("/workspace/project/dependency/node_modules/local-dependency"):"image-only"; const values={dependency,feature:fs.existsSync("/opt/prebuilt-feature")?fs.readFileSync("/opt/prebuilt-feature","utf8"):"absent",projectHook:fs.readFileSync("/workspace/project/project-hook","utf8"),featureHook:fs.existsSync("/workspace/project/feature-hook")?fs.readFileSync("/workspace/project/feature-hook","utf8"):""}; fs.writeFileSync("/workspace/project/dependency/manual","still writable"); process.stdout.write(JSON.stringify(values));`)
 	dependency := "exact offline dependency"
 	if kind == "image-only" {
 		dependency = "image-only"
 	}
+	feature, featureHook := "prepared toolchain", "required Feature hook"
+	if kind == "build-no-features" {
+		feature, featureHook = "absent", ""
+	}
 	var values map[string]string
 	if json.Unmarshal([]byte(observation), &values) != nil ||
-		values["dependency"] != dependency || values["feature"] != "prepared toolchain" ||
-		values["projectHook"] != "required project hook" || values["featureHook"] != "required Feature hook" {
+		values["dependency"] != dependency || values["feature"] != feature ||
+		values["projectHook"] != "required project hook" || values["featureHook"] != featureHook {
 		t.Fatalf("prepared Compose consumer lost dependencies or required hooks: %s", observation)
 	}
 	var selected map[string]any
@@ -231,10 +329,11 @@ exec %q "$@"
 	}
 	summary := map[string]any{
 		"nativeComponentProof": true, "nativeFactoryboxProof": false, "platform": platform,
-		"primaryKind": kind, "preparedDependency": kind == "build",
+		"primaryKind": kind, "preparedDependency": kind != "image-only",
 		"image": result.Image, "firstBuildMS": first.Milliseconds(), "replayMS": replayed.Milliseconds(),
 		"consumerStartMS": consumer.Milliseconds(), "requiredHooks": true, "writableDependency": true,
-		"modelCalls": 0, "projectCredentials": false,
+		"producerGraphEvictedBeforeConsumer": true,
+		"modelCalls":                         0, "projectCredentials": false,
 	}
 	encoded, _ := json.Marshal(summary)
 	if err := os.WriteFile("/tmp/compose-prebuild-result.json", encoded, 0600); err != nil {

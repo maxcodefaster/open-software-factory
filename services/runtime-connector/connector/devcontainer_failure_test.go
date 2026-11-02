@@ -11,6 +11,29 @@ import (
 	"unicode/utf8"
 )
 
+func TestDevcontainerBuildCauseOnStdoutIsNotReplacedByTheComposeWrapper(t *testing.T) {
+	for _, format := range []string{"text", "raw JSON"} {
+		t.Run(format, func(t *testing.T) {
+			cause := "ERROR: failed to solve: actual-builder-cause-on-stdout; GH_TOKEN=owned-private-value\n"
+			if format == "raw JSON" {
+				encoded, err := json.Marshal(map[string]string{"type": "raw", "text": cause})
+				if err != nil {
+					t.Fatal(err)
+				}
+				cause = string(encoded) + "\n"
+			}
+			stdout := cause + `{"outcome":"error","description":"An error occurred building the Docker Compose images.","message":"Command failed: docker compose build"}`
+			detail := devcontainerFailureDiagnostic(stdout, "Error: Command failed: docker compose build", Assignment{
+				RuntimeEnvironment: map[string]string{"GH_TOKEN": "owned-private-value"},
+			})
+			if !strings.Contains(detail, "actual-builder-cause-on-stdout") ||
+				strings.Contains(detail, "owned-private-value") || len(detail) > 1024 {
+				t.Fatalf("stdout build cause was lost or not safely bounded: %s", detail)
+			}
+		})
+	}
+}
+
 func TestDevcontainerBuildCauseSurvivesLargeCLIRawTransportEvent(t *testing.T) {
 	directory := t.TempDir()
 	text := strings.Repeat("ordinary build progress\n", 4096) +

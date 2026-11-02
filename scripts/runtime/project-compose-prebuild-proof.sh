@@ -23,6 +23,10 @@ node_id="$(docker image inspect --format '{{.Id}}' "$node_image")"
 registry_id="$(docker image inspect --format '{{.Id}}' "$registry_image")"
 owner="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
 name="factory-compose-prebuild-$owner"
+node_alias="factory-compose-node-$owner:input"
+registry_alias="factory-compose-registry-$owner:input"
+node_alias_created=0
+registry_alias_created=0
 directory="$PWD/.factory/test-results/runtime-compose-prebuild/$owner"
 mkdir -p "$directory"
 printf '{"owner":"%s","image":"%s","platform":"linux/%s","nativeFactoryboxProof":false,"network":"none","cpu":3,"memoryGiB":3}\n' \
@@ -34,15 +38,25 @@ cleanup() {
     actual="$(docker inspect --format '{{ index .Config.Labels "factory.compose-prebuild-proof" }}' "$name")"
     if [[ "$actual" != "$owner" ]]; then echo "Owned Compose proof identity changed" >&2; exit 1; fi
     docker cp "$name:/tmp/compose-prebuild-result.json" "$directory/native-result.json" 2>/dev/null || true
-    for kind in build image-only; do
+    for kind in build image-only build-no-features; do
       docker cp "$name:/tmp/compose-prebuild-result-$kind.json" "$directory/native-$kind-result.json" 2>/dev/null || true
     done
     docker cp "$name:/tmp/owned-devcontainer-build.log" "$directory/devcontainer-build.log" 2>/dev/null || true
+    docker cp "$name:/tmp/owned-devcontainer-up.log" "$directory/devcontainer-up.log" 2>/dev/null || true
     docker rm --force --volumes "$name" > "$directory/cleanup.log" || result=1
   elif ! grep -Fq "No such object: $name" "$directory/cleanup-observation.log"; then
     result=1
   fi
   rm -f "$directory/images.tar" "$directory/compose-prebuild.test"
+  for kind in node registry; do
+    if [[ "$kind" = node ]]; then alias="$node_alias"; expected="$node_id"; created="$node_alias_created"
+    else alias="$registry_alias"; expected="$registry_id"; created="$registry_alias_created"; fi
+    if [[ "$created" = 1 ]]; then
+      if [[ "$(docker image inspect --format '{{.Id}}' "$alias")" = "$expected" ]]; then
+        docker image rm "$alias" >>"$directory/cleanup.log" || result=1
+      else result=1; fi
+    fi
+  done
   printf '{"owner":"%s","exitCode":%s,"nativeFactoryboxProof":false}\n' "$owner" "$result" > "$directory/result.json"
   exit "$result"
 }
@@ -51,23 +65,30 @@ trap cleanup EXIT
   cd services/runtime-connector
   CGO_ENABLED=0 GOOS=linux GOARCH="$architecture" go test -c -o "$directory/compose-prebuild.test" ./connector
 )
-docker save --output "$directory/images.tar" "$node_id" "$registry_id"
+for alias in "$node_alias" "$registry_alias"; do
+  if docker image inspect "$alias" >/dev/null 2>&1; then echo "Owned input alias already exists" >&2; exit 1; fi
+done
+docker tag "$node_id" "$node_alias"; node_alias_created=1
+docker tag "$registry_id" "$registry_alias"; registry_alias_created=1
+docker save --output "$directory/images.tar" "$node_alias" "$registry_alias"
 docker create --pull=never --name "$name" --label "factory.compose-prebuild-proof=$owner" \
   --privileged --cgroupns=private --network=none --cpus=3 --memory=3g --pids-limit=512 \
   --env "FACTORY_COMPOSE_PREBUILD_NATIVE=1" \
   --env "FACTORY_COMPOSE_PROOF_PLATFORM=linux/$architecture" \
-  --env "FACTORY_COMPOSE_PROOF_NODE=$node_id" --env "FACTORY_COMPOSE_PROOF_REGISTRY=$registry_id" \
+  --env "FACTORY_COMPOSE_PROOF_NODE_REF=$node_alias" --env "FACTORY_COMPOSE_PROOF_REGISTRY_REF=$registry_alias" \
   --entrypoint timeout "$image" -s KILL 420 /bin/sh -euc '
     export DOCKER_HOST=unix:///var/run/docker.sock
-    dockerd --host="$DOCKER_HOST" >/tmp/owned-dockerd.log 2>&1 &
+    dockerd --storage-driver=overlay2 --host="$DOCKER_HOST" >/tmp/owned-dockerd.log 2>&1 &
     daemon=$!
     trap "kill $daemon 2>/dev/null || true" EXIT
     until docker info >/dev/null 2>&1; do
       if ! kill -0 "$daemon" 2>/dev/null; then cat /tmp/owned-dockerd.log; exit 1; fi
       sleep 0.1
     done
-    docker load --input /tmp/images.tar >/dev/null
-    for kind in build image-only; do
+    for kind in build image-only build-no-features; do
+      docker load --input /tmp/images.tar >/dev/null
+      export FACTORY_COMPOSE_PROOF_NODE="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_NODE_REF")"
+      export FACTORY_COMPOSE_PROOF_REGISTRY="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_REGISTRY_REF")"
       FACTORY_COMPOSE_PROOF_KIND="$kind" /tmp/compose-prebuild.test -test.run "^TestPrebuildComposeNative$" -test.v
     done
   ' >/dev/null

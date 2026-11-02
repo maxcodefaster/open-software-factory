@@ -41,6 +41,9 @@ that CA bundle unchanged for the retained worker. This configures its private Sa
 trust; it does not configure Kubernetes node image pulls. Node image-pull trust is an operator
 prerequisite. Publishing new digest-pinned runtime tools does not itself require changing this
 setting, and Factory refuses to overwrite a retained worker's shared trust declaration.
+The Dev Containers CLI receives that admitted Factory Registry CA alongside any
+Project Registry certificates. Empty Project settings do not discard the installation
+trust or disable TLS verification.
 
 The development Helm chart lives in [deploy/helm/factory](deploy/helm/factory/README.md).
 Install it directly from this repository; a public chart repository and release publication are

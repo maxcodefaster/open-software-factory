@@ -95,7 +95,10 @@ func devcontainerFailureDiagnostic(stdout, stderr string, assignment Assignment)
 	}
 	var raw strings.Builder
 	var causes, fallback []string
-	for _, line := range strings.Split(stderr, "\n") {
+	// Compose/Bake can send its actual build failure to stdout while the CLI
+	// puts only its command wrapper on stderr. Both still use the same bounded
+	// cause selection and credential masking below.
+	for _, line := range strings.Split(stderr+"\n"+stdout, "\n") {
 		var entry struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
