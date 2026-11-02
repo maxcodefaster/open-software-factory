@@ -1313,19 +1313,8 @@ export function createRuntimeController(
             factoryboxProfile: artifacts.factoryboxProfile,
           },
           {
-            observe: async () => {
-              setTimeout(async () => {
-                const [current] = await database.client<
-                  Array<{ state: string }>
-                >`SELECT state FROM factory.runtime_attempt WHERE id=${attemptID}`;
-                if (current && ["create-intended", "starting"].includes(current.state))
-                  await updateStatus(
-                    attemptID,
-                    "failed",
-                    "Project image preparation exceeded its twelve-minute bound; normal startup remains available",
-                  );
-              }, 12 * 60_000).unref();
-            },
+            observe: () =>
+              observeStartup(attemptID, attemptID, attempt.namespace, attempt.podName, resources),
             fail: async () => {
               await updateStatus(
                 attemptID,

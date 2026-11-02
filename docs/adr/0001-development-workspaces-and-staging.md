@@ -78,8 +78,11 @@ may use immutable artifacts, never a development worktree, mutable dependency tr
 Project registration and signed default-branch push events admit separate Development and
 Main-Preview image-preparation jobs. One producer runs at a time, including its teardown. Persist
 deterministic intent first, coalesce superseded inputs and expire interrupted producers after twelve
-minutes. A confirmed image is reusable only for its exact commit, recipe, resolved image/Feature
-inputs, native platform and environment version. Normal image tags and JSONC remain repository-owned;
+minutes. Worker readiness is infrastructure admission, not a running image producer. Prebuild
+Attempts use the same observed native Sandbox Start as other roles; the preparation coordinator
+separately owns job expiry and teardown. A confirmed image is reusable only for its exact commit,
+recipe, resolved image/Feature inputs, native platform and environment version. Normal image tags
+and JSONC remain repository-owned;
 resolve and freeze only an isolated build snapshot. The consumer uses a temporary image configuration
 and upstream image metadata so Feature lifecycle hooks still run. Dirty source, changed inputs,
 unsupported recipes or failed preparation use normal compliant startup. Compose preparation builds
