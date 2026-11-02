@@ -1268,16 +1268,8 @@ func injectChild(ctx context.Context, assignment Assignment, result devcontainer
 	if err := injectApprovedTools(ctx, assignment, result.ContainerID); err != nil {
 		return err
 	}
-	// docker cp creates root-owned artifacts even when the image declares a
-	// non-root USER. Only setup uses root; the child keeps the CLI's remote user.
-	setup := exec.CommandContext(
-		ctx,
-		"docker", "exec", "--user", "0:0", result.ContainerID, "sh", "-c",
-		"chmod 0555 \"$1\" && chmod 0444 \"$2\"",
-		"factory-connector-setup", connectorPath, assignmentPath,
-	)
-	if output, err := setup.CombinedOutput(); err != nil {
-		return fmt.Errorf("prepare Connector child: %w: %s", err, output)
+	if err := prepareChildPermissions(ctx, result.ContainerID, connectorPath, assignmentPath); err != nil {
+		return err
 	}
 	command := exec.CommandContext(
 		ctx,

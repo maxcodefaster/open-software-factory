@@ -10,6 +10,47 @@ import (
 	"testing"
 )
 
+func TestPreparedChildSetupUsesRootOnlyForArtifactPermissions(t *testing.T) {
+	bin := t.TempDir()
+	trace := filepath.Join(bin, "docker-commands")
+	script := `#!/bin/sh
+printf '%s\n' "$*" >>"$FACTORY_OWNED_DOCKER_TRACE"
+case "$1" in
+  cp) exit 0 ;;
+  exec)
+    if [ "$2" = "--user" ] && [ "$3" = "0:0" ]; then exit 0; fi
+    if [ "$2" = "--user" ] && [ "$3" = "node" ]; then exit 0; fi
+    printf '%s\n' 'chmod: root-owned Connector artifact: Operation not permitted' >&2
+    exit 1 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FACTORY_OWNED_DOCKER_TRACE", trace)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	exited, err := injectPreparedChild(ctx, Assignment{}, devcontainerResult{
+		ContainerID: strings.Repeat("a", 64), RemoteUser: "node",
+	})
+	if err != nil {
+		t.Fatalf("non-root primary cannot prepare the copied Connector artifacts: %v", err)
+	}
+	if err := <-exited; err != nil {
+		t.Fatal(err)
+	}
+	commands, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(commands), "exec --user 0:0 ") ||
+		!strings.Contains(string(commands), "exec --user node ") {
+		t.Fatalf("artifact setup and Project execution did not retain separate identities: %s", commands)
+	}
+}
+
 func TestPreparedRebuildKeepsExactPrivateSourceAndInstalledDependencies(t *testing.T) {
 	for _, changedRevision := range []bool{false, true} {
 		t.Run(map[bool]string{false: "same source", true: "changed source"}[changedRevision], func(t *testing.T) {

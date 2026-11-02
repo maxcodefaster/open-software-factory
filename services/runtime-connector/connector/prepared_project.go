@@ -177,9 +177,8 @@ func injectPreparedChild(ctx context.Context, assignment Assignment, result devc
 	}
 	// Only the public, credential-free recipe is readable by the configured
 	// remote user. Fresh Runtime tokens still arrive through the private RPC.
-	if err := exec.CommandContext(ctx, "docker", "exec", result.ContainerID, "sh", "-ec",
-		`chmod 0555 "$1" && chmod 0444 "$2"`, "factory-prepared-setup",
-		"/tmp/factory-prepared-connector", "/tmp/factory-prepared-assignment.json").Run(); err != nil {
+	if err := prepareChildPermissions(ctx, result.ContainerID,
+		"/tmp/factory-prepared-connector", "/tmp/factory-prepared-assignment.json"); err != nil {
 		return nil, err
 	}
 	command := exec.CommandContext(ctx, "docker", "exec", "--user", result.RemoteUser, result.ContainerID,

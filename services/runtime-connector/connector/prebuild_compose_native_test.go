@@ -344,6 +344,35 @@ exec %q "$@"
 	if json.Unmarshal([]byte(output), &selected) != nil || selected["Image"] != result.Image {
 		t.Fatalf("Compose consumer did not use the exact prebuilt digest: %s", output)
 	}
+	if kind == "build-no-features" {
+		if selected["User"] != "node" {
+			t.Fatal("prepared child regression requires the actual non-root image USER")
+		}
+		artifacts := map[string]string{
+			"connector":       "#!/bin/sh\nprintf '%s' prepared-child-readable",
+			"assignment.json": `{"public":"credential-free recipe"}`,
+		}
+		for name, content := range artifacts {
+			path := filepath.Join(t.TempDir(), name)
+			if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+			command("docker", "cp", path, container.ContainerID+":/tmp/owned-"+name)
+		}
+		if command("docker", "exec", "--user", "0:0", container.ContainerID,
+			"stat", "-c", "%u:%a", "/tmp/owned-connector") != "0:600" {
+			t.Fatal("native fixture did not reproduce root-private copied artifacts")
+		}
+		if err := prepareChildPermissions(ctx, container.ContainerID,
+			"/tmp/owned-connector", "/tmp/owned-assignment.json"); err != nil {
+			t.Fatalf("non-root primary cannot prepare the captured child: %v", err)
+		}
+		if command("docker", "exec", container.ContainerID, "/tmp/owned-connector") != "prepared-child-readable" ||
+			command("docker", "exec", container.ContainerID, "stat", "-c", "%u:%a",
+				"/tmp/owned-assignment.json") != "0:444" {
+			t.Fatal("artifact setup did not leave the non-root child readable and executable")
+		}
+	}
 	var dependencyRebuildMS int64
 	if kind == "dependency-seed" {
 		source := assignment
@@ -430,6 +459,7 @@ exec %q "$@"
 		"consumerStartMS": consumer.Milliseconds(), "requiredHooks": true, "writableDependency": true,
 		"producerGraphEvictedBeforeConsumer": true,
 		"freshGrantDependencyRebuildMS":      dependencyRebuildMS,
+		"nonRootPreparedChildArtifacts":      kind == "build-no-features",
 		"modelCalls":                         0, "projectCredentials": false,
 	}
 	encoded, _ := json.Marshal(summary)
