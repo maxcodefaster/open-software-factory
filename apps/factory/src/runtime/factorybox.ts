@@ -294,7 +294,7 @@ export function createFactoryboxExecution(
       op.action === "delete" &&
       record.attempted &&
       !observeOnly &&
-      ["running", "paused", "deleting"].includes(result.record.phase) &&
+      ["running", "paused", "resuming", "deleting"].includes(result.record.phase) &&
       result.runtime?.status === "stopped"
     ) {
       // Failed startup also records compensating cleanup before Native Delete.
@@ -318,7 +318,9 @@ export function createFactoryboxExecution(
         })
         .parse(started?.observation);
       // The pinned native Delete revalidates its own original process/cgroup
-      // identity and is idempotent. Keep the existing intent and first attempt.
+      // identity and is idempotent. It may settle a positively failed Resume
+      // before activation; uncertain or held restores remain refused natively.
+      // Keep the existing intent and first attempt.
       // No new Start, prompt, source write or native identity is admitted.
       const continued = await executeFactoryboxOperation(request, identity, op, run, declaration);
       if (!continued.confirmed) throw new Error("Factorybox delete outcome is unconfirmed");

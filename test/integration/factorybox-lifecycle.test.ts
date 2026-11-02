@@ -48,6 +48,8 @@ test.each([
   ["arm64", false, false, "resume-admission"],
   ["amd64", false, false, "resume-admission"],
   ["arm64", false, false, "resume-already-attempted"],
+  ["arm64", false, false, "resume-failed-stop"],
+  ["amd64", false, false, "resume-failed-stop"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
   async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
@@ -186,7 +188,12 @@ test.each([
         rejected_at?: string;
         source_pid?: number;
         error?: string;
-        resume?: { requested_at?: string; attempted?: boolean; completed_at?: string };
+        resume?: {
+          requested_at?: string;
+          attempted?: boolean;
+          completed_at?: string;
+          error?: string;
+        };
       };
       const record: {
         version: number;
@@ -437,7 +444,12 @@ test.each([
               record.phase = "resuming";
               record.pause.resume = {
                 requested_at: "2026-10-25T10:01:30Z",
-                attempted: deleteContinuation === "resume-already-attempted",
+                attempted: ["resume-already-attempted", "resume-failed-stop"].includes(
+                  deleteContinuation,
+                ),
+                ...(deleteContinuation === "resume-failed-stop"
+                  ? { error: "original native restore failed before activation" }
+                  : {}),
               };
             }
             return {
@@ -864,6 +876,34 @@ test.each([
         expect(before).toBeDefined();
         if (!before) throw new Error("Missing original Resume intent");
         const recovered = createFactoryboxExecution(database, hub, run);
+        if (deleteContinuation === "resume-failed-stop") {
+          await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+          const nativeResume = structuredClone(record.pause?.resume);
+          await database.client`UPDATE factory.runtime_attempt
+            SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
+          // Original failed Delete, lost successful Delete reply, lost capture
+          // retirement reply and lost private-backing retirement reply.
+          for (let observation = 0; observation < 4; observation++)
+            await expect(recovered.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
+          await recovered.deleteSandbox(owned.attemptID);
+          await recovered.deleteSandbox(owned.attemptID);
+          const [original] = await database.client<
+            Array<{ id: string; attemptedAt: string; completed: boolean }>
+          >`SELECT id,attempted_at::text AS "attemptedAt",completed_at IS NOT NULL AS completed
+            FROM factory.factorybox_lifecycle_operation
+            WHERE runtime_attempt_id=${owned.attemptID} AND action='resume'`;
+          expect(original).toEqual({ ...before, completed: false });
+          expect(record.pause?.resume).toEqual(nativeResume);
+          expect(resumeCommands).toBe(1);
+          expect(mutations.filter((action) => action === "delete")).toHaveLength(2);
+          expect(reclaimed.has(originalSnapshot)).toBe(true);
+          expect(mutations.filter((action) => action === "retire-resume")).toHaveLength(0);
+          const [released] = await database.client<Array<{ released: boolean }>>`
+            SELECT inputs_released_at IS NOT NULL AS released FROM factory.factorybox_runtime
+            WHERE runtime_attempt_id=${owned.attemptID}`;
+          expect(released?.released).toBe(true);
+          return;
+        }
         if (deleteContinuation === "resume-already-attempted") {
           await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
           expect(resumeCommands).toBe(1);
