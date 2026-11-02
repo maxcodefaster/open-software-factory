@@ -383,8 +383,7 @@ export function createFactoryboxExecution(
         run,
         factoryboxRuntimeDeclaration(saved.request),
       );
-      if (!result.confirmed)
-        throw new Error("Factorybox checkpoint retirement remains unconfirmed");
+      if (!result.confirmed) throw factoryboxOperationFailure(operation.action, result.stderr);
       const receipt = readFactoryboxCheckpointRetirement(
         request,
         saved.identity.controllerRoot,
@@ -442,8 +441,7 @@ export function createFactoryboxExecution(
       run,
       factoryboxRuntimeDeclaration(saved.request),
     );
-    if (!result.confirmed)
-      throw new Error("Factorybox private backing retirement remains unconfirmed");
+    if (!result.confirmed) throw factoryboxOperationFailure("retire-sandbox", result.stderr);
     const receipt = readFactoryboxBackingRetirement(
       request,
       saved.identity.controllerRoot,

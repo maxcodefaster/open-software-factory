@@ -966,7 +966,7 @@ test.each([
       if (!reserveDeleted)
         await expect(execution.deleteSandbox(owned.attemptID)).rejects.toThrow("unconfirmed");
       await expect(execution.deleteSandbox(owned.attemptID, reserveDeleted)).rejects.toThrow(
-        "unconfirmed",
+        /unconfirmed.*reply lost after private backing retirement/,
       );
       const [unreleased] = await database.client<Array<{ released: boolean }>>`
         SELECT inputs_released_at IS NOT NULL AS released FROM factory.factorybox_runtime WHERE runtime_attempt_id=${owned.attemptID}`;
