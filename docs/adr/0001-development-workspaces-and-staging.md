@@ -76,8 +76,10 @@ remain valid; a prebuilt image is still a normal writable development environmen
 may use immutable artifacts, never a development worktree, mutable dependency tree or cached verdict.
 
 Project registration and signed default-branch push events admit separate Development and
-Main-Preview image-preparation jobs. One producer runs at a time, including its teardown. Persist
-deterministic intent first, coalesce superseded inputs and expire interrupted producers after twelve
+Main-Preview image-preparation jobs. One live producer runs at a time, through confirmed native
+Delete or complete Stop. Outstanding private backing cleanup keeps its storage ownership and failure;
+it does not hold the global producer queue after that exact Sandbox's native Delete is confirmed.
+Persist deterministic intent first, coalesce superseded inputs and expire interrupted producers after twelve
 minutes. Worker readiness is infrastructure admission, not a running image producer. Prebuild
 Attempts use the same observed native Sandbox Start as other roles; the preparation coordinator
 separately owns job expiry and teardown. A confirmed image is reusable only for its exact commit,

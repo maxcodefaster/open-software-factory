@@ -250,53 +250,100 @@ test("automatic image preparation starts its admitted native Sandbox after obser
   }
 }, 60_000);
 
-test("restarted preparation expires old producers and waits for confirmed teardown before next admission", async () => {
-  const process = await factoryProcess();
-  const database = process.connect();
-  try {
-    const owned = await fixture(undefined, undefined, database);
-    const head = "e".repeat(40);
-    const started: string[] = [];
-    const expired: string[] = [];
-    const input = {
-      database,
-      head: async () => head,
-      start: async (id: string) => {
-        started.push(id);
-      },
-      expire: async (id: string) => {
-        expired.push(id);
-        await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${id}`;
-      },
-    };
-    await createProjectPreparation(input).ensure(owned.projectID);
-    const [job] = await database.client<
-      Array<{ id: string }>
-    >`SELECT id FROM factory.project_image_preparation ORDER BY environment LIMIT 1`;
-    if (!job) throw new Error("Missing owned preparation");
-    const producerID = crypto.randomUUID();
-    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+test.each(["complete Stop", "confirmed native Delete", "foreign native Delete"] as const)(
+  "restarted preparation expires old producers and waits for %s before next admission",
+  async (teardown) => {
+    const process = await factoryProcess();
+    const database = process.connect();
+    try {
+      const owned = await fixture(undefined, undefined, database);
+      const head = "e".repeat(40);
+      const started: string[] = [];
+      const expired: string[] = [];
+      const input = {
+        database,
+        head: async () => head,
+        start: async (id: string) => {
+          started.push(id);
+        },
+        expire: async (id: string) => {
+          expired.push(id);
+          await database.client`UPDATE factory.runtime_attempt SET state='stopping',stop_intended_at=now() WHERE id=${id}`;
+        },
+      };
+      await createProjectPreparation(input).ensure(owned.projectID);
+      const [job] = await database.client<
+        Array<{ id: string }>
+      >`SELECT id FROM factory.project_image_preparation ORDER BY environment LIMIT 1`;
+      if (!job) throw new Error("Missing owned preparation");
+      const producerID = crypto.randomUUID();
+      await database.client`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
       VALUES(${producerID},${owned.projectID},'prebuild',2,${head},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now()-interval '13 minutes',${owned.userID})`;
-    await database.client`UPDATE factory.project_image_preparation SET state='running',runtime_attempt_id=${producerID},updated_at=now()-interval '13 minutes' WHERE id=${job.id}`;
-    const restarted = createProjectPreparation(input);
-    await restarted.drain();
-    expect(expired).toEqual([producerID]);
-    expect(started).toEqual([]);
-    await restarted.drain();
-    expect(expired).toEqual([producerID]);
-    expect(started).toEqual([]);
-    await database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now() WHERE id=${producerID}`;
-    await restarted.drain();
-    expect(started).toHaveLength(1);
-    expect(
-      (
-        await database.client<
-          Array<{ state: string }>
-        >`SELECT state FROM factory.project_image_preparation WHERE id=${job.id}`
-      )[0]?.state,
-    ).toBe("failed");
-  } finally {
-    await database.client.end();
-    await process.dispose();
-  }
-}, 60_000);
+      await database.client`UPDATE factory.project_image_preparation SET state='running',runtime_attempt_id=${producerID},updated_at=now()-interval '13 minutes' WHERE id=${job.id}`;
+      if (teardown !== "complete Stop") {
+        await database.client`UPDATE factory.runtime_attempt SET state='starting' WHERE id=${producerID}`;
+        await database.client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request)
+        VALUES(${producerID},${JSON.stringify({ sandboxID: `runtime-${producerID.replaceAll("-", "")}` })}::text::jsonb)`;
+      }
+      const restarted = createProjectPreparation(input);
+      await restarted.drain();
+      expect(expired).toEqual([producerID]);
+      expect(started).toEqual([]);
+      await restarted.drain();
+      expect(expired).toEqual([producerID]);
+      expect(started).toEqual([]);
+      if (teardown === "complete Stop") {
+        await database.client`UPDATE factory.runtime_attempt SET state='stopped',stopped_at=now() WHERE id=${producerID}`;
+      } else {
+        await database.client`INSERT INTO factory.factorybox_lifecycle_operation(runtime_attempt_id,action,attempted_at,completed_at,observation)
+        VALUES(${producerID},'delete',now(),now(),${JSON.stringify({
+          version: 1,
+          id:
+            teardown === "foreign native Delete"
+              ? "runtime-foreign"
+              : `runtime-${producerID.replaceAll("-", "")}`,
+          phase: "deleted",
+          owner: "d".repeat(32),
+          inputSHA256: "e".repeat(64),
+        })}::text::jsonb)`;
+      }
+      await restarted.drain();
+      if (teardown === "foreign native Delete") {
+        expect(started).toEqual([]);
+        expect(
+          (
+            await database.client<{ state: string }[]>`
+          SELECT state FROM factory.project_image_preparation WHERE id=${job.id}`
+          )[0]?.state,
+        ).toBe("running");
+        return;
+      }
+      expect(started).toHaveLength(1);
+      expect(
+        (
+          await database.client<
+            Array<{ state: string }>
+          >`SELECT state FROM factory.project_image_preparation WHERE id=${job.id}`
+        )[0]?.state,
+      ).toBe("failed");
+      if (teardown === "confirmed native Delete") {
+        expect(
+          (
+            await database.client<{ state: string }[]>`
+        SELECT state FROM factory.runtime_attempt WHERE id=${producerID}`
+          )[0]?.state,
+        ).toBe("stopping");
+        expect(
+          (
+            await database.client`SELECT id FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${producerID} AND action='retire-sandbox' AND completed_at IS NOT NULL`
+          ).length,
+        ).toBe(0);
+      }
+    } finally {
+      await database.client.end();
+      await process.dispose();
+    }
+  },
+  60_000,
+);

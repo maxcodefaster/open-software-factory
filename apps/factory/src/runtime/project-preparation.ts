@@ -92,10 +92,22 @@ export function createProjectPreparation(input: {
             Array<{ id: string }>
           >`SELECT attempt.id FROM factory.project_image_preparation preparation JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id WHERE preparation.state='succeeded' AND attempt.state IN ('starting','ready') AND attempt.stop_intended_at IS NULL`;
           for (const attempt of completed) await input.finish?.(attempt.id);
-          await connection`UPDATE factory.project_image_preparation preparation SET state='failed',failure='Image preparation was interrupted; normal startup remains available.',updated_at=now() FROM factory.runtime_attempt attempt WHERE preparation.runtime_attempt_id=attempt.id AND preparation.state='running' AND attempt.state IN ('stopped','failed','cleanup-failed')`;
+          await connection`UPDATE factory.project_image_preparation preparation SET state='failed',failure='Image preparation was interrupted; normal startup remains available.',updated_at=now()
+            FROM factory.runtime_attempt attempt WHERE preparation.runtime_attempt_id=attempt.id AND preparation.state='running'
+              AND (attempt.state IN ('stopped','failed','cleanup-failed') OR (attempt.state='stopping' AND EXISTS(
+                SELECT 1 FROM factory.factorybox_lifecycle_operation deletion JOIN factory.factorybox_runtime native ON native.runtime_attempt_id=deletion.runtime_attempt_id
+                WHERE deletion.runtime_attempt_id=attempt.id AND deletion.action='delete' AND deletion.completed_at IS NOT NULL
+                  AND deletion.observation->>'phase'='deleted' AND deletion.observation->>'id'=native.request->>'sandboxID')))`;
           await connection`UPDATE factory.project_image_preparation preparation SET state='unsupported',failure='Replaced by newer Project inputs.',updated_at=now() WHERE state='pending' AND EXISTS(SELECT 1 FROM factory.project_image_preparation newer WHERE newer.project_id=preparation.project_id AND newer.environment=preparation.environment AND newer.created_at>preparation.created_at)`;
+          // A confirmed native Delete means this producer is no longer live.
+          // Keep failed backing cleanup and its storage ownership retained,
+          // without making it an indefinite global image-production lock.
           const active =
-            await connection`SELECT preparation.id FROM factory.project_image_preparation preparation LEFT JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id WHERE preparation.state='running' OR attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed') LIMIT 1`;
+            await connection`SELECT preparation.id FROM factory.project_image_preparation preparation LEFT JOIN factory.runtime_attempt attempt ON attempt.id=preparation.runtime_attempt_id
+              WHERE preparation.state='running' OR (attempt.state IN ('create-intended','starting','ready','stop-intended','stopping','cleanup-failed') AND NOT EXISTS(
+                SELECT 1 FROM factory.factorybox_lifecycle_operation deletion JOIN factory.factorybox_runtime native ON native.runtime_attempt_id=deletion.runtime_attempt_id
+                WHERE deletion.runtime_attempt_id=attempt.id AND deletion.action='delete' AND deletion.completed_at IS NOT NULL
+                  AND deletion.observation->>'phase'='deleted' AND deletion.observation->>'id'=native.request->>'sandboxID')) LIMIT 1`;
           if (active.length) return;
           const [pending] = await connection<
             Array<{ id: string }>
