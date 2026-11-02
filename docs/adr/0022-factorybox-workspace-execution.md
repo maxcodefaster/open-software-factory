@@ -112,6 +112,13 @@ only for that exact worker epoch. Unknown operation outcomes retain ownership an
 they cannot authorize a new Pod, Sandbox or model request. Explicit Stop still removes execution.
 Reserve slots continue to use the existing PostgreSQL controller and locks.
 
+A transport attempt is not proof that native restore started. A fresh, native-lock-protected
+observation may positively identify the original committed Pause, stopped runtime and explicitly
+unattempted Resume preparation. Factory can then continue that exact request, retaining its
+original intent and first dispatch timestamp. Native copy verification and storage admission still
+apply. An absent attempted flag, a different owner/input/checkpoint, live runtime or an attempted
+or unknown restore never permits this continuation.
+
 A failed Pause command can have a confirmed native rollback. Factory observes the original
 Start owner/input and exact rejected snapshot, requiring the same live source PID and native
 rejection receipt before recording that outcome. It atomically returns execution to connection

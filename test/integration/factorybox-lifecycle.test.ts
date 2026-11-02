@@ -43,6 +43,11 @@ test.each([
   ["arm64", false, false, "pause-capacity"],
   ["amd64", false, false, "pause-capacity"],
   ["arm64", false, false, "pause-capacity-stop"],
+  ["arm64", false, false, "resume-preparation"],
+  ["amd64", false, false, "resume-preparation"],
+  ["arm64", false, false, "resume-admission"],
+  ["amd64", false, false, "resume-admission"],
+  ["arm64", false, false, "resume-already-attempted"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
   async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
@@ -181,7 +186,7 @@ test.each([
         rejected_at?: string;
         source_pid?: number;
         error?: string;
-        resume?: { completed_at: string };
+        resume?: { requested_at?: string; attempted?: boolean; completed_at?: string };
       };
       const record: {
         version: number;
@@ -426,10 +431,24 @@ test.each([
         }
         if (action === "resume") {
           resumeCommands++;
-          record.phase = "running";
           if (!record.pause) throw new Error("Missing Pause");
+          if (deleteContinuation.startsWith("resume-") && resumeCommands === 1) {
+            if (deleteContinuation !== "resume-admission") {
+              record.phase = "resuming";
+              record.pause.resume = {
+                requested_at: "2026-10-25T10:01:30Z",
+                attempted: deleteContinuation === "resume-already-attempted",
+              };
+            }
+            return {
+              exitCode: 1,
+              stderr: "private Resume preparation could not allocate its copy",
+              stdout: "",
+            };
+          }
+          record.phase = "running";
           record.pause.resume = { completed_at: "2026-10-25T10:02:00Z" };
-          if (resumeCommands === 2)
+          if (resumeCommands === 2 && !deleteContinuation.startsWith("resume-"))
             return { exitCode: 1, stderr: "reply lost after the second native Resume", stdout: "" };
         }
         if (action === "retire-checkpoint" || action === "retire-resume") {
@@ -834,6 +853,52 @@ test.each([
       await execution.reclaimStorage();
       expect(mutations).toEqual(["start", "pause"]);
       expect(reclaimed.size).toBe(0);
+      if (deleteContinuation.startsWith("resume-")) {
+        const originalSnapshot = activeSnapshot();
+        await expect(execution.resume(owned.attemptID)).rejects.toThrow(
+          "could not allocate its copy",
+        );
+        const [before] = await database.client<Array<{ id: string; attemptedAt: string }>>`
+          SELECT id,attempted_at::text AS "attemptedAt" FROM factory.factorybox_lifecycle_operation
+          WHERE runtime_attempt_id=${owned.attemptID} AND action='resume' AND completed_at IS NULL`;
+        expect(before).toBeDefined();
+        if (!before) throw new Error("Missing original Resume intent");
+        const recovered = createFactoryboxExecution(database, hub, run);
+        if (deleteContinuation === "resume-already-attempted") {
+          await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+          expect(resumeCommands).toBe(1);
+          expect(mutations).toEqual(["start", "pause", "resume"]);
+          return;
+        }
+        await recovered.resume(owned.attemptID);
+        const [after] = await database.client<
+          Array<{ id: string; attemptedAt: string; completed: boolean }>
+        >`
+          SELECT id,attempted_at::text AS "attemptedAt",completed_at IS NOT NULL AS completed
+          FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${owned.attemptID} AND action='resume'`;
+        expect(after).toEqual({ ...before, completed: true });
+        const [current] = await database.client<
+          Array<{
+            state: string;
+            failure: string | null;
+            generation: string;
+            parent: string;
+            child: string;
+          }>
+        >`SELECT state,failure,generation,parent_connector_token_hash AS parent,child_connector_token_hash AS child
+          FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+        expect(current).toEqual({
+          state: "starting",
+          failure: null,
+          generation: attempt.generation,
+          parent: attempt.parent,
+          child: attempt.child,
+        });
+        expect(resumeCommands).toBe(2);
+        expect(mutations).toEqual(["start", "pause", "resume", "resume"]);
+        expect(record.pause?.snapshot_id).toBe(originalSnapshot);
+        return;
+      }
       await execution.resume(owned.attemptID);
       expect(mutations).toEqual(["start", "pause", "resume"]);
       const [resumed] = await database.client<

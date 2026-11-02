@@ -42,6 +42,7 @@ import {
   runFactoryboxKubernetes,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import { rejectedFactoryboxPause } from "./factorybox-pause";
+import { unattemptedFactoryboxResume } from "./factorybox-resume";
 import type { RuntimeHub } from "./hub";
 import {
   factoryboxAllocation,
@@ -188,9 +189,10 @@ export function createFactoryboxExecution(
         .passthrough()
         .parse(record.observation);
     const declaration = factoryboxRuntimeDeclaration(saved.request);
-    // Lost Start/Pause/Resume output remains observation-only. Explicit Stop
-    // may continue Delete only after the exact original native runtime is
-    // confirmed stopped, never by assuming a failed command had no effect.
+    // Unknown Start/Pause/Resume outcomes remain observation-only. A fresh
+    // native record may positively prove an unattempted Resume preparation.
+    // Explicit Stop may continue Delete only for the confirmed original
+    // stopped runtime, never by assuming a failed command had no effect.
     if (observeOnly && !record.attempted) await attempted(connection, record);
     if (op.action === "pause" && record.attempted) hub.revoke(attemptID);
     let observation =
@@ -263,6 +265,31 @@ export function createFactoryboxExecution(
       }),
     });
     let result = nativeResult.parse(raw);
+    if (op.action === "resume" && record.attempted && !observeOnly) {
+      const [started] = await connection<{ observation: unknown }[]>`
+        SELECT observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${attemptID} AND action='start' AND completed_at IS NOT NULL`;
+      const [paused] = await connection<{ observation: unknown }[]>`
+        SELECT observation FROM factory.factorybox_lifecycle_operation
+        WHERE runtime_attempt_id=${attemptID} AND action='pause' AND snapshot_id=${op.snapshotID}
+          AND completed_at IS NOT NULL`;
+      if (
+        unattemptedFactoryboxResume(
+          raw,
+          saved.request.sandboxID,
+          op.snapshotID,
+          started?.observation,
+          paused?.observation,
+        )
+      ) {
+        // Continue only the same preparation. The native record positively
+        // proves no restore was dispatched; unknown/attempted outcomes remain
+        // observation-only. Keep the original Factory intent and first stamp.
+        const continued = await executeFactoryboxOperation(request, identity, op, run, declaration);
+        if (!continued.confirmed) throw factoryboxOperationFailure("resume", continued.stderr);
+        result = nativeResult.parse(JSON.parse(continued.stdout));
+      }
+    }
     if (
       op.action === "delete" &&
       record.attempted &&
