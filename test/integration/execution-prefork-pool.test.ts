@@ -69,6 +69,7 @@ test("nonempty Staging environments can prepare a separate credential-free depen
       composeProjectName: "project_devcontainer",
       repositoryUrl: `https://unassigned.invalid/${owned.projectID}.git`,
       controlUrl: "ws://unassigned.invalid/",
+      deferRuntimeProcesses: true,
     });
     const recipe = JSON.stringify(offered[0]);
     for (const forbidden of [

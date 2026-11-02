@@ -148,6 +148,44 @@ func preparedFixture(t *testing.T) (ReserveSlot, ReserveActivation) {
 	return slot, activation
 }
 
+func TestDeferredPreparedProcessesCannotBeAdoptedAsAlreadyRunning(t *testing.T) {
+	slot, activation := preparedFixture(t)
+	content, err := json.Marshal(slot.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(content, &fields); err != nil {
+		t.Fatal(err)
+	}
+	fields["deferRuntimeProcesses"] = true
+	content, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, slot.Project); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateReserveSlot(slot); err != nil {
+		t.Fatal(err)
+	}
+	if samePreparedProject(*slot.Project, activation.Assignment) {
+		t.Fatal("a dependency-only template claimed that its Apps were already running")
+	}
+	fields["controlUrl"] = activation.Assignment.ControlURL
+	content, err = json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var granted Assignment
+	if err := json.Unmarshal(content, &granted); err != nil {
+		t.Fatal(err)
+	}
+	if granted.Validate() == nil {
+		t.Fatal("an assigned Runtime accepted deferred required processes")
+	}
+}
+
 func TestPreparedRecipeHasNoRuntimeGrantsOrExecutionTools(t *testing.T) {
 	slot, activation := preparedFixture(t)
 	if err := validateReserveSlot(slot); err != nil {

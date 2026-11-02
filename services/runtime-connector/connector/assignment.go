@@ -47,6 +47,7 @@ type Assignment struct {
 	Prebuild               *PrebuildAssignment `json:"prebuild,omitempty"`
 	EffectiveConfiguration string              `json:"-"`
 	PrebuildCacheImage     string              `json:"-"`
+	DeferRuntimeProcesses  bool                `json:"deferRuntimeProcesses,omitempty"`
 	containerOrigin        *containerOrigin
 }
 
@@ -101,6 +102,9 @@ func ReadAssignment(path string) (Assignment, error) {
 }
 
 func (assignment Assignment) Validate() error {
+	if assignment.DeferRuntimeProcesses && assignment.ControlURL != "ws://unassigned.invalid/" {
+		return errors.New("required Runtime processes may be deferred only in unassigned Project preparation")
+	}
 	if assignment.Prebuild != nil && (assignment.Prebuild.ID == "" || (assignment.Prebuild.Platform != "native" && assignment.Prebuild.Platform != "linux/arm64" && assignment.Prebuild.Platform != "linux/amd64") || !strings.HasSuffix(assignment.Prebuild.ImageRepository, "/"+assignment.RepositoryIdentity)) {
 		return errors.New("Invalid Project prebuild assignment")
 	}

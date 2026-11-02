@@ -38,10 +38,15 @@ export function createStagingTemplateProducer(
           runtimeHostImage: string;
           profile: unknown;
           declaration: unknown;
+          requiresRuntimeInputs: boolean;
         }>
       >`SELECT project.id AS "projectID",staging.id AS "stagingAttemptID",staging.revision,
           project.repository_url AS "repositoryURL",configuration.declaration->>'devcontainerPath' AS "devcontainerPath",
-          artifact.runtime_host_image AS "runtimeHostImage",artifact.factorybox_profile AS profile,configuration.declaration
+          artifact.runtime_host_image AS "runtimeHostImage",artifact.factorybox_profile AS profile,configuration.declaration,
+          coalesce((SELECT write.manifest<>'{"variables":[],"registries":[]}'::jsonb
+            FROM factory.runtime_environment_intent environment
+            JOIN factory.environment_write write ON write.secret_key=environment.secret_key AND write.state='committed'
+            WHERE environment.runtime_attempt_id=staging.id),false) AS "requiresRuntimeInputs"
         FROM factory.staging_preview preview JOIN factory.project project ON project.id=preview.project_id
         JOIN factory.runtime_attempt staging ON staging.id=preview.runtime_attempt_id AND staging.revision=preview.revision
         JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=staging.id
@@ -73,6 +78,7 @@ export function createStagingTemplateProducer(
         connectorStateDir: "/home/coder/connector-state",
         channels: declaration.channels,
         processes: declaration.processes,
+        ...(candidate.requiresRuntimeInputs ? { deferRuntimeProcesses: true } : {}),
       };
       await database.client.begin((sql) =>
         store.offerTemplate(sql, { ...candidate, id, key, recipe, profile }),

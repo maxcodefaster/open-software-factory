@@ -177,6 +177,12 @@ The separate template still receives no Runtime Environment version, variables,
 registry grants or Factory credentials. If its recipe cannot prepare without those
 grants, ordinary fresh execution remains available. An existing canonical Workspace
 is never replaced by the template checkout.
+A template whose promoted Staging has protected Runtime inputs prepares its Dev Container
+and required dependency hooks without starting Apps or testing their authenticated health.
+The public recipe records that deferral, never the input values or Environment version.
+After assignment, fresh authority starts all required processes through normal preparation;
+the dependency-only template cannot claim to have already-running Apps. Hooks that themselves
+require unavailable protected inputs still fail closed and use ordinary fresh execution.
 A template that never reached confirmed standby is not repeatedly cold-built for the
 same immutable basis after cleanup. A new healthy Staging basis or changed artifact
 inputs permits a new template; uncertain external outcomes retain their original owner.

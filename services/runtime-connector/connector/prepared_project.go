@@ -53,7 +53,7 @@ func samePreparedSource(source, target Assignment) bool {
 }
 
 func samePreparedProject(source, target Assignment) bool {
-	return samePreparedSource(source, target) &&
+	return !source.DeferRuntimeProcesses && samePreparedSource(source, target) &&
 		reflect.DeepEqual(source.Channels, target.Channels) && reflect.DeepEqual(source.Processes, target.Processes) &&
 		target.Prebuild == nil && target.BrowserToolsImage == ""
 }
@@ -125,6 +125,11 @@ func prepareReservedProject(ctx context.Context, assignment Assignment) (*prepar
 	}
 	project := &preparedProject{assignment: assignment, result: result,
 		origin: containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, container.Config.Labels["com.docker.compose.project"]}}
+	// Protected Runtime inputs never enter a captured template. Its required
+	// hooks and dependencies are prepared, but Apps must wait for assignment.
+	if assignment.DeferRuntimeProcesses {
+		return project, nil
+	}
 	childExited, err := injectPreparedChild(ctx, assignment, result)
 	if err != nil {
 		return nil, err
