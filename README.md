@@ -17,6 +17,8 @@ A required App process that has exited fails with its exit code and a bounded, r
 instead of waiting for the health timeout. HTTP readiness failures retain the last response
 status and the App's sanitized startup cause, not the response body or credential-bearing URL.
 Startup output never establishes readiness.
+Required channels share one elapsed 420-second readiness window. Fast connection refusals do not
+exhaust a retry counter after thirty seconds; cancellation and actual process failure still end startup early.
 
 The runtime host builds Docker Compose from the verified upstream source archive pinned in
 `upstream.json`. It includes the configured-input grants needed for Dev Containers' temporary

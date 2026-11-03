@@ -184,7 +184,10 @@ func runChild(ctx context.Context, assignment Assignment, token string, prepared
 }
 
 func waitForChannels(ctx context.Context, assignment Assignment, processes *processManager) error {
-	client := http.Client{Timeout: 2 * time.Second}
+	return waitForChannelsWithClient(ctx, assignment, processes, &http.Client{Timeout: 2 * time.Second})
+}
+
+func waitForChannelsWithClient(ctx context.Context, assignment Assignment, processes *processManager, client *http.Client) error {
 	for _, channel := range assignment.Channels {
 		if channel.Kind == "ide" {
 			// This child owns real PTYs. No editor lives in execution, and App
@@ -192,9 +195,13 @@ func waitForChannels(ctx context.Context, assignment Assignment, processes *proc
 			return nil
 		}
 	}
+	// A refused TCP connection is fast, not evidence that an App exhausted its
+	// startup window. Share one elapsed lifecycle window across all required
+	// channels; caller cancellation and real process failures still end it early.
+	ctx, cancel := context.WithTimeout(ctx, 420*time.Second)
+	defer cancel()
 	for _, channel := range assignment.Channels {
 		healthURL := strings.TrimSuffix(channel.Target, "/") + channel.HealthPath
-		ready := false
 		lastFailure := "health endpoint has not responded"
 		readinessFailure := func(cause error) error {
 			detail := lastFailure
@@ -208,7 +215,7 @@ func waitForChannels(ctx context.Context, assignment Assignment, processes *proc
 			}
 			return fmt.Errorf("channel %q did not become ready: %s", channel.Name, detail)
 		}
-		for attempt := 0; attempt < 120; attempt++ {
+		for {
 			if processes != nil {
 				if err := processes.startupFailure(assignment); err != nil {
 					return err
@@ -224,7 +231,6 @@ func waitForChannels(ctx context.Context, assignment Assignment, processes *proc
 				io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 				response.Body.Close()
 				if response.StatusCode >= 200 && response.StatusCode < 400 {
-					ready = true
 					break
 				}
 				lastFailure = fmt.Sprintf("last health response was HTTP %d", response.StatusCode)
@@ -238,9 +244,6 @@ func waitForChannels(ctx context.Context, assignment Assignment, processes *proc
 				return readinessFailure(ctx.Err())
 			case <-time.After(250 * time.Millisecond):
 			}
-		}
-		if !ready {
-			return readinessFailure(nil)
 		}
 	}
 	return nil
