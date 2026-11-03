@@ -791,6 +791,17 @@ export function createReserveClient(
             checkpoint_sha256: z.literal(captured.checkpointSHA256),
           }),
         }).parse(state.record);
+        if (state.processExited && !slot.factoryboxPauseAttempted)
+          return {
+            ...observed,
+            ready: false,
+            failed: true,
+            factoryboxPreparation: slot.factoryboxPreparation ?? {
+              version: 1,
+              kind: "fork",
+              request,
+            },
+          };
         if (!slot.factoryboxPreparation)
           return {
             ...observed,
@@ -860,6 +871,8 @@ export function createReserveClient(
             : {}),
         };
       }
+      if (state.processExited && !slot.factoryboxPauseAttempted)
+        return { ...observed, ready: false, failed: true };
       if (state.runtime?.status !== "running")
         throw new Error("Execution slot preparation has no running native Sandbox");
       const ready = await reserveGuestCommand(

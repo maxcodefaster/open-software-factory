@@ -7,6 +7,10 @@ const state = z.object({
       id: z.string(),
       runtime_id: z.string().regex(/^fbx-[a-f0-9]{32}$/),
       phase: z.enum(["running", "paused"]),
+      start: z
+        .object({ completed_at: z.string().min(1).optional() })
+        .passthrough()
+        .optional(),
       pause: z
         .object({
           snapshot_id: z.string(),
@@ -19,7 +23,9 @@ const state = z.object({
         .optional(),
     })
     .passthrough(),
-  runtime: z.object({ status: z.string() }).optional(),
+  runtime: z
+    .object({ status: z.string(), pid: z.number().int().nonnegative().optional() })
+    .optional(),
 });
 
 interface StandbyCommands {
@@ -32,7 +38,14 @@ export function readFactoryboxStandbyState(sandboxID: string, value: unknown) {
   const observed = state.parse(value);
   if (observed.record.id !== sandboxID)
     throw new Error("Standby observation belongs to another Sandbox");
-  return observed;
+  return {
+    ...observed,
+    processExited:
+      observed.record.phase === "running" &&
+      Boolean(observed.record.start?.completed_at) &&
+      observed.runtime?.status === "stopped" &&
+      observed.runtime.pid === 0,
+  };
 }
 
 // The slot owns one immutable standby snapshot. Observe an uncertain command;

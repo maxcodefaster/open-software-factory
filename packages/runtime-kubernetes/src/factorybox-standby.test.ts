@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { settleFactoryboxStandby } from "./factorybox-standby";
+import { readFactoryboxStandbyState, settleFactoryboxStandby } from "./factorybox-standby";
 
 const sandboxID = `runtime-${"a".repeat(32)}`;
 const snapshotID = "b".repeat(32);
@@ -20,6 +20,31 @@ function observation(phase: "running" | "paused", resumed = false) {
     ...(phase === "running" ? { runtime: { status: "running" } } : {}),
   };
 }
+
+test("a confirmed exited preparation process is distinct from an unknown or paused Sandbox", () => {
+  const exited = {
+    record: {
+      id: sandboxID,
+      runtime_id: `fbx-${"c".repeat(32)}`,
+      phase: "running",
+      start: { completed_at: "2026-11-03T23:14:13Z" },
+    },
+    runtime: { status: "stopped", pid: 0 },
+  };
+  expect(readFactoryboxStandbyState(sandboxID, exited)).toMatchObject({ processExited: true });
+  for (const current of [
+    { ...exited, record: { ...exited.record, phase: "paused" } },
+    { ...exited, record: { ...exited.record, start: undefined } },
+    { ...exited, runtime: { status: "running", pid: 123 } },
+    { ...exited, runtime: { status: "stopped" } },
+    { ...exited, runtime: undefined },
+  ]) {
+    expect(readFactoryboxStandbyState(sandboxID, current)).toMatchObject({
+      processExited: false,
+    });
+  }
+  expect(() => readFactoryboxStandbyState("runtime-foreign", exited)).toThrow("another Sandbox");
+});
 
 for (const action of ["pause", "resume"] as const) {
   test(`standby ${action} persists intent before exactly one native mutation`, async () => {

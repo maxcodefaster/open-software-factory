@@ -208,6 +208,10 @@ Unknown build metadata or a mismatching image uses ordinary compliant preparatio
 A template that never reached confirmed standby is not repeatedly cold-built for the
 same immutable basis after cleanup. A new healthy Staging basis or changed artifact
 inputs permits a new template; uncertain external outcomes retain their original owner.
+If the exact native process is confirmed stopped after completed Start and before any
+Pause attempt, preparation has failed even while the shared worker remains healthy.
+Retire that owned slot normally instead of keeping it in a read/retry loop. Missing or
+ambiguous native state and an unconfirmed Pause remain fenced, never inferred as failure.
 
 Ready requires native confirmation of the exact standby snapshot, zero anonymous
 RAM and no resident snapshot pages. Persist source import, Fork, Pause and Resume
