@@ -55,6 +55,28 @@ class RetainedStoreTests(unittest.TestCase):
                           for path in before}, before)
         self.assertEqual(self.image.stat().st_ino, self.image_info.st_ino)
 
+    def test_exact_copy_on_write_store_is_read_without_conversion_or_reinitialization(self):
+        identity = json.loads(self.record.read_text())
+        identity['image'].update(schema=2, filesystem_uuid='a'*32)
+        self.record.write_text(json.dumps(identity))
+        before = {path: (path.read_bytes(), path.stat().st_ino, stat.S_IMODE(path.stat().st_mode))
+                  for path in [self.receipt, self.record, self.image, self.lock]}
+        self.assertEqual(self.inspect(), {
+            'version': 1, 'storeID': 'a'*32, 'boundedBytes': self.image_info.st_size})
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_ino, stat.S_IMODE(path.stat().st_mode))
+                          for path in before}, before)
+
+    def test_unknown_format_and_foreign_copy_on_write_uuid_are_not_repaired(self):
+        original = json.loads(self.record.read_text())
+        for schema, uuid in [(3, 'a'*32), (2, 'b'*32), (2, None)]:
+            identity = json.loads(json.dumps(original))
+            identity['image'].update(schema=schema, filesystem_uuid=uuid)
+            self.record.write_text(json.dumps(identity))
+            before = self.record.read_bytes()
+            with self.subTest(schema=schema, uuid=uuid), self.assertRaisesRegex(ValueError, 'capacity changed'):
+                self.inspect()
+            self.assertEqual(self.record.read_bytes(), before)
+
     def test_live_original_store_lease_refuses_successor(self):
         with self.lock.open('r') as held:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)

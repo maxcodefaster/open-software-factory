@@ -39,7 +39,8 @@ def inspect(root, original_pod_uid, store_id, expected_bytes):
     identity = json.loads(record.read_text())
     image = regular(bounded/'store.img')
     recorded = identity.get('image', {})
-    if (identity.get('schema') != 1 or recorded.get('schema') != 1 or
+    if (identity.get('schema') != 1 or recorded.get('schema') not in (1, 2) or
+            (recorded.get('schema') == 2 and recorded.get('filesystem_uuid') != store_id) or
             recorded.get('owner') != store_id or recorded.get('bytes') != expected_bytes or
             recorded.get('path') != '/var/lib/sysbox/fixed-store/store.img' or
             (recorded.get('device'), recorded.get('inode'), recorded.get('bytes')) !=
