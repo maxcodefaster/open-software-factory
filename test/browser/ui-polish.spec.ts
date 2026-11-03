@@ -749,7 +749,9 @@ for (const touch of [false, true])
     });
   });
 
-test("silent Preview attachment offers a bounded reload of the same instance", async ({ page }) => {
+test("silent Preview attachment keeps waiting and offers a local reload of the same instance", async ({
+  page,
+}) => {
   const attemptID = crypto.randomUUID();
   const developmentAttemptID = crypto.randomUUID();
   let documents = 0;
@@ -814,6 +816,10 @@ test("silent Preview attachment offers a bounded reload of the same instance", a
     await page.getByRole("menuitem", { name: /^Staging ready$/ }).click();
     await expect.poll(() => documents).toBe(1);
     await page.clock.fastForward(31_000);
+    await expect(page.getByRole("status", { name: "Preview connection" })).toContainText(
+      "Preview is taking longer to open. You can keep waiting.",
+    );
+    await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "true");
     const retry = page.getByRole("button", { name: "Reload view", exact: true });
     await expect(retry).toBeVisible({ timeout: 1500 });
     await page.screenshot({ path: `${evidence}/sweep-preview-retry.png` });

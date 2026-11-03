@@ -7,6 +7,7 @@ import { previewBridge } from "../../apps/factory/src/review/preview-bridge";
 import { previewAttachmentFailure } from "../../apps/factory/src/runtime/preview-attachment-failure";
 import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { protocolFailure } from "../../apps/factory/src/server/protocols/failure";
+import { observeBrowserErrors } from "../fixtures/browser-errors";
 import { test } from "../fixtures/browser-test";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
@@ -169,6 +170,111 @@ test("Preview accepts its parsed document, not a spoofed sender, while an image 
   await expect(connection).toHaveCount(0);
   expect(documents).toBe(1);
   await page.screenshot({ path: `${evidence}/preview-parsed-before-image.png` });
+});
+
+test("a slow initial document stays loading and can finish without a reload", async ({
+  browser,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  for (const [label, width, touch] of [
+    ["desktop", 1440, false],
+    ["narrow", 390, false],
+    ["touch", 390, true],
+  ] as const) {
+    documents = 0;
+    const context = await browser.newContext({
+      viewport: { width, height: 844 },
+      hasTouch: touch,
+      isMobile: touch,
+      reducedMotion: "reduce",
+    });
+    const documentGate = Promise.withResolvers<void>();
+    try {
+      const page = await context.newPage();
+      const errors = observeBrowserErrors(page);
+      await page.clock.install();
+      await page.route("**/document", async (route) => {
+        documents++;
+        await documentGate.promise;
+        await route
+          .fulfill({
+            contentType: "text/html",
+            body: '<!doctype html><p>Usable Preview document</p><script src="/bridge.js"></script>',
+          })
+          .catch(() => {});
+      });
+      await page.goto(`${origin}/runtime-attachment.html`, { waitUntil: "domcontentloaded" });
+      await expect.poll(() => documents).toBe(1);
+      await page.clock.fastForward(31_000);
+      const connection = page.getByRole("status", { name: "Preview connection" });
+      await expect(connection).toContainText("Preview is taking longer to open");
+      await expect(connection).not.toContainText("Could not open");
+      await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "true");
+      const reload = connection.getByRole("button", { name: "Reload view", exact: true });
+      await expect(reload).toBeVisible();
+      if (touch)
+        expect(
+          await reload.evaluate((element) => element.getBoundingClientRect().height),
+        ).toBeGreaterThanOrEqual(44);
+      await page.screenshot({ path: `${evidence}/preview-slow-document-${label}.png` });
+      documentGate.resolve();
+      await expect(connection).toHaveCount(0, { timeout: 3000 });
+      await expect(
+        page.frameLocator('iframe[title="Factory Preview"]').getByText("Usable Preview document"),
+      ).toBeVisible();
+      await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "false");
+      await expect(page.locator("iframe")).toHaveAttribute("data-runtime-attempt-id", attemptID);
+      await page.clock.fastForward(31_000);
+      expect(documents).toBe(1);
+      expect(errors).toEqual([]);
+    } finally {
+      documentGate.resolve();
+      await context.close();
+    }
+  }
+});
+
+test("reloading a delayed Preview rearms its waiting hint without automatic replay", async ({
+  page,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  const documentGate = Promise.withResolvers<void>();
+  await page.clock.install();
+  await page.route("**/document", async (route) => {
+    documents++;
+    await documentGate.promise;
+    await route
+      .fulfill({
+        contentType: "text/html",
+        body: '<!doctype html><p>Usable Preview document</p><script src="/bridge.js"></script>',
+      })
+      .catch(() => {});
+  });
+  try {
+    await page.goto(`${origin}/runtime-attachment.html`, { waitUntil: "domcontentloaded" });
+    await expect.poll(() => documents).toBe(1);
+    await page.clock.fastForward(31_000);
+    const connection = page.getByRole("status", { name: "Preview connection" });
+    await connection.getByRole("button", { name: "Reload view", exact: true }).click();
+    await expect.poll(() => documents).toBe(2);
+    await expect(connection).toHaveText("Opening Preview…");
+    await page.clock.fastForward(29_000);
+    await expect(connection.getByRole("button", { name: "Reload view" })).toHaveCount(0);
+    await page.clock.fastForward(2000);
+    await expect(connection).toContainText("Preview is taking longer to open");
+    await expect(page.locator(".runtime-frame")).toHaveAttribute("aria-busy", "true");
+    expect(documents).toBe(2);
+    documentGate.resolve();
+    await expect(connection).toHaveCount(0, { timeout: 3000 });
+    await expect(
+      page.frameLocator('iframe[title="Factory Preview"]').getByText("Usable Preview document"),
+    ).toBeVisible();
+    await expect(page.locator("iframe")).toHaveAttribute("data-runtime-attempt-id", attemptID);
+  } finally {
+    documentGate.resolve();
+  }
 });
 
 test("a cold App reconnects its initial Preview document without another Start", async ({

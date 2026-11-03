@@ -201,6 +201,8 @@ commission another Start. Ticket compute remains controlled from its existing wo
 On first attachment, a temporary Factory transport refusal reconnects the same Preview document
 while its view is active. Permanent failures and documents already used by a person require an
 explicit reload; App writes and runtime Starts are never repeated by this recovery.
+A slow document keeps its loading state and can finish without a reload. After a delayed-opening
+hint, a person can choose to reload that view; elapsed time alone is not a failed connection.
 
 A merged Ticket whose replacement Main Preview failed offers one developer-only Retry Main
 Preview action. It retains the failed attempt and original merge, starting a separately recorded

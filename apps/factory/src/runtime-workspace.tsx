@@ -191,6 +191,7 @@ function AttachedRuntimeFrame(props: {
     | undefined;
 }) {
   const [phase, setPhase] = createSignal<"loading" | "loaded" | "failed">("loading");
+  const [delayed, setDelayed] = createSignal(false);
   const [documentFailed, setDocumentFailed] = createSignal(false);
   const [retryable, setRetryable] = createSignal(false);
   let attached = false;
@@ -213,16 +214,21 @@ function AttachedRuntimeFrame(props: {
       retryDelay = 1000;
       setRetryable(false);
       setDocumentFailed(false);
+      setDelayed(false);
       setPhase("loading");
     },
   );
-  createEffect(phase, (current) => {
-    if (current !== "loading") return;
-    // iframe errors do not cover a response that never completes. Keep the same
-    // attachment and offer a local reload instead of preparing another runtime.
-    const timer = setTimeout(() => setPhase("failed"), 30_000);
-    return () => clearTimeout(timer);
-  });
+  createEffect(
+    () => ({ phase: phase(), delayed: delayed(), url: props.url }),
+    (current) => {
+      if (current.phase !== "loading") return;
+      if (current.delayed) return;
+      // Silence is not a failed navigation. Keep waiting on the same document;
+      // offer a local reload without replaying App work or starting compute.
+      const timer = setTimeout(() => setDelayed(true), 30_000);
+      return () => clearTimeout(timer);
+    },
+  );
   createEffect(
     () => ({
       phase: phase(),
@@ -283,6 +289,7 @@ function AttachedRuntimeFrame(props: {
         attached = true;
         setRetryable(false);
         setDocumentFailed(false);
+        setDelayed(false);
         setPhase("loaded");
         usePreview(activePreviewID());
       };
@@ -299,6 +306,7 @@ function AttachedRuntimeFrame(props: {
     }
     setRetryable(false);
     setDocumentFailed(false);
+    setDelayed(false);
     setPhase("loading");
     frame.src = props.url;
   }
@@ -329,10 +337,14 @@ function AttachedRuntimeFrame(props: {
           const rejected = accessRejected || documentFailed();
           // A failed cross-origin document also fires load. Only the Preview
           // bridge can confirm attachment and suppress retries over human work.
+          setDelayed(false);
           setPhase(rejected ? "failed" : "loaded");
           if (!rejected) usePreview(activePreviewID());
         }}
-        onError={() => setPhase("failed")}
+        onError={() => {
+          setDelayed(false);
+          setPhase("failed");
+        }}
       />
       <Show
         when={
@@ -371,9 +383,11 @@ function AttachedRuntimeFrame(props: {
               <p>
                 {props.reconnecting
                   ? "Connection interrupted. Reconnecting to the same Workspace…"
-                  : props.title === "IDE"
-                    ? "Workspace is running. Opening IDE…"
-                    : "Opening Preview…"}
+                  : delayed()
+                    ? `${props.title} is taking longer to open. You can keep waiting.`
+                    : props.title === "IDE"
+                      ? "Workspace is running. Opening IDE…"
+                      : "Opening Preview…"}
               </p>
             }
           >
@@ -382,7 +396,13 @@ function AttachedRuntimeFrame(props: {
                 ? "Preview could not be reached. Reconnecting…"
                 : `Could not open ${props.title}. Reload this view to retry.`}
             </p>
-            <button type="button" class="primary-button" onClick={() => reload()}>
+          </Show>
+          <Show when={!props.reconnecting && (phase() === "failed" || delayed())}>
+            <button
+              type="button"
+              class={phase() === "failed" ? "primary-button" : "quiet-button"}
+              onClick={() => reload()}
+            >
               Reload view
             </button>
           </Show>
