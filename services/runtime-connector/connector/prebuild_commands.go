@@ -13,7 +13,8 @@ import (
 
 func prebuildEnvironment(home string) []string {
 	return []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + home, "DOCKER_CONFIG=" + filepath.Join(home, ".docker"),
-		"DOCKER_HOST=unix:///var/run/docker.sock", "DOCKER_BUILDKIT=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0"}
+		"DOCKER_HOST=unix:///var/run/docker.sock", "DOCKER_BUILDKIT=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_TERMINAL_PROMPT=0",
+		"NODE_EXTRA_CA_CERTS=" + factoryRegistryCAFile}
 }
 
 func prebuildCommand(ctx context.Context, home, name string, arguments ...string) *exec.Cmd {

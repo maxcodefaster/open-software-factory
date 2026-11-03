@@ -65,6 +65,8 @@ func runtimeDockerCommand(ctx context.Context, arguments ...string) *exec.Cmd {
 
 type runtimeVariablesContextKey struct{}
 
+const factoryRegistryCAFile = "/factory/registry-ca/ca.crt"
+
 func devcontainerEnvironment(assignment Assignment) []string {
 	values := make(map[string]string, len(assignment.RuntimeEnvironment)+2)
 	for name, value := range assignment.RuntimeEnvironment {
@@ -72,6 +74,9 @@ func devcontainerEnvironment(assignment Assignment) []string {
 	}
 	if assignment.DockerConfigDirectory != "" {
 		values["DOCKER_CONFIG"] = assignment.DockerConfigDirectory
+	}
+	values["NODE_EXTRA_CA_CERTS"] = factoryRegistryCAFile
+	if assignment.RegistryCAFile != "" {
 		values["NODE_EXTRA_CA_CERTS"] = assignment.RegistryCAFile
 	}
 	return assignedEnvironment(os.Environ(), values)
@@ -205,7 +210,7 @@ func prepareEnvironmentFiles(environment runtimeEnvironment) (environmentFiles, 
 	if err := requireMemoryFilesystem("/dev/shm"); err != nil {
 		return environmentFiles{}, err
 	}
-	factoryCA, err := os.ReadFile("/factory/registry-ca/ca.crt")
+	factoryCA, err := os.ReadFile(factoryRegistryCAFile)
 	if err != nil {
 		return environmentFiles{}, errors.New("Admitted Factory registry trust is unavailable")
 	}

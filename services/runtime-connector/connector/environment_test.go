@@ -138,3 +138,40 @@ func TestComposeAndDevcontainerReceiveOnlyAssignedRuntimeValues(t *testing.T) {
 		t.Fatal("Compose cannot resolve assigned environment")
 	}
 }
+
+func TestCredentialFreeCommandsRetainAdmittedFactoryRegistryTrust(t *testing.T) {
+	t.Setenv("NODE_EXTRA_CA_CERTS", "/foreign/inherited-ca")
+	slot, _ := preparedFixture(t)
+	if err := validatePreparedProject(*slot.Project); err != nil {
+		t.Fatal(err)
+	}
+	for _, environment := range [][]string{
+		devcontainerEnvironment(*slot.Project),
+		prebuildCommand(context.Background(), "/tmp", "node", "--version").Env,
+	} {
+		count := 0
+		for _, variable := range environment {
+			if strings.HasPrefix(variable, "NODE_EXTRA_CA_CERTS=") {
+				count++
+				if variable != "NODE_EXTRA_CA_CERTS=/factory/registry-ca/ca.crt" {
+					t.Fatal("credential-free CLI lost its admitted public Registry trust")
+				}
+			}
+		}
+		if count != 1 {
+			t.Fatal("credential-free CLI requires exactly one admitted Registry CA bundle")
+		}
+	}
+}
+
+func TestProjectRegistryTrustOverridesPublicDefaultWithoutDockerCredentials(t *testing.T) {
+	environment := devcontainerEnvironment(Assignment{RegistryCAFile: "/owned/combined-ca"})
+	if !strings.Contains(strings.Join(environment, "\n"), "NODE_EXTRA_CA_CERTS=/owned/combined-ca") {
+		t.Fatal("CLI trust incorrectly depends on Docker credential configuration")
+	}
+	ctx := context.WithValue(context.Background(), registryCAContextKey{}, "/owned/combined-ca")
+	command := prebuildCommand(ctx, "/tmp", "node", "--version")
+	if !strings.Contains(strings.Join(command.Env, "\n"), "NODE_EXTRA_CA_CERTS=/owned/combined-ca") {
+		t.Fatal("prebuild command discarded the combined admitted Registry trust")
+	}
+}

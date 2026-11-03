@@ -71,6 +71,18 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if output, err := trustProbe.CombinedOutput(); err != nil {
 		t.Fatalf("the real Node CLI environment dropped the admitted Factory Registry CA: %s: %v", output, err)
 	}
+	// A clean template deliberately has no Project environment or Docker
+	// credentials. Both CLI entrypoints must still trust the installation's
+	// public Registry CA before resolving a prepared image or its Features.
+	credentialFreeTrustProbe := exec.CommandContext(ctx, "node", trustProbe.Args[1:]...)
+	credentialFreeTrustProbe.Env = devcontainerEnvironment(Assignment{})
+	if output, err := credentialFreeTrustProbe.CombinedOutput(); err != nil {
+		t.Fatalf("the credential-free template CLI lost public Registry trust: %s: %v", output, err)
+	}
+	prebuildTrustProbe := prebuildCommand(context.Background(), "/tmp", "node", trustProbe.Args[1:]...)
+	if output, err := prebuildTrustProbe.CombinedOutput(); err != nil {
+		t.Fatalf("the credential-free prebuild lookup lost public Registry trust: %s: %v", output, err)
+	}
 	registryTrust.cleanup()
 	cli, err := exec.LookPath("devcontainer")
 	if err != nil {
