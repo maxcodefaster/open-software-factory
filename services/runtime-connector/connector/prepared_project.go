@@ -71,9 +71,10 @@ func reusablePreparedDependencies(source, target Assignment, environment runtime
 }
 
 type preparedProject struct {
-	assignment Assignment
-	result     devcontainerResult
-	origin     containerOrigin
+	assignment  Assignment
+	result      devcontainerResult
+	origin      containerOrigin
+	rootFSImage string
 }
 
 func (project *preparedProject) state() parentState {
@@ -133,6 +134,9 @@ func prepareReservedProject(ctx context.Context, assignment Assignment) (*prepar
 	}
 	project := &preparedProject{assignment: assignment, result: result,
 		origin: containerOrigin{assignment.RuntimeAttemptID, assignment.Generation, container.Config.Labels["com.docker.compose.project"]}}
+	if err := project.captureRootFS(ctx); err != nil {
+		return nil, err
+	}
 	// Protected Runtime inputs never enter a captured template. Its required
 	// hooks and dependencies are prepared, but Apps must wait for assignment.
 	if assignment.DeferRuntimeProcesses {

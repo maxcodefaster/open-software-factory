@@ -52,6 +52,7 @@ type Assignment struct {
 	BuildEnvironmentSHA256 string              `json:"-"`
 	DeferRuntimeProcesses  bool                `json:"deferRuntimeProcesses,omitempty"`
 	containerOrigin        *containerOrigin
+	preparedRootFSImage    string
 }
 
 type containerOrigin struct {

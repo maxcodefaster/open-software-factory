@@ -147,6 +147,11 @@ Cold Project pool templates use their original preparation lease, fifteen minute
 for image import, dependency hooks and checkpoint quiescence. Native Fork preparation retains its
 420-second window. A newly commissioned healthy Staging permits one fresh preparation after a
 failed template; unchanged observation never cold-retries it. Already-ready templates remain reusable.
+Clean preparation retains the primary's installed user-home tools in a private, exact-image
+cache before Apps or Runtime grants are activated. A same-source Fork that needs fresh Runtime
+values can create a new compliant Dev Container from those files instead of downloading its
+tools again. Required hooks still run once, and changed build or registry grants cannot reuse
+that cache. It stays in the Sandbox's private daemon and is never published.
 Idle Pause checks that same capacity decision before revoking live transports or dispatching capture.
 A known pre-dispatch refusal keeps the Sandbox usable and the same snapshot intent unattempted;
 the existing idle grace permits another admission check. A dispatched or unknown Pause remains fenced.

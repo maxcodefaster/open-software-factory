@@ -28,9 +28,10 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if kind == "" {
 		kind = "build"
 	}
-	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" && kind != "prepared-image" {
+	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" && kind != "prepared-image" && kind != "prepared-rootfs" {
 		t.Fatal("unknown native Compose proof recipe")
 	}
+	preparedRecipe := kind == "prepared-image" || kind == "prepared-rootfs"
 	platform := "linux/" + runtime.GOARCH
 	if runtime.GOOS != "linux" || platform != os.Getenv("FACTORY_COMPOSE_PROOF_PLATFORM") {
 		t.Fatal("proof is not running on its admitted native architecture")
@@ -170,7 +171,7 @@ exec %q "$@"
 		t.Fatal("owned base publication changed the original native payload")
 	}
 	root := filepath.Join(t.TempDir(), "project")
-	if kind == "prepared-image" {
+	if preparedRecipe {
 		root = "/home/coder/project"
 		if _, err := os.Lstat(root); !os.IsNotExist(err) {
 			t.Fatal("owned prepared-image proof cannot replace an existing canonical checkout")
@@ -188,6 +189,14 @@ exec %q "$@"
 		"seed/dependency/index.js":                        `module.exports="exact offline dependency";`,
 		"seed/package-lock.json":                          `{"name":"seed","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"seed","version":"1.0.0","dependencies":{"local-dependency":"file:./dependency"}},"dependency":{"name":"local-dependency","version":"1.0.0"},"node_modules/local-dependency":{"resolved":"dependency","link":true}}}`,
 		".gitignore":                                      "/dependency/\n/project-hook\n/feature-hook\n/create-hook\n",
+	}
+	if kind == "prepared-rootfs" {
+		var config map[string]any
+		json.Unmarshal([]byte(files[".devcontainer/devcontainer.json"]), &config)
+		config["postCreateCommand"] = []string{"node", "-e", `const fs=require('fs'),p=require('os').homedir()+'/.cache/owned-prepared-tool';if(!fs.existsSync(p)){fs.mkdirSync(require('path').dirname(p),{recursive:true});fs.writeFileSync(p,'prepared outside the checkout');fs.appendFileSync('/workspace/project/cache-downloads','download\n')}fs.appendFileSync('/workspace/project/project-hook','required project hook\n')`}
+		encoded, _ := json.Marshal(config)
+		files[".devcontainer/devcontainer.json"] = string(encoded)
+		files[".gitignore"] += "/cache-downloads\n"
 	}
 	if kind == "image-only" {
 		var config map[string]any
@@ -244,7 +253,7 @@ exec %q "$@"
 	if kind == "build-no-features" {
 		assignment.ComposeProjectName = "project_devcontainer"
 	}
-	if kind == "prepared-image" {
+	if preparedRecipe {
 		version := uint64(9)
 		assignment.EnvironmentVersion = &version
 		assignment.PublicImageBuild = publicImageBuild(runtimeEnvironment{Version: version, Bundle: environmentBundle{
@@ -312,14 +321,14 @@ exec %q "$@"
 	assignment.RegistryCAFile = grants.caFile
 	ctx = context.WithValue(ctx, dockerConfigContextKey{}, grants.dockerConfig)
 	ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
-	if kind == "dependency-seed" || kind == "prepared-image" {
+	if kind == "dependency-seed" || preparedRecipe {
 		assignment.EnvironmentVersion = nil
 		assignment.RuntimeEnvironment = nil
 		assignment.EnvironmentSecretsFile = ""
 		assignment.DockerConfigDirectory = ""
 		assignment.RegistryCAFile = ""
 	}
-	if kind != "prepared-image" {
+	if !preparedRecipe {
 		path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
 		if err != nil {
 			t.Fatal(err)
@@ -333,7 +342,8 @@ exec %q "$@"
 	}
 	started = time.Now()
 	var container devcontainerResult
-	if kind == "prepared-image" {
+	var preparedRootFS *preparedProject
+	if preparedRecipe {
 		assignment.ControlURL = "ws://unassigned.invalid/"
 		assignment.ConnectorStateDir = "/home/coder/connector-state"
 		assignment.PreparedImage = &result
@@ -343,6 +353,7 @@ exec %q "$@"
 		project, prepareErr := prepareReservedProject(context.Background(), assignment)
 		err = prepareErr
 		if project != nil {
+			preparedRootFS = project
 			container = project.result
 			assignment = project.assignment
 			if assignment.PrebuildCacheImage != result.Image || assignment.EffectiveConfiguration == "" {
@@ -499,6 +510,10 @@ exec %q "$@"
 			t.Fatal("fresh compliant startup lost its dependency or skipped its required hook")
 		}
 	}
+	if kind == "prepared-rootfs" {
+		grants.cleanup()
+		dependencyRebuildMS = provePreparedRootFSRebuild(t, preparedRootFS).Milliseconds()
+	}
 	summary := map[string]any{
 		"nativeComponentProof": true, "nativeFactoryboxProof": false, "platform": platform,
 		"primaryKind": kind, "preparedDependency": kind != "image-only",
@@ -507,7 +522,8 @@ exec %q "$@"
 		"producerGraphEvictedBeforeConsumer": true,
 		"freshGrantDependencyRebuildMS":      dependencyRebuildMS,
 		"nonRootPreparedChildArtifacts":      kind == "build-no-features",
-		"credentialFreePreparedImage":        kind == "prepared-image",
+		"credentialFreePreparedImage":        preparedRecipe,
+		"preparedPrimaryDependenciesReused":  kind == "prepared-rootfs",
 		"modelCalls":                         0, "projectCredentials": false,
 	}
 	encoded, _ := json.Marshal(summary)

@@ -118,6 +118,7 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	if token == "" || childToken == "" {
 		return errors.New("Factory parent and child connector tokens are required")
 	}
+	var preparedDependencies *preparedProject
 	if prepared != nil {
 		// Runtime grants are read only after assignment. Never inject them into
 		// the captured clean processes, even when only their version changed.
@@ -131,7 +132,9 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 			// hooks, not deletion of its exact prepared dependency files.
 			// checkoutProject still verifies its Project, commit and clean
 			// tracked source before the ordinary Dev Container startup.
-			if !reusablePreparedDependencies(prepared.assignment, assignment, environment) {
+			if reusablePreparedDependencies(prepared.assignment, assignment, environment) {
+				preparedDependencies = prepared
+			} else {
 				if err := os.RemoveAll(assignment.WorkspaceFolder); err != nil {
 					return err
 				}
@@ -193,12 +196,29 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		return nil
 	}
 	if prepared == nil {
-		assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, assignment, token)
-		if assignment.PrebuildCacheImage != "" {
-			path, cleanup, err := preparePrebuildConsumer(ctx, assignment, assignment.PrebuildCacheImage)
+		if preparedDependencies != nil && preparedDependencies.rootFSImage != "" {
+			image, err := preparedDependencies.inspectRootFS(ctx, preparedDependencies.rootFSImage)
+			if err != nil {
+				control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
+				return err
+			}
+			consumer := assignment
+			consumer.preparedRootFSImage = image
+			path, cleanup, err := preparePrebuildConsumer(ctx, consumer, image)
 			if err == nil {
 				defer cleanup()
 				assignment.EffectiveConfiguration = path
+				assignment.preparedRootFSImage = image
+			}
+		}
+		if assignment.EffectiveConfiguration == "" {
+			assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, assignment, token)
+			if assignment.PrebuildCacheImage != "" {
+				path, cleanup, err := preparePrebuildConsumer(ctx, assignment, assignment.PrebuildCacheImage)
+				if err == nil {
+					defer cleanup()
+					assignment.EffectiveConfiguration = path
+				}
 			}
 		}
 		if err := prepareDevcontainerProject(ctx, assignment); err != nil {
@@ -614,8 +634,15 @@ func prepareDevcontainerProject(ctx context.Context, assignment Assignment) erro
 	if err != nil {
 		return err
 	}
+	registryImages, localImage, err := assignment.registryProjectImages(images)
+	if err != nil {
+		return err
+	}
+	if assignment.preparedRootFSImage != "" && !localImage {
+		return errors.New("Dev Container did not select its prepared primary dependency image")
+	}
 	finishImages := startupPhase("project-images")
-	err = prepareProjectImages(ctx, images)
+	err = prepareProjectImages(ctx, registryImages)
 	finishImages()
 	if err != nil {
 		return err
@@ -625,7 +652,15 @@ func prepareDevcontainerProject(ctx context.Context, assignment Assignment) erro
 	finishMerged := startupPhase("devcontainer-merged-configuration")
 	currentImages, err := validateDevcontainer(ctx, assignment)
 	if err == nil {
-		err = requirePreparedProjectImages(images, currentImages)
+		var currentRegistryImages []string
+		var currentLocalImage bool
+		currentRegistryImages, currentLocalImage, err = assignment.registryProjectImages(currentImages)
+		if err == nil && localImage != currentLocalImage {
+			err = errors.New("Project image inputs changed during preparation; start compute again")
+		}
+		if err == nil {
+			err = requirePreparedProjectImages(registryImages, currentRegistryImages)
+		}
 	}
 	finishMerged()
 	return err

@@ -236,7 +236,15 @@ already-running App processes through private root-peer control. Different input
 rebuilds only that Fork's private execution with its fresh grants. For the same
 Project, commit and Dev Container path with no new build-variable or registry grants,
 retain the Fork's clean checkout and prepared dependency files; recheck source identity
-and rerun required hooks. Different source or build inputs discard that private checkout
+and rerun required hooks. Before activating Apps or delivering Runtime authority, capture
+the clean primary's filesystem as a private image in its own daemon. Bind that image to the
+exact primary, template and generation, and retain its immutable ID in the checkpointed
+preparation. This preserves installed user-home tools as well as checkout dependencies when
+fresh grants require a new primary. The normal CLI consumer still runs required Project and
+Feature hooks once. Only this internally observed image bypasses Registry acquisition;
+source-authored local image IDs remain inadmissible. The image is never published, and its
+bind mounts do not replace the Fork's separate checkout. Different source or build inputs
+discard that private checkout and cannot select the captured primary image
 before normal preparation. Neither path reuses a
 Verification verdict or grants credentials to captured processes. Keep the immutable
 inner container origin separate from the new Runtime Attempt identity.

@@ -181,7 +181,8 @@ func preparePrebuildConsumer(ctx context.Context, assignment Assignment, image s
 	if err != nil || len(output) > 1<<20 || json.Unmarshal(output, &labels) != nil {
 		return "", func() {}, errors.New("Prepared image metadata is unavailable")
 	}
-	if err := removePrebuiltProjectHooks(config, labels["devcontainer.metadata"]); err != nil {
+	if err := removePrebuiltProjectHooksFrom(config, labels["devcontainer.metadata"],
+		assignment.preparedRootFSImage != "" && assignment.preparedRootFSImage == image); err != nil {
 		return "", func() {}, err
 	}
 	directory, err := os.MkdirTemp("/dev/shm", "factory-prebuild-consumer-")
@@ -209,6 +210,10 @@ func preparePrebuildConsumer(ctx context.Context, assignment Assignment, image s
 }
 
 func removePrebuiltProjectHooks(config map[string]json.RawMessage, metadata string) error {
+	return removePrebuiltProjectHooksFrom(config, metadata, false)
+}
+
+func removePrebuiltProjectHooksFrom(config map[string]json.RawMessage, metadata string, capturedPrimary bool) error {
 	if metadata == "" {
 		return nil
 	}
@@ -225,6 +230,27 @@ func removePrebuiltProjectHooks(config map[string]json.RawMessage, metadata stri
 	if len(entries) == 0 {
 		return nil
 	}
+	hooks := []string{"onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"}
+	if capturedPrimary {
+		// A CLI consumer appends another Project metadata entry after its
+		// prebuilt Project entry. Its duplicate hooks were already removed
+		// from that override. Look past those hook-free entries only for our
+		// exact captured primary; never treat a Feature entry as the Project.
+		for len(entries) > 1 {
+			last := entries[len(entries)-1]
+			if last == nil || last["id"] != nil {
+				break
+			}
+			hasHooks := false
+			for _, hook := range hooks {
+				hasHooks = hasHooks || last[hook] != nil
+			}
+			if hasHooks {
+				break
+			}
+			entries = entries[:len(entries)-1]
+		}
+	}
 	// The pinned CLI appends the Project's metadata after inherited image and
 	// Feature entries. Only remove an identical hook from that final Project
 	// entry. Inherited/Feature hooks remain upstream-owned and still run.
@@ -236,7 +262,7 @@ func removePrebuiltProjectHooks(config map[string]json.RawMessage, metadata stri
 		return nil
 	}
 	var duplicated []string
-	for _, hook := range []string{"onCreateCommand", "updateContentCommand", "postCreateCommand", "postStartCommand", "postAttachCommand"} {
+	for _, hook := range hooks {
 		if config[hook] == nil || project[hook] == nil {
 			continue
 		}
