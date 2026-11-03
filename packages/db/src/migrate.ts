@@ -37,7 +37,7 @@ try {
   `;
   if (
     versions[0]?.version !== 1 ||
-    versions.length > 8 ||
+    versions.length > 9 ||
     versions.some((value, index) => value.version !== index + 1)
   )
     throw new Error(
@@ -83,6 +83,13 @@ try {
     await client.unsafe(
       await readFile(
         resolve(import.meta.dir, "../migrations/0008_public_image_build_inputs.sql"),
+        "utf8",
+      ),
+    );
+  if (versions.length <= 8)
+    await client.unsafe(
+      await readFile(
+        resolve(import.meta.dir, "../migrations/0009_execution_template_availability.sql"),
         "utf8",
       ),
     );

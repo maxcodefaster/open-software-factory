@@ -211,6 +211,9 @@ concurrency and compute admission still bound retention. Changed inputs, another
 Project or disabling the reserve retire the exact unused backing through normal cleanup.
 Original seed/expiry timestamps remain immutable metadata; age alone neither invalidates
 these credential-free Forks nor authorizes reuse of a stale recipe.
+Staging process availability is not recipe freshness either. Reconnect, Pause and Stop
+retain the separately prepared checkpoint and its ancestry. The initial template still
+requires healthy Staging; a failed first Start cannot establish a prepared basis.
 
 Resume the selected Fork before delivering fresh Parent and Child authority. An exact
 revision/configuration with no resolved Runtime variables or registries adopts the

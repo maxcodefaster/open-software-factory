@@ -177,7 +177,7 @@ for (const basis of [
   }, 60_000);
 }
 
-test("an identical healthy Staging retry retains its prepared template and original Fork ancestry", async () => {
+test("an identical promoted Staging recipe retains its Forks through reconnect, Pause and Stop", async () => {
   const host = await factoryProcess();
   const database = host.connect();
   const store = createReserveStore(defaultReservePolicy, images, profile);
@@ -258,6 +258,26 @@ test("an identical healthy Staging retry retains its prepared template and origi
         snapshotResidentBytes: 0,
       },
     });
+    for (const state of ["starting", "paused", "resuming", "stopped"]) {
+      await database.client`UPDATE factory.runtime_attempt SET state=${state} WHERE id=${stagingID}`;
+      await database.client.begin((sql) => store.plan(sql));
+      expect((await store.get(database.client, template.id))?.state).toBe("ready");
+      expect((await store.get(database.client, fork.id))?.state).toBe("ready");
+      const newID = crypto.randomUUID();
+      await expect(
+        (async () => {
+          await database.client`INSERT INTO factory.execution_slot(id,project_id,staging_attempt_id,
+            revision,template_key,project_recipe,seed_expires_at,role,state,
+            runtime_host_image,expires_at,factorybox_profile)
+            SELECT ${newID},project_id,${stagingID},revision,template_key,
+              jsonb_set(project_recipe,'{runtimeAttemptId}',to_jsonb(${newID}::text)),
+              seed_expires_at,role,'creating',runtime_host_image,
+              now()+interval '15 minutes',factorybox_profile FROM factory.execution_slot
+            WHERE id=${template.id}`;
+        })(),
+      ).rejects.toThrow("Initial execution template requires healthy Staging");
+    }
+    await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${stagingID}`;
     await expect(
       database.client.begin(async (sql) => {
         expect(
@@ -271,7 +291,10 @@ test("an identical healthy Staging retry retains its prepared template and origi
         throw new Error("Owned assignment lookup rollback");
       }),
     ).rejects.toThrow("assignment lookup rollback");
-    await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${stagingID}`;
+    // A changed promoted revision, unlike process availability, invalidates the
+    // prepared recipe. Both the write guard and assignment must still refuse it.
+    await database.client`UPDATE factory.staging_preview SET revision=${"7".repeat(40)}
+      WHERE project_id=${fixtureValue(owned, "owned").projectID}`;
     await expect(
       (async () => {
         await database.client`UPDATE factory.execution_slot SET state='assigned',
