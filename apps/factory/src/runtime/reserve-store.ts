@@ -115,6 +115,9 @@ export function createReserveStore(
       // Paused Project Forks contain no grants and release their anonymous RAM.
       // Their current recipe and bounded pool size, not seed age, own retention.
       // Expiring and immediately refilling them only repeats Fork/Pause work.
+      // A replacement pointer can precede its frozen public configuration.
+      // Keep that bounded standby while inputs are unknown, without assigning
+      // or refilling it until the complete current recipe matches again.
       await sql`UPDATE factory.execution_slot SET state='retiring',reconcile_after=now()
         WHERE (state='creating' AND created_at<=now()-${policy.preparationMS}*interval '1 millisecond')
         OR (state='creating' AND template_id IS NOT NULL AND NOT factorybox_fork_attempted AND
@@ -123,11 +126,24 @@ export function createReserveStore(
         OR (state='ready' AND (${policy.readyTarget === 0} OR
           factorybox_profile IS DISTINCT FROM ${selected ? JSON.stringify(selected) : null}::text::jsonb OR
           runtime_host_image<>${images.staging} OR
-          NOT factory.execution_template_is_current(execution_slot)))`;
+          (NOT factory.execution_template_is_current(execution_slot) AND NOT EXISTS (
+            SELECT 1 FROM factory.staging_preview preview
+            JOIN factory.runtime_attempt pending ON pending.id=preview.runtime_attempt_id
+            JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=pending.id
+            WHERE preview.project_id=execution_slot.project_id AND preview.revision=execution_slot.revision
+              AND pending.revision=execution_slot.revision AND pending.state IN ('create-intended','starting')
+              AND pending.factorybox_worker_id=execution_slot.factorybox_worker_id
+              AND pending.factorybox_admission_id=execution_slot.factorybox_admission_id
+              AND artifact.runtime_host_image=execution_slot.runtime_host_image
+              AND artifact.factorybox_profile=execution_slot.factorybox_profile
+              AND NOT EXISTS (SELECT 1 FROM factory.staging_configuration configuration
+                WHERE configuration.runtime_attempt_id=pending.id)
+          ))))`;
       const [template] = await sql.unsafe<
         ExecutionSlot[]
       >(`SELECT ${fields} FROM factory.execution_slot
         WHERE template_id IS NULL AND state='ready' AND factorybox_standby IS NOT NULL
+          AND factory.execution_template_is_current(execution_slot)
           ORDER BY created_at DESC,id LIMIT 1`);
       if (template) {
         await sql`UPDATE factory.execution_slot SET state='retiring',reconcile_after=now()

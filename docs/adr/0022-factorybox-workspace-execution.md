@@ -214,6 +214,9 @@ these credential-free Forks nor authorizes reuse of a stale recipe.
 Staging process availability is not recipe freshness either. Reconnect, Pause and Stop
 retain the separately prepared checkpoint and its ancestry. The initial template still
 requires healthy Staging; a failed first Start cannot establish a prepared basis.
+While a same-revision replacement's public configuration is not yet frozen, retain
+the bounded pool without assigning or refilling it. An unknown recipe is neither
+proof that the checkpoint is obsolete nor permission to reuse it.
 
 Resume the selected Fork before delivering fresh Parent and Child authority. An exact
 revision/configuration with no resolved Runtime variables or registries adopts the

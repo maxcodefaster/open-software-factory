@@ -291,6 +291,40 @@ test("an identical promoted Staging recipe retains its Forks through reconnect, 
         throw new Error("Owned assignment lookup rollback");
       }),
     ).rejects.toThrow("assignment lookup rollback");
+    // ensureStaging persists the replacement pointer before its public
+    // configuration is frozen. Unknown configuration must not retire the pool,
+    // and must not authorize assignment until the exact recipe is known.
+    const pendingID = crypto.randomUUID();
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${pendingID},${fixtureValue(owned, "owned").projectID},'staging',3,${fixtureValue(owned, "owned").revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+      await freezeRuntimeArtifacts(
+        sql,
+        pendingID,
+        fixtureValue(owned, "owned").artifactConfiguration,
+      );
+      await sql`UPDATE factory.staging_preview SET runtime_attempt_id=${pendingID}
+        WHERE project_id=${fixtureValue(owned, "owned").projectID}`;
+    });
+    await database.client.begin((sql) => store.plan(sql));
+    expect((await store.get(database.client, template.id))?.state).toBe("ready");
+    expect((await store.get(database.client, fork.id))?.state).toBe("ready");
+    await expect(
+      database.client.begin(async (sql) => {
+        expect(
+          await store.admit(sql, crypto.randomUUID(), "verification", {
+            projectID: fixtureValue(owned, "owned").projectID,
+            kind: "verification",
+          }),
+        ).toBeNull();
+        throw new Error("Owned incomplete recipe lookup rollback");
+      }),
+    ).rejects.toThrow("incomplete recipe lookup rollback");
+    await database.client`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
+      SELECT ${pendingID},declaration FROM factory.staging_configuration
+      WHERE runtime_attempt_id=${fixtureValue(owned, "owned").stagingID}`;
+    await database.client.begin((sql) => store.plan(sql));
+    expect((await store.get(database.client, template.id))?.state).toBe("ready");
     // A changed promoted revision, unlike process availability, invalidates the
     // prepared recipe. Both the write guard and assignment must still refuse it.
     await database.client`UPDATE factory.staging_preview SET revision=${"7".repeat(40)}
