@@ -1,5 +1,6 @@
 """Prepare one Factory-owned OCI input inside an admitted live worker."""
 import hashlib
+import ctypes
 import fcntl
 import json
 import os
@@ -77,6 +78,18 @@ def publish(path, value):
         os.close(directory)
 
 
+def sync_prepared_filesystem(store):
+    descriptor = os.open(store, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.syncfs.argtypes = [ctypes.c_int]
+        libc.syncfs.restype = ctypes.c_int
+        if libc.syncfs(descriptor) != 0:
+            raise OSError(ctypes.get_errno(), 'Failed to sync the prepared Sandbox filesystem')
+    finally:
+        os.close(descriptor)
+
+
 def input_mounts(bundle):
     paths = {str(bundle/name) for name in ['rootfs', 'lower']}
     rows = {}
@@ -94,7 +107,7 @@ def input_mounts(bundle):
 def validate_identity(request, with_assignment=False):
     if type(request) is not dict or set(request) != IDENTITY_FIELDS | ({'assignment'} if with_assignment else set()):
         raise ValueError('Unexpected Factory preparation fields')
-    if (type(request['version']) is not int or request['version'] != 3 or
+    if (type(request['version']) is not int or request['version'] not in (3, 4) or
             any(not isinstance(request[key], str) for key in
                 ['sandboxID', 'storeID', 'epoch', 'podUID', 'runtimeHostImage', 'bootstrap']) or
             not re.fullmatch(r'runtime-[a-f0-9]{32}', request['sandboxID']) or
@@ -164,7 +177,7 @@ def prepared_input(request, status):
     if {key: plan['request'].get(key) for key in IDENTITY_FIELDS} != {key: request[key] for key in IDENTITY_FIELDS}:
         raise ValueError('Private input already belongs to another preparation')
     completed = json.loads((root/'prepared.json').read_text())
-    if (completed.get('version') != 3 or completed.get('sandboxID') != request['sandboxID'] or
+    if (completed.get('version') != request['version'] or completed.get('sandboxID') != request['sandboxID'] or
             completed.get('bundle') != str(root/'bundle') or completed.get('storeID') != request['storeID'] or
             completed.get('epoch') != request['epoch'] or completed.get('podUID') != request['podUID'] or
             completed.get('rootfsSHA256') != plan['rootfsSHA256'] or
@@ -402,6 +415,10 @@ def prepare(request):
     status = json.loads(subprocess.check_output(['/opt/factorybox/factorybox', 'worker-status'], timeout=10))
     if status['store_id'] != request['storeID'] or status['epoch'] != request['epoch']:
         raise ValueError('Worker identity changed before consumer preparation')
+    if request['version'] == 4:
+        image = status.get('lifecycle', {}).get('bounded_store', {}).get('image', {})
+        if image.get('schema') != 2 or image.get('filesystem_uuid') != request['storeID']:
+            raise ValueError('Factory native preparation requires its admitted copy-on-write store')
     root = Path(status['store'])/'input'/request['sandboxID']
     if (root/'intent.json').exists():
         retained = json.loads((root/'intent.json').read_text())
@@ -429,12 +446,22 @@ def prepare(request):
     publish(root/'intent.json', plan)
     bundle = root/'bundle'
     bundle.mkdir(mode=0o700)
-    for name in ['lower', 'upper', 'work', 'rootfs']:
+    for name in ['lower', 'rootfs']:
         (bundle/name).mkdir(mode=0o755)
+    if request['version'] == 4:
+        mutable = bundle/'mutable'
+        subprocess.run(['btrfs', 'subvolume', 'create', '--', str(mutable)],
+                       check=True, stdout=subprocess.DEVNULL, timeout=remaining_preparation_seconds())
+        mutable.chmod(0o700)
+        upper, work = mutable/'upper', mutable/'work'
+    else:
+        upper, work = bundle/'upper', bundle/'work'
+    upper.mkdir(mode=0o755)
+    work.mkdir(mode=0o700 if request['version'] == 4 else 0o755)
     subprocess.run(['mount', '--bind', base['tree']['saved'], str(bundle/'lower')], check=True)
     subprocess.run(['mount', '-o', 'remount,bind,ro', str(bundle/'lower')], check=True)
     subprocess.run(['mount', '-t', 'overlay', 'overlay', '-o',
-                    f'index=off,lowerdir={bundle}/lower,upperdir={bundle}/upper,workdir={bundle}/work', str(bundle/'rootfs')], check=True)
+                    f'index=off,lowerdir={bundle}/lower,upperdir={upper},workdir={work}', str(bundle/'rootfs')], check=True)
     filesystem = bundle/'rootfs'
     if request['sharedSource']:
         (filesystem/'home/coder/project').mkdir()
@@ -488,12 +515,12 @@ def prepare(request):
                                'options': ['rbind', 'rw', 'rprivate', 'nosuid', 'nodev']})
         annotations['io.factorybox.shared-source'] = json.dumps({'source': source['path'], 'destination': '/home/coder/project'})
     config.write_text(json.dumps(spec, separators=(',', ':'))+'\n')
-    os.sync()
+    sync_prepared_filesystem(status['store'])
     mounts = input_mounts(bundle)
     if set(mounts) != {str(bundle/name) for name in ['rootfs', 'lower']}:
         raise ValueError('Prepared input mount pair is incomplete')
     publish(root/'mounts.json', mounts)
-    completed = {'version': 3, 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': rootfs_sha256,
+    completed = {'version': request['version'], 'sandboxID': request['sandboxID'], 'bundle': str(bundle), 'configSHA256': digest(config), 'rootfsSHA256': rootfs_sha256,
                  'storeID': request['storeID'], 'epoch': request['epoch'], 'podUID': request['podUID']}
     publish(root/'prepared.json', completed)
     return completed

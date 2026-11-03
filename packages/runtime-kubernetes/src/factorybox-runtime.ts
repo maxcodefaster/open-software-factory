@@ -59,6 +59,8 @@ export const factoryboxRuntimeProfile = z
       })
       .optional(),
     storageAdmission: z.literal(1).optional(),
+    // Missing retains the original flat Sandbox inputs on admitted workers.
+    filesystemLayout: z.literal(2).optional(),
     architecture: z.enum(["arm64", "amd64"]),
     nodeName: z
       .string()
@@ -113,6 +115,7 @@ export function configuredFactoryboxRuntimeProfile(
           },
         }),
     storageAdmission: 1,
+    filesystemLayout: 2,
     architecture: environment["FACTORY_FACTORYBOX_ARCHITECTURE"],
     nodeName: environment["FACTORY_FACTORYBOX_NODE"],
     kernel: environment["FACTORY_FACTORYBOX_KERNEL"],
@@ -186,6 +189,7 @@ export function factoryboxRuntimeRequest(input: FactoryboxRuntimeInput) {
   // The concrete consumer declaration owns this pre-admission init stage.
   // It is not a new option on the pinned standalone worker CLI.
   delete nativeProfile.storageAdmission;
+  delete nativeProfile.filesystemLayout;
   delete nativeProfile.resourceAdmission;
   delete nativeProfile.retainedStore;
   factoryboxRuntimeImage.parse(input.runtimeHostImage);
@@ -385,6 +389,10 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
   };
 }
 
+export function factoryboxPreparationVersion(input: Pick<FactoryboxRuntimeInput, "profile">) {
+  return input.profile.filesystemLayout === 2 ? (4 as const) : (3 as const);
+}
+
 function factoryboxPreparationIdentity(
   input: FactoryboxRuntimeInput,
   identity: FactoryboxWorkerIdentity,
@@ -396,7 +404,7 @@ function factoryboxPreparationIdentity(
   )
     throw new Error("Factory preparation does not match its admitted worker");
   return {
-    version: 3,
+    version: factoryboxPreparationVersion(input),
     sandboxID: input.sandboxID,
     storeID: identity.storeID,
     epoch: identity.epoch,
@@ -540,7 +548,7 @@ export async function prepareFactoryboxRuntime(
     throw new Error(`Factorybox preparation is unconfirmed: ${result.stderr}`);
   return z
     .strictObject({
-      version: z.literal(3),
+      version: z.literal(factoryboxPreparationVersion(input)),
       sandboxID: z.literal(input.sandboxID),
       bundle: z.literal(`/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle`),
       configSHA256: z.string().regex(/^[a-f0-9]{64}$/),

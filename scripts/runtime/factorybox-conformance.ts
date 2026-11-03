@@ -19,6 +19,7 @@ import {
 import {
   type FactoryboxRuntimeInput,
   type FactoryboxRuntimeProfile,
+  factoryboxPreparationVersion,
   factoryboxRuntimeRequest,
   factoryboxSandboxID,
   prepareFactoryboxRuntime,
@@ -485,7 +486,8 @@ print(json.dumps({'importSourceRetired':True,'nativeBaseReverified':True,'sealed
 expected=json.loads(sys.argv[1])
 status=json.loads(subprocess.check_output(['/opt/factorybox/factorybox','worker-status'],timeout=5))
 if status['store_id']!=expected['storeID'] or status['epoch']!=expected['epoch']:raise ValueError('Diagnostic worker identity changed')
-root=pathlib.Path('/var/lib/sysbox/fixed-store/data/store/input')/expected['sandboxID']/'bundle/upper'
+bundle=pathlib.Path('/var/lib/sysbox/fixed-store/data/store/input')/expected['sandboxID']/'bundle'
+root=bundle/('mutable/upper' if expected['version']==4 else 'upper')
 for name in ['factory-connector.log','factory-dockerd.log']:
  path=root/'var/log'/name
  if not path.resolve().is_relative_to(root.resolve()):raise ValueError('Diagnostic log leaves its private input')
@@ -498,6 +500,7 @@ for name in ['factory-connector.log','factory-dockerd.log']:
               storeID: identity.storeID,
               epoch: identity.epoch,
               sandboxID: input.sandboxID,
+              version: factoryboxPreparationVersion(input),
             }),
           ]),
           undefined,

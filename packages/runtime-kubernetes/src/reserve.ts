@@ -19,6 +19,7 @@ import {
 import {
   type FactoryboxRuntimeInput,
   factoryboxOriginalWorkerRetired,
+  factoryboxPreparationVersion,
   factoryboxRuntimeDeclaration,
   factoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
@@ -328,7 +329,7 @@ export const slotActivationCommand =
   'set -eu\nIFS= read -r expected_uid\ntest "$FACTORY_POD_UID" = "$expected_uid"\ntest -d /home/coder/.factory-reserve\ntest ! -L /home/coder/.factory-reserve\nfile=$(mktemp /home/coder/.factory-reserve/.activation-XXXXXX)\ntrap \'rm -f "$file"\' EXIT\nhead -c 1048577 > "$file"\ntest "$(wc -c < "$file")" -le 1048576\nchmod 0400 "$file"\nchown 100000:100000 "$file"\nsync "$file"\nif test -f /home/coder/.factory-reserve/activation.json; then cmp -s "$file" /home/coder/.factory-reserve/activation.json; else ln "$file" /home/coder/.factory-reserve/activation.json; sync /home/coder/.factory-reserve; fi\n';
 
 const preparation = z.object({
-  version: z.literal(3),
+  version: z.union([z.literal(3), z.literal(4)]),
   sandboxID: z.string(),
   bundle: z.string(),
   configSHA256: z.string(),
@@ -809,6 +810,7 @@ export function createReserveClient(
         };
       const prepared = preparation.parse(slot.factoryboxPreparation);
       if (
+        prepared.version !== factoryboxPreparationVersion(input) ||
         prepared.sandboxID !== input.sandboxID ||
         prepared.bundle !==
           `/var/lib/sysbox/fixed-store/data/store/input/${input.sandboxID}/bundle` ||

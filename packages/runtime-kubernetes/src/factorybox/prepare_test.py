@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -87,6 +88,27 @@ class PreparationTests(unittest.TestCase):
                 self.module["publish"](path, {"version": 1})
         self.assertEqual(path.read_text(), "preserve successor")
 
+    def test_prepared_sync_targets_only_its_open_filesystem_and_propagates_io_failure(self):
+        for result in [0, -1]:
+            descriptors = []
+            def syncfs(descriptor):
+                descriptors.append(descriptor)
+                self.assertEqual(os.fstat(descriptor).st_ino, self.root.stat().st_ino)
+                return result
+            native = unittest.mock.Mock()
+            native.syncfs.side_effect = syncfs
+            with patch("ctypes.CDLL", return_value=native), \
+                    patch("ctypes.get_errno", return_value=5), \
+                    patch("os.sync", side_effect=AssertionError("Must not flush the host")):
+                if result:
+                    with self.assertRaisesRegex(OSError, "prepared Sandbox filesystem"):
+                        self.module["sync_prepared_filesystem"](str(self.root))
+                else:
+                    self.module["sync_prepared_filesystem"](str(self.root))
+            self.assertEqual(len(descriptors), 1)
+            with self.assertRaises(OSError):
+                os.fstat(descriptors[0])
+
     def test_checkpoint_profile_denies_all_io_uring_entrypoints_on_each_native_architecture(self):
         for machine, architecture in [("aarch64", "SCMP_ARCH_AARCH64"),
                                        ("x86_64", "SCMP_ARCH_X86_64")]:
@@ -168,6 +190,93 @@ class PreparationTests(unittest.TestCase):
         self.assertEqual(plan, self.module["preparation_plan"](reordered, "a" * 64, None))
         changed = {**request, "assignment": {**request["assignment"], "parent-token": "another-parent"}}
         self.assertNotEqual(plan, self.module["preparation_plan"](changed, "a" * 64, None))
+
+    def test_native_preparation_requires_its_admitted_cow_store_before_any_input_or_import(self):
+        request = self.assigned(version=4)
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"],
+                  "lifecycle": {"bounded_store": {"image": {"schema": 1}}}}
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run") as mutation, self.environment(), \
+                patch.dict(self.module["prepare"].__globals__, {
+                    "image_base": unittest.mock.Mock(side_effect=AssertionError("Must not import")),
+                }):
+            with self.assertRaisesRegex(ValueError, "native.*store"):
+                self.module["prepare"](request)
+            mutation.assert_not_called()
+            self.assertFalse((self.root / "input").exists())
+
+    def test_fresh_native_preparation_owns_one_common_subvolume_and_exact_replay(self):
+        request = self.assigned(version=4)
+        seed = self.root / "seed"
+        seed.mkdir()
+        (seed / "rootfs.tar").write_bytes(b"exact frozen image")
+        rootfs = hashlib.sha256((seed / "rootfs.tar").read_bytes()).hexdigest()
+        (seed / "rootfs.sha256").write_text(rootfs + "  rootfs.tar\n")
+        (seed / "intent").write_text(
+            "\n".join(request[key] for key in ["podUID", "storeID", "runtimeHostImage"]) + "\n")
+        certificate = self.root / "registry-ca.crt"
+        certificate.write_bytes(b"owned test CA")
+        for name in ["hosts", "hostname", "resolv.conf"]:
+            (self.root / name).write_bytes(b"owned DNS input")
+        status = {"store": str(self.root), "store_id": request["storeID"], "epoch": request["epoch"],
+                  "lifecycle": {"bounded_store": {"image": {
+                      "schema": 2, "filesystem_uuid": request["storeID"]}}}}
+        bundle = self.root / "input" / request["sandboxID"] / "bundle"
+        commands = []
+        flushed = []
+
+        def native_effect(args, **kwargs):
+            commands.append(args)
+            if args[:3] == ["btrfs", "subvolume", "create"]:
+                self.assertEqual(kwargs.get("stdout"), subprocess.DEVNULL,
+                                 "native success messages must not corrupt the JSON response")
+                Path(args[-1]).mkdir()
+            elif args[:4] == ["mount", "-t", "overlay", "overlay"]:
+                for directory in ["factory/assignment", "factory/registry-ca", "etc", "home/coder"]:
+                    (bundle / "rootfs" / directory).mkdir(parents=True, exist_ok=True)
+            elif args[0].endswith("sysbox-runc"):
+                (bundle / "config.json").write_text(json.dumps({
+                    "process": {"capabilities": {
+                        "bounding": [], "effective": [], "permitted": []}},
+                    "root": {}, "linux": {}, "mounts": [],
+                }))
+
+        def path(*parts):
+            value = Path(*parts)
+            if str(value) == "/var/lib/sysbox/seed":
+                return seed
+            if str(value) == "/factory/registry-ca/ca.crt":
+                return certificate
+            if value.parent == Path("/etc"):
+                return self.root / value.name
+            return Path(value)
+
+        with patch("subprocess.check_output", return_value=json.dumps(status).encode()), \
+                patch("subprocess.run", side_effect=native_effect), \
+                patch("os.sync", side_effect=AssertionError("Must not flush unrelated host filesystems")), \
+                patch("os.uname", return_value=os.uname_result(("Linux", "", "", "", "aarch64"))), \
+                self.environment(), \
+                patch.dict(self.module["prepare"].__globals__, {
+                    "Path": path,
+                    "image_base": lambda *_: {"id": "factory-runtime",
+                                             "tree": {"saved": "/owned/immutable/base"}},
+                    "input_mounts": lambda _: {
+                        str(bundle / name): {"mountinfo": name} for name in ["rootfs", "lower"]},
+                    "sync_prepared_filesystem": lambda store: flushed.append(store),
+                }):
+            prepared = self.module["prepare"](request)
+            self.assertEqual(prepared["version"], 4)
+            self.assertEqual(self.module["prepare"](request), prepared)
+            self.assertEqual(flushed, [str(self.root)])
+            self.assertEqual(sum(args[:3] == ["btrfs", "subvolume", "create"] for args in commands), 1)
+            self.assertTrue((bundle / "mutable/upper").is_dir())
+            self.assertTrue((bundle / "mutable/work").is_dir())
+            self.assertEqual((bundle / "mutable").stat().st_mode & 0o777, 0o700)
+            self.assertFalse((bundle / "upper").exists())
+            overlay = next(args for args in commands if args[:4] == ["mount", "-t", "overlay", "overlay"])
+            self.assertIn(f"upperdir={bundle}/mutable/upper,workdir={bundle}/mutable/work", overlay[-2])
+            with self.assertRaisesRegex(ValueError, "another preparation"):
+                self.module["prepare"]({**request, "version": 3})
 
     def test_explicit_cancellation_fences_an_unpublished_preparation_without_replay(self):
         request = self.request

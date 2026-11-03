@@ -70,6 +70,7 @@ export function factoryboxBuildCandidate(request: BuildRequest, value: unknown) 
     profile: factoryboxRuntimeProfile.parse({
       image: receipt.image,
       executableSHA256: receipt.executable_sha256,
+      filesystemLayout: 2,
       architecture: request.platform.split("/")[1],
       nodeName: request.nodeName,
       kernel: request.kernel,

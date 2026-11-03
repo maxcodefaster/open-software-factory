@@ -44,6 +44,7 @@ test("Factory builds either explicit target without publishing or selecting inst
     expect(candidate.profile.image).toBe(receipt.image);
     expect(candidate.profile.executableSHA256).toBe(receipt.executable_sha256);
     expect(candidate.profile).toMatchObject({
+      filesystemLayout: 2,
       boundedBytes: 32 * 1024 ** 3,
       minimumBoundedBytes: 8 * 1024 ** 3,
       claimGiB: 64,

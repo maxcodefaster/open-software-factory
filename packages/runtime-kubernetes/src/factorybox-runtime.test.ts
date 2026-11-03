@@ -159,6 +159,33 @@ function assignmentFiles(execution = input): Readonly<Record<string, string>> {
       };
 }
 
+test("fresh profiles select native preparation without changing retained flat inputs or the worker CLI", () => {
+  const profile = configuredFactoryboxRuntimeProfile({
+    FACTORY_FACTORYBOX_WORKER_IMAGE: input.profile.image,
+    FACTORY_FACTORYBOX_EXECUTABLE_SHA256: input.profile.executableSHA256,
+    FACTORY_FACTORYBOX_ARCHITECTURE: input.profile.architecture,
+    FACTORY_FACTORYBOX_NODE: input.profile.nodeName,
+    FACTORY_FACTORYBOX_KERNEL: input.profile.kernel,
+  });
+  expect(profile.filesystemLayout).toBe(2);
+  const identity = {
+    version: 1 as const,
+    namespaceUID: "namespace",
+    claimUID: "claim",
+    podUID: "pod",
+    storeID: input.workerID.replaceAll("-", ""),
+    epoch: "e".repeat(32),
+    bootID: "boot",
+    nodeBootID: "node-boot",
+    executableSHA256: input.profile.executableSHA256,
+    controllerRoot: "/controller",
+  };
+  const fresh = { ...input, profile };
+  expect(factoryboxPreparationRequest(fresh, identity, assignmentFiles()).version).toBe(4);
+  expect(factoryboxPreparationRequest(input, identity, assignmentFiles()).version).toBe(3);
+  expect(factoryboxRuntimeRequest(fresh)).not.toHaveProperty("filesystemLayout");
+});
+
 test("shared workers receive only the selected Sandbox assignment, never an ambient Secret mount", () => {
   const identity = {
     version: 1 as const,

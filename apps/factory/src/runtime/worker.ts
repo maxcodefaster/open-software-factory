@@ -452,6 +452,7 @@ export function createFactoryboxWorker(
             );
           const nativeProfile = { ...profile };
           delete nativeProfile.storageAdmission;
+          delete nativeProfile.filesystemLayout;
           delete nativeProfile.resourceAdmission;
           delete nativeProfile.retainedStore;
           declaration = factoryboxWorkerDeclaration.parse(

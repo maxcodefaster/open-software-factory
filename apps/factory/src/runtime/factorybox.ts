@@ -22,6 +22,7 @@ import {
   cancelFactoryboxPreparation,
   type FactoryboxRuntimeInput,
   factoryboxOriginalWorkerRetired,
+  factoryboxPreparationVersion,
   factoryboxRuntimeDeclaration,
   factoryboxRuntimeProfile,
   factoryboxRuntimeRequest,
@@ -488,12 +489,13 @@ export function createFactoryboxExecution(
   }
   async function preparation(connection: SQL, attemptID: string, saved: Retained) {
     factoryboxRuntimeRequest(saved.request);
+    const version = factoryboxPreparationVersion(saved.request);
     const path = `/var/lib/sysbox/fixed-store/data/store/input/${saved.request.sandboxID}/prepared.json`;
     const operation = await intent(connection, attemptID, "prepare");
     if (operation.completed)
       return z
         .object({
-          version: z.literal(3),
+          version: z.literal(version),
           sandboxID: z.literal(saved.request.sandboxID),
           bundle: z.literal(path.replace("/prepared.json", "/bundle")),
         })
@@ -533,7 +535,7 @@ export function createFactoryboxExecution(
       }
       const observed = z
         .object({
-          version: z.literal(3),
+          version: z.literal(version),
           sandboxID: z.literal(saved.request.sandboxID),
           storeID: z.literal(saved.identity.storeID),
           epoch: z.literal(saved.identity.epoch),

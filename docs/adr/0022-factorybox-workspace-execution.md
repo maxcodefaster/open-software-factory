@@ -133,14 +133,26 @@ original Runtime Attempt, worker, inputs and credentials. A dispatched Start or 
 preparation never gains another native execution window from observation expiry. Ticket progress
 distinguishes preparation, its last recorded issue and actual running checks.
 
-Sandbox identities are independent of worker identities. Preparation protocol 3
-retains a private input directory and OCI configuration for each immutable
+Sandbox identities are independent of worker identities. Preparation retains a private
+input directory and OCI configuration for each immutable
 Sandbox ID; a reserve assignment keeps its original slot Sandbox ID. Sandboxes
 reuse the worker's verified common image import, not another Sandbox's writable
 overlay or credentials. Releasing an unused input cannot authorize deletion or
 unmounts for another running Sandbox.
 
-Preparation protocol 3 delivers only that Sandbox's bounded assignment through the
+Fresh configured worker profiles select native Sandbox layout 2 and preparation protocol 4.
+Upper and work directories share one private Btrfs subvolume; Sysbox owns the separate native
+private-volume roots. The original admitted schema-2 store is required before importing an image
+or creating private inputs. The layout pin does not qualify a worker, convert a store or rewrite
+an existing Sandbox. Retained profiles without that pin keep protocol 3 and their flat inputs.
+Preparation replay, pool Start and retained completion observation require the version selected
+by the original profile, not whichever version the current server prefers.
+
+Flush the prepared store filesystem before publishing its completion marker, without a host-wide
+sync. Writeback failure remains an unconfirmed preparation; it never produces a ready receipt.
+Native storage utilities must not mix their success messages into the structured response.
+
+Both preparation protocols deliver only that Sandbox's bounded assignment through the
 authenticated provisioning command. The worker Pod has no ambient assignment Secret
 mount. A reserve seed receives no Parent or Child credentials; activation delivers
 those only after its original Sandbox has resumed. Private assignment files do not
