@@ -60,12 +60,12 @@ export function createStagingTemplateProducer(
           JOIN factory.runtime_attempt producer ON producer.id=preparation.runtime_attempt_id
             AND producer.project_id=project.id AND producer.revision=staging.revision AND producer.isolated_kind='prebuild'
           JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=producer.id
-            AND environment.environment='main-preview' AND environment.version=preparation.environment_version
+            AND environment.environment=preparation.environment AND environment.version=preparation.environment_version
             AND factory.image_build_is_public(environment.secret_key)
           JOIN factory.runtime_artifact_intent producer_artifact ON producer_artifact.runtime_attempt_id=producer.id
             AND producer_artifact.factorybox_profile->>'architecture'=artifact.factorybox_profile->>'architecture'
           WHERE preparation.project_id=project.id AND preparation.revision=staging.revision
-            AND preparation.environment='main-preview' AND preparation.state='succeeded'
+            AND preparation.state='succeeded'
           ORDER BY preparation.environment_version,preparation.created_at DESC LIMIT 1
         ) prepared ON true
         WHERE staging.state='ready' AND staging.stop_intended_at IS NULL

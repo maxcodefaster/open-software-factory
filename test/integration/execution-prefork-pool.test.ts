@@ -20,7 +20,13 @@ const profile = {
   claimGiB: 32 as const,
 };
 
-for (const basis of ["credential-free", "runtime-only", "protected", "other revision"] as const) {
+for (const basis of [
+  "credential-free",
+  "development public",
+  "runtime-only",
+  "protected",
+  "other revision",
+] as const) {
   test(`clean templates reuse only a ${basis} prebuild when its inputs are safe`, async () => {
     const host = await factoryProcess();
     const database = host.connect();
@@ -29,6 +35,7 @@ for (const basis of ["credential-free", "runtime-only", "protected", "other revi
     try {
       owned = await executionPoolFixture(database, store, profile, images);
       const prebuildID = crypto.randomUUID();
+      const producerEnvironment = basis === "development public" ? "development" : "main-preview";
       const version = basis === "protected" || basis === "runtime-only" ? 1 : 0;
       const revision = basis === "other revision" ? "7".repeat(40) : owned.revision;
       const preparedImage = {
@@ -50,7 +57,7 @@ for (const basis of ["credential-free", "runtime-only", "protected", "other revi
           VALUES(${prebuildID},${fixtureValue(owned, "owned").projectID},'prebuild',2,${revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
         await sql`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,
           environment_version,runtime_attempt_id,state,identity,image)
-          VALUES(${crypto.randomUUID()},${fixtureValue(owned, "owned").projectID},'main-preview',
+          VALUES(${crypto.randomUUID()},${fixtureValue(owned, "owned").projectID},${producerEnvironment},
             ${revision},${version},${prebuildID},'succeeded',
             ${preparedImage.identity},${preparedImage.image})`;
         await freezeRuntimeArtifacts(
@@ -72,7 +79,7 @@ for (const basis of ["credential-free", "runtime-only", "protected", "other revi
         images,
       ).refresh();
       expect(offers).toHaveLength(1);
-      if (basis === "credential-free" || basis === "runtime-only")
+      if (basis === "credential-free" || basis === "development public" || basis === "runtime-only")
         expect(offers[0]?.recipe).toMatchObject({ preparedImage });
       else expect(offers[0]?.recipe).not.toHaveProperty("preparedImage");
       for (const hidden of ["environmentVersion", "owned-secret-must-not-be-captured"])

@@ -171,9 +171,9 @@ export function createProjectPreparation(input: {
           >`SELECT preparation.identity,preparation.image FROM factory.project_image_preparation preparation
             JOIN factory.runtime_environment_intent producer_environment ON producer_environment.runtime_attempt_id=preparation.runtime_attempt_id
               AND producer_environment.environment=preparation.environment AND producer_environment.version=preparation.environment_version
-            WHERE preparation.project_id=${attempt.projectID} AND preparation.environment=${attempt.environment}
+            WHERE preparation.project_id=${attempt.projectID}
               AND preparation.revision=${attempt.revision} AND preparation.state='succeeded'
-              AND (preparation.environment_version=${attempt.version} OR
+              AND ((preparation.environment=${attempt.environment} AND preparation.environment_version=${attempt.version}) OR
                 (${attempt.publicBuild} AND factory.image_build_is_public(producer_environment.secret_key)))
             ORDER BY CASE WHEN ${attempt.publicBuild} THEN preparation.environment_version ELSE 0 END,
               preparation.updated_at DESC LIMIT 1`;
