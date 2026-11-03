@@ -70,6 +70,14 @@ or a mounted host Docker socket. Factorybox execution requires an admitted Linux
 profile, permission for privileged outer Pods and usable persistent storage. Supply the exact
 private worker image and executable hash in the chart's `factorybox` values.
 
+PostgreSQL checks idle TCP connections after 30 seconds, with three ten-second probes and a
+60-second unacknowledged-data bound. This detects lost control-plane Pods so their session
+advisory locks do not wait for node TCP defaults that can retain them for hours. Healthy idle
+connections have no session expiry; a long Sandbox operation is not cancelled merely because it issues no SQL.
+Active queries check for a kernel-reported disconnect every second. Database connection loss
+does not authorize replaying external work; retained intents and native operation locks still
+govern reconciliation.
+
 Fresh chart installations select the aggregate worker budget from the configured node before
 first admission. Factory checks its platform and readiness, uses its allocatable CPU ceiling
 and subtracts other Pods' memory reservations plus `factorybox.memoryHeadroomMiB`, 2048 MiB

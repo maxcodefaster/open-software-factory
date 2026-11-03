@@ -22,7 +22,24 @@ spec:
       containers:
         - name: postgres
           image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
-          args: [postgres, -c, wal_level=logical]
+          # Detect lost Pod connections, including idle advisory-lock owners.
+          # Healthy idle sessions and long-running native work have no idle expiry.
+          args:
+            - postgres
+            - -c
+            - wal_level=logical
+            - -c
+            - tcp_keepalives_idle=30
+            - -c
+            - tcp_keepalives_interval=10
+            - -c
+            - tcp_keepalives_count=3
+            - -c
+            - tcp_user_timeout=60000
+            - -c
+            - client_connection_check_interval=1000
+            - -c
+            - idle_session_timeout=0
           env:
             - {name: POSTGRES_DB, value: factory}
             - {name: POSTGRES_USER, value: factory}

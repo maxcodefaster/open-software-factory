@@ -62,6 +62,7 @@ type Resource = {
           name: string;
           image: string;
           command?: string[];
+          args?: string[];
           env?: Array<{ name: string; value?: string }>;
           startupProbe?: {
             exec?: { command: string[] };
@@ -627,6 +628,26 @@ test("PostgreSQL readiness allows its own connection check to finish under execu
   expect(postgres?.startupProbe?.timeoutSeconds).toBeGreaterThanOrEqual(5);
   expect(postgres?.readinessProbe?.tcpSocket).toEqual({ port: 5432 });
   expect(postgres?.readinessProbe?.exec).toBeUndefined();
+});
+
+test("PostgreSQL detects lost coordination peers without expiring healthy idle owners", async () => {
+  const postgres = (await resources()).find(
+    (resource) => resource.kind === "StatefulSet" && resource.metadata.name === "portable-postgres",
+  )?.spec?.template?.spec.containers[0];
+  const args = postgres?.args ?? [];
+  expect(args[0]).toBe("postgres");
+  const settings = Object.fromEntries(
+    args.flatMap((argument, index) => (args[index - 1] === "-c" ? [argument.split("=", 2)] : [])),
+  );
+  expect(settings).toMatchObject({
+    wal_level: "logical",
+    tcp_keepalives_idle: "30",
+    tcp_keepalives_interval: "10",
+    tcp_keepalives_count: "3",
+    tcp_user_timeout: "60000",
+    client_connection_check_interval: "1000",
+    idle_session_timeout: "0",
+  });
 });
 
 test("browser origins and internal Kubernetes callbacks remain separate", async () => {
