@@ -8,6 +8,7 @@ test-results/
 !.env.example
 *.log
 *.tsbuildinfo
+__pycache__/
 .DS_Store
 /.factory/
 .impeccable/
