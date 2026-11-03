@@ -90,7 +90,7 @@ export function createStagingTemplateProducer(
           }),
         )
         .digest("hex");
-      if (await store.hasTemplate(database.client, key)) return;
+      if (await store.hasTemplate(database.client, key, candidate.stagingAttemptID)) return;
       const id = crypto.randomUUID();
       const recipe = {
         version: 1,

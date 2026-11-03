@@ -502,6 +502,110 @@ test("nonempty Staging environments can prepare a separate credential-free depen
   }
 }, 60_000);
 
+for (const [kind, ageMinutes, state] of [
+  ["template", 8, "creating"],
+  ["template", 16, "retiring"],
+  ["fork", 8, "retiring"],
+] as const) {
+  test(`a ${ageMinutes}-minute ${kind} uses its own preparation lifetime`, async () => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const store = createReserveStore(defaultReservePolicy, images, profile);
+    let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+    try {
+      owned = await executionPoolFixture(database, store, profile, images);
+      if (kind === "fork") await owned.prepareTemplate();
+      else {
+        await store.retire(database.client, owned.template.id);
+        await store.retired(database.client, owned.template.id);
+      }
+      const id = crypto.randomUUID();
+      await database.client`INSERT INTO factory.execution_slot(id,project_id,staging_attempt_id,
+        revision,template_id,template_key,project_recipe,seed_expires_at,role,state,
+        runtime_host_image,created_at,expires_at,factorybox_profile)
+        SELECT ${id},project_id,staging_attempt_id,revision,
+          ${kind === "fork" ? owned.template.id : null},template_key,
+          CASE WHEN ${kind === "fork"} THEN project_recipe
+            ELSE jsonb_set(project_recipe,'{runtimeAttemptId}',to_jsonb(${id}::text)) END,
+          CASE WHEN ${kind === "fork"} THEN seed_expires_at
+            ELSE now()+${15 - ageMinutes}*interval '1 minute' END,role,'creating',runtime_host_image,
+          now()-${ageMinutes}*interval '1 minute',now()+${15 - ageMinutes}*interval '1 minute',
+          factorybox_profile FROM factory.execution_slot WHERE id=${owned.template.id}`;
+      const original = await store.get(database.client, id);
+      await database.client.begin((sql) => store.plan(sql));
+      const observed = await store.get(database.client, id);
+      expect(observed?.state).toBe(state);
+      expect(observed?.expiresAt).toBe(original?.expiresAt);
+      expect(observed?.projectRecipe).toEqual(original?.projectRecipe);
+      expect(observed?.factoryboxStartAttempted).toBe(false);
+    } finally {
+      await owned?.cleanup();
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  }, 60_000);
+}
+
+test("a new healthy commissioned Staging permits one fresh preparation after a failed template", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const store = createReserveStore(defaultReservePolicy, images, profile);
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+  try {
+    owned = await executionPoolFixture(database, store, profile, images);
+    const producer = createStagingTemplateProducer(database, store, images);
+    await store.retire(database.client, owned.template.id);
+    await store.retired(database.client, owned.template.id);
+    await database.client`UPDATE factory.execution_slot SET reconcile_after=now()-interval '1 second'
+      WHERE id=${owned.template.id}`;
+    const retained = await store.get(database.client, owned.template.id);
+    await producer.refresh();
+    await producer.refresh();
+    expect(await database.client`SELECT id FROM factory.execution_slot`).toHaveLength(1);
+
+    const stagingID = crypto.randomUUID();
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,
+        revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${stagingID},${fixtureValue(owned, "owned").projectID},'staging',2,
+          ${fixtureValue(owned, "owned").revision},'create-intended',${"a".repeat(64)},
+          ${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+      await freezeRuntimeArtifacts(
+        sql,
+        stagingID,
+        fixtureValue(owned, "owned").artifactConfiguration,
+      );
+      await sql`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
+        SELECT ${stagingID},declaration FROM factory.staging_configuration
+        WHERE runtime_attempt_id=${fixtureValue(owned, "owned").stagingID}`;
+      await sql`UPDATE factory.staging_preview SET runtime_attempt_id=${stagingID}
+        WHERE project_id=${fixtureValue(owned, "owned").projectID}`;
+    });
+    await producer.refresh();
+    expect(await database.client`SELECT id FROM factory.execution_slot`).toHaveLength(1);
+    await database.client`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${stagingID}`;
+    await producer.refresh();
+    await producer.refresh();
+    const templates = await database.client<Array<{ id: string; staging: string }>>`
+      SELECT id,staging_attempt_id AS staging FROM factory.execution_slot WHERE template_id IS NULL`;
+    expect(templates).toHaveLength(2);
+    const replacement = templates.find((template) => template.id !== owned?.template.id);
+    expect(replacement?.staging).toBe(stagingID);
+    expect(await store.get(database.client, owned.template.id)).toEqual(retained);
+    if (!replacement) throw new Error("Missing fresh template intent");
+    await store.retire(database.client, replacement.id);
+    await store.retired(database.client, replacement.id);
+    await database.client`UPDATE factory.execution_slot SET reconcile_after=now()-interval '1 second'
+      WHERE id=${replacement.id}`;
+    await producer.refresh();
+    expect(await database.client`SELECT id FROM factory.execution_slot`).toHaveLength(2);
+  } finally {
+    await owned?.cleanup();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
 test("a template that never reached standby is not repeatedly cold-built for unchanged inputs", async () => {
   const host = await factoryProcess();
   const database = host.connect();
@@ -515,8 +619,10 @@ test("a template that never reached standby is not repeatedly cold-built for unc
     await store.retired(database.client, owned.template.id);
     await database.client`UPDATE factory.execution_slot SET reconcile_after=now()-interval '1 second'
       WHERE id=${owned.template.id}`;
-    expect(await store.hasTemplate(database.client, key)).toBe(true);
-    expect(await store.hasTemplate(database.client, `${key}-new-input`)).toBe(false);
+    expect(await store.hasTemplate(database.client, key, owned.stagingID)).toBe(true);
+    expect(await store.hasTemplate(database.client, `${key}-new-input`, owned.stagingID)).toBe(
+      false,
+    );
   } finally {
     await owned?.cleanup();
     await database.client.end({ timeout: 2 });

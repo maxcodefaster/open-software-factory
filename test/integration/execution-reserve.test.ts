@@ -388,17 +388,20 @@ test("retirement retains exact immutable intent and outcome across controller re
   }
 }, 60_000);
 
-test("cold preparation retains the original 420 second deadline, without resetting stale identities", async () => {
+test("cold preparation expires its admitted lease without resetting stale identities", async () => {
   const f = await setup();
   try {
     const ids = [crypto.randomUUID(), crypto.randomUUID()];
-    for (const [index, age] of [240, 421].entries()) {
+    const leaseSeconds = defaultReservePolicy.expiryMS / 1_000;
+    for (const [index, age] of [240, leaseSeconds + 1].entries()) {
       const id = fixtureValue(ids[index], "ids[index]");
       const recipe = { ...(f.template.projectRecipe as object), runtimeAttemptId: id };
       await f.database.client`INSERT INTO factory.execution_slot
         (id,project_id,staging_attempt_id,revision,template_key,project_recipe,seed_expires_at,role,state,runtime_host_image,created_at,expires_at,factorybox_profile)
         VALUES(${id},${f.projectID},${f.stagingID},${f.revision},${String(index + 1).repeat(64)},${JSON.stringify(recipe)}::text::jsonb,
-          now()+interval '10 minutes','staging','creating',${image},now()-${age}*interval '1 second',now()+interval '10 minutes',${JSON.stringify(profile)}::text::jsonb)`;
+          now()+${leaseSeconds - age}*interval '1 second','staging','creating',${image},
+          now()-${age}*interval '1 second',now()+${leaseSeconds - age}*interval '1 second',
+          ${JSON.stringify(profile)}::text::jsonb)`;
     }
     const due = await f.database.client.begin((sql) => f.store.plan(sql));
     expect(due.find((slot) => slot.id === ids[0])?.state).toBe("creating");

@@ -53,8 +53,8 @@ export const defaultReservePolicy: ReservePolicy = {
   creationConcurrency: 1,
   maxExecutionSlots: 16,
   expiryMS: 15 * 60_000,
-  // Initial image export and worker admission are part of cold preparation.
-  // Match the lifecycle deadline instead of retiring a still-preparing worker.
+  // Native Fork preparation retains its lifecycle window. A cold Project
+  // template also runs dependency hooks and uses its admitted expiry lease.
   preparationMS: 420_000,
   retryMS: 30_000,
 };

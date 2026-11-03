@@ -95,15 +95,18 @@ export function createReserveStore(
     return result;
   }
   return {
-    async hasTemplate(sql: SQL, key: string) {
+    async hasTemplate(sql: SQL, key: string, stagingAttemptID: string) {
       // Repeating a failed clean recipe cannot grant it missing credentials.
-      // Keep that terminal basis fenced, while a new Staging/artifact basis
-      // gets its own preparation. Healthy retired templates remain refillable.
+      // Observation of the same Staging never retries it. A newly commissioned,
+      // healthy Staging may admit one fresh template without changing the old
+      // intent or invalidating an already-ready checkpoint for this recipe.
       return (
         (
           await sql`SELECT id FROM factory.execution_slot WHERE template_id IS NULL AND template_key=${key}
         AND (state IN ('creating','ready','retiring') OR
-          (state='deleted' AND (factorybox_standby IS NULL OR reconcile_after>now()))) LIMIT 1`
+          (state='deleted' AND (
+            (factorybox_standby IS NULL AND staging_attempt_id=${stagingAttemptID})
+            OR reconcile_after>now()))) LIMIT 1`
         ).length > 0
       );
     },
@@ -123,7 +126,8 @@ export function createReserveStore(
       },
     ) {
       await lock(sql);
-      if (!policy.readyTarget || (await this.hasTemplate(sql, input.key))) return;
+      if (!policy.readyTarget || (await this.hasTemplate(sql, input.key, input.stagingAttemptID)))
+        return;
       if (
         input.runtimeHostImage !== images.staging ||
         JSON.stringify(factoryboxRuntimeProfile.parse(input.profile)) !==
@@ -162,7 +166,9 @@ export function createReserveStore(
       // Keep that bounded standby while inputs are unknown, without assigning
       // or refilling it until the complete current recipe matches again.
       await sql`UPDATE factory.execution_slot SET state='retiring',reconcile_after=now()
-        WHERE (state='creating' AND created_at<=now()-${policy.preparationMS}*interval '1 millisecond')
+        WHERE (state='creating' AND CASE
+          WHEN template_id IS NULL AND project_recipe IS NOT NULL THEN expires_at<=now()
+          ELSE created_at<=now()-${policy.preparationMS}*interval '1 millisecond' END)
         OR (state='creating' AND template_id IS NOT NULL AND NOT factorybox_fork_attempted AND
           (${policy.readyTarget === 0} OR EXISTS(
             SELECT 1 FROM factory.execution_slot source WHERE source.id=execution_slot.template_id AND source.state='retiring')))
