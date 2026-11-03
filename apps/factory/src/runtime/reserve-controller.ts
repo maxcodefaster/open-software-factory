@@ -113,6 +113,8 @@ export function createExecutionReserve(
               intendRetirement: (request) => store.intendRetirement(sql, slot.id, request),
               completeRetirement: (observation) =>
                 store.completeRetirement(sql, slot.id, observation),
+              completeRetirementPart: (observation) =>
+                store.completeRetirementPart(sql, slot.id, observation),
             });
             await store.retired(sql, slot.id);
             requested = true;
@@ -210,6 +212,8 @@ export function createExecutionReserve(
           intendDelete: () => store.intendDelete(sql, slot.id),
           intendRetirement: (request) => store.intendRetirement(sql, slot.id, request),
           completeRetirement: (observation) => store.completeRetirement(sql, slot.id, observation),
+          completeRetirementPart: (observation) =>
+            store.completeRetirementPart(sql, slot.id, observation),
         }),
       );
     },

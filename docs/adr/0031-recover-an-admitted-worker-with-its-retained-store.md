@@ -27,4 +27,20 @@ Completed predecessor transport archives have a separate, exact retirement contr
 Source remains on its original claim and node. Opening a Project does not commission recovery.
 Already admitted worker replacement is separate from the unused bootstrap recovery in
 [ADR 0029](0029-worker-bootstrap-admission-recovery.md). This does not claim cross-node RAM restore,
-automatic recovery of a missing unobserved Pod, or reclamation of retained old-epoch data.
+automatic recovery of a missing unobserved Pod, or general reclamation of retained old-epoch data.
+
+Confirmed Delete and private backing reclamation are separate outcomes. After
+ordinary Stop settles execution and the original terminal Pod is observed, a
+successor may continue an already retained backing-retirement request in that
+same store. It verifies the original worker, claim, boot and Sandbox identities,
+and dispatches metadata-only cleanup through the successor's own pinned
+executable. Old Runtime Attempts, admissions and requests are never retargeted.
+This is not general collection of old epochs or permission to delete an old Pause.
+
+Reserve retirement retains each confirmed checkpoint and Resume-image receipt
+before proceeding to backing cleanup. Those receipts are append-only and survive
+Factory restart or worker replacement. A parent template can retire once every
+child has confirmed native Delete, without waiting for the child's storage
+reclamation; the native dependency checks remain authoritative. After replacement,
+unconfirmed checkpoint outcomes stay pending. Neither worker termination nor an
+absent process manufactures their completion.

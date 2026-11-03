@@ -7,6 +7,7 @@ import { freezeStagingConfiguration } from "../../apps/factory/src/runtime/stagi
 import { createStagingTemplateProducer } from "../../apps/factory/src/runtime/staging-template";
 import type { createDatabase } from "../../packages/db/src/client";
 import type { FactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import type { FactoryboxWorkerIdentity } from "../../packages/runtime-kubernetes/src/factorybox-worker";
 import upstream from "../../upstream.json";
 import { fixtureValue } from "./value";
 
@@ -124,13 +125,13 @@ export async function executionPoolFixture(
     const [template] = await database.client.begin((sql) => store.plan(sql));
     if (!template || template.templateID !== null)
       throw new Error("Owned clean template intent missing");
-    async function prepareTemplate() {
+    async function prepareTemplate(identity?: FactoryboxWorkerIdentity) {
       await store.observe(database.client, fixtureValue(template, "template").id, {
-        namespaceUID: "owned-namespace",
-        podUID: "owned-pod",
-        claimUID: "owned-claim",
+        namespaceUID: identity?.namespaceUID ?? "owned-namespace",
+        podUID: identity?.podUID ?? "owned-pod",
+        claimUID: identity?.claimUID ?? "owned-claim",
         ready: false,
-        factoryboxIdentity: { epoch: "owned" },
+        factoryboxIdentity: identity ?? { epoch: "owned" },
         factoryboxPreparation: { bundle: "owned" },
       });
       await store.intendSourceImport(
@@ -144,9 +145,9 @@ export async function executionPoolFixture(
       await store.intendStart(database.client, fixtureValue(template, "template").id);
       await store.intendStandby(database.client, fixtureValue(template, "template").id, "pause");
       await store.observe(database.client, fixtureValue(template, "template").id, {
-        namespaceUID: "owned-namespace",
-        podUID: "owned-pod",
-        claimUID: "owned-claim",
+        namespaceUID: identity?.namespaceUID ?? "owned-namespace",
+        podUID: identity?.podUID ?? "owned-pod",
+        claimUID: identity?.claimUID ?? "owned-claim",
         ready: true,
         factoryboxPaused: true,
         factoryboxStandby: {

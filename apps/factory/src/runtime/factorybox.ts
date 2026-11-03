@@ -44,6 +44,10 @@ import {
 } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import { rejectedFactoryboxPause } from "./factorybox-pause";
 import { unattemptedFactoryboxResume } from "./factorybox-resume";
+import {
+  type RetiredBackingCursor,
+  reclaimRetiredFactoryboxBacking,
+} from "./factorybox-retirement";
 import type { RuntimeHub } from "./hub";
 import {
   factoryboxAllocation,
@@ -79,6 +83,7 @@ export function createFactoryboxExecution(
 ) {
   let reclaiming: Promise<void> | null = null;
   let reclaimAfter: string | null = null;
+  let retiredCursor: RetiredBackingCursor = { attempts: null, slots: null };
   const deadlines = new AsyncLocalStorage<number>();
   const run: typeof transport = (args, input, limits) => {
     const remaining = (deadlines.getStore() ?? performance.now() + 420_000) - performance.now();
@@ -622,11 +627,21 @@ export function createFactoryboxExecution(
           try {
             await locked(current.id, async (connection) => {
               const saved = await retained(connection, current.id);
-              if (saved?.identity)
+              if (!saved?.identity) return;
+              try {
                 await retireImportedFactoryboxExports(saved.request, saved.identity, run);
+              } catch {
+                console.error("Factorybox imported export retirement needs observation");
+              }
+              retiredCursor = await reclaimRetiredFactoryboxBacking(
+                connection,
+                { request: saved.request, identity: saved.identity },
+                retiredCursor,
+                run,
+              );
             });
           } catch {
-            console.error("Factorybox imported export retirement needs observation");
+            console.error("Factorybox retained backing retirement needs observation");
           }
         }
         const attempts = await database.client<

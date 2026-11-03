@@ -104,6 +104,13 @@ and prior execution has settled. The successor reuses the original private store
 it has a new Pod and native epoch, without replaying Agent work. See
 [admitted worker recovery](docs/adr/0031-recover-an-admitted-worker-with-its-retained-store.md)
 and [bootstrap admission recovery](docs/adr/0029-worker-bootstrap-admission-recovery.md).
+The successor can finish an exact private-backing retirement whose native Delete
+and preceding checkpoint retirements were already confirmed. Factory retains each
+reserve retirement receipt as it arrives, instead of losing completed steps when
+the final cleanup fails. Its storage sweep uses the successor's pinned executable
+against the original controller in the same store. It preserves old execution
+identities and never starts old processes. Missing checkpoint receipts remain
+pending; stopped compute is not a claim that all retained storage was reclaimed.
 Before preparing a successor's Sandbox, Factory retires completed image-export transports
 owned by positively terminated predecessor admissions. It keeps their receipts and checks
 exact archive identity; active, partial and changed payloads are not deletion authority.

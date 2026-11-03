@@ -1,13 +1,17 @@
 import { expect, test } from "bun:test";
 import { z } from "zod";
+import { reclaimRetiredFactoryboxBacking } from "../../apps/factory/src/runtime/factorybox-retirement";
+import { createReserveStore } from "../../apps/factory/src/runtime/reserve-store";
 import {
   createFactoryboxWorker,
   factoryboxAllocation,
   rememberFactoryboxIdentity,
   rememberFactoryboxSource,
   retainedFactoryboxProfile,
+  withFactoryboxWorkerLock,
 } from "../../apps/factory/src/runtime/worker";
 import { recoverFactoryboxWorker } from "../../apps/factory/src/runtime/worker-recovery";
+import { defaultReservePolicy } from "../../packages/runtime-domain/src/reserve";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import {
   factoryboxAssignmentSecret,
@@ -15,10 +19,13 @@ import {
   factoryboxSharedLabels,
 } from "../../packages/runtime-kubernetes/src/factorybox-location";
 import {
+  type FactoryboxRuntimeInput,
   type FactoryboxRuntimeProfile,
   factoryboxSandboxID,
   renderFactoryboxRuntime,
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import type { executeFactoryboxOperation } from "../../packages/runtime-kubernetes/src/factorybox-worker";
+import { executionPoolFixture } from "../fixtures/execution-pool";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
 import { ownedFactoryboxProfile as profile } from "../fixtures/runtime-configuration";
 
@@ -307,12 +314,12 @@ async function failedBootstrap() {
       location,
       original,
       pod,
-      async attempt(state: "create-intended" | "failed") {
+      async attempt(state: "create-intended" | "starting" | "failed", generation = 1) {
         const id = crypto.randomUUID();
         await database.client`INSERT INTO factory.runtime_attempt(
           id,project_id,isolated_kind,generation,revision,state,
           parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
-          VALUES(${id},${projectID},'staging',1,${"a".repeat(40)},${state},
+          VALUES(${id},${projectID},'staging',${generation},${"a".repeat(40)},${state},
             ${"b".repeat(64)},${"c".repeat(64)},now(),${actorID})`;
         return id;
       },
@@ -328,7 +335,7 @@ async function failedBootstrap() {
   }
 }
 
-async function admittedWorker() {
+async function admittedWorker(controllerRoot = "/factorybox") {
   const f = await failedBootstrap();
   const { original } = f;
   if (!original.podUID || !original.claimUID || !original.namespaceUID)
@@ -344,11 +351,224 @@ async function admittedWorker() {
     bootID: "original-boot",
     nodeBootID: "original-node-boot",
     executableSHA256: profile.executableSHA256,
-    controllerRoot: "/factorybox",
+    controllerRoot,
   };
   await rememberFactoryboxIdentity(f.database.client, original.id, identity);
   return { ...f, identity };
 }
+
+test.each(["normal", "lost reply", "unconfirmed Delete", "missing checkpoint"] as const)(
+  "successor retires exact old backing with %s while preserving execution and store identities",
+  async (scenario) => {
+    const root = "/var/lib/sysbox/fixed-store/data/store";
+    const f = await admittedWorker(`${root}/epochs/${"e".repeat(32)}/controller`);
+    const sql = f.database.coordination();
+    let pool: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+    try {
+      const store = createReserveStore(
+        defaultReservePolicy,
+        {
+          staging: runtimeImage,
+          verification: runtimeImage,
+        },
+        profile,
+      );
+      pool = await executionPoolFixture(
+        f.database,
+        store,
+        profile,
+        { staging: runtimeImage, verification: runtimeImage },
+        { projectID: f.projectID, userID: f.actorID },
+      );
+      const template = await pool.prepareTemplate(f.identity);
+      if (!template) throw new Error("Missing owned template");
+      await store.retire(f.database.client, template.id);
+      await store.intendDelete(f.database.client, template.id);
+      const checkpoint = {
+        source_id: factoryboxSandboxID(template.id),
+        source_owner: "e".repeat(32),
+        snapshot_id: template.id.replaceAll("-", ""),
+        checkpoint_sha256: "f".repeat(64),
+      };
+      const slotRequest = {
+        version: 1,
+        storeID: f.identity.storeID,
+        epoch: f.identity.epoch,
+        sandboxID: checkpoint.source_id,
+        checkpoints: [checkpoint],
+        resumes: [],
+        backing: {
+          sandbox_id: checkpoint.source_id,
+          sandbox_owner: checkpoint.source_owner,
+          input_sha256: "a".repeat(64),
+        },
+      };
+      await store.intendRetirement(f.database.client, template.id, slotRequest);
+      if (scenario !== "missing checkpoint")
+        await store.completeRetirementPart(f.database.client, template.id, {
+          action: "retire-checkpoint",
+          controllerRoot: f.identity.controllerRoot,
+          request: checkpoint,
+          intentSHA256: "1".repeat(64),
+          completedAt: "original-native-checkpoint-retirement",
+          availableBytesBefore: 1024,
+          availableBytesAfter: 2048,
+        });
+      await store.retired(f.database.client, template.id);
+      const oldID = await f.attempt("starting", 2);
+      function input(
+        attemptID: string,
+        podName: string,
+        selected: FactoryboxRuntimeProfile,
+      ): FactoryboxRuntimeInput {
+        return {
+          attemptID,
+          workerID: f.original.id,
+          namespace: f.original.namespace,
+          podName,
+          sandboxID: factoryboxSandboxID(attemptID),
+          runtimeOwnerID: attemptID,
+          labels: {},
+          sharedSource: false,
+          runtimeHostImage: runtimeImage,
+          profile: selected,
+        };
+      }
+      const oldInput = input(oldID, f.original.podName, profile);
+      const backing = {
+        sandbox_id: oldInput.sandboxID,
+        sandbox_owner: "a".repeat(32),
+        input_sha256: "b".repeat(64),
+      };
+      await f.database
+        .client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request,identity)
+        VALUES(${oldID},${JSON.stringify(oldInput)}::jsonb,${JSON.stringify(f.identity)}::jsonb)`;
+      await f.database.client`INSERT INTO factory.factorybox_lifecycle_operation
+        (runtime_attempt_id,action,attempted_at,completed_at,observation)
+        VALUES(${oldID},'delete',now(),now(),${JSON.stringify({
+          id: backing.sandbox_id,
+          owner: backing.sandbox_owner,
+          inputSHA256: backing.input_sha256,
+          phase: scenario === "unconfirmed Delete" ? "running" : "deleted",
+        })}::jsonb)`;
+      await f.database.client`INSERT INTO factory.factorybox_lifecycle_operation
+        (runtime_attempt_id,action,request,attempted_at)
+        VALUES(${oldID},'retire-sandbox',${JSON.stringify(backing)}::jsonb,now())`;
+      await f.database.client`UPDATE factory.runtime_attempt SET state='stopped',
+        stop_intended_at=now(),stopped_at=now() WHERE id IN (${oldID},${pool.stagingID})`;
+      const before = [
+        ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${oldID}`),
+      ];
+      const [originalOperation] = await f.database.client`SELECT intended_at,attempted_at,request
+        FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${oldID} AND action='retire-sandbox'`;
+      const nextProfile = {
+        ...profile,
+        image: `registry.invalid/upgraded@sha256:${"7".repeat(64)}`,
+        executableSHA256: "8".repeat(64),
+      };
+      await recoverFactoryboxWorker(f.database, f.kube.kubernetes, nextProfile, runtimeImage, {
+        actorID: f.actorID,
+        requestID: crypto.randomUUID(),
+      });
+      const selected = await retainedFactoryboxProfile(f.database.client);
+      const location = await f.worker.location();
+      await f.worker.provision(resources(location, runtimeImage, selected), selected, runtimeImage);
+      const next = await factoryboxAllocation(f.database.client);
+      const identity = {
+        ...f.identity,
+        podUID: next.podUID ?? "",
+        epoch: "f".repeat(32),
+        controllerRoot: `${root}/epochs/${"f".repeat(32)}/controller`,
+        executableSHA256: nextProfile.executableSHA256,
+      };
+      await rememberFactoryboxIdentity(f.database.client, next.id, identity);
+      const currentID = await f.attempt("starting", 3);
+      const request = input(currentID, next.podName, selected);
+      await f.database
+        .client`INSERT INTO factory.factorybox_runtime(runtime_attempt_id,request,identity)
+        VALUES(${currentID},${JSON.stringify(request)}::jsonb,${JSON.stringify(identity)}::jsonb)`;
+      const calls: unknown[] = [];
+      let lost = scenario === "lost reply";
+      const execute: typeof executeFactoryboxOperation = async (target, observed, operation) => {
+        expect(target.executableSHA256).toBe(nextProfile.executableSHA256);
+        expect(observed).toEqual(identity);
+        expect(operation).toMatchObject({
+          action: "retire-sandbox",
+          sourceRoot: f.identity.controllerRoot,
+        });
+        if (operation.action !== "retire-sandbox") throw new Error("Unexpected native execution");
+        calls.push(operation);
+        if (lost && operation.sandboxID === oldInput.sandboxID) {
+          lost = false;
+          return { confirmed: false, stdout: "", stderr: "lost original reply", exitCode: 1 };
+        }
+        return {
+          confirmed: true,
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({
+            version: 1,
+            payload_kind: "sandbox-backing",
+            request: {
+              sandbox_id: operation.sandboxID,
+              sandbox_owner: operation.sandboxOwner,
+              input_sha256: operation.inputSHA256,
+            },
+            intent_sha256: "9".repeat(64),
+            completed_at: "retired-by-current-worker",
+            before: { root: f.identity.controllerRoot, filesystem_available_bytes: 2048 },
+            after: { root: f.identity.controllerRoot, filesystem_available_bytes: 4096 },
+          }),
+        };
+      };
+      let cursor = { attempts: null as string | null, slots: null as string | null };
+      async function sweep() {
+        cursor = await withFactoryboxWorkerLock(sql, () =>
+          reclaimRetiredFactoryboxBacking(sql, { request, identity }, cursor, undefined, execute),
+        );
+      }
+      await sweep();
+      if (scenario === "lost reply") {
+        const [pending] = await f.database.client`SELECT completed_at
+          FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${oldID} AND action='retire-sandbox'`;
+        expect(pending?.["completed_at"]).toBeNull();
+        await sweep();
+      }
+      const [operation] = await f.database
+        .client`SELECT intended_at,attempted_at,request,completed_at
+        FROM factory.factorybox_lifecycle_operation WHERE runtime_attempt_id=${oldID} AND action='retire-sandbox'`;
+      if (!originalOperation || !operation)
+        throw new Error("Missing original retained backing intent");
+      expect(operation).toMatchObject(originalOperation);
+      expect(operation?.["completed_at"] !== null).toBe(scenario !== "unconfirmed Delete");
+      expect([
+        ...(await f.database.client`SELECT * FROM factory.runtime_attempt WHERE id=${oldID}`),
+      ]).toEqual(before);
+      const [saved] = await f.database.client`SELECT request,identity,
+        inputs_released_at IS NOT NULL AS released FROM factory.factorybox_runtime
+        WHERE runtime_attempt_id=${oldID}`;
+      expect(saved).toMatchObject({
+        request: oldInput,
+        identity: f.identity,
+        released: scenario !== "unconfirmed Delete",
+      });
+      const [slot] = await f.database.client`SELECT factorybox_retirement_progress AS progress,
+        factorybox_retirement_observation AS observation FROM factory.execution_slot WHERE id=${template.id}`;
+      expect(slot?.["observation"] !== null).toBe(scenario !== "missing checkpoint");
+      expect(slot?.["progress"]).toHaveLength(scenario === "missing checkpoint" ? 0 : 2);
+      const count = calls.length;
+      await sweep();
+      expect(calls).toHaveLength(count);
+      expect(next.claimUID).toBe(f.original.claimUID);
+      expect(next.sourceClaimUID).toBe(f.original.sourceClaimUID);
+    } finally {
+      await pool?.cleanup();
+      await sql.end({ timeout: 1 });
+      await f.dispose();
+    }
+  },
+  60_000,
+);
 
 test("explicit operator recovery keeps one store and Source while admitting a distinct worker lifetime", async () => {
   const f = await admittedWorker();

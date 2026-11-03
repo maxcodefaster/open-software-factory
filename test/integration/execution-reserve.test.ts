@@ -150,6 +150,173 @@ test("disabled reserve retires unused prepared execution without returning it to
   }
 }, 60_000);
 
+test("template Stop waits for child Delete, not already-authorized child storage cleanup", async () => {
+  const f = await setup();
+  try {
+    const identity = {
+      version: 1 as const,
+      namespaceUID: "owned-namespace",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      storeID: f.template.workerID.replaceAll("-", ""),
+      epoch: "b".repeat(32),
+      bootID: "owned-boot",
+      nodeBootID: "owned-node-boot",
+      executableSHA256: profile.executableSHA256,
+      controllerRoot: `/var/lib/sysbox/fixed-store/data/store/epochs/${"b".repeat(32)}/controller`,
+    };
+    const template = await f.prepareTemplate(identity);
+    if (!template) throw new Error("Missing prepared template");
+    const [child] = await f.database.client.begin((sql) => f.store.plan(sql));
+    if (!child) throw new Error("Missing owned Fork");
+    await f.store.observe(f.database.client, child.id, {
+      namespaceUID: identity.namespaceUID,
+      podUID: identity.podUID,
+      claimUID: identity.claimUID,
+      ready: false,
+      factoryboxIdentity: identity,
+      factoryboxPreparation: { kind: "fork" },
+    });
+    const standby = template.factoryboxStandby as {
+      sandboxID: string;
+      owner: string;
+      snapshotID: string;
+      checkpointSHA256: string;
+    };
+    await f.store.intendFork(f.database.client, child.id, {
+      action: "fork",
+      sandboxID: `runtime-${child.id.replaceAll("-", "")}`,
+      sourceSandboxID: standby.sandboxID,
+      sourceOwner: standby.owner,
+      snapshotID: standby.snapshotID,
+      checkpointSHA256: standby.checkpointSHA256,
+    });
+    const drain = createReserveStore({ ...defaultReservePolicy, readyTarget: 0 }, images, profile);
+    await drain.retire(f.database.client, child.id);
+    await drain.retire(f.database.client, template.id);
+    const before = await f.database.client.begin((sql) => drain.plan(sql));
+    expect(before.some((slot) => slot.id === template.id)).toBe(false);
+    // The adapter persists this request only after validating the exact
+    // completed native Delete. A request still needs physical retirement.
+    await drain.intendRetirement(f.database.client, child.id, {
+      version: 1,
+      storeID: identity.storeID,
+      epoch: identity.epoch,
+      sandboxID: `runtime-${child.id.replaceAll("-", "")}`,
+      checkpoints: [],
+      resumes: [],
+      backing: {
+        sandbox_id: `runtime-${child.id.replaceAll("-", "")}`,
+        sandbox_owner: "a".repeat(32),
+        input_sha256: "b".repeat(64),
+      },
+    });
+    const after = await f.database.client.begin((sql) => drain.plan(sql));
+    expect(after.some((slot) => slot.id === template.id)).toBe(true);
+    expect((await drain.get(f.database.client, child.id))?.state).toBe("retiring");
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
+
+test("native retirement receipts survive partial cleanup and cannot be changed or discarded", async () => {
+  const f = await setup({ ...defaultReservePolicy, readyTarget: 0 });
+  try {
+    await f.prepareTemplate();
+    await f.store.retire(f.database.client, f.template.id);
+    const sandboxID = `runtime-${f.template.id.replaceAll("-", "")}`;
+    const generation = {
+      source_id: sandboxID,
+      source_owner: "c".repeat(32),
+      snapshot_id: "1".repeat(32),
+      checkpoint_sha256: "2".repeat(64),
+    };
+    const request = {
+      version: 1,
+      storeID: "a".repeat(32),
+      epoch: "b".repeat(32),
+      sandboxID,
+      checkpoints: [generation],
+      resumes: [generation],
+      backing: {
+        sandbox_id: sandboxID,
+        sandbox_owner: generation.source_owner,
+        input_sha256: "d".repeat(64),
+      },
+    };
+    const part = {
+      action: "retire-checkpoint" as const,
+      controllerRoot: `/var/lib/sysbox/fixed-store/data/store/epochs/${request.epoch}/controller`,
+      request: generation,
+      intentSHA256: "e".repeat(64),
+      completedAt: "native-complete",
+      availableBytesBefore: 1024,
+      availableBytesAfter: 2048,
+    };
+    await expect(
+      f.store.completeRetirementPart(f.database.client, f.template.id, part),
+    ).rejects.toThrow("original request");
+    await f.store.intendRetirement(f.database.client, f.template.id, request);
+    await Promise.all(
+      [part, part, { ...part, action: "retire-resume" }].map((receipt) =>
+        f.store.completeRetirementPart(f.database.client, f.template.id, receipt),
+      ),
+    );
+    const read = async () => {
+      const [row] = await f.database.client<Array<{ progress: unknown[] }>>`
+        SELECT factorybox_retirement_progress AS progress FROM factory.execution_slot
+        WHERE id=${f.template.id}`;
+      if (!row) throw new Error("Missing retained retirement progress");
+      return row.progress;
+    };
+    const before = await read();
+    expect(before).toHaveLength(2);
+    expect(before).toContainEqual(part);
+    expect(before).toContainEqual({ ...part, action: "retire-resume" });
+    for (const changed of [
+      { ...part, intentSHA256: "f".repeat(64) },
+      { ...part, request: { ...generation, source_owner: "f".repeat(32) } },
+      { ...part, controllerRoot: part.controllerRoot.replace(request.epoch, "f".repeat(32)) },
+    ])
+      await expect(
+        f.store.completeRetirementPart(f.database.client, f.template.id, changed),
+      ).rejects.toThrow("original request");
+    await expect(
+      (async () => {
+        await f.database
+          .client`UPDATE factory.execution_slot SET factorybox_retirement_progress='[]'::jsonb
+            WHERE id=${f.template.id}`;
+      })(),
+    ).rejects.toThrow("append-only");
+    await expect(
+      (async () => {
+        await f.database.client`UPDATE factory.execution_slot SET factorybox_retirement_progress=
+          jsonb_set(factorybox_retirement_progress,'{0,intentSHA256}',to_jsonb(${"f".repeat(64)}::text))
+          WHERE id=${f.template.id}`;
+      })(),
+    ).rejects.toThrow("append-only");
+    expect(await read()).toEqual(before);
+    // Termination settles compute, not storage. A successor can append the
+    // exact final backing receipt without replacing the earlier outcomes.
+    await f.store.retired(f.database.client, f.template.id);
+    const recovered = createReserveStore(
+      { ...defaultReservePolicy, readyTarget: 0 },
+      images,
+      profile,
+    );
+    await recovered.completeRetirementPart(f.database.client, f.template.id, {
+      ...part,
+      action: "retire-sandbox",
+      request: request.backing,
+    });
+    const after = await read();
+    expect(after.slice(0, 2)).toEqual(before);
+    expect(after).toHaveLength(3);
+  } finally {
+    await f.dispose();
+  }
+}, 60_000);
+
 test("retirement retains exact immutable intent and outcome across controller recovery", async () => {
   const f = await setup({ ...defaultReservePolicy, readyTarget: 0 });
   try {

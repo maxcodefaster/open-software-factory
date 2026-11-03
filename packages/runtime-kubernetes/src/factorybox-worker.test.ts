@@ -786,6 +786,63 @@ test("private backing retirement requires exact deleted owner, input and worker 
   }
 });
 
+test("retained backing retirement uses the current pinned worker and exact earlier controller", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  const sourceRoot = root.replace(epoch, "f".repeat(32));
+  const operation = {
+    action: "retire-sandbox",
+    sandboxID: "owned",
+    sandboxOwner: "a".repeat(32),
+    inputSHA256: "b".repeat(64),
+    sourceRoot,
+  } as const;
+  const receipt = {
+    version: 1,
+    payload_kind: "sandbox-backing",
+    request: {
+      sandbox_id: operation.sandboxID,
+      sandbox_owner: operation.sandboxOwner,
+      input_sha256: operation.inputSHA256,
+    },
+    intent_sha256: "c".repeat(64),
+    completed_at: "2026-11-03T17:00:00Z",
+    before: { root: sourceRoot, filesystem_available_bytes: 1024 },
+    after: { root: sourceRoot, filesystem_available_bytes: 2048 },
+  };
+  f.calls.length = 0;
+  f.result({ exitCode: 0, stderr: "", stdout: JSON.stringify(receipt) });
+  expect((await executeFactoryboxOperation(request, identity, operation, f.run)).confirmed).toBe(
+    true,
+  );
+  const command = f.calls.at(-1);
+  expect(command).toContain(request.podName);
+  expect(command?.slice(-8)).toEqual([
+    "retire-sandbox",
+    "--source-root",
+    sourceRoot,
+    "--sandbox-owner",
+    operation.sandboxOwner,
+    "--input-sha256",
+    operation.inputSHA256,
+    operation.sandboxID,
+  ]);
+  expect(command?.slice(-10, -8)).toEqual(["--worker-epoch", epoch]);
+  for (const invalid of [root, "/foreign", `${sourceRoot}/..`, sourceRoot.toUpperCase()]) {
+    f.calls.length = 0;
+    await expect(
+      executeFactoryboxOperation(request, identity, { ...operation, sourceRoot: invalid }, f.run),
+    ).rejects.toThrow();
+    expect(f.calls).toHaveLength(0);
+  }
+  f.result({
+    exitCode: 0,
+    stderr: "",
+    stdout: JSON.stringify({ ...receipt, after: { ...receipt.after, root } }),
+  });
+  await expect(executeFactoryboxOperation(request, identity, operation, f.run)).rejects.toThrow();
+});
+
 test("worker architecture is explicit and rejects unsupported or inferred targets", () => {
   expect(() => factoryboxWorkerRequest.parse({ ...request, architecture: undefined })).toThrow();
   expect(() => factoryboxWorkerRequest.parse({ ...request, architecture: "riscv64" })).toThrow();

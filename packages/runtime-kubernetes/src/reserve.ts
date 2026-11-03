@@ -57,6 +57,7 @@ interface DeleteIntent {
   intendDelete(): Promise<boolean>;
   intendRetirement(request: unknown): Promise<void>;
   completeRetirement(observation: unknown): Promise<void>;
+  completeRetirementPart(observation: unknown): Promise<void>;
 }
 export interface ReserveClient {
   prepare(
@@ -590,14 +591,19 @@ export function createReserveClient(
             JSON.parse(result.stdout),
             action === "retire-resume" ? "resume-images" : undefined,
           );
-          receipts.push({
+          const part = {
             action,
             request: generation,
             intentSHA256: receipt.intent_sha256,
             completedAt: receipt.completed_at,
             availableBytesBefore: receipt.before.filesystem_available_bytes,
             availableBytesAfter: receipt.after.filesystem_available_bytes,
+          };
+          await options.completeRetirementPart({
+            ...part,
+            controllerRoot: identity.controllerRoot,
           });
+          receipts.push(part);
         }
       }
       if (!slot.templateID) await native.release(input, identity, false);
@@ -620,14 +626,16 @@ export function createReserveClient(
         identity.controllerRoot,
         JSON.parse(result.stdout),
       );
-      receipts.push({
+      const part = {
         action: "retire-sandbox",
         request: backing,
         intentSHA256: receipt.intent_sha256,
         completedAt: receipt.completed_at,
         availableBytesBefore: receipt.before.filesystem_available_bytes,
         availableBytesAfter: receipt.after.filesystem_available_bytes,
-      });
+      };
+      await options.completeRetirementPart({ ...part, controllerRoot: identity.controllerRoot });
+      receipts.push(part);
       await options.completeRetirement({ version: 1, request, receipts });
       return;
     }

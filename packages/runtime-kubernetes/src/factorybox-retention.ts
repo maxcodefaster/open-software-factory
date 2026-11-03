@@ -17,6 +17,53 @@ export const factoryboxBackingRequest = z.strictObject({
 });
 export type FactoryboxBackingRequest = z.infer<typeof factoryboxBackingRequest>;
 
+export const factoryboxSlotRetirementRequest = z
+  .strictObject({
+    version: z.literal(1),
+    storeID: token,
+    epoch: token,
+    sandboxID: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/),
+    checkpoints: z.array(factoryboxCheckpointRequest),
+    resumes: z.array(factoryboxCheckpointRequest),
+    backing: factoryboxBackingRequest,
+  })
+  .refine(
+    (value) =>
+      value.backing.sandbox_id === value.sandboxID &&
+      [value.checkpoints, value.resumes].every(
+        (generations) =>
+          new Set(generations.map((generation) => generation.snapshot_id)).size ===
+            generations.length &&
+          generations.every(
+            (generation) =>
+              generation.source_id === value.sandboxID &&
+              generation.source_owner === value.backing.sandbox_owner,
+          ),
+      ),
+    { message: "Slot retirement must retain one exact deleted Sandbox and its generations" },
+  );
+const retirementReceiptFields = {
+  controllerRoot: z
+    .string()
+    .regex(/^\/var\/lib\/sysbox\/fixed-store\/data\/store\/epochs\/[a-f0-9]{32}\/controller$/),
+  intentSHA256: digest,
+  completedAt: z.string().min(1),
+  availableBytesBefore: z.number().int().nonnegative().safe(),
+  availableBytesAfter: z.number().int().nonnegative().safe(),
+};
+export const factoryboxRetirementPart = z.discriminatedUnion("action", [
+  z.strictObject({
+    ...retirementReceiptFields,
+    action: z.enum(["retire-checkpoint", "retire-resume"]),
+    request: factoryboxCheckpointRequest,
+  }),
+  z.strictObject({
+    ...retirementReceiptFields,
+    action: z.literal("retire-sandbox"),
+    request: factoryboxBackingRequest,
+  }),
+]);
+
 export function readFactoryboxBackingRetirement(
   request: FactoryboxBackingRequest,
   controllerRoot: string,

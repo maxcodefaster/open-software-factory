@@ -161,6 +161,10 @@ export const factoryboxOperation = z.discriminatedUnion("action", [
     sandboxID: sandbox,
     sandboxOwner: token,
     inputSHA256: digest,
+    sourceRoot: z
+      .string()
+      .regex(new RegExp(`^${storeRoot}/epochs/[a-f0-9]{32}/controller$`))
+      .optional(),
   }),
 ]);
 export type FactoryboxOperation = z.infer<typeof factoryboxOperation>;
@@ -636,6 +640,13 @@ export async function executeFactoryboxOperation(
   const input = factoryboxWorkerRequest.parse(request);
   const admitted = factoryboxWorkerIdentity.parse(identity);
   const op = factoryboxOperation.parse(operation);
+  if (
+    op.action === "retire-sandbox" &&
+    op.sourceRoot &&
+    (admitted.controllerRoot !== `${storeRoot}/epochs/${admitted.epoch}/controller` ||
+      op.sourceRoot === admitted.controllerRoot)
+  )
+    throw new Error("Retained backing requires a distinct exact controller in the same store");
   await inspectFactoryboxWorker(input, admitted, run, declaration);
   const command = [
     binary,
@@ -731,6 +742,7 @@ export async function executeFactoryboxOperation(
       throw new Error("Fork source differs from its owned published private checkpoint");
   }
   const args = [...command, op.action];
+  if (op.action === "retire-sandbox" && op.sourceRoot) args.push("--source-root", op.sourceRoot);
   if (op.action === "start") args.push("--bundle", op.bundle);
   if (op.action === "fork") args.push("--source", op.sourceSandboxID);
   if (
@@ -780,7 +792,7 @@ export async function executeFactoryboxOperation(
   } else if (op.action === "retire-sandbox") {
     readFactoryboxBackingRetirement(
       { sandbox_id: op.sandboxID, sandbox_owner: op.sandboxOwner, input_sha256: op.inputSHA256 },
-      admitted.controllerRoot,
+      op.sourceRoot ?? admitted.controllerRoot,
       output,
     );
   } else {

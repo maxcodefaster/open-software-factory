@@ -8,6 +8,7 @@ import {
   reserveCreationCount,
   reserveIdentity,
 } from "../../../../packages/runtime-domain/src/reserve";
+import { factoryboxRetirementPart } from "../../../../packages/runtime-kubernetes/src/factorybox-retention";
 import {
   type FactoryboxRuntimeProfile,
   factoryboxRuntimeProfile,
@@ -27,6 +28,48 @@ const fields =
   'seed_expires_at AS "seedExpiresAt",' +
   'id,project_id AS "projectID",staging_attempt_id AS "stagingAttemptID",revision,template_id AS "templateID",template_key AS "templateKey",project_recipe AS "projectRecipe",source_import_sha256 AS "sourceImportSHA256",source_import_observation AS "sourceImportObservation",factorybox_fork_request AS "factoryboxForkRequest",factorybox_fork_attempted AS "factoryboxForkAttempted",factorybox_standby AS "factoryboxStandby",role,state,runtime_host_image AS "runtimeHostImage",factorybox_worker_id AS "workerID",kubernetes_namespace AS namespace,namespace_uid AS "namespaceUID",pod_uid AS "podUID",claim_uid AS "claimUID",expires_at AS "expiresAt",assigned_attempt_id AS "assignedAttemptID",factorybox_profile AS "factoryboxProfile",factorybox_identity AS "factoryboxIdentity",factorybox_preparation AS "factoryboxPreparation",factorybox_start_attempted AS "factoryboxStartAttempted",factorybox_pause_attempted AS "factoryboxPauseAttempted",factorybox_resume_attempted AS "factoryboxResumeAttempted",factorybox_delete_attempted AS "factoryboxDeleteAttempted"';
 export const executionCapacityLock = "factory-execution-capacity";
+
+export async function completeSlotRetirement(sql: SQL, id: string, observation: unknown) {
+  const result = await sql`UPDATE factory.execution_slot
+    SET factorybox_retirement_observation=coalesce(factorybox_retirement_observation,${JSON.stringify(observation)}::text::jsonb)
+    WHERE id=${id} AND state IN ('retiring','assigned','deleted')
+    AND factorybox_retirement_request IS NOT NULL
+    AND factorybox_retirement_request=${JSON.stringify(observation)}::text::jsonb->'request'
+    AND (factorybox_retirement_observation IS NULL OR factorybox_retirement_observation=${JSON.stringify(observation)}::text::jsonb)`;
+  if (result.count !== 1)
+    throw new Error(
+      "Execution slot retirement observation differs from its original request or outcome",
+    );
+}
+
+export async function completeSlotRetirementPart(sql: SQL, id: string, observation: unknown) {
+  const part = factoryboxRetirementPart.parse(observation);
+  const body = JSON.stringify(part);
+  const request = JSON.stringify(part.request);
+  const key =
+    part.action === "retire-checkpoint"
+      ? "checkpoints"
+      : part.action === "retire-resume"
+        ? "resumes"
+        : "backing";
+  const result = await sql`UPDATE factory.execution_slot
+    SET factorybox_retirement_progress=CASE
+      WHEN factorybox_retirement_progress @> jsonb_build_array(${body}::text::jsonb)
+        THEN factorybox_retirement_progress
+      ELSE factorybox_retirement_progress || jsonb_build_array(${body}::text::jsonb) END
+    WHERE id=${id} AND state IN ('retiring','assigned','deleted')
+      AND factorybox_retirement_request IS NOT NULL
+      AND factorybox_retirement_request->>'epoch'=substring(${part.controllerRoot} from '/epochs/([a-f0-9]{32})/controller$')
+      AND (CASE WHEN ${key}='backing'
+        THEN factorybox_retirement_request->${key}::text=${request}::text::jsonb
+        ELSE factorybox_retirement_request->${key}::text @> jsonb_build_array(${request}::text::jsonb) END)
+      AND NOT EXISTS (
+        SELECT 1 FROM jsonb_array_elements(factorybox_retirement_progress) existing
+        WHERE existing->>'action'=${part.action} AND existing->'request'=${request}::text::jsonb
+          AND existing<>${body}::text::jsonb)`;
+  if (result.count !== 1)
+    throw new Error("Slot retirement receipt differs from its original request or outcome");
+}
 
 export function createReserveStore(
   policyInput: ReservePolicy,
@@ -180,7 +223,8 @@ export function createReserveStore(
       return sql.unsafe<ExecutionSlot[]>(
         `SELECT ${fields} FROM factory.execution_slot slot WHERE state IN ('creating','retiring') AND reconcile_after<=now()
           AND (template_id IS NOT NULL OR state<>'retiring' OR NOT EXISTS(
-            SELECT 1 FROM factory.execution_slot child WHERE child.template_id=slot.id AND child.state<>'deleted'))
+            SELECT 1 FROM factory.execution_slot child WHERE child.template_id=slot.id
+              AND child.state<>'deleted' AND child.factorybox_retirement_request IS NULL))
           ORDER BY CASE WHEN state='retiring' AND template_id IS NOT NULL THEN 0 ELSE 1 END,created_at,id LIMIT ${policy.maxSlots + 1}`,
       );
     },
@@ -336,18 +380,8 @@ export function createReserveStore(
       if (result.count !== 1)
         throw new Error("Execution slot retirement differs from its durable original request");
     },
-    async completeRetirement(sql: SQL, id: string, observation: unknown) {
-      const result = await sql`UPDATE factory.execution_slot
-        SET factorybox_retirement_observation=coalesce(factorybox_retirement_observation,${JSON.stringify(observation)}::text::jsonb)
-        WHERE id=${id} AND state IN ('retiring','assigned')
-        AND factorybox_retirement_request IS NOT NULL
-        AND factorybox_retirement_request=${JSON.stringify(observation)}::text::jsonb->'request'
-        AND (factorybox_retirement_observation IS NULL OR factorybox_retirement_observation=${JSON.stringify(observation)}::text::jsonb)`;
-      if (result.count !== 1)
-        throw new Error(
-          "Execution slot retirement observation differs from its original request or outcome",
-        );
-    },
+    completeRetirement: completeSlotRetirement,
+    completeRetirementPart: completeSlotRetirementPart,
     async defer(sql: SQL, id: string) {
       await sql`UPDATE factory.execution_slot SET reconcile_after=now()+${policy.retryMS}*interval '1 millisecond'
         WHERE id=${id} AND state IN ('creating','retiring')`;

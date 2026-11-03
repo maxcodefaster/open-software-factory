@@ -298,6 +298,7 @@ test("unused paused slot retirement releases checkpoint and private backing befo
     delete: undefined as { attempted: boolean; completed_at: string } | undefined,
   };
   const actions: string[] = [];
+  const progress: unknown[] = [];
   let retained: unknown, completed: unknown;
   const fixture = cleanupFixture(undefined, {
     async retired() {
@@ -368,6 +369,9 @@ test("unused paused slot retirement releases checkpoint and private backing befo
     async completeRetirement(value: unknown) {
       completed = value;
     },
+    async completeRetirementPart(value: unknown) {
+      progress.push(value);
+    },
   };
   await fixture.adapter.retire(
     {
@@ -381,6 +385,10 @@ test("unused paused slot retirement releases checkpoint and private backing befo
   );
   expect(actions).toEqual(["state", "delete", "retire-checkpoint", "release", "retire-sandbox"]);
   expect(completed).toBeDefined();
+  expect(progress).toMatchObject([
+    { action: "retire-checkpoint", controllerRoot: root },
+    { action: "retire-sandbox", controllerRoot: root },
+  ]);
   expect(fixture.deleted).toEqual([factoryboxAssignmentSecret(slot.id)]);
 });
 
@@ -492,6 +500,7 @@ test.each(["delete", "retire-checkpoint", "retire-resume", "retire-sandbox"] as 
       factoryboxPreparation: {},
       factoryboxStartAttempted: true,
     };
+    const progress: unknown[] = [];
     const callbacks = {
       async intendDelete() {
         if (deleteIntended) return false;
@@ -505,9 +514,15 @@ test.each(["delete", "retire-checkpoint", "retire-resume", "retire-sandbox"] as 
       async completeRetirement(value: unknown) {
         outcome = value;
       },
+      async completeRetirementPart(value: unknown) {
+        progress.push(value);
+      },
     };
     await expect(fixture.adapter.retire(owned, callbacks)).rejects.toThrow("unconfirmed");
     expect(outcome).toBeUndefined();
+    expect(progress).toHaveLength(
+      lostAction === "retire-sandbox" ? 2 : lostAction === "retire-resume" ? 1 : 0,
+    );
     expect(fixture.deleted).toEqual([]);
     await fixture.adapter.retire({ ...owned, factoryboxDeleteAttempted: true }, callbacks);
     expect(actions.filter((action) => action === "delete")).toHaveLength(1);
