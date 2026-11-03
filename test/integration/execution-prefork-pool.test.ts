@@ -20,6 +20,91 @@ const profile = {
   claimGiB: 32 as const,
 };
 
+test("unchanged paused Project Forks remain assignable without timer-driven replacement", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const store = createReserveStore(defaultReservePolicy, images, profile);
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+  try {
+    owned = await executionPoolFixture(database, store, profile, images);
+    const template = await owned.prepareTemplate();
+    if (!template) throw new Error("Missing prepared template");
+    const id = crypto.randomUUID();
+    // Create an originally expired timestamp in this owned fixture. Never
+    // rewrite an existing slot's immutable creation or expiry identities.
+    await database.client`INSERT INTO factory.execution_slot(id,project_id,staging_attempt_id,
+      revision,template_id,template_key,project_recipe,seed_expires_at,role,state,
+      runtime_host_image,created_at,expires_at,factorybox_profile)
+      SELECT ${id},project_id,staging_attempt_id,revision,id,template_key,project_recipe,
+        seed_expires_at,role,'creating',runtime_host_image,now()-interval '2 seconds',now()-interval '1 second',
+        factorybox_profile FROM factory.execution_slot WHERE id=${template.id}`;
+    await store.observe(database.client, id, {
+      namespaceUID: "owned-namespace",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      ready: false,
+      factoryboxIdentity: template.factoryboxIdentity,
+      factoryboxPreparation: { kind: "fork" },
+    });
+    const source = template.factoryboxStandby as {
+      sandboxID: string;
+      owner: string;
+      snapshotID: string;
+      checkpointSHA256: string;
+    };
+    expect(
+      await store.intendFork(database.client, id, {
+        action: "fork",
+        sandboxID: `runtime-${id.replaceAll("-", "")}`,
+        sourceSandboxID: source.sandboxID,
+        sourceOwner: source.owner,
+        snapshotID: source.snapshotID,
+        checkpointSHA256: source.checkpointSHA256,
+      }),
+    ).toBe(true);
+    await store.intendStandby(database.client, id, "pause");
+    await store.observe(database.client, id, {
+      namespaceUID: "owned-namespace",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      ready: true,
+      factoryboxPaused: true,
+      factoryboxStandby: {
+        ...source,
+        sandboxID: `runtime-${id.replaceAll("-", "")}`,
+        owner: "9".repeat(32),
+        anonymousBytes: 0,
+        snapshotResidentBytes: 0,
+      },
+    });
+    const original = await store.get(database.client, id);
+    expect(new Date(fixtureValue(original, "original Fork").expiresAt).getTime()).toBeLessThan(
+      Date.now(),
+    );
+    await database.client.begin((sql) => store.plan(sql));
+    const retained = await store.get(database.client, id);
+    expect(retained?.state).toBe("ready");
+    expect(retained?.expiresAt).toEqual(original?.expiresAt);
+    await expect(
+      database.client.begin(async (sql) => {
+        expect(
+          (
+            await store.admit(sql, crypto.randomUUID(), "verification", {
+              projectID: fixtureValue(owned, "owned").projectID,
+              kind: "verification",
+            })
+          )?.id,
+        ).toBe(id);
+        throw new Error("Owned assignment lookup rollback");
+      }),
+    ).rejects.toThrow("assignment lookup rollback");
+  } finally {
+    await owned?.cleanup();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
 for (const basis of [
   "credential-free",
   "development public",

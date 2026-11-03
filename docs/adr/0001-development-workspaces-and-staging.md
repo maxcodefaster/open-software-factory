@@ -46,7 +46,9 @@ The concrete worker, canonical Source and same-worker Pause/Resume boundary is d
 
 Factory maintains a small reserve of clean, unassigned, prepared execution slots. It replenishes
 after reservation rather than waiting for the reserve to become empty. A configured minimum-ready
-target is constrained by maximum slots, creation concurrency, idle expiry and total compute budget.
+target is constrained by maximum slots, creation concurrency and total compute budget.
+Project-bound paused Forks retain their current recipe rather than cycling on an idle timer,
+as specified in [ADR 0022](0022-factorybox-workspace-execution.md).
 Ready and in-flight creations count toward reconciliation so a burst or failed start cannot create
 an unbounded replacement loop. Exhaustion leaves the editor usable and compute honestly preparing.
 

@@ -112,13 +112,15 @@ export function createReserveStore(
       const selected = policy.readyTarget ? await retainedFactoryboxProfile(sql, profile) : null;
       // Finish an already-admitted clean template before retiring its backing.
       // Cancelling before native Start would strand an unregistered input tree.
+      // Paused Project Forks contain no grants and release their anonymous RAM.
+      // Their current recipe and bounded pool size, not seed age, own retention.
+      // Expiring and immediately refilling them only repeats Fork/Pause work.
       await sql`UPDATE factory.execution_slot SET state='retiring',reconcile_after=now()
         WHERE (state='creating' AND created_at<=now()-${policy.preparationMS}*interval '1 millisecond')
         OR (state='creating' AND template_id IS NOT NULL AND NOT factorybox_fork_attempted AND
           (${policy.readyTarget === 0} OR EXISTS(
             SELECT 1 FROM factory.execution_slot source WHERE source.id=execution_slot.template_id AND source.state='retiring')))
-        OR (state='ready' AND ((template_id IS NOT NULL AND expires_at<=now()) OR
-          ${policy.readyTarget === 0} OR
+        OR (state='ready' AND (${policy.readyTarget === 0} OR
           factorybox_profile IS DISTINCT FROM ${selected ? JSON.stringify(selected) : null}::text::jsonb OR
           runtime_host_image<>${images.staging} OR
           NOT factory.execution_template_is_current(execution_slot)))`;
@@ -192,7 +194,7 @@ export function createReserveStore(
           ? (
               await sql.unsafe<ExecutionSlot[]>(
                 `SELECT ${fields} FROM factory.execution_slot
-        WHERE state='ready' AND template_id IS NOT NULL AND project_id=$1 AND runtime_host_image=$2 AND factorybox_profile=$3::text::jsonb AND expires_at>now()
+        WHERE state='ready' AND template_id IS NOT NULL AND project_id=$1 AND runtime_host_image=$2 AND factorybox_profile=$3::text::jsonb
           AND factory.execution_template_is_current(execution_slot)
         ORDER BY created_at,id FOR UPDATE LIMIT 1`,
                 [

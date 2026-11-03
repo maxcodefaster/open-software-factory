@@ -204,6 +204,14 @@ native owner, checkpoint hash and worker epoch. Lost output is observed without
 another mutation or a replacement identity. Used slots never return to the pool;
 the controller fills their places with new paused Forks.
 
+Keep unused paused Project Forks while their promoted recipe, artifact pins and worker
+admission remain current. Do not retire and immediately recreate them on a fixed idle
+timer. They contain no grants and retain zero anonymous RAM. The pool size, creation
+concurrency and compute admission still bound retention. Changed inputs, another selected
+Project or disabling the reserve retire the exact unused backing through normal cleanup.
+Original seed/expiry timestamps remain immutable metadata; age alone neither invalidates
+these credential-free Forks nor authorizes reuse of a stale recipe.
+
 Resume the selected Fork before delivering fresh Parent and Child authority. An exact
 revision/configuration with no resolved Runtime variables or registries adopts the
 already-running App processes through private root-peer control. Different input
