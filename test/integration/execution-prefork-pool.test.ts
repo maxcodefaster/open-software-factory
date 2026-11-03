@@ -20,6 +20,207 @@ const profile = {
   claimGiB: 32 as const,
 };
 
+test("an identical healthy Staging retry retains its prepared template and original Fork ancestry", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const store = createReserveStore(defaultReservePolicy, images, profile);
+  let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+  try {
+    owned = await executionPoolFixture(database, store, profile, images);
+    const template = await owned.prepareTemplate();
+    if (!template) throw new Error("Missing prepared template");
+    const stagingID = crypto.randomUUID();
+    await database.client.begin(async (sql) => {
+      await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+        VALUES(${stagingID},${fixtureValue(owned, "owned").projectID},'staging',2,${fixtureValue(owned, "owned").revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+      await freezeRuntimeArtifacts(
+        sql,
+        stagingID,
+        fixtureValue(owned, "owned").artifactConfiguration,
+      );
+      await sql`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
+        SELECT ${stagingID},declaration FROM factory.staging_configuration
+        WHERE runtime_attempt_id=${fixtureValue(owned, "owned").stagingID}`;
+      await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${stagingID}`;
+      await sql`UPDATE factory.staging_preview SET runtime_attempt_id=${stagingID}
+        WHERE project_id=${fixtureValue(owned, "owned").projectID}`;
+      await sql`UPDATE factory.runtime_attempt SET state='stopped'
+        WHERE id=${fixtureValue(owned, "owned").stagingID}`;
+    });
+    await createStagingTemplateProducer(database, store, images).refresh();
+    const planned = await database.client.begin((sql) => store.plan(sql));
+    expect((await store.get(database.client, template.id))?.state).toBe("ready");
+    expect(
+      await database.client`SELECT id FROM factory.execution_slot WHERE template_id IS NULL`,
+    ).toHaveLength(1);
+    expect(planned).toHaveLength(1);
+    expect(planned[0]).toMatchObject({
+      templateID: template.id,
+      stagingAttemptID: owned.stagingID,
+      state: "creating",
+    });
+    // Both admission and the durable INSERT guard must accept the same
+    // healthy basis without rewriting any template's original ancestry.
+    const fork = fixtureValue(planned[0], "planned Fork");
+    await store.observe(database.client, fork.id, {
+      namespaceUID: "owned-namespace",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      ready: false,
+      factoryboxIdentity: template.factoryboxIdentity,
+      factoryboxPreparation: { kind: "fork" },
+    });
+    const source = template.factoryboxStandby as {
+      sandboxID: string;
+      owner: string;
+      snapshotID: string;
+      checkpointSHA256: string;
+    };
+    expect(
+      await store.intendFork(database.client, fork.id, {
+        action: "fork",
+        sandboxID: `runtime-${fork.id.replaceAll("-", "")}`,
+        sourceSandboxID: source.sandboxID,
+        sourceOwner: source.owner,
+        snapshotID: source.snapshotID,
+        checkpointSHA256: source.checkpointSHA256,
+      }),
+    ).toBe(true);
+    await store.intendStandby(database.client, fork.id, "pause");
+    await store.observe(database.client, fork.id, {
+      namespaceUID: "owned-namespace",
+      podUID: "owned-pod",
+      claimUID: "owned-claim",
+      ready: true,
+      factoryboxPaused: true,
+      factoryboxStandby: {
+        ...source,
+        sandboxID: `runtime-${fork.id.replaceAll("-", "")}`,
+        owner: "9".repeat(32),
+        anonymousBytes: 0,
+        snapshotResidentBytes: 0,
+      },
+    });
+    await expect(
+      database.client.begin(async (sql) => {
+        expect(
+          (
+            await store.admit(sql, crypto.randomUUID(), "verification", {
+              projectID: fixtureValue(owned, "owned").projectID,
+              kind: "verification",
+            })
+          )?.id,
+        ).toBe(fork.id);
+        throw new Error("Owned assignment lookup rollback");
+      }),
+    ).rejects.toThrow("assignment lookup rollback");
+    await database.client`UPDATE factory.runtime_attempt SET stop_intended_at=now() WHERE id=${stagingID}`;
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.execution_slot SET state='assigned',
+          assigned_attempt_id=${crypto.randomUUID()},assigned_at=now() WHERE id=${fork.id}`;
+      })(),
+    ).rejects.toThrow("healthy promoted Staging");
+    await expect(
+      (async () => {
+        await database.client`INSERT INTO factory.execution_slot(id,project_id,staging_attempt_id,
+          revision,template_id,template_key,project_recipe,seed_expires_at,role,state,
+          runtime_host_image,expires_at,factorybox_profile)
+          SELECT ${crypto.randomUUID()},project_id,staging_attempt_id,revision,id,template_key,
+            project_recipe,seed_expires_at,role,'creating',runtime_host_image,
+            now()+interval '15 minutes',factorybox_profile FROM factory.execution_slot
+          WHERE id=${template.id}`;
+      })(),
+    ).rejects.toThrow("healthy promoted Staging");
+    await expect(
+      database.client.begin(async (sql) => {
+        expect(
+          await store.admit(sql, crypto.randomUUID(), "verification", {
+            projectID: fixtureValue(owned, "owned").projectID,
+            kind: "verification",
+          }),
+        ).toBeNull();
+        throw new Error("Owned unhealthy lookup rollback");
+      }),
+    ).rejects.toThrow("unhealthy lookup rollback");
+    await database.client.begin((sql) => store.plan(sql));
+    expect((await store.get(database.client, template.id))?.state).toBe("retiring");
+  } finally {
+    await owned?.cleanup();
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+for (const changed of ["App declaration", "consumer image", "protected inputs"] as const) {
+  test(`a Staging retry with changed ${changed} cannot reuse or refill the old template`, async () => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const store = createReserveStore(defaultReservePolicy, images, profile);
+    let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+    try {
+      owned = await executionPoolFixture(database, store, profile, images);
+      const template = await owned.prepareTemplate();
+      if (!template) throw new Error("Missing prepared template");
+      const stagingID = crypto.randomUUID();
+      if (changed === "protected inputs") {
+        const key = `owned-protected-${crypto.randomUUID()}`;
+        await database.client`INSERT INTO factory.environment_write(command_id,project_id,environment,
+          base_version,fingerprint,manifest,secret_key,state,created_by,committed_at)
+          VALUES(${crypto.randomUUID()},${owned.projectID},'main-preview',0,${"e".repeat(64)},
+            '{"variables":[{"name":"APP_TOKEN","runtime":true,"build":false,"verification":false}],"registries":[]}'::jsonb,
+            ${key},'committed',${owned.userID},now())`;
+        await database.client`INSERT INTO factory.project_environment(project_id,environment,version,manifest,secret_key)
+          SELECT project_id,environment,1,manifest,secret_key FROM factory.environment_write WHERE secret_key=${key}`;
+      }
+      await database.client.begin(async (sql) => {
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${stagingID},${fixtureValue(owned, "owned").projectID},'staging',2,${fixtureValue(owned, "owned").revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+        await freezeRuntimeEnvironment(sql, stagingID);
+        const artifacts = fixtureValue(owned, "owned").artifactConfiguration;
+        await freezeRuntimeArtifacts(
+          sql,
+          stagingID,
+          changed === "consumer image"
+            ? {
+                ...artifacts,
+                hostImages: {
+                  ...artifacts.hostImages,
+                  staging: `registry.invalid/runtime@sha256:${"2".repeat(64)}`,
+                },
+              }
+            : artifacts,
+        );
+        await sql`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
+          SELECT ${stagingID},CASE WHEN ${changed === "App declaration"}
+            THEN jsonb_set(declaration,'{processes,0,command}','["node","changed.js"]'::jsonb)
+            ELSE declaration END FROM factory.staging_configuration
+          WHERE runtime_attempt_id=${fixtureValue(owned, "owned").stagingID}`;
+        await sql`UPDATE factory.runtime_attempt SET state='ready' WHERE id=${stagingID}`;
+        await sql`UPDATE factory.staging_preview SET runtime_attempt_id=${stagingID}
+          WHERE project_id=${fixtureValue(owned, "owned").projectID}`;
+      });
+      await expect(
+        (async () => {
+          await database.client`INSERT INTO factory.execution_slot(id,project_id,staging_attempt_id,
+            revision,template_id,template_key,project_recipe,seed_expires_at,role,state,
+            runtime_host_image,expires_at,factorybox_profile)
+            SELECT ${crypto.randomUUID()},project_id,staging_attempt_id,revision,id,template_key,
+              project_recipe,seed_expires_at,role,'creating',runtime_host_image,
+              now()+interval '15 minutes',factorybox_profile FROM factory.execution_slot
+            WHERE id=${template.id}`;
+        })(),
+      ).rejects.toThrow("healthy promoted Staging");
+      await database.client.begin((sql) => store.plan(sql));
+      expect((await store.get(database.client, template.id))?.state).toBe("retiring");
+    } finally {
+      await owned?.cleanup();
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  }, 60_000);
+}
+
 test("nonempty Staging environments can prepare a separate credential-free dependency template", async () => {
   const host = await factoryProcess();
   const database = host.connect();

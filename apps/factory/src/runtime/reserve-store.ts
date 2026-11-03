@@ -120,11 +120,8 @@ export function createReserveStore(
         OR (state='ready' AND ((template_id IS NOT NULL AND expires_at<=now()) OR
           ${policy.readyTarget === 0} OR
           factorybox_profile IS DISTINCT FROM ${selected ? JSON.stringify(selected) : null}::text::jsonb OR
-          runtime_host_image<>${images.staging} OR NOT EXISTS(
-            SELECT 1 FROM factory.staging_preview preview
-            JOIN factory.staging_configuration configuration ON configuration.runtime_attempt_id=preview.runtime_attempt_id
-            WHERE preview.project_id=execution_slot.project_id AND preview.runtime_attempt_id=execution_slot.staging_attempt_id
-              AND preview.revision=execution_slot.revision AND configuration.declaration->>'devcontainerPath'=execution_slot.project_recipe->>'devcontainerPath')))`;
+          runtime_host_image<>${images.staging} OR
+          NOT factory.execution_template_is_current(execution_slot)))`;
       const [template] = await sql.unsafe<
         ExecutionSlot[]
       >(`SELECT ${fields} FROM factory.execution_slot
@@ -196,8 +193,7 @@ export function createReserveStore(
               await sql.unsafe<ExecutionSlot[]>(
                 `SELECT ${fields} FROM factory.execution_slot
         WHERE state='ready' AND template_id IS NOT NULL AND project_id=$1 AND runtime_host_image=$2 AND factorybox_profile=$3::text::jsonb AND expires_at>now()
-          AND EXISTS(SELECT 1 FROM factory.staging_preview preview WHERE preview.project_id=execution_slot.project_id
-            AND preview.runtime_attempt_id=execution_slot.staging_attempt_id AND preview.revision=execution_slot.revision)
+          AND factory.execution_template_is_current(execution_slot)
         ORDER BY created_at,id FOR UPDATE LIMIT 1`,
                 [
                   owner.projectID,

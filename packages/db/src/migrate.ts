@@ -37,7 +37,7 @@ try {
   `;
   if (
     versions[0]?.version !== 1 ||
-    versions.length > 6 ||
+    versions.length > 7 ||
     versions.some((value, index) => value.version !== index + 1)
   )
     throw new Error(
@@ -69,6 +69,13 @@ try {
     await client.unsafe(
       await readFile(
         resolve(import.meta.dir, "../migrations/0006_ticket_execution_revision.sql"),
+        "utf8",
+      ),
+    );
+  if (versions.length <= 6)
+    await client.unsafe(
+      await readFile(
+        resolve(import.meta.dir, "../migrations/0007_execution_template_basis.sql"),
         "utf8",
       ),
     );

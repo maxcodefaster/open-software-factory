@@ -32,6 +32,7 @@ export function createStagingTemplateProducer(
         Array<{
           projectID: string;
           stagingAttemptID: string;
+          admissionID: string;
           revision: string;
           repositoryURL: string;
           devcontainerPath: string;
@@ -40,7 +41,7 @@ export function createStagingTemplateProducer(
           declaration: unknown;
           requiresRuntimeInputs: boolean;
         }>
-      >`SELECT project.id AS "projectID",staging.id AS "stagingAttemptID",staging.revision,
+      >`SELECT project.id AS "projectID",staging.id AS "stagingAttemptID",staging.factorybox_admission_id AS "admissionID",staging.revision,
           project.repository_url AS "repositoryURL",configuration.declaration->>'devcontainerPath' AS "devcontainerPath",
           artifact.runtime_host_image AS "runtimeHostImage",artifact.factorybox_profile AS profile,configuration.declaration,
           coalesce((SELECT write.manifest<>'{"variables":[],"registries":[]}'::jsonb
@@ -58,7 +59,19 @@ export function createStagingTemplateProducer(
       const profile = factoryboxRuntimeProfile.parse(candidate.profile);
       const declaration = stagingConfiguration.parse(candidate.declaration);
       const key = createHash("sha256")
-        .update(JSON.stringify({ ...candidate, profile, declaration }))
+        .update(
+          JSON.stringify({
+            projectID: candidate.projectID,
+            admissionID: candidate.admissionID,
+            revision: candidate.revision,
+            repositoryURL: candidate.repositoryURL,
+            devcontainerPath: candidate.devcontainerPath,
+            runtimeHostImage: candidate.runtimeHostImage,
+            profile,
+            declaration,
+            requiresRuntimeInputs: candidate.requiresRuntimeInputs,
+          }),
+        )
         .digest("hex");
       if (await store.hasTemplate(database.client, key)) return;
       const id = crypto.randomUUID();

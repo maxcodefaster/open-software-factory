@@ -212,6 +212,14 @@ retirement so private inputs have a native owner. An obsolete template waits for
 its children to retire. An unconfirmed native or import outcome remains retained for
 inspection rather than resetting attempted flags or repeating the create.
 
+A new Staging Attempt for unchanged promoted inputs does not invalidate prepared
+compute. Template keys exclude that Attempt ID. Planning, assignment and the durable
+Fork insertion guard require a healthy current promoted Attempt with the same revision,
+public App declaration, consumer image, worker profile, admission and protected-input
+deferral. Templates and Forks retain their original Staging ancestry; neither a retry
+nor reuse rewrites it. Missing, stopping or incompatible current Staging cannot authorize
+reuse, even when the previous template remains intact.
+
 An explicit Stop can retire execution on a missing, terminal or restarted original worker after exact Namespace
 and Pod UID checks. This records no invented native Delete receipt. It still removes only that
 Sandbox's private assignment and inputs. It never deletes or relabels the shared worker Pod,
