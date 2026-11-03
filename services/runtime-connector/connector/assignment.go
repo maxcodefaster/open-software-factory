@@ -47,6 +47,9 @@ type Assignment struct {
 	Prebuild               *PrebuildAssignment `json:"prebuild,omitempty"`
 	EffectiveConfiguration string              `json:"-"`
 	PrebuildCacheImage     string              `json:"-"`
+	PreparedImage          *PrebuildResult     `json:"preparedImage,omitempty"`
+	PublicImageBuild       bool                `json:"-"`
+	BuildEnvironmentSHA256 string              `json:"-"`
 	DeferRuntimeProcesses  bool                `json:"deferRuntimeProcesses,omitempty"`
 	containerOrigin        *containerOrigin
 }
@@ -102,6 +105,15 @@ func ReadAssignment(path string) (Assignment, error) {
 }
 
 func (assignment Assignment) Validate() error {
+	if assignment.PreparedImage != nil {
+		key, err := projectImageKey(assignment.PreparedImage.Image)
+		if err != nil || !regexpIdentity(assignment.PreparedImage.Identity) ||
+			!strings.HasSuffix(strings.Split(key, "@")[0], "/"+assignment.RepositoryIdentity) ||
+			assignment.ControlURL != "ws://unassigned.invalid/" ||
+			assignment.Prebuild != nil || assignment.EnvironmentVersion != nil {
+			return errors.New("prepared image must be an exact credential-free Project artifact")
+		}
+	}
 	if assignment.DeferRuntimeProcesses && assignment.ControlURL != "ws://unassigned.invalid/" {
 		return errors.New("required Runtime processes may be deferred only in unassigned Project preparation")
 	}

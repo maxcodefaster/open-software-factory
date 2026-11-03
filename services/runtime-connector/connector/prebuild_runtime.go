@@ -3,6 +3,7 @@ package connector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,28 @@ import (
 	"strings"
 	"time"
 )
+
+func publicImageBuild(environment runtimeEnvironment) bool {
+	if len(environment.Bundle.Registries) != 0 {
+		return false
+	}
+	for _, variable := range environment.Bundle.Variables {
+		if variable.Build {
+			return false
+		}
+	}
+	return true
+}
+
+func imageBuildEnvironmentSHA256(environment runtimeEnvironment) string {
+	if publicImageBuild(environment) {
+		return ""
+	}
+	// Development v1 and Main-Preview v1 can have different protected inputs.
+	// The validated bundle contains only bounded JSON primitives.
+	encoded, _ := json.Marshal(environment.Bundle)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
+}
 
 func runtimePrebuildRequest(ctx context.Context, assignment Assignment, token, method string, body []byte) ([]byte, error) {
 	endpoint, err := url.Parse(assignment.ControlURL)
@@ -63,6 +86,22 @@ func compatibleRuntimePrebuild(parent context.Context, assignment Assignment, to
 	if err != nil || json.Unmarshal(content, &result) != nil || !regexpIdentity(result.Identity) {
 		return ""
 	}
+	return compatiblePrebuild(ctx, assignment, result, readPrebuildConfiguration)
+}
+
+func compatiblePreparedPrebuild(parent context.Context, assignment Assignment) string {
+	if assignment.PreparedImage == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	return compatiblePrebuild(ctx, assignment, *assignment.PreparedImage, readPrebuildConfiguration)
+}
+
+func compatiblePrebuild(ctx context.Context, assignment Assignment, result PrebuildResult, read prebuildConfigurationReader) string {
+	if !regexpIdentity(result.Identity) {
+		return ""
+	}
 	key, err := projectImageKey(result.Image)
 	if err != nil {
 		return ""
@@ -75,7 +114,7 @@ func compatibleRuntimePrebuild(parent context.Context, assignment Assignment, to
 	if err != nil {
 		return ""
 	}
-	input, snapshot, err := preparePrebuildInputWith(ctx, assignment, PrebuildRequest{Commit: assignment.Revision, Platform: platform, ImageRepository: strings.Split(key, "@")[0]}, readPrebuildConfiguration)
+	input, snapshot, err := preparePrebuildInputWith(ctx, assignment, PrebuildRequest{Commit: assignment.Revision, Platform: platform, ImageRepository: strings.Split(key, "@")[0]}, read)
 	if err != nil {
 		return ""
 	}

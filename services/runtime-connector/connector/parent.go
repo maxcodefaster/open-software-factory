@@ -83,6 +83,8 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 	if err != nil {
 		return err
 	}
+	assignment.PublicImageBuild = publicImageBuild(environment)
+	assignment.BuildEnvironmentSHA256 = imageBuildEnvironmentSHA256(environment)
 	if assignment.EnvironmentVersion != nil {
 		files, err := prepareEnvironmentFiles(environment)
 		if err != nil {
@@ -191,21 +193,17 @@ func runParent(ctx context.Context, assignment Assignment, token string, childTo
 		return nil
 	}
 	if prepared == nil {
-		if err := prepareDevcontainerProject(ctx, assignment); err != nil {
-			control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
-			return err
-		}
 		assignment.PrebuildCacheImage = compatibleRuntimePrebuild(ctx, assignment, token)
 		if assignment.PrebuildCacheImage != "" {
 			path, cleanup, err := preparePrebuildConsumer(ctx, assignment, assignment.PrebuildCacheImage)
 			if err == nil {
 				defer cleanup()
 				assignment.EffectiveConfiguration = path
-				if _, err := validateDevcontainer(ctx, assignment); err != nil {
-					control.write(Message{Type: "status", Phase: "failed", Error: "Prepared image violates the resolved Dev Container boundary"})
-					return err
-				}
 			}
+		}
+		if err := prepareDevcontainerProject(ctx, assignment); err != nil {
+			control.write(Message{Type: "status", Phase: "failed", Error: err.Error()})
+			return err
 		}
 	}
 	preparation := prepareBrowserImage(ctx, func(ctx context.Context) error {

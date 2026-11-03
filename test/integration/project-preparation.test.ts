@@ -6,6 +6,7 @@ import { createRuntimeController } from "../../apps/factory/src/runtime/controll
 import { createFactoryboxExecution } from "../../apps/factory/src/runtime/factorybox";
 import { RuntimeHub } from "../../apps/factory/src/runtime/hub";
 import { createProjectPreparation } from "../../apps/factory/src/runtime/project-preparation";
+import { hashConnectorToken } from "../../packages/runtime-domain/src/identity";
 import { createKubernetesClient } from "../../packages/runtime-kubernetes/src/client";
 import { fixture } from "../fixtures/change-agent-turns";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -15,6 +16,86 @@ import {
   ownedRuntimeConfiguration,
 } from "../fixtures/runtime-configuration";
 import { fixtureValue } from "../fixtures/value";
+
+for (const inputs of ["runtime-only", "build-variable", "registry"] as const) {
+  test(`prebuild lookup handles ${inputs} changes without reusing protected image inputs`, async () => {
+    const process = await factoryProcess();
+    const database = process.connect();
+    try {
+      const token = "owned-public-image-consumer";
+      const owned = await fixture(undefined, undefined, database, token);
+      const revision = "a".repeat(40);
+      const producerID = crypto.randomUUID();
+      const consumerID = crypto.randomUUID();
+      const image = {
+        identity: "9".repeat(64),
+        image: `registry.test/open-factory/prebuilds/${owned.projectID}@sha256:${"8".repeat(64)}`,
+      };
+      const artifacts = {
+        factoryboxProfile: ownedFactoryboxProfile,
+        hostImages: {
+          development: `registry.test/runtime@sha256:${"d".repeat(64)}`,
+          build: `registry.test/runtime@sha256:${"d".repeat(64)}`,
+          verification: undefined,
+          staging: undefined,
+        },
+        browserToolsImage: `registry.test/browser@sha256:${"c".repeat(64)}`,
+      };
+      await database.client.begin(async (sql) => {
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${producerID},${owned.projectID},'prebuild',2,${revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${owned.userID})`;
+        await sql`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,
+          environment_version,runtime_attempt_id,state,identity,image)
+          VALUES(${crypto.randomUUID()},${owned.projectID},'development',${revision},0,${producerID},'succeeded',${image.identity},${image.image})`;
+        await freezeRuntimeArtifacts(sql, producerID, artifacts);
+        const manifest = {
+          variables: [
+            {
+              name: "APP_TOKEN",
+              runtime: true,
+              build: inputs === "build-variable",
+              verification: false,
+            },
+          ],
+          registries:
+            inputs === "registry" ? [{ host: "registry.private", verification: false }] : [],
+        };
+        const secret = `owned-input-${crypto.randomUUID()}`;
+        await sql`INSERT INTO factory.environment_write(command_id,project_id,environment,
+          base_version,fingerprint,manifest,secret_key,state,created_by,committed_at)
+          VALUES(${crypto.randomUUID()},${owned.projectID},'development',0,${"e".repeat(64)},
+            ${JSON.stringify(manifest)}::text::jsonb,${secret},'committed',${owned.userID},now())`;
+        await sql`INSERT INTO factory.project_environment(project_id,environment,version,manifest,secret_key)
+          SELECT project_id,environment,1,manifest,secret_key FROM factory.environment_write WHERE secret_key=${secret}`;
+        await sql`UPDATE factory.runtime_attempt SET state='stopped',stop_intended_at=now(),stopped_at=now()
+          WHERE id=${owned.attemptID}`;
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${consumerID},${owned.projectID},${owned.changeID},${owned.workspaceID},3,${revision},'create-intended',${hashConnectorToken(token)},${"b".repeat(64)},now(),${owned.userID})`;
+        await freezeRuntimeArtifacts(sql, consumerID, artifacts);
+      });
+      const preparation = createProjectPreparation({
+        database,
+        head: async () => revision,
+        start: async () => {},
+      });
+      const response = await preparation.endpoint(
+        new Request(`https://factory.test/internal/project-image/${consumerID}`, {
+          headers: { authorization: `Bearer ${token}`, "x-factory-runtime-generation": "3" },
+        }),
+        consumerID,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(inputs === "runtime-only" ? image : null);
+      const [classification] = await database.client<Array<{ empty: boolean; unknown: boolean }>>`
+        SELECT factory.image_build_is_public(NULL) AS empty,
+          factory.image_build_is_public('unknown-secret-metadata') AS unknown`;
+      expect(classification).toEqual({ empty: true, unknown: false });
+    } finally {
+      await database.client.end();
+      await process.dispose();
+    }
+  }, 60_000);
+}
 
 test("automatic preparation coalesces exact jobs, bounds producers and fences results to runtime environment", async () => {
   const process = await factoryProcess();

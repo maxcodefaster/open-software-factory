@@ -112,6 +112,14 @@ func prepareReservedProject(ctx context.Context, assignment Assignment) (*prepar
 	if err := checkoutProject(ctx, assignment); err != nil {
 		return nil, err
 	}
+	if image := compatiblePreparedPrebuild(ctx, assignment); image != "" {
+		path, cleanup, err := preparePrebuildConsumer(ctx, assignment, image)
+		if err == nil {
+			defer cleanup()
+			assignment.PrebuildCacheImage = image
+			assignment.EffectiveConfiguration = path
+		}
+	}
 	if err := prepareDevcontainerProject(ctx, assignment); err != nil {
 		return nil, err
 	}

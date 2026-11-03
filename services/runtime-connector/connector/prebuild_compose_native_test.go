@@ -28,7 +28,7 @@ func TestPrebuildComposeNative(t *testing.T) {
 	if kind == "" {
 		kind = "build"
 	}
-	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" {
+	if kind != "build" && kind != "image-only" && kind != "build-no-features" && kind != "dependency-seed" && kind != "prepared-image" {
 		t.Fatal("unknown native Compose proof recipe")
 	}
 	platform := "linux/" + runtime.GOARCH
@@ -158,6 +158,13 @@ exec %q "$@"
 		t.Fatal("owned base publication changed the original native payload")
 	}
 	root := filepath.Join(t.TempDir(), "project")
+	if kind == "prepared-image" {
+		root = "/home/coder/project"
+		if _, err := os.Lstat(root); !os.IsNotExist(err) {
+			t.Fatal("owned prepared-image proof cannot replace an existing canonical checkout")
+		}
+		t.Cleanup(func() { os.RemoveAll(root) })
+	}
 	files := map[string]string{
 		".devcontainer/devcontainer.json":                 `{"dockerComposeFile":"compose.json","service":"workspace","workspaceFolder":"/workspace/project","remoteUser":"root","features":{"./feature":{}},"onCreateCommand":["node","-e","const fs=require('fs');fs.cpSync('/opt/project-seed','/workspace/project/dependency',{recursive:true});fs.appendFileSync('/workspace/project/create-hook','required create hook\\n')"],"postCreateCommand":["node","-e","require('fs').appendFileSync('/workspace/project/project-hook','required project hook\\n')"]}`,
 		".devcontainer/compose.json":                      `{"name":"owned_compose_project","services":{"workspace":{"build":{"context":"..","dockerfile":".devcontainer/Dockerfile"},"volumes":["..:/workspace/project"],"cap_drop":["ALL"],"command":["sleep","infinity"]},"support":{"image":"` + base + `","command":["sleep","infinity"]}}}`,
@@ -225,6 +232,13 @@ exec %q "$@"
 	if kind == "build-no-features" {
 		assignment.ComposeProjectName = "project_devcontainer"
 	}
+	if kind == "prepared-image" {
+		version := uint64(9)
+		assignment.EnvironmentVersion = &version
+		assignment.PublicImageBuild = publicImageBuild(runtimeEnvironment{Version: version, Bundle: environmentBundle{
+			Variables: []environmentVariable{{Name: "RUNTIME_ONLY", Value: "never-capture", Runtime: true}},
+		}})
+	}
 	request := PrebuildRequest{Commit: commit, Platform: platform, ImageRepository: "127.0.0.1:5000/prebuilds/owned-compose-project"}
 	initialTrims, _ := os.ReadFile("/tmp/owned-cache-trims")
 	started := time.Now()
@@ -286,25 +300,46 @@ exec %q "$@"
 	assignment.RegistryCAFile = grants.caFile
 	ctx = context.WithValue(ctx, dockerConfigContextKey{}, grants.dockerConfig)
 	ctx = context.WithValue(ctx, registryCAContextKey{}, grants.caFile)
-	if kind == "dependency-seed" {
+	if kind == "dependency-seed" || kind == "prepared-image" {
 		assignment.EnvironmentVersion = nil
 		assignment.RuntimeEnvironment = nil
 		assignment.EnvironmentSecretsFile = ""
 		assignment.DockerConfigDirectory = ""
 		assignment.RegistryCAFile = ""
 	}
-	path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cleanup()
-	assignment.EffectiveConfiguration = path
-	assignment.PrebuildCacheImage = result.Image
-	if _, err := validateDevcontainer(ctx, assignment); err != nil {
-		t.Fatal(err)
+	if kind != "prepared-image" {
+		path, cleanup, err := preparePrebuildConsumer(ctx, assignment, result.Image)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		assignment.EffectiveConfiguration = path
+		assignment.PrebuildCacheImage = result.Image
+		if _, err := validateDevcontainer(ctx, assignment); err != nil {
+			t.Fatal(err)
+		}
 	}
 	started = time.Now()
-	container, err := startDevcontainer(ctx, assignment)
+	var container devcontainerResult
+	if kind == "prepared-image" {
+		assignment.ControlURL = "ws://unassigned.invalid/"
+		assignment.ConnectorStateDir = "/home/coder/connector-state"
+		assignment.PreparedImage = &result
+		assignment.DeferRuntimeProcesses = true
+		assignment.Channels = []Channel{{Name: "app", Kind: "app", Target: "http://127.0.0.1:19472", HealthPath: "/"}}
+		assignment.Processes = []Process{{Name: "app", Command: []string{"node", "server.js"}}}
+		project, prepareErr := prepareReservedProject(context.Background(), assignment)
+		err = prepareErr
+		if project != nil {
+			container = project.result
+			assignment = project.assignment
+			if assignment.PrebuildCacheImage != result.Image || assignment.EffectiveConfiguration == "" {
+				t.Fatal("real credential-free template fell back to rebuilding the Project image")
+			}
+		}
+	} else {
+		container, err = startDevcontainer(ctx, assignment)
+	}
 	if err != nil {
 		diagnostic, _ := os.ReadFile("/tmp/owned-devcontainer-up.log")
 		if len(diagnostic) > 24*1024 {
@@ -460,6 +495,7 @@ exec %q "$@"
 		"producerGraphEvictedBeforeConsumer": true,
 		"freshGrantDependencyRebuildMS":      dependencyRebuildMS,
 		"nonRootPreparedChildArtifacts":      kind == "build-no-features",
+		"credentialFreePreparedImage":        kind == "prepared-image",
 		"modelCalls":                         0, "projectCredentials": false,
 	}
 	encoded, _ := json.Marshal(summary)

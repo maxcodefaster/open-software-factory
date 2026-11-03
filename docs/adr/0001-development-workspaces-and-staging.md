@@ -83,7 +83,9 @@ Persist deterministic intent first, coalesce superseded inputs and expire interr
 minutes. Worker readiness is infrastructure admission, not a running image producer. Prebuild
 Attempts use the same observed native Sandbox Start as other roles; the preparation coordinator
 separately owns job expiry and teardown. A confirmed image is reusable only for its exact commit,
-recipe, resolved image/Feature inputs, native platform and environment version. Normal image tags
+recipe, resolved image/Feature inputs and native platform. Builds with protected build
+variables or Project registry grants also bind the exact environment version; runtime-only
+values do not invalidate a credential-free image. Normal image tags
 and JSONC remain repository-owned;
 resolve and freeze only an isolated build snapshot. The consumer uses a temporary image configuration
 and upstream image metadata so Feature lifecycle hooks still run. Dirty source, changed inputs,

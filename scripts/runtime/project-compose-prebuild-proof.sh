@@ -38,7 +38,7 @@ cleanup() {
     actual="$(docker inspect --format '{{ index .Config.Labels "factory.compose-prebuild-proof" }}' "$name")"
     if [[ "$actual" != "$owner" ]]; then echo "Owned Compose proof identity changed" >&2; exit 1; fi
     docker cp "$name:/tmp/compose-prebuild-result.json" "$directory/native-result.json" 2>/dev/null || true
-    for kind in build image-only build-no-features dependency-seed; do
+    for kind in build image-only build-no-features dependency-seed prepared-image; do
       docker cp "$name:/tmp/compose-prebuild-result-$kind.json" "$directory/native-$kind-result.json" 2>/dev/null || true
     done
     docker cp "$name:/tmp/owned-devcontainer-build.log" "$directory/devcontainer-build.log" 2>/dev/null || true
@@ -85,7 +85,7 @@ docker create --pull=never --name "$name" --label "factory.compose-prebuild-proo
       if ! kill -0 "$daemon" 2>/dev/null; then cat /tmp/owned-dockerd.log; exit 1; fi
       sleep 0.1
     done
-    for kind in build image-only build-no-features dependency-seed; do
+    for kind in build image-only build-no-features dependency-seed prepared-image; do
       docker load --input /tmp/images.tar >/dev/null
       export FACTORY_COMPOSE_PROOF_NODE="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_NODE_REF")"
       export FACTORY_COMPOSE_PROOF_REGISTRY="$(docker image inspect --format "{{.Id}}" "$FACTORY_COMPOSE_PROOF_REGISTRY_REF")"

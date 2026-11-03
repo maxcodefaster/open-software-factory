@@ -154,8 +154,9 @@ export function createProjectPreparation(input: {
             jobVersion: number | null;
             imageRepository: string | null;
             jobEnvironment: string | null;
+            publicBuild: boolean;
           }>
-        >`SELECT attempt.project_id AS "projectID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",split_part(artifact.runtime_host_image,'/',1)||'/open-factory/prebuilds/'||attempt.project_id::text AS "imageRepository" FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id LEFT JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id AND attempt.isolated_kind='prebuild' WHERE attempt.id=${attemptID} AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL FOR SHARE OF attempt`;
+        >`SELECT attempt.project_id AS "projectID",attempt.revision,attempt.generation::float8 AS generation,attempt.parent_connector_token_hash AS hash,intent.environment,intent.version::float8 AS version,factory.image_build_is_public(intent.secret_key) AS "publicBuild",preparation.id AS "jobID",preparation.revision AS "jobRevision",preparation.environment_version::float8 AS "jobVersion",preparation.environment AS "jobEnvironment",split_part(artifact.runtime_host_image,'/',1)||'/open-factory/prebuilds/'||attempt.project_id::text AS "imageRepository" FROM factory.runtime_attempt attempt JOIN factory.runtime_environment_intent intent ON intent.runtime_attempt_id=attempt.id LEFT JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=attempt.id LEFT JOIN factory.project_image_preparation preparation ON preparation.runtime_attempt_id=attempt.id AND attempt.isolated_kind='prebuild' WHERE attempt.id=${attemptID} AND attempt.state IN ('create-intended','starting','ready') AND attempt.stop_intended_at IS NULL FOR SHARE OF attempt`;
         const hash = hashConnectorToken(token);
         if (
           !attempt ||
@@ -167,7 +168,15 @@ export function createProjectPreparation(input: {
         if (request.method === "GET") {
           const [image] = await transaction<
             Array<{ identity: string; image: string }>
-          >`SELECT identity,image FROM factory.project_image_preparation WHERE project_id=${attempt.projectID} AND environment=${attempt.environment} AND environment_version=${attempt.version} AND revision=${attempt.revision} AND state='succeeded' ORDER BY updated_at DESC LIMIT 1`;
+          >`SELECT preparation.identity,preparation.image FROM factory.project_image_preparation preparation
+            JOIN factory.runtime_environment_intent producer_environment ON producer_environment.runtime_attempt_id=preparation.runtime_attempt_id
+              AND producer_environment.environment=preparation.environment AND producer_environment.version=preparation.environment_version
+            WHERE preparation.project_id=${attempt.projectID} AND preparation.environment=${attempt.environment}
+              AND preparation.revision=${attempt.revision} AND preparation.state='succeeded'
+              AND (preparation.environment_version=${attempt.version} OR
+                (${attempt.publicBuild} AND factory.image_build_is_public(producer_environment.secret_key)))
+            ORDER BY CASE WHEN ${attempt.publicBuild} THEN preparation.environment_version ELSE 0 END,
+              preparation.updated_at DESC LIMIT 1`;
           return Response.json(image ?? null, { headers: { "cache-control": "no-store" } });
         }
         if (

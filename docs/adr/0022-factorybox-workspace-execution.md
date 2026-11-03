@@ -183,6 +183,16 @@ The public recipe records that deferral, never the input values or Environment v
 After assignment, fresh authority starts all required processes through normal preparation;
 the dependency-only template cannot claim to have already-running Apps. Hooks that themselves
 require unavailable protected inputs still fail closed and use ordinary fresh execution.
+A clean template may reuse a published Project image built without build variables or
+Project registry grants. The frozen recipe carries only its digest and input fingerprint.
+The Connector checks committed source, lockfiles, resolved image/Feature inputs, native
+architecture, CLI identity and image ownership in its private daemon before using the
+normal prebuild override. Required hooks and resolved-container checks still run.
+Runtime-only Environment version changes do not change that image fingerprint or make
+the template capture Runtime values. Protected build inputs retain their exact Environment
+version and a digest of the resolved protected bundle, never its values. Independent
+Development and Main-Preview version numbers alone cannot identify the same build.
+Unknown build metadata or a mismatching image uses ordinary compliant preparation.
 A template that never reached confirmed standby is not repeatedly cold-built for the
 same immutable basis after cleanup. A new healthy Staging basis or changed artifact
 inputs permits a new template; uncertain external outcomes retain their original owner.

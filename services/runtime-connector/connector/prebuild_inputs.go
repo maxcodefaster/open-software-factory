@@ -280,8 +280,9 @@ func preparePrebuildInputWith(ctx context.Context, assignment Assignment, reques
 		input.Version = 2
 		input.ComposeService = config.Service
 	}
-	if assignment.EnvironmentVersion != nil {
+	if assignment.EnvironmentVersion != nil && !assignment.PublicImageBuild {
 		input.EnvironmentVersion = *assignment.EnvironmentVersion
+		input.EnvironmentSHA256 = assignment.BuildEnvironmentSHA256
 	}
 	complete = true
 	return input, snapshot, nil

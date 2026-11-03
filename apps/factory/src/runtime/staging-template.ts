@@ -40,6 +40,7 @@ export function createStagingTemplateProducer(
           profile: unknown;
           declaration: unknown;
           requiresRuntimeInputs: boolean;
+          preparedImage: { identity: string; image: string } | null;
         }>
       >`SELECT project.id AS "projectID",staging.id AS "stagingAttemptID",staging.factorybox_admission_id AS "admissionID",staging.revision,
           project.repository_url AS "repositoryURL",configuration.declaration->>'devcontainerPath' AS "devcontainerPath",
@@ -47,11 +48,26 @@ export function createStagingTemplateProducer(
           coalesce((SELECT write.manifest<>'{"variables":[],"registries":[]}'::jsonb
             FROM factory.runtime_environment_intent environment
             JOIN factory.environment_write write ON write.secret_key=environment.secret_key AND write.state='committed'
-            WHERE environment.runtime_attempt_id=staging.id),false) AS "requiresRuntimeInputs"
+            WHERE environment.runtime_attempt_id=staging.id),false) AS "requiresRuntimeInputs",
+          prepared.metadata AS "preparedImage"
         FROM factory.staging_preview preview JOIN factory.project project ON project.id=preview.project_id
         JOIN factory.runtime_attempt staging ON staging.id=preview.runtime_attempt_id AND staging.revision=preview.revision
         JOIN factory.runtime_artifact_intent artifact ON artifact.runtime_attempt_id=staging.id
         JOIN factory.staging_configuration configuration ON configuration.runtime_attempt_id=staging.id
+        LEFT JOIN LATERAL (
+          SELECT jsonb_build_object('identity',preparation.identity,'image',preparation.image) AS metadata
+          FROM factory.project_image_preparation preparation
+          JOIN factory.runtime_attempt producer ON producer.id=preparation.runtime_attempt_id
+            AND producer.project_id=project.id AND producer.revision=staging.revision AND producer.isolated_kind='prebuild'
+          JOIN factory.runtime_environment_intent environment ON environment.runtime_attempt_id=producer.id
+            AND environment.environment='main-preview' AND environment.version=preparation.environment_version
+            AND factory.image_build_is_public(environment.secret_key)
+          JOIN factory.runtime_artifact_intent producer_artifact ON producer_artifact.runtime_attempt_id=producer.id
+            AND producer_artifact.factorybox_profile->>'architecture'=artifact.factorybox_profile->>'architecture'
+          WHERE preparation.project_id=project.id AND preparation.revision=staging.revision
+            AND preparation.environment='main-preview' AND preparation.state='succeeded'
+          ORDER BY preparation.environment_version,preparation.created_at DESC LIMIT 1
+        ) prepared ON true
         WHERE staging.state='ready' AND staging.stop_intended_at IS NULL
         ORDER BY greatest(preview.updated_at,coalesce((SELECT max(created_at) FROM factory.runtime_attempt demand
           WHERE demand.project_id=project.id),preview.updated_at)) DESC,project.id LIMIT 1`;
@@ -70,6 +86,7 @@ export function createStagingTemplateProducer(
             profile,
             declaration,
             requiresRuntimeInputs: candidate.requiresRuntimeInputs,
+            preparedImage: candidate.preparedImage,
           }),
         )
         .digest("hex");
@@ -91,6 +108,7 @@ export function createStagingTemplateProducer(
         connectorStateDir: "/home/coder/connector-state",
         channels: declaration.channels,
         processes: declaration.processes,
+        ...(candidate.preparedImage ? { preparedImage: candidate.preparedImage } : {}),
         ...(candidate.requiresRuntimeInputs ? { deferRuntimeProcesses: true } : {}),
       };
       await database.client.begin((sql) =>

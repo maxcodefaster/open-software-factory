@@ -49,6 +49,7 @@ type prebuildInput struct {
 	CLIIntegrity       string   `json:"cliIntegrity"`
 	ImmutableInputs    []string `json:"immutableInputs"`
 	EnvironmentVersion uint64   `json:"environmentVersion"`
+	EnvironmentSHA256  string   `json:"environmentSHA256,omitempty"`
 	ComposeService     string   `json:"composeService,omitempty"`
 }
 

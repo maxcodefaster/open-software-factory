@@ -20,6 +20,71 @@ const profile = {
   claimGiB: 32 as const,
 };
 
+for (const basis of ["credential-free", "runtime-only", "protected", "other revision"] as const) {
+  test(`clean templates reuse only a ${basis} prebuild when its inputs are safe`, async () => {
+    const host = await factoryProcess();
+    const database = host.connect();
+    const store = createReserveStore(defaultReservePolicy, images, profile);
+    let owned: Awaited<ReturnType<typeof executionPoolFixture>> | undefined;
+    try {
+      owned = await executionPoolFixture(database, store, profile, images);
+      const prebuildID = crypto.randomUUID();
+      const version = basis === "protected" || basis === "runtime-only" ? 1 : 0;
+      const revision = basis === "other revision" ? "7".repeat(40) : owned.revision;
+      const preparedImage = {
+        identity: "9".repeat(64),
+        image: `registry.invalid/open-factory/prebuilds/${owned.projectID}@sha256:${"8".repeat(64)}`,
+      };
+      await database.client.begin(async (sql) => {
+        if (basis === "protected" || basis === "runtime-only") {
+          await sql`INSERT INTO factory.environment_write(command_id,project_id,environment,
+            base_version,fingerprint,manifest,secret_key,state,created_by,committed_at)
+            VALUES(${crypto.randomUUID()},${fixtureValue(owned, "owned").projectID},'main-preview',0,${"e".repeat(64)},
+              ${JSON.stringify({ variables: [{ name: "APP_TOKEN", runtime: true, build: basis === "protected", verification: false }], registries: [] })}::text::jsonb,
+              'owned-secret-must-not-be-captured','committed',${fixtureValue(owned, "owned").userID},now())`;
+          await sql`INSERT INTO factory.project_environment(project_id,environment,version,manifest,secret_key)
+            SELECT project_id,environment,1,manifest,secret_key FROM factory.environment_write
+            WHERE secret_key='owned-secret-must-not-be-captured'`;
+        }
+        await sql`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+          VALUES(${prebuildID},${fixtureValue(owned, "owned").projectID},'prebuild',2,${revision},'create-intended',${"a".repeat(64)},${"b".repeat(64)},now(),${fixtureValue(owned, "owned").userID})`;
+        await sql`INSERT INTO factory.project_image_preparation(id,project_id,environment,revision,
+          environment_version,runtime_attempt_id,state,identity,image)
+          VALUES(${crypto.randomUUID()},${fixtureValue(owned, "owned").projectID},'main-preview',
+            ${revision},${version},${prebuildID},'succeeded',
+            ${preparedImage.identity},${preparedImage.image})`;
+        await freezeRuntimeArtifacts(
+          sql,
+          prebuildID,
+          fixtureValue(owned, "owned").artifactConfiguration,
+        );
+      });
+      const offers: Array<{ recipe: unknown }> = [];
+      await createStagingTemplateProducer(
+        database,
+        {
+          ...store,
+          hasTemplate: async () => false,
+          async offerTemplate(_sql, input) {
+            offers.push({ recipe: input.recipe });
+          },
+        },
+        images,
+      ).refresh();
+      expect(offers).toHaveLength(1);
+      if (basis === "credential-free" || basis === "runtime-only")
+        expect(offers[0]?.recipe).toMatchObject({ preparedImage });
+      else expect(offers[0]?.recipe).not.toHaveProperty("preparedImage");
+      for (const hidden of ["environmentVersion", "owned-secret-must-not-be-captured"])
+        expect(JSON.stringify(offers)).not.toContain(hidden);
+    } finally {
+      await owned?.cleanup();
+      await database.client.end({ timeout: 2 });
+      await host.dispose();
+    }
+  }, 60_000);
+}
+
 test("an identical healthy Staging retry retains its prepared template and original Fork ancestry", async () => {
   const host = await factoryProcess();
   const database = host.connect();
