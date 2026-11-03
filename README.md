@@ -135,6 +135,9 @@ Preparation checks that same decision before exporting a consumer image and agai
 extraction or private mounts. A refused check keeps preparation unattempted and can continue when
 capacity returns. If dispatched preparation has no completion receipt, reconciliation preserves its
 original failure diagnostic rather than replacing it with a generic pending message.
+Verified pre-dispatch capacity waiting does not consume the Sandbox's native startup window.
+When capacity returns, the same admitted request receives its full bounded lifecycle window.
+Unknown outcomes retain their existing deadline and cannot use this admission-wait path.
 A confirmed native Start with its Parent connected remains preparing while Project setup hooks
 finish. Expiry of the native startup observation window does not report those hooks as failed.
 Connector readiness, actual setup errors and exact-identity transport recovery still own the outcome.

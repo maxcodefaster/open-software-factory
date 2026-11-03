@@ -24,6 +24,7 @@ import {
   factoryboxRuntimeDeclaration,
   factoryboxRuntimeRequest,
 } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { FactoryboxCapacityRefusedError } from "../../packages/runtime-kubernetes/src/factorybox-worker";
 import { fixture } from "../fixtures/change-agent-turns";
 import { executionPoolFixture } from "../fixtures/execution-pool";
 import { eventually, factoryProcess } from "../fixtures/factory-process";
@@ -113,7 +114,8 @@ test.each([
     let reads = 0,
       sourceReads = 0,
       starts = 0,
-      remaining: number | undefined;
+      remaining: number | undefined,
+      resumedRemaining: number | undefined;
     try {
       const [attempt] = await database.client<
         { namespace: string; podName: string; workerID: string }[]
@@ -187,12 +189,19 @@ test.each([
           async ensureStarted(_id, _resources, deadline) {
             starts++;
             if (starts > 1 && scenario.startsWith("capacity returns")) {
+              resumedRemaining = deadline === undefined ? undefined : deadline - clockValue;
               await database.client`UPDATE factory.runtime_attempt SET state='ready',failure=NULL
                 WHERE id=${owned.attemptID}`;
               return;
             }
             if (deadline === undefined) throw new Error("Missing Sandbox lifecycle deadline");
             remaining = deadline - clockValue;
+            if (scenario.startsWith("capacity returns")) {
+              clockValue = deadline - 1;
+              throw new FactoryboxCapacityRefusedError(
+                "Native operating storage capacity is unavailable",
+              );
+            }
             if (scenario !== "repeated refusal" || starts >= 3) clockValue = deadline + 1;
             throw new Error("Native operating storage capacity is unavailable");
           },
@@ -205,6 +214,20 @@ test.each([
         (value) => value?.failure === "Native operating storage capacity is unavailable",
         "Specific native failure was not observed",
       );
+      if (scenario.startsWith("capacity returns")) {
+        await eventually(
+          () => controller.get(owned.attemptID),
+          (value) => value?.state === "ready",
+          "Known pre-dispatch waiting did not continue automatically when capacity returned",
+        );
+        expect(resumedRemaining).toBeCloseTo(420_000, 6);
+        expect(starts).toBe(2);
+        expect(sourceReads).toBe(1);
+        await controller.drainComputeWaits();
+        await Bun.sleep(1_100);
+        expect(starts).toBe(2);
+        return;
+      }
       const failureTimestamp = async () => {
         const [current] = await database.client<Array<{ updatedAt: string }>>`
           SELECT updated_at::text AS "updatedAt" FROM factory.runtime_attempt
@@ -227,21 +250,8 @@ test.each([
       expect((await controller.get(owned.attemptID))?.state).toBe("starting");
       if (resumedPreparation) {
         await controller.drainComputeWaits();
-        if (scenario.startsWith("capacity returns")) {
-          await eventually(
-            () => controller.get(owned.attemptID),
-            (value) => value?.state === "ready",
-            "The same unattempted Sandbox did not continue when capacity returned",
-          );
-          expect(starts).toBe(2);
-          expect(sourceReads).toBe(2);
-          await controller.drainComputeWaits();
-          expect(starts).toBe(2);
-          await Bun.sleep(1_100);
-        } else {
-          expect(sourceReads).toBe(1);
-          expect(starts).toBe(1);
-        }
+        expect(sourceReads).toBe(1);
+        expect(starts).toBe(1);
       }
     } finally {
       clock.mockRestore();

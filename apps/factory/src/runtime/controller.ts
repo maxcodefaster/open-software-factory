@@ -20,6 +20,7 @@ import {
   factoryboxAssignmentSecret,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-location";
 import { configuredFactoryboxRuntimeProfile } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
+import { FactoryboxCapacityRefusedError } from "../../../../packages/runtime-kubernetes/src/factorybox-worker";
 import { renderRuntimeResources } from "../../../../packages/runtime-kubernetes/src/manifest";
 import {
   parseSystemContract,
@@ -666,6 +667,12 @@ export function createRuntimeController(
               current.observedAt,
             );
         } catch (cause) {
+          if (cause instanceof FactoryboxCapacityRefusedError) {
+            // A verified refusal precedes native dispatch. Admission waiting
+            // must not spend the Sandbox's qualified lifecycle window.
+            // Unknown outcomes keep the original deadline and are not replayed.
+            deadline = performance.now() + 420_000;
+          }
           const failure =
             cause instanceof Error ? cause.message : "Factorybox operation is unconfirmed";
           await database.client`UPDATE factory.runtime_attempt SET failure=${failure},updated_at=now()
