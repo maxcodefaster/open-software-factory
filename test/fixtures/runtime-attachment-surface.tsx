@@ -49,7 +49,7 @@ function Surface() {
               title="Preview"
               attemptID={attemptID}
               active={!params.has("inactive")}
-              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("starting") ? "starting-document" : params.has("connection-error") ? "failed-document" : "document"}`}
+              url={`${appRuntimeOrigin(location.origin, attemptID, "app")}/${params.has("late-failure") ? "late-failure-document" : params.has("starting") ? "starting-document" : params.has("connection-error") ? "failed-document" : "document"}`}
               loadingLabel="Opening Preview…"
             />
           }

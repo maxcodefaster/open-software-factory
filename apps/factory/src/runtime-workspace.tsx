@@ -327,7 +327,8 @@ function AttachedRuntimeFrame(props: {
             document?.contentType === "application/json" &&
             new URL(document.URL).pathname === "/api/runtime-access";
           const rejected = accessRejected || documentFailed();
-          if (!rejected) attached = true;
+          // A failed cross-origin document also fires load. Only the Preview
+          // bridge can confirm attachment and suppress retries over human work.
           setPhase(rejected ? "failed" : "loaded");
           if (!rejected) usePreview(activePreviewID());
         }}

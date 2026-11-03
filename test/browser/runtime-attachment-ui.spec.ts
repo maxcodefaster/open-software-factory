@@ -34,8 +34,28 @@ test.beforeAll(async () => {
         configureServer(server) {
           server.middlewares.use(async (request, response, next) => {
             const path = request.url?.split("?")[0];
-            if (["/document", "/failed-document", "/starting-document"].includes(path ?? "")) {
+            if (
+              [
+                "/document",
+                "/failed-document",
+                "/starting-document",
+                "/late-failure-document",
+              ].includes(path ?? "")
+            ) {
               documents++;
+              if (path === "/late-failure-document" && documents === 1) {
+                const failure = previewAttachmentFailure(
+                  new Request(`${origin}/runtime/${attemptID}/preview/app/`, {
+                    headers: { "sec-fetch-mode": "navigate" },
+                  }),
+                  origin,
+                  Response.json({ error: "Runtime transport is not ready" }, { status: 503 }),
+                );
+                response.writeHead(failure.status, Object.fromEntries(failure.headers));
+                // Deliver the real failed document first. The test posts its
+                // failure from that same frame only after iframe load fires.
+                return response.end((await failure.text()).replace(/<script>.*?<\/script>/s, ""));
+              }
               if (path === "/starting-document" && documents <= 2) {
                 const navigation = new Request(`${origin}/runtime/${attemptID}/preview/app/`, {
                   headers: { "sec-fetch-mode": "navigate" },
@@ -209,6 +229,37 @@ test("a cold App reconnects its initial Preview document without another Start",
   } finally {
     await touch.close();
   }
+});
+
+test("a failed Preview document can report after iframe load without losing its initial retry", async ({
+  page,
+}) => {
+  bridgeGate.resolve();
+  imageGate.resolve();
+  await page.clock.install();
+  await page.goto(`${origin}/runtime-attachment.html?late-failure=1`);
+  const connection = page.getByRole("status", { name: "Preview connection" });
+  const errorDocument = page
+    .frameLocator('iframe[title="Factory Preview"]')
+    .getByText("Could not open Preview. Reload this view to retry.", { exact: true });
+  await expect(errorDocument).toBeVisible();
+  await errorDocument.evaluate((_, factoryOrigin) => {
+    window.parent.postMessage(
+      { type: "factory-preview-document-failed", retryable: true },
+      factoryOrigin,
+    );
+  }, origin);
+  await expect(connection).toContainText("Reconnecting");
+  expect(documents).toBe(1);
+  await page.screenshot({ path: `${evidence}/preview-failure-after-load.png` });
+  await page.clock.fastForward(1000);
+  await expect(connection).toHaveCount(0, { timeout: 3000 });
+  await expect(
+    page.frameLocator('iframe[title="Factory Preview"]').getByText("Usable Preview document"),
+  ).toBeVisible();
+  expect(documents).toBe(2);
+  await expect(page.locator("iframe")).toHaveAttribute("data-runtime-attempt-id", attemptID);
+  await page.screenshot({ path: `${evidence}/preview-reconnected-after-load.png` });
 });
 
 test("an inactive Preview does not keep retrying its unavailable attachment", async ({ page }) => {
