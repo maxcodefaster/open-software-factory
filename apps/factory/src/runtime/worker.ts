@@ -1,8 +1,8 @@
-import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import { isDeepStrictEqual } from "node:util";
 import type { TransactionSql } from "postgres";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { nativeLifecycleWindowMS } from "../../../../packages/runtime-domain/src/timing";
 import {
   type KubernetesClient,
   requireRuntimePodArtifacts,
@@ -430,8 +430,12 @@ export function createFactoryboxWorker(
         const pod = await kubernetes.getPod(location.namespace, location.podName);
         if (pod && !worker.attempted)
           throw new Error("Refusing a worker Pod without its persisted create attempt");
-        if (worker.podUID && (!pod || pod.uid !== worker.podUID))
-          throw new Error("Original Factory worker disappeared or its UID changed");
+        if (worker.podUID && !pod)
+          throw new Error(
+            "Original Factory worker Pod no longer exists (its node was deleted or replaced, or the Pod object was removed). Its termination was not observed, so no replacement was created. Source and the store claim are retained; restore the original node and Pod object.",
+          );
+        if (worker.podUID && pod?.uid !== worker.podUID)
+          throw new Error("Original Factory worker UID changed");
         if (!pod && worker.attempted)
           throw new Error("Factory worker creation is unconfirmed; refusing another create");
         const storeClaimDeclaration = declared.find(

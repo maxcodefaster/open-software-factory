@@ -1,0 +1,118 @@
+{{- /*
+`helm test RELEASE` runs scripts/kubernetes/preflight.ts as this Job. It checks the configured
+worker node, storage class and Pod admission, and prints PASS/WARN/FAIL lines with the exact fix.
+Helm creates these hook resources only while the test runs and deletes them after success.
+The ServiceAccount is separate from Factory's. It can create one throwaway `factory-preflight-*`
+Namespace with a privileged probe Pod (the same trust Factory's own ServiceAccount already holds
+for worker Pods), and the script deletes that Namespace before it exits.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "factory.name" . }}-preflight
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Namespace }}-{{ include "factory.name" . }}-preflight
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
+  - apiGroups: ["storage.k8s.io"]
+    resources: [storageclasses, csinodes]
+    verbs: [get, list]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, create, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Namespace }}-{{ include "factory.name" . }}-preflight
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "-4"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "factory.name" . }}-preflight
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Namespace }}-{{ include "factory.name" . }}-preflight
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "factory.name" . }}-preflight
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 1500
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: preflight
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      restartPolicy: Never
+      serviceAccountName: {{ include "factory.name" . }}-preflight
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: preflight
+          image: {{ include "factory.image" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command: [bun, scripts/kubernetes/preflight.ts, --probe-timeout-seconds, "900"]
+          securityContext:
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
+          envFrom:
+            - configMapRef: {name: "{{ include "factory.name" . }}-config"}
+          env:
+            - name: HOME
+              value: /tmp
+            - name: FACTORY_PREFLIGHT_NAMESPACE
+              valueFrom:
+                fieldRef: {fieldPath: metadata.namespace}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}

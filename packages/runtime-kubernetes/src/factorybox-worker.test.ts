@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import type { runCommand } from "./command";
 import {
   executeFactoryboxOperation,
+  FactoryboxWorkerLostError,
   type FactoryboxWorkerRequest,
   factoryboxOperation,
   factoryboxOperationFailure,
@@ -1017,4 +1018,43 @@ test("zero exit alone cannot confirm an unrelated pause or incomplete resume", a
       f.run,
     ),
   ).rejects.toThrow("exact pause/resume");
+});
+
+test("a managed node's image-upgraded kernel release passes only through an explicit policy", async () => {
+  const managed = { ...request, kernel: "5.15.0-*-azure,6.8.0-*-azure" };
+  const f = fixture(managed);
+  for (const release of ["5.15.0-1068-azure", "6.8.0-1015-azure"]) {
+    f.node.status.nodeInfo.kernelVersion = release;
+    await inspectFactoryboxWorker(managed, undefined, f.run);
+  }
+  for (const release of ["5.15.0-1068-generic", "6.9.0-1-azure", "5.10.0-1-azure"]) {
+    f.node.status.nodeInfo.kernelVersion = release;
+    await expect(inspectFactoryboxWorker(managed, undefined, f.run)).rejects.toThrow(
+      `${release} is outside the admitted kernel policy`,
+    );
+  }
+  expect(() => factoryboxWorkerRequest.parse({ ...request, kernel: "*" })).toThrow();
+});
+
+test("a terminated worker or changed node boot reports node loss with the explicit recovery path", async () => {
+  const f = fixture();
+  const identity = await inspectFactoryboxWorker(request, undefined, f.run);
+  f.pod.status.phase = "Failed";
+  f.pod.status.containerStatuses = [];
+  const terminated = await inspectFactoryboxWorker(request, identity, f.run).catch(
+    (cause: unknown) => cause,
+  );
+  expect(terminated).toBeInstanceOf(FactoryboxWorkerLostError);
+  expect((terminated as FactoryboxWorkerLostError).reason).toBe("terminated");
+  expect((terminated as Error).message).toContain("POST /api/admin/worker/recover");
+  f.pod.status.phase = "Running";
+  f.pod.status.containerStatuses = [{ name: "worker", restartCount: 0, ready: true }];
+  f.node.status.nodeInfo.bootID = "rebooted";
+  f.calls.length = 0;
+  const restarted = await inspectFactoryboxWorker(request, identity, f.run).catch(
+    (cause: unknown) => cause,
+  );
+  expect((restarted as FactoryboxWorkerLostError).reason).toBe("node-restarted");
+  expect((restarted as Error).message).toContain("boot identity changed");
+  expect(f.calls.every((args) => args[0] === "get")).toBe(true);
 });

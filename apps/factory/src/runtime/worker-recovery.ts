@@ -109,19 +109,26 @@ export async function recoverFactoryboxWorker(
             );
           });
           const labels = factoryboxSharedLabels(current.id);
+          if (!namespace || namespace.uid !== current.namespaceUID)
+            throw refused(
+              "Original worker Namespace is missing or replaced; its identities were retained. Do not recreate it by hand.",
+            );
+          if (!pod)
+            throw refused(
+              "Original worker Pod no longer exists (its node was deleted or replaced, or the Pod object was removed), so its termination cannot be observed. No successor was created and the store claim, Source and history are retained. Restore the original node and Pod object, or keep the retained data and escalate to the Factory operator.",
+            );
           if (
-            !namespace ||
-            namespace.uid !== current.namespaceUID ||
-            !Object.entries(labels).every(([key, value]) => namespace.labels[key] === value) ||
-            !pod ||
             pod.uid !== current.podUID ||
+            !Object.entries(labels).every(([key, value]) => namespace.labels[key] === value) ||
             !Object.entries(labels).every(([key, value]) => pod.labels[key] === value)
           )
             throw refused(
               "Original worker termination is unconfirmed; its identities were retained",
             );
           if (!["Failed", "Succeeded"].includes(pod.phase))
-            throw refused("Stop the original worker before explicit recovery");
+            throw refused(
+              "Stop the original worker before explicit recovery. After a node reboot Kubernetes reports the Pod Failed; wait for that state and keep the Pod object.",
+            );
           if (!current.runtimeHostImage)
             throw refused("Original worker bootstrap image is missing");
           requireRuntimePodArtifacts(pod, current.runtimeHostImage, profile.image);

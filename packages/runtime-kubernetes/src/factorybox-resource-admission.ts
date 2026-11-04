@@ -1,5 +1,6 @@
 import { z } from "zod";
 import type { runCommand } from "./command";
+import { factoryboxKernelMatches } from "./factorybox-kernel";
 import type { FactoryboxRuntimeProfile } from "./factorybox-runtime";
 import { factoryboxWorkerResources, runFactoryboxKubernetes } from "./factorybox-worker";
 
@@ -115,7 +116,11 @@ export function selectFactoryboxWorkerResources(
         allocatable: quantities,
         nodeInfo: z.object({
           architecture: z.literal(profile.architecture),
-          kernelVersion: z.literal(profile.kernel),
+          kernelVersion: z
+            .string()
+            .refine((value) => factoryboxKernelMatches(profile.kernel, value), {
+              message: "Worker node kernel is outside the admitted kernel policy",
+            }),
           operatingSystem: z.literal("linux"),
         }),
         conditions: z.array(z.object({ type: z.string(), status: z.string() })),

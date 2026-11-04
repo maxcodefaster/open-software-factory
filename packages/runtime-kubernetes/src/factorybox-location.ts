@@ -38,3 +38,14 @@ export function factoryboxSharedLabels(workerID: string) {
 export function factoryboxAssignmentSecret(executionID: string) {
   return `assignment-${uuid.parse(executionID).replaceAll("-", "")}`;
 }
+
+// The worker Pod is privileged. A cluster whose Pod Security default is below
+// "privileged" admits it only in a Namespace carrying these labels at creation.
+// Factory's ServiceAccount cannot patch Namespaces, so they cannot be added later.
+export function factoryboxPodSecurityLabels() {
+  return {
+    "pod-security.kubernetes.io/enforce": "privileged",
+    "pod-security.kubernetes.io/audit": "privileged",
+    "pod-security.kubernetes.io/warn": "privileged",
+  } as const;
+}

@@ -1,8 +1,9 @@
-import { nativeLifecycleWindowMS } from "../../runtime-domain/src/timing";
 import { isDeepStrictEqual, stripVTControlCharacters } from "node:util";
 import { z } from "zod";
+import { nativeLifecycleWindowMS } from "../../runtime-domain/src/timing";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
+import { factoryboxKernelMatches, factoryboxKernelPolicy } from "./factorybox-kernel";
 import {
   readFactoryboxBackingRetirement,
   readFactoryboxCheckpointRetirement,
@@ -63,11 +64,7 @@ export const factoryboxWorkerRequest = z
       .string()
       .max(253)
       .regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/),
-    kernel: z
-      .string()
-      .min(1)
-      .max(256)
-      .regex(/^[a-zA-Z0-9._+-]+$/),
+    kernel: factoryboxKernelPolicy,
     boundedBytes: z
       .number()
       .int()
@@ -471,6 +468,50 @@ export async function observeOriginalFactoryboxDeclaration(
   return declaration;
 }
 
+// Node reboot, eviction or an AKS-style node image upgrade ends the worker's
+// processes and RAM. Source, the private store and history are retained; only
+// the explicit recovery command may commission a successor.
+export class FactoryboxWorkerLostError extends Error {
+  constructor(
+    readonly reason: "terminated" | "node-restarted",
+    message: string,
+  ) {
+    super(`${message} ${workerLossRemediation}`);
+  }
+}
+const workerLossRemediation =
+  "Stop remaining execution, keep the original Pod object and run the explicit System Manager recovery (POST /api/admin/worker/recover). Source and the private store are retained.";
+
+function requireWorkerNotLost(
+  podRaw: unknown,
+  nodeRaw: unknown,
+  previous?: FactoryboxWorkerIdentity,
+) {
+  const pod = z
+    .object({
+      metadata: z.object({ uid: z.string().optional() }).optional(),
+      status: z.object({ phase: z.string().optional() }).optional(),
+    })
+    .safeParse(podRaw);
+  if (
+    pod.success &&
+    (!previous || pod.data.metadata?.uid === previous.podUID) &&
+    (pod.data.status?.phase === "Failed" || pod.data.status?.phase === "Succeeded")
+  )
+    throw new FactoryboxWorkerLostError(
+      "terminated",
+      `Factorybox worker Pod is ${pod.data.status.phase} (node reboot, eviction or node upgrade). Its RAM state is lost.`,
+    );
+  const node = z
+    .object({ status: z.object({ nodeInfo: z.object({ bootID: z.string() }) }) })
+    .safeParse(nodeRaw);
+  if (previous && node.success && previous.nodeBootID !== node.data.status.nodeInfo.bootID)
+    throw new FactoryboxWorkerLostError(
+      "node-restarted",
+      "Factorybox node boot identity changed (the node rebooted or was replaced); explicit new admission is required.",
+    );
+}
+
 export async function inspectFactoryboxWorker(
   request: FactoryboxWorkerRequest,
   previous?: FactoryboxWorkerIdentity,
@@ -487,6 +528,7 @@ export async function inspectFactoryboxWorker(
     read(run, ["pod", input.podName, "-n", input.namespace]),
     read(run, ["node", input.nodeName]),
   ]);
+  requireWorkerNotLost(podRaw, nodeRaw, previous);
   const namespace = resource.parse(namespaceRaw);
   const claim = resource
     .extend({
@@ -518,12 +560,16 @@ export async function inspectFactoryboxWorker(
         nodeInfo: z.object({
           operatingSystem: z.literal("linux"),
           architecture: z.literal(input.architecture),
-          kernelVersion: z.literal(input.kernel),
+          kernelVersion: z.string().min(1),
           bootID: uid,
         }),
       }),
     })
     .parse(nodeRaw);
+  if (!factoryboxKernelMatches(input.kernel, node.status.nodeInfo.kernelVersion))
+    throw new Error(
+      `Factorybox node kernel ${node.status.nodeInfo.kernelVersion} is outside the admitted kernel policy ${input.kernel}. Admit that kernel with factorybox.kernel only after native qualification.`,
+    );
   for (const [wanted, actual] of [
     [expected[0], namespace],
     [expected[1], claim],
@@ -554,8 +600,6 @@ export async function inspectFactoryboxWorker(
       previous.podUID !== pod.metadata.uid)
   )
     throw new Error("Factorybox Kubernetes UID changed; explicit new admission is required");
-  if (previous && previous.nodeBootID !== node.status.nodeInfo.bootID)
-    throw new Error("Factorybox node boot identity changed; explicit new admission is required");
 
   // No exec has been created before HTTP readiness and exact Pod validation.
   const result = await run([

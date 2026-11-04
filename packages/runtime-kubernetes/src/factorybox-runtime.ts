@@ -1,8 +1,9 @@
-import { nativeLifecycleWindowMS } from "../../runtime-domain/src/timing";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
+import { nativeLifecycleWindowMS } from "../../runtime-domain/src/timing";
 import type { runCommand } from "./command";
 import { ensureFactoryboxConsumer } from "./factorybox-consumer";
+import { factoryboxKernelPolicy } from "./factorybox-kernel";
 import {
   factoryboxAdmissionID,
   factoryboxAssignmentSecret,
@@ -67,10 +68,7 @@ export const factoryboxRuntimeProfile = z
       .string()
       .regex(/^[a-z0-9][a-z0-9.-]*[a-z0-9]$/)
       .max(253),
-    kernel: z
-      .string()
-      .regex(/^[a-zA-Z0-9._+-]+$/)
-      .max(256),
+    kernel: factoryboxKernelPolicy,
     boundedBytes: z
       .number()
       .int()

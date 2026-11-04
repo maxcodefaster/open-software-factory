@@ -97,7 +97,10 @@ Replace the example store and trust-domain IDs with random 32-character hexadeci
 Factory renders and validates either Linux ARM64 or AMD64 using the same worker protocol.
 The standalone runtime is qualified on its exact Linux AMD64 kernel and 4096-byte pages;
 ARM64 qualifies per kernel on the target node. Inspection checks the node's OS,
-architecture and kernel against the live worker. Node-reported and kernel-reported boot IDs
+architecture and kernel against the live worker. `kernel` may be one release or a comma-separated
+list using `*` wildcards (`5.15.0-*-azure,6.8.0-*-azure`). That only widens Factory's admission
+gate. The standalone binary still refuses a kernel its build does not admit, and the node boot ID
+still pins each retained worker. Node-reported and kernel-reported boot IDs
 are pinned separately; a later change to either refuses the original admission. Worker startup checks its actual
 cgroups, component identities, store lease and filesystem. Another node profile needs the
 standalone native checks before use.
@@ -140,7 +143,10 @@ inside PID 1 after cgroup delegation. An early Kubernetes exec probe would inter
 delegation, so the manifest uses HTTP probes.
 
 The Pod has `restartPolicy: Never`. There is no Deployment, automatic replacement or recovery
-after node loss. Keep a failed worker's complete PVC and original identity for explicit recovery.
+after node loss. A node reboot leaves the Pod `Failed` and changes the node boot ID. Inspection
+then reports a node-loss error naming the recovery command. If the node is deleted and the Pod
+object is garbage-collected, Factory cannot observe termination and refuses recovery, so keep
+the node (see the managed-cluster section of the operations guide). Keep a failed worker's complete PVC and original identity for explicit recovery.
 The health port serves only `GET /readyz` with an empty 204/503 response; it is not an admin API.
 
 ## Recover an admitted product worker
