@@ -2,7 +2,6 @@ import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect, type Page } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { CommandError } from "../../apps/factory/src/command-error";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
@@ -13,6 +12,7 @@ import type {
 } from "../../packages/conversation-domain/src/mcp-library";
 import type { monitoringSave } from "../../packages/conversation-domain/src/monitoring";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import {
   browserFunction,
@@ -85,6 +85,14 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await expect(current.getByRole("button", { name: "Settings", exact: true })).toBeVisible();
   }
   async function open(current: Page) {
+    // A reload restores an open Settings workspace; otherwise it opens from the dock.
+    const restored = current.getByRole("region", { name: "settings workspace", exact: true });
+    await current.getByRole("button", { name: "Settings", exact: true }).waitFor();
+    const reopened = await restored
+      .waitFor({ timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (reopened) return chooseSettingsPage(current, "Inputs");
     await openProjectMenu(current);
     await current.getByRole("button", { name: new RegExp(projectName) }).click();
     await current.getByRole("button", { name: "Settings", exact: true }).click();
@@ -128,10 +136,10 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
     const navigation = page.getByRole("navigation", { name: "Settings navigation" });
     // A personal draft is never silently converted into a shared monitoring connection.
-    await navigation.getByRole("button", { name: "MCP connections", exact: true }).click();
+    await chooseSettingsPage(page, "MCP connections");
     await page.getByRole("button", { name: "Add MCP", exact: true }).click();
     await mcpUI.getByLabel("Name", { exact: true }).fill("Keep my personal draft");
-    await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
+    await chooseSettingsPage(page, "Inputs");
     await monitoring.getByRole("button", { name: "Add input", exact: true }).click();
     await editor.getByRole("button", { name: "Add source", exact: true }).click();
     await editor.getByRole("button", { name: "Connect a service", exact: true }).click();
@@ -140,13 +148,13 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await page.getByRole("button", { name: "Resume draft", exact: true }).click();
     await expect(page.getByRole("alert")).toContainText("draft outside this Project setup");
     await expect(page.getByRole("button", { name: "Save definition", exact: true })).toBeDisabled();
-    await navigation.getByRole("button", { name: "MCP connections", exact: true }).click();
+    await chooseSettingsPage(page, "MCP connections");
     await expect(mcpUI.getByLabel("Name", { exact: true })).toHaveValue("Keep my personal draft");
     await expect(page.getByRole("combobox", { name: "Save in", exact: true })).toHaveValue(
       "personal",
     );
     await page.getByRole("button", { name: "Discard draft", exact: true }).click();
-    await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
+    await chooseSettingsPage(page, "Inputs");
     await editor.getByRole("button", { name: "Connect a service", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Choose a source" })).toBeVisible();
     await page.screenshot({ path: `${evidence}/source-picker-desktop.png`, fullPage: true });
@@ -263,13 +271,13 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await editor.getByLabel("Name", { exact: true }).fill("Source-enriched feedback");
     await expect(save).toBeEnabled();
     await editor.getByRole("button", { name: "Cancel", exact: true }).click();
-    await navigation.getByRole("button", { name: "MCP connections", exact: true }).click();
+    await chooseSettingsPage(page, "MCP connections");
     const libraryActions = page.locator('summary[aria-label="MCP library actions"]');
     await expect(libraryActions).toBeVisible();
     await libraryActions.click();
     await expect(page.getByRole("button", { name: "Manage", exact: true })).toBeVisible();
     await page.keyboard.press("Escape");
-    await navigation.getByRole("button", { name: "Inputs", exact: true }).click();
+    await chooseSettingsPage(page, "Inputs");
     await stopConnectMock();
     const sourceView = await serverCall(browserFunction(page, "getMCPLibrary", [projectId]));
     expect(sourceView.choices).toHaveLength(0);
@@ -278,10 +286,7 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     ).toEqual(["read_issue"]);
     // Remove synthetic discovery from the later eligibility matrix, not the definition.
     await database.client`UPDATE factory.mcp_connection SET state='revoked',version=4 WHERE id=${contextualSourceId}`;
-    await page
-      .getByRole("navigation", { name: "Settings navigation" })
-      .getByRole("button", { name: "Inputs", exact: true })
-      .click();
+    await chooseSettingsPage(page, "Inputs");
 
     // Only discovery/approval state is synthetic in this UI fixture. It never calls a provider
     // or sends an executable alert. SDK/controller and live lanes cover those boundaries.
@@ -436,14 +441,8 @@ test("Project Inputs separate automatic preparation, source access, explicit Aut
     await secret.getByRole("button", { name: "Copy URL" }).click();
     expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(url);
     await page.screenshot({ path: `${evidence}/created-desktop.png`, fullPage: true });
-    await page
-      .getByRole("navigation", { name: "Settings navigation" })
-      .getByRole("button", { name: "MCP connections", exact: true })
-      .click();
-    await page
-      .getByRole("navigation", { name: "Settings navigation" })
-      .getByRole("button", { name: "Inputs", exact: true })
-      .click();
+    await chooseSettingsPage(page, "MCP connections");
+    await chooseSettingsPage(page, "Inputs");
     await expect(secret).toBeHidden();
     await expect(monitoring.locator(":scope > .input-message[role='status']")).toHaveCount(0);
 
