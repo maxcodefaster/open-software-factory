@@ -481,7 +481,7 @@ test("the repository chart is a Kubernetes installation, not a host Docker launc
       expect(definition).not.toContain(forbidden);
   }
   const dependencies = all.filter((resource) => resource.kind === "StatefulSet");
-  expect(dependencies).toHaveLength(5);
+  expect(dependencies).toHaveLength(6);
   for (const dependency of dependencies)
     expect(dependency.spec?.template?.spec.automountServiceAccountToken).toBe(false);
 });
@@ -1007,6 +1007,7 @@ test("every workload container drops capabilities and uses the runtime seccomp p
   expect(found.map((item) => item.metadata.name).sort()).toEqual([
     "portable",
     "portable-backup",
+    "portable-backup-store",
     "portable-forgejo",
     "portable-maintenance",
     "portable-objects",
@@ -1067,7 +1068,10 @@ test("unprivileged services use the user their images define", async () => {
 
 test("every long-running service has liveness separate from readiness", async () => {
   const { all } = await renderAll();
-  for (const workload of workloads(all).filter((item) => !["Job", "CronJob"].includes(item.kind))) {
+  for (const workload of workloads(all).filter(
+    (item) =>
+      !["Job", "CronJob"].includes(item.kind) && item.metadata.name !== "portable-backup-store",
+  )) {
     const container = workload.spec.template.spec.containers[0];
     expect(container?.livenessProbe).toBeDefined();
     expect(container?.readinessProbe).toBeDefined();
@@ -1319,13 +1323,26 @@ test("the release smoke tests start the Factory image as the unprivileged user t
 
 test("backups are on by default and write to one dedicated retained claim", async () => {
   const all = await resources();
-  const claim = all.find(
-    (item) => item.kind === "PersistentVolumeClaim" && item.metadata.name === "portable-backup",
-  );
-  expect(claim?.metadata.annotations?.["helm.sh/resource-policy"]).toBe("keep");
-  const requested = (claim?.spec as unknown as { resources: { requests: { storage: string } } })
-    ?.resources;
-  expect(requested?.requests.storage).toBe("40Gi");
+  const holder = all.find(
+    (item) => item.kind === "StatefulSet" && item.metadata.name === "portable-backup-store",
+  ) as unknown as {
+    spec: {
+      persistentVolumeClaimRetentionPolicy: { whenDeleted: string };
+      volumeClaimTemplates: Array<{
+        metadata: { name: string };
+        spec: { resources: { requests: { storage: string } } };
+      }>;
+    };
+  };
+  // A stand-alone claim would stay Pending under WaitForFirstConsumer and stall `helm --wait`.
+  expect(
+    all.some(
+      (item) => item.kind === "PersistentVolumeClaim" && item.metadata.name === "portable-backup",
+    ),
+  ).toBe(false);
+  expect(holder.spec.persistentVolumeClaimRetentionPolicy.whenDeleted).toBe("Retain");
+  expect(holder.spec.volumeClaimTemplates[0]?.metadata.name).toBe("store");
+  expect(holder.spec.volumeClaimTemplates[0]?.spec.resources.requests.storage).toBe("40Gi");
   const cron = (workloads(all) as Workload[]).find((item) => item.kind === "CronJob");
   const raw = all.find((item) => item.kind === "CronJob") as unknown as {
     spec: { schedule: string; concurrencyPolicy: string };
@@ -1346,7 +1363,7 @@ test("backups are on by default and write to one dedicated retained claim", asyn
     volume.persistentVolumeClaim ? [volume.persistentVolumeClaim] : [],
   );
   expect(claims).toEqual([
-    { claimName: "portable-backup" },
+    { claimName: "store-portable-backup-store-0" },
     { claimName: "portable-state", readOnly: true },
   ]);
   // The read-only state claim is mounted by the OpenBao step alone.

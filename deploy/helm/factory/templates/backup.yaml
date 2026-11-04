@@ -35,16 +35,63 @@ data:
     {{- $.Files.Get $path | nindent 4 }}
 {{- end }}
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
+{{- /*
+The claim belongs to a one-container StatefulSet instead of a stand-alone PersistentVolumeClaim.
+Storage classes with WaitForFirstConsumer binding (the AKS default among them) leave a claim
+Pending until a Pod uses it, and `helm --wait` would then never finish. The holder Pod only
+sleeps; it binds the claim and keeps it on the node where Factory and the backup Job run.
+*/ -}}
+apiVersion: apps/v1
+kind: StatefulSet
 metadata:
-  name: {{ $name }}-backup
+  name: {{ $name }}-backup-store
   labels:
     {{- include "factory.labels" . | nindent 4 }}
-  annotations:
-    helm.sh/resource-policy: keep
 spec:
-  {{- include "factory.claim" (dict "root" . "size" .Values.backup.size) | nindent 2 }}
+  serviceName: {{ $name }}-backup-store
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy: {whenDeleted: Retain, whenScaled: Retain}
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: backup-store
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: backup-store
+    spec:
+      nodeSelector: {kubernetes.io/os: linux}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/instance: {{ .Release.Name | quote }}
+                  app.kubernetes.io/component: factory
+      containers:
+        - name: hold
+          image: {{ $rcloneImage }}
+          command: [sleep, infinity]
+          securityContext:
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}
+            limits: {cpu: 50m, memory: 32Mi}
+          volumeMounts:
+            - {name: store, mountPath: /backup, readOnly: true}
+  volumeClaimTemplates:
+    - metadata:
+        name: store
+      spec:
+        {{- include "factory.claim" (dict "root" . "size" .Values.backup.size) | nindent 8 }}
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -265,7 +312,7 @@ spec:
                 {{- end }}
           volumes:
             - name: backup
-              persistentVolumeClaim: {claimName: {{ $name }}-backup}
+              persistentVolumeClaim: {claimName: store-{{ $name }}-backup-store-0}
             - name: state
               persistentVolumeClaim: {claimName: {{ $name }}-state, readOnly: true}
             - name: scripts

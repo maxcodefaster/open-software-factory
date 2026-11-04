@@ -275,7 +275,8 @@ Kubernetes Services, never the Mac's host alias or a manually selected VM addres
 ## Backups and restore
 
 `backup.enabled` (default true) renders one CronJob, `<release>-backup`, a dedicated retained claim
-(`backup.size`, default 40Gi) and a ServiceAccount. It runs on `backup.schedule` (default
+(`backup.size`, default 40Gi) held by a one-container StatefulSet `<release>-backup-store` so
+WaitForFirstConsumer storage binds it, and a ServiceAccount. It runs on `backup.schedule` (default
 `17 2 * * *`) and never overlaps itself. One Pod takes every part in this order, so the object
 mirror always contains the objects the database dump refers to:
 
@@ -342,7 +343,7 @@ spec:
       volumeMounts:
         - {name: backup, mountPath: /backup, readOnly: true}
   volumes:
-    - {name: backup, persistentVolumeClaim: {claimName: factory-backup, readOnly: true}}
+    - {name: backup, persistentVolumeClaim: {claimName: store-factory-backup-store-0, readOnly: true}}
 ```
 
 ### Check a backup
