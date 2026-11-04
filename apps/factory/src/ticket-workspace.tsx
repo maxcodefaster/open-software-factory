@@ -340,7 +340,11 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const [draftDescription, setDraftDescription] = createSignal(
     untrack(() => props.current.ticket.description),
   );
-  const [draftSummary, setDraftSummary] = createSignal("");
+  const [draftSummary, setDraftSummary] = createSignal(
+    untrack(() =>
+      !props.latestRevision && !props.current.proposal ? props.current.ticket.description : "",
+    ),
+  );
   const [draftAcceptance, setDraftAcceptance] = createSignal<DraftBlock[]>([createDraftBlock("")]);
   const [draftNonGoals, setDraftNonGoals] = createSignal<DraftBlock[]>([createDraftBlock("")]);
   const [selectionToolbar, setSelectionToolbar] = createSignal<SelectionToolbar>();
@@ -363,16 +367,12 @@ function TicketDocument(props: TicketWorkspaceProps) {
   const separateSummary = () =>
     Boolean((props.latestRevision || proposal()) && draftSummary() !== draftDescription());
   // Until requirements exist the description is the only visible summary, so the
-  // requirement summary follows it. Later edits may deliberately diverge.
-  createEffect(
-    () => ({
-      description: draftDescription(),
-      linked: !props.latestRevision && !proposal(),
-    }),
-    ({ description, linked }) => {
-      if (linked) setDraftSummary(description);
-    },
-  );
+  // requirement summary follows it. Later edits may deliberately diverge. The summary is
+  // written with the description, so no effect relays one signal into the other.
+  function updateDescription(description: string) {
+    setDraftDescription(description);
+    if (!props.latestRevision && !proposal()) setDraftSummary(description);
+  }
   const [historyRevisionID, setHistoryRevisionID] = createSignal<string>();
   const versions = () => [
     ...props.current.documentRevisions,
@@ -1653,7 +1653,7 @@ function TicketDocument(props: TicketWorkspaceProps) {
                         {...richTextHandlers({
                           field: "description",
                           slash: true,
-                          update: setDraftDescription,
+                          update: updateDescription,
                         })}
                       />
                     </details>

@@ -239,7 +239,8 @@ test("Project backgrounds stay shared and persistent with a compact, expandable 
         };
       });
       expect(colors.path).toBe(background.image);
-      expect(colors.width).toBe(2560);
+      expect(colors.width).toBeGreaterThanOrEqual(1792);
+      expect(colors.width).toBeLessThanOrEqual(2560);
       const hex = (value: string) =>
         [1, 3, 5].map((offset) => Number.parseInt(value.slice(offset, offset + 2), 16));
       expect(

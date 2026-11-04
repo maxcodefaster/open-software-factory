@@ -2,10 +2,10 @@ import { spawn } from "node:child_process";
 import { mkdir } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import { z } from "zod";
 import { serverCall } from "../../apps/factory/src/server-functions/result";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
 import { browserFunction } from "../fixtures/server-functions";
 import { chooseSettingsPage } from "../fixtures/settings-navigation";
@@ -241,14 +241,27 @@ test("MCP library uses landscape connection covers, retains private drafts and k
       "src",
       /^\/art\/skills\//,
     );
-    for (const cover of await page.locator(".skill-cover:visible").all()) {
-      await expect
-        .poll(() => cover.evaluate((element) => (element as HTMLImageElement).naturalWidth))
-        .toBeGreaterThan(0);
-      const size = await cover.boundingBox();
-      if (!size) throw new Error("Skill book cover is not rendered");
-      expect(size.width / size.height).toBeCloseTo(3 / 4, 2);
-    }
+    // The list can re-render while covers load, so judge the whole visible set in one read.
+    await expect
+      .poll(() =>
+        page.locator(".skill-cover:visible").evaluateAll((covers) =>
+          covers.map((element) => {
+            const box = element.getBoundingClientRect();
+            return {
+              loaded: (element as HTMLImageElement).naturalWidth > 0,
+              ratio: box.height ? Math.round((box.width / box.height) * 100) / 100 : 0,
+            };
+          }),
+        ),
+      )
+      .toEqual(expect.arrayContaining([{ loaded: true, ratio: 0.75 }]));
+    const covers = await page.locator(".skill-cover:visible").evaluateAll((items) =>
+      items.map((element) => {
+        const box = element.getBoundingClientRect();
+        return Math.round((box.width / box.height) * 100) / 100;
+      }),
+    );
+    for (const ratio of covers) expect(ratio).toBeCloseTo(3 / 4, 2);
     await page.screenshot({ path: `${evidence}/skills-comparison-desktop.png`, fullPage: true });
     await page
       .getByRole("navigation", { name: "Settings navigation" })

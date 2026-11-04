@@ -220,13 +220,18 @@ for (const touch of [false, true]) {
             if (touch && menu) {
               const cdp = await page.context().newCDPSession(page);
               try {
-                await cdp.send("Input.synthesizeScrollGesture", {
-                  x: menu.x + menu.width / 2,
-                  y: menu.y + menu.height - 60,
-                  yDistance: -320,
-                  gestureSourceType: "touch",
-                  speed: 600,
-                });
+                // A headless compositor can drop a gesture issued right after layout, so repeat it.
+                for (let attempt = 0; attempt < 4; attempt++) {
+                  await cdp.send("Input.synthesizeScrollGesture", {
+                    x: menu.x + menu.width / 2,
+                    y: menu.y + menu.height - 60,
+                    yDistance: -320,
+                    gestureSourceType: "touch",
+                    speed: 600,
+                  });
+                  if ((await navigation.evaluate((node) => node.scrollTop)) > before) break;
+                  await page.waitForTimeout(250);
+                }
               } finally {
                 await cdp.detach();
               }

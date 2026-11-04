@@ -323,9 +323,9 @@ export function DocumentWindow(props: { model: DocumentWindowModel }) {
   // and never on a narrow or touch viewport until the IDE is opened.
   const [idleWarm, setIdleWarm] = createSignal(false);
   createEffect(
-    () => model.canDevelopProject(),
-    (developer) => {
-      if (!developer || idleWarm()) return;
+    () => ({ developer: model.canDevelopProject(), warm: idleWarm() }),
+    ({ developer, warm }) => {
+      if (!developer || warm) return;
       return scheduleWarmup({
         prefetch: prefetchDeveloperWorkspaceChunks,
         warm: () => setIdleWarm(true),

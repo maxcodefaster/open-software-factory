@@ -1,11 +1,10 @@
-import { mockFactoryFunctions } from "../fixtures/server-functions";
-import { CommandError } from "../../apps/factory/src/command-error";
-import { browserBootstrap } from "../fixtures/server-functions";
 import { mkdir } from "node:fs/promises";
 import { expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
+import { CommandError } from "../../apps/factory/src/command-error";
 import { createDatabase } from "../../packages/db/src/client";
+import { test } from "../fixtures/browser-test";
 import { openProjectMenu } from "../fixtures/project-menu";
+import { browserBootstrap, mockFactoryFunctions } from "../fixtures/server-functions";
 import { createPlanningEpic, deleteFactoryProject, signIn } from "../support/factory-fixture";
 
 const evidence = ".factory/test-results/epic-folders";
@@ -267,23 +266,27 @@ test("Epic grid centers sparse and incomplete rows and remains usable on small s
       }
       await expect(folder.locator(".ticket-card")).toHaveCount(count);
       // Each row is centered independently, including the short final row.
-      const layout = await folder.locator(".epic-folder-grid").evaluate((grid) => {
-        const bounds = grid.getBoundingClientRect();
-        const rows: { top: number; left: number; right: number; count: number }[] = [];
-        for (const card of grid.querySelectorAll<HTMLElement>(":scope > .ticket-card")) {
-          const rect = card.getBoundingClientRect();
-          const row = rows.find((row) => Math.abs(row.top - card.offsetTop) < 1);
-          if (row) {
-            row.right = rect.right;
-            row.count++;
-          } else rows.push({ top: card.offsetTop, left: rect.left, right: rect.right, count: 1 });
-        }
-        return {
-          center: bounds.left + bounds.right,
-          rows,
-          widths: Array.from(grid.children, (card) => card.getBoundingClientRect().width),
-        };
-      });
+      const measure = () =>
+        folder.locator(".epic-folder-grid").evaluate((grid) => {
+          const bounds = grid.getBoundingClientRect();
+          const rows: { top: number; left: number; right: number; count: number }[] = [];
+          for (const card of grid.querySelectorAll<HTMLElement>(":scope > .ticket-card")) {
+            const rect = card.getBoundingClientRect();
+            const row = rows.find((row) => Math.abs(row.top - card.offsetTop) < 1);
+            if (row) {
+              row.right = rect.right;
+              row.count++;
+            } else rows.push({ top: card.offsetTop, left: rect.left, right: rect.right, count: 1 });
+          }
+          return {
+            center: bounds.left + bounds.right,
+            rows,
+            widths: Array.from(grid.children, (card) => card.getBoundingClientRect().width),
+          };
+        });
+      // Web fonts and the scrollbar can reflow the grid after the cards are inserted.
+      await expect.poll(async () => (await measure()).rows[0]?.count).toBe(Math.min(count, 4));
+      const layout = await measure();
       expect(layout.rows[0]?.count).toBe(Math.min(count, 4));
       for (const row of layout.rows)
         expect(Math.abs(row.left + row.right - layout.center)).toBeLessThanOrEqual(2);
