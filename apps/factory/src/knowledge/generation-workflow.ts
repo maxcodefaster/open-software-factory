@@ -416,11 +416,36 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
     inputSchema: planSchema,
     outputSchema: wikiGenerationOutput,
     execute: async ({ inputData }) => {
-      try {
-        for (const topic of inputData.topics) await runTopic(topic, inputData.topics);
-      } catch (cause) {
-        executionError = cause;
-        throw cause;
+      // A topic whose own writing fails its checks must not discard the others. Later topics
+      // still run, except those under an unpublished parent; the update then reports the first
+      // failure so a retry continues with only what remains (published pages are completed).
+      const failed = new Map<string, unknown>();
+      for (const topic of inputData.topics) {
+        if (topic.parentSlug && failed.has(topic.parentSlug)) {
+          failed.set(topic.slug, failed.get(topic.parentSlug));
+          continue;
+        }
+        try {
+          await runTopic(topic, inputData.topics);
+        } catch (cause) {
+          const topicFailure =
+            cause instanceof WikiTopicQualityError ||
+            cause instanceof WikiStructuredResultError ||
+            cause instanceof WikiSourceEvidenceError;
+          if (!topicFailure || activeSignal.aborted) {
+            // A provider or budget failure after an earlier topic failed reports that first failure.
+            const reported =
+              failed.size && !activeSignal.aborted ? failed.values().next().value : cause;
+            executionError = reported;
+            throw reported;
+          }
+          failed.set(topic.slug, cause);
+        }
+      }
+      const [firstFailure] = failed.values();
+      if (firstFailure !== undefined) {
+        executionError = firstFailure;
+        throw firstFailure;
       }
       return { pages: [] };
     },

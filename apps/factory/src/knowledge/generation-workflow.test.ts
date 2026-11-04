@@ -154,7 +154,12 @@ test.each([
             expect(parsed.correction).toContain("use readSource");
             expect(parsed.rejectedResult.findings[0].paths).toEqual(["src/flow-63.ts"]);
           }
-          expect(publications).toBe(topics.findIndex((topic) => topic.slug === prompt.topic.slug));
+          // Independent topics keep running after one fails, so only strictly ordered scenarios
+          // can predict the publication count.
+          if (scenario !== "wrong-parent" && scenario !== "empty-topic")
+            expect(publications).toBe(
+              topics.findIndex((topic) => topic.slug === prompt.topic.slug),
+            );
           output = {
             findings: [
               {
