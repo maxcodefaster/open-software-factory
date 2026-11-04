@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createIdentityConfiguration } from "./identity-configuration";
@@ -62,9 +63,7 @@ export function createForgeIdentityRoutes(options: {
       ON CONFLICT(user_id) DO UPDATE SET version=factory.access_revocation.version+1,updated_at=now()`;
     // Native connection readiness is separate from retained per-account reconciliation.
     // Failed accounts remain prohibited and the durable worker retries their intent.
-    await options
-      .reconcile()
-      .catch(() => console.error("Forge access reconciliation remains pending"));
+    await options.reconcile().catch(reportFailure("Forge access reconciliation remains pending"));
     return new Response(null, { status: 204 });
   };
 }

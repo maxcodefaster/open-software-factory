@@ -33,7 +33,7 @@ test("observations never overlap and shutdown drains admitted work without repla
   expect(calls).toBe(1);
 });
 
-test("a failed observation is sanitized and does not prevent the next tick", async () => {
+test("a failed observation logs its redacted cause and does not prevent the next tick", async () => {
   const log = spyOn(console, "error").mockImplementation(() => {});
   const jobs = createBackgroundJobs();
   const recovered = Promise.withResolvers<void>();
@@ -42,7 +42,7 @@ test("a failed observation is sanitized and does not prevent the next tick", asy
     jobs.every(
       "Owned observation failed",
       async () => {
-        if (++calls === 1) throw new Error("private provider details");
+        if (++calls === 1) throw new Error("provider refused token=sk-secret-value");
         recovered.resolve();
       },
       1,
@@ -51,8 +51,10 @@ test("a failed observation is sanitized and does not prevent the next tick", asy
     await recovered.promise;
     await jobs.close();
     expect(calls).toBeGreaterThanOrEqual(2);
-    expect(log).toHaveBeenCalledWith("Owned observation failed");
-    expect(log.mock.calls.flat().join(" ")).not.toContain("private provider");
+    const logged = log.mock.calls.flat().join(" ");
+    expect(logged).toContain("Owned observation failed");
+    expect(logged).toContain("provider refused");
+    expect(logged).not.toContain("sk-secret-value");
   } finally {
     await jobs.close();
     log.mockRestore();

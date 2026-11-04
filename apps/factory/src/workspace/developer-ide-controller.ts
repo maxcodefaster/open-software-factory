@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createDeveloperIDEClient,
@@ -176,7 +177,7 @@ export function createDeveloperIDEController(
         pending.delete(userID);
         if (worker.wakeup) schedule(userID);
       }
-    })().catch(() => console.error("Developer IDE reconciliation failed"));
+    })().catch(reportFailure("Developer IDE reconciliation failed"));
   }
   return {
     async ensure(projectID: string, userID: string) {

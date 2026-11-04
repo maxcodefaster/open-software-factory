@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   createRegisterProjectInput,
@@ -108,7 +109,7 @@ export function createProjectService(dependencies: ProjectServiceDependencies) {
         if (!project) throw new Error("Project insert returned no row");
         void dependencies
           .onRegistered(project.id, userID, false)
-          .catch(() => console.error("Registered Project preparation needs attention"));
+          .catch(reportFailure("Registered Project preparation needs attention"));
         return dto(project);
       } catch (cause) {
         if (isUniqueViolation(cause)) {

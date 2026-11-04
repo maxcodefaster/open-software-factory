@@ -571,7 +571,7 @@ export function createReleaseController(options: {
             );
           throw cause;
         }
-        void reconcileOne(id).catch(() => console.error("Release reconciliation is unavailable"));
+        void reconcileOne(id).catch(reportFailure("Release reconciliation is unavailable"));
         return { id };
       });
     },

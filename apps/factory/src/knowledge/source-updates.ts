@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
@@ -144,7 +145,7 @@ export function createWikiSourceUpdates(options: {
     // The same signed event admits image preparation independently of Wiki inference.
     await options.prepareProject?.(projectID);
     // This wake-up is expendable. Persisted versions recover after restart and before acknowledgement.
-    void drain().catch(() => console.error("Wiki event reconciliation needs retry"));
+    void drain().catch(reportFailure("Wiki event reconciliation needs retry"));
     return new Response(null, { status: 202 });
   }
   async function drain() {

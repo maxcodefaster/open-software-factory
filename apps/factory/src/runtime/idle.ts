@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { RuntimeHub } from "./hub";
 
@@ -106,7 +107,7 @@ export function createIdleCompute(
     start() {
       if (closed || timer || !idleMS) return;
       timer = setInterval(() => {
-        void sweep().catch(() => console.error("Idle compute reconciliation failed"));
+        void sweep().catch(reportFailure("Idle compute reconciliation failed"));
       }, 30_000);
       timer.unref();
     },

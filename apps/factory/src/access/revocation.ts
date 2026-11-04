@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import type { createDatabase } from "../../../../packages/db/src/client";
 
 type Database = ReturnType<typeof createDatabase>;
@@ -51,7 +52,7 @@ export function createAccessRevocation(
     return running;
   }
   function wake() {
-    void drain().catch(() => console.error("Access revocation remains pending"));
+    void drain().catch(reportFailure("Access revocation remains pending"));
   }
   return {
     drain,
@@ -59,7 +60,7 @@ export function createAccessRevocation(
       listener = await database.client.listen("factory_access_revoked", wake);
       timer = setInterval(wake, 30_000);
       timer.unref();
-      await drain().catch(() => console.error("Access revocation remains pending"));
+      await drain().catch(reportFailure("Access revocation remains pending"));
     },
     async close() {
       closed = true;

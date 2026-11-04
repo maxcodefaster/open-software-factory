@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import type { z } from "zod";
 import {
   feedbackCreateInput,
@@ -57,7 +58,7 @@ export function createReviewService(options: {
       // turn, and a failed observation does not replay the human command.
       void options
         .dispatchPending(changeID)
-        .catch(() => console.error("Review correction dispatch needs reconciliation"));
+        .catch(reportFailure("Review correction dispatch needs reconciliation"));
       return result;
     },
   };

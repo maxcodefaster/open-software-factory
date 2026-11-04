@@ -38,7 +38,7 @@ import {
 } from "../../../../packages/workspace-domain/src/workspace";
 import { createAccessController } from "../access/controller";
 import { createOpenCodeClient } from "../agent/opencode-client";
-import { logFailure } from "../failure-log";
+import { logFailure, reportFailure } from "../failure-log";
 import { requireSetupReady } from "../setup/execution-gate";
 import { admitComputeIn, ComputeCapacityError } from "../usage/compute";
 import { createComputeWait } from "../usage/compute-wait";
@@ -1219,7 +1219,7 @@ export function createRuntimeController(
             attempt.namespace,
             attempt.podName,
             resources,
-          ).catch(() => console.error("Retained unattempted startup observation failed"));
+          ).catch(reportFailure("Retained unattempted startup observation failed"));
         }
       } finally {
         drainingCompute = false;
@@ -1371,7 +1371,7 @@ export function createRuntimeController(
       const failedStops = await database.client<{ id: string }[]>`
         SELECT id FROM factory.runtime_attempt WHERE state='failed' AND stop_intended_at IS NOT NULL`;
       for (const attempt of failedStops)
-        await this.stop(attempt.id).catch(() => console.error("Retained runtime Stop needs retry"));
+        await this.stop(attempt.id).catch(reportFailure("Retained runtime Stop needs retry"));
       await database.client`
         UPDATE factory.change change SET
           state = CASE WHEN attempt.state = 'stopped' AND change.cancel_requested_at IS NOT NULL
@@ -1506,7 +1506,7 @@ export function createRuntimeController(
         if (observing) return;
         observing = true;
         for (const create of deferredCreates)
-          void create().catch(() => console.error("Reserved runtime recovery failed"));
+          void create().catch(reportFailure("Reserved runtime recovery failed"));
         observeConnections();
         setTimeout(() => {
           void (async () => {

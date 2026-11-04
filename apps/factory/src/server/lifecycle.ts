@@ -1,3 +1,4 @@
+import { reportFailure } from "../failure-log";
 import type { FactoryApplication } from "./application";
 import { createBackgroundJobs } from "./background-jobs";
 
@@ -59,7 +60,7 @@ export function startFactoryLifecycle(application: LifecycleServices) {
   observeRecoveredRuntimes();
   const reserveStarted = executionReserve
     .start()
-    .catch(() => console.error("Execution reserve startup failed"));
+    .catch(reportFailure("Execution reserve startup failed"));
   idleCompute.start();
   jobs.every("Delivery observation failed", () => deliveryController.sweep(), 1_000, true);
   jobs.every("Input observation failed", () => monitoringWorker.sweep(), 2_000, true);

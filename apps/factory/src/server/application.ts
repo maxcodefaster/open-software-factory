@@ -183,7 +183,7 @@ export async function createFactoryApplication() {
   });
   await modelConnections
     .recover()
-    .catch(() => console.error("Model connection save recovery is unavailable"));
+    .catch(reportFailure("Model connection save recovery is unavailable"));
   const environmentSecrets = createOpenBaoEnvironmentSecrets();
   const environmentController = createEnvironmentController(
     database,
@@ -193,7 +193,7 @@ export async function createFactoryApplication() {
   const runtimeEnvironmentEndpoint = createRuntimeEnvironmentEndpoint(database, environmentSecrets);
   await environmentController
     .recover()
-    .catch(() => console.error("Environment save recovery is unavailable"));
+    .catch(reportFailure("Environment save recovery is unavailable"));
   const skillService = createSkillService(createSkillController(database), accessController);
   const mcpConnections = createMCPConnections(
     database,
@@ -202,9 +202,7 @@ export async function createFactoryApplication() {
     factoryOrigin,
   );
   const mcpOAuthCallback = createMCPOAuthCallback(mcpConnections);
-  await mcpConnections
-    .recover()
-    .catch(() => console.error("MCP credential recovery is unavailable"));
+  await mcpConnections.recover().catch(reportFailure("MCP credential recovery is unavailable"));
   const usageService = createUsageService(database);
   const learningService = createLearningService(database);
   const learningWorker = createLearningWorker(database, { signingKey: runtimeSecret });
@@ -594,11 +592,11 @@ export async function createFactoryApplication() {
         await database.client`SELECT kind FROM factory.project_repository_intent WHERE project_id=${projectID}`;
       void setupReadiness
         .start(projectID, userID, intent?.["kind"] === "starter")
-        .catch(() => console.error("Project preparation needs attention"));
+        .catch(reportFailure("Project preparation needs attention"));
       if (intent?.["kind"] === "import")
         void setupInspection
           .start(projectID, userID, projectID)
-          .catch(() => console.error("Project configuration inspection needs attention"));
+          .catch(reportFailure("Project configuration inspection needs attention"));
     },
   });
   const setupInspection = createSetupInspection({
@@ -625,19 +623,17 @@ export async function createFactoryApplication() {
       ON CONFLICT(project_id,task) DO UPDATE SET state='ready',failure=NULL`;
       void setupReadiness
         .start(projectID, userID, false)
-        .catch(() => console.error("Confirmed Project preparation needs attention"));
+        .catch(reportFailure("Confirmed Project preparation needs attention"));
     },
   });
   await setupInspection
     .recover()
-    .catch(() => console.error("Project inspection recovery is unavailable"));
-  await projectSetup.recover().catch(() => console.error("Project setup recovery is unavailable"));
+    .catch(reportFailure("Project inspection recovery is unavailable"));
+  await projectSetup.recover().catch(reportFailure("Project setup recovery is unavailable"));
   await setupReadiness
     .recover()
-    .catch(() => console.error("Project preparation recovery is unavailable"));
-  await projectService
-    .recover()
-    .catch(() => console.error("Registered Project recovery is unavailable"));
+    .catch(reportFailure("Project preparation recovery is unavailable"));
+  await projectService.recover().catch(reportFailure("Registered Project recovery is unavailable"));
 
   const buildDirectory = factoryBuildDirectory();
   const planningCacheURL =

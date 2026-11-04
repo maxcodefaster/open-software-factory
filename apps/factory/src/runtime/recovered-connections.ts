@@ -1,3 +1,5 @@
+import { reportFailure } from "../failure-log";
+
 type RecoveredAttempt = { id: string; state: string };
 type RecoveryPorts = {
   connected: (attemptID: string) => boolean;
@@ -14,7 +16,7 @@ export function recoveredConnectionObserver(attempts: RecoveredAttempt[], ports:
     ports.schedule ??
     ((check: () => Promise<void>, delayMS: number) => {
       setTimeout(() => {
-        void check().catch(() => console.error("Runtime reconnect observation failed"));
+        void check().catch(reportFailure("Runtime reconnect observation failed"));
       }, delayMS).unref();
     });
   return () => {
