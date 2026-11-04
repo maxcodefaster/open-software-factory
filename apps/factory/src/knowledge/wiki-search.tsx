@@ -77,6 +77,7 @@ export function WikiSearch(props: {
             type="button"
             class="icon-button"
             aria-label="Close search"
+            title="Close search"
             onClick={props.onClose}
           >
             <Icon name="close" />

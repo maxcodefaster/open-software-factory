@@ -1,5 +1,6 @@
 import type {
   WikiGenerationOutput,
+  WikiGenerationProgress,
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
 import type { ResolvedModelConnection } from "../models/native";
@@ -19,6 +20,7 @@ export type WikiGenerationInput = {
   publish?(output: WikiGenerationOutput): Promise<WikiPageSnapshot[]>;
   providerRequests?: { remaining: number };
   authorize?(): Promise<void>;
+  progress?(progress: WikiGenerationProgress): Promise<void>;
   usageSink?(callID: string): MastraUsageSink;
   signal: AbortSignal;
 };

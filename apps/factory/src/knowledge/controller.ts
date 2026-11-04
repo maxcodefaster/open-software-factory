@@ -315,7 +315,8 @@ export function createKnowledgeController(
       const generations = await database.client<
         Array<{ projectID: string; commitSha: string; userID: string; modelId: string | null }>
       >`
-        UPDATE factory.knowledge_generation SET state = 'running', updated_at = now(), failure = NULL, attempt_id=${attemptId}
+        UPDATE factory.knowledge_generation SET state = 'running', updated_at = now(), failure = NULL, attempt_id=${attemptId},
+          progress='{"phase":"planning","topicsTotal":0,"topicsDone":0,"currentTopic":null}'::jsonb
         WHERE id = ${generationID} AND state IN ('pending', 'running')
         RETURNING project_id AS "projectID", source_commit_sha AS "commitSha",
           created_by AS "userID", model_id AS "modelId"
@@ -389,6 +390,16 @@ export function createKnowledgeController(
             readFiles: bundle.readFiles,
             signal,
             authorize,
+            progress: async (progress) => {
+              // Progress is advisory; a lost write must never fail checked generation.
+              try {
+                await database.client`UPDATE factory.knowledge_generation
+                  SET progress=${JSON.stringify(progress)}::jsonb,updated_at=now()
+                  WHERE id=${generationID} AND attempt_id=${attemptId} AND state='running'`;
+              } catch {
+                console.error("[factory] Wiki progress could not be recorded");
+              }
+            },
             usageSink: (callID) =>
               recordedMastraUsage(database, {
                 id: `wiki:${generationID}:${attemptId}:${callID}`,
@@ -577,7 +588,7 @@ export function createKnowledgeController(
       const rows = await database.client<Array<Record<string, unknown>>>`
         SELECT id, state, page_count AS "pageCount",
           conflict_count AS "conflictCount", failure, created_at AS "createdAt",
-          completed_at AS "completedAt"
+          completed_at AS "completedAt", progress
         FROM factory.knowledge_generation WHERE project_id = ${projectID}
         ORDER BY created_at DESC LIMIT 1
       `;

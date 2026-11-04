@@ -29,6 +29,11 @@ test.each([
   "large-repository",
   "many-topics",
   "authority-change",
+  "rate-limited-once",
+  "rate-limited-always",
+  "shared-budget-exhausted",
+  "one-sibling-fails",
+  "large-source",
 ])(
   "real Mastra checked progressive workflow: %s",
   async (scenario) => {
@@ -57,6 +62,28 @@ test.each([
     const pages: WikiPageSnapshot[] = [];
     const topicLookups = new Map<string, number>();
     const checkedSources = new Set<string>();
+    const publishedSlugs = new Set<string>();
+    const progressLog: Array<{
+      phase: string;
+      topicsTotal: number;
+      topicsDone: number;
+      currentTopic: string | null;
+    }> = [];
+    const budget = {
+      remaining:
+        scenario === "execution-bound"
+          ? 1
+          : scenario === "checker-budget-exhausted" || scenario === "shared-budget-exhausted"
+            ? 5
+            : 32,
+    };
+    const researchCalls = new Map<string, number>();
+    let fetchedPaths = 0,
+      truncatedToolResult = false;
+    let inFlight = 0,
+      maximumInFlight = 0,
+      publishing = 0,
+      overlappingPublications = 0;
     let writes = 0,
       checks = 0,
       publications = 0,
@@ -74,57 +101,86 @@ test.each([
       port: 0,
       async fetch(request) {
         receivedRequests++;
-        if (scenario === "provider-failure-not-repaired")
-          return Response.json(
-            { error: { message: "Controlled unavailable provider" } },
-            { status: 503 },
-          );
-        const incoming = (await request.json()) as {
-          tools?: Array<{ function?: { name?: string } }>;
-          tool_choice?: string;
-          messages: Array<{
-            role: string;
-            content: string | Array<{ type: string; text?: string }> | null;
-          }>;
-        };
-        largestRequest = Math.max(largestRequest, JSON.stringify(incoming).length);
-        for (const tool of incoming.tools ?? []) toolNames.add(tool.function?.name ?? "");
-        const body = {
-          messages: incoming.messages.map((message) => ({
-            ...message,
-            content:
-              typeof message.content === "string"
-                ? message.content
-                : (message.content?.find((part) => part.type === "text")?.text ?? ""),
-          })),
-        };
-        const system = body.messages
-          .filter((message) => message.role === "system")
-          .map((message) => message.content)
-          .join("\n");
-        const raw =
-          body.messages.find(
-            (message) => message.role === "user" && message.content.includes('"project"'),
-          )?.content ??
-          body.messages.find(
-            (message) => message.role === "user" && message.content.includes('"topic"'),
-          )?.content;
-        if (!raw) throw new Error("Missing controlled workflow input");
-        const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
-        const prompt = (parsed.input ?? parsed) as {
-          topic: (typeof topics)[number];
-          issues?: string[];
-        };
-        let output: unknown;
-        let sourceToolCall = false;
-        let sourcePaths: string[] | undefined;
-        if (system.includes("Review the whole proposed Wiki topic plan")) {
-          output = { issues: [] };
-        } else if (system.includes("Research manifests")) {
-          plans++;
-          if (parsed.correction) corrections.push(parsed);
-          output = {
-            topics: topics.map((topic, index) => ({
+        inFlight++;
+        maximumInFlight = Math.max(maximumInFlight, inFlight);
+        try {
+          return await respond(request);
+        } finally {
+          inFlight--;
+        }
+      },
+    });
+    async function respond(request: Request) {
+      await Bun.sleep(10);
+      if (
+        scenario === "rate-limited-always" ||
+        (scenario === "rate-limited-once" && receivedRequests === 3)
+      )
+        return Response.json(
+          { error: { message: "Rate limit reached" } },
+          { status: 429, headers: { "retry-after": "0" } },
+        );
+      if (scenario === "provider-failure-not-repaired")
+        return Response.json(
+          { error: { message: "Controlled unavailable provider" } },
+          { status: 503 },
+        );
+      const incoming = (await request.json()) as {
+        tools?: Array<{ function?: { name?: string } }>;
+        tool_choice?: string;
+        messages: Array<{
+          role: string;
+          content: string | Array<{ type: string; text?: string }> | null;
+        }>;
+      };
+      largestRequest = Math.max(largestRequest, JSON.stringify(incoming).length);
+      if (
+        incoming.messages.some(
+          (message) =>
+            message.role === "tool" &&
+            JSON.stringify(message.content).includes("truncated") &&
+            JSON.stringify(message.content).includes("nextStartLine"),
+        )
+      )
+        truncatedToolResult = true;
+      for (const tool of incoming.tools ?? []) toolNames.add(tool.function?.name ?? "");
+      const body = {
+        messages: incoming.messages.map((message) => ({
+          ...message,
+          content:
+            typeof message.content === "string"
+              ? message.content
+              : (message.content?.find((part) => part.type === "text")?.text ?? ""),
+        })),
+      };
+      const system = body.messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n");
+      const raw =
+        body.messages.find(
+          (message) => message.role === "user" && message.content.includes('"project"'),
+        )?.content ??
+        body.messages.find(
+          (message) => message.role === "user" && message.content.includes('"topic"'),
+        )?.content;
+      if (!raw) throw new Error("Missing controlled workflow input");
+      const parsed = JSON.parse(raw.slice(raw.indexOf("{"), raw.lastIndexOf("}") + 1));
+      const prompt = (parsed.input ?? parsed) as {
+        topic: (typeof topics)[number];
+        issues?: string[];
+      };
+      let output: unknown;
+      let sourceToolCall = false;
+      let sourcePaths: string[] | undefined;
+      if (system.includes("Review the whole proposed Wiki topic plan")) {
+        output = { issues: [] };
+      } else if (system.includes("Research manifests")) {
+        plans++;
+        if (parsed.correction) corrections.push(parsed);
+        output = {
+          topics: (scenario === "checker-budget-exhausted" ? topics.slice(0, 1) : topics).map(
+            (topic, index) => ({
               ...topic,
               ...(index === 0 &&
               (scenario === "invalid-plan-always" ||
@@ -134,141 +190,151 @@ test.each([
               ...(index === 1 && scenario === "verbose-topic-plan" && plans === 1
                 ? { purpose: "x".repeat(801) }
                 : {}),
-            })),
-          };
-          if (scenario === "verbose-topic-plan" && plans === 2) expect(raw).toContain("800");
-        } else if (system.includes("Follow relationships")) {
-          researches++;
-          const replies = topicLookups.get(prompt.topic.slug) ?? 0;
-          if (scenario === "many-topics" && replies < 3) {
-            sourceToolCall = true;
-            topicLookups.set(prompt.topic.slug, replies + 1);
-            const topicIndex = topics.findIndex((topic) => topic.slug === prompt.topic.slug);
-            sourcePaths = [files[96 + topicIndex * 3 + replies]?.path ?? ""];
-          }
-          const rejectedResearchAvailable =
-            parsed.rejectedResult?.findings?.[0]?.claim?.length === 1201 &&
-            parsed.correction?.includes("findings.0.claim");
-          if (parsed.correction && scenario.startsWith("unread-research")) {
-            expect(parsed.correction).toContain("Research cites unread source: src/flow-63.ts");
-            expect(parsed.correction).toContain("use readSource");
-            expect(parsed.rejectedResult.findings[0].paths).toEqual(["src/flow-63.ts"]);
-          }
-          // Independent topics keep running after one fails, so only strictly ordered scenarios
-          // can predict the publication count.
-          if (scenario !== "wrong-parent" && scenario !== "empty-topic")
-            expect(publications).toBe(
-              topics.findIndex((topic) => topic.slug === prompt.topic.slug),
-            );
-          output = {
-            findings: [
-              {
-                claim:
-                  (scenario === "invalid-research" && researches === 1) ||
-                  (scenario === "repair-needs-rejected-research" &&
-                    researches <= 2 &&
-                    !rejectedResearchAvailable)
-                    ? "x".repeat(1201)
-                    : "Verified workflow",
-                paths:
-                  scenario === "unread-research-always" ||
-                  (scenario === "unread-research-once" && researches === 1)
-                    ? ["src/flow-63.ts"]
-                    : prompt.topic.paths.slice(0, 8),
-              },
-            ],
-            uncertainties: [],
-          };
-        } else if (system.includes("Write only this topic")) {
-          writes++;
-          output = {
-            pages:
-              scenario === "empty-topic"
-                ? []
-                : [
-                    {
-                      body:
-                        scenario === "planned-links-need-more-repair" &&
-                        prompt.topic.slug === "overview" &&
-                        writes <= 3
-                          ? "Useful verified behavior. See [Flow 1](#wiki/guide-1)."
-                          : scenario === "bare-wiki-reference" &&
-                              prompt.topic.slug === "guide-1" &&
-                              !prompt.issues?.length
-                            ? "See #wiki/overview for the verified orientation."
-                            : scenario === "verbose-overview" &&
-                                !prompt.issues?.length &&
-                                prompt.topic.slug === "overview"
-                              ? "x".repeat(1201)
-                              : !prompt.issues?.length && prompt.topic.slug === "overview"
-                                ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
-                                : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
-                      ...(scenario === "wrong-parent" && prompt.topic.slug !== "overview"
-                        ? { parentSlug: null }
-                        : {}),
-                      sources: prompt.topic.paths,
-                    },
-                  ],
-          };
-        } else {
-          checks++;
-          sourceToolCall =
-            scenario === "source-hungry-checker" && !checkedSources.has(prompt.topic.slug);
-          if (sourceToolCall) checkedSources.add(prompt.topic.slug);
-          expect(system).toContain("normalized publication package, not a raw writer response");
-          expect(system).toContain("Do not flag these fields or request schema changes");
-          expect(system).toContain("Judge the current draft, not an earlier rejected version");
-          expect(system).toContain("Never request source-code changes");
-          expect(system).toContain("Clearly labelled advice");
-          expect(system).toContain("Do not invent an overclaim that the draft does not make");
-          expect(system).toContain(
-            "A topic purpose cannot require onward navigation to unpublished planned guides",
-          );
-          expect(system).toContain(
-            "Repository-document pointers are optional, not a substitute publication gate",
-          );
-          output = {
-            issues:
-              scenario === "unsupported-claim" && prompt.topic.slug !== "overview"
-                ? ["Draft invents deployment unsupported by inspected source"]
-                : scenario === "duplicate-prose" && prompt.topic.slug !== "overview"
-                  ? ["The status transition is repeated under multiple headings"]
-                  : [],
-          };
+            }),
+          ),
+        };
+        if (scenario === "verbose-topic-plan" && plans === 2) expect(raw).toContain("800");
+      } else if (system.includes("Follow relationships")) {
+        researches++;
+        // Topics research concurrently, so scripted faults follow the overview's own calls.
+        const nth = (researchCalls.get(prompt.topic.slug) ?? 0) + 1;
+        researchCalls.set(prompt.topic.slug, nth);
+        const overview = prompt.topic.slug === "overview";
+        const replies = topicLookups.get(prompt.topic.slug) ?? 0;
+        if (scenario === "many-topics" && replies < 3) {
+          sourceToolCall = true;
+          topicLookups.set(prompt.topic.slug, replies + 1);
+          const topicIndex = topics.findIndex((topic) => topic.slug === prompt.topic.slug);
+          sourcePaths = [files[96 + topicIndex * 3 + replies]?.path ?? ""];
         }
-        return Response.json({
-          id: "owned-wiki",
-          object: "chat.completion",
-          created: 1,
-          model: "controlled-wiki",
-          choices: [
+        const rejectedResearchAvailable =
+          parsed.rejectedResult?.findings?.[0]?.claim?.length === 1201 &&
+          parsed.correction?.includes("findings.0.claim");
+        if (parsed.correction && scenario.startsWith("unread-research")) {
+          expect(parsed.correction).toContain("Research cites unread source: src/flow-63.ts");
+          expect(parsed.correction).toContain("use readSource");
+          expect(parsed.rejectedResult.findings[0].paths).toEqual(["src/flow-63.ts"]);
+        }
+        output = {
+          findings: [
             {
-              index: 0,
-              message: sourceToolCall
-                ? {
-                    role: "assistant",
-                    content: null,
-                    tool_calls: [
-                      {
-                        id: `read-${receivedRequests}`,
-                        type: "function",
-                        function: {
-                          name: "readSource",
-                          arguments: JSON.stringify({
-                            paths: sourcePaths ?? prompt.topic.paths.slice(0, 1),
-                          }),
-                        },
-                      },
-                    ],
-                  }
-                : { role: "assistant", content: JSON.stringify(output) },
-              finish_reason: sourceToolCall ? "tool_calls" : "stop",
+              claim:
+                (scenario === "invalid-research" && overview && nth === 1) ||
+                (scenario === "repair-needs-rejected-research" &&
+                  overview &&
+                  nth <= 2 &&
+                  !rejectedResearchAvailable)
+                  ? "x".repeat(1201)
+                  : "Verified workflow",
+              paths:
+                scenario === "unread-research-always" ||
+                (scenario === "unread-research-once" && overview && nth === 1)
+                  ? ["src/flow-63.ts"]
+                  : prompt.topic.paths.slice(0, 8),
             },
           ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-        });
-      },
-    });
+          uncertainties: [],
+        };
+      } else if (system.includes("Write only this topic")) {
+        writes++;
+        // A child researches early but writes only after its parent was published.
+        if (prompt.topic.parentSlug) expect(publishedSlugs.has(prompt.topic.parentSlug)).toBe(true);
+        // The writer receives the evidence its findings cite, not every file the research read.
+        expect(
+          (prompt as { sources?: Array<{ path: string }> }).sources?.map((source) => source.path),
+        ).toEqual(prompt.topic.paths.slice(0, 8));
+        expect((prompt as { currentPages?: unknown[] }).currentPages).toEqual([]);
+        output = {
+          pages:
+            scenario === "empty-topic"
+              ? []
+              : [
+                  {
+                    body:
+                      scenario === "planned-links-need-more-repair" &&
+                      prompt.topic.slug === "overview" &&
+                      writes <= 3
+                        ? "Useful verified behavior. See [Flow 1](#wiki/guide-1)."
+                        : scenario === "bare-wiki-reference" &&
+                            prompt.topic.slug === "guide-1" &&
+                            !prompt.issues?.length
+                          ? "See #wiki/overview for the verified orientation."
+                          : scenario === "verbose-overview" &&
+                              !prompt.issues?.length &&
+                              prompt.topic.slug === "overview"
+                            ? "x".repeat(1201)
+                            : !prompt.issues?.length && prompt.topic.slug === "overview"
+                              ? "Useful verified behavior.\n\n## Sources\n\nSource noise."
+                              : `Useful verified behavior for ${prompt.topic.slug}.${prompt.topic.parentSlug ? `\n\n[Overview](#wiki/${scenario === "broken-link" ? "missing-page" : "overview"})` : ""}`,
+                    ...(scenario === "wrong-parent" && prompt.topic.slug !== "overview"
+                      ? { parentSlug: null }
+                      : {}),
+                    sources: prompt.topic.paths,
+                  },
+                ],
+        };
+      } else {
+        checks++;
+        // The checker verifies the draft against its cited sources and needs no research findings.
+        expect((prompt as { findings?: unknown }).findings).toBeUndefined();
+        sourceToolCall =
+          (scenario === "source-hungry-checker" || scenario === "large-source") &&
+          !checkedSources.has(prompt.topic.slug);
+        if (sourceToolCall) checkedSources.add(prompt.topic.slug);
+        expect(system).toContain("normalized publication package, not a raw writer response");
+        expect(system).toContain("Do not flag these fields or request schema changes");
+        expect(system).toContain("Judge the current draft, not an earlier rejected version");
+        expect(system).toContain("Never request source-code changes");
+        expect(system).toContain("Clearly labelled advice");
+        expect(system).toContain("Do not invent an overclaim that the draft does not make");
+        expect(system).toContain(
+          "A topic purpose cannot require onward navigation to unpublished planned guides",
+        );
+        expect(system).toContain(
+          "Repository-document pointers are optional, not a substitute publication gate",
+        );
+        output = {
+          issues:
+            (scenario === "unsupported-claim" && prompt.topic.slug !== "overview") ||
+            (scenario === "one-sibling-fails" && prompt.topic.slug === "guide-1")
+              ? ["Draft invents deployment unsupported by inspected source"]
+              : scenario === "duplicate-prose" && prompt.topic.slug !== "overview"
+                ? ["The status transition is repeated under multiple headings"]
+                : [],
+        };
+      }
+      return Response.json({
+        id: "owned-wiki",
+        object: "chat.completion",
+        created: 1,
+        model: "controlled-wiki",
+        choices: [
+          {
+            index: 0,
+            message: sourceToolCall
+              ? {
+                  role: "assistant",
+                  content: null,
+                  tool_calls: [
+                    {
+                      id: `read-${receivedRequests}`,
+                      type: "function",
+                      function: {
+                        name: "readSource",
+                        arguments: JSON.stringify({
+                          paths: sourcePaths ?? prompt.topic.paths.slice(0, 1),
+                        }),
+                      },
+                    },
+                  ],
+                }
+              : { role: "assistant", content: JSON.stringify(output) },
+            finish_reason: sourceToolCall ? "tool_calls" : "stop",
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    }
     process.env["FACTORY_MODEL_BASE_URL"] = `http://127.0.0.1:${server.port}/v1`;
     process.env["FACTORY_MODEL_API_KEY"] = "owned-test-not-a-secret";
     try {
@@ -290,28 +356,35 @@ test.each([
           if (scenario === "authority-change" && receivedRequests > 0)
             throw new Error("Wiki execution authority changed");
         },
+        progress: async (value) => {
+          progressLog.push(value);
+        },
         ...(scenario === "many-topics"
           ? {}
           : {
-              providerRequests: {
-                remaining:
-                  scenario === "execution-bound"
-                    ? 1
-                    : scenario === "checker-budget-exhausted"
-                      ? 5
-                      : 32,
-              },
+              providerRequests: budget,
             }),
         readFiles: async (paths) =>
           paths.map((path) => {
             read.add(path);
-            return { path, content: "export const valid = true;" };
+            fetchedPaths++;
+            return {
+              path,
+              content:
+                scenario === "large-source"
+                  ? "export const valid = true;\n".repeat(520)
+                  : "export const valid = true;",
+            };
           }),
         publish: async (output) => {
           if (scenario === "publication-conflict")
             throw new WikiPublicationConflict("Controlled revision conflict");
           publications++;
+          if (publishing++) overlappingPublications++;
+          await Bun.sleep(5);
+          publishing--;
           for (const page of output.pages) {
+            publishedSlugs.add(page.slug);
             expect(page.body).not.toContain("## Sources");
             if (scenario === "bare-wiki-reference")
               expect(page.body).not.toContain("See #wiki/overview");
@@ -350,6 +423,16 @@ test.each([
         expect(publications).toBe(0);
         return;
       }
+      if (scenario === "rate-limited-always") {
+        // One request plus four Retry-After repeats, each charged to the shared budget; then the
+        // definite 429 surfaces as a known rejection instead of hanging or retrying forever.
+        const failure = await run.catch((cause: unknown) => cause);
+        expect(knownModelRejection(failure)).toBe(true);
+        expect(receivedRequests).toBe(5);
+        expect(budget.remaining).toBe(32 - 5);
+        expect(publications).toBe(0);
+        return;
+      }
       if (scenario === "execution-bound") {
         const failure = await run.catch((cause: unknown) => cause);
         expect(knownModelRejection(failure)).toBe(true);
@@ -365,7 +448,17 @@ test.each([
       }
       if (scenario === "unread-research-always") {
         await expect(run).rejects.toThrow("Research cites unread source: src/flow-63.ts");
-        expect(researches).toBe(2);
+        // The overview and its repair; siblings may research alongside before the failure lands.
+        expect(researches).toBeGreaterThanOrEqual(2);
+        expect(publications).toBe(0);
+        return;
+      }
+      if (scenario === "shared-budget-exhausted") {
+        // Concurrent topics draw on one provider request budget that is never exceeded.
+        const failure = await run.catch((cause: unknown) => cause);
+        expect(knownModelRejection(failure)).toBe(true);
+        expect(receivedRequests).toBe(5);
+        expect(budget.remaining).toBe(0);
         expect(publications).toBe(0);
         return;
       }
@@ -379,10 +472,12 @@ test.each([
           "invalid-plan-once",
           "verbose-topic-plan",
           "source-hungry-checker",
+          "large-source",
           "bare-wiki-reference",
           "planned-links-need-more-repair",
           "large-repository",
           "many-topics",
+          "rate-limited-once",
         ].includes(scenario)
       ) {
         await expect(run).rejects.toThrow(
@@ -393,7 +488,12 @@ test.each([
               : "Wiki topic failed bounded quality checks",
         );
         expect(publications).toBe(
-          ["publication-conflict", "execution-bound", "empty-topic"].includes(scenario) ? 0 : 1,
+          ["publication-conflict", "execution-bound", "empty-topic"].includes(scenario)
+            ? 0
+            : // One failed sibling does not discard the topics that published around it.
+              scenario === "one-sibling-fails"
+              ? 3
+              : 1,
         );
         expect(receivedRequests).toBeLessThanOrEqual(32);
         if (scenario === "large-repository") {
@@ -416,6 +516,34 @@ test.each([
         );
       }
       expect(result.pages).toEqual([]);
+      expect(overlappingPublications).toBe(0);
+      expect(maximumInFlight).toBeLessThanOrEqual(3);
+      if (scenario === "rate-limited-once") {
+        // The refused request repeated once and finished the same generation.
+        expect(publications).toBe(4);
+        expect(plans).toBe(1);
+        expect(budget.remaining).toBe(32 - receivedRequests);
+      }
+      if (scenario === "success") {
+        // Child topics research while their parent is written, so provider calls overlap.
+        expect(maximumInFlight).toBeGreaterThan(1);
+        expect(progressLog[0]).toEqual({
+          phase: "writing",
+          topicsTotal: 4,
+          topicsDone: 0,
+          currentTopic: "Flow 0",
+        });
+        expect(progressLog.map((entry) => entry.topicsDone)).toEqual(
+          [...progressLog.map((entry) => entry.topicsDone)].sort((a, b) => a - b),
+        );
+        expect(progressLog.some((entry) => entry.phase === "publishing")).toBe(true);
+        expect(progressLog.at(-1)).toEqual({
+          phase: "publishing",
+          topicsTotal: 4,
+          topicsDone: 4,
+          currentTopic: null,
+        });
+      }
       if (scenario === "many-topics") {
         expect(receivedRequests).toBeGreaterThan(32);
         expect(publications).toBe(6);
@@ -431,7 +559,15 @@ test.each([
             ? 6
             : 5,
       );
-      expect(checks).toBe(scenario === "source-hungry-checker" ? 8 : 4);
+      expect(checks).toBe(
+        scenario === "source-hungry-checker" || scenario === "large-source" ? 8 : 4,
+      );
+      // Each repository path is fetched once per generation, however many agents read it.
+      expect(fetchedPaths).toBe(64);
+      if (scenario === "large-source") {
+        expect(truncatedToolResult).toBe(true);
+        expect(largestRequest).toBeLessThan(120_000);
+      }
       expect(researches).toBe(
         ["invalid-research", "repair-needs-rejected-research", "unread-research-once"].includes(
           scenario,

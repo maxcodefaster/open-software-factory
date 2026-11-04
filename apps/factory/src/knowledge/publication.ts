@@ -95,6 +95,9 @@ export async function publishWikiPackage(
       count++;
     }
     await transaction`UPDATE factory.knowledge_generation SET page_count=COALESCE(page_count,0)+${count},conflict_count=0,updated_at=now(),
+      progress=CASE WHEN ${input.complete} AND progress IS NOT NULL
+        THEN progress||jsonb_build_object('phase','done','topicsDone',progress->'topicsTotal','currentTopic',NULL)
+        ELSE progress END,
       state=CASE WHEN ${input.complete} THEN 'succeeded'::factory.knowledge_generation_state ELSE state END,
       completed_at=CASE WHEN ${input.complete} THEN now() ELSE completed_at END
       WHERE id=${input.generationID} AND attempt_id=${input.attemptID} AND state='running'`;

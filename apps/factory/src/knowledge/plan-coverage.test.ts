@@ -181,3 +181,103 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
   },
   20_000,
 );
+
+test("the coverage reviewer receives bounded previews and a refused request is repeated", async () => {
+  const large = {
+    path: "docs/large.md",
+    content: `# Large guide\n${"Run npm test to verify the editor.\n".repeat(900)}`,
+  };
+  let planned = 0;
+  let refusals = 0;
+  let reviewed: Array<{ path: string; content: string; truncated?: boolean }> = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const incoming = (await request.json()) as {
+        messages: Array<{ role: string; content: string | Array<{ text?: string }> | null }>;
+      };
+      const text = (content: string | Array<{ text?: string }> | null) =>
+        typeof content === "string" ? content : (content?.[0]?.text ?? "");
+      const system = incoming.messages
+        .filter((message) => message.role === "system")
+        .map((message) => text(message.content))
+        .join("\n");
+      let output: unknown = { issues: [] };
+      if (system.includes("Review the whole proposed Wiki topic plan")) {
+        // The first coverage request is refused before any inference starts.
+        if (refusals++ === 0)
+          return Response.json(
+            { error: { message: "Rate limit reached" } },
+            { status: 429, headers: { "retry-after-ms": "5" } },
+          );
+        const user = text(
+          incoming.messages.find((message) => message.role === "user")?.content ?? "",
+        );
+        reviewed = JSON.parse(user.slice(user.indexOf("{"), user.lastIndexOf("}") + 1)).sources;
+      } else if (system.includes("Research manifests")) {
+        planned++;
+        output = { topics: [] };
+      }
+      return Response.json({
+        id: "owned-wiki-previews",
+        object: "chat.completion",
+        created: 1,
+        model: "controlled-wiki",
+        choices: [
+          {
+            index: 0,
+            message: { role: "assistant", content: JSON.stringify(output) },
+            finish_reason: "stop",
+          },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+    },
+  });
+  const budget = { remaining: 10 };
+  try {
+    const result = await generateWiki({
+      name: "Preview fixture",
+      commit: "a".repeat(40),
+      modelId: "controlled-wiki",
+      connection: {
+        provider: "openai",
+        baseURL: `http://127.0.0.1:${server.port}/v1`,
+        apiKey: "owned-test-not-a-secret",
+      },
+      pages: [
+        {
+          id: crypto.randomUUID(),
+          slug: "overview",
+          title: "Overview",
+          body: "Run npm test to verify the editor.",
+          version: 1,
+          revisionId: crypto.randomUUID(),
+          parentId: null,
+          state: "active",
+          citations: [],
+        },
+      ],
+      inventory: [{ path: large.path, sha: "b".repeat(40), size: large.content.length }],
+      changedPaths: [],
+      sources: [large],
+      providerRequests: budget,
+      signal: AbortSignal.timeout(15_000),
+      readFiles: async () => [large],
+      publish: async () => {
+        throw new Error("An empty plan publishes nothing");
+      },
+    });
+    expect(result).toEqual({ pages: [] });
+    expect(planned).toBe(1);
+    expect(refusals).toBe(2);
+    // Planner, one refused and repeated coverage request: three admitted requests in total.
+    expect(budget.remaining).toBe(7);
+    expect(reviewed).toHaveLength(1);
+    expect(reviewed[0]?.truncated).toBe(true);
+    expect(reviewed[0]?.content.length).toBeLessThanOrEqual(2_000);
+  } finally {
+    await server.stop(true);
+  }
+}, 20_000);

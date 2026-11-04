@@ -19,6 +19,16 @@ export const wikiGenerationOutput = z
   })
   .strict();
 
+export const wikiGenerationProgress = z
+  .object({
+    phase: z.enum(["planning", "writing", "publishing", "done"]),
+    topicsTotal: z.number().int().min(0).max(100),
+    topicsDone: z.number().int().min(0).max(100),
+    currentTopic: z.string().max(200).nullable(),
+  })
+  .strict();
+export type WikiGenerationProgress = z.infer<typeof wikiGenerationProgress>;
+
 export type WikiPageSnapshot = {
   id: string;
   slug: string;
