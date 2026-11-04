@@ -52,7 +52,7 @@ test("endpoint policy rejects credentials, plaintext, native path spoofing and u
     expect(() => validateModelEndpoint({ provider: "anthropic", endpoint })).toThrow();
   expect(() =>
     validateModelEndpoint({ provider: "openai", endpoint: "https://private.test/v1" }),
-  ).toThrow("not allowed");
+  ).toThrow("modelAllowedOrigins");
   expect(
     validateModelEndpoint({ provider: "openai", endpoint: "https://private.test/v1/" }, [
       "https://private.test",

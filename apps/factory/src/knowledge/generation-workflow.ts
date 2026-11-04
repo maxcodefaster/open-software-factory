@@ -24,6 +24,7 @@ import {
   WikiTopicPlanError,
   WikiTopicQualityError,
 } from "./generation-failure";
+import { documentationLanguage } from "./language";
 import { listDirectory, repositoryMap } from "./repository-map";
 import { wikiLinkIssues } from "./wiki-links";
 
@@ -59,6 +60,14 @@ Do not enumerate imaginary missing features or every untested input. Mention onl
 otherwise misunderstand. Avoid repeating the same status transition under several headings.
 Inspect implementation and focused tests before claiming behavior. Never invent intent, deployment, guarantees,
 commands or integrations. Omit unknown behavior, do not fill it with generic advice.
+Write for the reader, not about your research. State verified behavior plainly. Never write phrases such as
+"the inspected evidence", "the inspected code does not establish", "was not verified here" or "treat as a design
+contract". Leave out what you could not confirm. Only when a reader could be harmed by assuming it, name that one
+boundary in a single short sentence, and collect such boundaries in one "Open questions" list at the end of the page.
+Write titles and bodies in the language the Project's own documentation uses (given as language when known,
+otherwise match its README). Keep product terms, UI labels, commands and identifiers exactly as they appear in the source.
+A guide is one reader task, typically 300 to 800 words. Split a longer topic into a parent page and child guides
+instead of appending sections.
 Preserve human business framing and hierarchy. Absence from code does not disprove business knowledge.
 Human operating practices need not be implemented in code. Keep them; do not replace them with
 unsupported-feature disclaimers unless inspected evidence actually contradicts that human context.
@@ -82,7 +91,7 @@ Do not archive or delete pages. Cite only paths actually read. Never link to not
 export const wikiReviewTask =
   "Check only this topic package for claims against inspected source, internal links, preservation of human context, meaningful coverage, duplicate prose, readability and useful density. The draft is Factory's normalized publication package, not a raw writer response: id, slug, title, parentSlug and sources are required metadata already validated by Factory. Do not flag these fields or request schema changes. Review the page bodies and titles. This is progressive publication: other plannedTopics deliberately publish later. Do not require those guides or links to them yet, do not request new pages, and do not request edits outside topic.pageIDs or its single new slug. A topic purpose cannot require onward navigation to unpublished planned guides. That part of the plan is deferred, not missing coverage in the current overview. Repository-document pointers are optional, not a substitute publication gate. Still reject broken or invented destinations actually present in the draft. A concise summary in a published parent is valid alongside a detailed guide. A root overview must not repeat a capability description or duplicate guide-level interface/test details. Reject repeated descriptions of the same state transition and long lists of irrelevant missing features. " +
   "Judge the current draft, not an earlier rejected version or the source code's quality. A source defect accurately described in the Wiki is not a documentation defect. Never request source-code changes from this read-only writing task. Clearly labelled advice for improving an example is not a claim that the existing example already follows that advice. Do not infer application-wide guarantees from a statement explicitly scoped to one helper, instance or connection pool. " +
-  "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands.";
+  "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands. Also report these repairable style flaws: prose that talks about the inspected evidence or code instead of stating verified behavior, a language that differs from the Project's documentation language, and a guide that mixes several reader tasks or exceeds roughly 1,000 words.";
 
 export const wikiPlanReviewTask =
   "Review the whole proposed Wiki topic plan against the current pages and inspected repository evidence. This is a coverage check before progressive publication, not a review of one page draft. " +
@@ -114,6 +123,15 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   const completedPageIDs = new Set(input.completedPageIDs ?? []);
   const known = new Set(input.inventory.map((file) => file.path));
   const repository = repositoryMap(input.inventory);
+  // Starting files orient the planner; readSource returns their full text on demand.
+  const sourcePreview = (file: { path: string; content: string }) =>
+    file.content.length <= 6_000
+      ? file
+      : { path: file.path, content: file.content.slice(0, 6_000), truncated: true };
+  const language = documentationLanguage([
+    ...input.sources.map((file) => file.content),
+    ...pages.map((page) => page.body),
+  ]);
   function sourceScope(seed: Array<{ path: string; content: string }> = []) {
     const read = new Map(seed.map((file) => [file.path, file]));
     let bytes = seed.reduce(
@@ -343,7 +361,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             changedPaths: input.changedPaths,
             currentPages: pages,
             completedPageIDs: [...completedPageIDs],
-            initialSources: input.sources,
+            initialSources: input.sources.map(sourcePreview),
           },
           planSources,
           "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add child guides only when distinct reader tasks need them. There is no target page count. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.",
@@ -464,6 +482,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             {
               topic,
               plannedTopics,
+              ...(language ? { language } : {}),
               findings,
               currentPages: pages,
               sources: [...sources.read.values()],
@@ -546,6 +565,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             {
               topic,
               plannedTopics,
+              ...(language ? { language } : {}),
               findings,
               currentPages: pages,
               draft: output,

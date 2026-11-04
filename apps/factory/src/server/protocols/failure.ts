@@ -12,7 +12,8 @@ export function protocolFailure(request: Request, cause: unknown): Response {
     return json({ error: "Invalid command. Check the entered values." }, 400);
   const appFailure = appRequestFailureResponse(request, cause);
   if (appFailure) return appFailure;
-  logFailure(`${request.method} ${new URL(request.url).pathname}`, cause);
+  if (!request.signal.aborted && !(cause instanceof DOMException && cause.name === "AbortError"))
+    logFailure(`${request.method} ${new URL(request.url).pathname}`, cause);
   if (cause instanceof SystemContractError) return json({ error: cause.message }, 422);
   return json({ error: "Factory command failed" }, 500);
 }

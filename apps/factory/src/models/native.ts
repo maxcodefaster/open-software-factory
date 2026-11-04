@@ -66,7 +66,10 @@ export function validateModelEndpoint(
     );
   const defaultURL = new URL(nativeEndpoints[metadata.provider]);
   if (url.origin !== defaultURL.origin && !allowedOrigins.includes(url.origin))
-    throw new CommandError("forbidden", "This model endpoint is not allowed by the deployment");
+    throw new CommandError(
+      "forbidden",
+      `This installation does not allow ${url.origin}. An operator adds it to modelAllowedOrigins in the Helm values.`,
+    );
   if (
     url.origin === defaultURL.origin &&
     url.pathname.replace(/\/$/, "") !== defaultURL.pathname.replace(/\/$/, "")
