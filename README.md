@@ -202,6 +202,12 @@ or an installer for Kubernetes.
 
 Each declared App has its own isolated origin. Root-relative pages, framework APIs, assets and
 WebSockets stay with that App instead of entering Factory's document or command handlers.
+Declared App processes receive `FACTORY_APP_ORIGINS`, a JSON object from their declared ports
+to the published origins of that exact Runtime Attempt. Projects can use those addresses for
+browser-facing configuration while keeping backend and health connections local. The addresses
+contain no credentials and grant no cross-App access or relaxed authentication. New artifact
+intent freezes the public Factory origin; existing Attempts and clean prepared templates are
+not rewritten. See [published App addresses](docs/adr/0037-bind-published-app-origins-to-runtime-intent.md).
 The Connector preserves the browser-visible App Host for HTTP and WebSocket requests while
 dialing only the admitted internal target. Factory reconstructs proxy authority after discarding
 client-supplied forwarding headers; same-origin authentication does not need a relaxed origin check.

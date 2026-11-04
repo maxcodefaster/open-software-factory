@@ -4,6 +4,16 @@ import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
+const declaredProcess = z.strictObject({
+  name: z.string(),
+  label: z.string().optional(),
+  command: z.array(z.string()).min(1),
+});
+const assignedProcess = declaredProcess
+  .extend({
+    env: z.strictObject({ FACTORY_APP_ORIGINS: z.string() }).optional(),
+  })
+  .transform(({ env: _metadata, ...process }) => process);
 export const stagingConfiguration = z.strictObject({
   devcontainerPath: z.string().min(1),
   channels: z
@@ -17,16 +27,7 @@ export const stagingConfiguration = z.strictObject({
     )
     .min(1)
     .max(4),
-  processes: z
-    .array(
-      z.strictObject({
-        name: z.string(),
-        label: z.string().optional(),
-        command: z.array(z.string()).min(1),
-      }),
-    )
-    .min(1)
-    .max(4),
+  processes: z.array(declaredProcess).min(1).max(4),
 });
 
 // Keep only the public declaration actually sent to this Staging Attempt.
@@ -64,7 +65,7 @@ export async function freezeStagingConfiguration(
   const declaration = stagingConfiguration.parse({
     devcontainerPath: assignment.devcontainerPath,
     channels: assignment.channels,
-    processes: assignment.processes,
+    processes: assignment.processes.map((process) => assignedProcess.parse(process)),
   });
   await sql`INSERT INTO factory.staging_configuration(runtime_attempt_id,declaration)
     VALUES(${attemptID},${JSON.stringify(declaration)}::text::jsonb) ON CONFLICT DO NOTHING`;

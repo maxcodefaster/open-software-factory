@@ -23,7 +23,7 @@ test("the PostgreSQL invariant command owns a fresh baseline instead of using th
   expect(stdout).toContain("PostgreSQL clean baseline invariants passed");
 });
 
-test("fresh-storage migration upgrades version ten once without changing retained source records", async () => {
+test("forward migrations upgrade version ten once without changing retained source or artifact records", async () => {
   const owned = await ownedPostgresServer();
   const admin = postgres(owned.identity.url, { max: 1 });
   const name = `upgrade_${crypto.randomUUID().replaceAll("-", "")}`;
@@ -34,8 +34,11 @@ test("fresh-storage migration upgrades version ten once without changing retaine
     await admin.unsafe(`CREATE DATABASE "${name}"`);
     database = postgres(url.toString(), { max: 1 });
     const directory = new URL("../../packages/db/migrations/", import.meta.url);
-    for (const migration of (await readdir(directory)).sort())
-      if (/^\d{4}_.+\.sql$/.test(migration) && Number(migration.slice(0, 4)) <= 10)
+    const migrations = (await readdir(directory))
+      .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+      .sort();
+    for (const migration of migrations)
+      if (Number(migration.slice(0, 4)) <= 10)
         await database.unsafe(await readFile(new URL(migration, directory), "utf8"));
     const actorID = crypto.randomUUID();
     const projectID = crypto.randomUUID();
@@ -47,6 +50,14 @@ test("fresh-storage migration upgrades version ten once without changing retaine
         'https://example.invalid/retained.git','main','.devcontainer/devcontainer.json',
         ${actorID},'river-landscape')`;
     const before = [...(await database`SELECT * FROM factory.project WHERE id=${projectID}`)];
+    const attemptID = crypto.randomUUID();
+    await database`INSERT INTO factory.runtime_attempt(id,project_id,isolated_kind,generation,
+      revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${attemptID},${projectID},'staging',1,${"a".repeat(40)},'create-intended',
+        ${"b".repeat(64)},${"c".repeat(64)},now(),${actorID})`;
+    await database`INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image)
+      VALUES(${attemptID},'staging',${`registry.invalid/retained@sha256:${"d".repeat(64)}`})`;
+    const oldArtifacts = [...(await database`SELECT * FROM factory.runtime_artifact_intent`)];
     for (let run = 0; run < 2; run++) {
       const child = Bun.spawn([process.execPath, "--no-env-file", "packages/db/src/migrate.ts"], {
         env: { ...verificationEnvironment(process.env), DATABASE_URL: url.toString() },
@@ -62,13 +73,20 @@ test("fresh-storage migration upgrades version ten once without changing retaine
       expect([...(await database`SELECT * FROM factory.project WHERE id=${projectID}`)]).toEqual(
         before,
       );
+      const artifacts = [...(await database`SELECT * FROM factory.runtime_artifact_intent`)];
+      expect(
+        artifacts.map(({ public_factory_origin, ...original }) => {
+          expect(public_factory_origin).toBeNull();
+          return original;
+        }),
+      ).toEqual(oldArtifacts);
       expect(
         (
           await database<
             Array<{ version: number }>
           >`SELECT version FROM factory.schema_migration ORDER BY version`
         ).map(({ version }) => version),
-      ).toEqual(Array.from({ length: 11 }, (_, i) => i + 1));
+      ).toEqual(migrations.map((file) => Number(file.slice(0, 4))));
     }
   } finally {
     await database?.end({ timeout: 1 });

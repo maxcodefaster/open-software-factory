@@ -39,6 +39,7 @@ import { createComputeWait } from "../usage/compute-wait";
 import { createRecordedOpenCodeUsage } from "../usage/record-opencode";
 import type { createWorkspaceSourceController } from "../workspace/source-controller";
 import { agentConfiguration } from "./agent-configuration";
+import { runtimeAppOrigins } from "./app-origins";
 import { freezeRuntimeArtifacts } from "./artifacts";
 import { runtimeFactoryURL, runtimeForgeURL, runtimeReleaseRegistryURL } from "./endpoints";
 import { createFactoryboxExecution } from "./factorybox";
@@ -115,6 +116,7 @@ export function createRuntimeController(
       verification: pinnedRuntimeHostImage,
     },
     browserToolsImage: process.env["FACTORY_BROWSER_TOOLS_IMAGE"],
+    publicFactoryOrigin: new URL(process.env["FACTORY_BASE_URL"] ?? "http://127.0.0.1:3000").origin,
   };
   const artifactsFor = (attemptID: string, sql: Database["client"]) =>
     freezeRuntimeArtifacts(sql, attemptID, artifactConfiguration);
@@ -729,6 +731,9 @@ export function createRuntimeController(
           ? undefined
           : await resolveSystemContract(input.repositoryURL, input.revision);
       const artifacts = await artifactsFor(input.identity.attemptID, connection);
+      const appOrigins = systemContract
+        ? runtimeAppOrigins(artifacts.publicFactoryOrigin, input.identity.attemptID, systemContract)
+        : undefined;
       const resources = renderRuntimeResources({
         ...input.identity,
         generation: input.generation,
@@ -747,6 +752,7 @@ export function createRuntimeController(
         registryCA: await readRegistryCA(),
         mode: input.kind,
         ...(systemContract ? { systemContract } : {}),
+        ...(appOrigins ? { appOrigins } : {}),
         ...(input.verification
           ? {
               verification: {
@@ -931,6 +937,9 @@ export function createRuntimeController(
           ? await sources.prepareExecution(attempt.id)
           : undefined;
         const artifacts = await artifactsFor(attempt.id, sql);
+        const appOrigins = systemContract
+          ? runtimeAppOrigins(artifacts.publicFactoryOrigin, attempt.id, systemContract)
+          : undefined;
         const resources = renderRuntimeResources({
           ...identity,
           generation,
@@ -953,6 +962,7 @@ export function createRuntimeController(
           registryCA: await readRegistryCA(),
           mode: row.isolatedKind ?? "development",
           ...(systemContract ? { systemContract } : {}),
+          ...(appOrigins ? { appOrigins } : {}),
           ...(row.changeID && row.workspaceID
             ? {
                 agent: await agentConfiguration(

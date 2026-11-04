@@ -39,6 +39,7 @@ export interface RuntimeManifestInput {
     readonly imageRepository: string;
   };
   readonly systemContract?: SystemContract;
+  readonly appOrigins?: Readonly<Record<string, string>>;
   readonly agent?: {
     readonly modelBaseURL: string;
     readonly modelToken: string;
@@ -100,6 +101,18 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
       : (input.systemContract?.apps ?? []);
   const primaryApp = input.systemContract?.primaryApp;
   const runtimeName = (appID: string) => (appID === primaryApp ? "app" : `app-${appID}`);
+  if (input.appOrigins) {
+    if (
+      Object.keys(input.appOrigins).length !== apps.length ||
+      apps.some((app) => typeof input.appOrigins?.[String(app.port)] !== "string")
+    )
+      throw new Error("Published App origins must match the declared ports");
+    for (const origin of Object.values(input.appOrigins)) {
+      const parsed = new URL(origin);
+      if (!["http:", "https:"].includes(parsed.protocol) || parsed.origin !== origin)
+        throw new Error("Published App addresses must be exact HTTP(S) origins");
+    }
+  }
   const namespaceLabels = factoryboxSharedLabels(input.workerID);
   const labels = {
     "app.kubernetes.io/managed-by": "open-software-factory",
@@ -164,7 +177,14 @@ export function renderRuntimeResources(input: RuntimeManifestInput) {
         : []),
     ],
     processes: [
-      ...apps.map((app) => ({ name: runtimeName(app.id), label: app.label, command: app.command })),
+      ...apps.map((app) => ({
+        name: runtimeName(app.id),
+        label: app.label,
+        command: app.command,
+        ...(input.appOrigins
+          ? { env: { FACTORY_APP_ORIGINS: JSON.stringify(input.appOrigins) } }
+          : {}),
+      })),
       ...(input.agent
         ? [
             {

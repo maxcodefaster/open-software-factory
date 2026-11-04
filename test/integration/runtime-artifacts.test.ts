@@ -25,6 +25,7 @@ const configuration = {
     verification: image("verification", "3"),
   },
   browserToolsImage: image("browser", "4"),
+  publicFactoryOrigin: "https://factory.example",
 } satisfies RuntimeArtifactConfiguration;
 
 test("runtime artifact selection follows persisted role, freezes before create and retains pins across recovery", async () => {
@@ -65,6 +66,8 @@ test("runtime artifact selection follows persisted role, freezes before create a
         browserToolsImage: role === "build" ? configuration.browserToolsImage : null,
         environmentVersion: 0,
         factoryboxProfile: configuration.factoryboxProfile,
+        publicFactoryOrigin:
+          artifactRole === "verification" ? null : configuration.publicFactoryOrigin,
       });
       const changed: RuntimeArtifactConfiguration = {
         hostImages: {
@@ -74,6 +77,7 @@ test("runtime artifact selection follows persisted role, freezes before create a
           staging: undefined,
         },
         browserToolsImage: undefined,
+        publicFactoryOrigin: "https://different.example",
       };
       expect(await freezeRuntimeArtifacts(database.client, attemptID, changed)).toEqual(first);
       await expect(
@@ -145,6 +149,39 @@ test("fresh execution on an existing worker retains its admitted resource envelo
     const [worker] = await database.client<Array<{ profile: unknown }>>`
       SELECT profile FROM factory.factorybox_worker WHERE id=${selected.workerID}`;
     expect(worker?.profile).toEqual(retainedProfile);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 30_000);
+
+test("an older artifact intent without public App metadata never adopts a later Factory address", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const [original] = await database.client<Array<{ workspaceID: string }>>`
+      SELECT workspace_id AS "workspaceID" FROM factory.runtime_attempt WHERE id=${owned.attemptID}`;
+    if (!original) throw new Error("Missing retained Workspace");
+    await database.client`UPDATE factory.runtime_attempt SET state='stopped' WHERE id=${owned.attemptID}`;
+    const attemptID = crypto.randomUUID();
+    await database.client`INSERT INTO factory.runtime_attempt(id,project_id,change_id,workspace_id,
+      generation,revision,state,parent_connector_token_hash,child_connector_token_hash,create_intended_at,created_by)
+      VALUES(${attemptID},${owned.projectID},${owned.changeID},${original.workspaceID},2,${"a".repeat(40)},
+        'create-intended',${"b".repeat(64)},${"c".repeat(64)},now(),${owned.userID})`;
+    const first = await freezeRuntimeArtifacts(database.client, attemptID, {
+      factoryboxProfile: configuration.factoryboxProfile,
+      hostImages: configuration.hostImages,
+      browserToolsImage: configuration.browserToolsImage,
+    });
+    expect(first.publicFactoryOrigin).toBeNull();
+    expect(await freezeRuntimeArtifacts(database.client, attemptID, configuration)).toEqual(first);
+    await expect(
+      (async () => {
+        await database.client`UPDATE factory.runtime_artifact_intent
+        SET public_factory_origin=${configuration.publicFactoryOrigin} WHERE runtime_attempt_id=${attemptID}`;
+      })(),
+    ).rejects.toThrow("immutable");
   } finally {
     await database.client.end({ timeout: 2 });
     await host.dispose();

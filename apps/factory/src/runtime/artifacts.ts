@@ -6,6 +6,7 @@ import {
   factoryboxRuntimeProfile,
 } from "../../../../packages/runtime-kubernetes/src/factorybox-runtime";
 import { freezeRuntimeEnvironment } from "../environments/runtime";
+import { runtimePublicFactoryOrigin } from "./app-origins";
 import { retainedFactoryboxProfile } from "./worker";
 
 export type RuntimeArtifactRole = "development" | "build" | "verification" | "staging";
@@ -17,11 +18,13 @@ export interface RuntimeArtifactIntent {
   readonly browserToolsImage: string | null;
   readonly environmentVersion: number;
   readonly factoryboxProfile: FactoryboxRuntimeProfile;
+  readonly publicFactoryOrigin: string | null;
 }
 export interface RuntimeArtifactConfiguration {
   readonly factoryboxProfile?: FactoryboxRuntimeProfile;
   readonly hostImages: Readonly<Record<RuntimeArtifactRole, string | undefined>>;
   readonly browserToolsImage: string | undefined;
+  readonly publicFactoryOrigin?: string;
 }
 
 type SQL = ReturnType<typeof createDatabase>["client"] | TransactionSql;
@@ -43,7 +46,7 @@ export async function freezeRuntimeArtifacts(
         SELECT artifact.role,artifact.runtime_host_image AS "runtimeHostImage",
           artifact.browser_tools_image AS "browserToolsImage",${environment.version}::float8 AS "environmentVersion",
           artifact.factorybox_profile AS "factoryboxProfile",attempt.factorybox_worker_id AS "workerID",
-          slot.id AS "reserveSlotID"
+          slot.id AS "reserveSlotID",artifact.public_factory_origin AS "publicFactoryOrigin"
         FROM factory.runtime_artifact_intent artifact
         JOIN factory.runtime_attempt attempt ON attempt.id=artifact.runtime_attempt_id
         LEFT JOIN factory.execution_slot slot ON slot.assigned_attempt_id=attempt.id
@@ -52,6 +55,7 @@ export async function freezeRuntimeArtifacts(
   const retained = await read();
   if (retained) {
     factoryboxRuntimeProfile.parse(retained.factoryboxProfile);
+    runtimePublicFactoryOrigin(retained.publicFactoryOrigin ?? undefined);
     return retained;
   }
   const [attempt] = await sql<Array<{ role: RuntimeArtifactRole }>>`
@@ -76,9 +80,13 @@ export async function freezeRuntimeArtifacts(
   const profile = slot
     ? factoryboxRuntimeProfile.parse(slot.profile)
     : await retainedFactoryboxProfile(sql, configuration.factoryboxProfile, runtimeHostImage);
+  const publicFactoryOrigin =
+    attempt.role === "verification"
+      ? null
+      : runtimePublicFactoryOrigin(configuration.publicFactoryOrigin);
   await sql`
-    INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image,factorybox_profile)
-    VALUES(${attemptID},${attempt.role},${runtimeHostImage},${browserToolsImage},${JSON.stringify(profile)}::text::jsonb)
+    INSERT INTO factory.runtime_artifact_intent(runtime_attempt_id,role,runtime_host_image,browser_tools_image,factorybox_profile,public_factory_origin)
+    VALUES(${attemptID},${attempt.role},${runtimeHostImage},${browserToolsImage},${JSON.stringify(profile)}::text::jsonb,${publicFactoryOrigin})
     ON CONFLICT(runtime_attempt_id) DO NOTHING`;
   const intent = await read();
   if (!intent) throw new Error("Runtime artifact intent was not recorded");

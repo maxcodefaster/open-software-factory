@@ -37,7 +37,7 @@ try {
   `;
   if (
     versions[0]?.version !== 1 ||
-    versions.length > 11 ||
+    versions.length > 12 ||
     versions.some((value, index) => value.version !== index + 1)
   )
     throw new Error(
@@ -104,6 +104,13 @@ try {
     await client.unsafe(
       await readFile(
         resolve(import.meta.dir, "../migrations/0011_fresh_worker_storage.sql"),
+        "utf8",
+      ),
+    );
+  if (versions.length <= 11)
+    await client.unsafe(
+      await readFile(
+        resolve(import.meta.dir, "../migrations/0012_runtime_app_origins.sql"),
         "utf8",
       ),
     );

@@ -109,7 +109,16 @@ export async function executionPoolFixture(
               channels: [
                 { name: "app", kind: "app", target: "http://127.0.0.1:19472", healthPath: "/" },
               ],
-              processes: [{ name: "app", label: "App", command: ["node", "server.js"] }],
+              processes: [
+                {
+                  name: "app",
+                  label: "App",
+                  command: ["node", "server.js"],
+                  env: {
+                    FACTORY_APP_ORIGINS: '{"19472":"https://do-not-capture.runtime.invalid"}',
+                  },
+                },
+              ],
               repositoryUrl: "https://factory.invalid/private-source-capability-do-not-capture",
               controlUrl: "ws://factory.invalid/only-this-attempt",
             }),

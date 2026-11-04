@@ -103,7 +103,7 @@ describe("runtime Kubernetes resources", () => {
   test.each([undefined, 100] as const)(
     "keeps development tools out of Staging with CPU reserve %s",
     (cpuRequestMilli) => {
-      const resources = renderRuntimeResources({
+      const input: Parameters<typeof renderRuntimeResources>[0] = {
         factoryboxProfile: { ...ownedFactoryboxProfile, cpuRequestMilli },
         attemptID: "01234567-89ab-5def-8123-456789abcdef",
         generation: 1,
@@ -120,7 +120,12 @@ describe("runtime Kubernetes resources", () => {
         registryCA: "certificate",
         mode: "staging",
         systemContract: multiAppSystemContract,
-      });
+        appOrigins: {
+          "4300": "https://primary.runtime.factory.example",
+          "4310": "https://worker.runtime.factory.example",
+        },
+      };
+      const resources = renderRuntimeResources(input);
       const assignment = resources.find((resource) => resource.kind === "Secret")?.stringData?.[
         "assignment.json"
       ];
@@ -129,6 +134,21 @@ describe("runtime Kubernetes resources", () => {
         channels: [{ name: "app" }, { name: "app-worker" }],
         processes: [{ name: "app" }, { name: "app-worker" }],
       });
+      for (const process of JSON.parse(String(assignment)).processes) {
+        expect(JSON.parse(process.env.FACTORY_APP_ORIGINS)).toEqual({
+          "4300": "https://primary.runtime.factory.example",
+          "4310": "https://worker.runtime.factory.example",
+        });
+      }
+      for (const appOrigins of [
+        { "4300": "https://primary.runtime.factory.example" },
+        { "4300": "file:///tmp/app", "4310": "https://worker.runtime.factory.example" },
+        {
+          "4300": "https://owned:fixture@example.test",
+          "4310": "https://worker.runtime.factory.example",
+        },
+      ])
+        expect(() => renderRuntimeResources({ ...input, appOrigins })).toThrow();
       expect(String(assignment)).not.toContain("/opt/factory/theia");
       expect(String(assignment)).not.toContain('"name":"ide"');
       expect(String(assignment)).not.toContain('"name":"agent"');
