@@ -152,6 +152,17 @@ export function LearningFlow(props: { view: LearningView; onInspect: (detailId: 
           >
             <defs>
               <linearGradient
+                id={`${id}-threads`}
+                x1="0%"
+                y1="0%"
+                x2={layout().mobile ? "0%" : "100%"}
+                y2={layout().mobile ? "100%" : "0%"}
+              >
+                <stop offset="0%" stop-color="var(--color-ink)" stop-opacity="0.5" />
+                <stop offset="50%" stop-color="var(--color-ink)" stop-opacity="0.28" />
+                <stop offset="100%" stop-color="var(--color-ink)" stop-opacity="0.08" />
+              </linearGradient>
+              <linearGradient
                 id={`${id}-highlight`}
                 gradientUnits="userSpaceOnUse"
                 x1={activeSegment()?.start.x ?? 0}
@@ -166,8 +177,19 @@ export function LearningFlow(props: { view: LearningView; onInspect: (detailId: 
               </linearGradient>
             </defs>
             <For each={layout().threads}>
-              {(path) => <path class="learning-flow-thread" d={path} />}
+              {(path) => (
+                <path
+                  class="learning-flow-thread"
+                  d={path}
+                  style={{ stroke: `url(#${id}-threads)` }}
+                />
+              )}
             </For>
+            <path
+              class="learning-flow-ribbon"
+              d={activeSegment()?.ribbon ?? ""}
+              style={{ stroke: `url(#${id}-highlight)` }}
+            />
             <For each={activePaths()}>
               {(path) => (
                 <path
@@ -178,7 +200,19 @@ export function LearningFlow(props: { view: LearningView; onInspect: (detailId: 
               )}
             </For>
             <For each={trace()}>
-              {() => <path class="learning-flow-trace" d={activePaths()[6] ?? ""} pathLength="1" />}
+              {() => (
+                <g class="learning-flow-trace">
+                  <For each={[2, 6, 10]}>
+                    {(strand) => (
+                      <path
+                        d={activePaths()[strand] ?? ""}
+                        pathLength="1"
+                        stroke-dasharray={`0.001 ${0.13 + strand * 0.007}`}
+                      />
+                    )}
+                  </For>
+                </g>
+              )}
             </For>
           </svg>
           <For each={records()} keyed={(record) => record.id}>
@@ -241,7 +275,7 @@ export function LearningFlow(props: { view: LearningView; onInspect: (detailId: 
       <Show when={current()}>
         <p class="learning-flow-caption">
           Latest {records().length} of {history().length} records · Oldest first · UTC
-          <span>Connections show order, not measured improvement.</span>
+          <span>Connections show order, not measured improvement or live activity.</span>
         </p>
         <div class="learning-flow-detail" data-tone={current()?.tone}>
           <div aria-live="polite" aria-atomic="true">

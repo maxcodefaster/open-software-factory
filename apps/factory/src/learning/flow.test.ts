@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { learningFixture } from "../../../../test/fixtures/learning";
 import { learningHistoryFixture } from "../../../../test/fixtures/learning-history";
-import { learningFlowLayout, learningFlowRecords } from "./flow";
 import { fixtureValue } from "../../../../test/fixtures/value";
+import { learningFlowLayout, learningFlowRecords } from "./flow";
 
 describe("retained learning flow", () => {
   test("merges each proposal's lifecycle into one honest, dated record", () => {
@@ -158,6 +158,30 @@ describe("retained learning flow", () => {
 });
 
 describe("learning flow geometry", () => {
+  test("strands share an inlet and fan out instead of pinching at every record", () => {
+    for (const width of [288, 800]) {
+      const layout = learningFlowLayout(width, 4);
+      const inlet = layout.threads.map((path) => path.split(" ")[0]);
+      expect(new Set(inlet).size).toBe(1);
+      const outlets = layout.threads.map((path) => path.split(" ").at(-1));
+      expect(new Set(outlets).size).toBe(layout.threads.length);
+      for (const node of layout.nodes) {
+        const transverse = layout.threads.map((path) => {
+          const points = [...path.matchAll(/[ML]([\d.-]+),([\d.-]+)/g)].map((match) => ({
+            x: Number(match[1]),
+            y: Number(match[2]),
+          }));
+          const closest = points.toSorted(
+            (a, b) =>
+              Math.abs((layout.mobile ? a.y : a.x) - (layout.mobile ? node.y : node.x)) -
+              Math.abs((layout.mobile ? b.y : b.x) - (layout.mobile ? node.y : node.x)),
+          )[0];
+          return layout.mobile ? closest?.x : closest?.y;
+        });
+        expect(new Set(transverse).size).toBe(layout.threads.length);
+      }
+    }
+  });
   test("sparse histories take less room without inventing more nodes", () => {
     const single = learningFlowLayout(800, 1);
     const pair = learningFlowLayout(800, 2);
@@ -176,6 +200,9 @@ describe("learning flow geometry", () => {
         expect(layout.selections).toHaveLength(count);
         for (const segment of layout.selections) {
           expect(segment.paths).toHaveLength(13);
+          expect(segment.ribbon).not.toContain("NaN");
+          expect(segment.ribbon).not.toContain("Infinity");
+          expect(segment.ribbon).toMatch(/^M[\d.-]+,[\d.-]+ L/);
           for (const point of [segment.start, segment.end]) {
             expect(point.x).toBeGreaterThanOrEqual(0);
             expect(point.x).toBeLessThanOrEqual(width);

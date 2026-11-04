@@ -1,9 +1,9 @@
 import { mkdir, rm } from "node:fs/promises";
 import { resolve } from "node:path";
 import { type BrowserContext, expect } from "@playwright/test";
-import { test } from "../fixtures/browser-test";
 import solid from "@solidjs/vite-plugin";
 import { createServer, type ViteDevServer } from "vite";
+import { test } from "../fixtures/browser-test";
 import { factoryFixtureStart } from "../fixtures/start-plugins";
 import { fixtureValue } from "../fixtures/value";
 
@@ -701,9 +701,41 @@ test("motion is a finite interaction response and respects reduced motion", asyn
     const trace = flow.locator(".learning-flow-trace");
     await expect(trace).toHaveCSS("animation-name", "learning-flow-trace");
     await expect(trace).toHaveCSS("animation-iteration-count", "1");
+    await expect(trace.locator("path")).toHaveCount(3);
+    await expect(flow.locator(".learning-flow-ribbon")).toHaveCSS("stroke-width", "18px");
+    await expect(flow).toContainText("not measured improvement or live activity");
     expect(
       await trace.evaluate((element) => element.getAnimations()[0]?.effect?.getTiming().iterations),
     ).toBe(1);
+    // Inspect several actual animation frames without depending on screenshot
+    // timing. All three particle paths inherit this one finite animation.
+    const frames = await trace.evaluate((element) => {
+      const animation = element.getAnimations()[0];
+      if (!animation) throw new Error("Missing selection animation");
+      animation.pause();
+      const duration = Number(animation.effect?.getTiming().duration);
+      const frames = [0, 0.25, 0.6, 1].map((progress) => {
+        animation.currentTime = duration * progress;
+        const style = getComputedStyle(element);
+        return {
+          offset: Number.parseFloat(style.strokeDashoffset),
+          opacity: Number(style.opacity),
+        };
+      });
+      animation.currentTime = duration * 0.25;
+      return frames;
+    });
+    expect(frames[0]?.offset).toBeCloseTo(0.32);
+    expect(frames[1]?.offset).toBeGreaterThan(fixtureValue(frames[2], "frames[2]").offset);
+    expect(frames[1]?.opacity).toBeGreaterThan(0.9);
+    expect(frames[3]?.opacity).toBe(0);
+    await flow.screenshot({ path: `${directory}/flow-motion-180ms-1280.png` });
+    await trace.evaluate((element) => {
+      for (const animation of element.getAnimations()) {
+        animation.currentTime = 0;
+        animation.play();
+      }
+    });
     await expect.poll(() => trace.evaluate((element) => element.getAnimations().length)).toBe(0);
     const replace = page.getByRole("button", { name: "Replace synthetic history", exact: true });
     await replace.dispatchEvent("click");

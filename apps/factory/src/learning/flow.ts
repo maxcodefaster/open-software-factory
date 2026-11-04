@@ -225,7 +225,7 @@ export function learningFlowLayout(width: number, count: number) {
             : index === count - 1 && count > 1
               ? width - labelWidth
               : x - labelWidth / 2,
-        y: mobile ? y - 34 : index % 2 === 0 ? y - 104 : y + 38,
+        y: mobile ? y - 34 : index % 2 === 0 ? 8 : height - 76,
         width: labelWidth,
       },
     };
@@ -240,7 +240,7 @@ export function learningFlowLayout(width: number, count: number) {
           mobile ? { x: last.x, y: height - 8 } : { x: width - 8, y: last.y },
         ]
       : [];
-  function point(t: number, strand: number) {
+  function point(t: number, strand: number, fan = true) {
     const scaled = t * (anchors.length - 1);
     const segment = Math.min(anchors.length - 2, Math.floor(scaled));
     const u = scaled - segment;
@@ -248,21 +248,25 @@ export function learningFlowLayout(width: number, count: number) {
     const to = anchors[segment + 1];
     if (!from || !to) throw new RangeError("The learning flow segment is outside its layout");
     const smooth = u * u * (3 - 2 * u);
-    const spread = Math.sin(u * Math.PI) ** 1.5;
-    const tail = segment === 0 || segment === anchors.length - 2;
-    const offset = tail
-      ? strand * (0.16 + (segment === 0 ? 1 - u : u) ** 1.3 * 1.2)
-      : strand * (0.16 + spread * (mobile ? 1.3 : 3.1)) +
-        Math.sin(u * Math.PI * 2) * (mobile ? 8 : 14);
+    // The strands leave one inlet and fan out continuously, rather than
+    // reconverging at every record. They are schematic, not separate runs.
+    const spread = Math.sin((t * Math.PI) / 2);
+    const offset = fan
+      ? strand * spread * (mobile ? 1 : 3.2) +
+        Math.sin(t * Math.PI * 2 + strand * 0.18) *
+          Math.sin(t * Math.PI) *
+          (strand / 13) *
+          (mobile ? 2 : 11)
+      : strand * (mobile ? 0.65 : 0.9);
     return mobile
       ? { x: from.x + (to.x - from.x) * smooth + offset, y: from.y + (to.y - from.y) * u }
       : { x: from.x + (to.x - from.x) * u, y: from.y + (to.y - from.y) * smooth + offset };
   }
-  function path(strand: number, start = 0, end = 1) {
+  function path(strand: number, start = 0, end = 1, fan = true) {
     if (!count) return "";
     const steps = Math.ceil((end - start) * (count + 1) * 36);
     return Array.from({ length: steps + 1 }, (_, index) => {
-      const p = point(start + ((end - start) * index) / steps, strand);
+      const p = point(start + ((end - start) * index) / steps, strand, fan);
       return `${index ? "L" : "M"}${p.x.toFixed(2)},${p.y.toFixed(2)}`;
     }).join(" ");
   }
@@ -273,7 +277,8 @@ export function learningFlowLayout(width: number, count: number) {
     return {
       start: point(start, 0),
       end: point(end, 0),
-      paths: Array.from({ length: 13 }, (_, strand) => path((strand - 6) * 2, start, end)),
+      ribbon: path(0, start, end, false),
+      paths: Array.from({ length: 13 }, (_, strand) => path(strand - 6, start, end, false)),
     };
   });
   return { width, height, mobile, nodes, threads, selections };
