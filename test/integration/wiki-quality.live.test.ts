@@ -27,7 +27,10 @@ test.skipIf(process.env["FACTORY_WIKI_QUALITY_LIVE"] !== "1")(
     const sources = await Promise.all(
       ["test/auth.test.ts", "src/app.ts", "src/db/client.ts"].map(async (path) => ({
         path,
-        content: await readFile(resolve("templates/starter-app", path), "utf8"),
+        content: await readFile(
+          resolve("test/fixtures/wiki-quality-sources", `${path}.txt`),
+          "utf8",
+        ),
       })),
     );
     const healthy = [
@@ -127,7 +130,10 @@ test.skipIf(process.env["FACTORY_WIKI_QUALITY_LIVE"] !== "1")(
             modelSettings: { maxRetries: 0, maxOutputTokens: 8000 },
             ...(providerOptions ? { providerOptions } : {}),
             structuredOutput: {
-              schema: z.object({ issues: z.array(z.string().min(1).max(800)).max(12) }),
+              schema: z.object({
+                issues: z.array(z.string().min(1).max(800)).max(12),
+                advisory: z.array(z.string().min(1).max(800)).max(8).optional(),
+              }),
               jsonPromptInjection: "auto",
             },
           },
