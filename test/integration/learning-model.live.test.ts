@@ -106,40 +106,72 @@ test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(
         settle: async () => {},
       },
     };
-    const baseline = validateReplayAnswers(
-      await replayPlanning({ ...common, cases: plan.cases, instructions: plan.before }),
-      plan.cases,
-    );
-    const candidate = validateReplayAnswers(
-      await replayPlanning({ ...common, cases: plan.cases, instructions: plan.after }),
-      plan.cases,
-    );
-    const cases = comparisonCases(plan, [baseline, candidate]);
-    const result = await reviewWork({ ...common, cases, comparison: true });
-    const passed = comparisonPassed(plan, result);
-    await mkdir(".factory/test-results/learning-live", { recursive: true });
+    const runs = Math.max(1, Number(process.env["FACTORY_LEARNING_COMPARISON_RUNS"] ?? "1"));
+    const summary: { passed: boolean; reproduced: boolean; verdicts: string[] }[] = [];
+    for (let run = 0; run < runs; run++) {
+      const before = usage.length;
+      const baseline = validateReplayAnswers(
+        await replayPlanning({ ...common, cases: plan.cases, instructions: plan.before }),
+        plan.cases,
+      );
+      const candidate = validateReplayAnswers(
+        await replayPlanning({ ...common, cases: plan.cases, instructions: plan.after }),
+        plan.cases,
+      );
+      const cases = comparisonCases(plan, [baseline, candidate]);
+      const result = await reviewWork({ ...common, cases, comparison: true });
+      const passed = comparisonPassed(plan, result);
+      const verdict = (arm: number, index: number) =>
+        result.cases.find((item) => item.caseId === `replay:${arm}:${index}`);
+      // Arm 0 is the baseline and arm 1 the candidate in this fixed plan.
+      const reproduced = [0, 1].every((index) => verdict(0, index)?.fulfillment === "problem");
+      const candidateSupported = [0, 1, 2].every(
+        (index) =>
+          verdict(1, index)?.fulfillment === "supported" &&
+          verdict(1, index)?.rework !== "avoidable",
+      );
+      const controlSupported =
+        verdict(0, 2)?.fulfillment === "supported" && verdict(0, 2)?.rework !== "avoidable";
+      // A judge-observed verification problem still fails the arms the gate must trust. The
+      // baseline's two reproduced failures may carry one without affecting the outcome.
+      const noVerificationProblem = [
+        verdict(1, 0),
+        verdict(1, 1),
+        verdict(1, 2),
+        verdict(0, 2),
+      ].every((item) => item?.verification !== "problem");
+      summary.push({
+        passed,
+        reproduced,
+        verdicts: result.cases.map(
+          (item) => `${item.caseId}:${item.fulfillment}/${item.verification}/${item.rework}`,
+        ),
+      });
+      await mkdir(".factory/test-results/learning-live", { recursive: true });
+      await Bun.write(
+        `.factory/test-results/learning-live/comparison-${run + 1}.json`,
+        JSON.stringify(
+          { modelId, plan, baseline, candidate, result, passed, usage: usage.slice(before) },
+          null,
+          2,
+        ),
+      );
+      expect(result.cases).toHaveLength(6);
+      // The gate rests on the blinded fulfilment verdicts. It must pass exactly when the baseline
+      // reproduced both failures, the candidate removed them and the healthy control stayed
+      // supported. Never train this assertion to pass.
+      expect(passed).toBe(
+        reproduced && candidateSupported && controlSupported && noVerificationProblem,
+      );
+    }
+    const passes = summary.filter((item) => item.passed).length;
     await Bun.write(
       ".factory/test-results/learning-live/comparison.json",
-      JSON.stringify({ modelId, plan, baseline, candidate, result, passed, usage }, null, 2),
+      JSON.stringify({ modelId, runs, passes, passRate: passes / runs, summary }, null, 2),
     );
-    expect(result.cases).toHaveLength(6);
-    for (const index of [0, 1, 2])
-      expect(result.cases.find((item) => item.caseId === `replay:1:${index}`)?.fulfillment).toBe(
-        "supported",
-      );
-    expect(result.cases.find((item) => item.caseId === "replay:0:2")?.fulfillment).toBe(
-      "supported",
-    );
-    // A baseline that does not reproduce the problem cannot justify adoption,
-    // even if the candidate also looks good. Never train this assertion to pass.
-    const reproduced = [0, 1].every(
-      (index) =>
-        result.cases.find((item) => item.caseId === `replay:0:${index}`)?.fulfillment === "problem",
-    );
-    if (!reproduced) expect(passed).toBe(false);
-    expect(usage.filter((entry) => entry.source === "step")).toHaveLength(3);
+    expect(usage.filter((entry) => entry.source === "step")).toHaveLength(3 * runs);
   },
-  330_000,
+  330_000 * Math.max(1, Number(process.env["FACTORY_LEARNING_COMPARISON_RUNS"] ?? "1")),
 );
 
 test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(

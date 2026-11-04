@@ -512,8 +512,16 @@ test.each(["reconnect", "Stop"] as const)(
         const retained = await controller.get(attemptID);
         expect(retained?.state).toBe("starting");
         expect(deletions).toBe(0);
+        expect((await controller.get(attemptID))?.readyAt).toBeNull();
         await controller.status(attemptID, "ready");
-        expect((await controller.get(attemptID))?.state).toBe("ready");
+        const ready = await controller.get(attemptID);
+        expect(ready?.state).toBe("ready");
+        expect(ready?.readyAt).toBeTruthy();
+        expect(ready?.appReadyAt).toEqual({});
+        const stamped = ready?.readyAt;
+        // A repeated readiness report is not a new transition.
+        await controller.status(attemptID, "ready");
+        expect((await controller.get(attemptID))?.readyAt).toEqual(stamped);
       } else {
         await eventually(
           async () => (await controller?.get(attemptID ?? ""))?.state,

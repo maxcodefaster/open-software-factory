@@ -17,7 +17,7 @@ Docker daemon, the Dev Containers CLI and the Factory Runtime Connector.
 Factory runs on a Kubernetes cluster you provide, from the Helm chart in
 [deploy/helm/factory](deploy/helm/factory/README.md). The chart runs Factory, PostgreSQL, Forgejo,
 Zero, encrypted OpenBao and one private Garage object store, and generates their credentials.
-Factorybox execution needs a Linux node with an admitted kernel profile, permission for privileged
+Factorybox execution needs a Linux node with a recent kernel (the worker checks its capabilities), permission for privileged
 outer Pods and persistent storage. Supply the exact worker image and executable hash in the
 `factorybox` values.
 

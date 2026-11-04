@@ -46,6 +46,10 @@ export function learningFixture(empty = false): LearningView {
     version: 0,
     waiting: empty ? 0 : 2,
     waitingSince: empty ? null : "2026-10-28T11:52:00.000Z",
+    waitingDeveloperOnly: false,
+    reviewRunning: false,
+    reviewRequestedAt: null,
+    calibration: { state: "passed", attempts: 0, modelId: "configured-project-model" },
     days: Array.from({ length: 28 }, (_, index) => {
       const operations = empty ? 0 : index % 7 === 6 ? 2 : 5 + (index % 6);
       const failed = operations ? (index % 5 === 0 ? 2 : 1) : 0;

@@ -652,6 +652,271 @@ test("a calibration call with an unknown outcome is never repeated", async () =>
   expect(reviews.map((item) => item.state)).toEqual(["uncertain"]);
 }, 60_000);
 
+async function reviewNowFixture<T>(
+  run: (context: {
+    database: ReturnType<Awaited<ReturnType<typeof factoryProcess>>["connect"]>;
+    owned: Awaited<ReturnType<typeof fixture>>;
+    service: ReturnType<typeof createLearningService>;
+    calls: string[];
+    batches: number[];
+    worker: ReturnType<typeof createLearningWorker>;
+    fresh(id: string, ownerId?: string | null): Promise<void>;
+  }) => Promise<T>,
+) {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const previous = {
+    url: process.env["FACTORY_MODEL_BASE_URL"],
+    key: process.env["FACTORY_MODEL_API_KEY"],
+  };
+  const workers: ReturnType<typeof createLearningWorker>[] = [];
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    process.env["FACTORY_MODEL_BASE_URL"] = "https://owned.invalid/v1";
+    process.env["FACTORY_MODEL_API_KEY"] = "owned-not-a-real-key";
+    const calls: string[] = [];
+    const batches: number[] = [];
+    const worker = createLearningWorker(database, {
+      signingKey: "owned-signing-key",
+      review: async (input) => {
+        await input.authorize();
+        await input.usage.begin();
+        await input.usage.settle("completed");
+        if (fixtureValue(input.cases[0], "input.cases[0]").id.startsWith("calibration:")) {
+          calls.push("calibration");
+          return calibratedResult();
+        }
+        calls.push("work");
+        batches.push(input.cases.length);
+        return {
+          cases: input.cases.map((item) => ({
+            caseId: item.id,
+            fulfillment: "supported",
+            rework: "necessary",
+            verification: "unknown",
+            explanation: "The answer agrees with the exact source.",
+            evidenceIds: item.evidence.map((value) => value.id),
+          })),
+          findings: [],
+          proposals: [],
+        } satisfies LearningResult;
+      },
+    });
+    workers.push(worker);
+    return await run({
+      database,
+      owned,
+      service: createLearningService(database),
+      calls,
+      batches,
+      worker,
+      fresh: async (id, ownerId = null) => {
+        const source: LearningCase = {
+          ...fixtureValue(calibrationCases[0], "calibrationCases[0]"),
+          id,
+          projectId: owned.projectID,
+          ownerId,
+          settledAt: new Date(Date.now() - 60_000).toISOString(),
+        };
+        await database.client`INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
+          VALUES(${source.id},${owned.projectID},${ownerId},${owned.userID},false,'research','completed',${source.settledAt},${JSON.stringify(source)}::jsonb,true)`;
+      },
+    });
+  } finally {
+    for (const worker of workers) worker.close();
+    if (previous.url === undefined) delete process.env["FACTORY_MODEL_BASE_URL"];
+    else process.env["FACTORY_MODEL_BASE_URL"] = previous.url;
+    if (previous.key === undefined) delete process.env["FACTORY_MODEL_API_KEY"];
+    else process.env["FACTORY_MODEL_API_KEY"] = previous.key;
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}
+const reviewNow = (projectId: string, cases: number, developerOnly = false) => ({
+  commandId: crypto.randomUUID(),
+  projectId,
+  scope: "project" as const,
+  developerOnly,
+  cases,
+});
+
+test("Review now starts the calibrated batch for fresh cases once, idempotently, within the confirmed size", async () => {
+  await reviewNowFixture(async ({ database, owned, service, calls, batches, worker, fresh }) => {
+    for (const id of ["now:1", "now:2", "now:3"]) await fresh(id);
+    for (let sweep = 0; sweep < 3; sweep++) await worker.sweep();
+    expect(calls).toEqual([]); // Three young cases are neither six cases nor 24 hours old.
+    const before = await service.get(owned.userID, owned.projectID);
+    expect(before.waiting).toBe(3);
+    expect(before.reviewRequestedAt).toBeNull();
+    expect(before.calibration.state).toBe("none");
+
+    const command = reviewNow(owned.projectID, 2);
+    expect(await service.reviewNow(owned.userID, command)).toEqual({ cases: 2 });
+    expect(await service.reviewNow(owned.userID, command)).toEqual({ cases: 2 });
+    await expect(service.reviewNow(owned.userID, { ...command, cases: 3 })).rejects.toThrow(
+      "identity was reused",
+    );
+    await expect(service.reviewNow(owned.userID, reviewNow(owned.projectID, 3))).rejects.toThrow(
+      "already requested",
+    );
+    expect(
+      await database.client`SELECT id FROM factory.learning_command WHERE input->>'kind'='review-now'`,
+    ).toHaveLength(1);
+    const requested = await service.get(owned.userID, owned.projectID);
+    expect(requested.reviewRequestedAt).not.toBeNull();
+
+    // The request survives the judge's first calibration, then reviews only the confirmed cases.
+    for (let sweep = 0; sweep < 4; sweep++) await worker.sweep();
+    expect(calls).toEqual(["calibration", "work"]);
+    expect(batches).toEqual([2]);
+    const after = await service.get(owned.userID, owned.projectID);
+    expect(after.reviewRequestedAt).toBeNull();
+    expect(after.waiting).toBe(1);
+    expect(after.calibration).toMatchObject({ state: "passed", attempts: 0 });
+    // A consumed request never starts another review for the remaining young case.
+    for (let sweep = 0; sweep < 3; sweep++) await worker.sweep();
+    expect(calls).toEqual(["calibration", "work"]);
+    expect(
+      await database.client`SELECT id FROM factory.learning_case WHERE batch_id IS NOT NULL`,
+    ).toHaveLength(2);
+    // Retrying the same receipt after settlement still answers, without another request.
+    expect(await service.reviewNow(owned.userID, command)).toEqual({ cases: 2 });
+    await worker.sweep();
+    expect(calls).toEqual(["calibration", "work"]);
+  });
+}, 90_000);
+
+test("Review now keeps authority, pause and eligibility rules of the automatic batch", async () => {
+  await reviewNowFixture(async ({ database, owned, service, calls, worker, fresh }) => {
+    await expect(service.reviewNow(owned.userID, reviewNow(owned.projectID, 1))).rejects.toThrow(
+      "No selected case",
+    );
+    await fresh("rules:1");
+    // A Project-wide review spends shared model budget, so it needs a current manager.
+    await database.client`UPDATE factory.project_membership SET manage_project=false WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    await expect(service.reviewNow(owned.userID, reviewNow(owned.projectID, 1))).rejects.toThrow(
+      "Project Manager",
+    );
+    await database.client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    // Developer-only work needs development authority even for a manager.
+    await expect(
+      service.reviewNow(owned.userID, reviewNow(owned.projectID, 1, true)),
+    ).rejects.toThrow();
+
+    const policy = {
+      commandId: crypto.randomUUID(),
+      projectId: owned.projectID,
+      scope: "project" as const,
+      expectedVersion: 0,
+      enabled: false,
+      automaticSkills: false,
+    };
+    await service.set(owned.userID, policy);
+    await expect(service.reviewNow(owned.userID, reviewNow(owned.projectID, 1))).rejects.toThrow(
+      "paused",
+    );
+    await service.set(owned.userID, {
+      ...policy,
+      commandId: crypto.randomUUID(),
+      expectedVersion: 1,
+      enabled: true,
+    });
+
+    // Pausing after the request fences the paid call the request would have started.
+    await service.reviewNow(owned.userID, reviewNow(owned.projectID, 1));
+    await service.set(owned.userID, {
+      ...policy,
+      commandId: crypto.randomUUID(),
+      expectedVersion: 2,
+      enabled: false,
+    });
+    for (let sweep = 0; sweep < 3; sweep++) await worker.sweep();
+    expect(calls).toEqual([]);
+    expect(await database.client`SELECT id FROM factory.learning_review`).toHaveLength(0);
+  });
+}, 90_000);
+
+test("Review now of private work needs only its owner and never reviews shared cases", async () => {
+  await reviewNowFixture(async ({ database, owned, service, calls, batches, worker, fresh }) => {
+    await fresh("private:1", owned.userID);
+    await fresh("shared:1");
+    await expect(
+      service.reviewNow(owned.userID, { ...reviewNow(owned.projectID, 1), scope: "personal" }),
+    ).resolves.toEqual({ cases: 1 });
+    for (let sweep = 0; sweep < 4; sweep++) await worker.sweep();
+    expect(calls).toEqual(["calibration", "work"]);
+    expect(batches).toEqual([1]);
+    const reviews = await database.client<{ ownerId: string | null; reviewerId: string }[]>`
+      SELECT owner_id AS "ownerId",reviewer_id AS "reviewerId" FROM factory.learning_review WHERE kind='work'`;
+    expect([...reviews]).toEqual([{ ownerId: owned.userID, reviewerId: owned.userID }]);
+    expect(
+      await database.client`SELECT id FROM factory.learning_case WHERE id='shared:1' AND batch_id IS NULL`,
+    ).toHaveLength(1);
+  });
+}, 90_000);
+
+test("legacy per-call Wiki cases stay retained but no longer count toward metrics or selection", async () => {
+  await reviewNowFixture(async ({ database, owned, service, calls, worker, fresh }) => {
+    const generation = crypto.randomUUID();
+    const legacy = `wiki:${generation}:${crypto.randomUUID()}`;
+    const settled = new Date(Date.now() - 26 * 60 * 60_000).toISOString();
+    const snapshot = {
+      ...fixtureValue(calibrationCases[0], "calibrationCases[0]"),
+      id: legacy,
+      projectId: owned.projectID,
+      ownerId: null,
+      activity: "wiki",
+      settledAt: settled,
+    };
+    // Old and old enough to trigger the 24 hour rule, were it not excluded.
+    await database.client`INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
+      VALUES(${legacy},${owned.projectID},NULL,${owned.userID},false,'wiki','completed',${settled},${JSON.stringify(snapshot)}::jsonb,true)`;
+    const reviewed = crypto.randomUUID();
+    const result = {
+      cases: [
+        {
+          caseId: "wiki:reviewed",
+          fulfillment: "problem",
+          rework: "avoidable",
+          verification: "unknown",
+          explanation: "Legacy per-call review.",
+          evidenceIds: [],
+        },
+      ],
+      findings: [],
+      proposals: [],
+    };
+    const old = { ...snapshot, id: `wiki:${generation}:${crypto.randomUUID()}` };
+    await database.client`INSERT INTO factory.learning_review(id,project_id,owner_id,developer_only,reviewer_id,kind,rubric,model_id,judge_key,state,
+      input,input_digest,result,owner_token,owner_expires_at,completed_at)
+      VALUES(${reviewed},${owned.projectID},NULL,false,${owned.userID},'work','work-review/v1','owned','owned-legacy','completed',
+        ${JSON.stringify([old])}::jsonb,${"a".repeat(64)},${JSON.stringify({ ...result, cases: [{ ...result.cases[0], caseId: old.id }] })}::jsonb,
+        ${crypto.randomUUID()},now(),now())`;
+    await database.client`INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected,batch_id)
+      VALUES(${old.id},${owned.projectID},NULL,${owned.userID},false,'wiki','completed',${settled},${JSON.stringify(old)}::jsonb,true,${reviewed})`;
+    await fresh("current:wiki-generation");
+
+    const view = await service.get(owned.userID, owned.projectID);
+    const total = (key: "observed" | "selected" | "reviewed" | "avoidable" | "reworkKnown") =>
+      view.days.reduce((sum, day) => sum + day[key], 0);
+    expect(total("observed")).toBe(1);
+    expect(total("reviewed")).toBe(0);
+    expect(total("avoidable")).toBe(0);
+    expect(total("reworkKnown")).toBe(0);
+    expect(view.waiting).toBe(1);
+    expect(view.reviews).toHaveLength(1); // The retained history is intact.
+    await expect(service.reviewNow(owned.userID, reviewNow(owned.projectID, 6))).resolves.toEqual({
+      cases: 1,
+    });
+    for (let sweep = 0; sweep < 4; sweep++) await worker.sweep();
+    expect(calls).toEqual(["calibration", "work"]);
+    expect(
+      await database.client`SELECT id FROM factory.learning_case WHERE id=${legacy} AND batch_id IS NOT NULL`,
+    ).toHaveLength(0);
+  });
+}, 90_000);
+
 test("pausing private learning fences new retained evidence without changing shared Project authority", async () => {
   const host = await factoryProcess();
   const database = host.connect();

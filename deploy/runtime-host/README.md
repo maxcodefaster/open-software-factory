@@ -61,7 +61,7 @@ Opening an editable Workspace automatically starts or resumes its compute. This 
 Agent Turn. Read-only observation does not claim writing authority. A failed Start remains visible
 with an explicit Retry, rather than repeating on every observation.
 
-Development compute idles after five minutes without use. `FACTORY_EXECUTION_IDLE_MINUTES`
+Development compute idles after fifteen minutes without use (two when nothing is attached). `FACTORY_EXECUTION_IDLE_MINUTES`
 accepts 0–1440; zero disables it. Admitted/uncertain Build, working Sessions, pending commits,
 open terminal sessions and pending runtime operations prevent automatic Pause. Native PTY Resume
 currently fails to reopen `/dev/tty`, so even detached idle prompts block Pause. A Run view,

@@ -1,6 +1,11 @@
 import { expect, test } from "bun:test";
 import { createChangeAdmission } from "../../apps/factory/src/agent/change-admission";
-import { createIdleCompute, executionIdleMS } from "../../apps/factory/src/runtime/idle";
+import {
+  createIdleCompute,
+  executionIdleMS,
+  executionQuietMS,
+  executionReviewMS,
+} from "../../apps/factory/src/runtime/idle";
 import { buildModelID, fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -27,6 +32,8 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
         },
       },
       1,
+      1,
+      0,
     );
     await Promise.all([idle.sweep(), idle.sweep()]);
     expect(stops).toBe(1);
@@ -36,7 +43,10 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
     expect(
       await database.client`SELECT id FROM factory.requirement_approval WHERE ticket_id=${owned.ticketID}`,
     ).toHaveLength(1);
-    expect(executionIdleMS({})).toBe(5 * 60_000);
+    expect(executionIdleMS({})).toBe(15 * 60_000);
+    expect(executionQuietMS({})).toBe(2 * 60_000);
+    expect(executionQuietMS({ FACTORY_EXECUTION_IDLE_MINUTES: "1" })).toBe(60_000);
+    expect(executionReviewMS({})).toBe(30 * 60_000);
     expect(executionIdleMS({ FACTORY_EXECUTION_IDLE_MINUTES: "0" })).toBe(0);
     expect(() => executionIdleMS({ FACTORY_EXECUTION_IDLE_MINUTES: "1441" })).toThrow("0–1440");
     // Keep the oldest 64 candidates busy. A bounded sweep must eventually reach the idle tail.
@@ -75,6 +85,8 @@ test("idle compute records Pause before execution and leaves Workspace source/ap
         },
       },
       1,
+      1,
+      0,
     );
     await idle.sweep();
     await idle.sweep();
@@ -115,6 +127,8 @@ test("idle Pause waits for Build admission and retains pending, working and unce
         },
       },
       1,
+      1,
+      0,
     );
     await database.client`UPDATE factory.change_agent_session SET state='working' WHERE change_id=${owned.changeID}`;
     await idle.sweep();
@@ -187,6 +201,8 @@ test("failed idle intent rolls back and releases its ephemeral dispatch gate", a
         },
       },
       1,
+      1,
+      0,
     );
     await expect(idle.sweep()).rejects.toThrow("Owned idle intent failure");
     expect(released).toBe(1);

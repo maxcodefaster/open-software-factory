@@ -35,8 +35,8 @@ The chart runs Factory, PostgreSQL, Forgejo, Zero, encrypted OpenBao and one pri
 object store in Kubernetes. It creates the file bucket, credentials and persistent volume
 automatically; no separate S3 provisioning is required. Internal
 callbacks use Services and the application uses its ServiceAccount, without a personal kubeconfig
-or a mounted host Docker socket. Factorybox execution requires an admitted Linux node/kernel
-profile, permission for privileged outer Pods and usable persistent storage. Supply the exact
+or a mounted host Docker socket. Factorybox execution requires a Linux node whose kernel passes the worker's capability gate,
+permission for privileged outer Pods and usable persistent storage. Supply the exact
 private worker image and executable hash in the chart's `factorybox` values.
 
 PostgreSQL checks idle TCP connections after 30 seconds, with three ten-second probes and a
@@ -128,6 +128,12 @@ that cache. It stays in the Sandbox's private daemon and is never published.
 Idle Pause checks that same capacity decision before revoking live transports or dispatching capture.
 A known pre-dispatch refusal keeps the Sandbox usable and the same snapshot intent unattempted;
 the existing idle grace permits another admission check. A dispatched or unknown Pause remains fenced.
+Development compute keeps its Sandbox for `FACTORY_EXECUTION_IDLE_MINUTES` (default 15) and pauses after
+`FACTORY_EXECUTION_QUIET_MINUTES` (default 2, capped at the idle value) when no IDE, Terminal, App or
+browser request is open; every Pause fence is unchanged. A submitted Change stays warm for
+`FACTORY_EXECUTION_REVIEW_MINUTES` (default 30, 0 disables) after its last commit or Verification verdict
+and while Verification runs. Native commands hold the cross-process lock `factorybox-worker-lifecycle` one call at a time;
+image export, Kubernetes reads and sweeps do not, and background retirement yields to waiting Start, Resume and Pause.
 
 Choose an available development application image containing the exact runtime artifact bundle,
 then supply the browser-facing Factory and Forgejo origins. See the chart's
@@ -193,17 +199,23 @@ tolerations. Set `factorybox.nodeName` to the node's `kubernetes.io/hostname` la
 `factorybox.architecture: amd64`. Source, the worker store and every Developer IDE claim use
 ReadWriteOnce disks, so they all stay on that one node.
 
-**Kernel.** Factory accepts a list of releases with `*` wildcards, for example
-`factorybox.kernel: "5.15.0-*-azure,6.8.0-*-azure"`. This only gates Factory's admission. The pinned
-worker binary also refuses a kernel its build does not admit, and `factorybox doctor` reports
-that refusal. Use a Factorybox release built for your kernel family.
+**Kernel.** Factory does not pin a kernel release. Leave `factorybox.kernel` empty (or `"*"`) and the
+worker's own capability gate decides: it checks the kernel facilities, cgroup v2 and page size, and
+`factorybox doctor` reports any refusal. The worker reports the node's exact kernel and boot ID and
+marks it `qualification: verified` or `unverified`. That mark is informational, and Factory still
+admits an unverified kernel the gate accepts. Node image upgrades change the release string, so an
+empty value keeps working across them. To restrict nodes anyway, list releases with `*` wildcards,
+for example `factorybox.kernel: "5.15.0-*-azure,6.8.0-*-azure"`. A node outside the list is
+refused, and the restriction never relaxes the worker's gate. With `--set` on the command line,
+escape the comma as `\,`. The node boot ID still pins each retained worker whatever you choose.
 
 **Namespaces.** The release Namespace may enforce `baseline` but not `restricted` (the volume-ownership
-init containers run as root with `CHOWN`, `DAC_OVERRIDE` and `FOWNER`). Factory creates `factory-box-<uuid>` Namespaces for the privileged worker and does not
-label them. AKS does not set a Pod Security default, so they are admitted. If you set a
-cluster default below `privileged`, or run Azure Policy or Gatekeeper rules against privileged
-Pods, exempt Namespaces labelled `app.kubernetes.io/managed-by=open-software-factory`. The
-preflight shows which layer denies the Pod.
+init containers run as root with `CHOWN`, `DAC_OVERRIDE` and `FOWNER`). Factory creates `factory-box-<uuid>` Namespaces for the privileged worker and labels them
+`pod-security.kubernetes.io/enforce`, `audit` and `warn` at `privileged`, so a cluster default of
+`baseline` or `restricted` does not reject the worker. Namespaces that existed before this label
+keep their labels. If you run Azure Policy or Gatekeeper rules against privileged Pods, exempt
+Namespaces labelled `app.kubernetes.io/managed-by=open-software-factory`, because labels cannot
+override a policy engine. The preflight shows which layer denies the Pod.
 
 **Storage.** Use Azure Disk CSI: `storageClass: managed-csi` (or `managed-csi-premium`) with
 `volumeBindingMode: WaitForFirstConsumer`. Azure Files and Blob are refused, because the store is a
@@ -223,12 +235,15 @@ it from a checkout with your kubectl context:
 
 ```sh
 bun scripts/kubernetes/preflight.ts --node NODE --architecture amd64 \
-  --kernel '5.15.0-*-azure,6.8.0-*-azure' --image REGISTRY/factorybox@sha256:DIGEST \
+  --image REGISTRY/factorybox@sha256:DIGEST \
   --storage-class managed-csi --namespace factory
 ```
 
-It checks the node platform, kernel, taints, memory and CPU budget, the storage class and attach
-limit, and the release Namespace. Unless you pass `--read-only`, it also creates one throwaway
+Add `--kernel '5.15.0-*-azure,6.8.0-*-azure'` only to test a restriction. The preflight checks the
+node platform, taints, memory and CPU budget, the storage class and attach limit, and the release
+Namespace. It reports the node's kernel and checks it against the 5.15 minimum and any
+`factorybox.kernel` restriction. It FAILs on a missing kernel capability or a `factorybox doctor`
+refusal and only WARNs when the worker accepts a kernel its build has not verified. Unless you pass `--read-only`, it also creates one throwaway
 `factory-preflight-*` Namespace, dry-runs the real worker Pod and claim against admission, runs one
 privileged Pod to read the kernel configuration, cgroup, BTF and userfaultfd facts and run
 `factorybox doctor`, then deletes the Namespace. Each FAIL names its fix.

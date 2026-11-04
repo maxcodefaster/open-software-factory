@@ -198,7 +198,7 @@ test("early Fork Connector readiness waits for its retained native Start observa
   }
 }, 30_000);
 
-test("reserve preparation waits for the shared native worker instead of colliding with another Sandbox", async () => {
+test("reserve preparation proceeds without the native worker but waits for it before a native mutation", async () => {
   const restoreConfiguration = installOwnedRuntimeConfiguration();
   const host = await factoryProcess();
   const database = host.connect();
@@ -210,8 +210,12 @@ test("reserve preparation waits for the shared native worker instead of collidin
   const store = createReserveStore(defaultReservePolicy, images);
   const entered = Promise.withResolvers<void>();
   const controller = createExecutionReserve(database, images, defaultReservePolicy, {
-    async prepare() {
+    async prepare(_slot, options) {
+      // Preparation that dispatches nothing (image export, source archive)
+      // runs while another Sandbox holds the worker. A native mutation records
+      // its intent only after taking the worker lock.
       entered.resolve();
+      await options?.intendStandby?.("pause");
       return {
         namespaceUID: "namespace",
         podUID: "pod",
@@ -238,22 +242,17 @@ test("reserve preparation waits for the shared native worker instead of collidin
     await holder`SELECT pg_advisory_lock(hashtext('factorybox-worker-lifecycle'))`;
     held = true;
     pending = controller.reconcile();
-    await Promise.race([
-      entered.promise.then(() => {
-        throw new Error("Reserve preparation collided with the already busy native worker");
-      }),
-      eventually(
-        () => database.client`
-          SELECT pid FROM pg_stat_activity WHERE datname=current_database()
-            AND wait_event='advisory' AND query LIKE '%factorybox-worker-lifecycle%'`,
-        (rows) => rows.length === 1,
-        "Reserve preparation never waited for the shared worker",
-      ),
-    ]);
+    await entered.promise;
+    await eventually(
+      () => database.client`
+        SELECT pid FROM pg_stat_activity WHERE datname=current_database()
+          AND wait_event='advisory' AND query LIKE '%factorybox-worker-lifecycle%'`,
+      (rows) => rows.length === 1,
+      "Reserve native mutation never waited for the shared worker",
+    );
     await holder`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
     held = false;
     await pending;
-    await entered.promise;
   } finally {
     if (held) await holder`SELECT pg_advisory_unlock(hashtext('factorybox-worker-lifecycle'))`;
     await holder.end({ timeout: 1 });

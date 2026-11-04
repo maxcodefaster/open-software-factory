@@ -136,8 +136,12 @@ test("fresh and repeated installs preserve typed schema, allowed Zero tables and
       const [upgradedAttempt] =
         await candidate`SELECT * FROM factory.runtime_attempt WHERE id=${attemptID}`;
       if (!upgradedAttempt) throw new Error("Upgrade lost the retained Runtime Attempt");
-      const { factorybox_admission_id, ...unchangedAttempt } = upgradedAttempt;
+      const { factorybox_admission_id, ready_at, app_ready_at, ...unchangedAttempt } =
+        upgradedAttempt;
       expect(factorybox_admission_id).toBe(retainedWorker["id"]);
+      // Existing attempts keep no readiness timing.
+      expect(ready_at).toBeNull();
+      expect(app_ready_at).toEqual({});
       expect(unchangedAttempt).toEqual(retainedAttempt);
       expect([
         ...(await candidate`SELECT id,worker_id,profile,runtime_host_image,claim_uid,pod_uid,

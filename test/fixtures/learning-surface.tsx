@@ -20,6 +20,29 @@ function Surface() {
   if (query.has("calibration"))
     fixtureValue(initial.reviews[0], "initial.reviews[0]").kind = "calibration";
   if (query.has("paused")) initial.enabled = false;
+  const calibration = query.get("calibration-state");
+  if (
+    calibration === "none" ||
+    calibration === "running" ||
+    calibration === "retrying" ||
+    calibration === "closed" ||
+    calibration === "unconfirmed"
+  )
+    initial.calibration = { state: calibration, attempts: 2, modelId: "configured-project-model" };
+  if (query.has("requested")) initial.reviewRequestedAt = "2026-10-28T12:30:00.000Z";
+  if (query.has("running")) initial.reviewRunning = true;
+  if (query.has("many-waiting")) initial.waiting = 9;
+  if (query.has("one-waiting")) initial.waiting = 1;
+  if (query.has("few-reviewed"))
+    initial.days = initial.days.map((day, index) => ({
+      ...day,
+      selected: index === 27 ? 3 : 0,
+      reviewed: index === 27 ? 3 : 0,
+      supported: index === 27 ? 2 : 0,
+      problems: index === 27 ? 1 : 0,
+      avoidable: index === 27 ? 3 : 0,
+      reworkKnown: index === 27 ? 3 : 0,
+    }));
   if (query.has("missing-revision")) initial.applications = [];
   if (query.has("long") && initial.applications[0]) {
     initial.applications[0].title =
@@ -154,6 +177,10 @@ function Surface() {
           setAction("Automatic Skill permission saved");
         }}
         busy={query.has("busy")}
+        onReviewNow={({ developerOnly, cases }) => {
+          setAction(`Review requested for ${cases} ${developerOnly ? "developer-only " : ""}cases`);
+          setView((value) => ({ ...value, reviewRequestedAt: "2026-10-28T12:30:00.000Z" }));
+        }}
         onDecide={(id, decision, releasePrivate) => {
           if (decision === "apply") {
             const proposal = fixtureValue(

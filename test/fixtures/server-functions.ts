@@ -36,6 +36,7 @@ const serviceFunctions = {
     saveLearning: "set",
     decideLearning: "decide",
     rollbackLearning: "rollback",
+    reviewLearningNow: "reviewNow",
   },
   inbox: {
     getInbox: "list",

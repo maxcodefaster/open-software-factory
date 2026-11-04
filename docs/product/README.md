@@ -13,6 +13,11 @@ Startup output never establishes readiness.
 Required channels share one elapsed 420-second readiness window. Fast connection refusals do not
 exhaust a retry counter after thirty seconds; cancellation and actual process failure still end startup early.
 
+For developers on a wide pointer-driven window, the editor warms after the page has loaded, gone
+idle and received a first interaction or four seconds more; narrow and touch windows start it when
+the IDE is opened. Identical reads that overlap in flight share one server request, and a write or
+a Zero version change stops later readers joining an older one.
+
 Shared updates are change-driven. Zero synchronizes permission-scoped read versions for the
 existing authenticated lifecycle, conversation, Review and Inbox reads rather than polling
 unchanged state. Board History and Trash load in explicit batches; Ticket quick-find searches
@@ -104,7 +109,15 @@ includes queueing and is not active model time. Existing monthly usage, compute,
 remain below the overview.
 
 Retrospective learning is on by default. It reviews eligible failed work and a stable one-in-five
-sample of completed work in batches after six selected cases or 24 hours. Build work with missing
+sample of completed work in batches after six selected cases or 24 hours. The dashboard shows when the
+24 hours after the oldest waiting case end. Review now starts the batch for
+the waiting group immediately, with at least one selected case. Its confirmation states the
+cases and the paid Planning-model calls, one review plus any calibration the judge still needs.
+It needs a Project manager for shared work or the owner for private work, and obeys the
+same pause, calibration, input bound and one-running-review rules as the automatic batch. A request
+is a recorded intent that the background worker starts within a minute, never more than the
+confirmed cases, and it expires after an hour. Wiki generation is one case; older per-call Wiki
+cases stay retained but are neither counted nor selected. Build work with missing
 or incomplete Verification evidence, non-successful Verification, skipped/retried checks or test/CI
 changes is selected regardless of sampling. Selection is a review reason, not a defect verdict.
 Successful Verification retains bounded native workflow jobs, steps and attempts for the exact
@@ -114,7 +127,9 @@ full logs remain in the forge. Browser suites use the diagnostic fixture, enforc
 structural Solid diagnostics cannot hide behind passing assertions.
 The configured Planning model first checks fixed healthy, defect, false-alarm, missing-evidence,
 false-green, scope-mismatch and lost/preserved-coverage cases. Calibration is bound to those exact
-cases as well as the model and instructions. It reads bounded
+cases as well as the model and instructions. A completed but wrong grade is repeated, three
+grades in all, because one unlucky answer should not disable learning for that judge; the
+dashboard shows Calibrating and each attempt. An unconfirmed or rejected call is not repeated. It reads bounded
 retained evidence, never wakes a Sandbox for logs, and never runs because Settings opened.
 Unknown or expired calls are retained without an automatic paid retry. Learning calls are separately
 attributed in the usage journal. Project managers can pause shared learning; personal learning
@@ -155,7 +170,9 @@ A candidate needs two observed method failures with complete retained tasks and 
 A healthy control must come from a later review, unseen when the edit was proposed. Factory runs
 two isolated tool-free text replays under one frozen Planning model, then blinds their order for the
 calibrated judge. Both failures must reproduce in the baseline and disappear in the candidate;
-the healthy control must remain supported. An inconclusive, failed or uncertain comparison cannot
+the healthy control must remain supported. A text replay runs no checks, so no Verification
+evidence exists for it. The gate rests on the blinded fulfilment verdicts, treats an unknown
+Verification verdict as informational and still fails a judge-observed Verification problem. An inconclusive, failed or uncertain comparison cannot
 authorize adoption or an automatic paid retry. Each exact candidate gets one comparison.
 
 Compared changes retains the exact tested instructions, tasks, actual responses, verdicts, model
@@ -292,6 +309,9 @@ Requirements can be written directly. New Ticket → Write requirements creates 
 intent without calling a model or opening an Interview. Enter the specification and acceptance
 criteria; Implement approves that exact saved revision and commissions Coding in one action.
 An existing Idea has the same Write requirements action without starting AI.
+While the Wiki updates, its window names the recorded phase (queued, planning, writing or
+publishing a numbered guide), counts pages published so far and shows the viewer's elapsed time.
+This comes from saved generation state, starts no inference and leaves saved pages readable.
 Ask AI to clarify starts an optional Interview explicitly. Creating or moving Tickets, opening
 their documents and reconnecting do not start clarification. An Interview proposal still needs
 human confirmation, and neither path bypasses independent checks, review or Delivery approval.
@@ -308,7 +328,9 @@ without repeating the Product Interview. These are explicit model actions; readi
 saving remain model-free. A continuous Ticket document provides Product, Technical design,
 optional Architecture and Validation chapters. Technical Designs and PlantUML diagrams retain
 development-only access. Implement approves both exact revisions and rejects a changed source
-commit. See [Ticket technical planning](../../docs/adr/0004-agents-and-conversations.md#ticket-owned-technical-planning-follows-confirmed-product-intent).
+commit. Edits after approval save as a new revision and leave the approved requirements pinned;
+"Document updated since implementation" appears only when the saved wording differs from the
+approved document. See [Ticket technical planning](../../docs/adr/0004-agents-and-conversations.md#ticket-owned-technical-planning-follows-confirmed-product-intent).
 
 Factory's Models settings show separate Planning & knowledge and Coding choices. Each has a
 connection and model selector; OpenAI Coding has reasoning beside its model, with medium as the
@@ -320,6 +342,11 @@ Implement action still commissions work in one click with the configured default
 research chats, and contributor correction chats, have no model switcher. Existing Changes show developers their
 fixed admitted value; changing defaults never reconfigures them. OpenAI Coding uses the native
 Responses adapter.
+
+Settings show one scope at a time through a scope chooser: Project, Libraries, Personal or, for
+Factory administrators, Factory administration. Libraries holds Skills and MCP connections,
+Personal holds model overrides and login & security, and Project holds Environments, Inputs,
+Releases, Monitoring and, with the authority, Models and People & access.
 
 Settings → Libraries → MCP connections manages remote read-only sources with illustrated landscape connection
 cards and the same ownership and work-type choices as Skills. Start from a Sentry or Datadog suggestion, or add a public HTTPS
@@ -443,7 +470,9 @@ The custom QA player has continuous playback, a seek bar, scenario boundaries, f
 chapter navigation and fullscreen. Seeking preserves play/pause, and the active chapter follows
 the playhead. Comment pauses the video so a point can be selected; saved frames retain their
 original timestamp. Discussions have one reply level; source details and resolved Threads fold.
-Open Live Preview reuses the matching Factory workspace tab. Only ticket-bound Previews offer a
+A starting Preview names its recorded stage: waiting for execution capacity, starting compute,
+waiting for the App on its port, then opening the document. After a delay it says the App has not
+answered yet and keeps waiting. Open Live Preview reuses the matching Factory workspace tab. Only ticket-bound Previews offer a
 comment button. Hover or Tab selects an element, Enter confirms and Escape exits selection.
 There is no screen-sharing prompt, extension or coordinate editor. A restricted App-side bridge
 supplies the element anchor and an optional DOM-reconstructed context image from that human session.

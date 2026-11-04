@@ -5,7 +5,7 @@ import { candidateReviewFixture } from "../fixtures/candidate-review";
 import { buildModelID } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
-async function setup() {
+async function setup(reviewMS = 0) {
   const host = await factoryProcess();
   const database = host.connect();
   try {
@@ -40,6 +40,8 @@ async function setup() {
         },
       },
       1,
+      1,
+      reviewMS,
     );
     async function retained() {
       const [row] = await database.client`
@@ -295,6 +297,33 @@ test.each([
         ? [expectedAttemptID]
         : [],
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test("a submitted Change stays warm for its review window and while Verification runs", async () => {
+  const f = await setup(30 * 60_000);
+  try {
+    await f.idle.sweep();
+    expect(f.stopped).toEqual([]);
+    expect(f.paused).toEqual([]);
+    expect(f.claims).toEqual([]);
+    await f.database
+      .client`UPDATE factory.change_commit_operation SET updated_at=now()-interval '31 minutes'
+      WHERE change_id=${f.changeID}`;
+    await f.database
+      .client`INSERT INTO factory.verification(id,change_id,commit_sha,pull_request_number,
+      runner_name,created_by,state)
+      SELECT ${crypto.randomUUID()},${f.changeID},${"a".repeat(40)},1,'owned-runner',created_by,'pending'
+      FROM factory.change WHERE id=${f.changeID}`;
+    await f.idle.sweep();
+    expect(f.stopped).toEqual([]);
+    expect(f.claims).toEqual([]);
+    await f.database.client`UPDATE factory.verification SET state='cancelled',completed_at=now(),
+      updated_at=now()-interval '31 minutes' WHERE change_id=${f.changeID}`;
+    await f.idle.sweep();
+    expect(f.stopped).toEqual([f.attemptID]);
   } finally {
     await f.close();
   }

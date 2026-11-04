@@ -339,7 +339,7 @@ Kubernetes -> digest-pinned Factorybox worker Pod with its own bounded store
       -> bounded Compose dependencies
 ```
 
-Factory prepares the exact consumer image before native Start. After five minutes without genuine
+Factory prepares the exact consumer image before native Start. After fifteen minutes without genuine
 use, eligible Personal or unsubmitted Development execution pauses. Continuing to use the editor
 resumes the same Attempt and Connector credentials. Submitted, settled Ticket execution instead
 records normal Stop and releases its private backing, retaining Source and native Sessions.

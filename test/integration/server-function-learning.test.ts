@@ -32,6 +32,10 @@ test("compiled work-review commands validate exact input, session and fresh-writ
           effects.push(["decide", ...args]);
           return { ticketId: null };
         },
+        reviewNow: async (...args: unknown[]) => {
+          effects.push(["reviewNow", ...args]);
+          return { cases: 2 };
+        },
         rollback: async (...args: unknown[]) => {
           effects.push(["rollback", ...args]);
           return { revisionId: crypto.randomUUID(), version: 3 };
@@ -40,7 +44,12 @@ test("compiled work-review commands validate exact input, session and fresh-writ
     } as unknown as FactoryServices,
   });
   const call = async (
-    name: "getLearning" | "saveLearning" | "decideLearning" | "rollbackLearning",
+    name:
+      | "getLearning"
+      | "saveLearning"
+      | "decideLearning"
+      | "rollbackLearning"
+      | "reviewLearningNow",
     args: unknown[],
   ) =>
     decodeResponse(
@@ -87,6 +96,25 @@ test("compiled work-review commands validate exact input, session and fresh-writ
   };
   expect(await call("rollbackLearning", [rollback])).toMatchObject({ ok: true });
   expect(effects.at(-1)).toEqual(["rollback", actor, rollback]);
+  const review = {
+    commandId: crypto.randomUUID(),
+    projectId: project,
+    scope: "project",
+    developerOnly: false,
+    cases: 2,
+  };
+  expect(await call("reviewLearningNow", [{ ...review, cases: 7 }])).toMatchObject({
+    ok: false,
+    status: 400,
+  });
+  expect(await call("reviewLearningNow", [{ ...review, actorId: actor }])).toMatchObject({
+    ok: false,
+    status: 400,
+  });
+  const writes = fresh;
+  expect(await call("reviewLearningNow", [review])).toMatchObject({ ok: true });
+  expect(fresh).toBe(writes + 1);
+  expect(effects.at(-1)).toEqual(["reviewNow", actor, { ...review, kind: "review-now" }]);
   authenticated = false;
   expect(
     (
