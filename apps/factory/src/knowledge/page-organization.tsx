@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onCleanup } from "solid-js";
+import { createSignal, For, onCleanup, Show } from "solid-js";
 import {
   knowledgeIcons,
   pageParentWouldCycle,

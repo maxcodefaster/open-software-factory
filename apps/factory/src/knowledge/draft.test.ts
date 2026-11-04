@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { draftFrom, draftDirty, reconcileDraft, readDraft } from "./draft";
+import { draftDirty, draftFrom, readDraft, reconcileDraft } from "./draft";
 
 test("revisioned drafts adopt clean updates, merge disjoint edits and retain conflicting text", () => {
   const base = { id: "page", version: 1, title: "Guide", body: "First.\nLast." };

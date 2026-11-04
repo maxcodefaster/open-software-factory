@@ -2,7 +2,13 @@ import { expect, test } from "bun:test";
 import type { WikiPageSnapshot } from "../../../../packages/knowledge-domain/src/generation";
 import { generateWiki } from "./generation-workflow";
 
-test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-reviewer"] as const)(
+test.each([
+  "missing-guide",
+  "genuine-no-op",
+  "rejected-plan",
+  "unavailable-reviewer",
+  "deferred-guide",
+] as const)(
   "whole-Wiki planning checks useful coverage before accepting %s",
   async (scenario) => {
     const overview: WikiPageSnapshot = {
@@ -73,7 +79,10 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
             expect(correction).toContain("rejectedResult");
           }
           output = {
-            topics: scenario === "missing-guide" && plans > 1 ? [topic] : [],
+            topics:
+              scenario === "deferred-guide" || (scenario === "missing-guide" && plans > 1)
+                ? [topic]
+                : [],
           };
         } else if (system.includes("Review the whole proposed Wiki topic plan")) {
           expect(system).toContain("Reject a new topic whose reader task is already covered");
@@ -164,6 +173,10 @@ test.each(["missing-guide", "genuine-no-op", "rejected-plan", "unavailable-revie
       if (scenario === "rejected-plan") {
         await expect(run).rejects.toThrow("Wiki topic plan omits essential reader coverage");
         expect([plans, coverageChecks, publications]).toEqual([2, 2, 0]);
+      } else if (scenario === "deferred-guide") {
+        // The reviewer still wants more after one repair, but a useful guide is planned.
+        expect(await run).toEqual({ pages: [] });
+        expect([plans, coverageChecks, publications]).toEqual([2, 2, 1]);
       } else if (scenario === "unavailable-reviewer") {
         await expect(run).rejects.toThrow();
         expect([plans, coverageChecks, publications]).toEqual([1, 1, 0]);

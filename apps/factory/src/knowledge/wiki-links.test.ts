@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { wikiLinkIssues } from "./wiki-links";
 import { fixtureValue } from "../../../../test/fixtures/value";
+import { wikiLinkIssues } from "./wiki-links";
 
 const pages = [{ slug: "tasks", title: "Managing tasks", state: "active" }];
 test("Wiki writing gets an actionable repair for bare and unknown references", () => {

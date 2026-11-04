@@ -1,6 +1,6 @@
 import { knowledgeEditInput } from "../../../../packages/knowledge-domain/src/knowledge";
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { projectAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 // One versioned write boundary for the editor, restoration and an explicitly

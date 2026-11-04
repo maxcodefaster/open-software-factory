@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { factoryForgeSource } from "./forge-source";
+
 test("Wiki sources stay on the configured Forgejo origin and owner", () => {
   expect(
     factoryForgeSource(

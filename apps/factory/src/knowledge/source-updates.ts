@@ -1,10 +1,10 @@
-import { reportFailure } from "../failure-log";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { createForgejoClient } from "../../../../packages/forge/src/forge";
-import { factoryForgeSource } from "./forge-source";
 import { CommandError } from "../command-error";
+import { reportFailure } from "../failure-log";
+import { factoryForgeSource } from "./forge-source";
 
 type Database = ReturnType<typeof createDatabase>;
 type Forge = Pick<

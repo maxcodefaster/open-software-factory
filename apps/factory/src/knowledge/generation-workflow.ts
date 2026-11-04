@@ -346,6 +346,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       }),
     };
   }
+  let coverageRejections = 0;
   const planning = createStep({
     id: "plan-wiki-topics",
     inputSchema: z.object({}),
@@ -383,7 +384,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               planSources,
               wikiPlanReviewTask,
             );
-            if (coverage.issues.length) throw new WikiTopicCoverageError(coverage.issues);
+            // One repair pass for a coverage gap. A plan that still publishes something useful
+            // is accepted after that: a missing extra guide is for the next update, not a failure.
+            if (coverage.issues.length && (coverageRejections++ === 0 || !remaining.topics.length))
+              throw new WikiTopicCoverageError(coverage.issues);
           },
         );
         return remainingPlan(plan);

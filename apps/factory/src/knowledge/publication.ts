@@ -1,10 +1,10 @@
 import type { createDatabase } from "../../../../packages/db/src/client";
+import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
 import type {
   WikiGenerationOutput,
   WikiPageSnapshot,
 } from "../../../../packages/knowledge-domain/src/generation";
 import { projectAuthorityIn } from "../access/controller";
-import { mergeGeneratedDocument } from "../../../../packages/knowledge-domain/src/document-merge";
 import { WikiHumanEditConflict } from "./generation-failure";
 
 export class WikiPublicationConflict extends Error {}
