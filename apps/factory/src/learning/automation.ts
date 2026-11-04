@@ -6,6 +6,7 @@ import {
   learningCase,
   learningProposal,
   learningResult,
+  LearningResultRejected,
   validateLearningResult,
   type LearningCase,
   type LearningEdit,
@@ -336,7 +337,7 @@ export function createLearningAutomation(
       const cases = comparisonCases(admitted.plan, arms);
       const grade = validateLearningResult(
         await step(2, { instructions: workReviewInstructions, cases }, (usage) =>
-          (dependencies.review ?? reviewWork)({ ...common, usage, cases }),
+          (dependencies.review ?? reviewWork)({ ...common, usage, cases, comparison: true }),
         ),
         cases,
       );
@@ -384,10 +385,19 @@ export function createLearningAutomation(
           WHERE id=${admitted.id} AND owner_token=${admitted.token} AND state='running'`;
       });
     } catch (cause) {
+      const rejected = cause instanceof LearningResultRejected;
       const state =
-        knownModelRejection(cause) || cause instanceof CommandError ? "failed" : "uncertain";
+        knownModelRejection(cause) || cause instanceof CommandError || rejected
+          ? "failed"
+          : "uncertain";
       await database.client`UPDATE factory.learning_trial SET state=${state},
-        reason=${cause instanceof CommandError ? cause.message : "The comparison did not finish. It will not be repeated automatically."},completed_at=now()
+        reason=${
+          cause instanceof CommandError
+            ? cause.message
+            : rejected
+              ? "The comparison grade did not match the replayed responses, so it was discarded. It will not be repeated automatically."
+              : "The comparison did not finish. It will not be repeated automatically."
+        },completed_at=now()
         WHERE id=${admitted.id} AND state='running' AND owner_token=${admitted.token}`;
       await abandon(admitted.id);
     } finally {

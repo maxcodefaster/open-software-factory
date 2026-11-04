@@ -12,7 +12,7 @@ export type LearningFlowRecord = {
   description: string;
   detailId: string;
 };
-const targets = {
+export const learningTargetLabels = {
   skill: "Skill",
   knowledge: "Wiki",
   input: "Project Input",
@@ -46,7 +46,7 @@ export function learningFlowRecords(view: LearningView): LearningFlowRecord[] {
         title: application.title,
         at: application.revertedAt ?? application.createdAt,
         dateLabel: application.revertedAt ? "Reverted" : "Applied",
-        target: `${application.targetLabel ?? targets[application.target.kind]} · v${application.appliedVersion}`,
+        target: `${application.targetLabel ?? learningTargetLabels[application.target.kind]} · v${application.appliedVersion}`,
         status: reverted
           ? "Reverted"
           : `${application.automatic ? "Adopted" : "Applied"} v${application.appliedVersion}`,
@@ -70,7 +70,7 @@ export function learningFlowRecords(view: LearningView): LearningFlowRecord[] {
         title: proposal.content.title,
         at: review.completedAt ?? review.createdAt,
         dateLabel: "Source review",
-        target: targets[proposal.content.target],
+        target: learningTargetLabels[proposal.content.target],
         status: proposal.state === "dismissed" ? "Dismissed" : "Ticket created",
         tone: "quiet",
         mark: proposal.state === "dismissed" ? "diamond" : "square",
@@ -126,7 +126,7 @@ export function learningFlowRecords(view: LearningView): LearningFlowRecord[] {
         title: proposal.content.title,
         at: review.completedAt ?? review.createdAt,
         dateLabel: "Source review",
-        target: proposal.targetLabel ?? targets[proposal.content.target],
+        target: proposal.targetLabel ?? learningTargetLabels[proposal.content.target],
         status:
           proposal.state === "applied"
             ? "Revision unavailable"

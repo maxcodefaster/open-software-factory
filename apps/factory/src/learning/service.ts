@@ -111,6 +111,16 @@ export function createLearningService(database: Database) {
           coalesce(covered.problems,0) AS problems,coalesce(covered.avoidable,0) AS avoidable,
           coalesce(covered.rework_known,0) AS "reworkKnown"
         FROM dates LEFT JOIN operations USING(day) LEFT JOIN costs USING(day) LEFT JOIN covered USING(day) ORDER BY dates.day`;
+      // Cases batch within one visibility group, so report the group closest to starting.
+      const [waiting] = projectId
+        ? await database.client<{ count: number; since: Date }[]>`
+        SELECT count(*)::int AS count,min(settled_at) AS since FROM factory.learning_case
+        WHERE project_id=${projectId} AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
+          AND selected AND batch_id IS NULL
+          AND (NOT developer_only OR ${permitted.developer})
+          AND (activity<>'setup' OR ${permitted.manager})
+        GROUP BY developer_only ORDER BY count(*) DESC,min(settled_at) LIMIT 1`
+        : [];
       let reviews: Array<Record<string, unknown>> = projectId
         ? await database.client`
         SELECT id,kind,state,model_id AS "modelId",rubric,calibrated,reason,
@@ -278,6 +288,8 @@ export function createLearningService(database: Database) {
         parentEnabled,
         canManage: Boolean(projectId && (personal || permitted.manager)),
         version: policy?.version ?? 0,
+        waiting: waiting?.count ?? 0,
+        waitingSince: waiting ? new Date(waiting.since).toISOString() : null,
         days: [...days],
         reviews: reviews.map((row) => ({
           ...row,

@@ -52,8 +52,15 @@ export type WorkReviewInput = {
   signal: AbortSignal;
   authorize(): Promise<void>;
   usage: MastraUsageSink;
+  // A comparison grades the replayed responses only. Its findings and proposals are
+  // never retained, and a finding naturally cites the other arm's response.
+  comparison?: boolean;
 };
 export async function reviewWork(input: WorkReviewInput) {
   const { reviewWorkWithModel } = await import("./judge-engine");
-  return validateLearningResult(await reviewWorkWithModel(input), input.cases);
+  const result = await reviewWorkWithModel(input);
+  return validateLearningResult(
+    input.comparison ? { ...result, findings: [], proposals: [] } : result,
+    input.cases,
+  );
 }

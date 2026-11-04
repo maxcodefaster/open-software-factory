@@ -4,6 +4,7 @@ import {
   learningBatchDue,
   learningCase,
   learningRubric,
+  LearningResultRejected,
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
 import { createModelSettingsController } from "../models/controller";
@@ -25,6 +26,7 @@ type Database = ReturnType<typeof createDatabase>;
 type Group = { projectId: string; ownerId: string | null; developerOnly: boolean };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
+const maxCalibrationGrades = 3;
 export function createLearningWorker(
   database: Database,
   input: {
@@ -135,15 +137,25 @@ export function createLearningWorker(
         instructions: workReviewInstructions,
         calibration: calibrationCases,
       });
-      // Only one calibration per exact judge configuration. Expired/unknown
-      // calibration does not authorize another paid call.
+      // Expired or unknown calibration never authorizes another paid call.
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning-judge:${judgeKey}`}))`;
-      const [calibration] = await sql<{ state: string; calibrated: boolean | null }[]>`
+      const calibrations = await sql<{ state: string; calibrated: boolean | null }[]>`
         SELECT state,calibrated FROM factory.learning_review WHERE judge_key=${judgeKey} AND kind='calibration'
-        ORDER BY created_at DESC LIMIT 1`;
-      if (calibration && (calibration.state !== "completed" || !calibration.calibrated))
+        ORDER BY created_at DESC`;
+      const calibration = calibrations[0];
+      // A model can grade the fixed cases wrongly once and rightly the next time. Repeat a
+      // completed failing grade a bounded number of times so one unlucky answer does not
+      // disable learning for this exact judge. Unknown or rejected calls never repeat.
+      const wrongGrades = calibrations.filter(
+        (item) => item.state === "completed" && !item.calibrated,
+      ).length;
+      if (
+        calibration &&
+        (calibration.state !== "completed" ||
+          (!calibration.calibrated && wrongGrades >= maxCalibrationGrades))
+      )
         return null;
-      const kind = calibration ? "work" : "calibration";
+      const kind = calibration?.calibrated ? "work" : "calibration";
       const admittedCases = kind === "work" ? cases : calibrationCases;
       if (kind === "work" && admittedCases[0] && admittedCases[0].evidence.length < 24) {
         const previous = await sql<
@@ -270,9 +282,16 @@ export function createLearningWorker(
     } catch (cause) {
       // The lease is not proof no inference happened. Uncertain calls are
       // retained, never silently returned to the pending work queue.
-      const state = knownModelRejection(cause) ? "failed" : "uncertain";
+      const rejected = cause instanceof LearningResultRejected;
+      const state = knownModelRejection(cause) || rejected ? "failed" : "uncertain";
       await database.client`UPDATE factory.learning_review SET state=${state},
-        reason=${state === "failed" ? "The model rejected this review." : "Review outcome is unconfirmed. It will not be repeated automatically."},
+        reason=${
+          rejected
+            ? "The model's review did not match the evidence it was given, so it was discarded. It will not be repeated automatically."
+            : state === "failed"
+              ? "The model rejected this review."
+              : "Review outcome is unconfirmed. It will not be repeated automatically."
+        },
         completed_at=now() WHERE id=${admitted.id} AND state='running' AND owner_token=${admitted.token}`;
       await createUsageJournal(database).abandon(`learning:${admitted.id}`);
     } finally {

@@ -115,7 +115,7 @@ test.skipIf(process.env["FACTORY_LEARNING_MODEL_LIVE"] !== "1")(
       plan.cases,
     );
     const cases = comparisonCases(plan, [baseline, candidate]);
-    const result = await reviewWork({ ...common, cases });
+    const result = await reviewWork({ ...common, cases, comparison: true });
     const passed = comparisonPassed(plan, result);
     await mkdir(".factory/test-results/learning-live", { recursive: true });
     await Bun.write(

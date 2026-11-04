@@ -502,6 +502,156 @@ test("a full page of deferred source records does not starve later settled work"
   }
 }, 60_000);
 
+test("a Wiki generation is one reviewed case with the generation outcome, even after its calls were scanned", async () => {
+  const host = await factoryProcess();
+  const database = host.connect();
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    const commit = "a".repeat(40);
+    async function calls(generation: string, failedCall: number) {
+      await database.client`INSERT INTO factory.usage_operation(id,project_id,user_id,purpose,engine,provider,model,created_at,settled_at,outcome)
+        SELECT 'wiki:'||${generation}::text||':'||gen_random_uuid()::text||':'||gen_random_uuid()::text,
+          ${owned.projectID}::uuid,${owned.userID}::uuid,'wiki','mastra','owned','owned',
+          now()-interval '1 minute',now()-interval '30 seconds',
+          CASE WHEN n=${failedCall} THEN 'failed' ELSE 'completed' END
+        FROM generate_series(1,12) AS n`;
+    }
+    async function wikiCases(generation: string) {
+      return database.client<{ id: string; outcome: string; snapshot: LearningCase }[]>`
+        SELECT id,outcome,snapshot FROM factory.learning_case WHERE id=${`wiki:${generation}`}`;
+    }
+    const succeeded = crypto.randomUUID();
+    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state)
+      VALUES(${succeeded},${owned.projectID},${commit},${owned.userID},'running')`;
+    await calls(succeeded, 4);
+    // The calls settle before the generation does. A scan in between must not lose it.
+    let cursor = await collectLearningCases(database);
+    expect(await wikiCases(succeeded)).toHaveLength(0);
+    await database.client`UPDATE factory.knowledge_generation SET state='succeeded',page_count=5,conflict_count=0,completed_at=now()
+      WHERE id=${succeeded}`;
+    cursor = await collectLearningCases(database, cursor);
+    cursor = await collectLearningCases(database, cursor);
+    const [first, ...others] = await wikiCases(succeeded);
+    expect(others).toHaveLength(0);
+    expect(first?.id).toBe(`wiki:${succeeded}`);
+    // One failed model call inside a succeeded generation is not a failed piece of work.
+    expect(first?.outcome).toBe("completed");
+    const evidence = fixtureValue(first, "first").snapshot.evidence;
+    expect(evidence.length === 0 || evidence[0]?.body.includes('"state":"succeeded"')).toBe(true);
+    expect(JSON.stringify(first?.snapshot)).not.toContain("completedAt");
+
+    const failed = crypto.randomUUID();
+    await database.client`INSERT INTO factory.knowledge_generation(id,project_id,source_commit_sha,created_by,state,failure,completed_at)
+      VALUES(${failed},${owned.projectID},${commit},${owned.userID},'failed','The result did not match the required format.',now())`;
+    await calls(failed, 0);
+    await collectLearningCases(database, cursor);
+    const [lost, ...rest] = await wikiCases(failed);
+    expect(rest).toHaveLength(0);
+    expect(lost?.outcome).toBe("failed");
+    expect(JSON.stringify(lost?.snapshot)).toContain("required format");
+    const [counted] = await database.client<{ cases: number }[]>`
+      SELECT count(*)::int AS cases FROM factory.learning_case WHERE activity='wiki'`;
+    expect(counted?.cases).toBe(2);
+  } finally {
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}, 60_000);
+
+async function calibrationSweeps(wrongGrades: number, lostCall = false) {
+  const host = await factoryProcess();
+  const database = host.connect();
+  const previous = {
+    url: process.env["FACTORY_MODEL_BASE_URL"],
+    key: process.env["FACTORY_MODEL_API_KEY"],
+  };
+  const workers: ReturnType<typeof createLearningWorker>[] = [];
+  try {
+    const owned = await fixture(undefined, undefined, database);
+    await database.client`UPDATE factory.project_membership SET manage_project=true WHERE project_id=${owned.projectID} AND user_id=${owned.userID}`;
+    const source: LearningCase = {
+      ...fixtureValue(calibrationCases[0], "calibrationCases[0]"),
+      id: "owned:calibration-retry",
+      projectId: owned.projectID,
+      ownerId: null,
+      settledAt: new Date(Date.now() - 25 * 60 * 60_000).toISOString(),
+    };
+    await database.client`INSERT INTO factory.learning_case(id,project_id,owner_id,reviewer_id,developer_only,activity,outcome,settled_at,snapshot,selected)
+      VALUES(${source.id},${owned.projectID},NULL,${owned.userID},false,'research','completed',${source.settledAt},${JSON.stringify(source)}::jsonb,true)`;
+    process.env["FACTORY_MODEL_BASE_URL"] = "https://owned.invalid/v1";
+    process.env["FACTORY_MODEL_API_KEY"] = "owned-not-a-real-key";
+    const calls: string[] = [];
+    let remaining = wrongGrades;
+    const worker = createLearningWorker(database, {
+      signingKey: "owned-signing-key",
+      review: async (input) => {
+        await input.authorize();
+        await input.usage.begin();
+        await input.usage.settle("completed");
+        if (fixtureValue(input.cases[0], "input.cases[0]").id.startsWith("calibration:")) {
+          calls.push("calibration");
+          if (lostCall) throw new Error("The connection was lost after the request was sent");
+          const result = calibratedResult();
+          if (remaining-- > 0)
+            fixtureValue(
+              result.cases.find((item) => item.caseId === "calibration:defect"),
+              "defect verdict",
+            ).fulfillment = "supported";
+          return result;
+        }
+        calls.push("work");
+        return {
+          cases: input.cases.map((item) => ({
+            caseId: item.id,
+            fulfillment: "supported",
+            rework: "necessary",
+            verification: "unknown",
+            explanation: "The answer agrees with the exact source.",
+            evidenceIds: item.evidence.map((value) => value.id),
+          })),
+          findings: [],
+          proposals: [],
+        } satisfies LearningResult;
+      },
+    });
+    workers.push(worker);
+    for (let sweep = 0; sweep < 6; sweep++) await worker.sweep();
+    const reviews = await database.client<
+      { kind: string; state: string; calibrated: boolean | null }[]
+    >`
+      SELECT kind,state,calibrated FROM factory.learning_review ORDER BY created_at`;
+    return { calls, reviews };
+  } finally {
+    for (const worker of workers) worker.close();
+    if (previous.url === undefined) delete process.env["FACTORY_MODEL_BASE_URL"];
+    else process.env["FACTORY_MODEL_BASE_URL"] = previous.url;
+    if (previous.key === undefined) delete process.env["FACTORY_MODEL_API_KEY"];
+    else process.env["FACTORY_MODEL_API_KEY"] = previous.key;
+    await database.client.end({ timeout: 2 });
+    await host.dispose();
+  }
+}
+
+test("one unlucky calibration grade is repeated, then work review proceeds", async () => {
+  const { calls, reviews } = await calibrationSweeps(2);
+  expect(calls).toEqual(["calibration", "calibration", "calibration", "work"]);
+  expect(reviews.map((item) => item.calibrated)).toEqual([false, false, true, null]);
+}, 60_000);
+
+test("a judge that keeps grading the fixed cases wrongly stops after three paid calibrations", async () => {
+  const { calls, reviews } = await calibrationSweeps(10);
+  expect(calls).toEqual(["calibration", "calibration", "calibration"]);
+  expect(reviews.every((item) => item.kind === "calibration" && item.calibrated === false)).toBe(
+    true,
+  );
+}, 60_000);
+
+test("a calibration call with an unknown outcome is never repeated", async () => {
+  const { calls, reviews } = await calibrationSweeps(0, true);
+  expect(calls).toEqual(["calibration"]);
+  expect(reviews.map((item) => item.state)).toEqual(["uncertain"]);
+}, 60_000);
+
 test("pausing private learning fences new retained evidence without changing shared Project authority", async () => {
   const host = await factoryProcess();
   const database = host.connect();

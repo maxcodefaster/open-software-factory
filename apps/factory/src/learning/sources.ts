@@ -28,18 +28,39 @@ export async function collectLearningCases(
 ) {
   // The journal is an index into retained product evidence, not a transcript lake.
   // Never wake a Sandbox or fetch native logs to perform retrospective review.
-  const operations = await database.client<Operation[]>`
-    SELECT operation.id,operation.project_id AS "projectId",operation.user_id AS "userId",
-      operation.purpose,operation.outcome,operation.settled_at AS "settledAt",operation.settled_at::text AS "cursorAt"
-    FROM factory.usage_operation operation
-    WHERE operation.settled_at IS NOT NULL AND operation.project_id IS NOT NULL
-      AND operation.user_id IS NOT NULL AND operation.purpose NOT IN ('probe','learning')
-      AND NOT EXISTS(SELECT 1 FROM factory.learning_policy policy
-        WHERE policy.project_id=operation.project_id AND policy.owner_id IS NULL AND NOT policy.enabled)
-      AND (${cursor?.at ?? null}::timestamptz IS NULL OR (operation.settled_at,operation.id) >
-        (${cursor?.at ?? null}::timestamptz,${cursor?.id ?? ""}))
-      AND NOT EXISTS(SELECT 1 FROM factory.learning_case saved WHERE saved.id=operation.id)
-    ORDER BY operation.settled_at,operation.id LIMIT 100`;
+  // A Wiki generation makes dozens of model calls but is one piece of work with one
+  // retained outcome. Review it once, after it settles. Its calls settle first, so a
+  // cursor over them would pass the generation before it could be reviewed.
+  const operations = await database.client<(Operation & { wiki: boolean })[]>`
+    SELECT * FROM (
+      (SELECT operation.id,operation.project_id AS "projectId",operation.user_id AS "userId",
+        operation.purpose,operation.outcome,operation.settled_at AS "settledAt",
+        operation.settled_at::text AS "cursorAt",false AS wiki
+      FROM factory.usage_operation operation
+      WHERE operation.settled_at IS NOT NULL AND operation.project_id IS NOT NULL
+        AND operation.user_id IS NOT NULL AND operation.purpose NOT IN ('probe','learning')
+        AND operation.id NOT LIKE 'wiki:%'
+        AND NOT EXISTS(SELECT 1 FROM factory.learning_policy policy
+          WHERE policy.project_id=operation.project_id AND policy.owner_id IS NULL AND NOT policy.enabled)
+        AND (${cursor?.at ?? null}::timestamptz IS NULL OR (operation.settled_at,operation.id) >
+          (${cursor?.at ?? null}::timestamptz,${cursor?.id ?? ""}))
+        AND NOT EXISTS(SELECT 1 FROM factory.learning_case saved WHERE saved.id=operation.id)
+      ORDER BY operation.settled_at,operation.id LIMIT 100)
+      UNION ALL
+      (SELECT 'wiki:'||generation.id::text AS id,generation.project_id AS "projectId",generation.created_by AS "userId",
+        'wiki' AS purpose,'completed' AS outcome,generation.completed_at AS "settledAt",
+        generation.completed_at::text AS "cursorAt",true AS wiki
+      FROM factory.knowledge_generation generation
+      WHERE generation.completed_at>now()-interval '3 days'
+        AND NOT EXISTS(SELECT 1 FROM factory.learning_policy policy
+          WHERE policy.project_id=generation.project_id AND policy.owner_id IS NULL AND NOT policy.enabled)
+        AND NOT EXISTS(SELECT 1 FROM factory.learning_case saved
+          WHERE saved.id='wiki:'||generation.id::text OR saved.id LIKE 'wiki:'||generation.id::text||':%')
+        AND EXISTS(SELECT 1 FROM factory.usage_operation call
+          WHERE call.purpose='wiki' AND call.project_id=generation.project_id AND call.settled_at IS NOT NULL
+            AND call.id LIKE 'wiki:'||generation.id::text||':%')
+      ORDER BY generation.completed_at,generation.id LIMIT 20)
+    ) due ORDER BY due."settledAt",due.id`;
   for (const operation of operations) {
     const snapshot = await learningSnapshot(database, operation);
     if (!snapshot) continue; // An indexed operation can precede product settlement.
@@ -72,10 +93,10 @@ export async function collectLearningCases(
       ON CONFLICT DO NOTHING`;
     });
   }
-  const last = operations.at(-1);
+  const last = operations.findLast((operation) => !operation.wiki);
   // Keep PostgreSQL's microseconds. A JS Date rounds them away and can repeat
   // the same full page when several operations share one settlement instant.
-  return last ? { at: last.cursorAt, id: last.id } : null;
+  return last ? { at: last.cursorAt, id: last.id } : cursor;
 }
 
 async function learningSnapshot(database: Database, operation: Operation) {
@@ -112,6 +133,8 @@ async function learningSnapshot(database: Database, operation: Operation) {
   let ownerId: string | null = operation.userId;
   let developerOnly = false;
   let activity = operation.purpose;
+  let outcome = operation.outcome;
+  let settledAt = operation.settledAt;
   const sourceID = operation.id.split(":")[1] ?? "";
   if (operation.id.startsWith("turn:") && uuid.test(sourceID)) {
     const [turn] = await database.client<
@@ -392,14 +415,20 @@ async function learningSnapshot(database: Database, operation: Operation) {
         failure: string | null;
         pages: number | null;
         conflicts: number | null;
+        completedAt: Date;
       }[]
     >`
-      SELECT state,source_commit_sha AS commit,failure,page_count AS pages,conflict_count AS conflicts
+      SELECT state,source_commit_sha AS commit,failure,page_count AS pages,conflict_count AS conflicts,
+        completed_at AS "completedAt"
       FROM factory.knowledge_generation WHERE id=${sourceID} AND project_id=${operation.projectId} AND completed_at IS NOT NULL`;
     if (!generation) return null;
+    // One model call's status says nothing about the generation this case reviews.
+    outcome = generation.state === "succeeded" ? "completed" : "failed";
+    const { completedAt, ...retained } = generation;
+    settledAt = completedAt;
     ownerId = null;
     developerOnly = true;
-    add(`wiki:${sourceID}:outcome`, "outcome", generation);
+    add(`wiki:${sourceID}:outcome`, "outcome", retained);
     const revisions = await database.client<
       {
         id: string;
@@ -455,8 +484,8 @@ async function learningSnapshot(database: Database, operation: Operation) {
     ownerId,
     developerOnly,
     activity,
-    outcome: operation.outcome,
-    settledAt: new Date(operation.settledAt).toISOString(),
+    outcome,
+    settledAt: new Date(settledAt).toISOString(),
     evidence,
     targets,
     ...(reviewReasons.length ? { reviewReasons } : {}),

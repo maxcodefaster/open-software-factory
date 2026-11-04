@@ -109,9 +109,28 @@ export const learningResult = z.object({
 });
 export type LearningResult = z.infer<typeof learningResult>;
 
+// The model answered, but its output cannot be trusted. Unlike a lost call this is a
+// known outcome, so the retained review says so instead of "unconfirmed".
+export class LearningResultRejected extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "LearningResultRejected";
+  }
+}
+
 // A judge can interpret the packet, never invent source identities or treat an
 // unobserved result as proof. Findings need an observed outcome, not task text alone.
 export function validateLearningResult(input: unknown, cases: LearningCase[]): LearningResult {
+  try {
+    return validatedLearningResult(input, cases);
+  } catch (cause) {
+    throw new LearningResultRejected(
+      cause instanceof Error ? cause.message : "The review result is invalid",
+      { cause },
+    );
+  }
+}
+function validatedLearningResult(input: unknown, cases: LearningCase[]): LearningResult {
   const value = learningResult.parse(input);
   const byId = new Map(cases.map((item) => [item.id, item]));
   if (
@@ -251,6 +270,8 @@ export const learningView = z.object({
   parentEnabled: z.boolean(),
   canManage: z.boolean(),
   version: z.number().int().nonnegative(),
+  waiting: z.number().int().nonnegative().default(0),
+  waitingSince: z.iso.datetime().nullable().default(null),
   days: z.array(learningDay),
   reviews: z.array(
     z.object({

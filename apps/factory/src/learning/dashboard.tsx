@@ -6,6 +6,7 @@ import type {
 import "./settings.css";
 import { LearningEditPreview, type LearningDecision } from "./edit-preview";
 import { LearningFlow } from "./learning-flow";
+import { learningTargetLabels } from "./flow";
 
 const money = (nano: string | number) =>
   new Intl.NumberFormat("en-US", {
@@ -38,6 +39,14 @@ const sum = (
     | "selected"
     | "observed",
 ) => days.reduce((total, day) => total + day[key], 0);
+const waitingDate = (value: string) =>
+  new Date(value).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "UTC",
+  });
 const duration = (seconds: number) =>
   seconds >= 60 ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds)} sec`;
 
@@ -427,6 +436,17 @@ export function LearningDashboard(props: {
               reviewed
             </span>
           </div>
+          <Show when={props.view.waiting}>
+            <p class="work-note" data-waiting={props.view.waiting}>
+              {props.view.waiting} selected {props.view.waiting === 1 ? "case is" : "cases are"}{" "}
+              waiting for a review.{" "}
+              {props.view.enabled
+                ? `It starts at six selected cases, or 24 hours after the oldest settled${
+                    props.view.waitingSince ? ` (${waitingDate(props.view.waitingSince)} UTC)` : ""
+                  }.`
+                : "Nothing is reviewed while learning is paused."}
+            </p>
+          </Show>
           <p class="work-note">
             The judge must pass fixed calibration cases first. Analysis grants no write authority.
             Existing approvals and Verification stay in force.
@@ -490,7 +510,7 @@ export function LearningDashboard(props: {
                   <li id={`work-proposal-${proposal.id}`} tabindex="-1" class="work-proposal">
                     <div class="work-proposal-heading">
                       <h4>{proposal.content.title}</h4>
-                      <span>{proposal.content.target}</span>
+                      <span>{learningTargetLabels[proposal.content.target]}</span>
                     </div>
                     <p>{proposal.content.change}</p>
                     <LearningEditPreview
