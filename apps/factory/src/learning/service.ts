@@ -1,22 +1,26 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import {
+  learningCase,
   learningDecisionCommand,
   learningPolicyCommand,
   learningProposal,
-  learningView,
-  learningCase,
+  learningReviewNowCommand,
   learningRollbackCommand,
   learningTarget,
+  learningView,
+  legacyWikiCallPattern,
+  maxCalibrationGrades,
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { createRequirementRevision } from "../../../../packages/requirement-domain/src/requirement";
 import { createAccessController, projectAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { learningAuthorityIn } from "./authority";
+import { learningAuthorityIn, learningEnabledIn } from "./authority";
+import { pendingReviewRequests } from "./requests";
 import { createLearningTargets, learningActivation, learningEditDigest } from "./targets";
-import { z } from "zod";
 
 type Database = ReturnType<typeof createDatabase>;
 export function createLearningService(database: Database) {
@@ -100,6 +104,7 @@ export function createLearningService(database: Database) {
             AND source.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
             AND (NOT source.developer_only OR ${permitted.developer})
             AND (source.activity<>'setup' OR ${permitted.manager})
+            AND NOT(source.activity='wiki' AND source.id ~ ${legacyWikiCallPattern})
           GROUP BY 1
         )
         SELECT dates.day::text AS date,coalesce(operations.operations,0) AS operations,
@@ -113,14 +118,56 @@ export function createLearningService(database: Database) {
         FROM dates LEFT JOIN operations USING(day) LEFT JOIN costs USING(day) LEFT JOIN covered USING(day) ORDER BY dates.day`;
       // Cases batch within one visibility group, so report the group closest to starting.
       const [waiting] = projectId
-        ? await database.client<{ count: number; since: Date }[]>`
-        SELECT count(*)::int AS count,min(settled_at) AS since FROM factory.learning_case
+        ? await database.client<{ count: number; since: Date; developerOnly: boolean }[]>`
+        SELECT count(*)::int AS count,min(settled_at) AS since,developer_only AS "developerOnly" FROM factory.learning_case
         WHERE project_id=${projectId} AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
           AND selected AND batch_id IS NULL
           AND (NOT developer_only OR ${permitted.developer})
           AND (activity<>'setup' OR ${permitted.manager})
+          AND NOT(activity='wiki' AND id ~ ${legacyWikiCallPattern})
         GROUP BY developer_only ORDER BY count(*) DESC,min(settled_at) LIMIT 1`
         : [];
+      const [running] = projectId
+        ? await database.client<{ id: string }[]>`
+        SELECT id FROM factory.learning_review WHERE project_id=${projectId}
+          AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid AND state='running' AND kind='work'
+          AND (NOT developer_only OR ${permitted.developer}) LIMIT 1`
+        : [];
+      const [requested] = projectId
+        ? (await pendingReviewRequests(database.client, { projectId, ownerId })).filter(
+            (item) => !item.developerOnly || permitted.developer,
+          )
+        : [];
+      // Calibration is shared by every Project that uses the same judge, so describe the latest
+      // judge without exposing its cases. A model change starts a new judge with its own record.
+      const [latestCalibration] = projectId
+        ? await database.client<
+            { judgeKey: string; state: string; calibrated: boolean | null; modelId: string }[]
+          >`
+        SELECT judge_key AS "judgeKey",state,calibrated,model_id AS "modelId" FROM factory.learning_review
+        WHERE kind='calibration' ORDER BY created_at DESC LIMIT 1`
+        : [];
+      const [wrongGrades] = latestCalibration
+        ? await database.client<{ count: number }[]>`
+        SELECT count(*)::int AS count FROM factory.learning_review
+        WHERE kind='calibration' AND judge_key=${latestCalibration.judgeKey} AND state='completed' AND NOT calibrated`
+        : [];
+      const calibration = !latestCalibration
+        ? { state: "none" as const, attempts: 0, modelId: null }
+        : {
+            state:
+              latestCalibration.state === "running"
+                ? ("running" as const)
+                : latestCalibration.state !== "completed"
+                  ? ("unconfirmed" as const)
+                  : latestCalibration.calibrated
+                    ? ("passed" as const)
+                    : (wrongGrades?.count ?? 0) >= maxCalibrationGrades
+                      ? ("closed" as const)
+                      : ("retrying" as const),
+            attempts: wrongGrades?.count ?? 0,
+            modelId: latestCalibration.modelId,
+          };
       let reviews: Array<Record<string, unknown>> = projectId
         ? await database.client`
         SELECT id,kind,state,model_id AS "modelId",rubric,calibrated,reason,
@@ -290,6 +337,10 @@ export function createLearningService(database: Database) {
         version: policy?.version ?? 0,
         waiting: waiting?.count ?? 0,
         waitingSince: waiting ? new Date(waiting.since).toISOString() : null,
+        waitingDeveloperOnly: waiting?.developerOnly ?? false,
+        reviewRunning: Boolean(running),
+        reviewRequestedAt: requested ? new Date(requested.requestedAt).toISOString() : null,
+        calibration,
         days: [...days],
         reviews: reviews.map((row) => ({
           ...row,
@@ -336,6 +387,50 @@ export function createLearningService(database: Database) {
           ON CONFLICT(scope_key) DO UPDATE SET enabled=EXCLUDED.enabled,automatic_skills=EXCLUDED.automatic_skills,
             version=EXCLUDED.version,updated_by=EXCLUDED.updated_by,updated_at=now()`;
         const result = { version: input.expectedVersion + 1 };
+        await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
+          VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
+        return result;
+      });
+    },
+    async reviewNow(userId: string, raw: unknown) {
+      const input = learningReviewNowCommand.parse(raw);
+      return database.client.begin(async (sql) => {
+        const ownerId = input.scope === "personal" ? userId : null;
+        const group = { projectId: input.projectId, ownerId, developerOnly: input.developerOnly };
+        // Spending Planning-model calls on shared work needs the same current Project manager
+        // as pausing it. Private work needs only its owner, plus Developer access when required.
+        await learningAuthorityIn(sql, userId, {
+          ...group,
+          managerOnly: input.scope === "project",
+        });
+        const existing = await replay(sql, input.commandId, userId, input);
+        if (existing) return existing.result;
+        await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning:${input.projectId}:${ownerId ?? "project"}:${input.developerOnly}`}))`;
+        if (!(await learningEnabledIn(sql, input.projectId, ownerId)))
+          throw new CommandError("forbidden", "Learning is paused. Resume it to review now.");
+        const [busy] =
+          await sql`SELECT id FROM factory.learning_review WHERE project_id=${input.projectId}
+          AND owner_id IS NOT DISTINCT FROM ${ownerId}::uuid AND developer_only=${input.developerOnly} AND state='running'`;
+        if (busy) throw new CommandError("conflict", "A review of this work is already running.");
+        if (
+          (await pendingReviewRequests(sql, { projectId: input.projectId, ownerId })).some(
+            (item) => item.developerOnly === input.developerOnly,
+          )
+        )
+          throw new CommandError("conflict", "A review of this work is already requested.");
+        const [eligible] = await sql<{ count: number }[]>`
+          SELECT count(*)::int AS count FROM (
+            SELECT 1 FROM factory.learning_case source
+            WHERE source.project_id=${input.projectId} AND source.owner_id IS NOT DISTINCT FROM ${ownerId}::uuid
+              AND source.developer_only=${input.developerOnly} AND source.selected AND source.batch_id IS NULL
+              AND NOT(source.activity='wiki' AND source.id ~ ${legacyWikiCallPattern})
+              AND (source.activity<>'setup' OR EXISTS(SELECT 1 FROM factory.project_membership membership
+                WHERE membership.project_id=source.project_id AND membership.user_id=source.reviewer_id AND membership.manage_project)
+                OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=source.reviewer_id))
+            LIMIT ${input.cases}) limited`;
+        if (!eligible?.count)
+          throw new CommandError("conflict", "No selected case is waiting for a review.");
+        const result = { cases: Math.min(eligible.count, input.cases) };
         await sql`INSERT INTO factory.learning_command(id,actor_id,input,result)
           VALUES(${input.commandId},${userId},${JSON.stringify(input)}::jsonb,${JSON.stringify(result)}::jsonb)`;
         return result;

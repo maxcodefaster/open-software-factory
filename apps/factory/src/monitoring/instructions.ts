@@ -1,8 +1,8 @@
+import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
+import { inputInstructions } from "../../../../packages/conversation-domain/src/monitoring";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { inputInstructions } from "../../../../packages/conversation-domain/src/monitoring";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
   manageMonitoringIn,
   retainedInputAssignments,

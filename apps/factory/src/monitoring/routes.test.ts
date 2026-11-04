@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { createMonitoringRoutes } from "./routes";
 import type { createMonitoringController } from "./controller";
+import { createMonitoringRoutes } from "./routes";
 
 test("Inputs retain both external webhook URLs but no HTTP settings API or browser intake", async () => {
   const id = crypto.randomUUID(),

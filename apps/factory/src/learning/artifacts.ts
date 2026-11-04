@@ -1,5 +1,5 @@
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { sampleLearningCase } from "../../../../packages/conversation-domain/src/learning";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { learningEnabledIn } from "./authority";
 
 export type LearningSourceArtifact = { reference: string; body: string; truncated: boolean };

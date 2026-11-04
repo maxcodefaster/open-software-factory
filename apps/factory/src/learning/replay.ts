@@ -1,5 +1,5 @@
-import type { WorkReviewInput } from "./judge";
 import type { LearningCase } from "../../../../packages/conversation-domain/src/learning";
+import type { WorkReviewInput } from "./judge";
 
 export const replayInstructions = `Answer each supplied research task using only its supplied artifacts.
 This is a tool-free text replay, not a live repository or application run. Do not claim to execute

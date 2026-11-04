@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test";
 import {
   learningBatchDue,
+  learningReviewNowCommand,
+  legacyWikiCallPattern,
   sampleLearningCase,
   validateLearningResult,
   learningEdit,
@@ -126,4 +128,28 @@ test("sampling is stable, every failed outcome is eligible, and quiet projects r
       now,
     ),
   ).toBe(true);
+});
+
+test("only per-call Wiki case identities are legacy, not one case per generation", () => {
+  const generation = "0ca311d7-90ad-4008-ade7-77ae942ff774";
+  const legacy = new RegExp(legacyWikiCallPattern);
+  expect(legacy.test(`wiki:${generation}:1f16234b-0f1a-4f3e-8a39-0f4ad1b1b3a0`)).toBe(true);
+  expect(legacy.test(`wiki:${generation}`)).toBe(false);
+  expect(legacy.test("turn:15094104-4bad-4eb8-afd9-4cddccf60be8")).toBe(false);
+});
+
+test("an explicit review request is bounded to one batch and an idempotent identity", () => {
+  const command = {
+    commandId: crypto.randomUUID(),
+    projectId: crypto.randomUUID(),
+    scope: "project",
+    developerOnly: false,
+    cases: 3,
+  };
+  expect(learningReviewNowCommand.parse(command).kind).toBe("review-now");
+  expect(() => learningReviewNowCommand.parse({ ...command, cases: 0 })).toThrow();
+  expect(() => learningReviewNowCommand.parse({ ...command, cases: 7 })).toThrow();
+  expect(() =>
+    learningReviewNowCommand.parse({ ...command, ownerId: crypto.randomUUID() }),
+  ).toThrow();
 });

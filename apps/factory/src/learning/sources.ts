@@ -1,13 +1,13 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
 import {
-  learningCase,
-  sampleLearningCase,
   type LearningCase,
   type LearningTarget,
+  learningCase,
+  sampleLearningCase,
 } from "../../../../packages/conversation-domain/src/learning";
-import { learningAuthorityIn, learningEnabledIn } from "./authority";
-import { CommandError } from "../command-error";
 import { verificationReviewReasons } from "../../../../packages/conversation-domain/src/verification";
+import type { createDatabase } from "../../../../packages/db/src/client";
+import { CommandError } from "../command-error";
+import { learningAuthorityIn, learningEnabledIn } from "./authority";
 
 type Database = ReturnType<typeof createDatabase>;
 type Operation = {

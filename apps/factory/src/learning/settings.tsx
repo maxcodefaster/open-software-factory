@@ -3,6 +3,7 @@ import type { LearningView } from "../../../../packages/conversation-domain/src/
 import {
   decideLearning,
   getLearning,
+  reviewLearningNow,
   rollbackLearning,
   saveLearning,
 } from "../server-functions/learning";
@@ -80,6 +81,7 @@ export function LearningSettings(props: {
     key: string,
     run: (id: string) => Promise<unknown>,
     focus?: (result: unknown) => string | undefined,
+    saved = "Saved",
   ) {
     if (busy()) return;
     if (retry?.key !== key) retry = { key, commandId: crypto.randomUUID() };
@@ -91,7 +93,7 @@ export function LearningSettings(props: {
       const value = await run(retry.commandId);
       if (generation === epoch) {
         retry = undefined;
-        setNotice("Saved");
+        setNotice(saved);
         focusAfterRead = focus?.(value);
         const fresh = Promise.withResolvers<void>();
         const version = revision() + 1;
@@ -150,12 +152,9 @@ export function LearningSettings(props: {
       <Show
         when={view()}
         fallback={
-          <div
-            class="work-loading"
-            role="status"
-            aria-label="Loading monitoring"
-            aria-busy="true"
-          />
+          <div class="work-loading" role="status" aria-label="Loading monitoring" aria-busy="true">
+            Loading monitoring…
+          </div>
         }
       >
         {(current) => (
@@ -205,6 +204,22 @@ export function LearningSettings(props: {
                       ],
                     }),
                   ),
+              );
+            }}
+            onReviewNow={({ developerOnly, cases }) => {
+              const projectId = props.projectID;
+              if (!projectId) return;
+              const scope = personal() ? "personal" : "project";
+              void command(
+                `review-now:${target()}:${developerOnly}:${cases}`,
+                (commandId) =>
+                  serverCall(
+                    reviewLearningNow({
+                      data: [{ commandId, projectId, scope, developerOnly, cases }],
+                    }),
+                  ),
+                undefined,
+                "Review requested. It starts within a minute.",
               );
             }}
             onDecide={(id, decision, releasePrivate, editDigest) =>

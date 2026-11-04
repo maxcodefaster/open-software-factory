@@ -1,7 +1,7 @@
 import {
+  type LearningCase,
   learningRubric,
   validateLearningResult,
-  type LearningCase,
 } from "../../../../packages/conversation-domain/src/learning";
 import type { ResolvedModelConnection } from "../models/native";
 import type { MastraUsageSink } from "../usage/mastra";

@@ -1,37 +1,37 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { createDatabase } from "../../../../packages/db/src/client";
 import {
   applyLearningEdit,
+  type LearningCase,
+  type LearningEdit,
+  LearningResultRejected,
   learningCase,
   learningProposal,
   learningResult,
-  LearningResultRejected,
   validateLearningResult,
-  type LearningCase,
-  type LearningEdit,
 } from "../../../../packages/conversation-domain/src/learning";
 import {
   comparisonCases,
   comparisonPassed,
   comparisonRubric,
   learningComparisonPlan,
+  type ReplayAnswers,
   replayableCase,
   validateReplayAnswers,
-  type ReplayAnswers,
 } from "../../../../packages/conversation-domain/src/learning-comparison";
 import type { ModelConnectionReference } from "../../../../packages/conversation-domain/src/model-connection";
 import { skillContentInput } from "../../../../packages/conversation-domain/src/skills";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import type { AgentTurnTransaction } from "../agent/turn-store";
-import type { ResolvedModelConnection } from "../models/native";
-import { knownModelRejection } from "../models/execution-policy";
-import { recordedMastraUsage } from "../usage/record-mastra";
-import { createUsageJournal } from "../usage/journal";
 import { CommandError } from "../command-error";
+import { knownModelRejection } from "../models/execution-policy";
+import type { ResolvedModelConnection } from "../models/native";
+import { createUsageJournal } from "../usage/journal";
+import { recordedMastraUsage } from "../usage/record-mastra";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
-import { createLearningTargets, learningActivation, learningEditDigest } from "./targets";
 import { reviewWork, workReviewInstructions } from "./judge";
 import { replayInstructions, replayPlanning } from "./replay";
+import { createLearningTargets, learningActivation, learningEditDigest } from "./targets";
 
 type Database = ReturnType<typeof createDatabase>;
 type Scope = { projectId: string; ownerId: string | null; developerOnly: boolean };

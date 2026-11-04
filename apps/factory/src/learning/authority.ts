@@ -1,5 +1,5 @@
-import type { AgentTurnTransaction } from "../agent/turn-store";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
 
 export async function learningAuthorityIn(

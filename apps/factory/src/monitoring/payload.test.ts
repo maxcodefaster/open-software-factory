@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { monitoringSignals } from "./payload";
 import { fixtureValue } from "../../../../test/fixtures/value";
+import { monitoringSignals } from "./payload";
 
 test("monitoring coalesces incident occurrences rather than transport or event IDs", () => {
   const sentry = {

@@ -1,12 +1,15 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
-import type {
-  LearningDay,
-  LearningView,
+import {
+  type LearningDay,
+  type LearningView,
+  learningBatchAgeMs,
+  learningBatchSize,
+  maxCalibrationGrades,
 } from "../../../../packages/conversation-domain/src/learning";
 import "./settings.css";
-import { LearningEditPreview, type LearningDecision } from "./edit-preview";
-import { LearningFlow } from "./learning-flow";
+import { type LearningDecision, LearningEditPreview } from "./edit-preview";
 import { learningTargetLabels } from "./flow";
+import { LearningFlow } from "./learning-flow";
 
 const money = (nano: string | number) =>
   new Intl.NumberFormat("en-US", {
@@ -47,6 +50,32 @@ const waitingDate = (value: string) =>
     minute: "2-digit",
     timeZone: "UTC",
   });
+const waitingClock = (since: string) => {
+  const due = Date.parse(since) + learningBatchAgeMs;
+  const clock = `${waitingDate(new Date(due).toISOString())} UTC`;
+  return due > Date.now()
+    ? `It starts at six selected cases, or at ${clock}, 24 hours after the oldest settled (${waitingDate(since)} UTC).`
+    : `The 24 hour limit passed at ${clock} (oldest settled ${waitingDate(since)} UTC). It starts on the next background pass unless judge calibration or another review holds it.`;
+};
+const fewCases = 10;
+const plural = (count: number, one: string, many = `${one}s`) =>
+  `${count} ${count === 1 ? one : many}`;
+const calibrationNote = (calibration: LearningView["calibration"]) => {
+  switch (calibration.state) {
+    case "running":
+      return "Calibrating: the judge is grading the fixed cases. Work review starts after it passes.";
+    case "passed":
+      return "Judge calibrated on the fixed cases.";
+    case "retrying":
+      return `Calibration graded a fixed case wrongly (${calibration.attempts} of ${maxCalibrationGrades} attempts). The next review repeats it before judging work.`;
+    case "closed":
+      return `Calibration did not pass after ${maxCalibrationGrades} attempts. No paid review runs until the Planning model or judge instructions change.`;
+    case "unconfirmed":
+      return "The last calibration call has no confirmed outcome. It will not repeat automatically.";
+    default:
+      return "The judge has not been calibrated yet. The first review starts with the fixed calibration cases.";
+  }
+};
 const duration = (seconds: number) =>
   seconds >= 60 ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds)} sec`;
 
@@ -314,6 +343,88 @@ export function WorkChart(props: { days: LearningDay[] }) {
   );
 }
 
+export type LearningReviewNow = (request: { developerOnly: boolean; cases: number }) => void;
+function ReviewNow(props: {
+  view: LearningView;
+  busy?: boolean | undefined;
+  onReviewNow?: LearningReviewNow | undefined;
+}) {
+  const [confirming, setConfirming] = createSignal(false);
+  const cases = () => Math.min(props.view.waiting, learningBatchSize);
+  const calibration = () => props.view.calibration.state;
+  const calls = () =>
+    calibration() === "passed"
+      ? "1 review call"
+      : calibration() === "running"
+        ? "1 review call after the running calibration passes"
+        : `1 calibration call first (up to ${maxCalibrationGrades} if the judge grades a fixed case wrongly), then 1 review call`;
+  const blocked = () => calibration() === "closed" || calibration() === "unconfirmed";
+  return (
+    <Show
+      when={!props.view.reviewRunning && !props.view.reviewRequestedAt}
+      fallback={
+        <p class="work-note" role="status" data-review-state>
+          {props.view.reviewRunning
+            ? "A review of this work is running."
+            : `Review requested ${waitingDate(props.view.reviewRequestedAt ?? "")} UTC. It starts within a minute, after the judge is calibrated. A request expires after an hour.`}
+        </p>
+      }
+    >
+      <Show
+        when={confirming()}
+        fallback={
+          <div class="control-actions work-review-now-actions">
+            <button
+              type="button"
+              class="quiet-button"
+              data-review-now
+              disabled={props.busy || blocked()}
+              onClick={() => setConfirming(true)}
+            >
+              Review now
+            </button>
+          </div>
+        }
+      >
+        <fieldset class="work-review-now" aria-label="Confirm review now">
+          <p class="work-note" data-review-now-confirmation>
+            Review {plural(cases(), "selected case")} now? This makes paid Planning-model calls:{" "}
+            {calls()}. It uses the configured Planning model after checking your current authority
+            and the pause setting, reads only the retained evidence of{" "}
+            {cases() === 1 ? "this case" : "these cases"}, and never repeats a call whose outcome is
+            lost.
+          </p>
+          <div class="control-actions">
+            <button
+              type="button"
+              class="quiet-button"
+              disabled={props.busy}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="primary-button"
+              data-review-now-confirm
+              disabled={props.busy}
+              onClick={() => {
+                setConfirming(false);
+                props.onReviewNow?.({
+                  developerOnly: props.view.waitingDeveloperOnly,
+                  cases: cases(),
+                });
+              }}
+            >
+              Start paid review
+            </button>
+          </div>
+        </fieldset>
+      </Show>
+    </Show>
+  );
+}
+
 export function LearningDashboard(props: {
   view: LearningView;
   busy?: boolean;
@@ -321,6 +432,7 @@ export function LearningDashboard(props: {
   onAutomaticToggle?: (() => void) | undefined;
   onDecide?: LearningDecision | undefined;
   onRollback?: ((id: string, revisionId: string) => void) | undefined;
+  onReviewNow?: LearningReviewNow | undefined;
   onOpenTicket?: ((id: string, projectId: string) => void) | undefined;
 }) {
   let dashboard: HTMLElement | undefined;
@@ -385,7 +497,13 @@ export function LearningDashboard(props: {
           <dt>Avoidable rework</dt>
           <dd>
             {total("reworkKnown") ? `${total("avoidable")} / ${total("reworkKnown")}` : "Unknown"}
-            <small>{total("reworkKnown") ? " known cases" : " until reviewed"}</small>
+            <small>
+              {total("reworkKnown")
+                ? total("reworkKnown") < fewCases
+                  ? " known cases, too few for a rate"
+                  : " known cases"
+                : " until reviewed"}
+            </small>
           </dd>
         </div>
         <div>
@@ -398,6 +516,17 @@ export function LearningDashboard(props: {
           </dd>
         </div>
       </dl>
+      <Show when={total("reviewed") > 0 && total("reviewed") < fewCases}>
+        <p class="work-note" data-few-cases>
+          Only {plural(total("reviewed"), "case")} reviewed so far. Rates from so few cases are
+          anecdotes, not a trend.
+        </p>
+      </Show>
+      <Show when={total("operations") === 0 && total("observed") === 0}>
+        <p class="work-note" data-no-work>
+          No work settled in the last 28 days. The charts fill in as work settles.
+        </p>
+      </Show>
       <Show when={props.view.detailScope === "own" && props.view.scope !== "personal"}>
         <p class="work-note">
           Costs and operation counts are yours. Review coverage below concerns authorized shared
@@ -440,16 +569,24 @@ export function LearningDashboard(props: {
             <p class="work-note" data-waiting={props.view.waiting}>
               {props.view.waiting} selected {props.view.waiting === 1 ? "case is" : "cases are"}{" "}
               waiting for a review.{" "}
-              {props.view.enabled
-                ? `It starts at six selected cases, or 24 hours after the oldest settled${
-                    props.view.waitingSince ? ` (${waitingDate(props.view.waitingSince)} UTC)` : ""
-                  }.`
-                : "Nothing is reviewed while learning is paused."}
+              {!props.view.enabled
+                ? "Nothing is reviewed while learning is paused."
+                : props.view.waitingSince
+                  ? waitingClock(props.view.waitingSince)
+                  : "It starts at six selected cases, or 24 hours after the oldest settled."}
+            </p>
+            <Show when={props.view.canManage && props.view.enabled}>
+              <ReviewNow view={props.view} busy={props.busy} onReviewNow={props.onReviewNow} />
+            </Show>
+          </Show>
+          <Show when={!props.view.waiting && props.view.reviewRunning}>
+            <p class="work-note" role="status" data-review-state>
+              A review of this work is running.
             </p>
           </Show>
-          <p class="work-note">
-            The judge must pass fixed calibration cases first. Analysis grants no write authority.
-            Existing approvals and Verification stay in force.
+          <p class="work-note" data-calibration={props.view.calibration.state}>
+            {calibrationNote(props.view.calibration)} Analysis grants no write authority. Existing
+            approvals and Verification stay in force.
           </p>
           <details class="work-automatic">
             <summary>
@@ -494,7 +631,9 @@ export function LearningDashboard(props: {
                   {props.view.applications.length
                     ? "No pending improvement"
                     : total("observed")
-                      ? "No supported improvement to act on yet"
+                      ? total("reviewed")
+                        ? "No supported improvement to act on yet"
+                        : "Nothing reviewed yet"
                       : "Learning starts with completed work"}
                 </h4>
                 <p>
@@ -852,7 +991,7 @@ export function LearningDashboard(props: {
               when={props.view.reviews.length}
               fallback={
                 <p class="work-note">
-                  No review yet. Selected work waits for the batch or age trigger.
+                  No review yet. Selected work waits for six cases, 24 hours or Review now.
                 </p>
               }
             >

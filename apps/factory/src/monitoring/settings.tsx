@@ -19,8 +19,8 @@ import {
 import { serverCall } from "../server-functions/result";
 import { CopyButton } from "../ui/feedback";
 import { WorkspaceActionBar } from "../ui/workspace-actions";
-import { monitoringSourceAvailable } from "./sources";
 import { createInputReads } from "./reads";
+import { monitoringSourceAvailable } from "./sources";
 import "./settings.css";
 import { DeliverySettings } from "../delivery/settings";
 

@@ -1,24 +1,24 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { z } from "zod";
+import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
 import {
+  defaultAutofixInstructions,
   monitoringChange,
   monitoringSave,
   monitoringView,
-  defaultAutofixInstructions,
 } from "../../../../packages/conversation-domain/src/monitoring";
 import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, projectDevelopmentAuthorityIn } from "../access/controller";
 import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { monitoringDigest, type MonitoringSignal } from "./payload";
 import {
-  manageMonitoringIn,
   inputAssignmentsIn,
+  manageMonitoringIn,
   monitoringAuthorityIn,
   retainedInputAssignments,
   validateInputAssignmentsIn,
 } from "./authority";
-import type { MCPAssignment } from "../../../../packages/conversation-domain/src/mcp-library";
+import { type MonitoringSignal, monitoringDigest } from "./payload";
 
 type Database = ReturnType<typeof createDatabase>;
 

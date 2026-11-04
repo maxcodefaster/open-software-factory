@@ -18,6 +18,9 @@ export const learningComparisonPlan = z.object({
   controlId: z.string(),
   candidateFirst: z.boolean(),
   activationVersion: z.number().int().positive(),
+  // A text replay executes nothing, so no Verification evidence can exist for it. Only a
+  // replay that actually ran checks may be held to a supported verification verdict.
+  verification: z.enum(["text", "executed"]).default("text"),
 });
 export type LearningComparisonPlan = z.infer<typeof learningComparisonPlan>;
 export const replayAnswers = z.object({
@@ -85,8 +88,12 @@ export function comparisonPassed(plan: LearningComparisonPlan, result: LearningR
     const item = get(arm, index);
     return (
       item?.fulfillment === "supported" &&
-      item.verification === "supported" &&
-      item.rework !== "avoidable"
+      item.rework !== "avoidable" &&
+      (plan.verification === "executed"
+        ? item.verification === "supported"
+        : // Structurally unavailable for a tool-free replay: unknown is informational, but a
+          // judge-observed verification problem (for example a claimed but unrun check) still fails.
+          item.verification !== "problem")
     );
   };
   return (

@@ -60,9 +60,48 @@ test("matched comparison requires both observed failures to reproduce, improve a
   const unreproduced = structuredClone(passed);
   fixtureValue(unreproduced.cases[3], "unreproduced.cases[3]").fulfillment = "supported";
   expect(comparisonPassed(plan, unreproduced)).toBe(false);
-  const unverified = structuredClone(passed);
-  fixtureValue(unverified.cases[0], "unverified.cases[0]").verification = "unknown";
-  expect(comparisonPassed(plan, unverified)).toBe(false);
+});
+test("a tool-free text replay is judged on its fulfilment verdicts, and verification is informational", () => {
+  // A text replay executes nothing, so a judge honestly reports verification as unknown.
+  // Requiring "supported" made a correct comparison fail depending on that wording.
+  const unknownVerification = structuredClone(passed);
+  for (const item of unknownVerification.cases) item.verification = "unknown";
+  expect(plan.verification).toBe("text");
+  expect(comparisonPassed(plan, unknownVerification)).toBe(true);
+  // The relaxation never rescues a weak candidate, a baseline that did not fail, or a control regression.
+  for (const index of [0, 1, 2]) {
+    for (const fulfillment of ["unknown", "problem"] as const) {
+      const weak = structuredClone(unknownVerification);
+      fixtureValue(weak.cases[index], "weak.cases[index]").fulfillment = fulfillment;
+      expect(comparisonPassed(plan, weak)).toBe(false);
+    }
+  }
+  const avoidable = structuredClone(unknownVerification);
+  fixtureValue(avoidable.cases[1], "avoidable.cases[1]").rework = "avoidable";
+  expect(comparisonPassed(plan, avoidable)).toBe(false);
+  const baselineHealthy = structuredClone(unknownVerification);
+  fixtureValue(baselineHealthy.cases[4], "baselineHealthy.cases[4]").fulfillment = "supported";
+  expect(comparisonPassed(plan, baselineHealthy)).toBe(false);
+  const controlRegression = structuredClone(unknownVerification);
+  fixtureValue(controlRegression.cases[5], "controlRegression.cases[5]").fulfillment = "problem";
+  expect(comparisonPassed(plan, controlRegression)).toBe(false);
+  // A judge-observed verification problem, such as a claimed but unrun check, still fails.
+  const claimed = structuredClone(unknownVerification);
+  fixtureValue(claimed.cases[0], "claimed.cases[0]").verification = "problem";
+  expect(comparisonPassed(plan, claimed)).toBe(false);
+});
+test("a replay that claims executed verification stays strict", () => {
+  const executed = { ...plan, verification: "executed" as const };
+  expect(comparisonPassed(executed, passed)).toBe(true);
+  for (const index of [0, 1, 2, 5]) {
+    const unverified = structuredClone(passed);
+    fixtureValue(unverified.cases[index], "unverified.cases[index]").verification = "unknown";
+    expect(comparisonPassed(executed, unverified)).toBe(false);
+    expect(comparisonPassed(plan, unverified)).toBe(true);
+  }
+  // Plans retained before this field existed are text replays.
+  const { verification: _omitted, ...legacy } = plan;
+  expect(learningComparisonPlan.parse(legacy).verification).toBe("text");
 });
 test("comparison is blind to arm names and excludes old outcome/configuration from judging new responses", () => {
   expect(evidence.every((item) => item.targets.length === 0)).toBe(true);

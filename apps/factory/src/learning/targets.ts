@@ -1,24 +1,24 @@
-import type { createDatabase } from "../../../../packages/db/src/client";
-import {
-  applyLearningEdit,
-  learningEdit,
-  type LearningEdit,
-  type LearningTarget,
-} from "../../../../packages/conversation-domain/src/learning";
-import {
-  skillContentInput,
-  type SkillContent,
-} from "../../../../packages/conversation-domain/src/skills";
-import type { LibraryChoice } from "../../../../packages/conversation-domain/src/skill-library";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { AgentTurnTransaction } from "../agent/turn-store";
+import {
+  applyLearningEdit,
+  type LearningEdit,
+  type LearningTarget,
+  learningEdit,
+} from "../../../../packages/conversation-domain/src/learning";
+import type { LibraryChoice } from "../../../../packages/conversation-domain/src/skill-library";
+import {
+  type SkillContent,
+  skillContentInput,
+} from "../../../../packages/conversation-domain/src/skills";
+import type { createDatabase } from "../../../../packages/db/src/client";
 import { projectAuthorityIn, requireActiveAccountIn } from "../access/controller";
+import type { AgentTurnTransaction } from "../agent/turn-store";
 import { CommandError } from "../command-error";
-import { createSkillController } from "../skills/controller";
 import { editKnowledgeIn } from "../knowledge/edit";
 import { manageMonitoringIn } from "../monitoring/authority";
 import { editInputInstructionsIn } from "../monitoring/instructions";
+import { createSkillController } from "../skills/controller";
 
 type Database = ReturnType<typeof createDatabase>;
 export const learningActivation = z.object({

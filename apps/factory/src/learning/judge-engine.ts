@@ -3,7 +3,7 @@ import { learningResult } from "../../../../packages/conversation-domain/src/lea
 import { nativeAgentPolicy, nativeStepGuard } from "../models/execution-policy";
 import { modelProviderOptions, nativeModel } from "../models/native";
 import { createMastraUsage } from "../usage/mastra";
-import { workReviewInstructions, type WorkReviewInput } from "./judge";
+import { type WorkReviewInput, workReviewInstructions } from "./judge";
 
 export async function reviewWorkWithModel(input: WorkReviewInput) {
   const signal = AbortSignal.any([input.signal, AbortSignal.timeout(90_000)]);

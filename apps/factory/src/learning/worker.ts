@@ -1,32 +1,35 @@
 import { createHash } from "node:crypto";
-import type { createDatabase } from "../../../../packages/db/src/client";
 import {
+  LearningResultRejected,
   learningBatchDue,
+  learningBatchSize,
   learningCase,
   learningRubric,
-  LearningResultRejected,
+  legacyWikiCallPattern,
+  maxCalibrationGrades,
   validateLearningResult,
 } from "../../../../packages/conversation-domain/src/learning";
-import { createModelSettingsController } from "../models/controller";
+import type { createDatabase } from "../../../../packages/db/src/client";
+import { CommandError } from "../command-error";
 import { createModelConnections } from "../models/connections";
+import { createModelSettingsController } from "../models/controller";
+import { knownModelRejection } from "../models/execution-policy";
 import { createOpenBaoModelSecrets } from "../models/secrets";
 import { projectModelConnection } from "../project-agent/adapter";
 import { createUsageJournal } from "../usage/journal";
 import { recordedMastraUsage } from "../usage/record-mastra";
-import { knownModelRejection } from "../models/execution-policy";
-import { CommandError } from "../command-error";
 import { learningAuthorityIn, learningEnabledIn } from "./authority";
-import { calibrationCases, calibrationPassed } from "./calibration";
-import { collectLearningCases, type LearningSourceCursor } from "./sources";
-import { reviewWork, workReviewInstructions } from "./judge";
 import { createLearningAutomation } from "./automation";
+import { calibrationCases, calibrationPassed } from "./calibration";
+import { reviewWork, workReviewInstructions } from "./judge";
 import type { replayPlanning } from "./replay";
+import { pendingReviewRequests, type ReviewRequest } from "./requests";
+import { collectLearningCases, type LearningSourceCursor } from "./sources";
 
 type Database = ReturnType<typeof createDatabase>;
 type Group = { projectId: string; ownerId: string | null; developerOnly: boolean };
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
-const maxCalibrationGrades = 3;
 export function createLearningWorker(
   database: Database,
   input: {
@@ -84,7 +87,10 @@ export function createLearningWorker(
     ...(input.replay ? { replay: input.replay } : {}),
   });
 
-  async function admit(scope: Group) {
+  // An explicit request keeps every rule of the automatic batch: current authority, pause,
+  // calibration, input bound and one running review per group. It only waives the batch trigger,
+  // and it can never admit more cases than the requester was shown.
+  async function admit(scope: Group, request?: ReviewRequest) {
     return database.client.begin(async (sql) => {
       const key = `${scope.projectId}:${scope.ownerId ?? "project"}:${scope.developerOnly}`;
       await sql`SELECT pg_advisory_xact_lock(hashtext(${`learning:${key}`}))`;
@@ -97,22 +103,31 @@ export function createLearningWorker(
         SELECT source.snapshot,source.reviewer_id AS "reviewerId" FROM factory.learning_case source
         WHERE source.project_id=${scope.projectId} AND source.owner_id IS NOT DISTINCT FROM ${scope.ownerId}::uuid
           AND source.developer_only=${scope.developerOnly} AND source.selected AND source.batch_id IS NULL
+          AND NOT(source.activity='wiki' AND source.id ~ ${legacyWikiCallPattern})
           AND (source.activity<>'setup' OR EXISTS(SELECT 1 FROM factory.project_membership membership
             WHERE membership.project_id=source.project_id AND membership.user_id=source.reviewer_id AND membership.manage_project)
             OR EXISTS(SELECT 1 FROM factory.administrator WHERE user_id=source.reviewer_id))
-        ORDER BY source.settled_at,source.id LIMIT 6`;
+        ORDER BY source.settled_at,source.id LIMIT ${request?.cases ?? learningBatchSize}`;
       const cases = rows.map((row) => learningCase.parse(row.snapshot));
-      if (!learningBatchDue(cases)) return null;
+      if (request ? !cases.length : !learningBatchDue(cases)) return null;
       // Split an unusually escape-heavy packet instead of admitting a call
       // that the native input guard would reject before inference.
       while (cases.length > 1 && Buffer.byteLength(JSON.stringify(cases)) > 128 * 1024) cases.pop();
       const managerOnly = cases.some((item) => item.activity === "setup");
+      // Spending on shared work needs the same current Project manager as pausing it.
+      const manager = managerOnly || Boolean(request && scope.ownerId === null);
       // Use an actual commissioner's current authority, never an installation
       // service identity to evade private or Developer-only evidence boundaries.
       let actorId: string | undefined;
-      for (const candidate of [...new Set(rows.map((row) => row.reviewerId))]) {
+      const candidates = request
+        ? [request.actorId]
+        : [...new Set(rows.map((row) => row.reviewerId))];
+      for (const candidate of candidates) {
         try {
-          await learningAuthorityIn(sql, candidate, { ...scope, managerOnly });
+          await learningAuthorityIn(sql, candidate, {
+            ...scope,
+            managerOnly: manager,
+          });
           actorId = candidate;
           break;
         } catch (cause) {
@@ -201,7 +216,7 @@ export function createLearningWorker(
         await sql`UPDATE factory.learning_case SET batch_id=${id} WHERE id=ANY(${cases.map((item) => item.id)}::text[]) AND batch_id IS NULL`;
       return {
         ...scope,
-        managerOnly,
+        managerOnly: manager,
         id,
         token,
         actorId,
@@ -315,10 +330,30 @@ export function createLearningWorker(
       sourceCursor = await collectLearningCases(database, sourceCursor);
       // One bounded comparison or one review per sweep, never parallel fan-out.
       if (await automation.sweep()) return;
+      for (const request of await pendingReviewRequests(database.client)) {
+        if (closed) break;
+        try {
+          const admitted = await admit(
+            {
+              projectId: request.projectId,
+              ownerId: request.ownerId,
+              developerOnly: request.developerOnly,
+            },
+            request,
+          );
+          if (admitted) {
+            await execute(admitted);
+            return;
+          }
+        } catch (cause) {
+          if (!(cause instanceof CommandError)) throw cause;
+        }
+      }
       const pendingGroups = () => database.client<(Group & { key: string })[]>`
         SELECT project_id AS "projectId",owner_id AS "ownerId",developer_only AS "developerOnly",
           project_id::text||':'||coalesce(owner_id::text,'project')||':'||developer_only::text AS key
         FROM factory.learning_case WHERE selected AND batch_id IS NULL
+          AND NOT(activity='wiki' AND id ~ ${legacyWikiCallPattern})
           AND project_id::text||':'||coalesce(owner_id::text,'project')||':'||developer_only::text > ${groupCursor}
         GROUP BY project_id,owner_id,developer_only ORDER BY key LIMIT 32`;
       let groups = await pendingGroups();

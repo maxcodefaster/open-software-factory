@@ -1,7 +1,7 @@
 import { expect, mock, test } from "bun:test";
 import {
-  LearningResultRejected,
   type LearningResult,
+  LearningResultRejected,
 } from "../../../../packages/conversation-domain/src/learning";
 import {
   comparisonCases,

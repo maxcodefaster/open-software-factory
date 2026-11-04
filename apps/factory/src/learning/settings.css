@@ -211,6 +211,9 @@
   line-height: var(--leading-body);
 }
 .work-loading {
+  display: grid;
+  place-items: center;
+  color: var(--color-ink-muted);
   height: 22rem;
   background: var(--material-panel);
   border-radius: var(--radius-sm);
@@ -486,4 +489,18 @@
 .work-chart-day:hover .work-chart-hit,
 .work-chart-day:focus .work-chart-hit {
   fill: var(--material-accent);
+}
+
+.work-review-now {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 72ch;
+  min-width: 0;
+  margin: var(--space-3) 0;
+  padding: 0;
+  border: 0;
+}
+.work-review-now-actions {
+  justify-content: flex-start;
+  margin-block: var(--space-2);
 }

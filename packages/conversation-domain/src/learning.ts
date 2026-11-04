@@ -206,11 +206,35 @@ export function sampleLearningCase(
   for (const character of id) hash = Math.imul(hash ^ character.charCodeAt(0), 16777619);
   return (hash >>> 0) % 5 === 0;
 }
+// A model can grade the fixed calibration cases wrongly once and rightly the next time. Repeat a
+// completed failing grade this many times in all; an unknown or rejected call is never repeated.
+export const maxCalibrationGrades = 3;
+export const learningBatchSize = 6;
+export const learningBatchAgeMs = 24 * 60 * 60_000;
 export function learningBatchDue(cases: LearningCase[], now = Date.now()) {
   return (
-    cases.length >= 6 || cases.some((item) => now - Date.parse(item.settledAt) >= 24 * 60 * 60_000)
+    cases.length >= learningBatchSize ||
+    cases.some((item) => now - Date.parse(item.settledAt) >= learningBatchAgeMs)
   );
 }
+// Wiki generations used to be reviewed once per model call, as `wiki:<generation>:<call>`. One
+// generation is now one case, `wiki:<generation>`. The old per-call history stays retained but
+// is neither counted nor selected, because dozens of calls from one generation skewed the rates.
+export const legacyWikiCallPattern = "^wiki:[0-9a-f-]{36}:";
+// An explicit request to review now. It is only an authorized intent; the worker starts the
+// same calibrated, bounded review as the automatic batch and never repeats a lost call.
+export const learningReviewWindowMs = 60 * 60_000;
+export const learningReviewNowCommand = z
+  .object({
+    kind: z.literal("review-now").default("review-now"),
+    commandId: z.uuid(),
+    projectId: z.uuid(),
+    scope: learningScope,
+    developerOnly: z.boolean(),
+    cases: z.number().int().min(1).max(learningBatchSize),
+  })
+  .strict();
+export type LearningReviewNowCommand = z.infer<typeof learningReviewNowCommand>;
 
 export const learningPolicyCommand = z
   .object({
@@ -272,6 +296,16 @@ export const learningView = z.object({
   version: z.number().int().nonnegative(),
   waiting: z.number().int().nonnegative().default(0),
   waitingSince: z.iso.datetime().nullable().default(null),
+  waitingDeveloperOnly: z.boolean().default(false),
+  reviewRunning: z.boolean().default(false),
+  reviewRequestedAt: z.iso.datetime().nullable().default(null),
+  calibration: z
+    .object({
+      state: z.enum(["none", "running", "passed", "retrying", "closed", "unconfirmed"]),
+      attempts: z.number().int().nonnegative(),
+      modelId: z.string().nullable(),
+    })
+    .default({ state: "none", attempts: 0, modelId: null }),
   days: z.array(learningDay),
   reviews: z.array(
     z.object({
