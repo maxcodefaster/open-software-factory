@@ -78,11 +78,14 @@ export async function checkSnapshot(file: string): Promise<Result> {
     return { name, ok: false, detail: "does not start with a gzip header" };
   const listed = await run(["tar", "-tzf", file]);
   if (listed.exitCode !== 0) return { name, ok: false, detail: "not a readable gzip archive" };
-  const members = new Set(listed.stdout.split("\n").map((line) => line.replace(/^\.\//, "")));
+  // GNU tar matches the stored name exactly, so keep the "./" prefix some archives carry.
+  const members = new Map(
+    listed.stdout.split("\n").map((line) => [line.replace(/^\.\//, ""), line]),
+  );
   for (const member of ["meta.json", "state.bin", "SHA256SUMS"])
     if (!members.has(member)) return { name, ok: false, detail: `${member} is missing` };
   async function read(member: string) {
-    const child = Bun.spawn(["tar", "-xzOf", file, member], {
+    const child = Bun.spawn(["tar", "-xzOf", file, members.get(member) ?? member], {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "ignore",

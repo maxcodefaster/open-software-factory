@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +23,8 @@ function sha256(content: string) {
 // The layout OpenBao 2.7 writes for `bao operator raft snapshot save`.
 function snapshotFiles(overrides: Record<string, string> = {}) {
   const meta = '{"Version":1,"ID":"bolt-snapshot","Index":145,"Term":4}';
-  const state = "s".repeat(2048);
+  // Incompressible, so the gzip size is the same on every platform.
+  const state = randomBytes(2048).toString("hex");
   return {
     "meta.json": meta,
     "state.bin": state,
@@ -103,7 +105,11 @@ test("a raft snapshot needs its gzip header, size, members and matching checksum
       ok: true,
       detail: expect.stringContaining("match SHA256SUMS"),
     });
-    await tar(directory, "corrupt.snap", snapshotFiles({ "state.bin": "t".repeat(2048) }));
+    await tar(
+      directory,
+      "corrupt.snap",
+      snapshotFiles({ "state.bin": randomBytes(2048).toString("hex") }),
+    );
     expect(await checkSnapshot(join(directory, "corrupt.snap"))).toMatchObject({
       ok: false,
       detail: "state.bin does not match SHA256SUMS",
