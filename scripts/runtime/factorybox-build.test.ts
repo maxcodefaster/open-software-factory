@@ -78,13 +78,20 @@ async function fixture(
     head?: string;
     dirty?: boolean;
     headAfterBuild?: string;
+    kernel?: string | null;
+    doctorKernel?: string;
   } = {},
 ) {
   const parent = resolve(".factory/test-results");
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(resolve(parent, "factorybox-build-test-"));
   const input = resolve(root, "request.json");
-  await writeFile(input, JSON.stringify({ ...request, repository: root }));
+  const { kernel: _kernel, ...withoutKernel } = request;
+  const kernel = overrides.kernel === undefined ? request.kernel : overrides.kernel;
+  await writeFile(
+    input,
+    JSON.stringify({ ...withoutKernel, repository: root, ...(kernel === null ? {} : { kernel }) }),
+  );
   const calls: string[][] = [];
   let evidence: string | undefined;
   let built = false;
@@ -148,7 +155,12 @@ async function fixture(
     return {
       exitCode: overrides.doctorCode ?? 1,
       stdout: JSON.stringify({
-        platform: { os: "linux", architecture: "arm64", page_size: 4096, kernel: request.kernel },
+        platform: {
+          os: "linux",
+          architecture: "arm64",
+          page_size: 4096,
+          kernel: overrides.doctorKernel ?? request.kernel,
+        },
         matches_reference: overrides.doctorCode === 0,
         error: "ARM64 runtime is not qualified",
       }),
@@ -209,6 +221,28 @@ test("even a matching doctor never promotes a build to native lifecycle qualific
     expect(result.installed).toBe(false);
   } finally {
     await owned.cleanup();
+  }
+});
+
+test("the kernel is optional and a restriction still has to match the doctor's report", async () => {
+  const { kernel: _kernel, ...unset } = request;
+  for (const kernel of [undefined, "*"]) {
+    const open = factoryboxBuildRequest.parse({ ...unset, ...(kernel ? { kernel } : {}) });
+    expect(factoryboxBuildCandidate(open, receipt).profile.kernel).toBe(kernel);
+  }
+  for (const kernel of [null, "*", "owned-*"]) {
+    const owned = await fixture({ doctorCode: 0, kernel, doctorKernel: "owned-6.12" });
+    try {
+      expect((await main([owned.input], { run: owned.run })).platformMatches).toBe(true);
+    } finally {
+      await owned.cleanup();
+    }
+  }
+  const refused = await fixture({ doctorCode: 0, kernel: "other-*", doctorKernel: "owned-6.12" });
+  try {
+    await expect(main([refused.input], { run: refused.run })).rejects.toThrow("doctor differs");
+  } finally {
+    await refused.cleanup();
   }
 });
 

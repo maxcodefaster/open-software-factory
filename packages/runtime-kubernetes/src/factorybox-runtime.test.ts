@@ -70,6 +70,29 @@ test("operator recovery reuses the exact store but gives its successor independe
   });
 });
 
+test("only a retained store exposes earlier exports to its replacement worker, read-only", () => {
+  const retained = renderFactoryboxRuntime({
+    ...input,
+    profile: {
+      ...input.profile,
+      retainedStore: {
+        storeID: input.workerID.replaceAll("-", ""),
+        initializedByPodUID: "original-pod",
+        boundedBytes: input.profile.boundedBytes,
+      },
+    },
+  });
+  const exporter = fixtureValue(retained.pod.spec.initContainers[1], "bootstrap export");
+  expect(exporter.volumeMounts[1]).toEqual({
+    name: "store",
+    mountPath: "/factory-seeds",
+    subPath: "seeds",
+    readOnly: true,
+  });
+  expect(exporter.command[2]).toContain("FACTORY_REUSE");
+  expect(renderFactoryboxRuntime(input).pod.spec.initContainers[1]?.volumeMounts).toHaveLength(1);
+});
+
 test("observing a retained worker uses its admitted bootstrap, not today's exporter command", () => {
   const original = structuredClone(renderFactoryboxRuntime(input));
   const exporter = fixtureValue(

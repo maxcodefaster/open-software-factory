@@ -4,7 +4,10 @@
 // upstream Sysbox/CRIU requirements. They do not qualify a node. The pinned worker's own
 // `factorybox doctor` and startup checks stay authoritative.
 import { z } from "zod";
-import { factoryboxKernelMatches } from "../../packages/runtime-kubernetes/src/factorybox-kernel";
+import {
+  factoryboxKernelMatches,
+  factoryboxKernelRestriction,
+} from "../../packages/runtime-kubernetes/src/factorybox-kernel";
 import { selectFactoryboxWorkerResources } from "../../packages/runtime-kubernetes/src/factorybox-resource-admission";
 import type { FactoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 
@@ -108,14 +111,20 @@ export function evaluateNode(profile: FactoryboxRuntimeProfile, nodeInput: unkno
           `Use a linux/${profile.architecture} node pool or set factorybox.architecture to the node's architecture and a matching worker image`,
         ),
   );
+  const restriction = factoryboxKernelRestriction(profile.kernel);
   checks.push(
-    factoryboxKernelMatches(profile.kernel, info.kernelVersion)
-      ? pass("node.kernel-policy", `Kernel ${info.kernelVersion} matches factorybox.kernel`)
-      : fail(
+    !restriction
+      ? pass(
           "node.kernel-policy",
-          `Kernel ${info.kernelVersion} is outside factorybox.kernel ${profile.kernel}`,
-          `Set factorybox.kernel to this release or a pattern such as ${info.kernelVersion.replace(/\d+(?=-)/, "*")}, only if your Factorybox build admits it`,
-        ),
+          `Kernel ${info.kernelVersion}. factorybox.kernel does not restrict kernels, so the worker's capability gate decides`,
+        )
+      : factoryboxKernelMatches(restriction, info.kernelVersion)
+        ? pass("node.kernel-policy", `Kernel ${info.kernelVersion} matches factorybox.kernel`)
+        : fail(
+            "node.kernel-policy",
+            `Kernel ${info.kernelVersion} is outside factorybox.kernel ${restriction}`,
+            `Widen factorybox.kernel to a pattern such as ${info.kernelVersion.replace(/\d+(?=-)/, "*")}, or leave it empty to let the worker's capability gate decide`,
+          ),
   );
   const version = parseKernelRelease(info.kernelVersion);
   checks.push(
@@ -571,23 +580,7 @@ export function evaluateNodeFacts(facts: NodeFacts) {
           `modprobe ${device === "fuse" ? "fuse" : "loop"} on the node if the worker cannot start`,
         ),
       );
-  checks.push(
-    !facts.doctor
-      ? skip(
-          "worker.doctor",
-          "The worker image has no factorybox executable at /opt/factorybox/factorybox",
-        )
-      : facts.doctor.exitCode === 0
-        ? pass(
-            "worker.doctor",
-            `factorybox doctor accepts this node: ${facts.doctor.stdout.trim().slice(0, 200)}`,
-          )
-        : fail(
-            "worker.doctor",
-            `factorybox doctor refuses this node: ${facts.doctor.stdout.trim().slice(0, 300)}`,
-            `The worker binary links an exact kernel and architecture. Build or obtain a Factorybox release that admits kernel ${facts.release} (standalone repository: internal/platform), then set factorybox.image and executableSHA256.`,
-          ),
-  );
+  checks.push(workerDoctorCheck(facts));
   return checks;
 }
 
@@ -673,4 +666,43 @@ export function parseNodeFacts(logs: string): NodeFacts | null {
   } catch {
     return null;
   }
+}
+
+// `factorybox doctor` is the worker's own capability gate. A node that passes it but whose
+// kernel the build has not verified is usable and only worth a warning.
+function workerDoctorCheck(facts: NodeFacts) {
+  if (!facts.doctor)
+    return skip(
+      "worker.doctor",
+      "The worker image has no factorybox executable at /opt/factorybox/factorybox",
+    );
+  const output = facts.doctor.stdout.trim();
+  if (facts.doctor.exitCode !== 0)
+    return fail(
+      "worker.doctor",
+      `factorybox doctor refuses this node: ${output.slice(0, 300)}`,
+      `The worker's capability gate rejected kernel ${facts.release}. Read its message for the missing capability, use a node image that provides it, or use a Factorybox release whose gate admits it (standalone repository: internal/platform).`,
+    );
+  if (doctorQualification(output) === "unverified")
+    return warn(
+      "worker.doctor",
+      `factorybox doctor accepts this node, but kernel ${facts.release} is not verified by this Factorybox build: ${output.slice(0, 200)}`,
+      "The capability gate passed, so Factory will admit the node. Run your own workload acceptance before relying on it, or choose a verified kernel.",
+    );
+  return pass("worker.doctor", `factorybox doctor accepts this node: ${output.slice(0, 200)}`);
+}
+
+function doctorQualification(output: string) {
+  try {
+    const parsed = JSON.parse(output) as {
+      qualification?: unknown;
+      platform?: { qualification?: unknown };
+    };
+    const value = parsed.qualification ?? parsed.platform?.qualification;
+    if (value === "verified" || value === "unverified") return value;
+  } catch {}
+  return /["']?qualification["']?\s*[:=]\s*["']?(verified|unverified)\b/.exec(output)?.[1] as
+    | "verified"
+    | "unverified"
+    | undefined;
 }

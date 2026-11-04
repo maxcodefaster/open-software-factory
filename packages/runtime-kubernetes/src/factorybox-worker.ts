@@ -568,7 +568,7 @@ export async function inspectFactoryboxWorker(
     .parse(nodeRaw);
   if (!factoryboxKernelMatches(input.kernel, node.status.nodeInfo.kernelVersion))
     throw new Error(
-      `Factorybox node kernel ${node.status.nodeInfo.kernelVersion} is outside the admitted kernel policy ${input.kernel}. Admit that kernel with factorybox.kernel only after native qualification.`,
+      `Factorybox node kernel ${node.status.nodeInfo.kernelVersion} is outside the admitted kernel policy ${input.kernel}. Widen or remove factorybox.kernel to admit it.`,
     );
   for (const [wanted, actual] of [
     [expected[0], namespace],

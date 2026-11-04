@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { runCommand } from "./command";
 import { kubernetesCommand } from "./config";
+import { factoryboxPodSecurityLabels } from "./factorybox-location";
 
 export interface RuntimePodObservation {
   readonly uid: string;
@@ -151,7 +152,19 @@ export function createKubernetesClient(run: typeof kubectl = kubectl): Kubernete
         }
         if (expectedNamespace?.uid)
           throw new Error("Recorded Factory Namespace disappeared; refusing replacement");
-        const created = await run(["create", "-f", "-", "-o", "json"], JSON.stringify(namespace));
+        // The worker Pod is privileged. A cluster whose default Pod Security level is restrictive
+        // would reject it, so only this worker Namespace asks for the privileged level at creation.
+        const declared =
+          namespace.metadata?.labels?.["factory.dev/factorybox-worker"] === undefined
+            ? namespace
+            : {
+                ...namespace,
+                metadata: {
+                  ...namespace.metadata,
+                  labels: { ...namespace.metadata?.labels, ...factoryboxPodSecurityLabels() },
+                },
+              };
+        const created = await run(["create", "-f", "-", "-o", "json"], JSON.stringify(declared));
         if (created.exitCode !== 0)
           throw new Error(`Kubernetes Namespace create failed: ${created.stderr}`);
         const current = JSON.parse(created.stdout) as { metadata?: { uid?: string } };

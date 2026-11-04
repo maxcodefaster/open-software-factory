@@ -64,6 +64,25 @@ test("an AKS Ubuntu node passes and an upgraded kernel stays inside the policy",
   expect(status(evaluateNode(profile, upgraded), "node.kernel-policy")).toBe("PASS");
 });
 
+test("without a kernel restriction any release passes the policy check and only the node minimum applies", () => {
+  const open = configuredFactoryboxRuntimeProfile({
+    FACTORY_FACTORYBOX_WORKER_IMAGE: image,
+    FACTORY_FACTORYBOX_EXECUTABLE_SHA256: "b".repeat(64),
+    FACTORY_FACTORYBOX_ARCHITECTURE: "amd64",
+    FACTORY_FACTORYBOX_NODE: profile.nodeName,
+  });
+  expect(open.kernel).toBeUndefined();
+  const custom = node();
+  custom.status.nodeInfo.kernelVersion = "6.12.4-custom";
+  const checks = evaluateNode(open, custom);
+  expect(status(checks, "node.kernel-policy")).toBe("PASS");
+  expect(checks.find((check) => check.id === "node.kernel-policy")?.message).toContain(
+    "capability gate",
+  );
+  custom.status.nodeInfo.kernelVersion = "5.4.0-1-azure";
+  expect(status(evaluateNode(open, custom), "node.kernel-minimum")).toBe("FAIL");
+});
+
 test.each([
   [
     "architecture",
@@ -245,6 +264,21 @@ test("missing kernel facilities fail or warn with exact remediation", () => {
   const doctor = checks.find((check) => check.id === "worker.doctor");
   expect(doctor?.status).toBe("FAIL");
   expect(doctor?.fix).toContain("5.15.0-1068-azure");
+});
+
+test("a node the worker accepts on an unverified kernel is a warning, not a failure", () => {
+  for (const stdout of [
+    '{"platform":{"kernel":"5.15.0-1068-azure"},"qualification":"unverified"}',
+    "kernel=5.15.0-1068-azure qualification=unverified",
+  ]) {
+    const checks = evaluateNodeFacts(facts({ doctor: { exitCode: 0, stdout } }));
+    expect(status(checks, "worker.doctor")).toBe("WARN");
+    expect(checks.some((check) => check.status === "FAIL")).toBe(false);
+  }
+  const verified = evaluateNodeFacts(
+    facts({ doctor: { exitCode: 0, stdout: '{"qualification":"verified"}' } }),
+  );
+  expect(status(verified, "worker.doctor")).toBe("PASS");
 });
 
 test("an unreadable kernel configuration falls back to loaded filesystems with warnings", () => {

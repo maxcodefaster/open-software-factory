@@ -1,7 +1,9 @@
 // Node and cluster preflight for the Factorybox worker.
 //   bun scripts/kubernetes/preflight.ts --node NODE --architecture amd64 \
-//     --kernel '5.15.0-*-azure,6.8.0-*-azure' --image REGISTRY/factorybox@sha256:... \
+//     --image REGISTRY/factorybox@sha256:... [--kernel '5.15.0-*-azure,6.8.0-*-azure'] \
 //     [--storage-class managed-csi] [--namespace factory] [--read-only] [--json]
+// --kernel is optional and only restricts the nodes Factory admits. The kernel check otherwise
+// reports the node's capabilities and warns when the worker accepts an unverified kernel.
 // Without flags it reads the installation's FACTORY_FACTORYBOX_* environment, which the
 // Helm test Job (`helm test RELEASE`) supplies. Most checks only read through the API.
 // Unless --read-only, one throwaway probe also runs: it creates a labelled

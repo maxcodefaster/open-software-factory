@@ -336,6 +336,19 @@ export function renderFactoryboxRuntime(input: FactoryboxRuntimeInput) {
                   ? `seeds/${factoryboxAdmissionID(input.workerID, input.podName).replaceAll("-", "")}/bootstrap`
                   : "seed",
               },
+              // A replacement worker may reuse an earlier admission's hash-verified
+              // export of this exact image. The mount is read-only and the program
+              // hashes its copy again before it publishes anything.
+              ...(input.profile.retainedStore
+                ? [
+                    {
+                      name: "store",
+                      mountPath: "/factory-seeds",
+                      subPath: "seeds",
+                      readOnly: true,
+                    },
+                  ]
+                : []),
             ],
           },
           ...(input.profile.storageAdmission === 1 && !input.profile.retainedStore

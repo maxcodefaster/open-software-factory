@@ -51,7 +51,7 @@ const resources: Record<string, unknown> = {
       nodeInfo: {
         operatingSystem: "linux",
         architecture: request.architecture,
-        kernelVersion: request.kernel,
+        kernelVersion: request.kernel?.includes("*") ? "6.12.4-1" : (request.kernel ?? "6.12.4-1"),
         bootID: input.bootID,
       },
     },

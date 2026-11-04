@@ -22,7 +22,7 @@ const request: FactoryboxWorkerRequest = {
   executableSHA256: "d".repeat(64),
   architecture: "amd64",
   nodeName: "owned-linux-node",
-  kernel: "7.2.8-9-omarchy",
+  kernel: "6.12.4-1",
   boundedBytes: 4 * 1024 ** 3,
   claimGiB: 32,
 };
@@ -111,7 +111,7 @@ function fixture(input: FactoryboxWorkerRequest = request) {
       nodeInfo: {
         operatingSystem: "linux",
         architecture: input.architecture,
-        kernelVersion: input.kernel,
+        kernelVersion: input.kernel ?? "6.12.4-1",
         bootID: "boot-id",
       },
     },
@@ -1033,7 +1033,21 @@ test("a managed node's image-upgraded kernel release passes only through an expl
       `${release} is outside the admitted kernel policy`,
     );
   }
-  expect(() => factoryboxWorkerRequest.parse({ ...request, kernel: "*" })).toThrow();
+  expect(() => factoryboxWorkerRequest.parse({ ...request, kernel: "5.15|6.*" })).toThrow();
+});
+
+test("an unset or * kernel admits any node kernel while boot identity stays pinned", async () => {
+  for (const kernel of [undefined, "*"]) {
+    const open = { ...request, kernel };
+    const f = fixture(open);
+    for (const release of ["5.15.0-1068-azure", "7.2.8-9-custom"]) {
+      f.node.status.nodeInfo.kernelVersion = release;
+      const identity = await inspectFactoryboxWorker(open, undefined, f.run);
+      expect(identity.nodeBootID).toBe("boot-id");
+    }
+  }
+  const { kernel: _kernel, ...unset } = request;
+  expect(factoryboxWorkerRequest.parse(unset).kernel).toBeUndefined();
 });
 
 test("a terminated worker or changed node boot reports node loss with the explicit recovery path", async () => {

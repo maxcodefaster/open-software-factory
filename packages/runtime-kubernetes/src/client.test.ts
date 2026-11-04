@@ -4,7 +4,7 @@ import {
   KubernetesObservationUnavailableError,
   readRuntimeRegistryCA,
 } from "./client";
-import { factoryboxSharedLabels } from "./factorybox-location";
+import { factoryboxPodSecurityLabels, factoryboxSharedLabels } from "./factorybox-location";
 
 const namespace = {
   apiVersion: "v1",
@@ -175,6 +175,28 @@ test("resource creation uses one ordered apply after confirming its Namespace id
     items: resources.slice(1),
   });
   expect(calls[2]?.args).toContain("--server-side");
+});
+
+test("only a created Factorybox worker Namespace carries the privileged Pod Security labels", async () => {
+  const created: Array<{ metadata: { labels: Record<string, string> } }> = [];
+  const client = createKubernetesClient(async (args, input) => {
+    if (args[0] === "get") return { stdout: "", stderr: "NotFound", exitCode: 1 };
+    if (args[0] === "create") created.push(JSON.parse(input ?? "null"));
+    return {
+      stdout: JSON.stringify({ metadata: { uid: "namespace-uid" } }),
+      stderr: "",
+      exitCode: 0,
+    };
+  });
+  const shared = factoryboxSharedLabels("11111111-1111-4111-8111-111111111111");
+  await client.apply([{ ...namespace, metadata: { ...namespace.metadata, labels: shared } }]);
+  await client.apply([namespace]);
+  expect(created[0]?.metadata.labels).toEqual({ ...shared, ...factoryboxPodSecurityLabels() });
+  expect(created[0]?.metadata.labels["pod-security.kubernetes.io/enforce"]).toBe("privileged");
+  expect(created[1]).toEqual(namespace);
+  expect(Object.keys(namespace.metadata.labels)).not.toContain(
+    "pod-security.kubernetes.io/enforce",
+  );
 });
 
 test("foreign or replaced Namespace blocks the entire resource apply", async () => {

@@ -20,7 +20,7 @@ test("operator CLI persists exact intent before execution and never overwrites a
     executableSHA256: "d".repeat(64),
     architecture: "amd64",
     nodeName: "owned-node",
-    kernel: "7.2.8-9-omarchy",
+    kernel: "6.12.4-1",
     boundedBytes: 4 * 1024 ** 3,
     claimGiB: 32,
   } as const;

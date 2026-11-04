@@ -6,9 +6,10 @@ bundles through its own CLI. Factory Workspace Start and the execution reserve u
 contract with Factory-owned consumer preparation. See [Workspace execution](../../docs/adr/0002-factorybox-worker-and-execution.md#run-workspace-execution-in-factorybox-with-shared-canonical-source).
 
 The Helm chart requires `factorybox.image`, `factorybox.executableSHA256`,
-`factorybox.architecture`, `factorybox.nodeName` and `factorybox.kernel`. The local launcher uses
+`factorybox.architecture` and `factorybox.nodeName`. `factorybox.kernel` is optional. The local launcher uses
 `FACTORY_FACTORYBOX_WORKER_IMAGE`, `FACTORY_FACTORYBOX_EXECUTABLE_SHA256`,
-`FACTORY_FACTORYBOX_ARCHITECTURE`, `FACTORY_FACTORYBOX_NODE` and `FACTORY_FACTORYBOX_KERNEL`.
+`FACTORY_FACTORYBOX_ARCHITECTURE` and `FACTORY_FACTORYBOX_NODE`, plus an optional
+`FACTORY_FACTORYBOX_KERNEL`.
 They must identify a verified package and the actual admitted node. Architecture is explicitly
 `arm64` or `amd64`; Factory never infers it from the control-plane host.
 The worker image must be available in the operator's private registry or loaded on that node.
@@ -49,8 +50,7 @@ The request names exact completed inputs, not a floating tag or latest artifact:
   "boundedBuild": true,
   "network": "host",
   "dockerContext": "orbstack",
-  "nodeName": "orbstack",
-  "kernel": "REPLACE_WITH_ACTUAL_KERNEL_RELEASE"
+  "nodeName": "orbstack"
 }
 ```
 
@@ -87,7 +87,6 @@ and `--worker-epoch`. The previous first-release image does not expose these opt
   "executableSHA256": "REPLACE_WITH_EXECUTABLE_SHA256",
   "architecture": "amd64",
   "nodeName": "REPLACE_WITH_NODE_NAME",
-  "kernel": "7.2.8-9-omarchy",
   "boundedBytes": 8589934592,
   "claimGiB": 32
 }
@@ -95,12 +94,13 @@ and `--worker-epoch`. The previous first-release image does not expose these opt
 
 Replace the example store and trust-domain IDs with random 32-character hexadecimal identities.
 Factory renders and validates either Linux ARM64 or AMD64 using the same worker protocol.
-The standalone runtime is qualified on its exact Linux AMD64 kernel and 4096-byte pages;
-ARM64 qualifies per kernel on the target node. Inspection checks the node's OS,
-architecture and kernel against the live worker. `kernel` may be one release or a comma-separated
-list using `*` wildcards (`5.15.0-*-azure,6.8.0-*-azure`). That only widens Factory's admission
-gate. The standalone binary still refuses a kernel its build does not admit, and the node boot ID
-still pins each retained worker. Node-reported and kernel-reported boot IDs
+The standalone worker gates on kernel capabilities and 4096-byte pages, not one kernel release.
+It reports the node's exact kernel and boot ID, and an informational `qualification` of
+`verified` or `unverified`. Inspection checks the node's OS and architecture against the live
+worker. `kernel` is optional. Unset, empty or `*` admits any kernel. To restrict nodes, set one
+release or a comma-separated list using `*` wildcards (`5.15.0-*-azure,6.8.0-*-azure`); a node
+outside the list is refused. The restriction never relaxes the worker's own capability gate, and
+the node boot ID still pins each retained worker. Node-reported and kernel-reported boot IDs
 are pinned separately; a later change to either refuses the original admission. Worker startup checks its actual
 cgroups, component identities, store lease and filesystem. Another node profile needs the
 standalone native checks before use.

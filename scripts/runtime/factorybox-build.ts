@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { mkdir, mkdtemp, open, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
+import { factoryboxKernelMatches } from "../../packages/runtime-kubernetes/src/factorybox-kernel";
 import { factoryboxRuntimeProfile } from "../../packages/runtime-kubernetes/src/factorybox-runtime";
 
 const artifact = (prefix: string) => z.string().regex(new RegExp(`^${prefix}[a-f0-9]{32}$`));
@@ -309,7 +310,7 @@ export async function main(args: string[], ports: Ports = { run }) {
       observed?.os !== "linux" ||
       observed.architecture !== candidate.profile.architecture ||
       observed.page_size !== 4096 ||
-      observed.kernel !== request.kernel
+      !factoryboxKernelMatches(request.kernel, String(observed.kernel))
     )
       throw new Error("Factorybox doctor differs from the requested native worker profile");
   }

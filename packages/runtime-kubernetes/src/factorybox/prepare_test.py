@@ -514,6 +514,69 @@ class PreparationTests(unittest.TestCase):
                          "immutable": {"root": str(saved)}}}
         return root, source, saved, base, status
 
+    def archive_fixture(self, content=b'complete consumer image transport'):
+        seed = self.root/'verified-export'
+        seed.mkdir(mode=0o700)
+        checksum = hashlib.sha256(content).hexdigest()
+        for name, value in [('rootfs.tar', content), ('rootfs.sha256', (checksum+'  rootfs.tar\n').encode())]:
+            (seed/name).write_bytes(value)
+            (seed/name).chmod(0o600)
+        return seed, checksum
+
+    def test_export_is_hashed_once_and_then_trusted_by_its_identity_receipt(self):
+        seed, checksum = self.archive_fixture()
+        module = self.module
+        self.assertEqual(module['consumer_archive_checksum'](self.request, seed), checksum)
+        receipt = json.loads((seed/'rootfs.verified.json').read_text())
+        info = (seed/'rootfs.tar').stat()
+        self.assertEqual(receipt, {'version': 1, 'sha256': checksum, 'file': {
+            'device': info.st_dev, 'inode': info.st_ino, 'bytes': info.st_size,
+            'mtimeNS': info.st_mtime_ns, 'ctimeNS': info.st_ctime_ns}})
+        self.assertEqual((seed/'rootfs.verified.json').stat().st_mode & 0o777, 0o600)
+        with patch.dict(module['verify_archive'].__globals__, {'hashlib': None}):
+            # Any attempt to hash again would fail on the missing module.
+            self.assertEqual(module['consumer_archive_checksum'](self.request, seed), checksum)
+
+    def test_changed_export_is_never_trusted_by_a_stale_receipt(self):
+        seed, checksum = self.archive_fixture()
+        module = self.module
+        module['consumer_archive_checksum'](self.request, seed)
+        original = (seed/'rootfs.tar').read_bytes()
+        # Same size, different bytes: ctime and mtime change.
+        (seed/'rootfs.tar').write_bytes(b'x'*len(original))
+        with self.assertRaisesRegex(ValueError, 'differs from its committed export'):
+            module['consumer_archive_checksum'](self.request, seed)
+        # Replacement by an identical copy has a new inode and must be hashed again.
+        (seed/'rootfs.tar').unlink()
+        (seed/'rootfs.tar').write_bytes(original)
+        (seed/'rootfs.tar').chmod(0o600)
+        calls = []
+        real = hashlib.sha256
+        with patch.dict(module['verify_archive'].__globals__, {'hashlib': type('H', (), {
+                'sha256': staticmethod(lambda *a: calls.append(1) or real(*a))})}):
+            self.assertEqual(module['consumer_archive_checksum'](self.request, seed), checksum)
+        self.assertEqual(calls, [1])
+
+    def test_receipt_for_another_checksum_or_foreign_mode_is_ignored(self):
+        seed, checksum = self.archive_fixture()
+        module = self.module
+        module['consumer_archive_checksum'](self.request, seed)
+        receipt = json.loads((seed/'rootfs.verified.json').read_text())
+        (seed/'rootfs.verified.json').unlink()
+        (seed/'rootfs.verified.json').write_text(json.dumps({**receipt, 'sha256': 'f'*64}))
+        (seed/'rootfs.verified.json').chmod(0o600)
+        with patch.dict(module['verify_archive'].__globals__, {'hashlib': None}), \
+                self.assertRaises(AttributeError):
+            module['consumer_archive_checksum'](self.request, seed)
+        (seed/'rootfs.verified.json').chmod(0o644)
+        self.assertEqual(module['consumer_archive_checksum'](self.request, seed), checksum)
+
+    def test_a_group_readable_export_is_hashed_but_never_receipted(self):
+        seed, checksum = self.archive_fixture()
+        (seed/'rootfs.tar').chmod(0o644)
+        self.assertEqual(self.module['consumer_archive_checksum'](self.request, seed), checksum)
+        self.assertFalse((seed/'rootfs.verified.json').exists())
+
     def test_compacted_export_reuse_requires_exact_import_and_retirement_receipts(self):
         environment = patch.dict(os.environ, {'FACTORY_RUNTIME_IMAGE':
                                              'registry.invalid/bootstrap@sha256:'+'1'*64})

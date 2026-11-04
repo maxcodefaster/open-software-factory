@@ -223,6 +223,66 @@ def archive_receipt(path):
         return json.load(stream)
 
 
+ARCHIVE_VERIFIED = 'rootfs.verified.json'
+
+
+def file_identity(info):
+    return {'device': info.st_dev, 'inode': info.st_ino, 'bytes': info.st_size,
+            'mtimeNS': info.st_mtime_ns, 'ctimeNS': info.st_ctime_ns}
+
+
+def archive_verified(seed, checksum, info):
+    """Whether a receipt proves this exact unchanged file already matched checksum.
+
+    The receipt binds the checksum to the file's device, inode, size, mtime and
+    ctime. Any write, truncate, chmod or replacement changes one of them, so a
+    changed file always falls back to the full hash. It does not detect media
+    corruption that leaves metadata unchanged; that needs a fresh hash.
+    """
+    try:
+        receipt = archive_receipt(seed/ARCHIVE_VERIFIED)
+    except (OSError, ValueError):
+        return False
+    return (type(receipt) is dict and
+            set(receipt) == {'version', 'sha256', 'file'} and receipt['version'] == 1 and
+            receipt['sha256'] == checksum and receipt['file'] == file_identity(info))
+
+
+def verify_archive(seed, checksum):
+    """Hash the committed export once per file, then trust only its identity receipt."""
+    archive = seed/'rootfs.tar'
+    descriptor = os.open(archive, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, 'rb') as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError('Consumer rootfs export is not a regular file')
+        # Only the exporter's private, unlinked-once file may carry a receipt.
+        private = (info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600 and
+                   info.st_nlink == 1)
+        if private and archive_verified(seed, checksum, info):
+            return checksum
+        value = hashlib.sha256()
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            value.update(block)
+        after = os.fstat(stream.fileno())
+        if file_identity(after) != file_identity(info):
+            raise ValueError('Consumer rootfs export changed while it was verified')
+        if value.hexdigest() != checksum:
+            raise ValueError('Complete consumer rootfs differs from its committed export')
+    # The receipt is only an optimization. A lost or failed write never fails
+    # preparation. The next prepare simply hashes again.
+    if not private:
+        return checksum
+    try:
+        temporary = seed/(ARCHIVE_VERIFIED+'.partial')
+        temporary.unlink(missing_ok=True)
+        publish(temporary, {'version': 1, 'sha256': checksum, 'file': file_identity(info)})
+        os.replace(temporary, seed/ARCHIVE_VERIFIED)
+    except OSError:
+        pass
+    return checksum
+
+
 def consumer_archive_checksum(request, seed):
     expected = (seed/'rootfs.sha256').read_text().split()
     if (len(expected) != 2 or expected[1] != 'rootfs.tar' or
@@ -230,9 +290,7 @@ def consumer_archive_checksum(request, seed):
         raise ValueError('Consumer archive checksum is not committed')
     completed = seed/'archive-retired.json'
     if not completed.exists() and not completed.is_symlink():
-        if digest(seed/'rootfs.tar') != expected[0]:
-            raise ValueError('Complete consumer rootfs differs from its committed export')
-        return expected[0]
+        return verify_archive(seed, expected[0])
     retirement = archive_receipt(seed/'archive-retirement.json')
     if type(retirement) is not dict:
         raise ValueError('Consumer archive retirement is not an object')
