@@ -62,7 +62,9 @@ test.each([
       publications = 0,
       researches = 0,
       plans = 0,
-      receivedRequests = 0;
+      receivedRequests = 0,
+      largestRequest = 0;
+    const toolNames = new Set<string>();
     const corrections: Array<{ rejectedResult?: { topics?: typeof topics }; correction?: string }> =
       [];
     const keys = ["FACTORY_MODEL_BASE_URL", "FACTORY_MODEL_API_KEY"];
@@ -78,12 +80,15 @@ test.each([
             { status: 503 },
           );
         const incoming = (await request.json()) as {
+          tools?: Array<{ function?: { name?: string } }>;
           tool_choice?: string;
           messages: Array<{
             role: string;
             content: string | Array<{ type: string; text?: string }> | null;
           }>;
         };
+        largestRequest = Math.max(largestRequest, JSON.stringify(incoming).length);
+        for (const tool of incoming.tools ?? []) toolNames.add(tool.function?.name ?? "");
         const body = {
           messages: incoming.messages.map((message) => ({
             ...message,
@@ -386,6 +391,13 @@ test.each([
           ["publication-conflict", "execution-bound", "empty-topic"].includes(scenario) ? 0 : 1,
         );
         expect(receivedRequests).toBeLessThanOrEqual(32);
+        if (scenario === "large-repository") {
+          // 3,147 files must not reach any prompt: agents explore with tools instead.
+          expect(largestRequest).toBeLessThan(60_000);
+          expect([...toolNames]).toEqual(
+            expect.arrayContaining(["readSource", "listDirectory", "findFiles"]),
+          );
+        }
         return;
       }
       const result = await run;

@@ -14,6 +14,7 @@ import { modelProviderOptions, nativeModel } from "../models/native";
 import { projectModelConnection } from "../project-agent/adapter";
 import { isStructuredOutputFailure } from "../project-agent/structured-output";
 import { createMastraUsage } from "../usage/mastra";
+import { findReadableCodePaths } from "./code-read";
 import type { WikiGenerationInput } from "./generation-agent";
 import {
   rejectedWikiStructuredResult,
@@ -23,6 +24,7 @@ import {
   WikiTopicPlanError,
   WikiTopicQualityError,
 } from "./generation-failure";
+import { listDirectory, repositoryMap } from "./repository-map";
 import { wikiLinkIssues } from "./wiki-links";
 
 const topicSchema = z.object({
@@ -70,7 +72,8 @@ formatting and tests alone need no prose update unless they change supported gui
 Keep all necessary instructions, caveats and evidence; concise does not mean incomplete.
 No generated timestamps, hashes or Sources footers. Factory supplies provenance.
 Factory binds page identities and parents from the validated plan and current pages.
-Use source tools when evidence is missing, then return your structured result once it is sufficient.
+You receive a repository map, not the file list. Explore with listDirectory and findFiles, read only the few files a claim needs with readSource, and return your structured result once the evidence is sufficient.
+Use source tools when evidence is missing.
 Report missing evidence or uncertainty rather than inventing unsupported facts.
 Bodies exclude their separate title. Write internal Wiki links as Markdown [Page title](#wiki/page-slug),
 using the exact title and slug of an existing checked page. Never write a bare #wiki/ reference.
@@ -110,6 +113,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
   let pages = input.pages.map((page) => ({ ...page }));
   const completedPageIDs = new Set(input.completedPageIDs ?? []);
   const known = new Set(input.inventory.map((file) => file.path));
+  const repository = repositoryMap(input.inventory);
   function sourceScope(seed: Array<{ path: string; content: string }> = []) {
     const read = new Map(seed.map((file) => [file.path, file]));
     let bytes = seed.reduce(
@@ -142,7 +146,42 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       outputSchema: z.array(z.object({ path: z.string(), content: z.string() })),
       execute: ({ paths }) => readFiles(paths),
     });
-    return { tool, read, readFiles };
+    const listTool = createTool({
+      id: "list-wiki-directory",
+      description:
+        "List one directory level of the repository: child directories with file counts, then files with sizes. Paged.",
+      inputSchema: z.object({
+        path: z.string().max(500),
+        offset: z.number().int().min(0).max(100_000).optional(),
+      }),
+      outputSchema: z.object({
+        path: z.string(),
+        total: z.number(),
+        entries: z.array(z.string()),
+        nextOffset: z.number().nullable(),
+      }),
+      execute: async ({ path, offset }) => {
+        activeSignal.throwIfAborted();
+        return listDirectory(input.inventory, path, offset ?? 0);
+      },
+    });
+    const findTool = createTool({
+      id: "find-wiki-files",
+      description:
+        "Find readable source and documentation paths whose names contain the given words, best matches first.",
+      inputSchema: z.object({ query: z.string().min(1).max(200) }),
+      outputSchema: z.object({ paths: z.array(z.string()), truncated: z.boolean() }),
+      execute: async ({ query }) => {
+        activeSignal.throwIfAborted();
+        return findReadableCodePaths(input.inventory, query);
+      },
+    });
+    return {
+      tool,
+      tools: { readSource: tool, listDirectory: listTool, findFiles: findTool },
+      read,
+      readFiles,
+    };
   }
   async function ask<T extends z.ZodType>(
     id: string,
@@ -158,7 +197,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       name: `Factory Wiki ${id}`,
       ...nativeAgentPolicy,
       model: await nativeModel(connection, input.modelId),
-      tools: { readSource: sources.tool },
+      tools: sources.tools,
       instructions: `${wikiInstructions}\n${task}`,
     });
     const mastra = new Mastra({ agents: { wiki: agent }, logger: noopLogger });
@@ -255,7 +294,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           `Unknown seed paths: ${unknownPaths
             .slice(0, 8)
             .map((path) => path.slice(0, 500))
-            .join(", ")}. Use exact file paths from files.`,
+            .join(", ")}. Use exact file paths found with listDirectory, findFiles or readSource.`,
         );
       if (slugs.has(topic.slug))
         throw new WikiTopicPlanError(
@@ -300,14 +339,14 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           planSchema,
           {
             project: input.name,
-            files: input.inventory,
+            repository,
             changedPaths: input.changedPaths,
             currentPages: pages,
             completedPageIDs: [...completedPageIDs],
             initialSources: input.sources,
           },
           planSources,
-          "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add child guides only when distinct reader tasks need them. There is no target page count. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in files. Each active pageID belongs to only one topic; do not create overlapping packages.",
+          "Research manifests and core flows, then plan only useful affected topics. A new Wiki needs a concise overview; add child guides only when distinct reader tasks need them. There is no target page count. Each purpose must identify the material correction or uncovered reader task, in at most 800 characters. Existing pageIDs must be read in full from currentPages. Match changed sources to existing pages using citations and meaning, not only exact path overlap. Prefer the existing page's identity over a new topic when it already covers that reader task. completedPageIDs already have checked publication at this exact source commit from an interrupted update. Keep their full text as read-only context and valid link/parent targets; never assign those IDs to another topic. Plan only remaining stale pages or genuinely missing useful guides. Do not repeat completed work or rewrite unrelated pages. No topics for genuine no-op, even when changedPaths is nonempty. Seed paths must exist in the repository; discover them with listDirectory and findFiles. Each active pageID belongs to only one topic; do not create overlapping packages.",
           async (plan) => {
             const remaining = remainingPlan(plan);
             validatePlan(remaining);
@@ -316,7 +355,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               reviewSchema,
               {
                 project: input.name,
-                files: input.inventory,
+                repository,
                 changedPaths: input.changedPaths,
                 currentPages: pages,
                 completedPageIDs: [...completedPageIDs],
@@ -361,7 +400,7 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
             researchSchema,
             {
               topic,
-              files: input.inventory,
+              repository,
               currentPages: pages.filter((page) => topic.pageIDs.includes(page.id)),
               sources: [...sources.read.values()],
             },
