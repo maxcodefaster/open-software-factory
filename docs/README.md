@@ -514,6 +514,11 @@ Knowledge Pages have stable identities, ordered hierarchy, immutable revisions a
 autosave. Generation reads one exact repository commit and fences concurrent human changes.
 Publication also merges existing human text against a separate generated baseline; overlapping
 edits keep the saved page rather than trusting a model to preserve its wording.
+Wiki agents receive a compact repository map, not the file list, and explore with directory,
+file-name search and exact-revision read tools. For a 3,700-file Project, planner and checker
+input fell from about 220k tokens per call to between 20k and 100k. The planner adds the guides the coverage check reports as missing, and
+one failed topic does not discard the others: published pages stay and a retry continues with the
+rest. Pages follow the language of the Project's own documentation.
 Omission never deletes a page. Editable Wiki and read-only Repository Documents remain separate;
 code-derived reads and provenance require development authority. Signed forge events persist update
 intent, and missed-event reconciliation confirms current source without a second code database.
