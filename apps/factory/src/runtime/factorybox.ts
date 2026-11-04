@@ -59,6 +59,7 @@ import {
   type NativeLease,
   NativeSlotBusyError,
   releaseNativeDispatch,
+  trackNativeOperation,
   withNativeLease,
 } from "./native-lock";
 import type { RetryBackoff } from "./retry-backoff";
@@ -262,7 +263,16 @@ export function createFactoryboxExecution(
   // Intent and the first native dispatch happen under one native lease, so a
   // wait for the lock can never leave an attempted but undispatched command.
   // The lease ends with the last native call; completion bookkeeping is DB-only.
-  async function perform(
+  function perform(
+    connection: SQL,
+    attemptID: string,
+    saved: Retained,
+    op: LifecycleOperation,
+    observeOnly = false,
+  ) {
+    return trackNativeOperation(performLocked(connection, attemptID, saved, op, observeOnly));
+  }
+  async function performLocked(
     connection: SQL,
     attemptID: string,
     saved: Retained,

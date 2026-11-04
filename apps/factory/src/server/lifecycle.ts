@@ -1,4 +1,5 @@
 import { reportFailure } from "../failure-log";
+import { drainNativeOperations } from "../runtime/native-lock";
 import type { FactoryApplication } from "./application";
 import { createBackgroundJobs } from "./background-jobs";
 
@@ -134,6 +135,8 @@ export function startFactoryLifecycle(application: LifecycleServices) {
       // Stop admitting ticks synchronously, then abort and join owned work.
       // An irreversible Delivery already in flight is observed, never replayed.
       await Promise.all([
+        // A restart during Pause or Resume leaves that outcome unconfirmed; wait for it first.
+        drainNativeOperations(100_000),
         jobs.close(),
         monitoringWorker.close(),
         deliveryController.close(),

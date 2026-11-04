@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { needsNativeController } from "./native-lock";
+import { drainNativeOperations, needsNativeController, trackNativeOperation } from "./native-lock";
 
 const controller = (action: string) => [
   "exec",
@@ -43,4 +43,24 @@ test("only native controller commands need the cross-process lock", () => {
   expect(needsNativeController([...python, "print('prepare')"])).toBe(true);
   for (const action of ["start", "pause", "resume", "delete", "fork", "state", "capacity"])
     expect(needsNativeController(controller(action))).toBe(true);
+});
+
+test("shutdown waits for a running native operation and gives up at its deadline", async () => {
+  const finish = Promise.withResolvers<void>();
+  trackNativeOperation(finish.promise);
+  const waiting = drainNativeOperations(5_000);
+  let settled = false;
+  void waiting.then(() => {
+    settled = true;
+  });
+  await Bun.sleep(30);
+  expect(settled).toBe(false);
+  finish.resolve();
+  expect(await waiting).toBe(0);
+
+  const stuck = Promise.withResolvers<void>();
+  trackNativeOperation(stuck.promise);
+  expect(await drainNativeOperations(40)).toBe(1);
+  stuck.resolve();
+  expect(await drainNativeOperations(1_000)).toBe(0);
 });

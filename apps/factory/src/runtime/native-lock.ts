@@ -148,6 +148,28 @@ export function createNativeLease(
 
 const leases = new AsyncLocalStorage<NativeLease>();
 
+const inFlightOperations = new Set<Promise<unknown>>();
+/** Register a native lifecycle operation so shutdown can wait for it instead of cutting it off. */
+export function trackNativeOperation<T>(operation: Promise<T>) {
+  inFlightOperations.add(operation);
+  const done = () => void inFlightOperations.delete(operation);
+  operation.then(done, done);
+  return operation;
+}
+/**
+ * Wait for running native lifecycle operations. An operation interrupted between its
+ * intent and its outcome stays unconfirmed, so a restart waits up to `timeoutMs` first.
+ */
+export async function drainNativeOperations(timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (inFlightOperations.size && Date.now() < deadline)
+    await Promise.race([
+      Promise.allSettled([...inFlightOperations]),
+      new Promise((resolve) => setTimeout(resolve, Math.max(1, deadline - Date.now()))),
+    ]);
+  return inFlightOperations.size;
+}
+
 /** Run `action` with `lease` as the current native lease. The caller releases it. */
 export function withNativeLease<T>(lease: NativeLease, action: () => Promise<T>) {
   return leases.run(lease, action);

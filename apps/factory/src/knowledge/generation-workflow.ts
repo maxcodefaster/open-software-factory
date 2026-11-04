@@ -63,8 +63,10 @@ const toolRoundLimits: Record<string, number> = {
 };
 // A topic with at most this many seed files is investigated and written by one agent run.
 const mergedTopicPaths = 8;
-// The initial write and one repair; a second failed repair is a quality failure, not another loop.
-export const maximumWriteRounds = 2;
+// The initial write and two repairs of blocking issues; a third failed check is a quality failure.
+export const maximumWriteRounds = 3;
+// Style-only findings earn one repair, never a failure.
+const advisoryRepairRound = 2;
 // The writer is asked for 1200 characters; a little more is not worth a repair round.
 const overviewHardLimit = 1_500;
 const outputTokens = { default: 8_000, writer: 12_000, maximum: 32_000 };
@@ -75,10 +77,14 @@ const researchSchema = z.object({
     .max(24),
   uncertainties: z.array(z.string().max(400)).max(8),
 });
-const reviewSchema = z.object({ issues: z.array(z.string().min(1).max(800)).max(12) });
+const reviewSchema = z.object({
+  issues: z.array(z.string().min(1).max(800)).max(12),
+  advisory: z.array(z.string().min(1).max(800)).max(8).optional(),
+});
 const loopSchema = z.object({
   round: z.number().int(),
   issues: z.array(z.string()),
+  advisory: z.array(z.string()).optional(),
   output: wikiGenerationOutput,
 });
 type Topic = z.infer<typeof topicSchema>;
@@ -114,7 +120,7 @@ commands or integrations. Omit unknown behavior, do not fill it with generic adv
 Write for the reader, not about your research. State verified behavior plainly. Never write phrases such as
 "the inspected evidence", "the inspected code does not establish", "was not verified here" or "treat as a design
 contract". Leave out what you could not confirm. Only when a reader could be harmed by assuming it, name that one
-boundary in a single short sentence, and collect such boundaries in one "Open questions" list at the end of the page.
+boundary in a single short sentence, and collect such boundaries in one list at the end of the page, headed "Open questions" translated into the documentation language.
 Write titles and bodies in the language the Project's own documentation uses (given as language when known,
 otherwise match its README). Keep product terms, UI labels, commands and identifiers exactly as they appear in the source.
 A guide is one reader task, typically 300 to 800 words. Split a longer topic into a parent page and child guides
@@ -143,11 +149,11 @@ Do not archive or delete pages. Cite only paths actually read. Never link to not
 export const wikiReviewTask =
   "Check only this topic package for claims against inspected source, internal links, preservation of human context, meaningful coverage, duplicate prose, readability and useful density. The draft is Factory's normalized publication package, not a raw writer response: id, slug, title, parentSlug and sources are required metadata already validated by Factory. Do not flag these fields or request schema changes. Review the page bodies and titles. This is progressive publication: other plannedTopics deliberately publish later. Do not require those guides or links to them yet, do not request new pages, and do not request edits outside topic.pageIDs or its single new slug. A topic purpose cannot require onward navigation to unpublished planned guides. That part of the plan is deferred, not missing coverage in the current overview. Repository-document pointers are optional, not a substitute publication gate. Still reject broken or invented destinations actually present in the draft. A concise summary in a published parent is valid alongside a detailed guide. A root overview must not repeat a capability description or duplicate guide-level interface/test details. Reject repeated descriptions of the same state transition and long lists of irrelevant missing features. " +
   "Judge the current draft, not an earlier rejected version or the source code's quality. A source defect accurately described in the Wiki is not a documentation defect. Never request source-code changes from this read-only writing task. Clearly labelled advice for improving an example is not a claim that the existing example already follows that advice. Do not infer application-wide guarantees from a statement explicitly scoped to one helper, instance or connection pool. " +
-  "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands. Also report these repairable style flaws: prose that talks about the inspected evidence or code instead of stating verified behavior, a language that differs from the Project's documentation language, and a guide that mixes several reader tasks or exceeds roughly 1,000 words.";
+  "Every reported issue must identify the actual current draft text and explain its concrete contradiction, unsupported claim or essential missing coverage. Do not invent an overclaim that the draft does not make or block publication for personal wording preferences. All supplied sources have already been inspected; readSource is only for genuinely missing evidence, not rereading provided files. Report specific repairable flaws in this draft only. No-op is valid only if no material useful update exists. Never approve unsupported behavior or contradictory commands. Return two lists. issues holds only blocking flaws: a claim the sources contradict or do not support, an invented or broken destination, lost human context, an essential omission that makes a statement misleading, and a language that differs from the Project's documentation language. advisory holds the rest: prose that talks about the inspected evidence or code instead of stating verified behavior, repeated descriptions, a guide that mixes several reader tasks or exceeds roughly 1,000 words, misplaced sentences, density and wording. Never put an advisory flaw in issues.";
 
-// The one repair is judged against the first check's issues, so a moving target cannot fail a topic.
+// A repair is judged against the previous check's blocking issues, so a moving target cannot fail a topic.
 export const wikiFinalReviewTask =
-  "This is the final check, after one repair. previousIssues lists what the first check found. Report a previous issue only if the draft still has it. Report a new issue only if it is an unsupported claim or a contradiction with the sources. Do not raise new scope, coverage, density, structure or wording issues that the first check did not raise.";
+  "This is a check after a repair. previousIssues lists the blocking issues the last check found. Report a previous issue only if the draft still has it. Report a new issue only if it is an unsupported claim or a contradiction with the sources. Return advisory:[]. Do not raise new scope, coverage, density, structure or wording issues.";
 
 export const wikiPlanReviewTask =
   "Review the whole proposed Wiki topic plan against the current pages and inspected repository evidence. This is a coverage check before progressive publication, not a review of one page draft. " +
@@ -967,9 +973,10 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
                     }
                   : {}),
                 issues: inputData.issues,
+                ...(inputData.advisory?.length ? { advisory: inputData.advisory } : {}),
               },
               sources,
-              `${merged ? "No separate research was done for this topic: sources holds its seed files. Read further files with readSource only when a claim needs them. " : ""}Write only this topic package. pages:[] is valid only when updating existing pages without material change; a new topic always returns its one page. For a new topic return exactly one page containing body and sources only; Factory supplies its planned identity, title and parent. Existing updates contain only id, title, body and sources, using only this topic's pageIDs and at most two pages. Do not return slugs or parents. Preserve complete human context. A new root overview is at most 1200 characters, concise reader orientation without code examples or a catalogue of interfaces/tests. Child guides will publish later, so do not add or link them now. No sources footer. When issues are listed, resolve each by removing the claim or narrowing it to exactly what the sources state; add no new claims, so the next check finds nothing new. Omit unchanged existing pages. Never edit another topic's published page to resolve duplication; shorten this package instead.`,
+              `${merged ? "No separate research was done for this topic: sources holds its seed files. Read further files with readSource only when a claim needs them. " : ""}Write only this topic package. pages:[] is valid only when updating existing pages without material change; a new topic always returns its one page. For a new topic return exactly one page containing body and sources only; Factory supplies its planned identity, title and parent. Existing updates contain only id, title, body and sources, using only this topic's pageIDs and at most two pages. Do not return slugs or parents. Preserve complete human context. A new root overview is at most 1200 characters, concise reader orientation without code examples or a catalogue of interfaces/tests. Child guides will publish later, so do not add or link them now. No sources footer. When issues are listed, resolve each by removing the claim or narrowing it to exactly what the sources state; add no new claims, so the next check finds nothing new. advisory lists readability, density and structure suggestions: apply them when they fit without adding claims. Omit unchanged existing pages. Never edit another topic's published page to resolve duplication; shorten this package instead.`,
               undefined,
               merged ? { toolRounds: 3 } : {},
             ),
@@ -1098,7 +1105,12 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
               finalCheck ? `${wikiReviewTask} ${wikiFinalReviewTask}` : wikiReviewTask,
             ),
           );
-          return { round: inputData.round + 1, issues: [...issues, ...review.issues], output };
+          return {
+            round: inputData.round + 1,
+            issues: [...issues, ...review.issues],
+            advisory: review.advisory ?? [],
+            output,
+          };
         }),
     });
     const workflow = createWorkflow({
@@ -1112,7 +1124,8 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
       .dountil(
         repair,
         async ({ inputData }) =>
-          inputData.issues.length === 0 ||
+          (inputData.issues.length === 0 &&
+            !(inputData.advisory?.length && inputData.round < advisoryRepairRound)) ||
           inputData.round >= maximumWriteRounds ||
           providerRequests?.remaining === 0,
       )

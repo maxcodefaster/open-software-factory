@@ -333,7 +333,30 @@ test("a rejected draft is repaired once, then the topic fails its quality check"
   await expect(run).rejects.toThrow("Wiki topic failed bounded quality checks");
 });
 
-test("the writer and checker run exactly twice for a draft that never passes", async () => {
+test("style-only findings earn one repair and never fail the topic", async () => {
+  const seen: Seen[] = [];
+  let checks = 0;
+  const result = await scenario({
+    reply: (entry) => {
+      seen.push(entry);
+      if (entry.role === "planner")
+        return { output: { topics: [topic("overview", ["src/file-0.ts"], null)] } };
+      if (entry.role === "writer") return { output: page("Draft.") };
+      if (entry.role === "checker")
+        return {
+          output: {
+            issues: [],
+            advisory: [checks++ === 0 ? "Move one sentence" : "Still unhappy"],
+          },
+        };
+      return { output: { issues: [] } };
+    },
+  });
+  expect([count(seen, "writer"), count(seen, "checker")]).toEqual([2, 2]);
+  expect(result.published.map((entry) => entry.slug)).toEqual(["overview"]);
+});
+
+test("the writer and checker run exactly three times for a draft that never passes", async () => {
   const seen: Seen[] = [];
   await scenario({
     reply: (entry) => {
@@ -345,7 +368,7 @@ test("the writer and checker run exactly twice for a draft that never passes", a
       return { output: { issues: [] } };
     },
   }).catch(() => undefined);
-  expect([count(seen, "writer"), count(seen, "checker")]).toEqual([2, 2]);
+  expect([count(seen, "writer"), count(seen, "checker")]).toEqual([3, 3]);
 });
 
 test("the first topic starts while the coverage review runs and its extra guides follow", async () => {
