@@ -21,11 +21,48 @@ OrbStack, Docker, a VM, an Ingress controller or a cluster.
   For `factory.example.com`, route `*.runtime.factory.example.com` to the same Ingress and cover
   that wildcard in its TLS certificate. Each isolated host uses exactly one wildcard label.
 
-The application ServiceAccount can manage the concrete Pods, Namespaces, Secrets and volumes
-needed by Factory's Workspace topology, and read readiness diagnostics. It cannot administer RBAC.
-It is trusted infrastructure, not a restricted tenant application. Project containers receive
-neither that ServiceAccount nor the node Docker socket. This is not a hostile-code public service
-or a promise of VM-grade isolation.
+The application ServiceAccount's ClusterRole lists exactly the verbs Factory's `kubectl` calls use
+(see the comments in `templates/rbac.yaml`): no `watch`, no wildcards, no RBAC administration, and
+`update` only on `namespaces/finalize`. It still holds `get`, `list`, `create`, `patch` and `delete` on
+Secrets, plus `pods/exec`, cluster-wide. Factory creates a Namespace per worker with a generated
+name, so a Role cannot grant this, and Kubernetes cannot limit `create` by name. The same binding
+covers the release's own Namespace. The ServiceAccount is trusted infrastructure, not a restricted
+tenant application. Project containers receive neither that ServiceAccount nor the node Docker
+socket. This is not a hostile-code public service or a promise of VM-grade isolation.
+
+## Hardening
+
+- PostgreSQL (999), Forgejo (1000), Zero (1000), OpenBao (100:1000), Garage (1000) and the
+  maintenance Job run non-root with a read-only root filesystem, no capabilities, no privilege
+  escalation and the `RuntimeDefault` seccomp profile. Each was started with those settings against
+  its pinned image. Factory itself still runs as root with all capabilities dropped. Its retained
+  state claim has root-owned files, its start script chmods the state directory, and the image
+  defines no `USER`.
+- Zero and OpenBao have a short `own-data` init container. It runs as root with only `CHOWN`,
+  `DAC_OVERRIDE` and `FOWNER` and hands retained, root-owned volumes from earlier releases to the
+  service user. It changes nothing on fresh installs or later restarts.
+- `networkPolicy.enabled` (default true) denies ingress to every release Pod and allows only the
+  flows Factory uses. Runtime namespaces (labelled `app.kubernetes.io/managed-by=open-software-factory`)
+  may reach Factory and Forgejo on port 3000 and nothing else. PostgreSQL, OpenBao and Garage have
+  no egress except DNS (OpenBao also reaches itself). With `ingress.enabled`, set
+  `networkPolicy.ingressControllerNamespaceSelector` to the controller's namespace labels. Empty
+  allows every namespace. Port-forwarding enters through the Pod's loopback and is unaffected.
+  The cluster's CNI must enforce NetworkPolicy; otherwise the objects have no effect.
+- Every service has startup, readiness and liveness probes. Liveness tolerates about two minutes
+  of failures and only starts after startup succeeds. No PodDisruptionBudget is rendered. Every
+  service is a single replica on a ReadWriteOnce volume, so `minAvailable: 1` would block node
+  drains for good, and `maxUnavailable: 1` would not protect anything.
+
+## Secrets and GitOps
+
+By default the chart generates its credentials, object-store keys and OpenBao TLS identity once
+and keeps them with `lookup` and `helm.sh/resource-policy: keep`. `helm template` and Argo CD
+cannot see the cluster, so every render would invent new values. For those tools, create the
+Secrets yourself and set `existingSecrets.credentials`, `existingSecrets.objects` and
+`existingSecrets.openbaoTLS` (key names are in `values.yaml`). The chart then renders no Secret.
+Factory, Zero, Garage and OpenBao carry a checksum of the Secrets they read, so Helm and Flux roll them
+when a Secret changes. Argo CD cannot read the Secret, so bump `existingSecrets.revision`.
+The OpenBao certificate must cover the OpenBao Service names and `127.0.0.1`, which the liveness probe uses.
 
 ## Install
 
@@ -85,8 +122,7 @@ unresolved backing from any admission sharing the old claim. It records a new st
 keeps the old claim and history, and retains canonical Source on its original claim and node.
 Omitting `storage` retains the exact original store. Retry a request only with the same UUID and
 storage selection. See [ADR 0036](../../../docs/adr/0036-admit-fresh-execution-storage-after-confirmed-drain.md).
-Larger storage does not qualify a new node, kernel or storage backend; native
-admission and lifecycle verification still apply.
+A new node, kernel or storage backend still needs its own native admission.
 
 Fresh worker resource admission checks the configured node's readiness and allocatable resources
 and its assigned Pods before selecting a finite aggregate budget. The worker reserves the remaining
@@ -217,8 +253,7 @@ The command confirms HTTP transport rather than just an open socket. That is not
 application or its bootstrap is healthy. An Ingress installation does not need the local command.
 
 The local HTTP exception is restricted to loopback browser access. Internal callbacks still use
-Kubernetes Services, never the Mac's host alias or a manually selected VM address. Testing on
-OrbStack does not establish an AKS or independent Linux-host acceptance.
+Kubernetes Services, never the Mac's host alias or a manually selected VM address.
 
 ## Maintenance and upgrades
 

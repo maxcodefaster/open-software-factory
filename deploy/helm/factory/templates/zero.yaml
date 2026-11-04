@@ -1,3 +1,4 @@
+{{- $zeroImage := "docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437" -}}
 {{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.zeroSyncWorkers)) -}}
 {{- fail "zeroSyncWorkers must be a positive integer" -}}
 {{- end -}}
@@ -19,11 +20,25 @@ spec:
       labels:
         app.kubernetes.io/instance: {{ .Release.Name | quote }}
         app.kubernetes.io/component: zero
+      {{- $existing := include "factory.existingSecretChecksum" (dict "root" . "names" (list .Values.existingSecrets.credentials)) }}
+      {{- if $existing }}
+      annotations:
+        checksum/existing-secrets: {{ $existing }}
+      {{- end }}
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 600
+      # The image's unprivileged account is node (1000). Retained replica files from earlier
+      # releases are root-owned and are handed over by the first init container.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
       initContainers:
+        {{- include "factory.ownVolume" (dict "image" $zeroImage "path" "/data" "uid" 1000 "gid" 1000) | nindent 8 }}
         - name: wait-for-factory-schema
           image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
           command:
@@ -39,20 +54,25 @@ spec:
             - {name: PGCONNECT_TIMEOUT, value: "2"}
             - name: PGPASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
+          securityContext:
+            runAsUser: 999
+            runAsGroup: 999
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           resources:
             requests: {cpu: 25m, memory: 32Mi}
             limits: {cpu: 250m, memory: 128Mi}
       containers:
         - name: zero
-          image: docker.io/rocicorp/zero:1.10.0@sha256:745c80f13eb53f5b74e5423d9051269aaa26cd32333fc8da4229b03800d58437
+          image: {{ $zeroImage }}
           env:
             - name: FACTORY_DATABASE_PASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
             - name: ZERO_ADMIN_PASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: zero-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: zero-password}
             {{- range $key := list "ZERO_UPSTREAM_DB" "ZERO_CVR_DB" "ZERO_CHANGE_DB" }}
             - name: {{ $key }}
               value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" $ }}-postgres.{{ $.Release.Namespace }}.svc:5432/factory"
@@ -67,14 +87,32 @@ spec:
             - {name: ZERO_MUTATE_FORWARD_COOKIES, value: "true"}
             - {name: ZERO_AUTH_REVALIDATE_INTERVAL_SECONDS, value: "60"}
             - {name: DO_NOT_TRACK, value: "1"}
+          securityContext:
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
+          # Zero listens only after its initial replica sync, which grows with the database.
+          startupProbe:
+            httpGet: {path: /keepalive, port: 4848}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 360
           readinessProbe:
             httpGet: {path: /keepalive, port: 4848}
             periodSeconds: 3
             failureThreshold: 60
+          livenessProbe:
+            httpGet: {path: /keepalive, port: 4848}
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.zero.resources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /data}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: temporary
+          emptyDir: {sizeLimit: 2Gi}
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -1,3 +1,16 @@
+{{- /*
+Derived from the kubectl calls in packages/runtime-kubernetes, scripts/kubernetes/start.ts and
+scripts/factory/storage-readiness.ts. Factory creates a Namespace per Factorybox worker, Source and
+editor, with names that are unknown until runtime, and its Namespace-scoped objects cannot be
+granted by a Role. It cannot create RoleBindings (no RBAC administration is granted), so a
+ClusterRole bound cluster-wide is the only available shape. That binding also covers this release's
+own Namespace: the Factory ServiceAccount can read its Secrets and exec into its Pods. Consequently
+no separate Role for the release Namespace is rendered; it would add nothing. Treat the ServiceAccount
+as trusted infrastructure and restrict who can run the Factory image.
+resourceNames cannot narrow any rule below because the targeted objects are created with generated
+names (worker-<uuid>, assignment-<uuid>, store-<uuid>) and create cannot be limited by name.
+No watch, update (except namespaces/finalize), wildcard, escalate, bind or impersonate verbs.
+*/ -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -5,8 +18,6 @@ metadata:
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 ---
-# Factory creates independent Workspace/IDE Namespaces. Namespace-only RBAC
-# cannot express this topology. No RBAC management or node administration is granted.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -14,33 +25,60 @@ metadata:
   labels:
     {{- include "factory.labels" . | nindent 4 }}
 rules:
+  # One Namespace per worker/Source/editor, deleted with a UID precondition. The finalize
+  # subresource clears a Namespace left terminating after its owned resources are gone.
   - apiGroups: [""]
-    resources: [namespaces, namespaces/finalize, pods, persistentvolumeclaims, secrets]
-    verbs: [get, list, watch, create, patch, update, delete]
+    resources: [namespaces]
+    verbs: [get, create, delete]
   - apiGroups: [""]
-    resources: [pods/portforward, pods/exec]
+    resources: [namespaces/finalize]
+    verbs: [update]
+  # Worker, Source, editor and retained-stop Pods. patch is server-side apply, list is the
+  # node-wide Pod scan for worker admission and the storage check's provisioner-helper search.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, create, patch, delete]
+  # Needs get and create: kubectl's WebSocket exec and port-forward start with an upgrade GET.
+  # Used for worker native operations, the Forgejo bootstrap exec and Source/editor forwards.
+  - apiGroups: [""]
+    resources: [pods/exec, pods/portforward]
     verbs: [get, create]
   - apiGroups: [""]
-    resources: [pods/log, nodes, events, services, serviceaccounts, configmaps, replicationcontrollers]
-    verbs: [get, list, watch]
+    resources: [pods/log]
+    verbs: [get]
+  # Runtime claims. list is the storage check's emptiness listing of its own Namespace.
+  - apiGroups: [""]
+    resources: [persistentvolumeclaims]
+    verbs: [get, list, create, patch, delete]
+  # Cluster-wide secrets access cannot be narrowed (see above). It carries the per-Sandbox
+  # assignment, the registry CA and the worker's private tokens. list is the same emptiness check.
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, create, patch, delete]
+  # The storage check sets the reclaim policy of its own probe volume to Delete before cleanup.
   - apiGroups: [""]
     resources: [persistentvolumes]
-    verbs: [get, list, patch]
-  - apiGroups: ["storage.k8s.io"]
-    resources: [storageclasses]
-    verbs: [get, list]
+    verbs: [get, patch]
+  # Worker admission reads the configured node; retained Stop reads a recorded storage node.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get]
   - apiGroups: ["metrics.k8s.io"]
     resources: [pods]
     verbs: [get]
+  # The storage check lists these in its disposable Namespace to prove it is empty before delete.
+  - apiGroups: [""]
+    resources: [services, serviceaccounts, configmaps, replicationcontrollers]
+    verbs: [list]
   - apiGroups: ["apps"]
     resources: [deployments, replicasets, daemonsets, statefulsets]
-    verbs: [get, list]
+    verbs: [list]
   - apiGroups: ["batch"]
     resources: [jobs, cronjobs]
-    verbs: [get, list]
+    verbs: [list]
   - apiGroups: ["networking.k8s.io"]
     resources: [networkpolicies]
-    verbs: [get, list]
+    verbs: [list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

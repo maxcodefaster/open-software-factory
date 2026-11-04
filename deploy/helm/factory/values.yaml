@@ -1,5 +1,5 @@
-# Kept in this repository during development. Build/load an application image
-# containing the exact runtime-artifacts.json before local acceptance.
+# Required. Build/load an application image containing the exact runtime-artifacts.json.
+# Use an @sha256 digest reference for anything other than local acceptance.
 image: ""
 imagePullPolicy: IfNotPresent
 publicURL: ""
@@ -79,6 +79,30 @@ modelAllowedOrigins: []
 # Extra public HTTPS Git hosts shared by Project import and native push mirrors.
 # GitHub, GitLab.com and Codeberg are already allowed.
 gitAllowedOrigins: []
+
+# Chart-generated credentials are created once from `lookup` and retained. `helm template`,
+# Argo CD and other renderers without cluster access cannot see that Secret and would
+# generate new values on every render. Point these at Secrets you manage (External Secrets,
+# SealedSecrets, SOPS) to avoid that. Each value is a Secret name in the release namespace.
+existingSecrets:
+  # Keys: auth-secret, admin-password, database-password, zero-password, webhook-secret
+  credentials: ""
+  # Keys: access-key-id (GK + 32 hex), secret-access-key, rpc-secret
+  objects: ""
+  # Keys: ca.crt, tls.crt, tls.key. The certificate needs the OpenBao Service DNS names and 127.0.0.1.
+  openbaoTLS: ""
+  # Bump to roll Factory, Zero, Garage and OpenBao after changing an existing Secret when the
+  # renderer cannot `lookup` it (Argo CD). Helm and Flux roll them from the Secret contents.
+  revision: ""
+
+# Default-deny ingress for this release's Pods plus the flows Factory uses. Requires a CNI
+# that enforces NetworkPolicy; without one the objects are accepted and ignored.
+networkPolicy:
+  enabled: true
+  # Namespaces whose Pods may reach Factory, Forgejo and Zero on their HTTP ports when
+  # ingress.enabled is true. Empty allows every namespace; set the controller's namespace
+  # labels, for example {matchLabels: {kubernetes.io/metadata.name: ingress-nginx}}.
+  ingressControllerNamespaceSelector: {}
 
 ingress:
   enabled: false

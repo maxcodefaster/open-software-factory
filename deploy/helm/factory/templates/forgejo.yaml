@@ -28,10 +28,17 @@ spec:
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       automountServiceAccountToken: false
-      securityContext: {fsGroup: 1000}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: forgejo
           image: codeberg.org/forgejo/forgejo:17.0.0-rootless@sha256:6554520f7574602100b7d6620c6ac5b18cec30325f823777497eac36234f5cf8
+          securityContext:
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           env:
             - {name: FORGEJO__database__DB_TYPE, value: sqlite3}
             - {name: FORGEJO__database__PATH, value: /var/lib/gitea/data/forgejo.db}
@@ -50,14 +57,29 @@ spec:
             # Forgejo 17 uses wildcard matches here, not CIDRs. Explicitly allowed
             # hostnames must not resolve to private, loopback or link-local IPs.
             - {name: FORGEJO__migrations__BLOCKED_DOMAINS, value: "localhost,*.localhost,0.*,10.*,127.*,169.254.*,172.1[6-9].*,172.2[0-9].*,172.3[01].*,192.168.*,100.6[4-9].*,100.[7-9][0-9].*,100.1[01][0-9].*,100.12[0-7].*,::,::1,fc*:*,fd*:*,fe[89ab]*:*"}
+          # First start runs database migrations.
+          startupProbe:
+            httpGet: {path: /api/healthz, port: 3000}
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 120
           readinessProbe:
             httpGet: {path: /api/healthz, port: 3000}
             periodSeconds: 2
+          livenessProbe:
+            httpGet: {path: /api/healthz, port: 3000}
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.forgejo.resources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /var/lib/gitea}
             - {name: config, mountPath: /etc/gitea}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: temporary
+          emptyDir: {sizeLimit: 4Gi}
   volumeClaimTemplates:
     - metadata:
         name: data

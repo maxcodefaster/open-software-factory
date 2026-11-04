@@ -19,6 +19,15 @@ spec:
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       automountServiceAccountToken: false
+      # The official image runs postgres as uid 999 (its data directory is already owned by it).
+      # OnRootMismatch avoids a recursive fsGroup chmod that would make PGDATA group-writable,
+      # which PostgreSQL refuses to start with.
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: postgres
           image: docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8
@@ -46,7 +55,10 @@ spec:
             - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
             - name: POSTGRES_PASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
+          securityContext:
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           startupProbe:
             exec:
               command: [pg_isready, -U, factory, -d, factory, -t, "3"]
@@ -57,10 +69,24 @@ spec:
             tcpSocket: {port: 5432}
             timeoutSeconds: 5
             periodSeconds: 5
+          # Two minutes of failures under heavy execution load before a restart.
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, factory, -d, factory, -t, "5"]
+            timeoutSeconds: 10
+            periodSeconds: 20
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.postgres.resources | nindent 12 }}
           volumeMounts:
             - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: socket, mountPath: /var/run/postgresql}
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: socket
+          emptyDir: {medium: Memory, sizeLimit: 8Mi}
+        - name: temporary
+          emptyDir: {sizeLimit: 256Mi}
   volumeClaimTemplates:
     - metadata:
         name: data

@@ -74,3 +74,71 @@ resources:
 {{- printf "%s/zero" $factory -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "factory.image" -}}
+{{- required "image is required: set it to the Factory application image reference (an @sha256 digest outside local acceptance)" .Values.image | quote -}}
+{{- end -}}
+
+{{- define "factory.credentialsSecret" -}}
+{{- default (printf "%s-credentials" (include "factory.name" .)) .Values.existingSecrets.credentials -}}
+{{- end -}}
+
+{{- define "factory.objectsSecret" -}}
+{{- default (printf "%s-objects" (include "factory.name" .)) .Values.existingSecrets.objects -}}
+{{- end -}}
+
+{{- define "factory.openbaoTLSSecret" -}}
+{{- default (printf "%s-openbao-tls" (include "factory.name" .)) .Values.existingSecrets.openbaoTLS -}}
+{{- end -}}
+
+{{- /*
+Pod-template checksum for Secrets the operator owns. It is empty when the chart generates the
+Secret (generated values never change) and reads the live Secret through lookup, which
+returns nothing under helm template; existingSecrets.revision covers that renderer.
+*/ -}}
+{{- define "factory.existingSecretChecksum" -}}
+{{- $root := .root -}}
+{{- $parts := list -}}
+{{- range $name := .names -}}
+{{- if $name -}}
+{{- $secret := lookup "v1" "Secret" $root.Release.Namespace $name -}}
+{{- $parts = append $parts (printf "%s=%s" $name (toJson (default (dict) (get $secret "data")))) -}}
+{{- end -}}
+{{- end -}}
+{{- if $parts -}}
+{{- append $parts (toString $root.Values.existingSecrets.revision) | join "\n" | sha256sum -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* Restricted container defaults shared by every chart workload. */ -}}
+{{- define "factory.containerSecurity" -}}
+allowPrivilegeEscalation: false
+readOnlyRootFilesystem: true
+capabilities: {drop: [ALL]}
+seccompProfile: {type: RuntimeDefault}
+{{- end -}}
+
+{{- /*
+Chart-managed volumes from earlier releases hold root-owned files. A short root init container
+hands them to the unprivileged service user; it needs only chown and traversal capabilities.
+*/ -}}
+{{- define "factory.ownVolume" -}}
+- name: own-data
+  image: {{ .image }}
+  command:
+    - sh
+    - -c
+    - find {{ .path }} \( ! -user {{ .uid }} -o ! -group {{ .gid }} \) -exec chown {{ .uid }}:{{ .gid }} {} \;
+  securityContext:
+    runAsUser: 0
+    runAsNonRoot: false
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER]}
+    seccompProfile: {type: RuntimeDefault}
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 250m, memory: 64Mi}
+  volumeMounts:
+    - {name: data, mountPath: {{ .path }}}
+{{- end -}}

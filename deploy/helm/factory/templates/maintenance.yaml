@@ -18,19 +18,23 @@ spec:
       nodeSelector: {kubernetes.io/os: linux}
       restartPolicy: Never
       automountServiceAccountToken: false
+      # The Job only talks to PostgreSQL and needs no state volume, so it can use the image's node user.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: maintenance
-          image: {{ required "Set image to the available Factory development image" .Values.image | quote }}
+          image: {{ include "factory.image" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command: [bun, scripts/kubernetes/maintenance.ts]
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           env:
             - name: FACTORY_DATABASE_PASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
             - name: DATABASE_URL
               value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc:5432/factory"
           resources:

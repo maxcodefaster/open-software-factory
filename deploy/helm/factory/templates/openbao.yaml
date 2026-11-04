@@ -1,3 +1,5 @@
+{{- $localStatus := "bao status -address=https://127.0.0.1:8200 -ca-cert=/bao/tls/ca.crt >/dev/null; result=$?; test \"$result\" -eq 0 -o \"$result\" -eq 2" -}}
+{{- $openbaoImage := "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -18,18 +20,30 @@ spec:
         app.kubernetes.io/component: openbao
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        {{- $existing := include "factory.existingSecretChecksum" (dict "root" . "names" (list .Values.existingSecrets.openbaoTLS)) }}
+        {{- if $existing }}
+        checksum/existing-secrets: {{ $existing }}
+        {{- end }}
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       automountServiceAccountToken: false
+      # The image's openbao account is 100:1000. Its entrypoint is bypassed, so nothing
+      # else chowns the retained raft volume; the first init container does.
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        {{- include "factory.ownVolume" (dict "image" $openbaoImage "path" "/bao/data" "uid" 100 "gid" 1000) | nindent 8 }}
       containers:
         - name: openbao
-          image: docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf
+          image: {{ $openbaoImage }}
           command: [/usr/bin/bao, server, -config=/bao/config/config.json]
           securityContext:
-            runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           readinessProbe:
             exec:
               command:
@@ -38,6 +52,19 @@ spec:
                 - 'bao status -address=https://{{ include "factory.name" . }}-openbao.{{ .Release.Namespace }}.svc:8200 -ca-cert=/bao/tls/ca.crt >/dev/null; result=$?; test "$result" -eq 0 -o "$result" -eq 2'
             periodSeconds: 5
             timeoutSeconds: 5
+          # A sealed OpenBao (exit 2) is alive; only an unreachable listener (exit 1) restarts it.
+          startupProbe:
+            exec:
+              command: [sh, -c, {{ $localStatus | quote }}]
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            exec:
+              command: [sh, -c, {{ $localStatus | quote }}]
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.openbao.resources | nindent 12 }}
           volumeMounts:
@@ -49,7 +76,7 @@ spec:
         - name: config
           configMap: {name: "{{ include "factory.name" . }}-openbao"}
         - name: tls
-          secret: {secretName: "{{ include "factory.name" . }}-openbao-tls", defaultMode: 256}
+          secret: {secretName: {{ include "factory.openbaoTLSSecret" . | quote }}, defaultMode: 288}
         - name: temporary
           emptyDir: {medium: Memory, sizeLimit: 16Mi}
   volumeClaimTemplates:

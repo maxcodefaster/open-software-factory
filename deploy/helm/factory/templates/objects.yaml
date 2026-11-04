@@ -2,11 +2,13 @@
 {{- fail "Factory now manages one object store. Transfer retained external attachments and state-volume review media explicitly before upgrading; do not silently replace their storage." }}
 {{- end }}
 {{- $name := printf "%s-objects" (include "factory.name" .) -}}
+{{- $secretName := include "factory.objectsSecret" . -}}
 {{- $previous := lookup "v1" "Secret" .Release.Namespace $name -}}
 {{- $claim := lookup "v1" "PersistentVolumeClaim" .Release.Namespace $name -}}
-{{- if and $claim (not $previous) -}}
+{{- if and $claim (not $previous) (not .Values.existingSecrets.objects) -}}
 {{- fail "The retained object storage credentials are missing. Refusing to replace access to existing file data." -}}
 {{- end }}
+{{- if not .Values.existingSecrets.objects }}
 apiVersion: v1
 kind: Secret
 metadata:
@@ -21,6 +23,7 @@ data:
   secret-access-key: {{ if $previous }}{{ required "Retained object secret key is missing" (index $previous.data "secret-access-key") | quote }}{{ else }}{{ randAlphaNum 64 | sha256sum | b64enc | quote }}{{ end }}
   rpc-secret: {{ if $previous }}{{ required "Retained object RPC secret is missing" (index $previous.data "rpc-secret") | quote }}{{ else }}{{ randAlphaNum 64 | sha256sum | b64enc | quote }}{{ end }}
 ---
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -85,6 +88,10 @@ spec:
         app.kubernetes.io/component: objects
       annotations:
         factory.dev/upgrade-revision: {{ .Release.Revision | quote }}
+        {{- $existing := include "factory.existingSecretChecksum" (dict "root" . "names" (list .Values.existingSecrets.objects)) }}
+        {{- if $existing }}
+        checksum/existing-secrets: {{ $existing }}
+        {{- end }}
     spec:
       automountServiceAccountToken: false
       nodeSelector: {kubernetes.io/os: linux}
@@ -94,27 +101,27 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
       terminationGracePeriodSeconds: 60
       containers:
         - name: objects
           image: "docker.io/dxflrs/garage@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690"
           command: [/garage, server, --single-node, --default-bucket]
           securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
+            runAsNonRoot: true
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           env:
             - name: GARAGE_DEFAULT_BUCKET
               value: factory
             - name: GARAGE_DEFAULT_ACCESS_KEY
               valueFrom:
-                secretKeyRef: {name: {{ $name }}, key: access-key-id}
+                secretKeyRef: {name: {{ $secretName | quote }}, key: access-key-id}
             - name: GARAGE_DEFAULT_SECRET_KEY
               valueFrom:
-                secretKeyRef: {name: {{ $name }}, key: secret-access-key}
+                secretKeyRef: {name: {{ $secretName | quote }}, key: secret-access-key}
             - name: GARAGE_RPC_SECRET
               valueFrom:
-                secretKeyRef: {name: {{ $name }}, key: rpc-secret}
+                secretKeyRef: {name: {{ $secretName | quote }}, key: rpc-secret}
           ports:
             - {name: s3, containerPort: 3900}
           readinessProbe:
@@ -124,6 +131,11 @@ spec:
             tcpSocket: {port: s3}
             periodSeconds: 2
             failureThreshold: 60
+          livenessProbe:
+            tcpSocket: {port: s3}
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.objectStorage.resources | nindent 12 }}
           volumeMounts:

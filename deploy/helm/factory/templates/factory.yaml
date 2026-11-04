@@ -31,46 +31,54 @@ spec:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
         factory.dev/upgrade-revision: {{ .Release.Revision | quote }}
+        {{- $existing := include "factory.existingSecretChecksum" (dict "root" . "names" (list .Values.existingSecrets.credentials .Values.existingSecrets.objects .Values.existingSecrets.openbaoTLS)) }}
+        {{- if $existing }}
+        checksum/existing-secrets: {{ $existing }}
+        {{- end }}
     spec:
       nodeSelector: {kubernetes.io/os: linux}
       serviceAccountName: {{ include "factory.name" . }}
       terminationGracePeriodSeconds: 120
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
       containers:
         - name: factory
-          image: {{ required "Set image to the available Factory development image" .Values.image | quote }}
+          image: {{ include "factory.image" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command: [flock, --nonblock, --no-fork, /var/lib/factory/bootstrap.lock, bun, scripts/kubernetes/start.ts]
+          # Root is retained deliberately. The state claim holds root-owned files from earlier
+          # releases, start.ts chmods its directory to 0700 (owner only), the OpenBao token
+          # file is checked against the process uid, and the image defines no USER. All
+          # capabilities are dropped, so this is root without CHOWN/DAC_OVERRIDE/SETUID.
           securityContext:
             runAsUser: 0
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities: {drop: [ALL]}
+            {{- include "factory.containerSecurity" . | nindent 12 }}
           envFrom:
             - configMapRef: {name: "{{ include "factory.name" . }}-config"}
           env:
             - name: FACTORY_OBJECT_S3_ACCESS_KEY_ID
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-objects", key: access-key-id}
+                secretKeyRef: {name: {{ include "factory.objectsSecret" . | quote }}, key: access-key-id}
             - name: FACTORY_OBJECT_S3_SECRET_ACCESS_KEY
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-objects", key: secret-access-key}
+                secretKeyRef: {name: {{ include "factory.objectsSecret" . | quote }}, key: secret-access-key}
             - name: FACTORY_NAMESPACE
               valueFrom:
                 fieldRef: {fieldPath: metadata.namespace}
             - name: FACTORY_DATABASE_PASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: database-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
             - name: DATABASE_URL
               value: "postgresql://factory:$(FACTORY_DATABASE_PASSWORD)@{{ include "factory.name" . }}-postgres.{{ .Release.Namespace }}.svc:5432/factory"
             - name: FACTORY_AUTH_SECRET
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: auth-secret}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: auth-secret}
             - name: FACTORY_ADMIN_PASSWORD
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: admin-password}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: admin-password}
             - name: FACTORY_WIKI_WEBHOOK_SECRET
               valueFrom:
-                secretKeyRef: {name: "{{ include "factory.name" . }}-credentials", key: webhook-secret}
+                secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: webhook-secret}
           readinessProbe:
             httpGet:
               path: /health/ready?installation=complete
@@ -84,6 +92,15 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 240
+          # Runs only after the startup probe above, so a long first bootstrap is not restarted.
+          # /health/ready without `installation` answers 200 whenever the server is serving.
+          livenessProbe:
+            httpGet:
+              path: /health/ready
+              port: 3000
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 6
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
@@ -100,7 +117,7 @@ spec:
           emptyDir: {sizeLimit: 1Gi}
         - name: openbao-tls
           secret:
-            secretName: {{ include "factory.name" . }}-openbao-tls
+            secretName: {{ include "factory.openbaoTLSSecret" . }}
             items: [{key: ca.crt, path: ca.crt}]
         {{- if .Values.registryCASecret }}
         - name: registry-ca
