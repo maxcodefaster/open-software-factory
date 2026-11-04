@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { appRuntimeOrigin } from "../../apps/factory/src/runtime-origins";
 import { fixture } from "../fixtures/change-agent-turns";
 import { factoryProcess } from "../fixtures/factory-process";
 
@@ -8,7 +9,31 @@ test("isolated Factory grants stay on its listener and refuse disconnected Apps"
     await process.start();
     const owned = await fixture(undefined, undefined, process.connect());
     try {
+      const path = `/runtime/${owned.attemptID}/preview/app/forms-preview/drafts/owned?revision=1&route=%2Fforms%2F`;
+      const appOrigin = appRuntimeOrigin(process.base, owned.attemptID, "app");
+      const navigation = await fetch(`${process.base}${path}`, {
+        headers: {
+          host: new URL(appOrigin).host,
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-dest": "document",
+        },
+        redirect: "manual",
+      });
+      expect(navigation.status).toBe(302);
+      const issuer = new URL(navigation.headers.get("location") ?? "");
+      expect(issuer.origin).toBe(process.base);
+      expect(issuer.pathname).toBe("/api/runtime-access");
+      expect(issuer.searchParams.get("path")).toBe(path);
+      const anonymous = await fetch(issuer, { redirect: "manual" });
+      expect(anonymous.status).toBe(401);
+      expect(anonymous.headers.get("location")).toBeNull();
       const cookie = await process.signIn();
+      const disconnected = await fetch(issuer, {
+        headers: { cookie },
+        redirect: "manual",
+      });
+      expect(disconnected.status).toBe(409);
+      expect(disconnected.headers.get("location")).toBeNull();
       for (const channel of ["ide"] as const) {
         const path = `/runtime/${owned.attemptID}/${channel}/`;
         const response = await fetch(

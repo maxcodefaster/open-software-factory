@@ -26,6 +26,30 @@ type RuntimeServices = Pick<
   | "runtimeReady"
   | "sameRuntimeOrigin"
 >;
+
+function appAccessRequired(request: Request, url: URL, factoryOrigin: string) {
+  if (
+    runtimeDocumentRequest(request) &&
+    request.headers.get("sec-fetch-dest") === "document" &&
+    !url.searchParams.has("factory-grant")
+  ) {
+    // App origins deliberately do not share cookies. A human opening a link
+    // must return through the existing session and Project-authorized issuer,
+    // not inherit another App's grant or turn an API/iframe request into login.
+    const access = new URL("/api/runtime-access", factoryOrigin);
+    access.searchParams.set("path", `${url.pathname}${url.search}`);
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: access.href,
+        "cache-control": "private, no-store",
+        "referrer-policy": "no-referrer",
+      },
+    });
+  }
+  return json({ error: "Runtime access required" }, 401);
+}
+
 export function createRuntimeProtocol(services: RuntimeServices) {
   const {
     database,
@@ -57,7 +81,9 @@ export function createRuntimeProtocol(services: RuntimeServices) {
         if (redeemed) return redeemed;
         const accessToken = await runtimeAccess.authorize(request, attemptID, channel);
         if (!accessToken) {
-          return json({ error: "Runtime access required" }, 401);
+          return channel === "app"
+            ? appAccessRequired(request, url, factoryOrigin)
+            : json({ error: "Runtime access required" }, 401);
         }
         if (channel === "app" && suffix === "/__factory/activity" && request.method === "POST") {
           if (!sameRuntimeOrigin(request)) return json({ error: "Runtime origin is invalid" }, 403);
@@ -168,7 +194,7 @@ export function createRuntimeProtocol(services: RuntimeServices) {
         if (redeemed) return redeemed;
         const accessToken = await runtimeAccess.authorize(request, attemptID, "app", appChannel);
         if (!accessToken) {
-          return json({ error: "Runtime access required" }, 401);
+          return appAccessRequired(request, url, factoryOrigin);
         }
         if (suffix === "/__factory/activity" && request.method === "POST") {
           if (!sameRuntimeOrigin(request)) return json({ error: "Runtime origin is invalid" }, 403);

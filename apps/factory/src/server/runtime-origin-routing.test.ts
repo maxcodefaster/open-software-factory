@@ -115,6 +115,38 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
       expect(grant.headers.get("set-cookie")).not.toContain("Path=/runtime/");
       const denied = await fetch(`${base}/api/private`, { headers: { host } });
       expect(denied.status).toBe(401);
+      const draftPath = "/forms-preview/drafts/owned?revision=1&route=%2Fforms%2F";
+      const navigation = await fetch(`${base}${draftPath}`, {
+        headers: { host, "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+        redirect: "manual",
+      });
+      expect(navigation.status).toBe(302);
+      const access = new URL(navigation.headers.get("location") ?? "https://missing.invalid");
+      expect(access.origin).toBe(origin);
+      expect(access.pathname).toBe("/api/runtime-access");
+      expect(access.searchParams.get("path")).toBe(`/runtime/${id}/preview/${app}${draftPath}`);
+      expect(access.searchParams.has("embed")).toBe(false);
+      expect(navigation.headers.get("set-cookie")).toBeNull();
+      expect(navigation.headers.get("cache-control")).toContain("no-store");
+      expect(navigation.headers.get("referrer-policy")).toBe("no-referrer");
+      for (const [mode, destination, method] of [
+        ["navigate", "iframe", "GET"],
+        ["cors", "document", "GET"],
+        ["navigate", "document", "POST"],
+      ] as const) {
+        const blocked = await fetch(`${base}${draftPath}`, {
+          method,
+          headers: { host, "sec-fetch-mode": mode, "sec-fetch-dest": destination },
+          redirect: "manual",
+        });
+        expect(blocked.status).toBe(401);
+        expect(blocked.headers.get("location")).toBeNull();
+      }
+      const invalidGrant = await fetch(`${base}/?factory-grant=invalid`, {
+        headers: { host, "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" },
+        redirect: "manual",
+      });
+      expect(invalidGrant.status).toBe(401);
       if (app === "app-forms") {
         expect(
           (
@@ -137,6 +169,16 @@ test("isolated App origins serve root pages, assets, APIs and sockets without en
         body: "retained App request",
       });
     }
+    const ide = await fetch(`${base}/runtime/${id}/ide/`, {
+      headers: {
+        host: "factory.example",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-dest": "document",
+      },
+      redirect: "manual",
+    });
+    expect(ide.status).toBe(401);
+    expect(ide.headers.get("location")).toBeNull();
     const socket = new (
       WebSocket as typeof WebSocket & {
         new (url: string, options: Bun.WebSocketOptions & { protocols: string[] }): WebSocket;

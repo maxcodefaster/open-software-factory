@@ -16,3 +16,8 @@ declaration keep their exact assignments; recovery never fills the value retrosp
 Prepared templates exclude Attempt-specific address metadata, and assignment supplies it
 for the consumer. Internal health and service connections still use their declared local
 targets.
+
+Top-level App links without a runtime cookie return through Factory's existing session-
+and Project-authorized access issuer, preserving the exact App path and query. The issuer
+still decides access and creates the one-use grant. API calls, embedded frames and invalid
+grant redemptions remain denied; App cookies are never shared across isolated origins.
