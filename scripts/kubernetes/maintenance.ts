@@ -1,8 +1,10 @@
 import { beginInstallationMaintenance } from "../../apps/factory/src/installation/maintenance";
 import { createDatabase } from "../../packages/db/src/client";
+import { waitForDatabase } from "../../packages/db/src/wait";
 
 const database = createDatabase(1);
 try {
+  await waitForDatabase(database.client);
   const [schema] = await database.client<{ ready: boolean; baseline: boolean }[]>`
     SELECT to_regclass('factory.installation_maintenance') IS NOT NULL AS ready,
       to_regclass('factory.agent_turn') IS NOT NULL AS baseline`;

@@ -1,18 +1,11 @@
 import { createDatabase } from "./client";
 import { pendingMigrations, readMigration, shippedMigrations } from "./migrations";
+import { waitForDatabase } from "./wait";
 
 const { client } = createDatabase(1);
 let locked = false;
 try {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    try {
-      await client`SELECT 1`;
-      break;
-    } catch (cause) {
-      if (attempt === 59) throw cause;
-      await Bun.sleep(250);
-    }
-  }
+  await waitForDatabase(client);
   await client`SELECT pg_advisory_lock(hashtext('factory-schema-migration'))`;
   locked = true;
   const files = await shippedMigrations();

@@ -11,8 +11,8 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
-import type { UsageCounters, UsagePurpose, UsageRate } from "../../conversation-domain/src/usage";
 import type { ExecutionPolicy } from "../../conversation-domain/src/execution-policy";
+import type { UsageCounters, UsagePurpose, UsageRate } from "../../conversation-domain/src/usage";
 
 export const authSchema = pgSchema("auth");
 
