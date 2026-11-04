@@ -25,6 +25,12 @@ can wait indefinitely for deletion of a missing pre-upgrade hook, including Fact
 maintenance Job. The [upstream fix](https://github.com/helm/helm/issues/32231) is included in
 4.2.2; skipping hooks would bypass Factory's work-settlement guard rather than fix the wait.
 
+A Factory restart waits up to 100 seconds for running Start, Pause, Resume and Delete commands
+before it exits (the Pod's grace period is 120 seconds). A kill between a native Resume's intent
+and its outcome leaves that Sandbox unconfirmed. Factory retains it as `cleanup-failed` and never
+guesses, so roll Factory when no Pause or Resume is in flight and prefer `helm upgrade --wait`
+over deleting the Pod.
+
 The chart and owned Forgejo fixtures pin 17.0.0 by image digest. Its native job/step/log API
 supplies Verification diagnostics. Upgrading an existing Forgejo is an explicit operator action:
 back up its database, repositories, configuration and secrets, review the upstream 16/17 breaking
