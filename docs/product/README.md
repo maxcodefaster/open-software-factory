@@ -233,7 +233,8 @@ Unassigned uploads expire after one
 day. Private drafts retain their current file references; removal or Ticket publication releases
 obsolete draft associations. Backups are outside this accounting.
 Back up the object-store claim and Secret together with PostgreSQL and the other retained
-installation data. This single-node deployment does not claim high availability or automatic backups.
+installation data. This single-node deployment does not claim high availability. The chart's backup CronJob
+copies PostgreSQL, Forgejo, the object store, OpenBao and the Factory state on a schedule.
 
 Agents read actual images and rendered PDF pages through authenticated, task-bound tools.
 Text is paged rather than silently cut off. PDF processing is limited to 200 pages, extracted text

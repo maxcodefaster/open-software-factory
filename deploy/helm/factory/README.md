@@ -30,17 +30,30 @@ covers the release's own Namespace. The ServiceAccount is trusted infrastructure
 tenant application. Project containers receive neither that ServiceAccount nor the node Docker
 socket. This is not a hostile-code public service or a promise of VM-grade isolation.
 
+There is no `rbac.namespaceScoped` switch. A RoleBinding per Namespace would need Factory to create
+RoleBindings, which needs RBAC administration, a larger grant than the ClusterRole it would replace.
+Secret `list` and Pod `list` are cluster-wide for the node-wide Pod scan and the storage check's
+emptiness listing, and a Role cannot narrow them either. The only narrowed grant is the optional
+backup ServiceAccount: a Role in the release Namespace that lets it `get` and exec into the
+Forgejo Pod (`resourceNames`) and nothing else.
+
 ## Hardening
 
 - PostgreSQL (999), Forgejo (1000), Zero (1000), OpenBao (100:1000), Garage (1000) and the
   maintenance Job run non-root with a read-only root filesystem, no capabilities, no privilege
   escalation and the `RuntimeDefault` seccomp profile. Each was started with those settings against
-  its pinned image. Factory itself still runs as root with all capabilities dropped. Its retained
-  state claim has root-owned files, its start script chmods the state directory, and the image
-  defines no `USER`.
-- Zero and OpenBao have a short `own-data` init container. It runs as root with only `CHOWN`,
-  `DAC_OVERRIDE` and `FOWNER` and hands retained, root-owned volumes from earlier releases to the
-  service user. It changes nothing on fresh installs or later restarts.
+  its pinned image. Factory runs as uid 1000 with the same settings. Earlier releases ran it as
+  root only because the state claim, its `0700` directory and its `0600` OpenBao token file were
+  root-owned. Nothing else needed root: `/tmp` is an `emptyDir`, `kubectl` and the Kubernetes
+  connection file live under `/tmp`, and the image's tools need no installation at run time.
+- Factory has no `fsGroup`. Kubelet would add group read and write to every retained state file,
+  and Factory refuses an OpenBao token file that is group-accessible.
+- Factory, Zero and OpenBao have a short init container (`own-state` and `own-data`). It runs as
+  root with only `CHOWN`, `DAC_OVERRIDE` and `FOWNER` and hands retained, root-owned volumes from
+  earlier releases to the service user. `own-state` chowns the Factory state claim once and writes
+  `.owner-uid-1000` there; delete that file to force another pass, for example after rolling back to
+  a release that ran as root. `own-data` changes nothing on fresh installs or later restarts.
+  These init containers are why the release Namespace cannot enforce Pod Security `restricted`.
 - `networkPolicy.enabled` (default true) denies ingress to every release Pod and allows only the
   flows Factory uses. Runtime namespaces (labelled `app.kubernetes.io/managed-by=open-software-factory`)
   may reach Factory and Forgejo on port 3000 and nothing else. PostgreSQL, OpenBao and Garage have
@@ -49,9 +62,14 @@ socket. This is not a hostile-code public service or a promise of VM-grade isola
   allows every namespace. Port-forwarding enters through the Pod's loopback and is unaffected.
   The cluster's CNI must enforce NetworkPolicy; otherwise the objects have no effect.
 - Every service has startup, readiness and liveness probes. Liveness tolerates about two minutes
-  of failures and only starts after startup succeeds. No PodDisruptionBudget is rendered. Every
-  service is a single replica on a ReadWriteOnce volume, so `minAvailable: 1` would block node
-  drains for good, and `maxUnavailable: 1` would not protect anything.
+  of failures and only starts after startup succeeds.
+- No PodDisruptionBudget is rendered. Every service is a single replica on a ReadWriteOnce volume,
+  so `minAvailable: 1` would block node drains for good, and `maxUnavailable: 1` would not protect
+  anything. Factory itself cannot run more than one replica: the state claim is ReadWriteOnce, the
+  Deployment uses `Recreate` and a lock on the state directory refuses a second process. A node
+  drain therefore stops each service until its Pod restarts elsewhere. Expect an outage of a few
+  minutes, longer when a zonal volume must follow the Pod. The backup CronJob is the mitigation
+  for losing a node's storage, not for drains.
 
 ## Secrets and GitOps
 
@@ -170,8 +188,7 @@ QA recordings and annotation stills use that same store. No external S3 account,
 bucket setup is required. Set `objectStorage.size` to request more capacity using the cluster's
 normal storage rules. The internal-only service has no Ingress or workstation port forward.
 Public Factory readiness includes an authenticated object write/read, not just an open storage port.
-Back up the object-store claim and Secret with PostgreSQL and the installation state.
-The single-node store is not high availability and does not create backups.
+The single-node store is not high availability. The backup CronJob below mirrors it.
 Extracted attachment text remains in PostgreSQL. Git mirroring does not protect uploads or
 this installation's other retained data.
 
@@ -255,6 +272,149 @@ application or its bootstrap is healthy. An Ingress installation does not need t
 The local HTTP exception is restricted to loopback browser access. Internal callbacks still use
 Kubernetes Services, never the Mac's host alias or a manually selected VM address.
 
+## Backups and restore
+
+`backup.enabled` (default true) renders one CronJob, `<release>-backup`, a dedicated retained claim
+(`backup.size`, default 40Gi) and a ServiceAccount. It runs on `backup.schedule` (default
+`17 2 * * *`) and never overlaps itself. One Pod takes every part in this order, so the object
+mirror always contains the objects the database dump refers to:
+
+| Step | Tool | Result in `<timestamp>/` |
+| --- | --- | --- |
+| PostgreSQL | `pg_dump --format=custom` from the pinned postgres image, checked with `pg_restore --list` | `postgres.dump` |
+| Forgejo | `forgejo dump` run in the Forgejo container through `kubectl exec`, streamed back and checked | `forgejo.tar.gz` (`forgejo-db.sql`, repositories, attachments, configuration) |
+| Objects | `rclone sync` of the Garage bucket | one mirror at `objects/`; replaced or deleted objects move to `objects-changed/<timestamp>/` |
+| OpenBao | `bao operator raft snapshot save` | `openbao.snap` |
+| State | `tar` of the Factory state claim, mounted read-only | `state.tar.gz` (unseal key, AppRole login, installation identity) |
+
+A failed step leaves `<step>.failed` and does not stop the others. The last container writes
+`COMPLETE`, prunes and uploads only when every step succeeded, and otherwise fails the Job so the
+failure shows in `kubectl get jobs`. `backup.retention` (default 7) keeps that many complete sets.
+Incomplete sets are removed when a later run completes. Every network call retries, because a new
+Pod can be refused by NetworkPolicy for a few seconds. The NetworkPolicy lets Pods labelled
+`app.kubernetes.io/component=backup` reach PostgreSQL, OpenBao and Garage and nothing else.
+
+Limits to know before relying on this:
+
+- **OpenBao needs an operator token that Factory does not create.** Its AppRole policy cannot
+  read snapshots, and it revokes the root token after bootstrap. OpenBao 2.7 also disables
+  unauthenticated root generation, so the retained unseal key cannot mint a new one. Make a
+  periodic token from an admin credential you hold. Its policy needs `read` on
+  `sys/storage/raft/snapshot` and `update` on `auth/token/renew-self`. Put it in a Secret under the
+  key `token` and set `backup.openbao.tokenSecret`. Each run renews it. Without it the Job still
+  succeeds, but it writes `openbao.skipped`, warns, and the set holds no OpenBao data.
+- **Backups hold everything needed to decrypt OpenBao.** `state.tar.gz` contains the unseal key.
+  Treat the backup claim and any remote as sensitive as the cluster's Secrets and encrypt them.
+  An rclone `crypt` remote does that for the optional copy.
+- **Secrets are not in the sets.** Back up the credentials, object-store and OpenBao TLS Secrets
+  yourself, for example `kubectl get secret <release>-credentials <release>-objects
+  <release>-openbao-tls -o yaml`, or keep them in your own secret manager and set
+  `existingSecrets.*`.
+- **The Pod runs on Factory's node** because the state claim is ReadWriteOnce. If Factory is down
+  the Job waits until it returns or hits its six-hour deadline.
+- **The Forgejo archive is taken from a running server.** The database part is a consistent SQL
+  dump; repositories are copied while Forgejo runs. A push during the dump can leave a repository
+  slightly newer than the database.
+- The claim is a copy in the same cluster. Use `backup.remote` for protection against losing it.
+
+To copy sets off the cluster, create a Secret with an `rclone.conf` key that defines one remote
+(S3-compatible or Azure Blob, for example `[offsite]` with `type = azureblob`), then set
+`backup.remote.existingSecret` and `backup.remote.path` (`offsite:container/factory`). The upload
+uses `rclone copy`, so deletion is the remote's lifecycle rule. The image is
+`docker.io/rclone/rclone`, pinned by digest in `upstream.json`.
+
+### Reach the files
+
+The claims are not exposed. Mount them in a throwaway Pod that you delete afterwards. This one runs
+as root so extracted files keep their owners, and reads the backup claim; add the other claims
+from the restore steps below only while their owning workload is scaled to zero.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata: {name: restore-toolbox, namespace: factory}
+spec:
+  restartPolicy: Never
+  containers:
+    - name: tools
+      image: YOUR_FACTORY_IMAGE # has sh, tar, gzip and kubectl
+      command: [sleep, "7200"]
+      volumeMounts:
+        - {name: backup, mountPath: /backup, readOnly: true}
+  volumes:
+    - {name: backup, persistentVolumeClaim: {claimName: factory-backup, readOnly: true}}
+```
+
+### Check a backup
+
+`scripts/kubernetes/restore-check.ts` reads one set, or a single `postgres.dump`, and runs
+`pg_restore --list`, `tar -tzf` and the marker checks. It writes nothing. It needs a `pg_restore`
+of major version 16; set `PG_RESTORE` to a wrapper around
+`docker run --rm -i postgres:16.14-bookworm pg_restore "$@"` if you have none.
+
+```sh
+kubectl --namespace factory cp restore-toolbox:/backup/20261104T021700Z ./set
+mise exec -- bun scripts/kubernetes/restore-check.ts ./set
+```
+
+A pass proves the dump, both archives and the snapshot are readable. It does not prove a full
+restore, so rehearse one in a scratch Namespace on your own schedule.
+
+### Restore
+
+Restoring replaces data. Do it into a new installation, or keep a copy of what is there. Do not
+delete a retained claim to start clean; where a step empties a claim, that claim belongs to a
+new installation and holds nothing yet.
+
+1. Install the chart with the same release name, Namespace, origins and storage class, using the
+   Secrets you backed up (`existingSecrets.*`). Factory refuses a changed installation identity.
+   Then scale Factory, Zero, OpenBao and Forgejo to zero. Leave PostgreSQL and Garage running.
+2. PostgreSQL. Recreate the database and restore the dump over standard input:
+
+   ```sh
+   kubectl exec <release>-postgres-0 -- psql -U factory -d postgres \
+     -c 'DROP DATABASE factory WITH (FORCE)' -c 'CREATE DATABASE factory OWNER factory'
+   kubectl exec -i <release>-postgres-0 -- pg_restore --no-owner -U factory -d factory < postgres.dump
+   ```
+
+3. Forgejo. On your workstation, unpack `forgejo.tar.gz` into `./restore`, delete
+   `restore/data/data/forgejo.db*`, and rebuild the database with
+   `sqlite3 restore/data/data/forgejo.db < restore/forgejo-db.sql`. The archive's raw copy of the
+   database was taken while Forgejo ran, so use the SQL dump. Mount `data-<release>-forgejo-0` at
+   `/var/lib/gitea` and `config-<release>-forgejo-0` at `/etc/gitea` in the toolbox, then:
+
+   ```sh
+   tar -C restore -cf - data | kubectl exec -i restore-toolbox -- tar -xf - -C /var/lib/gitea --strip-components=1
+   tar -C restore -cf - repos | kubectl exec -i restore-toolbox -- sh -c \
+     'mkdir -p /var/lib/gitea/git/repositories && tar -xf - -C /var/lib/gitea/git/repositories --strip-components=1'
+   tar -C restore -cf - app.ini | kubectl exec -i restore-toolbox -- tar -xf - -C /etc/gitea
+   kubectl exec restore-toolbox -- chown -R 1000:1000 /var/lib/gitea /etc/gitea
+   ```
+
+   `app.ini` holds the secret key that encrypts stored credentials, so the original must come back.
+4. Objects. Port-forward `<release>-objects` and run
+   `rclone sync ./objects :s3:factory` with the `access-key-id` and `secret-access-key` from the
+   objects Secret (`--s3-endpoint http://127.0.0.1:3900 --s3-region garage --s3-force-path-style`).
+   Earlier versions of replaced objects are in `objects-changed/<timestamp>/`.
+5. Planning cache. Zero's claim (`data-<release>-zero-0`) is a replica of PostgreSQL. Empty it in the
+   toolbox so Zero rebuilds it from the restored database.
+6. OpenBao. Its snapshot only restores onto the key it was taken with. Mount
+   `data-<release>-openbao-0` at `/bao/data` and empty it. Scale OpenBao to one. It starts
+   uninitialized. Port-forward `<release>-openbao` and, with `BAO_ADDR=https://127.0.0.1:8200` and
+   `BAO_CACERT` set to the `ca.crt` of the OpenBao TLS Secret, run
+   `bao operator init -key-shares=1 -key-threshold=1`, `bao operator unseal`, then
+   `BAO_TOKEN=<that root token> bao operator raft snapshot restore -force openbao.snap`. OpenBao
+   reseals. Unseal it with the original key, the `keys_base64` value in `openbao/bootstrap.json`
+   inside `state.tar.gz`. Without `openbao.snap`, Factory cannot decrypt the secrets it stored.
+7. Factory state. Mount `<release>-state` at `/var/lib/factory`, empty it, extract `state.tar.gz`
+   into it as root so tar restores the original owners (uid 1000).
+8. Scale Zero, Forgejo and Factory back to one and wait for readiness. Startup runs the migrator,
+   which refuses a database newer than the image, so restore with an image at least as new as the
+   backup.
+
+The PostgreSQL, Forgejo and OpenBao parts of these steps were exercised with the pinned images
+outside a cluster. The Zero reset and the full ordering have not been rehearsed end to end.
+
 ## Maintenance and upgrades
 
 Save human edits, finish or explicitly stop active work, then select the next built image:
@@ -289,8 +449,8 @@ bootstrap or maintenance Job; do not delete PVCs to make readiness pass.
 Uninstalling the chart is not consent to erase Project source. The installation credentials,
 OpenBao TLS identity, object-store credentials and claim, Factory state and StatefulSet claims are retained. Explicit deletion must
 account for the exact installation's Workspace resources and data, never unrelated Namespaces,
-volumes or another Helm release. High availability, automatic backups and migration from the
-disposable source-development installation are not part of this chart.
+volumes or another Helm release. High availability and migration from the disposable
+source-development installation are not part of this chart.
 
 The former `attachments.endpoint`, `attachments.bucket` and `attachments.existingSecret` settings
 are rejected rather than silently switching existing attachments to an empty bucket.

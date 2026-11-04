@@ -112,8 +112,9 @@ registers its own version in the transaction that applies it.
 **Least privilege in the chart.** The Factory ClusterRole lists only calls the code makes.
 Stateful services run non-root with dropped capabilities. Default-deny NetworkPolicies allow
 the real flows, and Sandbox namespaces cannot reach PostgreSQL, OpenBao or the object store.
-Factory itself still runs as root and keeps cluster-wide Secret and `pods/exec` access because
-it creates Sandbox namespaces and workers at runtime; narrowing that needs a separate
+Factory runs as uid 1000 with a read-only root filesystem; a once-only init container hands the
+retained state claim to that user. It keeps cluster-wide Secret and `pods/exec` access because it
+creates Sandbox namespaces and workers at runtime; narrowing that needs a separate
 runtime-namespace design.
 
 **Attested releases.** Publication is re-runnable: an architecture image from an earlier attempt

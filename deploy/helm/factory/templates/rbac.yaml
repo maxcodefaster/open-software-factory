@@ -5,8 +5,10 @@ editor, with names that are unknown until runtime, and its Namespace-scoped obje
 granted by a Role. It cannot create RoleBindings (no RBAC administration is granted), so a
 ClusterRole bound cluster-wide is the only available shape. That binding also covers this release's
 own Namespace: the Factory ServiceAccount can read its Secrets and exec into its Pods. Consequently
-no separate Role for the release Namespace is rendered; it would add nothing. Treat the ServiceAccount
-as trusted infrastructure and restrict who can run the Factory image.
+no Role for Factory itself is rendered; it would add nothing. (backup.yaml renders a separate Role
+for the backup ServiceAccount.) Treat the ServiceAccount as trusted infrastructure and restrict who
+can run the Factory image. There is no namespace-scoped alternative: it would need RoleBindings,
+which needs the RBAC administration this role deliberately lacks.
 resourceNames cannot narrow any rule below because the targeted objects are created with generated
 names (worker-<uuid>, assignment-<uuid>, store-<uuid>) and create cannot be limited by name.
 No watch, update (except namespaces/finalize), wildcard, escalate, bind or impersonate verbs.

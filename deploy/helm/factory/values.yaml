@@ -16,6 +16,10 @@ factorybox:
   executableSHA256: ""
   architecture: ""
   nodeName: ""
+  # One kernel release or a comma-separated list. `*` is a wildcard, for example
+  # "5.15.0-*-azure,6.8.0-*-azure" on AKS, where node image upgrades change the release.
+  # Factory only gates admission with it. The pinned worker binary checks its own kernel on
+  # startup and the node boot ID still pins every retained worker. Run `helm test` first.
   kernel: ""
   # Scheduling reserve, not a fixed CPU allocation. Fresh workers select their
   # aggregate ceiling from the admitted node; retained profiles are not resized.
@@ -94,6 +98,30 @@ existingSecrets:
   # Bump to roll Factory, Zero, Garage and OpenBao after changing an existing Secret when the
   # renderer cannot `lookup` it (Argo CD). Helm and Flux roll them from the Secret contents.
   revision: ""
+
+# Scheduled backups into a dedicated claim, optionally copied to an operator-owned remote. See
+# the chart README for what each set contains and how to restore it.
+backup:
+  enabled: true
+  # Cron expression in the controller's time zone (normally UTC).
+  schedule: "17 2 * * *"
+  # Complete backup sets kept on the claim. Each holds a PostgreSQL dump, a Forgejo dump, the
+  # Factory state and an OpenBao snapshot. The object-store mirror is kept once beside them.
+  retention: 7
+  # Size for retention x (database + Forgejo + state) plus one copy of the object store.
+  size: 40Gi
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+  openbao:
+    # Secret with a `token` key. The token needs `read` on sys/storage/raft/snapshot and `update`
+    # on auth/token/renew-self. Without it, sets contain no OpenBao data.
+    tokenSecret: ""
+  remote:
+    # Secret with an `rclone.conf` key that defines the remote named in `path`.
+    existingSecret: ""
+    # For example `backup:my-bucket/factory`. Empty keeps backups on the claim only.
+    path: ""
 
 # Default-deny ingress for this release's Pods plus the flows Factory uses. Requires a CNI
 # that enforces NetworkPolicy; without one the objects are accepted and ignored.

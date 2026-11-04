@@ -1,0 +1,291 @@
+{{- if .Values.backup.enabled }}
+{{- /*
+One CronJob pod takes every backup into one dedicated claim, so a single RWO volume is never
+shared between nodes. The steps run in order as init containers. A failed step leaves a marker
+and does not stop the next one; the final container refuses to complete the set, so the Job fails.
+Pins match the images the matching services run, plus the rclone pin in upstream.json.
+*/ -}}
+{{- $name := include "factory.name" . }}
+{{- $postgresImage := "docker.io/library/postgres:16.14-bookworm@sha256:64154d0babcb1741988719e703419af0382b19953706149f9872fbd0f438efa8" }}
+{{- $openbaoImage := "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf" }}
+{{- $rcloneImage := "docker.io/rclone/rclone:1.74.1@sha256:eb8788b795f0009324e9572b0e2acb9b56885327c2746b07d67a9d3b893a6602" }}
+{{- $retention := int .Values.backup.retention }}
+{{- if or (ne (toString .Values.backup.retention) (printf "%d" $retention)) (lt $retention 1) }}
+{{- fail "backup.retention must be a positive whole number of backup sets to keep" }}
+{{- end }}
+{{- if not .Values.backup.schedule }}
+{{- fail "backup.schedule must be a cron expression" }}
+{{- end }}
+{{- if ne (empty .Values.backup.remote.existingSecret) (empty .Values.backup.remote.path) }}
+{{- fail "backup.remote.existingSecret and backup.remote.path must be set together" }}
+{{- end }}
+{{- if and .Values.backup.remote.path (not (regexMatch "^[A-Za-z0-9_-]+:.+$" .Values.backup.remote.path)) }}
+{{- fail "backup.remote.path must name a remote from the rclone.conf in the Secret, for example backup:bucket/factory" }}
+{{- end }}
+{{- $objects := include "factory.objectsSecret" . }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+data:
+{{- range $path, $_ := .Files.Glob "files/backup/*.sh" }}
+  {{ base $path }}: |
+    {{- $.Files.Get $path | nindent 4 }}
+{{- end }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  {{- include "factory.claim" (dict "root" . "size" .Values.backup.size) | nindent 2 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+---
+{{- /*
+The Forgejo dump runs inside the Forgejo container, which owns its volumes and configuration.
+The backup ServiceAccount may exec into that one Pod and nothing else.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    resourceNames: [{{ $name }}-forgejo-0]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [pods/exec]
+    resourceNames: [{{ $name }}-forgejo-0]
+    verbs: [get, create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}-backup
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}-backup
+  labels:
+    {{- include "factory.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 21600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/instance: {{ .Release.Name | quote }}
+            app.kubernetes.io/component: backup
+        spec:
+          nodeSelector: {kubernetes.io/os: linux}
+          restartPolicy: Never
+          serviceAccountName: {{ $name }}-backup
+          # Only the Forgejo step uses this token; the Role above is its entire authority.
+          automountServiceAccountToken: true
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            seccompProfile: {type: RuntimeDefault}
+          # The state claim is ReadWriteOnce, so the Pod runs where Factory runs.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - topologyKey: kubernetes.io/hostname
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+                      app.kubernetes.io/component: factory
+          initContainers:
+            - name: own-backup
+              image: {{ $rcloneImage }}
+              command: [chown, "1000:1000", /backup]
+              securityContext:
+                runAsUser: 0
+                runAsNonRoot: false
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER]}
+                seccompProfile: {type: RuntimeDefault}
+              resources:
+                requests: {cpu: 10m, memory: 16Mi}
+                limits: {cpu: 250m, memory: 64Mi}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+            - name: prepare
+              image: {{ $rcloneImage }}
+              command: [sh, /scripts/prepare.sh]
+              securityContext:
+                runAsNonRoot: true
+                {{- include "factory.containerSecurity" . | nindent 16 }}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: temporary, mountPath: /tmp}
+            - name: postgres
+              image: {{ $postgresImage }}
+              command: [sh, /scripts/postgres.sh]
+              securityContext:
+                runAsNonRoot: true
+                {{- include "factory.containerSecurity" . | nindent 16 }}
+              env:
+                - {name: PGHOST, value: "{{ $name }}-postgres.{{ .Release.Namespace }}.svc"}
+                - {name: PGPORT, value: "5432"}
+                - {name: PGUSER, value: factory}
+                - {name: PGDATABASE, value: factory}
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef: {name: {{ include "factory.credentialsSecret" . | quote }}, key: database-password}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: temporary, mountPath: /tmp}
+            - name: forgejo
+              image: {{ include "factory.image" . }}
+              imagePullPolicy: {{ .Values.imagePullPolicy }}
+              command: [sh, /scripts/forgejo.sh]
+              securityContext:
+                runAsNonRoot: true
+                {{- include "factory.containerSecurity" . | nindent 16 }}
+              env:
+                - {name: HOME, value: /tmp}
+                - name: BACKUP_NAMESPACE
+                  valueFrom:
+                    fieldRef: {fieldPath: metadata.namespace}
+                - {name: FORGEJO_POD, value: "{{ $name }}-forgejo-0"}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: temporary, mountPath: /tmp}
+            - name: objects
+              image: {{ $rcloneImage }}
+              command: [sh, /scripts/objects.sh]
+              securityContext:
+                runAsNonRoot: true
+                {{- include "factory.containerSecurity" . | nindent 16 }}
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: RCLONE_CONFIG_OBJECTS_TYPE, value: s3}
+                - {name: RCLONE_CONFIG_OBJECTS_PROVIDER, value: Other}
+                - {name: RCLONE_CONFIG_OBJECTS_ENDPOINT, value: "http://{{ $name }}-objects.{{ .Release.Namespace }}.svc:3900"}
+                - {name: RCLONE_CONFIG_OBJECTS_REGION, value: garage}
+                - {name: RCLONE_CONFIG_OBJECTS_FORCE_PATH_STYLE, value: "true"}
+                - name: RCLONE_CONFIG_OBJECTS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: {{ $objects | quote }}, key: access-key-id}
+                - name: RCLONE_CONFIG_OBJECTS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef: {name: {{ $objects | quote }}, key: secret-access-key}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: temporary, mountPath: /tmp}
+            - name: openbao
+              image: {{ $openbaoImage }}
+              command: [sh, /scripts/openbao.sh]
+              securityContext:
+                runAsNonRoot: true
+                {{- include "factory.containerSecurity" . | nindent 16 }}
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: BAO_ADDR, value: "https://{{ $name }}-openbao.{{ .Release.Namespace }}.svc:8200"}
+                - {name: BAO_CACERT, value: /bao/tls/ca.crt}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: temporary, mountPath: /tmp}
+                - {name: state, mountPath: /state, readOnly: true}
+                - {name: openbao-tls, mountPath: /bao/tls, readOnly: true}
+                {{- if .Values.backup.openbao.tokenSecret }}
+                - {name: openbao-token, mountPath: /openbao-token, readOnly: true}
+                {{- end }}
+          containers:
+            - name: finalize
+              image: {{ $rcloneImage }}
+              command: [sh, /scripts/finalize.sh]
+              securityContext:
+                runAsNonRoot: true
+                {{- include "factory.containerSecurity" . | nindent 16 }}
+              env:
+                - {name: HOME, value: /tmp}
+                - {name: BACKUP_RETENTION, value: {{ $retention | quote }}}
+                {{- if .Values.backup.remote.path }}
+                - {name: BACKUP_REMOTE, value: {{ .Values.backup.remote.path | quote }}}
+                - {name: RCLONE_CONFIG, value: /rclone/rclone.conf}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - {name: backup, mountPath: /backup}
+                - {name: scripts, mountPath: /scripts, readOnly: true}
+                - {name: temporary, mountPath: /tmp}
+                {{- if .Values.backup.remote.existingSecret }}
+                - {name: remote, mountPath: /rclone, readOnly: true}
+                {{- end }}
+          volumes:
+            - name: backup
+              persistentVolumeClaim: {claimName: {{ $name }}-backup}
+            - name: state
+              persistentVolumeClaim: {claimName: {{ $name }}-state, readOnly: true}
+            - name: scripts
+              configMap: {name: {{ $name }}-backup}
+            - name: temporary
+              emptyDir: {sizeLimit: 1Gi}
+            - name: openbao-tls
+              secret:
+                secretName: {{ include "factory.openbaoTLSSecret" . }}
+                items: [{key: ca.crt, path: ca.crt}]
+            {{- if .Values.backup.openbao.tokenSecret }}
+            - name: openbao-token
+              secret:
+                secretName: {{ .Values.backup.openbao.tokenSecret }}
+                items: [{key: token, path: token}]
+            {{- end }}
+            {{- if .Values.backup.remote.existingSecret }}
+            - name: remote
+              secret:
+                secretName: {{ .Values.backup.remote.existingSecret }}
+                items: [{key: rclone.conf, path: rclone.conf}]
+            {{- end }}
+{{- end }}

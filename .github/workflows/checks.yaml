@@ -72,7 +72,7 @@ jobs:
         run: docker build --file deploy/factory/Dockerfile --tag factory-image-check .
       - name: Start the Factory image
         run: |
-          docker run --rm --network=none --read-only --cap-drop=ALL \
+          docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
             --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
             --env FACTORY_SMOKE_ARTIFACTS=optional \
             --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \

@@ -830,6 +830,8 @@ type Container = {
     capabilities?: { drop?: string[]; add?: string[] };
     seccompProfile?: { type: string };
   };
+  command?: string[];
+  volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
   env?: Array<{ name: string; value?: string; valueFrom?: { secretKeyRef?: { name: string } } }>;
   livenessProbe?: { periodSeconds?: number; failureThreshold?: number; timeoutSeconds?: number };
   readinessProbe?: unknown;
@@ -847,9 +849,16 @@ type Workload = {
           fsGroup?: number;
           runAsUser?: number;
         };
+        serviceAccountName?: string;
+        automountServiceAccountToken?: boolean;
+        affinity?: unknown;
         containers: Container[];
         initContainers?: Container[];
-        volumes?: Array<{ name: string; secret?: { secretName: string } }>;
+        volumes?: Array<{
+          name: string;
+          secret?: { secretName: string };
+          persistentVolumeClaim?: { claimName: string; readOnly?: boolean };
+        }>;
       };
     };
   };
@@ -882,10 +891,20 @@ async function renderAll(extra: string[] = []) {
     all: parseAllDocuments(result.stdout).map((document) => document.toJSON() as Resource),
   };
 }
+type CronJob = {
+  kind: "CronJob";
+  metadata: { name: string };
+  spec: { jobTemplate: { spec: Workload["spec"] } };
+};
+// A CronJob is reported with the pod template of its Job so every workload check covers it.
 function workloads(all: Resource[]) {
-  return (all as unknown as Workload[]).filter((item) =>
-    ["Deployment", "StatefulSet", "Job"].includes(item.kind),
-  );
+  return (all as unknown as Array<Workload | CronJob>).flatMap((item): Workload[] => {
+    if (item.kind === "CronJob")
+      return [
+        { kind: "CronJob", metadata: item.metadata, spec: (item as CronJob).spec.jobTemplate.spec },
+      ];
+    return ["Deployment", "StatefulSet", "Job"].includes(item.kind) ? [item as Workload] : [];
+  });
 }
 function policies(all: Resource[]) {
   return (all as unknown as Policy[]).filter((item) => item.kind === "NetworkPolicy");
@@ -922,6 +941,18 @@ test.each([
     ],
   ],
   ["policies disabled", ["--set", "networkPolicy.enabled=false"]],
+  ["backups disabled", ["--set", "backup.enabled=false"]],
+  [
+    "backups copied to a remote with an OpenBao snapshot token",
+    [
+      "--set",
+      "backup.remote.existingSecret=backup-remote",
+      "--set",
+      "backup.remote.path=offsite:bucket/factory",
+      "--set",
+      "backup.openbao.tokenSecret=bao-snapshot",
+    ],
+  ],
 ])(
   "the %s renders valid Kubernetes objects",
   async (_name, extra) => {
@@ -975,11 +1006,13 @@ test("every workload container drops capabilities and uses the runtime seccomp p
   const found = workloads(all);
   expect(found.map((item) => item.metadata.name).sort()).toEqual([
     "portable",
+    "portable-backup",
     "portable-forgejo",
     "portable-maintenance",
     "portable-objects",
     "portable-openbao",
     "portable-postgres",
+    "portable-preflight",
     "portable-zero",
   ]);
   for (const workload of found) {
@@ -995,7 +1028,7 @@ test("every workload container drops capabilities and uses the runtime seccomp p
   }
 });
 
-test("only Factory and the volume-ownership init containers run as root", async () => {
+test("only the volume-ownership init containers run as root", async () => {
   const { all } = await renderAll();
   const roots: string[] = [];
   for (const workload of workloads(all)) {
@@ -1006,9 +1039,10 @@ test("only Factory and the volume-ownership init containers run as root", async 
     }
   }
   expect(roots.sort()).toEqual([
+    "portable-backup/own-backup",
     "portable-openbao/own-data",
     "portable-zero/own-data",
-    "portable/factory",
+    "portable/own-state",
   ]);
   const added = workloads(all).flatMap((workload) =>
     (workload.spec.template.spec.initContainers ?? []).flatMap(
@@ -1028,11 +1062,12 @@ test("unprivileged services use the user their images define", async () => {
   expect(user("portable-zero")).toBe(1000);
   expect(user("portable-openbao")).toBe(100);
   expect(user("portable-objects")).toBe(1000);
+  expect(user("portable-backup")).toBe(1000);
 });
 
 test("every long-running service has liveness separate from readiness", async () => {
   const { all } = await renderAll();
-  for (const workload of workloads(all).filter((item) => item.kind !== "Job")) {
+  for (const workload of workloads(all).filter((item) => !["Job", "CronJob"].includes(item.kind))) {
     const container = workload.spec.template.spec.containers[0];
     expect(container?.livenessProbe).toBeDefined();
     expect(container?.readinessProbe).toBeDefined();
@@ -1070,9 +1105,9 @@ test("default-deny ingress is followed by only the flows Factory uses", async ()
   expect(sources("factory")).toEqual(["zero", "forgejo", "namespace:open-software-factory"]);
   expect(sources("forgejo")).toEqual(["factory", "namespace:open-software-factory"]);
   expect(sources("zero")).toEqual(["factory"]);
-  expect(sources("postgres")).toEqual(["factory", "zero", "maintenance"]);
-  expect(sources("openbao")).toEqual(["factory", "openbao"]);
-  expect(sources("objects")).toEqual(["factory"]);
+  expect(sources("postgres")).toEqual(["factory", "zero", "maintenance", "backup"]);
+  expect(sources("openbao")).toEqual(["factory", "openbao", "backup"]);
+  expect(sources("objects")).toEqual(["factory", "backup"]);
   for (const backend of ["postgres", "openbao", "objects"])
     expect(sources(backend)?.some((source) => source.startsWith("namespace:"))).toBe(false);
   const egress = byName.get("portable-restrict-backend-egress")?.spec;
@@ -1216,11 +1251,253 @@ test("an empty application image is refused with an actionable message", async (
 test("every chart-owned service image is pinned by digest", async () => {
   const { all } = await renderAll();
   for (const workload of workloads(all).filter((item) => item.metadata.name !== "portable")) {
-    if (workload.kind === "Job") continue;
+    if (["Job", "CronJob"].includes(workload.kind)) continue;
     for (const container of [
       ...workload.spec.template.spec.containers,
       ...(workload.spec.template.spec.initContainers ?? []),
     ])
       expect(container.image).toMatch(/@sha256:[a-f0-9]{64}$/);
   }
+});
+
+test("the preflight is a Helm test hook that is not privileged and never runs at install", async () => {
+  const all = await resources();
+  const hooks = all.filter((item) => item.metadata.annotations?.["helm.sh/hook"] === "test");
+  expect(hooks.map((item) => item.kind).sort()).toEqual([
+    "ClusterRole",
+    "ClusterRoleBinding",
+    "Job",
+    "ServiceAccount",
+  ]);
+  const job = hooks.find((item) => item.kind === "Job");
+  const definition = JSON.stringify(job?.spec);
+  expect(definition).not.toContain('privileged":true');
+  expect(definition).not.toContain("hostPath");
+  expect(job?.spec?.template?.spec.containers[0]?.command?.slice(0, 2)).toEqual([
+    "bun",
+    "scripts/kubernetes/preflight.ts",
+  ]);
+  const role = hooks.find((item) => item.kind === "ClusterRole");
+  for (const rule of role?.rules ?? []) {
+    expect(rule.verbs).not.toContain("update");
+    expect(rule.verbs).not.toContain("patch");
+  }
+});
+
+test("Factory runs as an unprivileged user and fixes retained state ownership once", async () => {
+  const { all } = await renderAll();
+  const factory = workloads(all).find((item) => item.metadata.name === "portable");
+  const pod = factory?.spec.template.spec;
+  const main = pod?.containers[0];
+  expect(main?.securityContext).toMatchObject({
+    runAsUser: 1000,
+    runAsNonRoot: true,
+    readOnlyRootFilesystem: true,
+    allowPrivilegeEscalation: false,
+    capabilities: { drop: ["ALL"] },
+  });
+  // A pod fsGroup would add group access to every retained state file, and the OpenBao token
+  // file must stay private to its owner.
+  expect(pod?.securityContext?.fsGroup).toBeUndefined();
+  const init = pod?.initContainers?.[0];
+  expect(init?.name).toBe("own-state");
+  expect(init?.securityContext?.runAsUser).toBe(0);
+  expect(init?.securityContext?.capabilities?.add).toEqual(["CHOWN", "DAC_OVERRIDE", "FOWNER"]);
+  expect(init?.volumeMounts).toEqual([{ name: "state", mountPath: "/var/lib/factory" }]);
+  const script = init?.command?.at(-1) ?? "";
+  expect(script).toContain('test -e "$marker" && exit 0');
+  expect(script.indexOf("chown -R 1000:1000 /var/lib/factory")).toBeLessThan(
+    script.indexOf(': > "$marker"'),
+  );
+  expect(init?.image).toBe(main?.image);
+});
+
+test("the release smoke tests start the Factory image as the unprivileged user the chart uses", async () => {
+  for (const file of [".github/workflows/checks.yaml", ".github/workflows/images.yaml"])
+    expect(await readFile(file, "utf8")).toContain("--user 1000:1000");
+});
+
+test("backups are on by default and write to one dedicated retained claim", async () => {
+  const all = await resources();
+  const claim = all.find(
+    (item) => item.kind === "PersistentVolumeClaim" && item.metadata.name === "portable-backup",
+  );
+  expect(claim?.metadata.annotations?.["helm.sh/resource-policy"]).toBe("keep");
+  const requested = (claim?.spec as unknown as { resources: { requests: { storage: string } } })
+    ?.resources;
+  expect(requested?.requests.storage).toBe("40Gi");
+  const cron = (workloads(all) as Workload[]).find((item) => item.kind === "CronJob");
+  const raw = all.find((item) => item.kind === "CronJob") as unknown as {
+    spec: { schedule: string; concurrencyPolicy: string };
+  };
+  expect(raw.spec.schedule).toBe("17 2 * * *");
+  expect(raw.spec.concurrencyPolicy).toBe("Forbid");
+  const pod = cron?.spec.template.spec;
+  expect(pod?.initContainers?.map((container) => container.name)).toEqual([
+    "own-backup",
+    "prepare",
+    "postgres",
+    "forgejo",
+    "objects",
+    "openbao",
+  ]);
+  expect(pod?.containers.map((container) => container.name)).toEqual(["finalize"]);
+  const claims = pod?.volumes?.flatMap((volume) =>
+    volume.persistentVolumeClaim ? [volume.persistentVolumeClaim] : [],
+  );
+  expect(claims).toEqual([
+    { claimName: "portable-backup" },
+    { claimName: "portable-state", readOnly: true },
+  ]);
+  // The read-only state claim is mounted by the OpenBao step alone.
+  const mounts = (pod?.initContainers ?? [])
+    .concat(pod?.containers ?? [])
+    .filter((container) => container.volumeMounts?.some((mount) => mount.name === "state"));
+  expect(mounts.map((container) => container.name)).toEqual(["openbao"]);
+  expect(mounts[0]?.volumeMounts?.find((mount) => mount.name === "state")?.readOnly).toBe(true);
+  expect(JSON.stringify(pod?.affinity)).toContain('"app.kubernetes.io/component":"factory"');
+  const finalize = pod?.containers[0];
+  expect(finalize?.env).toContainEqual({ name: "BACKUP_RETENTION", value: "7" });
+  expect(finalize?.env?.some((entry) => entry.name === "BACKUP_REMOTE")).toBe(false);
+});
+
+test("backup images are pinned and match the maintained service pins", async () => {
+  const all = await resources();
+  const compose = parse(await readFile("deploy/local/compose.yaml", "utf8"));
+  const pod = workloads(all).find((item) => item.kind === "CronJob")?.spec.template.spec;
+  const images = new Map(
+    [...(pod?.initContainers ?? []), ...(pod?.containers ?? [])].map((container) => [
+      container.name,
+      container.image,
+    ]),
+  );
+  expect(images.get("postgres")).toBe(compose.services.postgres.image);
+  expect(images.get("openbao")).toBe(upstream.openbao.image);
+  for (const name of ["own-backup", "prepare", "objects", "finalize"])
+    expect(images.get(name)).toBe(upstream.rclone.image);
+  // The Forgejo step needs kubectl, which only the Factory image carries.
+  expect(images.get("forgejo")).toBe("owned-factory-proof:unit");
+  for (const [name, image] of images)
+    if (name !== "forgejo") expect(image).toMatch(/@sha256:[a-f0-9]{64}$/);
+  expect(upstream.rclone.image).toContain(`:${upstream.rclone.version}@sha256:`);
+});
+
+test("the backup ServiceAccount may only exec into the Forgejo Pod", async () => {
+  const all = await resources();
+  const role = all.find((item) => item.kind === "Role" && item.metadata.name === "portable-backup");
+  expect(role?.rules as unknown).toEqual([
+    {
+      apiGroups: [""],
+      resources: ["pods"],
+      resourceNames: ["portable-forgejo-0"],
+      verbs: ["get"],
+    },
+    {
+      apiGroups: [""],
+      resources: ["pods/exec"],
+      resourceNames: ["portable-forgejo-0"],
+      verbs: ["get", "create"],
+    },
+  ]);
+  const binding = all.find(
+    (item) => item.kind === "RoleBinding" && item.metadata.name === "portable-backup",
+  ) as unknown as { subjects: Array<{ name: string }> };
+  expect(binding.subjects as unknown).toEqual([
+    { kind: "ServiceAccount", name: "portable-backup" },
+  ]);
+  const cluster = all.find((item) => item.kind === "ClusterRoleBinding");
+  expect(JSON.stringify(cluster)).not.toContain("portable-backup");
+});
+
+test("backup Jobs may reach only the data services they read", async () => {
+  const { all } = await renderAll();
+  const byName = new Map(policies(all).map((policy) => [policy.metadata.name, policy]));
+  const from = (name: string) =>
+    byName
+      .get(`portable-allow-${name}`)
+      ?.spec.ingress?.flatMap((rule) => rule.from ?? [])
+      .some((peer) => peer.podSelector?.matchLabels["app.kubernetes.io/component"] === "backup");
+  expect(["postgres", "openbao", "objects"].map(from)).toEqual([true, true, true]);
+  expect(["factory", "forgejo", "zero"].map(from)).toEqual([false, false, false]);
+  const without = policies((await renderAll(["--set", "backup.enabled=false"])).all);
+  expect(JSON.stringify(without)).not.toContain('"backup"');
+  expect(
+    without.find((policy) => policy.metadata.name === "portable-allow-postgres")?.spec.ingress,
+  ).toHaveLength(1);
+});
+
+test("backups retry network calls and keep failed steps from hiding behind later ones", async () => {
+  const all = await resources();
+  const scripts = all.find(
+    (item) => item.metadata.name === "portable-backup" && item.kind === "ConfigMap",
+  )?.data as Record<string, string>;
+  expect(Object.keys(scripts).sort()).toEqual([
+    "common.sh",
+    "finalize.sh",
+    "forgejo.sh",
+    "objects.sh",
+    "openbao.sh",
+    "postgres.sh",
+    "prepare.sh",
+  ]);
+  expect(scripts["common.sh"]).toContain("retry()");
+  for (const name of ["postgres", "forgejo", "objects", "openbao"])
+    expect(scripts[`${name}.sh`]).toMatch(/step \w+ retry \d+/);
+  expect(scripts["postgres.sh"]).toContain("pg_dump --format=custom");
+  expect(scripts["postgres.sh"]).toContain("pg_restore --list");
+  expect(scripts["forgejo.sh"]).toContain("forgejo dump");
+  expect(scripts["openbao.sh"]).toContain("bao operator raft snapshot save");
+  expect(scripts["finalize.sh"]).toContain("exit 1");
+});
+
+test("backups can send sets to an operator remote and carry an OpenBao snapshot token", async () => {
+  const { all } = await renderAll([
+    "--set",
+    "backup.remote.existingSecret=backup-remote",
+    "--set",
+    "backup.remote.path=offsite:bucket/factory",
+    "--set",
+    "backup.openbao.tokenSecret=bao-snapshot",
+    "--set",
+    "backup.retention=14",
+  ]);
+  const pod = workloads(all).find((item) => item.kind === "CronJob")?.spec.template.spec;
+  const finalize = pod?.containers[0];
+  expect(finalize?.env).toContainEqual({ name: "BACKUP_REMOTE", value: "offsite:bucket/factory" });
+  expect(finalize?.env).toContainEqual({ name: "BACKUP_RETENTION", value: "14" });
+  expect(finalize?.volumeMounts).toContainEqual({
+    name: "remote",
+    mountPath: "/rclone",
+    readOnly: true,
+  });
+  const openbao = pod?.initContainers?.find((container) => container.name === "openbao");
+  expect(openbao?.volumeMounts).toContainEqual({
+    name: "openbao-token",
+    mountPath: "/openbao-token",
+    readOnly: true,
+  });
+  expect(pod?.volumes?.some((volume) => volume.secret?.secretName === "backup-remote")).toBe(true);
+});
+
+test("backup settings are validated and the whole feature can be disabled", async () => {
+  const { all } = await renderAll(["--set", "backup.enabled=false"]);
+  expect(JSON.stringify(all)).not.toContain("portable-backup");
+  for (const [setting, message] of [
+    ["backup.retention=0", "backup.retention"],
+    ["backup.retention=1.5", "backup.retention"],
+    ["backup.remote.path=offsite:bucket", "set together"],
+    ["backup.remote.existingSecret=backup-remote", "set together"],
+    ["backup.schedule=", "backup.schedule"],
+  ] as const) {
+    const result = await helm(["template", "portable", chart, ...localValues, "--set", setting]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(message);
+  }
+}, 60_000);
+
+test("no PodDisruptionBudget is rendered because every service is a single replica on an RWO volume", async () => {
+  expect((await resources()).some((item) => item.kind === "PodDisruptionBudget")).toBe(false);
+  for (const workload of workloads(await resources()))
+    if (workload.kind === "Deployment" || workload.kind === "StatefulSet")
+      expect((workload.spec as unknown as { replicas: number }).replicas).toBe(1);
 });

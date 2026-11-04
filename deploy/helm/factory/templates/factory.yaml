@@ -41,17 +41,45 @@ spec:
       terminationGracePeriodSeconds: 120
       securityContext:
         seccompProfile: {type: RuntimeDefault}
+      # No fsGroup: kubelet would add group read and write to every retained state file, and
+      # Factory refuses an OpenBao token file that is group-accessible. This container chowns the
+      # claim once instead. Files from earlier releases are root-owned, and a fresh claim is too.
+      # Delete .owner-uid-1000 from the state claim to force another pass, for example after
+      # rolling back to a release that ran as root.
+      initContainers:
+        - name: own-state
+          image: {{ include "factory.image" . }}
+          imagePullPolicy: {{ .Values.imagePullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              marker=/var/lib/factory/.owner-uid-1000
+              test -e "$marker" && exit 0
+              chown -R 1000:1000 /var/lib/factory
+              : > "$marker"
+              chown 1000:1000 "$marker"
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL], add: [CHOWN, DAC_OVERRIDE, FOWNER]}
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 250m, memory: 64Mi}
+          volumeMounts:
+            - {name: state, mountPath: /var/lib/factory}
       containers:
         - name: factory
           image: {{ include "factory.image" . }}
           imagePullPolicy: {{ .Values.imagePullPolicy }}
           command: [flock, --nonblock, --no-fork, /var/lib/factory/bootstrap.lock, bun, scripts/kubernetes/start.ts]
-          # Root is retained deliberately. The state claim holds root-owned files from earlier
-          # releases, start.ts chmods its directory to 0700 (owner only), the OpenBao token
-          # file is checked against the process uid, and the image defines no USER. All
-          # capabilities are dropped, so this is root without CHOWN/DAC_OVERRIDE/SETUID.
           securityContext:
-            runAsUser: 0
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
             {{- include "factory.containerSecurity" . | nindent 12 }}
           envFrom:
             - configMapRef: {name: "{{ include "factory.name" . }}-config"}

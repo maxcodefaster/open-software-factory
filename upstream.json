@@ -23,6 +23,11 @@
     "version": "2.7.1",
     "image": "docker.io/openbao/openbao:2.7.1@sha256:6d2b93856e3fcf7b18ad855a0b51eaba474dc8b79cf554379ea32034797d2acf"
   },
+  "rclone": {
+    "version": "1.74.1",
+    "image": "docker.io/rclone/rclone:1.74.1@sha256:eb8788b795f0009324e9572b0e2acb9b56885327c2746b07d67a9d3b893a6602",
+    "note": "Index digest (amd64 and arm64). Mirrors the object store and copies backup sets in the Helm chart's backup CronJob; deploy/helm/factory/templates/backup.yaml repeats this pin and a chart test compares them."
+  },
   "docker": {
     "version": "29.9.0",
     "image": "docker.io/library/docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470"

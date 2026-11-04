@@ -214,7 +214,7 @@ jobs:
           IMAGE_REF: ${{ steps.build.outputs.ref }}
         run: |
           set -euo pipefail
-          docker run --rm --network=none --read-only --cap-drop=ALL \
+          docker run --rm --network=none --read-only --cap-drop=ALL --user 1000:1000 \
             --security-opt=no-new-privileges --tmpfs /tmp --workdir /opt/factory --entrypoint bun \
             --volume "$PWD/scripts/factory/image-smoke.ts:/smoke/image-smoke.ts:ro" \
             "$IMAGE_REF" /smoke/image-smoke.ts

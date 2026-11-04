@@ -180,6 +180,59 @@ Preview grants bind the exact Runtime Attempt and App channel. Their host-only c
 App's origin; Factory credentials are not forwarded, and App cookies cannot escape to another App.
 
 
+## Managed clusters such as Azure AKS
+
+Factory runs on a standard managed cluster when one dedicated node can host the privileged
+Factorybox worker. Nothing here is verified on AKS yet. Run the preflight first, and treat its
+FAIL lines as blockers.
+
+**Node pool.** Use one Ubuntu 22.04 amd64 node (`--os-sku Ubuntu`), kernel 5.15 or newer, cgroup v2,
+containerd, a 128 GiB OS disk, and a VM size with at least 4 data-disk slots and 8 GiB of memory
+after system reservations. Do not taint the pool; the worker and Source Pods declare no
+tolerations. Set `factorybox.nodeName` to the node's `kubernetes.io/hostname` label and
+`factorybox.architecture: amd64`. Source, the worker store and every Developer IDE claim use
+ReadWriteOnce disks, so they all stay on that one node.
+
+**Kernel.** Factory accepts a list of releases with `*` wildcards, for example
+`factorybox.kernel: "5.15.0-*-azure,6.8.0-*-azure"`. This only gates Factory's admission. The pinned
+worker binary also refuses a kernel its build does not admit, and `factorybox doctor` reports
+that refusal. Use a Factorybox release built for your kernel family.
+
+**Namespaces.** The release Namespace may enforce `baseline` but not `restricted` (the volume-ownership
+init containers run as root with `CHOWN`, `DAC_OVERRIDE` and `FOWNER`). Factory creates `factory-box-<uuid>` Namespaces for the privileged worker and does not
+label them. AKS does not set a Pod Security default, so they are admitted. If you set a
+cluster default below `privileged`, or run Azure Policy or Gatekeeper rules against privileged
+Pods, exempt Namespaces labelled `app.kubernetes.io/managed-by=open-software-factory`. The
+preflight shows which layer denies the Pod.
+
+**Storage.** Use Azure Disk CSI: `storageClass: managed-csi` (or `managed-csi-premium`) with
+`volumeBindingMode: WaitForFirstConsumer`. Azure Files and Blob are refused, because the store is a
+loop-mounted ext4 image with direct I/O. A disk is zonal, so keep the pool in one zone.
+
+**Upgrades and reboots.** A reboot or image upgrade ends the worker's processes and RAM. A
+reboot in place leaves the Pod `Failed` and the retained store intact. Stop remaining
+execution and POST `/api/admin/worker/recover`, as in the Factorybox README. A replaced node
+gets a new name, and its original Pod is garbage-collected, so Factory refuses recovery and
+keeps the data. Prevent that. Set `az aks nodepool update --node-os-upgrade-channel None` (or the
+`Unmanaged` channel) and `az aks update --auto-upgrade-channel none`, so node images and
+Kubernetes versions change only when you run them. Upgrade the worker pool by itself, after
+stopping all execution and recording the retained Pod UID.
+
+**Preflight.** After `helm install`, run `helm test RELEASE --namespace NAMESPACE --logs`. Or run
+it from a checkout with your kubectl context:
+
+```sh
+bun scripts/kubernetes/preflight.ts --node NODE --architecture amd64 \
+  --kernel '5.15.0-*-azure,6.8.0-*-azure' --image REGISTRY/factorybox@sha256:DIGEST \
+  --storage-class managed-csi --namespace factory
+```
+
+It checks the node platform, kernel, taints, memory and CPU budget, the storage class and attach
+limit, and the release Namespace. Unless you pass `--read-only`, it also creates one throwaway
+`factory-preflight-*` Namespace, dry-runs the real worker Pod and claim against admission, runs one
+privileged Pod to read the kernel configuration, cgroup, BTF and userfaultfd facts and run
+`factorybox doctor`, then deletes the Namespace. Each FAIL names its fix.
+
 ## Runtime host
 
 The runtime host builds Docker Compose from the verified upstream source archive pinned in

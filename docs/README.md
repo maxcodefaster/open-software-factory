@@ -91,8 +91,11 @@ diagnoses; Delivery joins already admitted observations without replaying an unc
 Project research recovery is joined too, and Learning is cancelled before the process waits for
 its active sweep. Lease renewals finish before their owning work settles.
 
-Hashed public assets use build-time Brotli/gzip variants and immutable caching. HTML stays
-non-cached; private media, commands and Server Function responses do not enter that asset cache.
+Hashed public assets use build-time Brotli (quality 11) and gzip variants with immutable caching.
+Bundled artwork revalidates by ETag. The Editor edge passes Theia's application files through in
+the negotiated encoding and lets the browser revalidate them privately; every other Editor response
+stays uncached. HTML stays non-cached; private media, commands and Server Function responses do not
+enter that asset cache.
 The rich document engine loads when its surface opens rather than with the Board. Attachment
 conversion engines load only in bounded, terminated workers, not in the Factory store's import
 graph. The concurrency limit remains two conversions per Factory process.
