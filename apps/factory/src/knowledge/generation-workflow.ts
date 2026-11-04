@@ -287,11 +287,23 @@ export async function generateWiki(input: WikiGenerationInput): Promise<WikiGene
           )
         ).object;
       } catch (repairFailure) {
-        if (isStructuredOutputFailure(repairFailure)) throw new WikiStructuredResultError();
+        if (isStructuredOutputFailure(repairFailure)) {
+          console.error(`[factory] Wiki ${id} repair did not produce structured output`);
+          throw new WikiStructuredResultError();
+        }
         throw repairFailure;
       }
       const checked = schema.safeParse(repaired);
-      if (!checked.success) throw new WikiStructuredResultError();
+      if (!checked.success) {
+        // Paths and codes only: never the model's prose.
+        console.error(
+          `[factory] Wiki ${id} result stayed invalid after one repair: ${checked.error.issues
+            .slice(0, 6)
+            .map((issue) => `${issue.path.join(".") || "result"}:${issue.code}`)
+            .join(", ")}`,
+        );
+        throw new WikiStructuredResultError();
+      }
       await validate?.(checked.data);
       return checked.data;
     }
