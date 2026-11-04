@@ -50,6 +50,7 @@ test.each([
   ["arm64", false, false, "resume-already-attempted"],
   ["arm64", false, false, "resume-failed-stop"],
   ["amd64", false, false, "resume-failed-stop"],
+  ["arm64", false, false, "resume-delete-diagnostic"],
 ] as const)(
   "Factorybox %s preserves lifecycle and retirement ownership, reserve-deleted=%s, preparation-cancel=%s, delete-continuation=%s",
   async (architecture, reserveDeleted, cancelPreparation, deleteContinuation) => {
@@ -444,10 +445,12 @@ test.each([
               record.phase = "resuming";
               record.pause.resume = {
                 requested_at: "2026-10-25T10:01:30Z",
-                attempted: ["resume-already-attempted", "resume-failed-stop"].includes(
-                  deleteContinuation,
-                ),
-                ...(deleteContinuation === "resume-failed-stop"
+                attempted: [
+                  "resume-already-attempted",
+                  "resume-failed-stop",
+                  "resume-delete-diagnostic",
+                ].includes(deleteContinuation),
+                ...(["resume-failed-stop", "resume-delete-diagnostic"].includes(deleteContinuation)
                   ? { error: "original native restore failed before activation" }
                   : {}),
               };
@@ -508,6 +511,13 @@ test.each([
               stdout: "",
             };
           }
+          if (deleteContinuation === "resume-delete-diagnostic")
+            return {
+              exitCode: 1,
+              stderr:
+                "pause/resume is unresolved; deletion requires its exact failed-Resume proof: cgroup is still populated",
+              stdout: "",
+            };
           record.phase = "deleted";
           return { exitCode: 1, stderr: "response lost after completed native Delete", stdout: "" };
         }
@@ -876,6 +886,23 @@ test.each([
         expect(before).toBeDefined();
         if (!before) throw new Error("Missing original Resume intent");
         const recovered = createFactoryboxExecution(database, hub, run);
+        if (deleteContinuation === "resume-delete-diagnostic") {
+          await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
+          const nativeResume = structuredClone(record.pause?.resume);
+          await database.client`UPDATE factory.runtime_attempt
+            SET state='stopping',stop_intended_at=now() WHERE id=${owned.attemptID}`;
+          await expect(recovered.deleteSandbox(owned.attemptID)).rejects.toThrow(
+            "owned full-store refusal before native Delete",
+          );
+          await expect(recovered.deleteSandbox(owned.attemptID)).rejects.toThrow(
+            "deletion requires its exact failed-Resume proof: cgroup is still populated",
+          );
+          expect(record.pause?.resume).toEqual(nativeResume);
+          expect(record.phase).toBe("resuming");
+          expect(resumeCommands).toBe(1);
+          expect(mutations.filter((action) => action === "delete")).toHaveLength(2);
+          return;
+        }
         if (deleteContinuation === "resume-failed-stop") {
           await expect(recovered.resume(owned.attemptID)).rejects.toThrow("not confirmed");
           const nativeResume = structuredClone(record.pause?.resume);

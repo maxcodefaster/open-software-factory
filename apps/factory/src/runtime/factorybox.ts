@@ -329,7 +329,7 @@ export function createFactoryboxExecution(
       // Keep the existing intent and first attempt.
       // No new Start, prompt, source write or native identity is admitted.
       const continued = await executeFactoryboxOperation(request, identity, op, run, declaration);
-      if (!continued.confirmed) throw new Error("Factorybox delete outcome is unconfirmed");
+      if (!continued.confirmed) throw factoryboxOperationFailure("delete", continued.stderr);
       result = nativeResult.parse(JSON.parse(continued.stdout));
     }
     const expected = { start: "running", pause: "paused", resume: "running", delete: "deleted" };
